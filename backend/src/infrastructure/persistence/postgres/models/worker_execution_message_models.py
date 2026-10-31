@@ -18,12 +18,12 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .base import Base
+from .legacy_orchestration_base import LegacyOrchestrationBase
 
 _JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
 
 
-class WorkerExecutionMessageModel(Base):
+class WorkerExecutionMessageModel(LegacyOrchestrationBase):
     """Worker 实际模型消息和独立工具结果回执的顺序记录。"""
 
     __tablename__ = "worker_execution_messages"

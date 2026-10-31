@@ -37,6 +37,11 @@ from .worker_execution_message_repository import (
     PostgresWorkerExecutionMessageRepository,
 )
 from .root_resume_job_repository import PostgresRootResumeJobRepository
+from .worker_orchestration_repository import (
+    PostgresWorkerOrchestrationRepository,
+    WorkerIdempotencyConflict,
+    WorkerPlanRejected,
+)
 from .orchestration_outbox_repository import (
     PostgresOrchestrationOutboxRepository,
 )
@@ -76,6 +81,9 @@ __all__ = [
     "PostgresWorkerToolOperationRepository",
     "PostgresWorkerExecutionMessageRepository",
     "PostgresRootResumeJobRepository",
+    "PostgresWorkerOrchestrationRepository",
+    "WorkerIdempotencyConflict",
+    "WorkerPlanRejected",
     "PostgresOrchestrationOutboxRepository",
     "PostgresEvaluationRepository",
     "PostgresLeaseCenter",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from bootstrap import create_app
@@ -17,12 +19,15 @@ def _client() -> TestClient:
     ))
 
 
+_DATASET_PATH = str(Path(__file__).parents[1] / "retrieval_eval" / "chinese_cases.jsonl")
+
+
 def test_evaluation_api_validates_queues_and_reads_run() -> None:
     client = _client()
-    validated = client.post("/api/evaluations/datasets/validate", json={"path": "tests/retrieval_eval/chinese_cases.jsonl"})
+    validated = client.post("/api/evaluations/datasets/validate", json={"path": _DATASET_PATH})
     assert validated.status_code == 200
     assert validated.json()["case_count"] == 8
-    queued = client.post("/api/evaluations/runs", json={"dataset_path": "tests/retrieval_eval/chinese_cases.jsonl", "name": "api-smoke"})
+    queued = client.post("/api/evaluations/runs", json={"dataset_path": _DATASET_PATH, "name": "api-smoke"})
     assert queued.status_code == 200
     assert queued.json()["status"] == "queued"
     run = client.get(f"/api/evaluations/runs/{queued.json()['run_id']}")

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 
 from .base import Base
+from .legacy_orchestration_base import LegacyOrchestrationBase
 
 
 class EmbeddingMetadataModel(Base):
@@ -69,10 +70,9 @@ class AgentRunModel(Base):
     root_wait_generation: Mapped[int] = mapped_column(Integer, default=0)
     root_wait_checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     root_wait_armed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    root_wait_round_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    root_wait_plan_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     root_wait_interrupt_id: Mapped[str | None] = mapped_column(String, nullable=True)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
+    orchestrator_plan_sequence: Mapped[int] = mapped_column(Integer, default=0)
     cancellation_external_effect_status: Mapped[str] = mapped_column(
         String, default="none"
     )
@@ -81,23 +81,21 @@ class AgentRunModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class AgentPlanModel(Base):
+class AgentPlanModel(LegacyOrchestrationBase):
     __tablename__ = "agent_plans"
-    __table_args__ = (Index("idx_agent_plans_run", "run_id"), UniqueConstraint("run_id", name="one_plan_per_run"))
+    __table_args__ = (Index("idx_agent_plans_run", "run_id"),)
     plan_id: Mapped[str] = mapped_column(String, primary_key=True)
     run_id: Mapped[str] = mapped_column(String)
     session_id: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="created")
     user_goal: Mapped[str] = mapped_column(Text)
     max_parallelism: Mapped[int] = mapped_column(Integer, default=1)
-    current_version: Mapped[int] = mapped_column(Integer, default=1)
-    active_round_id: Mapped[str | None] = mapped_column(String, nullable=True)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class AgentTaskModel(Base):
+class AgentTaskModel(LegacyOrchestrationBase):
     __tablename__ = "agent_tasks"
     __table_args__ = (Index("idx_agent_tasks_plan_status", "plan_id", "status"), Index("idx_agent_tasks_run_status", "run_id", "status"))
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -320,8 +318,6 @@ class RetrievalCandidateModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-__all__ = [name for name in globals() if name.endswith("Model")]
-
 class MemoryProcessingJobModel(Base):
     """Durable queue entry for post-run long-term-memory extraction."""
 
@@ -344,3 +340,12 @@ class MemoryProcessingJobModel(Base):
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# 旧 DAG 代码仅保留导入名；应用数据库中的唯一 Plan/Task 表采用逐轮模型。
+from .worker_orchestration_models import (
+    OrchestratorPlanModel as AgentPlanModel,
+    OrchestratorTaskModel as AgentTaskModel,
+)
+
+__all__ = [name for name in globals() if name.endswith("Model")]

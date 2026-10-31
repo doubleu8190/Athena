@@ -19,6 +19,8 @@
 
 ## 专项设计与实施记录
 
+- [Worker 注册中心、逐轮规划与 HTTP 通信方案](worker-registry-round-plan-http-design.md)：定义同进程模块边界、四项能力契约、逐轮任务、HTTP 指令与结果、超时重试、120 秒审批及心跳；含状态转换和 S1–S8 阶段验收。首期无进度，允许重建数据库且不做迁移兼容，尚未实施。
+- [Worker HTTP 协议 v1](worker-protocol-v1.md)：S1 定稿的双方 HTTP/DTO/错误/配置约定，配套 [JSON Schema](worker-protocol-v1.schema.json) 与 [协议样例](worker-protocol-v1.examples.json)；供 S2–S8 直接实现，协议目标尚未接入运行时。
 - [Root 与 Worker 交互梳理及简化评审](root-worker-interaction-review-20261028.md)：记录当前调用链、审批/重试/取消/恢复边界、四个隔离复现问题，以及保持功能的代码收敛和可选功能调整；本轮只做分析。
 - [项目化聊天管理与首轮自动命名改造方案](project-chat-management-design.md)：记录项目与会话归属、项目侧栏、草稿首发建会话和基于首条消息的标题规则；当前工作树已实现，仍需运行验收。
 - [记忆系统分层重设计](memory-system-redesign.md)：结合 Codex 记忆组织方式；P1 可信事实写入实施中，P3 已接入冲突事实组读取基础，项目绑定、任务经验和分层目录待后续实施。

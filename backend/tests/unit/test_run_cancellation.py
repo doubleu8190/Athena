@@ -55,7 +55,9 @@ def factory(session):
 
 @pytest.mark.asyncio
 async def test_approval_resolution_is_rejected_after_run_enters_stopping():
-    approval = SimpleNamespace(run_id="run-1", plan_id="plan-1")
+    approval = SimpleNamespace(
+        run_id="run-1", plan_id="plan-1", execution_id=None
+    )
     run = SimpleNamespace(status="stopping")
     plan = SimpleNamespace(run_id="run-1", status="stopping")
     session = ApprovalSession([approval, run, plan, approval])

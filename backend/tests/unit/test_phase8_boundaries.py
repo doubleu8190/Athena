@@ -14,11 +14,18 @@ from bootstrap.check import check_app
 from application.approval import ApprovalService
 from application.files import AttachmentNotFoundError, SessionNotFoundError
 from application.knowledge import KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError
+from configuration import LLMProviderConfig, Settings
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def test_bootstrap_probe_and_unconfigured_query_routes() -> None:
+def test_bootstrap_probe_and_unconfigured_query_routes(monkeypatch) -> None:
+    settings = Settings(
+        llm_providers=[LLMProviderConfig(provider="openai", api_key="test-key")],
+        embedding_provider="echo",
+        embedding_dimension=2,
+    )
+    monkeypatch.setattr("configuration.get_settings", lambda: settings)
     check_app()
     from fastapi import FastAPI
     from  interfaces.http.controllers.query_controller import build_query_router

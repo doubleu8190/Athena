@@ -9,7 +9,6 @@ import pytest
 
 from domain.leases import LeaseKey, LeaseRecord
 from domain.orchestration import (
-    RunCancellationReceipt,
     Task,
     TaskResult,
     TaskStatus,
@@ -320,7 +319,7 @@ async def test_worker_acknowledges_only_its_fenced_cancellation():
 
 
 @pytest.mark.asyncio
-async def test_reconciler_finishes_cancel_when_no_workers_remain():
+async def test_legacy_worker_job_reconciliation_is_disabled_during_s2():
     run = SimpleNamespace(
         run_id="run-1",
         request_json={},
@@ -343,20 +342,17 @@ async def test_reconciler_finishes_cancel_when_no_workers_remain():
     session = ReconcileSession(run, plan)
     repository = PostgresWorkerJobRepository(factory(session), clock=lambda: NOW)
 
-    receipts = await repository.reconcile_cancellations()
-
-    assert receipts == [
-        RunCancellationReceipt("run-1", "session-1", "plan-1", 5, "none")
-    ]
-    assert run.status == plan.status == "cancelled"
-    assert [row.event_type for row in session.added] == [
-        "PlanCancelled",
-        "RunCancelled",
-    ]
+    with pytest.raises(
+        RuntimeError,
+        match="legacy_worker_job_reconciliation_disabled_during_worker_s2",
+    ):
+        await repository.reconcile_cancellations()
+    assert session.execute_count == 0
+    assert session.added == []
 
 
 @pytest.mark.asyncio
-async def test_reconciler_persists_task_cancelled_when_worker_lease_expires():
+async def test_legacy_reconciliation_does_not_read_old_round_task_fields():
     run = SimpleNamespace(
         run_id="run-1",
         request_json={},
@@ -407,16 +403,13 @@ async def test_reconciler_persists_task_cancelled_when_worker_lease_expires():
         ),
     )
 
-    receipts = await repository.reconcile_cancellations()
-
-    task_event = next(
-        item for item in session.added if isinstance(item, OrchestrationOutboxModel)
-        and item.event_type == "TaskCancelled"
-    )
-    assert receipts[0].external_effect_status == "unknown"
-    assert task_event.task_id == "task-1"
-    assert task_event.execution_id == "execution-1"
-    assert task_event.dedupe_key == "task:task-1:cancelled:5"
+    with pytest.raises(
+        RuntimeError,
+        match="legacy_worker_job_reconciliation_disabled_during_worker_s2",
+    ):
+        await repository.reconcile_cancellations()
+    assert session.execute_count == 0
+    assert session.added == []
 
 
 @pytest.mark.asyncio

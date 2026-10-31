@@ -49,6 +49,7 @@ BEGIN
             ARRAY['agent_runs', 'root_execution', 'run_id'],
             ARRAY['task_executions', 'worker_execution', 'execution_id'],
             ARRAY['root_resume_jobs', 'root_resume', 'job_id'],
+            ARRAY['orchestrator_root_resume_jobs', 'root_resume', 'job_id'],
             ARRAY['orchestration_outbox', 'orchestration_outbox', 'message_id'],
             ARRAY['knowledge_document_jobs', 'document_ingestion', 'attachment_id'],
             ARRAY['memory_processing_jobs', 'memory_processing', 'turn_id']

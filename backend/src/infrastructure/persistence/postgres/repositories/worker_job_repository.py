@@ -354,14 +354,17 @@ class PostgresWorkerJobRepository(WorkerJobRepository):
                 return True
 
     async def reconcile_cancellations(self) -> list[RunCancellationReceipt]:
-        """在一个事务中回收过期取消租约并收敛已停止的 Run。
+        """停用依赖旧 Round/WorkerJob 数据结构的取消扫描入口。
 
         Returns:
-            本轮完成取消收敛的 Run 回执。
+            此方法不会返回；S2 停止确认由 WorkerStopConfirmation 原子释放容量。
 
         Raises:
-            Exception: 数据库错误由队列循环重试。
+            RuntimeError: Worker S2 阶段旧 WorkerJob reconcile 入口已停用。
         """
+        raise RuntimeError("legacy_worker_job_reconciliation_disabled_during_worker_s2")
+
+        # 下方旧扫描仅供后续迁移参考，S2 中不会执行。
         receipts: list[RunCancellationReceipt] = []
         async with self._session_factory() as session:
             async with session.begin():

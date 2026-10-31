@@ -75,6 +75,13 @@ def test_target_retrieval_evaluation_and_entrypoint(monkeypatch):
     with pytest.raises(ValueError):
         evaluate_rankings([case], {}, ks=(0,))
 
+    settings = Settings(
+        llm_providers=[LLMProviderConfig(provider="openai", api_key="test-key")],
+        embedding_provider="echo",
+        embedding_dimension=2,
+    )
+    monkeypatch.setattr("configuration.get_settings", lambda: settings)
+    monkeypatch.setattr("configuration.settings.get_settings", lambda: settings)
     import  main as entrypoint
     observed = {}
     class Uvicorn:

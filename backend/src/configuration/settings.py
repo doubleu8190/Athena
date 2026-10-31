@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,10 +74,28 @@ class Settings(BaseSettings):
     document_ingestion_lease_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     memory_processing_lease_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
+    worker_protocol_service_tokens: dict[str, SecretStr] = Field(default_factory=dict)
+    worker_orchestrator_token: SecretStr = SecretStr("")
+    worker_allowed_origins: tuple[str, ...] = ()
+    worker_allowed_networks: tuple[str, ...] = ()
+    worker_protocol_ca_file: str = ""
+    worker_execution_grant_secret: SecretStr = SecretStr("")
+    worker_resource_storage_path: str = "./data/worker-resources"
+    worker_resource_max_bytes: int = Field(default=104_857_600, ge=1, le=1_073_741_824)
+    worker_max_json_body_bytes: int = Field(default=1_048_576, ge=1024, le=104_857_600)
+    worker_heartbeat_interval_seconds: float = Field(default=15, ge=1, le=300)
+    worker_heartbeat_request_timeout_seconds: float = Field(default=3, gt=0, le=300)
+    worker_heartbeat_failure_threshold: int = Field(default=3, ge=1, le=20)
+    worker_heartbeat_recovery_threshold: int = Field(default=2, ge=1, le=20)
     worker_max_tool_rounds: int = Field(default=4, ge=1, le=20)
     worker_max_tool_calls_per_round: int = Field(default=8, ge=1, le=32)
     worker_job_poll_interval_seconds: float = Field(default=0.25, gt=0, le=10.0)
     worker_dispatch_max_concurrency: int = Field(default=4, ge=1, le=64)
+    worker_dispatch_http_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30)
+    worker_dispatch_max_retries: int = Field(default=8, ge=0, le=100)
+    worker_dispatch_retry_initial_seconds: float = Field(default=1.0, ge=0.1, le=60)
+    worker_dispatch_retry_max_seconds: float = Field(default=30.0, ge=0.1, le=300)
+    worker_dispatch_retry_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
     worker_approval_timeout_seconds: float = Field(default=86400.0, gt=0)
     evaluation_enabled: bool = False
     evaluation_dataset_root: str = "./data/evaluations/datasets"
@@ -203,6 +221,38 @@ class Settings(BaseSettings):
     sandbox_require_digest: bool = False
     sandbox_mcp_auto_restore: bool = False
     exec_shell_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_worker_protocol_settings(self) -> "Settings":
+        """校验 Worker 身份映射及心跳周期之间的约束。
+
+        参数：
+        - `self`（Settings）：已解析的应用配置。
+
+        返回：配置有效的当前对象。
+
+        异常：ValueError 表示主体 token 映射重复、主体为空或心跳超时不小于探测间隔。
+        """
+        principals = list(self.worker_protocol_service_tokens)
+        tokens = [token.get_secret_value() for token in self.worker_protocol_service_tokens.values()]
+        if any(not principal or principal != principal.strip() for principal in principals):
+            raise ValueError("worker_service_principal_required")
+        if any(not token for token in tokens) or len(tokens) != len(set(tokens)):
+            raise ValueError("worker_service_tokens_must_be_non_empty_and_unique")
+        if self.worker_heartbeat_request_timeout_seconds >= self.worker_heartbeat_interval_seconds:
+            raise ValueError("worker_heartbeat_timeout_must_be_below_interval")
+        if self.worker_dispatch_http_timeout_seconds >= self.worker_heartbeat_interval_seconds:
+            raise ValueError("worker_dispatch_timeout_must_be_below_heartbeat_interval")
+        if self.worker_dispatch_retry_initial_seconds > self.worker_dispatch_retry_max_seconds:
+            raise ValueError("worker_dispatch_retry_initial_must_not_exceed_max")
+        if self.worker_protocol_service_tokens:
+            if not self.worker_orchestrator_token.get_secret_value():
+                raise ValueError("worker_orchestrator_token_required")
+            if not self.worker_allowed_origins:
+                raise ValueError("worker_allowed_origins_required")
+            if len(self.worker_execution_grant_secret.get_secret_value().encode("utf-8")) < 32:
+                raise ValueError("worker_execution_grant_secret_too_short")
+        return self
 
     @property
     def primary_llm(self) -> LLMProviderConfig:

@@ -26,7 +26,6 @@ from domain.memory import (
     MemoryJobStatusPort,
     MemorySourceReference,
     MemoryTaskOutcomeEvidence,
-    MemoryToolOutcomeEvidence,
 )
 from application.contracts.memory import (
     MemoryExecutionEvidenceSchema,
@@ -35,12 +34,12 @@ from application.contracts.memory import (
 )
 
 from ..models import (
-    AgentTaskModel,
     MemoryProcessingJobModel,
     MemoryRunEvidenceSnapshotModel,
+    OrchestratorExecutionModel,
+    OrchestratorPlanModel,
+    OrchestratorTaskModel,
     SessionModel,
-    TaskExecutionModel,
-    WorkerExecutionMessageModel,
 )
 from .lease_center import PostgresLeaseCenter
 from .memory_suppression import ensure_writable_run_scope, project_scope_is_writable
@@ -286,7 +285,7 @@ class PostgresMemoryJobRepository(MemoryJobPort, MemoryJobQueue, MemoryJobStatus
                         execution_evidence = await _load_or_freeze_execution_evidence(
                             session,
                             turn_id=row.turn_id,
-                            observed_at=row.created_at,
+                            observed_at=row.created_at.isoformat(),
                         )
                         if row.status == "queued":
                             row.attempt += 1
@@ -398,8 +397,12 @@ async def _load_or_freeze_execution_evidence(
     total_task_count = int(
         await session.scalar(
             select(func.count())
-            .select_from(AgentTaskModel)
-            .where(AgentTaskModel.run_id == turn_id)
+            .select_from(OrchestratorTaskModel)
+            .join(
+                OrchestratorPlanModel,
+                OrchestratorPlanModel.plan_id == OrchestratorTaskModel.plan_id,
+            )
+            .where(OrchestratorPlanModel.run_id == turn_id)
         )
         or 0
     )
@@ -410,115 +413,76 @@ async def _load_or_freeze_execution_evidence(
     task_rows = (
         (
             await session.execute(
-                select(AgentTaskModel)
-                .where(AgentTaskModel.run_id == turn_id)
-                .order_by(AgentTaskModel.created_at, AgentTaskModel.task_id)
+                select(OrchestratorTaskModel)
+                .join(
+                    OrchestratorPlanModel,
+                    OrchestratorPlanModel.plan_id == OrchestratorTaskModel.plan_id,
+                )
+                .where(OrchestratorPlanModel.run_id == turn_id)
+                .order_by(
+                    OrchestratorPlanModel.sequence,
+                    OrchestratorTaskModel.created_at,
+                    OrchestratorTaskModel.task_id,
+                )
                 .limit(12)
             )
         )
         .scalars()
         .all()
     )
-    task_ids = [task.task_id for task in task_rows]
-    task_generations = {task.task_id: task.execution_generation for task in task_rows}
+    if not task_rows:
+        logger.info("memory_run_evidence_no_tasks", extra={"turn_id": turn_id})
+        return None
+
+    current_task_generations = [
+        and_(
+            OrchestratorExecutionModel.task_id == task.task_id,
+            OrchestratorExecutionModel.generation == task.execution_generation,
+        )
+        for task in task_rows
+    ]
     execution_rows = (
         (
             await session.execute(
-                select(TaskExecutionModel).where(
-                    TaskExecutionModel.task_id.in_(task_ids)
-                )
+                select(OrchestratorExecutionModel).where(or_(*current_task_generations))
             )
         )
         .scalars()
         .all()
     )
     executions_by_task_generation = {
-        (execution.task_id, execution.attempt): execution
+        (execution.task_id, execution.generation): execution
         for execution in execution_rows
     }
-    message_rows = (
-        (
-            await session.execute(
-                select(WorkerExecutionMessageModel)
-                .where(
-                    WorkerExecutionMessageModel.run_id == turn_id,
-                    WorkerExecutionMessageModel.task_id.in_(task_ids),
-                    WorkerExecutionMessageModel.entry_type == "tool_result",
-                )
-                .order_by(
-                    WorkerExecutionMessageModel.created_at,
-                    WorkerExecutionMessageModel.sequence_no,
-                )
-                .limit(1001)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    message_overflow = len(message_rows) > 1000
-    messages_by_task: dict[str, list[WorkerExecutionMessageModel]] = {}
-    for message in message_rows[:1000]:
-        if task_generations.get(message.task_id) != message.execution_generation:
-            continue
-        messages_by_task.setdefault(message.task_id, []).append(message)
 
     task_evidence: list[MemoryTaskOutcomeEvidence] = []
     source_refs: list[MemorySourceReference] = []
-    truncated = total_task_count > len(task_rows) or message_overflow
+    truncated = total_task_count > len(task_rows)
     task_statuses: list[str] = []
     for task in task_rows:
-        task_messages = messages_by_task.get(task.task_id, [])
-        if len(task_messages) > 4:
-            truncated = True
-        tool_outcomes: list[MemoryToolOutcomeEvidence] = []
-        for message in task_messages[-4:]:
-            content = message.content_json
-            tool_result = (
-                content.get("tool_result") if isinstance(content, dict) else None
-            )
-            tool_result = tool_result if isinstance(tool_result, dict) else {}
-            status = tool_result.get("status")
-            if not isinstance(status, str) or not status:
-                status = "unknown"
-            tool_name = message.tool_name or "unknown"
-            result_ref = message.result_ref or tool_result.get("result_ref")
-            if not isinstance(result_ref, str):
-                result_ref = None
-            message_observed_at = message.created_at.isoformat()
-            tool_outcomes.append(
-                MemoryToolOutcomeEvidence(
-                    message_id=message.message_id,
-                    tool_name=tool_name,
-                    status=status[:40],
-                    result_ref=result_ref,
-                    observed_at=message_observed_at,
-                )
-            )
-            source_refs.append(
-                MemorySourceReference(
-                    source_type="worker_message",
-                    source_id=message.message_id,
-                    excerpt=f"{tool_name[:120]} status={status[:40]}",
-                    observed_at=message_observed_at,
-                )
-            )
-
         task_status = task.status or "unknown"
         task_statuses.append(f"{task.task_id}={task_status}")
         execution = executions_by_task_generation.get(
             (task.task_id, task.execution_generation)
         )
-        result_ref = execution.result_ref if execution is not None else None
+        has_result = (
+            execution is not None
+            and execution.status == "completed"
+            and task.status == "completed"
+            and isinstance(task.output_json, dict)
+            and isinstance(execution.result_json, dict)
+            and task.output_json == execution.result_json
+        )
+        result_ref = execution.execution_id if has_result else None
         error_code = _error_code(task.error_json)
         task_evidence.append(
             MemoryTaskOutcomeEvidence(
                 task_id=task.task_id,
-                title=(task.title or task.task_id)[:300],
+                title=task.task_ref[:300],
                 status=task_status[:40],
                 execution_generation=task.execution_generation,
                 error_code=error_code[:100] if error_code else None,
                 result_ref=result_ref,
-                tool_outcomes=tuple(tool_outcomes),
             )
         )
         if result_ref:
@@ -526,8 +490,8 @@ async def _load_or_freeze_execution_evidence(
                 MemorySourceReference(
                     source_type="artifact",
                     source_id=result_ref,
-                    excerpt=f"Task result artifact for {task.task_id}",
-                    observed_at=task.updated_at or observed_at,
+                    excerpt=f"Task output for {task.task_ref}"[:2000],
+                    observed_at=task.updated_at.isoformat(),
                 )
             )
 

@@ -10,7 +10,6 @@ from domain.orchestration import (
     OrchestrationCommandRepository,
     OrchestrationCommandType,
     Plan,
-    PlanValidator,
     ReviewAction,
     ReviewDecision,
     Task,
@@ -19,28 +18,23 @@ from .protocols import RootPlanCommandPort
 
 
 class OrchestrationCommandHandler(RootPlanCommandPort):
-    """提供经过 DAG 校验的 SubmitPlan 用例。"""
+    """处理 Root 仍使用的非 Plan 命令，并显式隔离旧 Plan 提交入口。"""
 
     def __init__(
         self,
         repository: OrchestrationCommandRepository,
-        *,
-        validator: PlanValidator | None = None,
     ) -> None:
-        """保存编排命令仓储和确定性 Plan 校验器。
+        """保存非 Plan 命令使用的编排仓储。
 
         参数：
-        - `repository`（OrchestrationCommandRepository）：在一个事务中接受命令并保存业务状态的仓储；约束：无额外运行时限制。
-        - `validator`（PlanValidator | None）：DAG、Task 和工具集合校验器；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `repository`（OrchestrationCommandRepository）：处理未退役 Root 命令的持久化端口。
 
         返回：
         - None：操作完成后不提供返回数据。
 
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        异常：无预期业务异常。
         """
         self._repository = repository
-        self._validator = validator or PlanValidator()
 
     async def submit_plan(
         self,
@@ -50,7 +44,7 @@ class OrchestrationCommandHandler(RootPlanCommandPort):
         *,
         legal_tools: Iterable[str] | None = None,
     ) -> CommandReceipt:
-        """验证并持久化首版 Plan。
+        """旧 DAG 提交入口在 S2 停用，防止请求写入已退役模型。
 
         参数：
         - `command`（OrchestrationCommand）：必须是首版 SubmitPlan，且绑定目标 Run；约束：须通过方法内校验；失败条件见下方异常说明。
@@ -62,19 +56,9 @@ class OrchestrationCommandHandler(RootPlanCommandPort):
         - CommandReceipt：首轮成员和稳定命令 ID 构成的回执。
 
         异常：
-        - ValueError：校验条件 `command.command_type != OrchestrationCommandType.SUBMIT_PLAN` 成立时（异常说明：submit_plan requires a SubmitPlan command）。
-        - ValueError：校验条件 `command.plan_id != plan.plan_id` 成立时（异常说明：command and plan IDs do not match）。
-        - ValueError：校验条件 `command.correlation_id != plan.run_id` 成立时（异常说明：command correlation_id must equal plan.run_id）。
-        - 未列出的依赖异常按当前实现传播。
+        - RuntimeError：S3/S7 接通远程 Worker 与 Root 多轮流程前，旧入口一律返回 execution_not_available_during_worker_s2。
         """
-        if command.command_type != OrchestrationCommandType.SUBMIT_PLAN:
-            raise ValueError("submit_plan requires a SubmitPlan command")
-        if command.plan_id != plan.plan_id:
-            raise ValueError("command and plan IDs do not match")
-        if command.correlation_id != plan.run_id:
-            raise ValueError("command correlation_id must equal plan.run_id")
-        self._validator.validate(plan, tasks, legal_tools=legal_tools)
-        return await self._repository.submit_plan(command, plan, tasks)
+        raise RuntimeError("execution_not_available_during_worker_s2")
 
     async def apply_review_decision(
         self,

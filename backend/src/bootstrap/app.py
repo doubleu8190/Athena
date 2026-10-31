@@ -46,6 +46,7 @@ from interfaces.http.controllers.mcp_controller import build_mcp_router
 from interfaces.http.controllers.evaluation_controller import build_evaluation_router
 from interfaces.http.auth import AuthOptions, AuthenticationMiddleware, build_auth_router
 from interfaces.http.auth import middleware as auth_middleware
+from interfaces.http.worker_protocol import install_worker_protocol_handlers
 from .dependencies import ApplicationDependencies, Provider, build_default_dependencies
 from .lifespan import lifespan
 
@@ -112,6 +113,7 @@ def create_app(
         version="0.1.0.dev0",
         lifespan=lambda application: lifespan(application, graph.resources),
     )
+    install_worker_protocol_handlers(app)
     app.add_middleware(AuthenticationMiddleware, options=resolved_auth_options, auth_service=resolved_auth_service)
     app.add_middleware(
         CORSMiddleware,

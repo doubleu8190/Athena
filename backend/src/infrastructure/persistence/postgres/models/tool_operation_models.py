@@ -9,12 +9,12 @@ from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .base import Base
+from .legacy_orchestration_base import LegacyOrchestrationBase
 
 _JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
 
 
-class WorkerToolOperationModel(Base):
+class WorkerToolOperationModel(LegacyOrchestrationBase):
     """Remember the first outcome for one fenced Worker tool operation."""
 
     __tablename__ = "worker_tool_operations"

@@ -23,9 +23,6 @@ from ..models import (
     AgentRunModel,
     AgentTaskModel,
     ApprovalRecordModel,
-    PlanRoundModel,
-    PlanVersionModel,
-    RoundTaskModel,
     TaskExecutionModel,
 )
 from domain.leases import LeaseRecord
@@ -130,11 +127,13 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
             if run_row is None:
                 return None
 
-            plan_row = (
+            plan_rows = (
                 await session.execute(
-                    select(AgentPlanModel).where(AgentPlanModel.run_id == run_id)
+                    select(AgentPlanModel)
+                    .where(AgentPlanModel.run_id == run_id)
+                    .order_by(AgentPlanModel.sequence)
                 )
-            ).scalar_one_or_none()
+            ).scalars().all()
             approvals = (
                 await session.execute(
                     select(ApprovalRecordModel)
@@ -143,110 +142,74 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                 )
             ).scalars().all()
 
-            plan_document: dict[str, object] | None = None
-            if plan_row is not None:
-                round_rows = (
-                    await session.execute(
-                        select(PlanRoundModel)
-                        .where(PlanRoundModel.plan_id == plan_row.plan_id)
-                        .order_by(PlanRoundModel.round_number)
-                    )
-                ).scalars().all()
-                version_rows = (
-                    await session.execute(
-                        select(PlanVersionModel)
-                        .where(PlanVersionModel.plan_id == plan_row.plan_id)
-                        .order_by(PlanVersionModel.version)
-                    )
-                ).scalars().all()
-                round_ids = [row.round_id for row in round_rows]
-                members = (
-                    await session.execute(
-                        select(RoundTaskModel, AgentTaskModel)
-                        .join(
-                            AgentTaskModel,
-                            AgentTaskModel.task_id == RoundTaskModel.task_id,
-                        )
-                        .where(RoundTaskModel.round_id.in_(round_ids))
-                        .order_by(RoundTaskModel.round_id, RoundTaskModel.task_id)
-                    )
-                ).all() if round_ids else []
-                executions = (
-                    await session.execute(
-                        select(TaskExecutionModel)
-                        .where(TaskExecutionModel.round_id.in_(round_ids))
-                        .order_by(
-                            TaskExecutionModel.round_id,
-                            TaskExecutionModel.task_id,
-                            TaskExecutionModel.attempt,
-                        )
-                    )
-                ).scalars().all() if round_ids else []
-
-                leases_by_execution = await self._leases.get_many_in_transaction(
-                    session, "worker_execution",
-                    [execution.execution_id for execution in executions],
+            task_rows = (
+                await session.execute(
+                    select(AgentTaskModel)
+                    .join(AgentPlanModel, AgentPlanModel.plan_id == AgentTaskModel.plan_id)
+                    .where(AgentPlanModel.run_id == run_id)
+                    .order_by(AgentPlanModel.sequence, AgentTaskModel.task_ref)
                 )
-
-                executions_by_member: dict[tuple[str, str], list[TaskExecutionModel]] = {}
-                for execution in executions:
-                    executions_by_member.setdefault(
-                        (execution.round_id, execution.task_id), []
-                    ).append(execution)
-                tasks_by_round: dict[str, list[dict[str, object]]] = {}
-                for member, task_row in members:
-                    tasks_by_round.setdefault(member.round_id, []).append(
-                        {
-                            "task_id": member.task_id,
-                            "title": _bounded_text(task_row.title, 240),
-                            "objective": _bounded_text(task_row.objective, 2000),
-                            "status": member.status,
-                            "active_execution_id": member.active_execution_id,
-                            "terminal_at": member.terminal_at,
-                            "executions": [
-                                _execution_snapshot(
-                                    execution,
-                                    leases_by_execution.get(execution.execution_id),
-                                )
-                                for execution in executions_by_member.get(
-                                    (member.round_id, member.task_id), []
-                                )
-                            ],
-                        }
-                    )
-
-                plan_document = {
-                    "plan_id": plan_row.plan_id,
-                    "status": plan_row.status,
-                    "user_goal": _bounded_text(plan_row.user_goal, 4000),
-                    "max_parallelism": plan_row.max_parallelism,
-                    "current_version": plan_row.current_version,
-                    "active_round_id": plan_row.active_round_id,
-                    "cancellation_epoch": plan_row.cancellation_epoch,
-                    "versions": [
-                        {
-                            "version": version.version,
-                            "change_reason": _bounded_text(version.change_reason, 500),
-                            "based_on_round_id": version.based_on_round_id,
-                            "created_at": version.created_at,
-                        }
-                        for version in version_rows
-                    ],
-                    "rounds": [
-                        {
-                            "round_id": round_row.round_id,
-                            "plan_version": round_row.plan_version,
-                            "round_number": round_row.round_number,
-                            "status": round_row.status,
-                            "expected_task_count": round_row.expected_task_count,
-                            "terminal_task_count": round_row.terminal_task_count,
-                            "created_at": round_row.created_at,
-                            "completed_at": round_row.completed_at,
-                            "tasks": tasks_by_round.get(round_row.round_id, []),
-                        }
-                        for round_row in round_rows
-                    ],
+            ).scalars().all()
+            task_ids = [task.task_id for task in task_rows]
+            executions = (
+                await session.execute(
+                    select(TaskExecutionModel)
+                    .where(TaskExecutionModel.task_id.in_(task_ids))
+                    .order_by(TaskExecutionModel.task_id, TaskExecutionModel.generation)
+                )
+            ).scalars().all() if task_ids else []
+            executions_by_task: dict[str, list[TaskExecutionModel]] = {}
+            for execution in executions:
+                executions_by_task.setdefault(execution.task_id, []).append(execution)
+            tasks_by_plan: dict[str, list[dict[str, object]]] = {}
+            for task in task_rows:
+                tasks_by_plan.setdefault(task.plan_id, []).append(
+                    {
+                        "task_id": task.task_id,
+                        "operation_id": task.operation_id,
+                        "task_ref": task.task_ref,
+                        "objective": _bounded_text(task.objective, 2000),
+                        "acceptance_criteria": _bounded_text(
+                            task.acceptance_criteria, 2000
+                        ),
+                        "status": task.status,
+                        "active_execution_id": task.active_execution_id,
+                        "generation": task.execution_generation,
+                        "output": task.output_json,
+                        "error": task.error_json,
+                        "executions": [
+                            {
+                                "execution_id": execution.execution_id,
+                                "generation": execution.generation,
+                                "status": execution.status,
+                                "started_at": execution.started_at,
+                                "deadline_at": execution.deadline_at,
+                                "cancellation_epoch": execution.cancellation_epoch,
+                                "capacity_reserved": execution.capacity_reserved,
+                                "error": execution.error_json,
+                            }
+                            for execution in executions_by_task.get(task.task_id, [])
+                        ],
+                    }
+                )
+            worker_plans = [
+                {
+                    "plan_id": plan.plan_id,
+                    "run_id": plan.run_id,
+                    "sequence": plan.sequence,
+                    "goal": _bounded_text(plan.goal, 4000),
+                    "status": plan.status,
+                    "expected_task_count": plan.expected_task_count,
+                    "terminal_task_count": plan.terminal_task_count,
+                    "root_wait_generation": plan.root_wait_generation,
+                    "created_at": plan.created_at,
+                    "completed_at": plan.completed_at,
+                    "tasks": tasks_by_plan.get(plan.plan_id, []),
                 }
+                for plan in plan_rows
+            ]
+            # 旧 plan 字段表示 DAG+Round；S2 返回新结构时不伪装为旧 DTO。
+            plan_document: dict[str, object] | None = None
 
         return {
             "run": {
@@ -260,6 +223,7 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                 "updated_at": run_row.updated_at,
             },
             "plan": plan_document,
+            "worker_plans": worker_plans,
             "approvals": [
                 {
                     "approval_id": approval.approval_id,
@@ -308,6 +272,7 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
             LookupError: Round、Plan 或其版本不存在。
             RuntimeError: Round 尚未完成、已过期或持久化身份不一致。
         """
+        raise RuntimeError("legacy_round_review_disabled_during_worker_s2")
         async with self._session_factory() as session:
             round_row = await session.get(PlanRoundModel, round_id)
             if round_row is None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -35,15 +34,14 @@ from application.contracts.memory import (
 )
 
 from ..models import (
-    AgentTaskModel,
     AgentRunModel,
     MemoryEpisodeModel,
     MemorySourceSuppressionModel,
     MessageModel,
+    OrchestratorExecutionModel,
+    OrchestratorPlanModel,
+    OrchestratorTaskModel,
     SessionModel,
-    TaskExecutionModel,
-    TaskExecutionResultModel,
-    WorkerExecutionMessageModel,
 )
 from .lease_center import PostgresLeaseCenter
 
@@ -453,7 +451,9 @@ def _to_domain(
         project_id=project_id,
         content=row.content,
         summary=memory_schema_to_domain(
-            MemoryEpisodeSummarySchema.model_validate(row.summary_json)
+            MemoryEpisodeSummarySchema.model_validate_json(
+                json.dumps(row.summary_json, ensure_ascii=False)
+            )
         ),
         source_refs=tuple(
             memory_schema_to_domain(
@@ -488,50 +488,52 @@ async def _load_source_excerpt(
             )
         )
         return None if row is None else row.content
-    if reference.source_type == "worker_message":
-        row = await session.scalar(
-            select(WorkerExecutionMessageModel).where(
-                WorkerExecutionMessageModel.message_id == reference.source_id,
-                WorkerExecutionMessageModel.session_id == session_id,
-                WorkerExecutionMessageModel.run_id == run_id,
-                WorkerExecutionMessageModel.entry_type == "tool_result",
+    if reference.source_type == "artifact":
+        row = (
+            await session.execute(
+                select(
+                    OrchestratorExecutionModel,
+                    OrchestratorTaskModel.output_json,
+                )
+                .join(
+                    OrchestratorTaskModel,
+                    OrchestratorTaskModel.task_id
+                    == OrchestratorExecutionModel.task_id,
+                )
+                .join(
+                    OrchestratorPlanModel,
+                    OrchestratorPlanModel.plan_id
+                    == OrchestratorTaskModel.plan_id,
+                )
+                .join(
+                    AgentRunModel,
+                    AgentRunModel.run_id == OrchestratorPlanModel.run_id,
+                )
+                .where(
+                    OrchestratorExecutionModel.execution_id == reference.source_id,
+                    OrchestratorExecutionModel.status == "completed",
+                    OrchestratorExecutionModel.worker_result_id.is_not(None),
+                    OrchestratorTaskModel.status == "completed",
+                    OrchestratorPlanModel.run_id == run_id,
+                    AgentRunModel.session_id == session_id,
+                )
             )
-        )
+        ).one_or_none()
         if row is None:
             return None
-        payload = row.content_json
-        tool_result = payload.get("tool_result") if isinstance(payload, dict) else None
-        return _bounded_json(tool_result if isinstance(tool_result, dict) else payload)
-    if reference.source_type == "artifact":
-        row = await session.scalar(
-            select(TaskExecutionResultModel)
-            .join(
-                TaskExecutionModel,
-                TaskExecutionModel.execution_id
-                == TaskExecutionResultModel.execution_id,
-            )
-            .join(AgentTaskModel, AgentTaskModel.task_id == TaskExecutionModel.task_id)
-            .join(AgentRunModel, AgentRunModel.run_id == AgentTaskModel.run_id)
-            .where(
-                TaskExecutionResultModel.result_ref == reference.source_id,
-                TaskExecutionModel.result_ref == reference.source_id,
-                AgentTaskModel.run_id == run_id,
-                AgentRunModel.session_id == session_id,
-            )
-        )
-        if row is None or not isinstance(row.result_json, dict):
+        execution, task_output = row
+        if not isinstance(execution.result_json, dict) or not isinstance(
+            task_output, dict
+        ):
             return None
+        if task_output != execution.result_json:
+            raise RuntimeError("memory_episode_source_integrity_failure")
         serialized = json.dumps(
-            row.result_json,
+            execution.result_json,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        if (
-            len(serialized) != row.content_bytes
-            or hashlib.sha256(serialized).hexdigest() != row.content_sha256
-        ):
-            raise RuntimeError("memory_episode_source_integrity_failure")
         return serialized.decode("utf-8")
     if reference.source_type == "run":
         source_run = await session.scalar(

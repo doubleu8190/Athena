@@ -21,11 +21,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
 from .base import Base
+from .legacy_orchestration_base import LegacyOrchestrationBase
 
 _JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
 
 
-class PlanVersionModel(Base):
+class PlanVersionModel(LegacyOrchestrationBase):
     """保存不可变的 Plan DAG 版本。"""
     __tablename__ = "plan_versions"
 
@@ -37,7 +38,7 @@ class PlanVersionModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class PlanRoundModel(Base):
+class PlanRoundModel(LegacyOrchestrationBase):
     """保存一次 Root Review 对应的固定任务轮次。"""
     __tablename__ = "plan_rounds"
     __table_args__ = (
@@ -61,7 +62,7 @@ class PlanRoundModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class RoundTaskModel(Base):
+class RoundTaskModel(LegacyOrchestrationBase):
     """保存 Round 启动时冻结的 Task 成员。"""
 
     __tablename__ = "round_tasks"
@@ -76,21 +77,15 @@ class RoundTaskModel(Base):
     terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class TaskExecutionModel(Base):
+class TaskExecutionModel(LegacyOrchestrationBase):
     """保存 Task 的业务执行尝试和执行结果。"""
     __tablename__ = "task_executions"
     __table_args__ = (
-        ForeignKeyConstraint(
-            ["round_id", "task_id"],
-            ["round_tasks.round_id", "round_tasks.task_id"],
-            name="fk_task_execution_round_task",
-        ),
         UniqueConstraint("task_id", "attempt", name="uq_task_execution_attempt"),
         UniqueConstraint("worker_thread_id", name="uq_task_execution_thread"),
     )
 
     execution_id: Mapped[str] = mapped_column(String, primary_key=True)
-    round_id: Mapped[str] = mapped_column(String, nullable=False)
     task_id: Mapped[str] = mapped_column(String, nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     worker_thread_id: Mapped[str] = mapped_column(String, nullable=False)
@@ -103,7 +98,7 @@ class TaskExecutionModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class TaskExecutionResultModel(Base):
+class TaskExecutionResultModel(LegacyOrchestrationBase):
     """保存大体积 Task 结果，并通过引用避免复制到多个投影。"""
 
     __tablename__ = "task_execution_results"
@@ -120,8 +115,8 @@ class TaskExecutionResultModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class OrchestrationCommandModel(Base):
-    """保存命令幂等键、请求摘要和稳定回执。"""
+class OrchestrationCommandModel(LegacyOrchestrationBase):
+    """旧 DAG 命令映射，仅供待替换的 Root 模块导入。"""
     __tablename__ = "orchestration_commands"
     __table_args__ = (
         UniqueConstraint("scope_key", "idempotency_key", name="uq_orchestration_command_idempotency"),
@@ -185,7 +180,7 @@ class OrchestrationInboxModel(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class WorkerJobModel(Base):
+class WorkerJobModel(LegacyOrchestrationBase):
     """保存 Worker 执行、恢复和取消作业。"""
     __tablename__ = "worker_jobs"
     __table_args__ = (
@@ -206,8 +201,8 @@ class WorkerJobModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class RootResumeJobModel(Base):
-    """保存由轮次完成事件触发的 Root 恢复作业。"""
+class RootResumeJobModel(LegacyOrchestrationBase):
+    """旧 Root Resume 映射，仅供待替换的旧代码导入。"""
     __tablename__ = "root_resume_jobs"
     __table_args__ = (
         UniqueConstraint("dedupe_key", name="uq_root_resume_jobs_dedupe"),
@@ -238,3 +233,6 @@ __all__ = [
     "TaskExecutionModel",
     "WorkerJobModel",
 ]
+
+# 旧执行表不注册到目标 metadata；唯一 task_executions 表来自逐轮模型。
+from .worker_orchestration_models import OrchestratorExecutionModel as TaskExecutionModel

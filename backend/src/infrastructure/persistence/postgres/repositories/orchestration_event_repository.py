@@ -81,18 +81,20 @@ class PostgresOrchestrationEventRepository(TaskEventRepository):
     async def apply_worker_terminal_event(
         self, event: WorkerTaskTerminalEvent
     ) -> TaskEventReceipt:
-        """在一个事务中校验 Worker 终态并推进任务与 Round 状态。
+        """停用旧 Round 终态事件入口。
 
         Args:
-            event: Worker 执行结束后提交的带 fencing 身份事件。
+            event: 仅为兼容未迁移调用方保留的旧 Round 事件对象。
 
         Returns:
-            事件受理、拒绝或重复投递的稳定回执。
+            此方法不会返回；Worker S2 结果必须提交给逐轮结果仓储。
 
         Raises:
-            TaskEventConflict: 同一消息 ID 被不同事件内容复用时。
-            Exception: 数据库错误由事件消费者按重试策略处理。
+            RuntimeError: Worker S2 阶段旧 Round 事件入口已停用。
         """
+        raise RuntimeError("legacy_worker_terminal_event_disabled_during_worker_s2")
+
+        # 下方 Round 实现暂保留供后续迁移参考，公开入口不会执行。
         payload = _event_document(event)
         payload_hash = _hash(payload)
         result_json = strict_result_json(event.result)

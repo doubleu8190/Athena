@@ -117,6 +117,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
             OrchestrationCommandConflict: 幂等键已对应其他请求内容。
             PlanCommandRejected: Run 不存在、已停止或已有 Plan。
         """
+        raise RuntimeError("legacy_dag_plan_submission_disabled_during_worker_s2")
         self._validate_submit_plan(command, plan)
         now = self._clock()
         command_hash = _plan_hash(command, plan, tasks)
@@ -485,6 +486,7 @@ class PostgresOrchestrationCommandRepository(OrchestrationCommandRepository):
             PlanCommandRejected: 命令身份、Round 状态或计划转换不合法时。
             OrchestrationCommandConflict: 幂等键被不同决策复用时。
         """
+        raise RuntimeError("legacy_round_review_disabled_during_worker_s2")
         self._validate_review_command(command, decision)
         command_hash = _review_command_hash(command, decision)
         now = self._clock()

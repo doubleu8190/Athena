@@ -6,9 +6,11 @@ from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 from typing import Any
 from uuid import uuid4
 
+import rfc8785
 from sqlalchemy import DateTime, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +40,11 @@ from ..models import (
     MemoryProcessingJobModel,
     MessageModel,
     OrchestrationOutboxModel,
+    OrchestratorExecutionModel,
+    OrchestratorPlanModel,
+    OrchestratorRootResumeJobModel,
+    OrchestratorTaskModel,
+    OrchestratorWorkerCommandModel,
     PlanRoundModel,
     RoundTaskModel,
     RootResumeJobModel,
@@ -642,79 +649,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         lease: LeaseGrant,
         wait_payload: dict[str, object] | None = None,
     ) -> bool:
-        """原子记录 Root 检查点并释放当前执行权。"""
-        if lease.key != LeaseKey("root_execution", run_id):
-            return False
-        async with self._session_factory() as session:
-            async with session.begin():
-                session_id = await session.scalar(
-                    select(AgentRunModel.session_id).where(
-                        AgentRunModel.run_id == run_id
-                    )
-                )
-                if session_id is None:
-                    return False
-                session_row = await session.scalar(
-                    select(SessionModel)
-                    .where(SessionModel.id == session_id)
-                    .with_for_update()
-                )
-                row = await session.get(AgentRunModel, run_id, with_for_update=True)
-                plan = await session.get(AgentPlanModel, plan_id, with_for_update=True)
-                if (
-                    session_row is None
-                    or session_row.active_run_id != run_id
-                    or row is None
-                    or plan is None
-                    or row.status != RunStatus.RUNNING.value
-                    or plan.run_id != run_id
-                    or plan.active_round_id != round_id
-                    or plan.current_version != plan_version
-                    or not interrupt_id
-                    or not checkpoint_id
-                ):
-                    return False
-                # 会话事件序号锁必须在租约锁之前获取，保证事件与释放原子提交。
-                await session.scalar(
-                    select(func.pg_advisory_xact_lock(func.hashtextextended(session_id, 0)))
-                )
-                try:
-                    await self._leases.assert_current_in_transaction(session, lease)
-                except LeaseLostError:
-                    return False
-
-                if (
-                    row.root_wait_round_id != round_id
-                    or row.root_wait_plan_version != plan_version
-                ):
-                    row.root_wait_generation = int(row.root_wait_generation or 0) + 1
-                    row.root_wait_round_id = round_id
-                    row.root_wait_plan_version = plan_version
-
-                row.root_wait_armed_at = _now()
-                row.root_wait_interrupt_id = interrupt_id
-                row.root_wait_checkpoint_id = checkpoint_id
-                row.updated_at = _now()
-                max_seq = int(await session.scalar(
-                    select(func.max(AgentEventModel.session_seq)).where(
-                        AgentEventModel.session_id == session_id
-                    )
-                ) or 0)
-                session.add(AgentEventModel(
-                    session_id=session_id,
-                    session_seq=max_seq + 1,
-                    run_id=run_id,
-                    event_type="run.root_suspended",
-                    durability="durable",
-                    payload_json=wait_payload or {
-                        "activity_id": f"run:{run_id}", "activity_type": "run",
-                        "name": "run", "status": "waiting",
-                    },
-                    occurred_at=_now(),
-                ))
-                if not await self._leases.finish_in_transaction(session, lease):
-                    raise LeaseLostError(lease.key)
-                return True
+        """停用旧 Round 专属等待入口；S2 的 Root 恢复以唯一作业建模。"""
+        raise RuntimeError("worker_round_wait_unavailable_in_s2")
 
     async def complete(
         self, run_id: str, result: dict[str, object], *, lease: LeaseGrant,
@@ -748,11 +684,19 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     or run.status != RunStatus.RUNNING.value
                 ):
                     return False
-                plan = await db.scalar(
-                    select(AgentPlanModel)
-                    .where(AgentPlanModel.run_id == run_id)
-                    .with_for_update()
-                )
+                active_plans = (
+                    await db.scalars(
+                        select(OrchestratorPlanModel)
+                        .where(
+                            OrchestratorPlanModel.run_id == run_id,
+                            OrchestratorPlanModel.status.in_(
+                                ("created", "running")
+                            ),
+                        )
+                        .order_by(OrchestratorPlanModel.sequence)
+                        .with_for_update()
+                    )
+                ).all()
                 try:
                     await self._leases.assert_current_in_transaction(db, lease)
                 except LeaseLostError:
@@ -797,11 +741,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     run = await db.get(AgentRunModel, session_row.active_run_id, with_for_update=True)
                     if run is None or run.status != RunStatus.RUNNING.value:
                         continue
-                    plan = await db.scalar(
-                        select(AgentPlanModel)
-                        .where(AgentPlanModel.run_id == run.run_id)
-                        .with_for_update()
-                    )
                     lease_row = await self._leases.get_in_transaction(
                         db, LeaseKey("root_execution", run.run_id)
                     )
@@ -838,9 +777,16 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         """在 Session、Run 锁内保存失败原因并启动同一套取消栅栏。"""
         run.error_json = error
         plan = await db.scalar(
-            select(AgentPlanModel).where(AgentPlanModel.run_id == run.run_id).with_for_update()
+            select(OrchestratorPlanModel)
+            .where(
+                OrchestratorPlanModel.run_id == run.run_id,
+                OrchestratorPlanModel.status.in_(("created", "running")),
+            )
+            .order_by(OrchestratorPlanModel.sequence.desc())
+            .limit(1)
+            .with_for_update()
         )
-        if plan is None or plan.status in {"completed", "failed", "cancelled"}:
+        if plan is None:
             await self._begin_stop_without_active_plan(
                 db,
                 run.run_id,
@@ -878,29 +824,6 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     or run is None
                     or session_row.active_run_id != run_id
                     or run.status != RunStatus.RUNNING.value
-                ):
-                    return None
-                plan = await db.scalar(
-                    select(AgentPlanModel)
-                    .where(AgentPlanModel.run_id == run_id)
-                    .with_for_update()
-                )
-                if (
-                    plan is None
-                    or plan.status != "waiting_review"
-                    or plan.active_round_id is None
-                ):
-                    return None
-                completed_round = await db.scalar(
-                    select(PlanRoundModel)
-                    .where(PlanRoundModel.round_id == plan.active_round_id)
-                    .with_for_update()
-                )
-                if (
-                    completed_round is None
-                    or completed_round.plan_id != plan.plan_id
-                    or completed_round.status != "completed"
-                    or completed_round.plan_version != plan.current_version
                 ):
                     return None
                 grant = await self._leases.acquire_in_transaction(
@@ -953,10 +876,15 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     or session_row.active_run_id != run_id
                 ):
                     return False
-                plan = await db.scalar(
-                    select(AgentPlanModel)
-                    .where(AgentPlanModel.run_id == run_id)
-                    .with_for_update()
+                active_plans = await db.scalar(
+                    select(func.count())
+                    .select_from(OrchestratorPlanModel)
+                    .where(
+                        OrchestratorPlanModel.run_id == run_id,
+                        OrchestratorPlanModel.status.in_(
+                            ("created", "running", "cancelling")
+                        ),
+                    )
                 )
                 lease_row = await self._leases.get_in_transaction(
                     db, LeaseKey("root_execution", run_id)
@@ -979,9 +907,28 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         ),
                         completed=True,
                     )
-                if plan is not None and plan.status not in {"completed", "failed", "cancelled"}:
-                    # Worker reconciliation owns the terminal transition while workers
-                    # still hold leases; it clears active_run_id with the plan result.
+                if active_plans:
+                    return False
+                active_execution_count = await db.scalar(
+                    select(func.count())
+                    .select_from(OrchestratorExecutionModel)
+                    .join(
+                        OrchestratorTaskModel,
+                        OrchestratorExecutionModel.task_id
+                        == OrchestratorTaskModel.task_id,
+                    )
+                    .join(
+                        OrchestratorPlanModel,
+                        OrchestratorTaskModel.plan_id
+                        == OrchestratorPlanModel.plan_id,
+                    )
+                    .where(
+                        OrchestratorPlanModel.run_id == run_id,
+                        OrchestratorExecutionModel.capacity_reserved.is_(True),
+                        OrchestratorExecutionModel.status == "cancelling",
+                    )
+                )
+                if active_execution_count:
                     return False
                 failed = failed or run.error_json is not None
                 terminal = RunStatus.FAILED if failed else RunStatus.CANCELLED
@@ -1065,14 +1012,17 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         raise ValueError("active_run_changed")
 
                     run.display_cutoff_session_seq = displayed_session_seq
-                    plan = (
-                        await db.execute(
-                            select(AgentPlanModel)
-                            .where(AgentPlanModel.run_id == run.run_id)
-                            .with_for_update()
+                    plan = await db.scalar(
+                        select(OrchestratorPlanModel)
+                        .where(
+                            OrchestratorPlanModel.run_id == run.run_id,
+                            OrchestratorPlanModel.status.in_(("created", "running")),
                         )
-                    ).scalar_one_or_none()
-                    if plan is None or plan.status in {"completed", "failed", "cancelled"}:
+                        .order_by(OrchestratorPlanModel.sequence.desc())
+                        .limit(1)
+                        .with_for_update()
+                    )
+                    if plan is None:
                         return await self._begin_stop_without_active_plan(
                             db, run.run_id, run, plan, now
                         )
@@ -1080,14 +1030,23 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     active_execution_count = (
                         await db.execute(
                             select(func.count())
-                            .select_from(TaskExecutionModel)
+                            .select_from(OrchestratorExecutionModel)
                             .join(
-                                AgentTaskModel,
-                                TaskExecutionModel.task_id == AgentTaskModel.task_id,
+                                OrchestratorTaskModel,
+                                OrchestratorExecutionModel.task_id
+                                == OrchestratorTaskModel.task_id,
+                            )
+                            .join(
+                                OrchestratorPlanModel,
+                                OrchestratorTaskModel.plan_id
+                                == OrchestratorPlanModel.plan_id,
                             )
                             .where(
-                                AgentTaskModel.plan_id == plan.plan_id,
-                                TaskExecutionModel.status == "running",
+                                OrchestratorPlanModel.run_id == run.run_id,
+                                OrchestratorExecutionModel.capacity_reserved.is_(True),
+                                OrchestratorExecutionModel.status.in_(
+                                    ("running", "waiting_approval", "cancelling")
+                                ),
                             )
                         )
                     ).scalar_one()
@@ -1120,7 +1079,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         session: AsyncSession,
         run_id: str,
         run: AgentRunModel,
-        plan: AgentPlanModel | None,
+        plan: OrchestratorPlanModel | None,
         now: datetime,
         *, root_execution_lease: LeaseGrant | None = None,
     ) -> RunCancellationResult:
@@ -1132,6 +1091,13 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         run.cancellation_epoch = int(run.cancellation_epoch or 0) + 1
         run.cancellation_external_effect_status = external_effect_status
         run.updated_at = now
+        await self._cancel_run_worker_plans(
+            session,
+            run_id=run_id,
+            cancellation_epoch=run.cancellation_epoch,
+            reason="RUN_STOPPED",
+            now=now,
+        )
         await self._cancel_root_resume_jobs(session, run_id, now)
         await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
         await self._revoke_run_leases(
@@ -1144,8 +1110,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 event_type="RunStopping",
                 correlation_id=run_id,
                 plan_id=plan.plan_id if plan is not None else None,
-                plan_version=plan.current_version if plan is not None else None,
-                round_id=plan.active_round_id if plan is not None else None,
+                plan_version=plan.sequence if plan is not None else None,
+                round_id=None,
                 payload_json={
                     "cancellation_epoch": run.cancellation_epoch,
                     "external_effect_status": external_effect_status,
@@ -1169,7 +1135,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         session: AsyncSession,
         run_id: str,
         run: AgentRunModel,
-        plan: AgentPlanModel,
+        plan: OrchestratorPlanModel,
         *,
         reason: str,
         now: datetime,
@@ -1182,32 +1148,19 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             if run.status == RunStatus.RUNNING.value or active_execution_count
             else "none"
         )
-        cancellation_epoch = (
-            max(int(run.cancellation_epoch or 0), int(plan.cancellation_epoch or 0)) + 1
-        )
+        cancellation_epoch = int(run.cancellation_epoch or 0) + 1
         run.status = RunStatus.STOPPING.value
         run.cancellation_epoch = cancellation_epoch
         run.cancellation_external_effect_status = external_effect_status
         run.updated_at = now
-        plan.status = "cancelling"
-        plan.cancellation_epoch = cancellation_epoch
-        plan.updated_at = now
-
-        await self._cancel_pending_plan_tasks(
+        await self._cancel_run_worker_plans(
             session,
             run_id=run_id,
-            plan=plan,
             cancellation_epoch=cancellation_epoch,
             reason=reason,
             now=now,
         )
-        await self._cancel_active_plan_executions(
-            session,
-            plan=plan,
-            cancellation_epoch=cancellation_epoch,
-            now=now,
-        )
-        await self._cancel_pending_approvals(session, run_id=run_id, plan=plan, now=now)
+        await self._cancel_pending_approvals(session, run_id=run_id, plan=None, now=now)
         await self._cancel_root_resume_jobs(session, run_id, now)
         await self._revoke_run_leases(
             session, run_id, root_execution_lease=root_execution_lease
@@ -1223,8 +1176,8 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     event_type=event_type,
                     correlation_id=run_id,
                     plan_id=plan.plan_id,
-                    plan_version=plan.current_version,
-                    round_id=plan.active_round_id,
+                    plan_version=plan.sequence,
+                    round_id=None,
                     payload_json={
                         "cancellation_epoch": cancellation_epoch,
                         "reason": reason,
@@ -1243,6 +1196,115 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             external_effect_status,
             run_id=run_id,
         )
+
+    async def _cancel_run_worker_plans(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: str,
+        cancellation_epoch: int,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        """撤销 Run 下所有未完成 Worker 任务和待投递命令。"""
+        plans = (
+            await session.scalars(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.run_id == run_id)
+                .order_by(OrchestratorPlanModel.sequence)
+                .with_for_update()
+            )
+        ).all()
+        for plan in plans:
+            active_plan = plan.status in {"created", "running"}
+            tasks = (
+                await session.scalars(
+                    select(OrchestratorTaskModel)
+                    .where(OrchestratorTaskModel.plan_id == plan.plan_id)
+                    .order_by(OrchestratorTaskModel.task_id)
+                    .with_for_update()
+                )
+            ).all()
+            for task in tasks:
+                executions = (
+                    await session.scalars(
+                        select(OrchestratorExecutionModel)
+                        .where(OrchestratorExecutionModel.task_id == task.task_id)
+                        .order_by(OrchestratorExecutionModel.generation)
+                        .with_for_update()
+                    )
+                ).all()
+                for execution in executions:
+                    commands = (
+                        await session.scalars(
+                            select(OrchestratorWorkerCommandModel)
+                            .where(
+                                OrchestratorWorkerCommandModel.execution_id
+                                == execution.execution_id,
+                                OrchestratorWorkerCommandModel.status.in_(
+                                    ("pending", "retry", "awaiting_assignment")
+                                ),
+                            )
+                            .order_by(OrchestratorWorkerCommandModel.command_id)
+                            .with_for_update()
+                        )
+                    ).all()
+                    for command in commands:
+                        command.status = "superseded"
+                        command.updated_at = now
+
+                    if execution.capacity_reserved and execution.instance_id is not None:
+                        execution.status = "cancelling"
+                        execution.cancellation_epoch = cancellation_epoch
+                        execution.updated_at = now
+                        command_id = str(uuid4())
+                        command_body = {
+                            "protocol_version": "1.0",
+                            "command_id": command_id,
+                            "execution_id": execution.execution_id,
+                            "generation": execution.generation,
+                            "cancellation_epoch": cancellation_epoch,
+                            "reason": "run_cancelled",
+                        }
+                        session.add(
+                            OrchestratorWorkerCommandModel(
+                                command_id=command_id,
+                                execution_id=execution.execution_id,
+                                instance_id=execution.instance_id,
+                                generation=execution.generation,
+                                idempotency_key=command_id,
+                                command_type="cancel",
+                                request_hash=hashlib.sha256(
+                                    rfc8785.dumps(command_body)
+                                ).hexdigest(),
+                                command_json=command_body,
+                                status="pending",
+                                attempt=0,
+                                available_at=now,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+                    elif execution.status not in {
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "superseded",
+                        "timed_out",
+                    }:
+                        execution.status = "cancelled"
+                        execution.cancellation_epoch = cancellation_epoch
+                        execution.capacity_reserved = False
+                        execution.updated_at = now
+
+                if task.status not in {"completed", "failed", "cancelled"}:
+                    task.status = "cancelled"
+                    task.cancellation_epoch = cancellation_epoch
+                    task.updated_at = now
+            if active_plan:
+                plan.terminal_task_count = plan.expected_task_count
+                plan.status = "cancelled"
+                plan.completed_at = now
 
     async def _cancel_pending_plan_tasks(
         self,
@@ -1437,8 +1499,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     event_type="ApprovalCancelled",
                     correlation_id=run_id,
                     plan_id=approval_plan_id,
-                    plan_version=plan.current_version if plan else None,
-                    round_id=plan.active_round_id if plan else None,
+                    # Worker approval API is not connected in S2; the legacy
+                    # approval record has no current-round identity.
+                    plan_version=None,
+                    round_id=None,
                     payload_json={
                         "approval_id": approval.approval_id,
                         "task_id": approval.task_id,
@@ -1465,10 +1529,10 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
     ) -> None:
         """撤销尚未执行的 Root 恢复作业，避免取消后重新进入 Root Graph。"""
         await session.execute(
-            update(RootResumeJobModel)
+            update(OrchestratorRootResumeJobModel)
             .where(
-                RootResumeJobModel.run_id == run_id,
-                RootResumeJobModel.status.in_(("pending", "running")),
+                OrchestratorRootResumeJobModel.run_id == run_id,
+                OrchestratorRootResumeJobModel.status.in_(("pending", "running")),
             )
             .values(
                 status="cancelled",
@@ -1484,11 +1548,20 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         root_execution_lease: LeaseGrant | None = None,
     ) -> None:
         """按资源 key 顺序撤销取消范围内仍活跃的执行授权。"""
-        worker_execution_ids = select(TaskExecutionModel.execution_id).join(
-            AgentTaskModel, AgentTaskModel.task_id == TaskExecutionModel.task_id
-        ).where(AgentTaskModel.run_id == run_id)
-        resume_job_ids = select(RootResumeJobModel.job_id).where(
-            RootResumeJobModel.run_id == run_id
+        worker_execution_ids = (
+            select(OrchestratorExecutionModel.execution_id)
+            .join(
+                OrchestratorTaskModel,
+                OrchestratorTaskModel.task_id == OrchestratorExecutionModel.task_id,
+            )
+            .join(
+                OrchestratorPlanModel,
+                OrchestratorPlanModel.plan_id == OrchestratorTaskModel.plan_id,
+            )
+            .where(OrchestratorPlanModel.run_id == run_id)
+        )
+        resume_job_ids = select(OrchestratorRootResumeJobModel.job_id).where(
+            OrchestratorRootResumeJobModel.run_id == run_id
         )
         resume_ids = list((await session.scalars(resume_job_ids)).all())
         execution_ids = list((await session.scalars(worker_execution_ids)).all())
@@ -1567,12 +1640,14 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 run = await session.get(AgentRunModel, run_id, with_for_update=True)
                 resume_jobs = (
                     await session.scalars(
-                        select(RootResumeJobModel)
+                        select(OrchestratorRootResumeJobModel)
                         .where(
-                            RootResumeJobModel.run_id == run_id,
-                            RootResumeJobModel.status.in_(("pending", "running")),
+                            OrchestratorRootResumeJobModel.run_id == run_id,
+                            OrchestratorRootResumeJobModel.status.in_(
+                                ("pending", "running")
+                            ),
                         )
-                        .order_by(RootResumeJobModel.job_id)
+                        .order_by(OrchestratorRootResumeJobModel.job_id)
                         .with_for_update()
                     )
                 ).all()

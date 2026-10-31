@@ -1,0 +1,637 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://athena.local/schemas/worker-protocol-v1.schema.json",
+  "title": "Athena Worker HTTP Protocol v1",
+  "description": "Worker 与 Athena Orchestrator 共用的请求、回执和错误 DTO。HTTP 头、状态码及跨字段业务校验见 worker-registry-round-plan-http-design.md。",
+  "$defs": {
+    "Uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "JsonObject": {
+      "type": "object"
+    },
+    "JsonSchemaDefinition": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "$schema": {"type": "string"},
+        "$id": {"type": "string", "format": "uri"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "type": {"const": "object"},
+        "properties": {"type": "object"},
+        "required": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "additionalProperties": {
+          "oneOf": [
+            {"type": "boolean"},
+            {"type": "object"}
+          ]
+        },
+        "minProperties": {"type": "integer", "minimum": 0},
+        "maxProperties": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "CapabilityContract": {
+      "type": "object",
+      "required": ["can_do", "cannot_do", "input_schema", "output_schema"],
+      "properties": {
+        "can_do": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1, "maxLength": 2000}
+        },
+        "cannot_do": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1, "maxLength": 2000}
+        },
+        "input_schema": {"$ref": "#/$defs/JsonSchemaDefinition"},
+        "output_schema": {"$ref": "#/$defs/JsonSchemaDefinition"}
+      },
+      "additionalProperties": false
+    },
+    "RegistrationRequest": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "registration_request_id",
+        "worker_instance_key",
+        "base_url",
+        "execution_timeout_seconds",
+        "max_concurrency",
+        "capability"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "registration_request_id": {"$ref": "#/$defs/Uuid"},
+        "worker_instance_key": {"$ref": "#/$defs/Uuid"},
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://[^/?#]+/?$",
+          "maxLength": 2048
+        },
+        "execution_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800
+        },
+        "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 256},
+        "capability": {"$ref": "#/$defs/CapabilityContract"}
+      },
+      "additionalProperties": false
+    },
+    "RegistrationResponse": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "worker_instance_id",
+        "worker_instance_key",
+        "contract_id",
+        "contract_revision",
+        "status",
+        "registered_at"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "worker_instance_id": {"$ref": "#/$defs/Identifier"},
+        "worker_instance_key": {"$ref": "#/$defs/Uuid"},
+        "contract_id": {"$ref": "#/$defs/Identifier"},
+        "contract_revision": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["active", "inactive"]},
+        "registered_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "additionalProperties": false
+    },
+    "ExecutionGrant": {
+      "type": "object",
+      "required": ["token", "expires_at"],
+      "properties": {
+        "token": {"type": "string", "minLength": 16, "maxLength": 8192},
+        "expires_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "additionalProperties": false
+    },
+    "TaskCommand": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "command_id",
+        "run_id",
+        "plan_id",
+        "task_id",
+        "execution_id",
+        "generation",
+        "cancellation_epoch",
+        "operation_id",
+        "contract_id",
+        "contract_revision",
+        "objective",
+        "acceptance_criteria",
+        "input",
+        "execution_grant"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "command_id": {"$ref": "#/$defs/Uuid"},
+        "run_id": {"$ref": "#/$defs/Identifier"},
+        "plan_id": {"$ref": "#/$defs/Identifier"},
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "cancellation_epoch": {"type": "integer", "minimum": 0},
+        "operation_id": {"$ref": "#/$defs/Uuid"},
+        "contract_id": {"$ref": "#/$defs/Identifier"},
+        "contract_revision": {"type": "integer", "minimum": 1},
+        "objective": {"type": "string", "minLength": 1, "maxLength": 10000},
+        "acceptance_criteria": {"type": "string", "minLength": 1, "maxLength": 10000},
+        "input": {"$ref": "#/$defs/JsonObject"},
+        "execution_grant": {"$ref": "#/$defs/ExecutionGrant"}
+      },
+      "additionalProperties": false
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "command_id",
+        "receipt_id",
+        "execution_id",
+        "generation",
+        "disposition",
+        "received_at"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "command_id": {"$ref": "#/$defs/Uuid"},
+        "receipt_id": {"$ref": "#/$defs/Identifier"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "disposition": {"enum": ["accepted", "duplicate"]},
+        "received_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "additionalProperties": false
+    },
+    "ApprovalDecisionItem": {
+      "type": "object",
+      "required": ["item_id", "decision", "arguments_sha256", "decided_at"],
+      "properties": {
+        "item_id": {"$ref": "#/$defs/Uuid"},
+        "decision": {"enum": ["approved", "denied", "expired"]},
+        "arguments_sha256": {"$ref": "#/$defs/Sha256"},
+        "decided_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "additionalProperties": false
+    },
+    "ResumeCommand": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "command_id",
+        "execution_id",
+        "generation",
+        "cancellation_epoch",
+        "pause_id",
+        "approval_request_id",
+        "decision_set_sha256",
+        "decisions",
+        "execution_grant"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "command_id": {"$ref": "#/$defs/Uuid"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "cancellation_epoch": {"type": "integer", "minimum": 0},
+        "pause_id": {"$ref": "#/$defs/Uuid"},
+        "approval_request_id": {"$ref": "#/$defs/Uuid"},
+        "approval_id": {"$ref": "#/$defs/Identifier"},
+        "approval_batch_id": {"$ref": "#/$defs/Identifier"},
+        "decision_set_sha256": {"$ref": "#/$defs/Sha256"},
+        "decisions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {"$ref": "#/$defs/ApprovalDecisionItem"}
+        },
+        "execution_grant": {"$ref": "#/$defs/ExecutionGrant"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"decisions": {"maxItems": 1}}, "required": ["decisions"]},
+          "then": {"required": ["approval_id"], "not": {"required": ["approval_batch_id"]}}
+        },
+        {
+          "if": {"properties": {"decisions": {"minItems": 2}}, "required": ["decisions"]},
+          "then": {"required": ["approval_batch_id"], "not": {"required": ["approval_id"]}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "CancelCommand": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "command_id",
+        "execution_id",
+        "generation",
+        "cancellation_epoch",
+        "reason"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "command_id": {"$ref": "#/$defs/Uuid"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "cancellation_epoch": {"type": "integer", "minimum": 0},
+        "reason": {"enum": ["task_cancelled", "run_cancelled", "execution_superseded", "execution_timed_out"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"reason": {"enum": ["task_cancelled", "run_cancelled"]}}, "required": ["reason"]},
+          "then": {"properties": {"cancellation_epoch": {"minimum": 1}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "CancelReceipt": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "command_id",
+        "receipt_id",
+        "execution_id",
+        "generation",
+        "cancellation_epoch",
+        "reason",
+        "accepted",
+        "stop_confirmation_required",
+        "received_at"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "command_id": {"$ref": "#/$defs/Uuid"},
+        "receipt_id": {"$ref": "#/$defs/Identifier"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "cancellation_epoch": {"type": "integer", "minimum": 0},
+        "reason": {"enum": ["task_cancelled", "run_cancelled", "execution_superseded", "execution_timed_out"]},
+        "accepted": {"const": true},
+        "stop_confirmation_required": {"const": true},
+        "received_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"reason": {"enum": ["task_cancelled", "run_cancelled"]}}, "required": ["reason"]},
+          "then": {"properties": {"cancellation_epoch": {"minimum": 1}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "StopConfirmation": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "stop_confirmation_id",
+        "cancel_command_id",
+        "execution_id",
+        "generation",
+        "cancellation_epoch",
+        "reason",
+        "stopped",
+        "stopped_at"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "stop_confirmation_id": {"$ref": "#/$defs/Uuid"},
+        "cancel_command_id": {"$ref": "#/$defs/Uuid"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "cancellation_epoch": {"type": "integer", "minimum": 0},
+        "reason": {"enum": ["task_cancelled", "run_cancelled", "execution_superseded", "execution_timed_out"]},
+        "stopped": {"const": true},
+        "stopped_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"reason": {"enum": ["task_cancelled", "run_cancelled"]}}, "required": ["reason"]},
+          "then": {"properties": {"cancellation_epoch": {"minimum": 1}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "StopConfirmationReceipt": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "stop_confirmation_id",
+        "cancel_command_id",
+        "execution_id",
+        "generation",
+        "cancellation_epoch",
+        "reason",
+        "disposition",
+        "task_status_unchanged",
+        "received_at"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "stop_confirmation_id": {"$ref": "#/$defs/Uuid"},
+        "cancel_command_id": {"$ref": "#/$defs/Uuid"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "cancellation_epoch": {"type": "integer", "minimum": 0},
+        "reason": {"enum": ["task_cancelled", "run_cancelled", "execution_superseded", "execution_timed_out"]},
+        "disposition": {"enum": ["capacity_released", "already_released"]},
+        "task_status_unchanged": {"const": true},
+        "received_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"reason": {"enum": ["task_cancelled", "run_cancelled"]}}, "required": ["reason"]},
+          "then": {"properties": {"cancellation_epoch": {"minimum": 1}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "HealthResponse": {
+      "type": "object",
+      "required": ["protocol_version", "worker_instance_key", "status", "accepting_tasks", "checked_at"],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "worker_instance_key": {"$ref": "#/$defs/Uuid"},
+        "status": {"enum": ["ready", "not_ready"]},
+        "accepting_tasks": {"type": "boolean"},
+        "checked_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "not_ready"}}, "required": ["status"]},
+          "then": {"properties": {"accepting_tasks": {"const": false}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalItemRequest": {
+      "type": "object",
+      "required": ["item_id", "tool_name", "summary", "risk_level", "arguments", "arguments_sha256"],
+      "properties": {
+        "item_id": {"$ref": "#/$defs/Uuid"},
+        "tool_name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "risk_level": {"enum": ["low", "medium", "high", "critical"]},
+        "arguments": {"$ref": "#/$defs/JsonObject"},
+        "arguments_sha256": {"$ref": "#/$defs/Sha256"}
+      },
+      "additionalProperties": false
+    },
+    "ApprovalRequest": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "approval_request_id",
+        "pause_id",
+        "run_id",
+        "plan_id",
+        "task_id",
+        "execution_id",
+        "generation",
+        "cancellation_epoch",
+        "items"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "approval_request_id": {"$ref": "#/$defs/Uuid"},
+        "pause_id": {"$ref": "#/$defs/Uuid"},
+        "run_id": {"$ref": "#/$defs/Identifier"},
+        "plan_id": {"$ref": "#/$defs/Identifier"},
+        "task_id": {"$ref": "#/$defs/Identifier"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "cancellation_epoch": {"type": "integer", "minimum": 0},
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {"$ref": "#/$defs/ApprovalItemRequest"},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ApprovalReceipt": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "approval_request_id",
+        "pause_id",
+        "disposition",
+        "status",
+        "expires_at",
+        "items",
+        "received_at"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "approval_request_id": {"$ref": "#/$defs/Uuid"},
+        "pause_id": {"$ref": "#/$defs/Uuid"},
+        "approval_batch_id": {"$ref": "#/$defs/Identifier"},
+        "disposition": {"enum": ["accepted", "duplicate"]},
+        "status": {"const": "accepted"},
+        "expires_at": {"$ref": "#/$defs/Timestamp"},
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": ["item_id", "approval_id", "arguments_sha256"],
+            "properties": {
+              "item_id": {"$ref": "#/$defs/Uuid"},
+              "approval_id": {"$ref": "#/$defs/Identifier"},
+              "arguments_sha256": {"$ref": "#/$defs/Sha256"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "received_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"items": {"maxItems": 1}}, "required": ["items"]},
+          "then": {"not": {"required": ["approval_batch_id"]}}
+        },
+        {
+          "if": {"properties": {"items": {"minItems": 2}}, "required": ["items"]},
+          "then": {"required": ["approval_batch_id"]}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "WorkerError": {
+      "type": "object",
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,63}$"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "retryable": {"type": "boolean"},
+        "details": {"$ref": "#/$defs/JsonObject"}
+      },
+      "additionalProperties": false
+    },
+    "ResultSubmission": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["protocol_version", "result_id", "generation", "status", "output"],
+          "properties": {
+            "protocol_version": {"const": "1.0"},
+            "result_id": {"$ref": "#/$defs/Uuid"},
+            "generation": {"type": "integer", "minimum": 1},
+            "status": {"const": "completed"},
+            "output": {"$ref": "#/$defs/JsonObject"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["protocol_version", "result_id", "generation", "status", "error"],
+          "properties": {
+            "protocol_version": {"const": "1.0"},
+            "result_id": {"$ref": "#/$defs/Uuid"},
+            "generation": {"type": "integer", "minimum": 1},
+            "status": {"const": "failed"},
+            "error": {"$ref": "#/$defs/WorkerError"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ResultReceipt": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "result_id",
+        "execution_id",
+        "generation",
+        "disposition",
+        "reason",
+        "received_at"
+      ],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "result_id": {"$ref": "#/$defs/Uuid"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "generation": {"type": "integer", "minimum": 1},
+        "disposition": {"enum": ["recorded", "retry_scheduled", "ignored"]},
+        "reason": {
+          "enum": [
+            "success_recorded",
+            "worker_error_retryable",
+            "worker_error_final",
+            "execution_attempts_exhausted",
+            "output_schema_invalid",
+            "task_cancelled",
+            "execution_superseded",
+            "execution_deadline_exceeded"
+          ]
+        },
+        "next_execution_id": {"$ref": "#/$defs/Identifier"},
+        "received_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"disposition": {"const": "retry_scheduled"}}, "required": ["disposition"]},
+          "then": {"required": ["next_execution_id"]}
+        },
+        {
+          "if": {"properties": {"disposition": {"enum": ["recorded", "ignored"]}}, "required": ["disposition"]},
+          "then": {"not": {"required": ["next_execution_id"]}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "ResourceReference": {
+      "type": "object",
+      "required": ["protocol_version", "resource_id", "media_type", "size_bytes", "sha256"],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "resource_id": {"$ref": "#/$defs/Uuid"},
+        "media_type": {"type": "string", "minLength": 1, "maxLength": 255},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/Sha256"},
+        "file_name": {"type": "string", "maxLength": 255}
+      },
+      "additionalProperties": false
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "required": ["protocol_version", "code", "message", "directive", "request_id"],
+      "properties": {
+        "protocol_version": {"const": "1.0"},
+        "code": {
+          "enum": [
+            "AUTHENTICATION_FAILED",
+            "FORBIDDEN",
+            "PROTOCOL_VERSION_UNSUPPORTED",
+            "MALFORMED_REQUEST",
+            "RESOURCE_DIGEST_MISMATCH",
+            "UNSUPPORTED_MEDIA_TYPE",
+            "PAYLOAD_TOO_LARGE",
+            "VALIDATION_ERROR",
+            "REGISTRATION_INVALID",
+            "TASK_INPUT_INVALID",
+            "APPROVAL_REQUEST_INVALID",
+            "UNKNOWN_CONTRACT",
+            "INSTANCE_NOT_READY",
+            "SERVER_OVERLOADED",
+            "RATE_LIMITED",
+            "TEMPORARY_UNAVAILABLE",
+            "IDEMPOTENCY_KEY_REUSED",
+            "COMMAND_ID_CONFLICT",
+            "RESULT_ID_CONFLICT",
+            "APPROVAL_ID_CONFLICT",
+            "STOP_CONFIRMATION_CONFLICT",
+            "RESOURCE_ID_CONFLICT",
+            "EXECUTION_NOT_FOUND",
+            "EXECUTION_SUPERSEDED",
+            "EXECUTION_DEADLINE_EXCEEDED",
+            "TASK_CANCELLED",
+            "APPROVAL_STALE",
+            "WORKER_QUEUE_FULL",
+            "CAPABILITY_UNAVAILABLE",
+            "INTERNAL_ERROR"
+          ]
+        },
+        "message": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "directive": {
+          "enum": ["retry_same_command", "retry_execution", "root_replan", "operator_action", "stop"]
+        },
+        "retry_after_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "request_id": {"$ref": "#/$defs/Identifier"},
+        "details": {"$ref": "#/$defs/JsonObject"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

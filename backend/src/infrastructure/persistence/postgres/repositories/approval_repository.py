@@ -85,6 +85,10 @@ class PostgresApprovalRepository(ApprovalRepository):
                 hint = await session.get(ApprovalRecordModel, approval_id)
                 if hint is None:
                     return False
+                if hint.execution_id is not None:
+                    raise RuntimeError(
+                        "legacy_worker_approval_resume_disabled_during_worker_s2"
+                    )
                 run_id = hint.run_id
                 run = await session.get(
                     AgentRunModel, run_id, with_for_update=True

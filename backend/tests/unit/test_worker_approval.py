@@ -352,7 +352,7 @@ async def test_worker_approval_request_persists_interrupt_identity_and_notifies(
 
 
 @pytest.mark.asyncio
-async def test_resolving_worker_approval_enqueues_resume_job_in_same_repository_call():
+async def test_legacy_worker_approval_resume_is_disabled_during_s2():
     approval = SimpleNamespace(
         approval_id="approval-1",
         run_id="run-1",
@@ -382,23 +382,15 @@ async def test_resolving_worker_approval_enqueues_resume_job_in_same_repository_
             return Context()
 
     repository = PostgresApprovalRepository(Factory())
-    assert await repository.resolve(
-        "approval-1",
-        decision=ApprovalDecision.APPROVED,
-    )
-    resume_job = next(
-        item
-        for item in session.added
-        if getattr(item, "job_type", None) == "resume_worker"
-    )
-    outbox = next(
-        item for item in session.added if isinstance(item, OrchestrationOutboxModel)
-    )
-    assert resume_job.approval_id == "approval-1"
-    assert resume_job.payload_json["interrupt_id"] == "interrupt-1"
-    assert outbox.event_type == "ApprovalResolved"
-    assert outbox.dedupe_key == "approval:approval-1:resolved"
-    assert outbox.payload_json["decision"] == "approved"
+    with pytest.raises(
+        RuntimeError,
+        match="legacy_worker_approval_resume_disabled_during_worker_s2",
+    ):
+        await repository.resolve(
+            "approval-1",
+            decision=ApprovalDecision.APPROVED,
+        )
+    assert session.added == []
 
 
 @pytest.mark.parametrize("job_type", ["execute", "resume_worker"])

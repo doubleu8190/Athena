@@ -416,6 +416,15 @@ async def test_target_file_parser_and_document_job_queue():
 
 
 def test_postgres_dependency_graph_is_explicit(monkeypatch):
+    from configuration import LLMProviderConfig, Settings
+
+    settings = Settings(
+        database_backend="postgres",
+        llm_providers=[LLMProviderConfig(provider="openai", api_key="test-key")],
+        embedding_provider="echo",
+        embedding_dimension=2,
+    )
+    monkeypatch.setattr("configuration.get_settings", lambda: settings)
     monkeypatch.setenv("ATHENA_DATABASE_BACKEND", "postgres")
     graph = build_default_dependencies()
     assert len(graph.resources) == 6
@@ -486,7 +495,16 @@ async def test_document_worker_run_and_stop_when_queue_is_empty():
     await task
 
 
-def test_startup_probe_checks_default_graph():
+def test_startup_probe_checks_default_graph(monkeypatch):
+    from configuration import LLMProviderConfig, Settings
+
+    settings = Settings(
+        database_backend="postgres",
+        llm_providers=[LLMProviderConfig(provider="openai", api_key="test-key")],
+        embedding_provider="echo",
+        embedding_dimension=2,
+    )
+    monkeypatch.setattr("configuration.get_settings", lambda: settings)
     check_app()
 
 

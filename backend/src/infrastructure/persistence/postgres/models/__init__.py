@@ -59,8 +59,22 @@ from .orchestration_models import (
     TaskExecutionResultModel,
     WorkerJobModel,
 )
+from .worker_orchestration_models import (
+    OrchestratorExecutionModel,
+    OrchestratorPlanModel,
+    OrchestratorRootResumeJobModel,
+    OrchestratorTaskModel,
+    OrchestratorWorkerCommandModel,
+    WorkerCommandReceiptModel,
+    WorkerContractModel,
+    WorkerInstanceModel,
+    WorkerRegistrationReceiptModel,
+    WorkerResultReceiptModel,
+    WorkerStopConfirmationModel,
+)
 from .tool_operation_models import WorkerToolOperationModel
 from .worker_execution_message_models import WorkerExecutionMessageModel
+from .worker_resource_models import WorkerResourceModel
 from .lease_models import ExecutionLeaseModel
 
 __all__ = [
@@ -105,8 +119,20 @@ __all__ = [
     "TaskExecutionModel",
     "TaskExecutionResultModel",
     "WorkerJobModel",
+    "WorkerContractModel",
+    "WorkerInstanceModel",
+    "WorkerRegistrationReceiptModel",
+    "OrchestratorPlanModel",
+    "OrchestratorTaskModel",
+    "OrchestratorWorkerCommandModel",
+    "OrchestratorExecutionModel",
+    "WorkerCommandReceiptModel",
+    "WorkerResultReceiptModel",
+    "WorkerStopConfirmationModel",
+    "OrchestratorRootResumeJobModel",
     "WorkerToolOperationModel",
     "WorkerExecutionMessageModel",
+    "WorkerResourceModel",
     "ExecutionLeaseModel",
     "EvalCaseAttemptModel",
     "EvalCaseModel",

@@ -20,6 +20,45 @@ from .worker_execution_messages import (
     WorkerExecutionMessageAppend,
 )
 from .entities import Plan, Task
+from .worker_entities import (
+    WorkerPlanReceipt,
+    WorkerPlanSubmission,
+    WorkerRegistrationIntent,
+    WorkerRegistrationReceipt,
+    WorkerResultReceipt,
+    WorkerResultSubmission,
+    WorkerStopConfirmation,
+    WorkerStopReceipt,
+)
+
+
+class WorkerOrchestrationRepository(Protocol):
+    """逐轮 Worker Plan、结果和命令的事务持久化边界。"""
+
+    async def find_registration_receipt(
+        self,
+        service_principal: str,
+        registration_request_id: str,
+        request_hash: str,
+    ) -> WorkerRegistrationReceipt | None: ...
+
+    async def register_worker(
+        self, intent: WorkerRegistrationIntent
+    ) -> WorkerRegistrationReceipt: ...
+
+    async def submit_plan(
+        self, submission: WorkerPlanSubmission
+    ) -> WorkerPlanReceipt: ...
+
+    async def record_result(
+        self,
+        *,
+        submission: WorkerResultSubmission,
+    ) -> WorkerResultReceipt: ...
+
+    async def confirm_stopped(
+        self, confirmation: WorkerStopConfirmation
+    ) -> WorkerStopReceipt: ...
 
 
 class OrchestrationCommandRepository(Protocol):
@@ -112,4 +151,5 @@ __all__ = [
     "TaskEventRepository",
     "WorkerJobRepository",
     "WorkerExecutionMessageRepository",
+    "WorkerOrchestrationRepository",
 ]

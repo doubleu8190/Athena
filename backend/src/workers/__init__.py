@@ -8,6 +8,7 @@ from .root_resume_dispatcher import RootResumeDispatcher
 from .orchestration_outbox_dispatcher import OrchestrationOutboxDispatcher
 from .memory_worker import MemoryWorker
 from .approval_expiry_worker import ApprovalExpiryWorker
+from .worker_health_monitor import WorkerHealthMonitor
 
 __all__ = [
     "RunConsumer",
@@ -18,4 +19,5 @@ __all__ = [
     "WorkerJobDispatcher",
     "RootResumeDispatcher",
     "OrchestrationOutboxDispatcher",
+    "WorkerHealthMonitor",
 ]

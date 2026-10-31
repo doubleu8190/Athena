@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 
 class OrchestrationExecutionResponse(BaseModel):
@@ -92,6 +92,46 @@ class RunOrchestrationSnapshotResponse(BaseModel):
     run: OrchestrationRunResponse
     plan: OrchestrationPlanResponse | None = None
     approvals: list[OrchestrationApprovalResponse]
+    worker_plans: list[WorkerPlanSnapshotResponse] = Field(default_factory=list)
+
+
+class WorkerExecutionSnapshotResponse(BaseModel):
+    execution_id: str
+    generation: int
+    status: str
+    started_at: datetime | None = None
+    deadline_at: datetime | None = None
+    cancellation_epoch: int
+    capacity_reserved: bool
+    error: dict[str, JsonValue] | None = None
+
+
+class WorkerTaskSnapshotResponse(BaseModel):
+    task_id: str
+    operation_id: str
+    task_ref: str
+    objective: str
+    acceptance_criteria: str
+    status: str
+    active_execution_id: str | None = None
+    generation: int
+    output: dict[str, JsonValue] | None = None
+    error: dict[str, JsonValue] | None = None
+    executions: list[WorkerExecutionSnapshotResponse]
+
+
+class WorkerPlanSnapshotResponse(BaseModel):
+    plan_id: str
+    run_id: str
+    sequence: int
+    goal: str
+    status: str
+    expected_task_count: int
+    terminal_task_count: int
+    root_wait_generation: int
+    created_at: datetime
+    completed_at: datetime | None = None
+    tasks: list[WorkerTaskSnapshotResponse]
 
 
 class PlanVersionResponse(BaseModel):

@@ -1,0 +1,615 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "协议 v1 的可机读请求、回执和错误示例；payload 按 schema_ref 指向共享 JSON Schema 的 $defs 校验。",
+  "examples": {
+    "registration_request": {
+      "schema_ref": "RegistrationRequest",
+      "payload": {
+        "protocol_version": "1.0",
+        "registration_request_id": "11000000-0000-4000-8000-000000000001",
+        "worker_instance_key": "10000000-0000-4000-8000-000000000001",
+        "base_url": "https://worker.example.test",
+        "execution_timeout_seconds": 1800,
+        "max_concurrency": 4,
+        "capability": {
+          "can_do": ["审查代码变更并给出问题位置和建议"],
+          "cannot_do": ["不修改代码", "不访问输入之外的仓库内容"],
+          "input_schema": {
+            "type": "object",
+            "properties": {"diff": {"type": "string"}},
+            "required": ["diff"],
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"],
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "registration_response": {
+      "schema_ref": "RegistrationResponse",
+      "payload": {
+        "protocol_version": "1.0",
+        "worker_instance_id": "20000000-0000-4000-8000-000000000001",
+        "worker_instance_key": "10000000-0000-4000-8000-000000000001",
+        "contract_id": "30000000-0000-4000-8000-000000000001",
+        "contract_revision": 1,
+        "status": "inactive",
+        "registered_at": "2026-10-30T08:00:00Z"
+      }
+    },
+    "task_command": {
+      "schema_ref": "TaskCommand",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "40000000-0000-4000-8000-000000000001",
+        "run_id": "50000000-0000-4000-8000-000000000001",
+        "plan_id": "60000000-0000-4000-8000-000000000001",
+        "task_id": "70000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "operation_id": "90000000-0000-4000-8000-000000000001",
+        "contract_id": "30000000-0000-4000-8000-000000000001",
+        "contract_revision": 1,
+        "objective": "审查认证模块变更中的安全问题",
+        "acceptance_criteria": "列出问题位置、触发条件和修正建议；没有问题时明确说明。",
+        "input": {"diff": "diff --git a/auth.py b/auth.py"},
+        "execution_grant": {
+          "token": "opaque-signed-execution-grant-example",
+          "expires_at": "2026-10-30T08:30:00Z"
+        }
+      }
+    },
+    "task_command_retry_generation_2": {
+      "schema_ref": "TaskCommand",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "40000000-0000-4000-8000-000000000002",
+        "run_id": "50000000-0000-4000-8000-000000000001",
+        "plan_id": "60000000-0000-4000-8000-000000000001",
+        "task_id": "70000000-0000-4000-8000-000000000001",
+        "execution_id": "execution-next-002",
+        "generation": 2,
+        "cancellation_epoch": 0,
+        "operation_id": "90000000-0000-4000-8000-000000000001",
+        "contract_id": "30000000-0000-4000-8000-000000000001",
+        "contract_revision": 1,
+        "objective": "审查认证模块变更中的安全问题",
+        "acceptance_criteria": "列出问题位置、触发条件和修正建议；没有问题时明确说明。",
+        "input": {"diff": "diff --git a/auth.py b/auth.py"},
+        "execution_grant": {
+          "token": "opaque-signed-retry-execution-grant-example",
+          "expires_at": "2026-10-30T08:35:00Z"
+        }
+      }
+    },
+    "command_receipt": {
+      "schema_ref": "CommandReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "40000000-0000-4000-8000-000000000001",
+        "receipt_id": "a0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "disposition": "accepted",
+        "received_at": "2026-10-30T08:00:01Z"
+      }
+    },
+    "duplicate_command_receipt": {
+      "schema_ref": "CommandReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "40000000-0000-4000-8000-000000000001",
+        "receipt_id": "a0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "disposition": "duplicate",
+        "received_at": "2026-10-30T08:00:01Z"
+      }
+    },
+    "health_response": {
+      "schema_ref": "HealthResponse",
+      "payload": {
+        "protocol_version": "1.0",
+        "worker_instance_key": "10000000-0000-4000-8000-000000000001",
+        "status": "ready",
+        "accepting_tasks": true,
+        "checked_at": "2026-10-30T08:00:02Z"
+      }
+    },
+    "approval_request_batch": {
+      "schema_ref": "ApprovalRequest",
+      "payload": {
+        "protocol_version": "1.0",
+        "approval_request_id": "b0000000-0000-4000-8000-000000000001",
+        "pause_id": "b1000000-0000-4000-8000-000000000001",
+        "run_id": "50000000-0000-4000-8000-000000000001",
+        "plan_id": "60000000-0000-4000-8000-000000000001",
+        "task_id": "70000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "items": [
+          {
+            "item_id": "b2000000-0000-4000-8000-000000000001",
+            "tool_name": "write_file",
+            "summary": "写入审查报告",
+            "risk_level": "medium",
+            "arguments": {"path": "reports/auth.md", "content": "审查报告"},
+            "arguments_sha256": "dc45dab471ef02640af7ac73961425c79083b1299f9b483d4c0fcb3126de7850"
+          },
+          {
+            "item_id": "b2000000-0000-4000-8000-000000000002",
+            "tool_name": "create_pull_request",
+            "summary": "创建代码审查请求",
+            "risk_level": "high",
+            "arguments": {"title": "认证模块审查", "draft": true},
+            "arguments_sha256": "75e47a9c95a0bf301fd593f70ec8eae752e0315ceed6ba1b6c9cae5ba1853b05"
+          }
+        ]
+      }
+    },
+    "approval_receipt_batch": {
+      "schema_ref": "ApprovalReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "approval_request_id": "b0000000-0000-4000-8000-000000000001",
+        "pause_id": "b1000000-0000-4000-8000-000000000001",
+        "approval_batch_id": "b4000000-0000-4000-8000-000000000001",
+        "disposition": "accepted",
+        "status": "accepted",
+        "expires_at": "2026-10-30T08:02:00Z",
+        "items": [
+          {
+            "item_id": "b2000000-0000-4000-8000-000000000001",
+            "approval_id": "b3000000-0000-4000-8000-000000000001",
+            "arguments_sha256": "dc45dab471ef02640af7ac73961425c79083b1299f9b483d4c0fcb3126de7850"
+          },
+          {
+            "item_id": "b2000000-0000-4000-8000-000000000002",
+            "approval_id": "b3000000-0000-4000-8000-000000000002",
+            "arguments_sha256": "75e47a9c95a0bf301fd593f70ec8eae752e0315ceed6ba1b6c9cae5ba1853b05"
+          }
+        ],
+        "received_at": "2026-10-30T08:00:03Z"
+      }
+    },
+    "resume_command_batch": {
+      "schema_ref": "ResumeCommand",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "c0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "pause_id": "b1000000-0000-4000-8000-000000000001",
+        "approval_request_id": "b0000000-0000-4000-8000-000000000001",
+        "approval_batch_id": "b4000000-0000-4000-8000-000000000001",
+        "decision_set_sha256": "125857b9f48bb0cbde68e77f76859d81734a9e4cf633e845cab1af02c525b839",
+        "decisions": [
+          {
+            "item_id": "b2000000-0000-4000-8000-000000000001",
+            "decision": "approved",
+            "arguments_sha256": "dc45dab471ef02640af7ac73961425c79083b1299f9b483d4c0fcb3126de7850",
+            "decided_at": "2026-10-30T08:00:30Z"
+          },
+          {
+            "item_id": "b2000000-0000-4000-8000-000000000002",
+            "decision": "denied",
+            "arguments_sha256": "75e47a9c95a0bf301fd593f70ec8eae752e0315ceed6ba1b6c9cae5ba1853b05",
+            "decided_at": "2026-10-30T08:00:31Z"
+          }
+        ],
+        "execution_grant": {
+          "token": "opaque-signed-resume-grant-example",
+          "expires_at": "2026-10-30T08:05:00Z"
+        }
+      }
+    },
+    "cancel_command": {
+      "schema_ref": "CancelCommand",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "d0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 1,
+        "reason": "task_cancelled"
+      }
+    },
+    "cancel_receipt_pending": {
+      "schema_ref": "CancelReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "d0000000-0000-4000-8000-000000000001",
+        "receipt_id": "cancel-receipt-001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 1,
+        "reason": "task_cancelled",
+        "accepted": true,
+        "stop_confirmation_required": true,
+        "received_at": "2026-10-30T08:00:04Z"
+      }
+    },
+    "cancel_timeout_command": {
+      "schema_ref": "CancelCommand",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "d1000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "reason": "execution_timed_out"
+      }
+    },
+    "cancel_timeout_receipt": {
+      "schema_ref": "CancelReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "d1000000-0000-4000-8000-000000000001",
+        "receipt_id": "cancel-receipt-timeout-001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "reason": "execution_timed_out",
+        "accepted": true,
+        "stop_confirmation_required": true,
+        "received_at": "2026-10-30T08:01:12Z"
+      }
+    },
+    "cancel_timeout_receipt_duplicate": {
+      "schema_ref": "CancelReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "d1000000-0000-4000-8000-000000000001",
+        "receipt_id": "cancel-receipt-timeout-001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "reason": "execution_timed_out",
+        "accepted": true,
+        "stop_confirmation_required": true,
+        "received_at": "2026-10-30T08:01:12Z"
+      }
+    },
+    "stop_confirmation_timeout": {
+      "schema_ref": "StopConfirmation",
+      "payload": {
+        "protocol_version": "1.0",
+        "stop_confirmation_id": "d2000000-0000-4000-8000-000000000001",
+        "cancel_command_id": "d1000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "reason": "execution_timed_out",
+        "stopped": true,
+        "stopped_at": "2026-10-30T08:01:14Z"
+      }
+    },
+    "stop_confirmation_timeout_receipt": {
+      "schema_ref": "StopConfirmationReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "stop_confirmation_id": "d2000000-0000-4000-8000-000000000001",
+        "cancel_command_id": "d1000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "reason": "execution_timed_out",
+        "disposition": "capacity_released",
+        "task_status_unchanged": true,
+        "received_at": "2026-10-30T08:01:15Z"
+      }
+    },
+    "stop_confirmation_timeout_receipt_duplicate": {
+      "schema_ref": "StopConfirmationReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "stop_confirmation_id": "d2000000-0000-4000-8000-000000000001",
+        "cancel_command_id": "d1000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "reason": "execution_timed_out",
+        "disposition": "capacity_released",
+        "task_status_unchanged": true,
+        "received_at": "2026-10-30T08:01:15Z"
+      }
+    },
+    "stop_confirmation_task_cancel": {
+      "schema_ref": "StopConfirmation",
+      "payload": {
+        "protocol_version": "1.0",
+        "stop_confirmation_id": "d3000000-0000-4000-8000-000000000001",
+        "cancel_command_id": "d0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 1,
+        "reason": "task_cancelled",
+        "stopped": true,
+        "stopped_at": "2026-10-30T08:00:05Z"
+      }
+    },
+    "stop_confirmation_task_cancel_receipt": {
+      "schema_ref": "StopConfirmationReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "stop_confirmation_id": "d3000000-0000-4000-8000-000000000001",
+        "cancel_command_id": "d0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 1,
+        "reason": "task_cancelled",
+        "disposition": "capacity_released",
+        "task_status_unchanged": true,
+        "received_at": "2026-10-30T08:00:06Z"
+      }
+    },
+    "result_success": {
+      "schema_ref": "ResultSubmission",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e0000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "status": "completed",
+        "output": {"summary": "发现一个需要修正的问题"}
+      }
+    },
+    "result_success_receipt": {
+      "schema_ref": "ResultReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "disposition": "recorded",
+        "reason": "success_recorded",
+        "received_at": "2026-10-30T08:01:00Z"
+      }
+    },
+    "result_success_duplicate_submission": {
+      "schema_ref": "ResultSubmission",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e0000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "status": "completed",
+        "output": {"summary": "发现一个需要修正的问题"}
+      }
+    },
+    "result_success_duplicate_receipt": {
+      "schema_ref": "ResultReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e0000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "disposition": "recorded",
+        "reason": "success_recorded",
+        "received_at": "2026-10-30T08:01:00Z"
+      }
+    },
+    "result_failure": {
+      "schema_ref": "ResultSubmission",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e1000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "status": "failed",
+        "error": {
+          "code": "WORKER_UPSTREAM_TIMEOUT",
+          "message": "依赖服务在执行时限内没有响应",
+          "retryable": true,
+          "details": {"dependency": "review-index"}
+        }
+      }
+    },
+    "result_failure_retry_receipt": {
+      "schema_ref": "ResultReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e1000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "disposition": "retry_scheduled",
+        "reason": "worker_error_retryable",
+        "next_execution_id": "execution-next-002",
+        "received_at": "2026-10-30T08:01:10Z"
+      }
+    },
+    "result_unknown_failure": {
+      "schema_ref": "ResultSubmission",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e2000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "status": "failed",
+        "error": {
+          "code": "VENDOR_SESSION_BROKEN",
+          "message": "Worker provider session ended unexpectedly",
+          "retryable": true
+        }
+      }
+    },
+    "result_unknown_failure_final_receipt": {
+      "schema_ref": "ResultReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e2000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "disposition": "recorded",
+        "reason": "worker_error_final",
+        "received_at": "2026-10-30T08:01:11Z"
+      }
+    },
+    "result_late_after_cancel": {
+      "schema_ref": "ResultSubmission",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e3000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "status": "completed",
+        "output": {"summary": "执行在取消到达前已经完成"}
+      }
+    },
+    "result_late_after_cancel_receipt": {
+      "schema_ref": "ResultReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e3000000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "disposition": "ignored",
+        "reason": "task_cancelled",
+        "received_at": "2026-10-30T08:00:06Z"
+      }
+    },
+    "error_retry_same_command": {
+      "schema_ref": "ErrorResponse",
+      "payload": {
+        "protocol_version": "1.0",
+        "code": "TEMPORARY_UNAVAILABLE",
+        "message": "The Worker endpoint is temporarily unavailable.",
+        "directive": "retry_same_command",
+        "retry_after_seconds": 2,
+        "request_id": "f0000000-0000-4000-8000-000000000001"
+      }
+    },
+    "error_root_replan": {
+      "schema_ref": "ErrorResponse",
+      "payload": {
+        "protocol_version": "1.0",
+        "code": "TASK_INPUT_INVALID",
+        "message": "input does not match the registered capability schema",
+        "directive": "root_replan",
+        "request_id": "f0000000-0000-4000-8000-000000000002",
+        "details": {"field": "input.diff"}
+      }
+    },
+    "resource_reference": {
+      "schema_ref": "ResourceReference",
+      "payload": {
+        "protocol_version": "1.0",
+        "resource_id": "f1000000-0000-4000-8000-000000000001",
+        "media_type": "text/markdown",
+        "size_bytes": 4096,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "file_name": "auth-review.md"
+      }
+    }
+  },
+  "rejected_examples": {
+    "cancelled_is_not_a_result": {
+      "schema_ref": "ResultSubmission",
+      "payload": {
+        "protocol_version": "1.0",
+        "result_id": "e4000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "status": "cancelled",
+        "cancellation_epoch": 1,
+        "stopped": true,
+        "stopped_at": "2026-10-30T08:00:05Z"
+      },
+      "expected": "reject; physical stop must use StopConfirmation"
+    },
+    "cancel_receipt_cannot_claim_stop_state": {
+      "schema_ref": "CancelReceipt",
+      "payload": {
+        "protocol_version": "1.0",
+        "command_id": "d1000000-0000-4000-8000-000000000001",
+        "receipt_id": "cancel-receipt-timeout-001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "generation": 1,
+        "cancellation_epoch": 0,
+        "reason": "execution_timed_out",
+        "accepted": true,
+        "stop_confirmation_required": true,
+        "stopped": false,
+        "received_at": "2026-10-30T08:01:12Z"
+      },
+      "expected": "reject; CancelReceipt records durable intent only, stop state belongs to StopConfirmation"
+    }
+  },
+  "lifecycle_scenarios": {
+    "timeout_retry_old_execution_cleanup": {
+      "fixture_refs": [
+        "cancel_timeout_command",
+        "cancel_timeout_receipt",
+        "cancel_timeout_receipt_duplicate",
+        "task_command_retry_generation_2",
+        "stop_confirmation_timeout",
+        "stop_confirmation_timeout_receipt",
+        "stop_confirmation_timeout_receipt_duplicate"
+      ],
+      "expected": {
+        "old_generation_capacity_released_once": true,
+        "new_execution_id": "execution-next-002",
+        "timeout_cancel_does_not_cancel_task": true,
+        "task_cancellation_epoch_unchanged": true,
+        "task_status_unchanged_by_stop_confirmation": true,
+        "cancel_replay_returns_original_intent_receipt": true,
+        "stop_confirmation_retry_returns_same_receipt": true
+      }
+    },
+    "logical_task_cancel_cleanup": {
+      "fixture_refs": [
+        "cancel_command",
+        "cancel_receipt_pending",
+        "stop_confirmation_task_cancel",
+        "stop_confirmation_task_cancel_receipt",
+        "result_late_after_cancel",
+        "result_late_after_cancel_receipt"
+      ],
+      "expected": {
+        "task_status": "cancelled",
+        "stop_confirmation_changes_task_status": false,
+        "late_result_disposition": "ignored",
+        "capacity_released_once": true
+      }
+    },
+    "health_probe_instance_binding": {
+      "registered_worker_instance_key": "10000000-0000-4000-8000-000000000001",
+      "matching_response_fixture": "health_response",
+      "mismatching_response": {
+        "protocol_version": "1.0",
+        "worker_instance_key": "10000000-0000-4000-8000-000000000002",
+        "status": "ready",
+        "accepting_tasks": true,
+        "checked_at": "2026-10-30T08:00:02Z"
+      },
+      "mismatch_action": "count_as_probe_failure; keep target instance inactive"
+    },
+    "resource_execution_scope": {
+      "resource_fixture": "resource_reference",
+      "upload": {
+        "service_principal": "worker-service-example",
+        "execution_grant_claims": {
+          "worker_instance_key": "10000000-0000-4000-8000-000000000001",
+          "run_id": "50000000-0000-4000-8000-000000000001",
+          "plan_id": "60000000-0000-4000-8000-000000000001",
+          "task_id": "70000000-0000-4000-8000-000000000001",
+          "execution_id": "80000000-0000-4000-8000-000000000001",
+          "generation": 1,
+          "write_resources": true
+        },
+        "owner_scope_source": "derive from verified grant; never accept scope fields from upload body"
+      },
+      "read": {
+        "same_run_next_task_resource_id_in_frozen_input": "f1000000-0000-4000-8000-000000000001",
+        "same_run_grant_read_resource_ids": ["f1000000-0000-4000-8000-000000000001"],
+        "outcome": "allow"
+      },
+      "cross_run_read": {
+        "same_service_principal": true,
+        "grant_read_resource_ids": [],
+        "outcome": "403 FORBIDDEN"
+      }
+    }
+  }
+}

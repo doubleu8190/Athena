@@ -39,7 +39,7 @@ services:
     secrets:
       - postgres_password
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-8190}:5432"
     volumes:
       - ../data/postgresql:/var/lib/postgresql
       - ./postgres-fts/init:/docker-entrypoint-initdb.d:ro

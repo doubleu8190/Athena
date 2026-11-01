@@ -46,7 +46,7 @@ def make_client() -> TestClient:
         id_factory=lambda: next(ids),
         clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
-    return TestClient(create_app(run_service_factory=lambda: service))
+    return TestClient(create_app(run_service=service))
 
 
 def test_submit_run_requires_idempotency_key_and_uses_server_ids():

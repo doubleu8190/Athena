@@ -11,10 +11,7 @@ from application.orchestration.langgraph.graphs.worker import (
     build_worker_graph,
     invoke_worker_graph as _invoke_worker_graph,
 )
-from application.orchestration.langgraph.runtime.worker_executor import (
-    LangGraphWorkerExecutor,
-)
-from application.orchestration.worker_tools import WorkerToolExecutor, worker_tool_manifest
+from application.orchestration.worker_tools import WorkerToolExecutor
 from application.orchestration.root_decision import RootAgentInput, RootMessage
 from application.orchestration.worker_workflow import WorkerWorkflow
 from application.orchestration.worker_approval import WorkerApprovalService
@@ -41,7 +38,10 @@ from tests.fakes.worker_runtime import (
     NoopGraphThreadLock,
 )
 from tests.fakes.leases import LeaseCenter, lease_context, lease_grant
-from infrastructure.persistence.postgres.models import OrchestrationOutboxModel
+from infrastructure.persistence.postgres.models import (
+    OrchestrationOutboxModel,
+    WorkerJobModel,
+)
 from workers.worker_job_dispatcher import WorkerJobDispatcher
 
 
@@ -85,22 +85,13 @@ class ToolService:
 
 
 @pytest.mark.asyncio
-async def test_worker_manifest_is_valid_root_input():
-    class Tools:
-        async def list_tools(self):
-            return [SimpleNamespace(
-                name="read_file", description="Read a file", parameters={},
-                enabled=True, risk_level="low", require_approval=False,
-                execution_mode="native",
-            )]
-
-    manifest = await worker_tool_manifest(Tools())
+async def test_root_input_does_not_accept_worker_tool_manifest():
     root_input = RootAgentInput(
         session_id="session", run_id="run", message_id="message",
         messages=(RootMessage(role="user", content="hello"),),
-        worker_tools=manifest, remaining_turns=1,
+        remaining_turns=1,
     )
-    assert root_input.worker_tools[0].name == "read_file"
+    assert not hasattr(root_input, "worker_tools")
 
 class WorkerAgent:
     def __init__(self):
@@ -119,23 +110,6 @@ class WorkerAgent:
                 ],
             }
         return {"status": "completed", "output": {"confirmed": True}}
-
-
-def test_worker_executor_rejects_legacy_done_status():
-    execution = TaskExecution(
-        plan_id="plan-1",
-        run_id="run-1",
-        session_id="session-1",
-        task=Task("task-1", "test", "test legacy status"),
-        execution_generation=1,
-    )
-
-    result = LangGraphWorkerExecutor._result(execution, {
-        "status": "done",
-        "result": {"output": {"confirmed": True}},
-    })
-
-    assert result.status is TaskStatus.FAILED
 
 
 class RepositorySession:
@@ -167,6 +141,9 @@ class RepositorySession:
 
     async def execute(self, _statement):
         return SimpleNamespace(rowcount=1)
+
+    async def scalar(self, _statement):
+        return datetime.now(timezone.utc)
 
     def add(self, value):
         self.added.append(value)
@@ -352,7 +329,7 @@ async def test_worker_approval_request_persists_interrupt_identity_and_notifies(
 
 
 @pytest.mark.asyncio
-async def test_legacy_worker_approval_resume_is_disabled_during_s2():
+async def test_legacy_approval_without_remote_request_is_rejected_by_incomplete_fake():
     approval = SimpleNamespace(
         approval_id="approval-1",
         run_id="run-1",
@@ -366,6 +343,7 @@ async def test_legacy_worker_approval_resume_is_disabled_during_s2():
         interrupt_id="interrupt-1",
         args_hash="args-hash",
         operation_key="operation-1",
+        approval_request_id=None,
         expires_at=None,
     )
     session = RepositorySession(approval)
@@ -382,14 +360,10 @@ async def test_legacy_worker_approval_resume_is_disabled_during_s2():
             return Context()
 
     repository = PostgresApprovalRepository(Factory())
-    with pytest.raises(
-        RuntimeError,
-        match="legacy_worker_approval_resume_disabled_during_worker_s2",
-    ):
-        await repository.resolve(
-            "approval-1",
-            decision=ApprovalDecision.APPROVED,
-        )
+    assert not await repository.resolve(
+        "approval-1",
+        decision=ApprovalDecision.APPROVED,
+    )
     assert session.added == []
 
 
@@ -537,10 +511,8 @@ async def test_batch_continues_across_two_approvals_with_original_call_indices()
 
     agent = BatchAgent()
     tools = ToolService()
-    executor = LangGraphWorkerExecutor(
-        workflow_factory=lambda: WorkerWorkflow(
-            execute=agent, execute_tool=WorkerToolExecutor(tools)
-        ),
+    graph = build_worker_graph(
+        workflow=WorkerWorkflow(execute=agent, execute_tool=WorkerToolExecutor(tools)),
         checkpointer=InMemorySaver(),
     )
     execution = TaskExecution(
@@ -550,33 +522,27 @@ async def test_batch_continues_across_two_approvals_with_original_call_indices()
         worker_thread_id="task:task-1:exec:1",
         lease=lease_grant("worker_execution", "execution-1"),
     )
-    result = await executor.execute(execution)
+    result = await _invoke_worker_graph(
+        graph,
+        task_id=execution.task.task_id,
+        execution_generation=execution.execution_generation,
+        execution=execution,
+    )
     for index, decision in enumerate(("approved", "denied", "approved")):
-        assert result.status is TaskStatus.WAITING_APPROVAL
-        approval = await executor.pending_interrupt(execution)
-        assert approval is not None
+        interrupts = result.get("__interrupt__", ())
+        assert len(interrupts) == 1
+        approval = dict(interrupts[0].value)
+        approval["interrupt_id"] = str(interrupts[0].id)
         assert approval["call_index"] == index
         assert approval["tool_round"] == 0
-        result = await executor.resume(execution, {**approval, "decision": decision})
-        if index == 0:
-            new_interrupt = await executor.pending_interrupt(execution)
-            lease = WorkerJobLease(
-                job_id="resume-1", worker_id="worker", run_id="run-1",
-                plan_id="plan-1", round_id="round-1", plan_version=1,
-                task_id="task-1", execution_id="execution-1", session_id="session-1",
-                attempt=1, worker_thread_id="task:task-1:exec:1",
-                lease=execution.lease, cancellation_epoch=0, task=execution.task,
-                job_type="resume_worker", resume_value={**approval, "decision": decision},
-            )
-            dispatcher = WorkerJobDispatcher(
-                None, executor, None, worker_id="worker", lease_center=LeaseCenter(),
-                lease_seconds=10, max_concurrency=1, approval_service=None,
-                thread_lock=NoopGraphThreadLock(),
-            )
-            recovered = await dispatcher._invoke_worker(lease, execution)
-            assert recovered.status is TaskStatus.WAITING_APPROVAL
-            assert recovered.approval_batch == new_interrupt
-    assert result.status is TaskStatus.COMPLETED
+        result = await _invoke_worker_graph(
+            graph,
+            task_id=execution.task.task_id,
+            execution_generation=execution.execution_generation,
+            execution=execution,
+            resume_value={**approval, "decision": decision},
+        )
+    assert result["status"] == "completed"
     assert agent.calls == 2
     assert [item["status"] for item in agent.results] == ["success", "denied", "success"]
     assert [request.operation_key for request in tools.executed] == [
@@ -586,14 +552,14 @@ async def test_batch_continues_across_two_approvals_with_original_call_indices()
 
 
 @pytest.mark.asyncio
-async def test_worker_executor_recovers_checkpointed_interrupt_after_process_restart():
+async def test_worker_graph_recovers_checkpointed_interrupt_after_rebuild():
     tools = ToolService()
-    executor = LangGraphWorkerExecutor(
-        workflow_factory=lambda: WorkerWorkflow(
-            execute=WorkerAgent(),
-            execute_tool=WorkerToolExecutor(tools),
+    checkpointer = InMemorySaver()
+    graph = build_worker_graph(
+        workflow=WorkerWorkflow(
+            execute=WorkerAgent(), execute_tool=WorkerToolExecutor(tools)
         ),
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer,
     )
     execution = TaskExecution(
         plan_id="plan-1",
@@ -610,12 +576,28 @@ async def test_worker_executor_recovers_checkpointed_interrupt_after_process_res
         worker_thread_id="task:task-1:exec:1",
     )
 
-    result = await executor.execute(execution)
-    recovered = await executor.pending_interrupt(execution)
-
-    assert result.status == TaskStatus.WAITING_APPROVAL
-    assert recovered is not None
-    assert recovered["interrupt_id"]
+    result = await _invoke_worker_graph(
+        graph,
+        task_id=execution.task.task_id,
+        execution_generation=execution.execution_generation,
+        execution=execution,
+    )
+    assert len(result.get("__interrupt__", ())) == 1
+    rebuilt_graph = build_worker_graph(
+        workflow=WorkerWorkflow(
+            execute=WorkerAgent(), execute_tool=WorkerToolExecutor(tools)
+        ),
+        checkpointer=checkpointer,
+    )
+    snapshot = await rebuilt_graph.aget_state(
+        {"configurable": {"thread_id": execution.worker_thread_id}}
+    )
+    interrupts = [
+        pending for task in snapshot.tasks for pending in task.interrupts
+    ]
+    assert len(interrupts) == 1
+    recovered = dict(interrupts[0].value)
+    assert str(interrupts[0].id)
     assert recovered["execution_id"] == "execution-1"
     assert recovered["operation_key"] == "athena:run-1:task-1:1:0:0"
     assert tools.executed == []

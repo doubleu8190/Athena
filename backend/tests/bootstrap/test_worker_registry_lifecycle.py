@@ -36,6 +36,10 @@ def test_enabled_worker_protocol_starts_monitor_and_dispatcher(monkeypatch) -> N
 
     monkeypatch.setattr("bootstrap.postgres.WorkerHealthMonitor", lambda *args, **kwargs: Monitor())
     monkeypatch.setattr("bootstrap.postgres.WorkerTaskDispatcher", lambda *args, **kwargs: Dispatcher())
+    monkeypatch.setattr("bootstrap.postgres.WorkerResumeDispatcher", lambda *args, **kwargs: Dispatcher())
+    monkeypatch.setattr("bootstrap.postgres.WorkerTimeoutScanner", lambda *args, **kwargs: BackgroundWorker())
+    monkeypatch.setattr("bootstrap.postgres.WorkerApprovalRequestService", lambda *args, **kwargs: BackgroundWorker())
+    monkeypatch.setattr("bootstrap.postgres.RootResumeDispatcher", lambda *args, **kwargs: Dispatcher())
     for worker_name in (
         "RunConsumer",
         "KnowledgeDocumentWorker",
@@ -59,6 +63,7 @@ def test_enabled_worker_protocol_starts_monitor_and_dispatcher(monkeypatch) -> N
         worker_execution_grant_secret="g" * 32,
     )
     graph = build_postgres_dependencies(settings)
+    assert graph.service("worker_supervisor") is graph.resources[-1]
     supervisors = [
         resource for resource in graph.resources if isinstance(resource, WorkerSupervisor)
     ]
@@ -71,7 +76,27 @@ def test_enabled_worker_protocol_starts_monitor_and_dispatcher(monkeypatch) -> N
 
     asyncio.run(exercise_supervisors())
 
-    assert events == ["start", "dispatcher-start", "dispatcher-stop", "stop"]
+    assert events.count("dispatcher-start") == 3
+    assert events.count("dispatcher-stop") == 3
+    assert events[:4] == ["start", "dispatcher-start", "dispatcher-start", "dispatcher-start"]
+
+
+def test_enabled_background_workers_register_their_supervisor_without_protocol() -> None:
+    """未配置远程协议时仍注册后台任务专属的 supervisor。"""
+    settings = Settings(
+        database_backend="postgres",
+        workers_enabled=True,
+        llm_providers=[LLMProviderConfig(provider="openai", api_key="test-key")],
+        embedding_provider="echo",
+        embedding_dimension=2,
+    )
+
+    graph = build_postgres_dependencies(settings)
+
+    supervisor = graph.service("worker_supervisor")
+    assert isinstance(supervisor, WorkerSupervisor)
+    assert supervisor is graph.resources[-1]
+    assert graph.service("worker_task_dispatcher") is None
 
 
 def test_disabled_worker_protocol_does_not_construct_dispatcher(monkeypatch) -> None:
@@ -83,6 +108,7 @@ def test_disabled_worker_protocol_does_not_construct_dispatcher(monkeypatch) -> 
         raise AssertionError("disabled_worker_protocol_constructed_dispatcher")
 
     monkeypatch.setattr("bootstrap.postgres.WorkerTaskDispatcher", create_dispatcher)
+    monkeypatch.setattr("bootstrap.postgres.RootResumeDispatcher", create_dispatcher)
     settings = Settings(
         database_backend="postgres",
         llm_providers=[LLMProviderConfig(provider="openai", api_key="test-key")],

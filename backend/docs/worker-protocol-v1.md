@@ -101,7 +101,7 @@ Orchestrator 必须按 CancelCommand.reason 分开处理后再投递命令：`ta
 
 CancelCommand 对所有 reason 都只返回 202 CancelReceipt，含 accepted=true、reason 和 stop_confirmation_required=true；它只确认取消意图已持久保存，不能确认远程已经停止，也不释放容量。Worker 实际停止或持久确认该 Execution 已不会启动后，必须通过专用 StopConfirmation 接口回报；此规则同时适用于 task/run 逻辑取消、execution_timed_out 和 execution_superseded。Worker 先持久保存 StopConfirmation outbox，再投递给 Athena。
 
-StopConfirmation 绑定原 cancel_command_id、execution_id、generation、cancellation_epoch 和 reason；Idempotency-Key = stop_confirmation_id。服务端必须验证该 CancelCommand 是由 Athena 发给该 Worker 实例且身份字段完全匹配。事务仅释放这个旧 Execution 的容量槽位一次，返回 StopConfirmationReceipt 的 capacity_released 或 already_released。该回执明确 task_status_unchanged=true：超时后的逻辑 Task 可以正在等待/运行新 Execution，旧执行停止回报不能取消 Task、改写结果、增加终态计数或唤醒 Root。重复 StopConfirmation 返回原回执。取消命令重放始终返回原 CancelReceipt；之后停止状态只由独立 StopConfirmation 接口表达。
+StopConfirmation 绑定原 cancel_command_id、execution_id、generation、cancellation_epoch 和 reason；Idempotency-Key = stop_confirmation_id。服务端必须验证该 CancelCommand 是由 Athena 发给该 Worker 实例且身份字段完全匹配。事务释放这个旧 Execution 的容量槽位一次；如果该 Execution 仍处于 `cancelling`，同时将其收敛为 `cancelled` 并记录首次 `completed_at`，已有 `completed`、`failed`、`timed_out` 或 `superseded` 终态的时间保持不变。返回 StopConfirmationReceipt 的 capacity_released 或 already_released。该回执明确 task_status_unchanged=true：超时后的逻辑 Task 可以正在等待/运行新 Execution，旧执行停止回报不能取消 Task、改写结果、增加终态计数或唤醒 Root；不得改写 Task、Plan、Run、cancellation_epoch 或重试代次。重复 StopConfirmation 返回原回执。取消命令重放始终返回原 CancelReceipt；之后停止状态只由独立 StopConfirmation 接口表达。
 
 ResultSubmission 仅接受 completed 和 failed。中心逻辑取消先提交时，迟到的成功/失败结果通过 ResultReceipt 的 ignored/task_cancelled 收口；它不作为物理停止证据。取消与成功结果在中心同一事务中竞争：先提交的一方决定逻辑 Task 是否取消/完成，状态不可倒退。
 

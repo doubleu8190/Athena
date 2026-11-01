@@ -11,9 +11,7 @@ from application.tools.service import ToolService
 from .answer_generation import AnswerGenerationService
 from domain.events.ports import EventPort
 from domain.memory import SessionMemorySettingsPort
-from domain.orchestration.ports import ReviewContextRepository
-
-from .protocols import PlanLoader, RootAgent, RootPlanCommandPort
+from .protocols import RootAgent, RootOrchestrationPort
 
 
 @dataclass(slots=True)
@@ -30,9 +28,7 @@ class RootWorkflowDependencies:
     available_context_providers: tuple[str, ...] = ()
     root_max_turns: int = 4
     context_prefetch_timeout_seconds: float = 10.0
-    review_context_repository: ReviewContextRepository | None = None
-    orchestration_command_handler: RootPlanCommandPort | None = None
-    plan_loader: PlanLoader | None = None
+    root_orchestration: RootOrchestrationPort | None = None
     memory_settings: SessionMemorySettingsPort | None = None
 
 

@@ -134,12 +134,12 @@ class RetrievalPort:
 def test_low_risk_queries_use_application_services() -> None:
     client = TestClient(
         create_app(
-            tool_query_factory=lambda: ToolQueryService(ToolRepository()),
-            provider_query_factory=lambda: ProviderQueryService(ProviderPort()),
-            settings_query_factory=lambda: SettingsQueryService(SettingsPort()),
-            memory_query_factory=lambda: MemoryQueryService(MemoryPort()),
-            retrieval_query_factory=lambda: RetrievalQueryService(RetrievalPort()),
-            knowledge_query_factory=lambda: KnowledgeBaseQueryService(KnowledgeRepository()),
+            tool_query_service=ToolQueryService(ToolRepository()),
+            provider_query_service=ProviderQueryService(ProviderPort()),
+            settings_query_service=SettingsQueryService(SettingsPort()),
+            memory_query_service=MemoryQueryService(MemoryPort()),
+            retrieval_query_service=RetrievalQueryService(RetrievalPort()),
+            knowledge_query_service=KnowledgeBaseQueryService(KnowledgeRepository()),
         )
     )
 
@@ -158,7 +158,7 @@ def test_low_risk_queries_use_application_services() -> None:
 
 def test_memory_queries_can_use_target_memory_service() -> None:
     client = TestClient(
-        create_app(memory_service_factory=lambda: MemoryService(TargetMemoryPort()))
+        create_app(memory_service=MemoryService(TargetMemoryPort()))
     )
 
     assert client.post("/api/memory/search", json={"query": "hello"}).json()[0]["id"] == "target-memory"

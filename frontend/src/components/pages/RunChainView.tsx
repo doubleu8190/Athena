@@ -24,14 +24,15 @@ import Badge from "../ui/Badge"
 import { apiClient } from "../../api/client"
 import { useChatStore } from "../../store/chatStore"
 import type {
-  OrchestrationApprovalSnapshot,
-  OrchestrationExecutionSnapshot,
-  PlanVersionDetail,
   RunOrchestrationSnapshot,
   RunTimelineEvent,
   SessionRunSummary,
+  WorkerApprovalRequestSnapshot,
+  WorkerExecutionSnapshot,
 } from "../../types"
 import { formatDuration, getActivityDuration, getRunTiming } from "./runTiming"
+import { executionCapacityMessage, orderedWorkerPlans } from "../../utils/workerSnapshotProjection"
+import { shouldApplySnapshotResponse } from "../../utils/workerSnapshotProjection"
 
 type EventStatus = "completed" | "failed" | "retry" | "approved" | "waiting" | "review" | "running" | "cancelled" | "info"
 type EventKind = "run" | "llm" | "retrieval" | "tool" | "plan" | "worker" | "response" | "system"
@@ -61,14 +62,14 @@ const demoEvents: RunEvent[] = [
   { id: "knowledge", parentId: "context-1", kind: "retrieval", name: "knowledge.search", summary: "命中 8 个销售分析文档片段", status: "completed", duration: "790 ms", time: "14:32:08.917", detail: "知识库返回销售口径说明、区域映射与季度复盘文档。", input: "knowledge_base=sales-ops", output: "8 个片段，最高相关度 0.94" },
   { id: "files", parentId: "context-1", kind: "retrieval", name: "file.search", summary: "检索当前请求中的 3 个附件", status: "info", duration: "510 ms", time: "14:32:08.923", detail: "附件检索限制在本次请求已验证的文件目录内。", input: "Q3_sales.csv, region_map.csv, ...", output: "3 个文件可用" },
   { id: "decision-2", parentId: "root", kind: "llm", name: "decide_root_action", summary: "Root 依据资料生成 Worker 计划", status: "completed", duration: "1.2 s", time: "14:32:10.631", detail: "检索后重新决策，Root 选择 Worker 工具并把分析拆成可执行任务。", input: "本轮检索结果 + 用户完整目标 + 系统工具目录", output: "action=plan；创建 2 个分析任务和 1 个汇总任务" },
-  { id: "plan", parentId: "root", kind: "plan", name: "materialize_execution_plan", summary: "校验并提交计划，启动 Worker", status: "completed", duration: "5.8 s", time: "14:32:13.840", detail: "应用层校验 DAG 与系统工具范围，再通过原子提交命令创建任务。", input: "max_parallelism=2", output: "3/3 tasks completed" },
+  { id: "plan", parentId: "root", kind: "plan", name: "materialize_worker_plan", summary: "提交本轮并行任务，启动 Worker", status: "completed", duration: "5.8 s", time: "14:32:13.840", detail: "应用层校验 Worker 能力范围，再通过原子提交命令创建本轮任务。", input: "sequence=1, max_parallelism=2", output: "3/3 tasks completed" },
   { id: "worker-region", parentId: "plan", kind: "worker", name: "worker.region_analysis", summary: "对比各区域销售表现", status: "completed", duration: "2.7 s", time: "14:32:13.903", detail: "Worker 对比三个区域的订单数、收入与客单价。", input: "task_id=tsk_region", output: "华东收入增长 18%；华北持平；华南下降 6%" },
   { id: "worker-trend", parentId: "plan", kind: "worker", name: "worker.trend_analysis", summary: "检测季度趋势和异常值", status: "completed", duration: "3.4 s", time: "14:32:13.911", detail: "第一次工具执行遇到限流，退避后重试并完成计算。", input: "task_id=tsk_trend", output: "收入环比 +11%；8 月有明显峰值" },
   { id: "worker-retry", parentId: "worker-trend", kind: "tool", name: "analytics.query · retry 1", summary: "rate limit，退避 600 ms 后重试", status: "retry", duration: "820 ms", time: "14:32:14.208", detail: "分析工具返回 429。执行器按重试策略等待 600ms 后再次提交。", input: "query=quarterly_revenue", output: "重试后返回 3 条聚合记录", error: "HTTP 429: rate limit exceeded" },
   { id: "approval", parentId: "root", kind: "tool", name: "approval.request", summary: "高风险导出操作等待审批", status: "approved", duration: "1.1 s", time: "14:32:18.742", detail: "导出汇总文件前触发高风险操作审批，审批人确认后继续执行。", input: "action=export_report, risk=high", output: "approved_by=operator@athena.local" },
   { id: "tool", parentId: "root", kind: "tool", name: "report.export", summary: "生成季度分析报告", status: "completed", duration: "1.4 s", time: "14:32:19.876", detail: "工具读取已授权的聚合结果并生成 CSV 报告。", input: "format=csv, rows=12", output: "Q3_sales_summary.csv · 18 KB" },
   { id: "synthesis", parentId: "plan", kind: "llm", name: "plan.synthesis", summary: "合并 Worker 结果并检查一致性", status: "completed", duration: "1.6 s", time: "14:32:21.312", detail: "汇总区域与趋势分析结果，检查统计口径并生成自然语言摘要。", input: "worker outputs: 2", output: "摘要 3 条要点，引用 4 个数据来源" },
-  { id: "review", parentId: "plan", kind: "llm", name: "round_review", summary: "Round 完成后判断计划是否结束", status: "completed", duration: "420 ms", time: "14:32:22.872", detail: "Root 根据固定 Round 结果和剩余任务选择 FINISH；若需新一轮会提交 Revision。", input: "完整 DAG + Worker 结果 + 原始目标", output: "action=FINISH；final_status=completed" },
+  { id: "review", parentId: "plan", kind: "llm", name: "plan_review", summary: "本轮完成后判断是否提交下一轮", status: "completed", duration: "420 ms", time: "14:32:22.872", detail: "Root 根据本轮任务结果和原始目标决定是否提交下一轮独立任务。", input: "本轮 Worker 结果 + 原始目标", output: "action=FINISH；final_status=completed" },
   { id: "response", parentId: "root", kind: "response", name: "final_response", summary: "向用户返回分析结果和报告", status: "completed", duration: "86 ms", time: "14:32:22.958", detail: "最终响应包含销售趋势、区域变化和生成文件链接。", input: "计划结果 + 生成文件引用", output: "Q3 销售收入环比增长 11%，华东区域增长最明显……" },
 ]
 
@@ -119,13 +120,13 @@ function RunChainView() {
   const [now, setNow] = useState(Date.now)
   const [timeline, setTimeline] = useState<RunTimelineEvent[]>([])
   const [orchestration, setOrchestration] = useState<RunOrchestrationSnapshot | null>(null)
-  const [selectedVersionDetail, setSelectedVersionDetail] = useState<PlanVersionDetail | null>(null)
   const [timelineCursor, setTimelineCursor] = useState(0)
   const [timelineHasMore, setTimelineHasMore] = useState(false)
   const [selectedRun, setSelectedRun] = useState<string | null>(demoMode ? demoRuns[0].id : null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState("root")
+  const snapshotGenerationRef = useRef(0)
   const [viewMode, setViewMode] = useState<"timeline" | "tree">("timeline")
   const [filter, setFilter] = useState<FilterKind>("all")
   const [query, setQuery] = useState("")
@@ -193,6 +194,7 @@ function RunChainView() {
       return
     }
     let cancelled = false
+    const generation = ++snapshotGenerationRef.current
     setLoading(true)
     setLoadError(null)
     Promise.all([
@@ -200,7 +202,7 @@ function RunChainView() {
       apiClient.getRunOrchestration(selectedRun),
     ])
       .then(([timelineResponse, snapshot]) => {
-        if (cancelled) return
+        if (cancelled || !shouldApplySnapshotResponse(snapshot.run.run_id, selectedRun, generation, snapshotGenerationRef.current)) return
         setTimeline(timelineResponse.events)
         setTimelineCursor(timelineResponse.next_after_seq)
         setTimelineHasMore(timelineResponse.has_more)
@@ -212,18 +214,19 @@ function RunChainView() {
   }, [demoMode, selectedSessionId, selectedRun, selectedRunStatus, refreshKey])
 
   useEffect(() => {
-    if (demoMode || !selectedSessionId || !selectedRun || timelineHasMore || !selectedRunStatus || ["completed", "failed", "cancelled"].includes(selectedRunStatus)) return
+    if (demoMode || !selectedSessionId || !selectedRun || !selectedRunStatus || ["completed", "failed", "cancelled"].includes(selectedRunStatus)) return
     let cancelled = false
     let inFlight = false
     const timer = window.setInterval(async () => {
       if (document.hidden || inFlight) return
       inFlight = true
       try {
+        const generation = ++snapshotGenerationRef.current
         const [response, snapshot] = await Promise.all([
           apiClient.getRunTimeline(selectedSessionId, selectedRun, timelineCursor),
           apiClient.getRunOrchestration(selectedRun),
         ])
-        if (cancelled) return
+        if (cancelled || !shouldApplySnapshotResponse(snapshot.run.run_id, selectedRun, generation, snapshotGenerationRef.current)) return
         setTimeline((current) => [...new Map([...current, ...response.events].map((event) => [event.session_seq, event])).values()].sort((left, right) => left.session_seq - right.session_seq))
         setTimelineCursor(response.next_after_seq)
         setTimelineHasMore(response.has_more)
@@ -234,48 +237,23 @@ function RunChainView() {
       } finally {
         inFlight = false
       }
-    }, 10000)
+    }, 2500)
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [demoMode, selectedSessionId, selectedRun, selectedRunStatus, timelineCursor, timelineHasMore])
 
   useEffect(() => {
-    const plan = orchestration?.plan
     if (!orchestration) return
     setExpanded((current) => {
       const next = new Set(current)
       next.add(`run:${orchestration.run.run_id}`)
       next.add(`snapshot:run:${orchestration.run.run_id}`)
-      if (!plan) return next
-      next.add(`snapshot:plan:${plan.plan_id}`)
-      for (const version of plan.versions) {
-        if (version.version === plan.current_version) {
-          next.add(`snapshot:version:${plan.plan_id}:${version.version}`)
-        }
+      for (const plan of orchestration.worker_plans) {
+        next.add(`snapshot:plan:${plan.plan_id}`)
+        for (const task of plan.tasks) next.add(`snapshot:task:${plan.plan_id}:${task.task_id}`)
       }
-      if (plan.active_round_id) next.add(`snapshot:round:${plan.active_round_id}`)
       return next
     })
   }, [orchestration])
-
-  useEffect(() => {
-    const prefix = "snapshot:version:"
-    if (!selectedId.startsWith(prefix)) {
-      setSelectedVersionDetail(null)
-      return
-    }
-    const identity = selectedId.slice(prefix.length)
-    const separator = identity.lastIndexOf(":")
-    if (separator < 1) return
-    const planId = identity.slice(0, separator)
-    const version = Number(identity.slice(separator + 1))
-    if (!Number.isInteger(version) || version < 1) return
-    let cancelled = false
-    setSelectedVersionDetail(null)
-    apiClient.getPlanVersion(planId, version)
-      .then((value) => { if (!cancelled) setSelectedVersionDetail(value) })
-      .catch(() => { if (!cancelled) setSelectedVersionDetail(null) })
-    return () => { cancelled = true }
-  }, [selectedId])
 
   const loadMoreEvents = async () => {
     if (!selectedSessionId || !selectedRun || loading || !timelineHasMore) return
@@ -558,7 +536,6 @@ function RunChainView() {
                 {selected.error && <div className="rounded-md border border-athena-danger/30 bg-athena-danger/5 p-3"><div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-athena-danger"><CircleAlert className="h-3.5 w-3.5" />错误信息</div><code className="break-words text-[11px] leading-5 text-athena-text/80">{selected.error}</code></div>}
                 {selected.input && <DetailBlock title="输入" value={selected.input} />}
                 {selected.output && <DetailBlock title="输出" value={selected.output} />}
-                {selectedVersionDetail && selected?.id === `snapshot:version:${selectedVersionDetail.plan_id}:${selectedVersionDetail.version}` && <DetailBlock title="Plan DAG" value={JSON.stringify(selectedVersionDetail.dag_json, null, 2)} />}
                 {selected.status === "approved" && <div className="flex items-start gap-2 rounded-md border border-athena-accent/30 bg-athena-accent/5 p-3 text-xs"><ShieldCheck className="mt-0.5 h-4 w-4 flex-shrink-0 text-athena-accent" /><div><div className="font-medium">审批已通过</div><div className="mt-1 text-[11px] text-athena-muted">审批事件已关联至当前运行</div></div></div>}
               </div>
               : <div className="p-4 text-xs text-athena-muted">{loading ? "正在加载链路事件…" : loadError || (runItems.length ? "该运行暂无可展示的链路事件" : "选择运行记录查看详情")}</div>}
@@ -597,129 +574,123 @@ function projectSnapshot(snapshot: RunOrchestrationSnapshot | null): RunEvent[] 
     status: snapshotStatus(snapshot.run.status),
     duration: "—",
     time: formatTimestamp(snapshot.run.updated_at || snapshot.run.created_at),
-    detail: `取消 epoch ${snapshot.run.cancellation_epoch} · ${externalEffectDetail}`,
+    detail: `${externalEffectDetail}`,
   }]
   const taskNodes = new Map<string, string>()
   const executionNodes = new Map<string, string>()
 
-  if (snapshot.plan) {
-    const plan = snapshot.plan
+  for (const plan of orderedWorkerPlans(snapshot)) {
     const planNodeId = `snapshot:plan:${plan.plan_id}`
     events.push({
       id: planNodeId,
       parentId: runNodeId,
       kind: "plan",
-      name: `Plan · ${plan.plan_id}`,
-      summary: `${plan.status} · 当前版本 v${plan.current_version}`,
+      name: `第 ${plan.sequence} 轮计划`,
+      summary: `${plan.status} · ${plan.terminal_task_count}/${plan.expected_task_count} 个任务结束`,
       status: snapshotStatus(plan.status),
-      duration: `${plan.max_parallelism} 并发`,
-      time: formatTimestamp(plan.versions[0]?.created_at ?? snapshot.run.created_at),
-      detail: `${plan.user_goal} · cancel epoch ${plan.cancellation_epoch}`,
+      duration: "—",
+      time: formatTimestamp(plan.created_at),
+      detail: `${plan.goal}${plan.completed_at ? ` · 完成于 ${formatTimestamp(plan.completed_at)}` : ""}`,
     })
-    const versionNodes = new Map<number, string>()
-    for (const version of plan.versions) {
-      const versionNodeId = `snapshot:version:${plan.plan_id}:${version.version}`
-      versionNodes.set(version.version, versionNodeId)
+    for (const task of plan.tasks) {
+      const taskNodeId = `snapshot:task:${plan.plan_id}:${task.task_id}`
+      taskNodes.set(task.task_id, taskNodeId)
       events.push({
-        id: versionNodeId,
+        id: taskNodeId,
         parentId: planNodeId,
-        kind: "plan",
-        name: `Plan Version v${version.version}`,
-        summary: version.change_reason || (version.version === 1 ? "初始版本" : "未记录修订原因"),
-        status: version.version === plan.current_version ? snapshotStatus(plan.status) : "info",
-        duration: version.version === plan.current_version ? "当前" : "历史",
-        time: formatTimestamp(version.created_at),
-        detail: version.based_on_round_id
-          ? `基于 Round ${version.based_on_round_id} 修订；选择此节点可查看不可变 DAG。`
-          : "选择此节点可查看不可变 DAG。",
+        kind: "worker",
+        name: task.task_ref,
+        summary: `${workerTaskStatusLabel(task.status)} · 第 ${task.generation} 代`,
+        status: snapshotStatus(task.status),
+        duration: `${task.executions.length} 次尝试`,
+        time: formatTimestamp(task.executions.find((item) => item.generation === task.generation)?.started_at || plan.created_at),
+        detail: `${task.objective}${task.acceptance_criteria ? ` · 验收标准：${task.acceptance_criteria}` : ""}`,
+        output: task.output == null ? undefined : formatJson(task.output),
+        error: task.error == null ? undefined : formatJson(task.error),
       })
-    }
-    for (const round of plan.rounds) {
-      const roundNodeId = `snapshot:round:${round.round_id}`
-      events.push({
-        id: roundNodeId,
-        parentId: versionNodes.get(round.plan_version) ?? planNodeId,
-        kind: "plan",
-        name: `Round ${round.round_number}`,
-        summary: `${round.status} · ${round.terminal_task_count}/${round.expected_task_count} tasks`,
-        status: snapshotStatus(round.status),
-        duration: `v${round.plan_version}`,
-        time: formatTimestamp(round.created_at),
-        detail: `round_id=${round.round_id}${round.completed_at ? ` · 完成于 ${formatTimestamp(round.completed_at)}` : ""}`,
-      })
-      for (const task of round.tasks) {
-        const taskNodeId = `snapshot:task:${round.round_id}:${task.task_id}`
-        taskNodes.set(task.task_id, taskNodeId)
-        events.push({
-          id: taskNodeId,
-          parentId: roundNodeId,
-          kind: "worker",
-          name: task.title || task.task_id,
-          summary: task.status,
-          status: snapshotStatus(task.status),
-          duration: `${task.executions.length} 次尝试`,
-          time: formatTimestamp(task.terminal_at ?? round.created_at),
-          detail: `${task.objective} · task_id=${task.task_id}`,
-        })
-        for (const execution of task.executions) {
-          const executionNodeId = `snapshot:execution:${execution.execution_id}`
-          executionNodes.set(execution.execution_id, executionNodeId)
-          events.push(executionEvent(execution, taskNodeId, executionNodeId))
-        }
+      for (const execution of task.executions) {
+        const executionNodeId = `snapshot:execution:${execution.execution_id}`
+        executionNodes.set(execution.execution_id, executionNodeId)
+        events.push(executionEvent(execution, taskNodeId, executionNodeId))
       }
     }
   }
 
   for (const approval of snapshot.approvals) {
-    events.push(approvalEvent(approval, executionNodes, taskNodes, runNodeId))
+    events.push(...approvalEvents(approval, executionNodes, taskNodes, runNodeId))
   }
   return events
 }
 
 function executionEvent(
-  execution: OrchestrationExecutionSnapshot,
+  execution: WorkerExecutionSnapshot,
   parentId: string,
   id: string,
 ): RunEvent {
-  const error = execution.error?.message || execution.error?.code
+  const startedAt = execution.started_at
+  const completedAt = execution.completed_at
+  const elapsed = startedAt ? (completedAt ? Date.parse(completedAt) : Date.now()) - Date.parse(startedAt) : null
+  const error = execution.error == null ? undefined : formatJson(execution.error)
+  const capacityMessage = executionCapacityMessage(execution.status, execution.capacity_reserved)
   return {
     id,
     parentId,
     kind: "worker",
-    name: `Execution attempt ${execution.attempt}`,
-    summary: `${execution.status}${execution.fencing_token === null ? "" : ` · fence ${execution.fencing_token}`}`,
+    name: `第 ${execution.generation} 次执行`,
+    summary: `${executionStatusLabel(execution.status)}${capacityMessage ? ` · ${capacityMessage}` : ""}`,
     status: snapshotStatus(execution.status),
-    duration: "—",
-    time: formatTimestamp(execution.created_at),
-    detail: `execution_id=${execution.execution_id} · thread=${execution.worker_thread_id}${execution.result_ref ? ` · result_ref=${execution.result_ref}` : ""}`,
-    error: error ? String(error) : undefined,
+    duration: elapsed == null || !Number.isFinite(elapsed) ? "—" : formatDuration(elapsed),
+    time: formatTimestamp(startedAt || execution.deadline_at || ""),
+    detail: `${startedAt ? `开始于 ${formatTimestamp(startedAt)}` : "尚未开始"}${execution.deadline_at ? ` · 执行期限 ${formatTimestamp(execution.deadline_at)}` : ""}${completedAt ? ` · 结束于 ${formatTimestamp(completedAt)}` : ""}${capacityMessage ? ` · ${capacityMessage}` : ""}`,
+    error,
   }
 }
 
-function approvalEvent(
-  approval: OrchestrationApprovalSnapshot,
+function approvalEvents(
+  approval: WorkerApprovalRequestSnapshot,
   executionNodes: Map<string, string>,
   taskNodes: Map<string, string>,
   fallbackParent: string,
-): RunEvent {
-  const status = approval.status.toLowerCase()
-  const eventStatus: EventStatus = status === "approved" || status === "resolved" && approval.decision === "approve"
-    ? "approved"
-    : status === "pending" ? "waiting"
-      : status === "cancelled" ? "cancelled" : status === "expired" || status === "rejected" || status === "denied" ? "failed" : "info"
-  return {
-    id: `snapshot:approval:${approval.approval_id}`,
-    parentId: (approval.execution_id && executionNodes.get(approval.execution_id))
-      || (approval.task_id && taskNodes.get(approval.task_id))
-      || fallbackParent,
+): RunEvent[] {
+  return approval.items.map((item): RunEvent => ({
+    id: `snapshot:approval:${approval.approval_request_id}:${item.item_id}`,
+    parentId: executionNodes.get(approval.execution_id) || taskNodes.get(approval.task_id) || fallbackParent,
     kind: "tool",
-    name: `审批 · ${approval.tool_name}`,
-    summary: `${approval.status}${approval.decision ? ` · ${approval.decision}` : ""} · ${approval.risk_level}`,
-    status: eventStatus,
+    name: `审批 · ${item.tool_name}`,
+    summary: `${approvalStatusLabel(approval.status, item.status, item.decision)}${approval.approval_batch_id ? " · 批量审批" : ""} · ${item.risk_level}`,
+    status: approvalEventStatus(approval.status, item.status, item.decision),
     duration: "—",
-    time: formatTimestamp(approval.created_at),
-    detail: `approval_id=${approval.approval_id}${approval.interrupt_id ? ` · interrupt_id=${approval.interrupt_id}` : ""}${approval.decided_at ? ` · 决定于 ${formatTimestamp(approval.decided_at)}` : ""}`,
-  }
+    time: formatTimestamp(item.created_at),
+    detail: `${item.summary} · ${item.decision ? `决定：${item.decision} · ` : ""}${item.decided_at ? `决定于 ${formatTimestamp(item.decided_at)} · ` : ""}到期于 ${formatTimestamp(approval.expires_at)}`,
+    input: formatJson(item.arguments),
+  }))
+}
+
+function formatJson(value: unknown): string {
+  if (typeof value === "string") return value
+  return JSON.stringify(value, null, 2)
+}
+
+function workerTaskStatusLabel(value: string): string {
+  const labels: Record<string, string> = { queued: "排队中", claimed: "已分配", running: "执行中", waiting_approval: "等待审批", retry_wait: "等待重试", completed: "已完成", failed: "失败", invalid_output: "输出无效", cancelled: "已取消" }
+  return labels[value] || value
+}
+
+function executionStatusLabel(value: string): string {
+  const labels: Record<string, string> = { queued: "排队中", dispatching: "发送中", running: "执行中", waiting_approval: "等待审批", retry_wait: "等待重试", succeeded: "已完成", completed: "已完成", failed: "失败", timed_out: "已超时", cancelled: "已取消", superseded: "已替代" }
+  return labels[value] || value
+}
+
+function approvalStatusLabel(requestStatus: string, itemStatus: string, decision?: string | null): string {
+  if (requestStatus === "expired" || itemStatus === "expired") return "已到期"
+  if (itemStatus === "resolved" || itemStatus === "decided") return decision === "approved" || decision === "approve" ? "已批准" : "已拒绝"
+  return requestStatus === "pending" ? "待审批" : requestStatus
+}
+
+function approvalEventStatus(requestStatus: string, itemStatus: string, decision?: string | null): EventStatus {
+  if (requestStatus === "expired" || itemStatus === "expired") return "failed"
+  if (itemStatus === "resolved" || itemStatus === "decided") return decision === "approved" || decision === "approve" ? "approved" : "failed"
+  return requestStatus === "pending" ? "waiting" : "info"
 }
 
 function snapshotStatus(value: string): EventStatus {

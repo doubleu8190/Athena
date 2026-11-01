@@ -37,6 +37,7 @@ from infrastructure.persistence.postgres.models import (
     WorkerContractModel,
     WorkerCommandReceiptModel,
     WorkerInstanceModel,
+    WorkerApprovalRequestModel,
     WorkerRegistrationReceiptModel,
     WorkerResultReceiptModel,
     WorkerStopConfirmationModel,
@@ -81,6 +82,7 @@ _S2_TABLES = [
     OrchestratorExecutionModel.__table__,
     WorkerResultReceiptModel.__table__,
     WorkerStopConfirmationModel.__table__,
+    WorkerApprovalRequestModel.__table__,
     OrchestratorRootResumeJobModel.__table__,
     OrchestratorWorkerCommandModel.__table__,
     WorkerCommandReceiptModel.__table__,
@@ -335,6 +337,16 @@ async def test_two_tasks_complete_concurrently_and_resume_once(worker_store) -> 
         assert plan is not None
         assert plan.terminal_task_count == 2
         assert plan.status == "completed"
+        completed_executions = list(
+            (
+                await session.scalars(
+                    select(OrchestratorExecutionModel).where(
+                        OrchestratorExecutionModel.execution_id.in_(execution_ids)
+                    )
+                )
+            ).all()
+        )
+        assert all(row.status == "completed" and row.completed_at is not None for row in completed_executions)
         assert len(resume_jobs) == 1
         assert len(resume_lease_rows) == 1
         assert resume_lease_rows[0].state == "pending"
@@ -360,9 +372,10 @@ async def test_cancelled_result_is_ignored_until_stop_confirmation(worker_store)
     timed_out_cancel_command_id = str(uuid4())
     queued_execution_id = str(uuid4())
     queued_command_id = str(uuid4())
+    current_time = [now]
     id_values = iter([str(uuid4()), str(uuid4()), str(uuid4())])
     repository = PostgresWorkerOrchestrationRepository(
-        session_factory, id_factory=lambda: next(id_values), clock=lambda: now
+        session_factory, id_factory=lambda: next(id_values), clock=lambda: current_time[0]
     )
 
     async with session_factory() as session, session.begin():
@@ -672,7 +685,21 @@ async def test_cancelled_result_is_ignored_until_stop_confirmation(worker_store)
             replace(confirmation, instance_id=str(uuid4()))
         )
     async with session_factory() as session:
-        assert (await session.get(OrchestratorExecutionModel, execution_id)).capacity_reserved
+        before_stop = await session.get(OrchestratorExecutionModel, execution_id)
+        assert before_stop is not None
+        assert before_stop.status == "cancelling"
+        assert before_stop.capacity_reserved
+        assert before_stop.completed_at is None
+    current_time[0] = now + timedelta(seconds=5)
+    stopped, concurrent_replay = await asyncio.gather(
+        repository.confirm_stopped(confirmation),
+        repository.confirm_stopped(confirmation),
+    )
+    assert stopped.disposition == "capacity_released"
+    assert sorted((stopped.replayed, concurrent_replay.replayed)) == [False, True]
+    replayed_stop = await repository.confirm_stopped(confirmation)
+    assert replayed_stop.replayed is True
+    assert replayed_stop.received_at == stopped.received_at
     old_command_stop = await repository.confirm_stopped(
         WorkerStopConfirmation(
             instance_id=instance_id,
@@ -685,16 +712,12 @@ async def test_cancelled_result_is_ignored_until_stop_confirmation(worker_store)
             stopped_at=now,
         )
     )
-    assert old_command_stop.disposition == "capacity_released"
-    stopped, concurrent_replay = await asyncio.gather(
-        repository.confirm_stopped(confirmation),
-        repository.confirm_stopped(confirmation),
-    )
-    assert stopped.disposition == "already_released"
-    assert sorted((stopped.replayed, concurrent_replay.replayed)) == [False, True]
-    replayed_stop = await repository.confirm_stopped(confirmation)
-    assert replayed_stop.replayed is True
-    assert replayed_stop.received_at == stopped.received_at
+    assert old_command_stop.disposition == "already_released"
+    async with session_factory() as session:
+        timed_out_cancel = await session.get(
+            OrchestratorWorkerCommandModel, timed_out_cancel_command_id
+        )
+        assert timed_out_cancel is not None and timed_out_cancel.status == "stopped"
     with pytest.raises(ValueError, match="worker_stop_confirmation_idempotency_conflict"):
         await repository.confirm_stopped(
             replace(confirmation, stopped_at=now + timedelta(seconds=1))
@@ -702,8 +725,18 @@ async def test_cancelled_result_is_ignored_until_stop_confirmation(worker_store)
 
     async with session_factory() as session:
         execution = await session.get(OrchestratorExecutionModel, execution_id)
+        stopped_cancel_command = await session.get(
+            OrchestratorWorkerCommandModel, cancel_command_id
+        )
         task = await session.get(OrchestratorTaskModel, task_id)
         assert execution is not None and execution.capacity_reserved is False
+        assert execution.status == "cancelled"
+        assert execution.completed_at is not None
+        completed_at = execution.completed_at
+        assert stopped_cancel_command is not None
+        assert stopped_cancel_command.status == "stopped"
+        assert stopped_cancel_command.lease_owner is None
+        assert stopped_cancel_command.lease_token is None
         assert task is not None and task.status == "cancelled"
         persisted_receipt = await session.scalar(
             select(WorkerStopConfirmationModel.receipt_json).where(
@@ -804,7 +837,12 @@ async def test_plan_sequence_allows_reuse_of_task_ref_and_rejects_active_or_stop
         )
 
     repository = PostgresWorkerOrchestrationRepository(
-        session_factory, id_factory=lambda: str(uuid4()), clock=lambda: now
+        session_factory,
+        id_factory=lambda: str(uuid4()),
+        clock=lambda: now,
+        execution_retry_initial_seconds=2.0,
+        execution_retry_max_seconds=4.0,
+        execution_retry_jitter_ratio=0.0,
     )
 
     def submission(*, target_run: str, target_plan: str, sequence: int) -> WorkerPlanSubmission:
@@ -1104,7 +1142,12 @@ async def test_result_classification_persists_retry_and_ignores_stale_results(wo
     task_ids = [str(uuid4()) for _ in range(6)]
     execution_ids = [str(uuid4()) for _ in range(6)]
     repository = PostgresWorkerOrchestrationRepository(
-        session_factory, id_factory=lambda: str(uuid4()), clock=lambda: now
+        session_factory,
+        id_factory=lambda: str(uuid4()),
+        clock=lambda: now,
+        execution_retry_initial_seconds=2.0,
+        execution_retry_max_seconds=4.0,
+        execution_retry_jitter_ratio=0.0,
     )
 
     async with session_factory() as session, session.begin():
@@ -1212,7 +1255,7 @@ async def test_result_classification_persists_retry_and_ignores_stale_results(wo
                     cancellation_epoch=0,
                     capacity_reserved=True,
                     started_at=now,
-                    deadline_at=(now - timedelta(seconds=1) if index == 3 else now + timedelta(minutes=1)),
+                    deadline_at=(now - timedelta(seconds=1) if index in {3, 4} else now + timedelta(minutes=1)),
                     created_at=now,
                     updated_at=now,
                 )
@@ -1269,6 +1312,7 @@ async def test_result_classification_persists_retry_and_ignores_stale_results(wo
     late = await repository.record_result(
         submission=result(3, status="completed", output={"ok": True})
     )
+    internal_timeout = await repository.timeout_execution(execution_id=execution_ids[4])
     exhausted = await repository.record_result(
         submission=result(
             5,
@@ -1296,6 +1340,9 @@ async def test_result_classification_persists_retry_and_ignores_stale_results(wo
     assert invalid_output.reason == "output_schema_invalid"
     assert late.disposition == "ignored"
     assert late.reason == "execution_deadline_exceeded"
+    assert internal_timeout is not None
+    assert internal_timeout.disposition == "retry_scheduled"
+    assert internal_timeout.next_execution_id is not None
     assert exhausted.disposition == "recorded"
     assert exhausted.reason == "execution_attempts_exhausted"
     assert exhausted.next_execution_id is None
@@ -1311,6 +1358,12 @@ async def test_result_classification_persists_retry_and_ignores_stale_results(wo
                 OrchestratorWorkerCommandModel.execution_id == retry.next_execution_id
             )
         )
+        internal_retry_command = await session.scalar(
+            select(OrchestratorWorkerCommandModel).where(
+                OrchestratorWorkerCommandModel.execution_id
+                == internal_timeout.next_execution_id
+            )
+        )
         deadline_execution = await session.get(OrchestratorExecutionModel, execution_ids[3])
         stale_receipt = await session.scalar(
             select(WorkerResultReceiptModel).where(
@@ -1321,5 +1374,9 @@ async def test_result_classification_persists_retry_and_ignores_stale_results(wo
         assert retry_task is not None and retry_task.status == "retry_pending"
         assert retry_execution is not None and retry_execution.generation == 2
         assert retry_command is not None and retry_command.status == "awaiting_assignment"
+        assert internal_retry_command is not None
+        assert internal_retry_command.status == "awaiting_assignment"
+        assert internal_retry_command.available_at == now + timedelta(seconds=2)
         assert deadline_execution is not None and deadline_execution.capacity_reserved is True
-        assert stale_receipt is None
+        assert stale_receipt is not None
+        assert stale_receipt.disposition == "retry_scheduled"

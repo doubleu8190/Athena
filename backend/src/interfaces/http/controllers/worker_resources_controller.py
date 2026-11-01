@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from uuid import UUID
 
 from fastapi import APIRouter, Request
@@ -20,13 +19,13 @@ from interfaces.http.worker_protocol import (
 
 
 def build_worker_resources_router(
-    service_factory: Callable[[], WorkerResourceService],
+    resource_service: WorkerResourceService,
     protocol: WorkerProtocolHttp,
 ) -> APIRouter:
     """建立經服務身份與 Execution Grant 保護的資源路由。
 
     参数：
-    - `service_factory`（Callable[[], WorkerResourceService]）：提供授權和資源應用用例。
+    - `resource_service`（WorkerResourceService]）：提供授權和資源應用用例。
     - `protocol`（WorkerProtocolHttp）：驗證服務 Bearer、版本和幂等 Header 的共用協議端口。
 
     返回：只包含 S1 Worker 资源 PUT/GET 的 APIRouter。
@@ -49,7 +48,7 @@ def build_worker_resources_router(
         """
         principal = protocol.authenticate(request)
         normalized_id = _normalize_uuid(resource_id)
-        service = service_factory()
+        service = resource_service
         grant_token = _single_header(request, "x-athena-execution-grant")
         content_type = _single_header(request, "content-type")
         media_type = content_type.strip()
@@ -108,7 +107,7 @@ def build_worker_resources_router(
         """
         principal = protocol.authenticate(request)
         normalized_id = _normalize_uuid(resource_id)
-        service = service_factory()
+        service = resource_service
         grant_token = _single_header(request, "x-athena-execution-grant")
         try:
             download = await service.get_resource(

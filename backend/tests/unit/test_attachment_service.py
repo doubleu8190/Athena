@@ -129,7 +129,7 @@ def test_attachment_service_uploads_enqueues_and_deletes() -> None:
 
 def test_attachment_controller_exposes_upload_list_detail_delete() -> None:
     service, _, _, _ = make_service()
-    client = TestClient(create_app(attachment_service_factory=lambda: service))
+    client = TestClient(create_app(attachment_service=service))
 
     upload = client.post(
         "/api/sessions/session-1/attachments",

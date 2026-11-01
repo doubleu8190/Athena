@@ -200,10 +200,10 @@ def test_result_route_binds_execution_from_path_and_database_not_result_body() -
     app.add_middleware(AuthenticationMiddleware, options=AuthOptions(enabled=True))
     app.include_router(
         build_worker_registry_router(
-            RegistrationService,
-            RegistryService,
-            ResultService,
-            StopService,
+            RegistrationService(),
+            RegistryService(),
+            ResultService(),
+            StopService(),
             OriginValidator(),
             protocol,
         ),
@@ -295,10 +295,10 @@ def test_idempotency_conflicts_map_to_protocol_409(
     install_worker_protocol_handlers(app)
     app.include_router(
         build_worker_registry_router(
-            Service,
-            Registry,
-            Service,
-            Service,
+            Service(),
+            Registry(),
+            Service(),
+            Service(),
             OriginValidator(),
             WorkerProtocolHttp({"worker-a": "secret-token"}),
         ),
@@ -389,10 +389,10 @@ def test_registration_replay_precedes_origin_validation_and_hash_conflict_preced
     install_worker_protocol_handlers(app)
     app.include_router(
         build_worker_registry_router(
-            lambda: registration,
-            Registry,
-            ResultService,
-            StopService,
+            registration,
+            Registry(),
+            ResultService(),
+            StopService(),
             origin_validator,
             WorkerProtocolHttp({"worker-a": "secret-token"}),
         ),

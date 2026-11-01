@@ -9,6 +9,7 @@ from domain.orchestration.worker_registry import (
     WorkerHealthProbeResult,
     WorkerHealthProbeTarget,
     WorkerHealthTransition,
+    WorkerRegistryInstanceSnapshot,
 )
 
 
@@ -37,6 +38,8 @@ class WorkerRegistryRepository(Protocol):
     ) -> WorkerHealthTransition | None: ...
 
     async def list_available_workers(self) -> list[WorkerAvailableInstance]: ...
+
+    async def list_registry_instances(self) -> list[WorkerRegistryInstanceSnapshot]: ...
 
     async def resolve_execution_instance(
         self, service_principal: str, execution_id: str
@@ -149,6 +152,17 @@ class WorkerRegistryService:
         异常：持久化错误原样传播。
         """
         return await self._repository.list_available_workers()
+
+    async def list_registry_instances(self) -> list[WorkerRegistryInstanceSnapshot]:
+        """读取管理页面所需的完整实例、契约、健康和容量快照。
+
+        参数：无。
+
+        返回：包含不可用、禁用和满载实例的排序列表，不含服务凭据。
+
+        异常：持久化错误原样传播。
+        """
+        return await self._repository.list_registry_instances()
 
     async def resolve_execution_instance(
         self, service_principal: str, execution_id: str

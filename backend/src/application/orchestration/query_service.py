@@ -25,22 +25,6 @@ class OrchestrationReadPort(Protocol):
         """
         ...
 
-    async def get_plan_version(
-        self, plan_id: str, version: int
-    ) -> Mapping[str, object] | None:
-        """读取指定计划的不可变版本快照。
-
-        参数：
-        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
-        - `version`（int）：目标计划版本号，用于定位不可变计划快照；约束：无额外运行时限制。
-
-        返回：
-        - Mapping[str, object] | None：指定计划版本的任务和依赖快照；版本不存在时返回 None。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
 
 
 class OrchestrationQueryService:
@@ -73,23 +57,5 @@ class OrchestrationQueryService:
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         return await self._repository.get_run_orchestration_snapshot(run_id)
-
-    async def plan_version(
-        self, plan_id: str, version: int
-    ) -> Mapping[str, object] | None:
-        """生成计划版本。
-
-        参数：
-        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
-        - `version`（int）：目标计划版本号，用于定位不可变计划快照；约束：无额外运行时限制。
-
-        返回：
-        - Mapping[str, object] | None：计划版本快照映射；对应版本不存在时返回 None。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        return await self._repository.get_plan_version(plan_id, version)
-
 
 __all__ = ["OrchestrationQueryService", "OrchestrationReadPort"]

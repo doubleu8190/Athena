@@ -6,13 +6,13 @@ import pytest
 
 from domain.runs import (
     CommandType,
-    RoundCompletedResumeValue,
+    RootPlanCheckpointRecovery,
+    RootPlanCompletedResumeValue,
     RunCommand,
     RunResumePayload,
     RunStartPayload,
 )
 from application.contracts.runs import (
-    RoundCompletedResumeValueSchema,
     RunResumePayloadSchema,
     RunStartPayloadSchema,
     parse_run_command_payload,
@@ -34,9 +34,9 @@ def test_start_payload_round_trips_sequence_and_attachment_ids():
 
 def test_resume_payload_validates_the_root_resume_identity():
     payload = RunResumePayload(
-        resume_value=RoundCompletedResumeValue(
-            type="round_completed", run_id="run-1", plan_id="plan-1",
-            round_id="round-1", plan_version=1, root_wait_generation=2,
+        resume_value=RootPlanCompletedResumeValue(
+            type="plan_completed", run_id="run-1", plan_id="plan-1",
+            plan_sequence=1, root_wait_generation=2,
             interrupt_id="interrupt-1",
         )
     )
@@ -46,6 +46,28 @@ def test_resume_payload_validates_the_root_resume_identity():
     )
     assert isinstance(restored, RunResumePayload)
     assert restored.resume_value.root_wait_generation == 2
+    assert isinstance(restored.resume_value, RootPlanCompletedResumeValue)
+
+
+def test_checkpoint_recovery_resume_payload_round_trips():
+    payload = RunResumePayload(
+        resume_value=RootPlanCheckpointRecovery(
+            type="plan_checkpoint_recovery",
+            run_id="run-1",
+            plan_id="plan-1",
+            plan_sequence=2,
+            root_wait_generation=3,
+        )
+    )
+
+    restored = parse_run_command_payload(
+        CommandType.RUN_RESUME,
+        RunResumePayloadSchema.from_domain(payload).model_dump(mode="json"),
+    )
+
+    assert isinstance(restored, RunResumePayload)
+    assert isinstance(restored.resume_value, RootPlanCheckpointRecovery)
+    assert restored.resume_value.plan_sequence == 2
 
 
 def test_internal_invocation_rejects_a_payload_for_another_type():
@@ -54,9 +76,9 @@ def test_internal_invocation_rejects_a_payload_for_another_type():
             command_id="invoke-1", command_type=CommandType.RUN_START,
             session_id="session-1", run_id="run-1",
             payload=RunResumePayload(
-                resume_value=RoundCompletedResumeValue(
-                    type="round_completed", run_id="run-1", plan_id="plan-1",
-                    round_id="round-1", plan_version=1, root_wait_generation=1,
+                resume_value=RootPlanCompletedResumeValue(
+                    type="plan_completed", run_id="run-1", plan_id="plan-1",
+                    plan_sequence=1, root_wait_generation=1,
                     interrupt_id="interrupt-1",
                 )
             ),

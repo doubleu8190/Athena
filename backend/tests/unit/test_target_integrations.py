@@ -14,7 +14,10 @@ import pytest
 
 from application.common.responses import ToolResponse
 from application.orchestration.agents.worker_agent import ConfiguredWorkerAgent
-from application.orchestration.langgraph.runtime.worker_executor import LangGraphWorkerExecutor
+from application.orchestration.langgraph.graphs.worker import (
+    build_worker_graph,
+    invoke_worker_graph,
+)
 from application.orchestration.worker_workflow import WorkerWorkflow
 from domain.orchestration import Task, TaskExecution
 from tests.fakes.leases import lease_grant
@@ -256,8 +259,8 @@ async def test_worker_graph_passes_allowed_tool_manifest_to_worker_model():
 
     llm = CaptureLLM()
     worker_agent = ConfiguredWorkerAgent(llm, tool_service=ToolService())
-    executor = LangGraphWorkerExecutor(
-        workflow_factory=lambda: WorkerWorkflow(execute=worker_agent)
+    graph = build_worker_graph(
+        workflow=WorkerWorkflow(execute=worker_agent)
     )
     task = Task(
         task_id="task-1",
@@ -266,14 +269,18 @@ async def test_worker_graph_passes_allowed_tool_manifest_to_worker_model():
         allowed_tools=("exec_shell",),
     )
 
-    await executor.execute(
-        TaskExecution(
-            plan_id="plan-1",
-            run_id="run-1",
-            session_id="session-1",
-            task=task,
-            execution_generation=1,
-        )
+    execution = TaskExecution(
+        plan_id="plan-1",
+        run_id="run-1",
+        session_id="session-1",
+        task=task,
+        execution_generation=1,
+    )
+    await invoke_worker_graph(
+        graph,
+        task_id=task.task_id,
+        execution_generation=execution.execution_generation,
+        execution=execution,
     )
 
     assert '"name": "exec_shell"' in llm.messages[0]["content"]

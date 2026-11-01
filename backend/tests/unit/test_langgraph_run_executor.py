@@ -8,7 +8,7 @@ from langgraph.types import Interrupt
 
 from domain.runs import (
     CommandType,
-    RoundCompletedResumeValue,
+    RootPlanCompletedResumeValue,
     RunCommand,
     RunResumePayload,
     RootWaitCheckpoint,
@@ -46,11 +46,11 @@ class _InterruptedGraph:
                 Interrupt(
                     id="interrupt-1",
                     value={
-                        "type": "round_wait",
+                        "type": "plan_wait",
                         "run_id": "run-1",
                         "plan_id": "plan-1",
-                        "round_id": "round-1",
-                        "plan_version": 2,
+                        "plan_sequence": 1,
+                        "root_wait_generation": 1,
                     },
                 )
             ],
@@ -98,8 +98,8 @@ async def test_langgraph_interrupt_is_returned_as_waiting_execution() -> None:
     assert outcome.root_wait == RootWaitCheckpoint(
         run_id="run-1",
         plan_id="plan-1",
-        round_id="round-1",
-        plan_version=2,
+        plan_sequence=1,
+        root_wait_generation=1,
         interrupt_id="interrupt-1",
         checkpoint_id="checkpoint-1",
     )
@@ -117,12 +117,11 @@ async def test_resume_uses_only_checkpoint_resume_identity() -> None:
         session_id="session-1",
         run_id="run-1",
         payload=RunResumePayload(
-            resume_value=RoundCompletedResumeValue(
-                type="round_completed",
+            resume_value=RootPlanCompletedResumeValue(
+                type="plan_completed",
                 run_id="run-1",
                 plan_id="plan-1",
-                round_id="round-1",
-                plan_version=1,
+                plan_sequence=1,
                 root_wait_generation=1,
                 interrupt_id="interrupt-1",
             )

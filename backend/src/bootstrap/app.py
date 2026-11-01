@@ -47,52 +47,52 @@ from interfaces.http.controllers.evaluation_controller import build_evaluation_r
 from interfaces.http.auth import AuthOptions, AuthenticationMiddleware, build_auth_router
 from interfaces.http.auth import middleware as auth_middleware
 from interfaces.http.worker_protocol import install_worker_protocol_handlers
-from .dependencies import ApplicationDependencies, Provider, build_default_dependencies
+from .dependencies import ApplicationDependencies, build_default_dependencies
 from .lifespan import lifespan
 
 
 def create_app(
     *,
     dependencies: ApplicationDependencies | None = None,
-    session_service_factory: Callable[[], SessionService] | None = None,
-    session_memory_settings_factory: Callable[[], SessionMemorySettingsService] | None = None,
-    project_factory: Callable[[], ProjectService] | None = None,
-    message_query_factory: Callable[[], SessionMessageQueryService] | None = None,
-    run_query_factory: Callable[[], RunQueryService] | None = None,
-    run_service_factory: Callable[[], RunService] | None = None,
-    orchestration_query_factory: Callable[[], OrchestrationQueryService] | None = None,
-    event_stream_factory: Callable[[], EventStreamService] | None = None,
-    tool_query_factory: Callable[[], ToolQueryService] | None = None,
-    tool_service_factory: Callable[[], ToolService] | None = None,
-    approval_service_factory: Callable[[], ApprovalService] | None = None,
-    mcp_service_factory: Callable[[], MCPService] | None = None,
-    provider_query_factory: Callable[[], ProviderQueryService] | None = None,
-    settings_query_factory: Callable[[], SettingsQueryService] | None = None,
-    memory_query_factory: Callable[[], MemoryQueryService] | None = None,
-    memory_service_factory: Callable[[], MemoryService] | None = None,
-    memory_episode_service_factory: Callable[[], MemoryEpisodeManagementService] | None = None,
-    memory_job_service_factory: Callable[[], MemoryJobManagementService] | None = None,
-    retrieval_query_factory: Callable[[], RetrievalQueryService] | None = None,
-    knowledge_query_factory: Callable[[], KnowledgeBaseQueryService] | None = None,
-    attachment_service_factory: Callable[[], AttachmentService] | None = None,
-    knowledge_service_factory: Callable[[], KnowledgeBaseService] | None = None,
-    evaluation_repository_factory: Callable[[], Any] | None = None,
+    session_service: SessionService | None = None,
+    session_memory_settings: SessionMemorySettingsService | None = None,
+    project_service: ProjectService | None = None,
+    message_query_service: SessionMessageQueryService | None = None,
+    run_query_service: RunQueryService | None = None,
+    run_service: RunService | None = None,
+    orchestration_query_service: OrchestrationQueryService | None = None,
+    event_stream_service: EventStreamService | None = None,
+    tool_query_service: ToolQueryService | None = None,
+    tool_service: ToolService | None = None,
+    approval_service: ApprovalService | None = None,
+    mcp_service: MCPService | None = None,
+    provider_query_service: ProviderQueryService | None = None,
+    settings_query_service: SettingsQueryService | None = None,
+    memory_query_service: MemoryQueryService | None = None,
+    memory_service: MemoryService | None = None,
+    memory_episode_service: MemoryEpisodeManagementService | None = None,
+    memory_job_service: MemoryJobManagementService | None = None,
+    retrieval_query_service: RetrievalQueryService | None = None,
+    knowledge_query_service: KnowledgeBaseQueryService | None = None,
+    attachment_service: AttachmentService | None = None,
+    knowledge_service: KnowledgeBaseService | None = None,
+    evaluation_repository: Any | None = None,
     evaluation_target_factory: Callable[[Any], Any] | None = None,
-    evaluation_dataset_loader_factory: Callable[[str], Any] | None = None,
-    evaluation_event_sink_factory: Callable[[], Any] | None = None,
-    evaluation_progress_hub_factory: Callable[[], Any] | None = None,
+    evaluation_dataset_loader: Callable[[str], Any] | None = None,
+    evaluation_event_sink: Any | None = None,
+    evaluation_progress_hub: Any | None = None,
     auth_options: AuthOptions | None = None,
     auth_service: AuthenticationService | None = None,
 ) -> FastAPI:
     """创建无外部副作用的 Athena 应用。
 
     参数：
-        session_service_factory: 可选的会话服务工厂。提供后才注册会话路由，
-            由调用方负责组装 repository 和其他运行时依赖。
+        session_service: 可选的会话服务实例。提供后才注册会话路由；
+            未显式传入时使用依赖图中的实例。
     返回值：
         FastAPI: 已注册健康检查和可选会话 Controller 的应用实例。
     异常：
-        本函数不主动抛出业务异常；依赖工厂异常会在请求处理时传播。
+        本函数不主动抛出业务异常；路由和生命周期资源的异常按原样传播。
     """
     graph = dependencies or build_default_dependencies()
     resolved_auth_options = auth_options or AuthOptions.from_settings(auth_middleware.get_settings())
@@ -103,11 +103,11 @@ def create_app(
         session_secret=resolved_auth_options.session_secret,
         session_ttl_seconds=resolved_auth_options.session_ttl_seconds,
     ))
-    # Explicit test/deployment providers take precedence over the paired
+    # Explicit test/deployment services take precedence over the paired
     # mutation service for the same read endpoint.
-    explicit_tool_query = tool_query_factory is not None
-    explicit_tool_service = tool_service_factory is not None
-    explicit_memory_query = memory_query_factory is not None
+    explicit_tool_query = tool_query_service is not None
+    explicit_tool_service = tool_service is not None
+    explicit_memory_query = memory_query_service is not None
     app = FastAPI(
         title="Athena",
         version="0.1.0.dev0",
@@ -124,50 +124,50 @@ def create_app(
     )
     app.state.dependencies = graph
 
-    def registered(name: str, explicit: Provider | None) -> Provider | None:
-        return explicit if explicit is not None else graph.provider(name)
+    def registered(name: str, explicit: Any | None) -> Any | None:
+        return explicit if explicit is not None else graph.service(name)
 
-    session_service_factory = registered("session_service_factory", session_service_factory)
-    session_memory_settings_factory = registered(
-        "session_memory_settings_factory", session_memory_settings_factory
+    session_service = registered("session_service", session_service)
+    session_memory_settings = registered(
+        "session_memory_settings", session_memory_settings
     )
-    project_factory = registered("project_factory", project_factory)
-    message_query_factory = registered("message_query_factory", message_query_factory)
-    run_query_factory = registered("run_query_factory", run_query_factory)
-    run_service_factory = registered("run_service_factory", run_service_factory)
-    orchestration_query_factory = registered(
-        "orchestration_query_factory", orchestration_query_factory
+    project_service = registered("project_service", project_service)
+    message_query_service = registered("message_query_service", message_query_service)
+    run_query_service = registered("run_query_service", run_query_service)
+    run_service = registered("run_service", run_service)
+    orchestration_query_service = registered(
+        "orchestration_query_service", orchestration_query_service
     )
-    event_stream_factory = registered("event_stream_factory", event_stream_factory)
-    tool_query_factory = registered("tool_query_factory", tool_query_factory)
-    tool_service_factory = registered("tool_service_factory", tool_service_factory)
-    approval_service_factory = registered("approval_service_factory", approval_service_factory)
-    mcp_service_factory = registered("mcp_service_factory", mcp_service_factory)
-    provider_query_factory = registered("provider_query_factory", provider_query_factory)
-    settings_query_factory = registered("settings_query_factory", settings_query_factory)
-    memory_query_factory = registered("memory_query_factory", memory_query_factory)
-    memory_service_factory = registered("memory_service_factory", memory_service_factory)
-    memory_episode_service_factory = registered(
-        "memory_episode_service_factory", memory_episode_service_factory
+    event_stream_service = registered("event_stream_service", event_stream_service)
+    tool_query_service = registered("tool_query_service", tool_query_service)
+    tool_service = registered("tool_service", tool_service)
+    approval_service = registered("approval_service", approval_service)
+    mcp_service = registered("mcp_service", mcp_service)
+    provider_query_service = registered("provider_query_service", provider_query_service)
+    settings_query_service = registered("settings_query_service", settings_query_service)
+    memory_query_service = registered("memory_query_service", memory_query_service)
+    memory_service = registered("memory_service", memory_service)
+    memory_episode_service = registered(
+        "memory_episode_service", memory_episode_service
     )
-    memory_job_service_factory = registered(
-        "memory_job_service_factory", memory_job_service_factory
+    memory_job_service = registered(
+        "memory_job_service", memory_job_service
     )
-    retrieval_query_factory = registered("retrieval_query_factory", retrieval_query_factory)
-    knowledge_query_factory = registered("knowledge_query_factory", knowledge_query_factory)
-    attachment_service_factory = registered("attachment_service_factory", attachment_service_factory)
-    knowledge_service_factory = registered("knowledge_service_factory", knowledge_service_factory)
-    evaluation_repository_factory = registered("evaluation_repository_factory", evaluation_repository_factory)
+    retrieval_query_service = registered("retrieval_query_service", retrieval_query_service)
+    knowledge_query_service = registered("knowledge_query_service", knowledge_query_service)
+    attachment_service = registered("attachment_service", attachment_service)
+    knowledge_service = registered("knowledge_service", knowledge_service)
+    evaluation_repository = registered("evaluation_repository", evaluation_repository)
     evaluation_target_factory = registered("evaluation_target_factory", evaluation_target_factory)
-    evaluation_dataset_loader_factory = registered("evaluation_dataset_loader_factory", evaluation_dataset_loader_factory)
-    evaluation_event_sink_factory = registered("evaluation_event_sink_factory", evaluation_event_sink_factory)
-    evaluation_progress_hub_factory = registered("evaluation_progress_hub_factory", evaluation_progress_hub_factory)
+    evaluation_dataset_loader = registered("evaluation_dataset_loader", evaluation_dataset_loader)
+    evaluation_event_sink = registered("evaluation_event_sink", evaluation_event_sink)
+    evaluation_progress_hub = registered("evaluation_progress_hub", evaluation_progress_hub)
     if explicit_tool_query:
-        tool_service_factory = None
+        tool_service = None
     if explicit_tool_service:
-        tool_query_factory = None
+        tool_query_service = None
     if explicit_memory_query:
-        memory_service_factory = None
+        memory_service = None
 
     @app.get("/health", tags=["health"])
     async def health() -> dict[str, Any]:
@@ -180,75 +180,75 @@ def create_app(
 
     app.include_router(build_auth_router(options=resolved_auth_options, auth_service=resolved_auth_service), prefix="/api")
 
-    if session_service_factory is not None:
+    if session_service is not None:
         app.include_router(
             build_sessions_router(
-                session_service_factory,
-                memory_settings_factory=session_memory_settings_factory,
-                message_query_factory=message_query_factory,
-                run_query_factory=run_query_factory,
+                session_service,
+                memory_settings_service=session_memory_settings,
+                message_query_service=message_query_service,
+                run_query_service=run_query_service,
             ),
             prefix="/api",
         )
     if any(
-        factory is not None
-        for factory in (
-            tool_query_factory,
-            provider_query_factory,
-            settings_query_factory,
-            memory_query_factory,
-            memory_service_factory,
-            memory_episode_service_factory,
-            memory_job_service_factory,
-            retrieval_query_factory,
-            knowledge_query_factory,
-            project_factory,
+        service is not None
+        for service in (
+            tool_query_service,
+            provider_query_service,
+            settings_query_service,
+            memory_query_service,
+            memory_service,
+            memory_episode_service,
+            memory_job_service,
+            retrieval_query_service,
+            knowledge_query_service,
+            project_service,
         )
     ):
         app.include_router(
             build_query_router(
-                tool_factory=tool_query_factory,
-                provider_factory=provider_query_factory,
-                settings_factory=settings_query_factory,
-                memory_factory=memory_query_factory,
-                memory_service_factory=memory_service_factory,
-                memory_episode_service_factory=memory_episode_service_factory,
-                memory_job_service_factory=memory_job_service_factory,
-                project_factory=project_factory,
-                retrieval_factory=retrieval_query_factory,
-                knowledge_factory=knowledge_query_factory,
-                include_tools=tool_service_factory is None,
+                tool_query_service=tool_query_service,
+                provider_query_service=provider_query_service,
+                settings_query_service=settings_query_service,
+                memory_query_service=memory_query_service,
+                memory_service=memory_service,
+                memory_episode_service=memory_episode_service,
+                memory_job_service=memory_job_service,
+                project_service=project_service,
+                retrieval_query_service=retrieval_query_service,
+                knowledge_query_service=knowledge_query_service,
+                include_tools=tool_service is None,
             ),
             prefix="/api",
         )
-    if attachment_service_factory is not None:
-        app.include_router(build_files_router(attachment_service_factory), prefix="/api")
-    if knowledge_service_factory is not None:
-        app.include_router(build_knowledge_router(knowledge_service_factory), prefix="/api")
-    if evaluation_repository_factory is not None:
+    if attachment_service is not None:
+        app.include_router(build_files_router(attachment_service), prefix="/api")
+    if knowledge_service is not None:
+        app.include_router(build_knowledge_router(knowledge_service), prefix="/api")
+    if evaluation_repository is not None:
         app.include_router(build_evaluation_router(
-            repository_factory=evaluation_repository_factory,
+            repository=evaluation_repository,
             target_factory=evaluation_target_factory,
-            dataset_loader_factory=evaluation_dataset_loader_factory,
-            event_sink_factory=evaluation_event_sink_factory,
-            progress_hub_factory=evaluation_progress_hub_factory,
+            dataset_loader=evaluation_dataset_loader,
+            event_sink=evaluation_event_sink,
+            progress_hub=evaluation_progress_hub,
         ), prefix="/api")
-    if tool_service_factory is not None:
-        app.include_router(build_tools_router(tool_service_factory), prefix="/api")
-    if approval_service_factory is not None:
-        app.include_router(build_approval_router(approval_service_factory), prefix="/api")
-    if mcp_service_factory is not None:
-        app.include_router(build_mcp_router(mcp_service_factory), prefix="/api")
-    if run_service_factory is not None:
-        app.include_router(build_runs_router(run_service_factory), prefix="/api")
-    if run_query_factory is not None:
-        app.include_router(build_run_query_router(run_query_factory), prefix="/api")
-    if orchestration_query_factory is not None:
+    if tool_service is not None:
+        app.include_router(build_tools_router(tool_service), prefix="/api")
+    if approval_service is not None:
+        app.include_router(build_approval_router(approval_service), prefix="/api")
+    if mcp_service is not None:
+        app.include_router(build_mcp_router(mcp_service), prefix="/api")
+    if run_service is not None:
+        app.include_router(build_runs_router(run_service), prefix="/api")
+    if run_query_service is not None:
+        app.include_router(build_run_query_router(run_query_service), prefix="/api")
+    if orchestration_query_service is not None:
         app.include_router(
-            build_orchestration_router(orchestration_query_factory), prefix="/api"
+            build_orchestration_router(orchestration_query_service), prefix="/api"
         )
-    if event_stream_factory is not None:
-        app.include_router(build_events_router(event_stream_factory), prefix="/api")
+    if event_stream_service is not None:
+        app.include_router(build_events_router(event_stream_service), prefix="/api")
     for router in graph.routers:
         app.include_router(router)
     return app

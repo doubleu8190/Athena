@@ -25,13 +25,12 @@ class RootGraphState(TypedDict, total=False):
     planning_context_updated: bool
     plan_draft: dict[str, Any] | None
     answer_input: dict[str, Any] | None
-    worker_tools: list[dict[str, Any]]
     knowledge_bases: list[dict[str, Any]]
     available_context_providers: list[str]
     context_queries: list[dict[str, Any]]
     context_bundle: dict[str, Any]
     plan: dict[str, Any]
-    deferred_plan_versions: dict[str, list[dict[str, Any]]]
+    completed_plans: list[dict[str, Any]]
     plan_results: dict[str, Any]
     root_wait: dict[str, Any]
     response: dict[str, Any]

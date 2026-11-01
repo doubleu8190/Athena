@@ -240,14 +240,88 @@ class PinnedWorkerHttpClient:
             raise ValueError("worker_response_limit_invalid")
         try:
             async with asyncio.timeout(request_timeout):
-                return await self._send_task(target, max_response_bytes=max_response_bytes)
+                return await self._send_command(
+                    target,
+                    path="/worker-api/v1/tasks",
+                    max_response_bytes=max_response_bytes,
+                )
         except TimeoutError as exc:
             raise httpx.TimeoutException("worker_task_request_timeout") from exc
 
-    async def _send_task(
-        self, target: WorkerDispatchStart, *, max_response_bytes: int
+    async def send_cancel(
+        self,
+        target: WorkerDispatchStart,
+        *,
+        max_response_bytes: int = 65_536,
+        timeout_seconds: float | None = None,
     ) -> WorkerTaskPostResponse:
-        """在调用方的总超时范围内完成固定地址解析与单次 POST。"""
+        """通过固定 HTTPS 地址发送持久化的取消指令。
+
+        参数：
+        - `target`（WorkerDispatchStart）：数据库冻结的取消命令和 Worker 地址快照。
+        - `max_response_bytes`（int）：响应体上限，必须为正数。
+        - `timeout_seconds`（float | None）：本次请求的总等待上限；为空时使用客户端默认值。
+
+        返回：HTTP 状态码、协议 JSON 和 Retry-After 下限；202 只表示取消意图已持久保存。
+
+        异常：WorkerOriginRejected 表示地址不在允许范围；HTTPError、WorkerTaskResponseInvalid 表示传输或响应无效。
+        """
+        request_timeout = (
+            self._timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
+        if max_response_bytes < 1 or request_timeout <= 0:
+            raise ValueError("worker_response_limit_invalid")
+        try:
+            async with asyncio.timeout(request_timeout):
+                return await self._send_command(
+                    target,
+                    path=f"/worker-api/v1/executions/{target.execution_id}/cancel",
+                    max_response_bytes=max_response_bytes,
+                )
+        except TimeoutError as exc:
+            raise httpx.TimeoutException("worker_cancel_request_timeout") from exc
+
+    async def send_resume(
+        self,
+        target: WorkerDispatchStart,
+        *,
+        max_response_bytes: int = 65_536,
+        timeout_seconds: float | None = None,
+    ) -> WorkerTaskPostResponse:
+        """通过固定 HTTPS 地址发送不可变的审批恢复命令。
+
+        参数：
+        - `target`（WorkerDispatchStart）：数据库冻结的恢复命令和 Worker 地址快照。
+        - `max_response_bytes`（int）：响应体上限，必须为正数。
+        - `timeout_seconds`（float | None）：本次请求的总等待上限；为空时使用客户端默认值。
+
+        返回：HTTP 状态码、协议 JSON 和 Retry-After 下限；202 只表示恢复命令已持久保存。
+
+        异常：WorkerOriginRejected 表示地址不在允许范围；HTTPError、WorkerTaskResponseInvalid 表示传输或响应无效。
+        """
+        request_timeout = (
+            self._timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
+        if max_response_bytes < 1 or request_timeout <= 0:
+            raise ValueError("worker_response_limit_invalid")
+        try:
+            async with asyncio.timeout(request_timeout):
+                return await self._send_command(
+                    target,
+                    path=f"/worker-api/v1/executions/{target.execution_id}/resume",
+                    max_response_bytes=max_response_bytes,
+                )
+        except TimeoutError as exc:
+            raise httpx.TimeoutException("worker_resume_request_timeout") from exc
+
+    async def _send_command(
+        self,
+        target: WorkerDispatchStart,
+        *,
+        path: str,
+        max_response_bytes: int,
+    ) -> WorkerTaskPostResponse:
+        """在调用方总超时内向固定地址发送一条不可变命令。"""
         try:
             parsed = _parse_https_origin(target.base_url)
             if _normalize_origin(target.base_url) not in self._allowed_origins:
@@ -264,7 +338,7 @@ class PinnedWorkerHttpClient:
                     scheme="https",
                     host=address,
                     port=port,
-                    path="/worker-api/v1/tasks",
+                    path=path,
                 )
                 async with httpx.AsyncClient(
                     verify=self._ssl_context,

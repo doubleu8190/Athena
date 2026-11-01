@@ -194,7 +194,7 @@ def test_knowledge_controller_exposes_lifecycle_and_document_routes() -> None:
         id_factory=iter(["attachment-1", "logical-1", "kb-2"]).__next__,
         clock=lambda: NOW,
     )
-    client = TestClient(create_app(knowledge_service_factory=lambda: service))
+    client = TestClient(create_app(knowledge_service=service))
 
     created = client.post("/api/knowledge-bases", json={"name": "  Docs  "})
     assert created.status_code == 201

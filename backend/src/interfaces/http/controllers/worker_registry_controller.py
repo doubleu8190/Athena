@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
@@ -21,24 +20,28 @@ from application.orchestration.worker_result_submission import (
 from application.orchestration.worker_stop_confirmation import (
     WorkerStopConfirmationService,
 )
+from application.orchestration.worker_approval_requests import (
+    WorkerApprovalRequestService,
+)
 from interfaces.http.worker_protocol import WorkerProtocolError, WorkerProtocolHttp
 
 
 def build_worker_registry_router(
-    registration_service_factory: Callable[[], WorkerRegistrationService],
-    registry_service_factory: Callable[[], WorkerRegistryService],
-    result_service_factory: Callable[[], WorkerResultSubmissionService],
-    stop_service_factory: Callable[[], WorkerStopConfirmationService],
+    registration_service: WorkerRegistrationService,
+    registry_service: WorkerRegistryService,
+    result_service: WorkerResultSubmissionService,
+    stop_service: WorkerStopConfirmationService,
     origin_validator: WorkerRegistrationAddressValidator,
     protocol: WorkerProtocolHttp,
+    approval_request_service: WorkerApprovalRequestService | None = None,
 ) -> APIRouter:
     """组装使用独立 Worker Bearer 身份的 v1 注册、结果和停止路由。
 
     参数：
-    - `registration_service_factory`：保存注册实例和不可变能力版本的应用服务工厂。
-    - `registry_service_factory`：依据执行分配记录解析 Worker 实例归属的应用服务工厂。
-    - `result_service_factory`：持久化 Worker 结果的应用服务工厂。
-    - `stop_service_factory`：处理物理停止确认的应用服务工厂。
+    - `registration_service`：保存注册实例和不可变能力版本的应用服务。
+    - `registry_service`：依据执行分配记录解析 Worker 实例归属的应用服务。
+    - `result_service`：持久化 Worker 结果的应用服务。
+    - `stop_service`：处理物理停止确认的应用服务。
     - `origin_validator`：检查注册地址 allowlist、DNS 结果和网络策略的 HTTP 客户端。
     - `protocol`：检查服务身份、协议头和原始 JSON 请求的共享边界。
 
@@ -65,7 +68,6 @@ def build_worker_registry_router(
             schema_name="RegistrationRequest",
             id_field="registration_request_id",
         )
-        registration_service = registration_service_factory()
         try:
             replay = await registration_service.find_replay(
                 raw_body, service_principal=principal
@@ -128,7 +130,7 @@ def build_worker_registry_router(
             id_field="result_id",
         )
         protocol.validate_path_identifier(execution_id)
-        instance_id = await registry_service_factory().resolve_execution_instance(
+        instance_id = await registry_service.resolve_execution_instance(
             principal, execution_id
         )
         if instance_id is None:
@@ -136,7 +138,7 @@ def build_worker_registry_router(
                 "EXECUTION_NOT_FOUND", 404, "operator_action", "execution does not belong to this service"
             )
         try:
-            result = await result_service_factory().submit(
+            result = await result_service.submit(
                 raw_body,
                 instance_id=instance_id,
                 execution_id=execution_id,
@@ -177,7 +179,7 @@ def build_worker_registry_router(
                 "operator_action",
                 "cancel command identity does not match",
             )
-        instance_id = await registry_service_factory().resolve_cancel_instance(
+        instance_id = await registry_service.resolve_cancel_instance(
             principal, execution_id, str(UUID(command_id))
         )
         if instance_id is None:
@@ -188,7 +190,7 @@ def build_worker_registry_router(
                 "cancel command identity does not match",
             )
         try:
-            receipt = await stop_service_factory().confirm(
+            receipt = await stop_service.confirm(
                 raw_body,
                 instance_id=instance_id,
             )
@@ -196,6 +198,40 @@ def build_worker_registry_router(
             raise _idempotency_conflict("STOP_CONFIRMATION_CONFLICT") from exc
         return JSONResponse(
             status_code=200,
+            content=receipt.model_dump(mode="json", exclude_none=True),
+        )
+
+    @router.post("/worker-approvals")
+    async def submit_worker_approval(request: Request) -> Response:
+        """接收 Worker 的单项或批量审批申请并返回稳定回执。"""
+        if approval_request_service is None:
+            raise WorkerProtocolError(
+                "INTERNAL_ERROR", 503, "operator_action", "worker approvals are unavailable"
+            )
+        principal = protocol.authenticate(request)
+        raw_body = await protocol.read_json(
+            request,
+            schema_name="ApprovalRequest",
+            id_field="approval_request_id",
+        )
+        execution_id = raw_body["execution_id"]
+        instance_id = await registry_service.resolve_execution_instance(
+            principal, execution_id
+        )
+        if instance_id is None:
+            raise WorkerProtocolError(
+                "EXECUTION_NOT_FOUND", 404, "operator_action", "execution does not belong to this service"
+            )
+        try:
+            receipt = await approval_request_service.submit(
+                raw_body, instance_id=instance_id
+            )
+        except WorkerIdempotencyConflict as exc:
+            raise _idempotency_conflict("APPROVAL_ID_CONFLICT") from exc
+        except ValueError as exc:
+            raise _approval_value_error(exc) from exc
+        return JSONResponse(
+            status_code=200 if receipt.disposition == "duplicate" else 202,
             content=receipt.model_dump(mode="json", exclude_none=True),
         )
 
@@ -210,6 +246,19 @@ def _idempotency_conflict(code: str) -> WorkerProtocolError:
         "operator_action",
         "idempotency key was already used with different content",
     )
+
+
+def _approval_value_error(exc: ValueError) -> WorkerProtocolError:
+    """把审批应用层拒绝转换为 S1 ErrorResponse 目录中的稳定错误。"""
+    reason = str(exc)
+    if "deadline" in reason:
+        return WorkerProtocolError(
+            "EXECUTION_DEADLINE_EXCEEDED", 409, "retry_execution", reason
+        )
+    if "identity" in reason or "eligible" in reason or "unknown" in reason:
+        code = "EXECUTION_NOT_FOUND" if "unknown" in reason else "APPROVAL_STALE"
+        return WorkerProtocolError(code, 409, "stop", reason)
+    return WorkerProtocolError("APPROVAL_REQUEST_INVALID", 422, "operator_action", reason)
 
 
 __all__ = ["build_worker_registry_router"]

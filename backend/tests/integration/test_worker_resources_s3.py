@@ -254,7 +254,7 @@ async def test_worker_resource_http_upload_download_and_idempotent_conflict(
     token = await service.issue_execution_grant(execution_id)
     protocol = WorkerProtocolHttp({"worker-service": "test-worker-token"})
     app = FastAPI()
-    app.include_router(build_worker_resources_router(lambda: service, protocol), prefix="/api")
+    app.include_router(build_worker_resources_router(service, protocol), prefix="/api")
     install_worker_protocol_handlers(app)
     body = b"smallfile"
     resource_id = str(uuid4())

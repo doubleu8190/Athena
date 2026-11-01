@@ -127,7 +127,7 @@ export LLM_BASE_URL="${LLM_BASE_URL:-}"
 export POSTGRES_USER="${POSTGRES_USER:-doubleu}"
 export POSTGRES_DB="${POSTGRES_DB:-athena}"
 export POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
-export POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+export POSTGRES_PORT="${POSTGRES_PORT:-8190}"
 export ATHENA_WORKERS_ENABLED="${ATHENA_WORKERS_ENABLED:-1}"
 mkdir -p "${PROJECT_ROOT}/data"
 
@@ -599,7 +599,7 @@ ENVIRONMENT (可在 .env 中配置，或执行时临时覆盖):
   POSTGRES_USER        PostgreSQL 用户          默认 doubleu
   POSTGRES_DB          PostgreSQL 数据库        默认 athena
   POSTGRES_HOST        PostgreSQL 主机          默认 localhost
-  POSTGRES_PORT        PostgreSQL 端口          默认 5432
+  POSTGRES_PORT        PostgreSQL 端口          默认 8190
 
 EXAMPLES:
   ./start.sh                         # 一键启动前后端（日常开发）

@@ -15,7 +15,9 @@ import type {
   ExecutionError,
   ExecutionTimelineEntry,
   RunTimelineEvent,
+  RunOrchestrationSnapshot,
 } from "../types"
+import { shouldAcceptSnapshotState, shouldApplySnapshotResponse } from "../utils/workerSnapshotProjection.ts"
 
 interface ChatStore {
   // 连接状态
@@ -94,6 +96,12 @@ interface ChatStore {
   orchestrationPlans: OrchestrationPlan[]
   upsertOrchestrationPlan: (plan: OrchestrationPlan) => void
   clearOrchestrationPlans: () => void
+  orchestrationSnapshots: Record<string, RunOrchestrationSnapshot>
+  beginOrchestrationSnapshotRequest: (runId: string) => number
+  setOrchestrationSnapshot: (snapshot: RunOrchestrationSnapshot, requestGeneration?: number) => void
+  clearOrchestrationSnapshots: () => void
+  orchestrationSnapshotGenerations: Record<string, number>
+  orchestrationSnapshotRequestSequence: number
 
   // 错误
   error: string | null
@@ -307,6 +315,30 @@ export const useChatStore = create<ChatStore>((set) => ({
       return { orchestrationPlans: next }
     }),
   clearOrchestrationPlans: () => set({ orchestrationPlans: [] }),
+  orchestrationSnapshots: {},
+  orchestrationSnapshotGenerations: {} as Record<string, number>,
+  // 单调递增且跨 clear 保留，避免 A -> B -> A 时复用旧请求代次。
+  orchestrationSnapshotRequestSequence: 0,
+  beginOrchestrationSnapshotRequest: (runId) => {
+    let generation = 0
+    set((state) => {
+      generation = state.orchestrationSnapshotRequestSequence + 1
+      return {
+        orchestrationSnapshotRequestSequence: generation,
+        orchestrationSnapshotGenerations: { ...state.orchestrationSnapshotGenerations, [runId]: generation },
+      }
+    })
+    return generation
+  },
+  setOrchestrationSnapshot: (snapshot, requestGeneration) => set((state) => {
+    const runId = snapshot.run.run_id
+    const latestGeneration = state.orchestrationSnapshotGenerations[runId] || 0
+    if (requestGeneration != null && !shouldApplySnapshotResponse(runId, runId, requestGeneration, latestGeneration)) return state
+    const existing = state.orchestrationSnapshots[runId]
+    if (existing && !shouldAcceptSnapshotState(existing.run.status, snapshot.run.status)) return state
+    return { orchestrationSnapshots: { ...state.orchestrationSnapshots, [runId]: snapshot } }
+  }),
+  clearOrchestrationSnapshots: () => set({ orchestrationSnapshots: {}, orchestrationSnapshotGenerations: {} }),
 
   // 错误
   error: null,

@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Any, Mapping
 
 from domain.leases import LeaseGrant
+from .worker_entities import JsonValue
 from .entities import PlanStatus, Task, TaskResult, TaskStatus
 
 
@@ -39,6 +40,60 @@ class ReviewAction(StrEnum):
     CONTINUE = "CONTINUE"
     REPLAN = "REPLAN"
     FINISH = "FINISH"
+
+
+@dataclass(frozen=True, slots=True)
+class RootExecutionAttemptFact:
+    """Root 可读取的一次远程执行尝试事实。"""
+
+    generation: int
+    status: str
+    error: JsonValue | None = None
+    started_at: datetime | None = None
+    deadline_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RootPlanTaskFact:
+    """Root 决策所需的逻辑任务终态和尝试摘要。"""
+
+    task_ref: str
+    status: str
+    output: JsonValue | None = None
+    error: JsonValue | None = None
+    attempts: tuple[RootExecutionAttemptFact, ...] = ()
+    resource_ids: tuple[str, ...] = ()
+    objective: str = ""
+    acceptance_criteria: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RootPlanFacts:
+    """已关闭 Plan 的完整只读事实快照。"""
+
+    run_id: str
+    plan_id: str
+    sequence: int
+    root_wait_generation: int
+    goal: str
+    status: str
+    tasks: tuple[RootPlanTaskFact, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RootPlanResumeLease:
+    """绑定一个 Plan 等待代次及中心租约的恢复作业。"""
+
+    job_id: str
+    run_id: str
+    session_id: str
+    plan_id: str
+    sequence: int
+    root_wait_generation: int
+    interrupt_id: str | None
+    checkpoint_id: str | None
+    lease: LeaseGrant
 
 
 @dataclass(frozen=True, slots=True)

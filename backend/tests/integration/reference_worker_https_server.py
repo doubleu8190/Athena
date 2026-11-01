@@ -136,17 +136,17 @@ async def _serve(
 
     app.include_router(
         build_worker_registry_router(
-            lambda: WorkerRegistrationService(orchestration),
-            lambda: registry,
-            lambda: WorkerResultSubmissionService(orchestration),
-            lambda: WorkerStopConfirmationService(orchestration),
+            WorkerRegistrationService(orchestration),
+            registry,
+            WorkerResultSubmissionService(orchestration),
+            WorkerStopConfirmationService(orchestration),
             _TestOriginPolicy(worker_http),
             protocol,
         ),
         prefix="/api",
     )
     app.include_router(
-        build_worker_resources_router(lambda: resource_service, protocol), prefix="/api"
+        build_worker_resources_router(resource_service, protocol), prefix="/api"
     )
     install_worker_protocol_handlers(app)
     config = uvicorn.Config(

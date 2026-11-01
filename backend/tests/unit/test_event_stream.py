@@ -78,7 +78,7 @@ class Events(EventPort):
 def make_client():
     events = Events()
     service = EventStreamService(Sessions(), events)
-    client = TestClient(create_app(event_stream_factory=lambda: service))
+    client = TestClient(create_app(event_stream_service=service))
     return client, events, events
 
 
@@ -95,7 +95,7 @@ def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
     events.queue.put_nowait(completed_event)
     service = EventStreamService(Sessions(), events)
     app = __import__("fastapi").FastAPI()
-    router = build_events_router(lambda: service)
+    router = build_events_router(service)
     endpoint = next(
         route.endpoint
         for route in router.routes
@@ -121,7 +121,7 @@ def test_sse_replays_from_last_event_id_and_cleans_up() -> None:
     request.is_disconnected = disconnect_after_live_event  # type: ignore[method-assign]
 
     async def run():
-        response = await endpoint("session-1", request, 0, service)
+        response = await endpoint("session-1", request, 0)
         chunks = [chunk async for chunk in response.body_iterator]
         assert "id: 5" in chunks[0]
         assert "run.started" in chunks[0]

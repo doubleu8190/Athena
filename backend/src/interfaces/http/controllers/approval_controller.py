@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -16,13 +15,13 @@ class ApprovalDecisionRequest(BaseModel):
     decision: str = Field(pattern="^(approved|denied)$")
 
 
-def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
+def build_approval_router(approval_service: ApprovalService) -> APIRouter:
     """构建只依赖 ApprovalService 的审批路由。"""
     router = APIRouter(prefix="/approvals", tags=["approvals"])
 
     @router.get("")
     async def pending(session_id: str | None = None) -> list[dict[str, Any]]:
-        return [_response(value) for value in await factory().pending(session_id)]
+        return [_response(value) for value in await approval_service.pending(session_id)]
 
     @router.get("/logs")
     async def history(
@@ -30,12 +29,19 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
     ) -> list[dict[str, Any]]:
-        return [_response(value) for value in await factory().history(session_id, limit=limit, offset=offset)]
+        return [_response(value) for value in await approval_service.history(session_id, limit=limit, offset=offset)]
 
     @router.get("/stats")
     async def stats(session_id: str | None = None) -> dict[str, int]:
-        value = await factory().stats(session_id)
+        value = await approval_service.stats(session_id)
         return {"pending": value.pending, "approved": value.approved, "denied": value.denied, "total": value.total}
+
+    @router.get("/{approval_id}")
+    async def get_status(approval_id: str) -> dict[str, Any]:
+        value = await approval_service.get(approval_id)
+        if value is None:
+            raise HTTPException(status_code=404, detail="approval_not_found")
+        return _response(value)
 
     async def record_decision(
         approval_id: str,
@@ -43,7 +49,7 @@ def build_approval_router(factory: Callable[[], ApprovalService]) -> APIRouter:
         *,
         status: str,
     ) -> dict[str, Any]:
-        updated = await factory().resolve(
+        updated = await approval_service.resolve(
             approval_id,
             decision=body.decision,
         )

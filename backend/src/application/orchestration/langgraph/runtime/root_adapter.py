@@ -16,7 +16,7 @@ from application.orchestration.protocols import (
 )
 from application.orchestration.dependencies import RootWorkflowDependencies
 from domain.leases import LeaseCenterPort, LeaseGrant
-from domain.runs import RoundCompletedResumeValue
+from domain.runs import RootPlanCheckpointRecovery, RootPlanCompletedResumeValue
 
 from .protocols import CheckpointerProvider
 from ..graphs.root import build_root_graph, invoke_root_graph
@@ -87,7 +87,7 @@ class LangGraphRootGraph(RootGraphPort):
         message_id: str = "",
         run_sequence: int = 1,
         attachment_ids: list[str] | None = None,
-        resume_value: RoundCompletedResumeValue | None = None,
+        resume_value: RootPlanCompletedResumeValue | RootPlanCheckpointRecovery | None = None,
         stop_signal: asyncio.Event | None = None,
     ) -> object:
         """按 Run 身份启动 Root 图，或恢复其持久化检查点。
@@ -100,7 +100,7 @@ class LangGraphRootGraph(RootGraphPort):
         - `message_id`（str）：关联消息的稳定标识；None 表示未绑定消息；约束：可省略，默认值为 `''`。
         - `run_sequence`（int）：会话内 Run 的单调递增序号；约束：可省略，默认值为 `1`。
         - `attachment_ids`（list[str] | None）：当前请求已授权使用的附件标识集合；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
-        - `resume_value`（RoundCompletedResumeValue | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `resume_value`（RootPlanCompletedResumeValue | RootPlanCheckpointRecovery | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
         - `stop_signal`（asyncio.Event | None）：通知当前执行应停止的异步信号；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
 
         返回：
@@ -138,13 +138,13 @@ class LangGraphRootGraph(RootGraphPort):
             await self._leases.assert_current(lease)
             return await invoke()
 
-    async def has_pending_round_wait(
+    async def has_pending_plan_wait(
         self,
         *,
         run_id: str,
         plan_id: str,
-        round_id: str,
-        plan_version: int,
+        plan_sequence: int,
+        root_wait_generation: int,
         interrupt_id: str,
         checkpoint_id: str,
     ) -> bool:
@@ -153,8 +153,8 @@ class LangGraphRootGraph(RootGraphPort):
         参数：
         - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
         - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
-        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
-        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
+        - `plan_sequence`（int）：Run 内 Plan 的单调递增序号。
+        - `root_wait_generation`（int）：Root 等待身份代次。
         - `interrupt_id`（str）：目标图中断的稳定标识；约束：无额外运行时限制。
         - `checkpoint_id`（str）：目标 LangGraph 检查点的稳定标识；约束：无额外运行时限制。
 
@@ -164,29 +164,29 @@ class LangGraphRootGraph(RootGraphPort):
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        pending = await self.find_pending_round_wait(
+        pending = await self.find_pending_plan_wait(
             run_id=run_id,
             plan_id=plan_id,
-            round_id=round_id,
-            plan_version=plan_version,
+            plan_sequence=plan_sequence,
+            root_wait_generation=root_wait_generation,
         )
         return pending == (interrupt_id, checkpoint_id)
 
-    async def find_pending_round_wait(
+    async def find_pending_plan_wait(
         self,
         *,
         run_id: str,
         plan_id: str,
-        round_id: str,
-        plan_version: int,
+        plan_sequence: int,
+        root_wait_generation: int,
     ) -> tuple[str, str] | None:
         """从持久 checkpoint 找回尚未登记到 Run 行的 Round 中断。
 
         参数：
         - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
         - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
-        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
-        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
+        - `plan_sequence`（int）：Run 内 Plan 的单调递增序号。
+        - `root_wait_generation`（int）：Root 等待身份代次。
 
         返回：
         - tuple[str, str] | None：检查点标识和中断标识；找不到符合条件的等待时返回 None。
@@ -213,16 +213,67 @@ class LangGraphRootGraph(RootGraphPort):
                 value = pending.value
                 if (
                     isinstance(value, Mapping)
-                    and value.get("type") == "round_wait"
+                    and value.get("type") == "plan_wait"
                     and value.get("run_id") == run_id
                     and value.get("plan_id") == plan_id
-                    and value.get("round_id") == round_id
-                    and value.get("plan_version") == plan_version
+                    and value.get("plan_sequence") == plan_sequence
+                    and value.get("root_wait_generation") == root_wait_generation
                 ):
                     interrupt_id = pending.id
                     if isinstance(interrupt_id, str) and interrupt_id:
                         return interrupt_id, checkpoint_id
         return None
+
+    async def is_plan_checkpoint_recoverable(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        plan_sequence: int,
+        root_wait_generation: int,
+    ) -> bool:
+        """确认 checkpoint 已消费指定 Plan 中断并保留可继续的图状态。
+
+        参数：`run_id`、`plan_id`、`plan_sequence` 和 `root_wait_generation` 绑定原等待。
+
+        返回：仅当当前 checkpoint 属于该 Run、没有待处理中断且图状态已记录该 Plan 事实时返回 True。
+
+        异常：checkpointer 读取异常原样传播。
+        """
+        snapshot = await self._compiled_graph().aget_state(
+            {"configurable": {"thread_id": f"run:{run_id}"}}
+        )
+        configurable = snapshot.config.get("configurable", {})
+        checkpoint_id = (
+            configurable.get("checkpoint_id")
+            if isinstance(configurable, Mapping)
+            else None
+        )
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
+            return False
+        if any(task.interrupts for task in snapshot.tasks):
+            return False
+        values = snapshot.values
+        if not isinstance(values, Mapping):
+            return False
+        request = values.get("request")
+        plan = values.get("plan")
+        completed = values.get("completed_plans")
+        return bool(
+            isinstance(request, Mapping)
+            and request.get("run_id") == run_id
+            and isinstance(plan, Mapping)
+            and plan.get("plan_id") == plan_id
+            and plan.get("sequence") == plan_sequence
+            and plan.get("root_wait_generation") == root_wait_generation
+            and isinstance(completed, list)
+            and any(
+                isinstance(item, Mapping)
+                and item.get("plan_id") == plan_id
+                and item.get("root_wait_generation") == root_wait_generation
+                for item in completed
+            )
+        )
 
 
 __all__ = ["LangGraphRootGraph"]

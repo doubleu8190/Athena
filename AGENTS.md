@@ -2,9 +2,9 @@
 
 ## 模型与角色
 
-Root: gd-yundu/gpt-6.1-sol
-Implementer: luna_implementer (gd-yundu/gpt-6.1-sol)
-Reviewer: terra_reviewer (gd-yundu/gpt-6.1-sol)
+Root: codex/gpt-6.1-sol
+Implementer: luna_implementer
+Reviewer: terra_reviewer
 
 ## 固定工作流
 

@@ -9,6 +9,7 @@ import pytest
 
 from domain.orchestration.worker_entities import WorkerDispatchLease
 from application.orchestration.worker_protocol_models import WorkerHttpErrorResponseModel
+from infrastructure.integrations.worker_http import WorkerTaskPostResponse
 from workers.worker_task_dispatcher import WorkerTaskDispatcher
 
 
@@ -38,6 +39,13 @@ class _Repository:
         self.calls.append(("await", {}))
         return True
 
+    async def prepare_cancel_dispatch(self, lease, *, lease_seconds: float):
+        return _start_for(lease)
+
+    async def record_cancel_receipt(self, lease, receipt) -> bool:
+        self.calls.append(("cancel_accepted", {"receipt": receipt}))
+        return True
+
 
 def _dispatcher(repository: _Repository) -> WorkerTaskDispatcher:
     return WorkerTaskDispatcher(
@@ -63,6 +71,23 @@ def _lease(*, attempt: int = 0) -> WorkerDispatchLease:
         lease_token=str(uuid4()),
         attempt=attempt,
         command={},
+    )
+
+
+def _start_for(lease: WorkerDispatchLease):
+    from domain.orchestration.worker_entities import WorkerDispatchStart
+
+    return WorkerDispatchStart(
+        command_id=lease.command_id,
+        execution_id=lease.execution_id,
+        instance_id="instance-1",
+        instance_key="instance-key",
+        service_principal="worker-service",
+        base_url="https://worker.example.test",
+        command=lease.command,
+        request_hash="hash",
+        started_at=None,
+        deadline_at=None,
     )
 
 
@@ -192,3 +217,94 @@ async def test_body_retry_after_uses_maximum_header_or_body_lower_bound() -> Non
     await dispatcher._handle_response(lease, 429, body, 30)
 
     assert repository.calls == [("retry", {"delay": 90})]
+
+
+@pytest.mark.asyncio
+async def test_cancel_receipt_requires_full_execution_identity_and_202() -> None:
+    repository = _Repository()
+    dispatcher = _dispatcher(repository)
+    lease = WorkerDispatchLease(
+        command_id=str(uuid4()),
+        execution_id=str(uuid4()),
+        lease_owner="dispatcher",
+        lease_token=str(uuid4()),
+        attempt=0,
+        command={
+            "command_id": str(uuid4()),
+            "execution_id": str(uuid4()),
+            "generation": 1,
+            "cancellation_epoch": 2,
+            "reason": "task_cancelled",
+        },
+        command_type="cancel",
+    )
+    lease = WorkerDispatchLease(
+        command_id=lease.command_id,
+        execution_id=lease.execution_id,
+        lease_owner=lease.lease_owner,
+        lease_token=lease.lease_token,
+        attempt=lease.attempt,
+        command={
+            **lease.command,
+            "command_id": lease.command_id,
+            "execution_id": lease.execution_id,
+        },
+        command_type="cancel",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    await dispatcher._handle_cancel_response(
+        lease,
+        WorkerTaskPostResponse(
+            status_code=202,
+            body={
+                "protocol_version": "1.0",
+                "command_id": lease.command_id,
+                "receipt_id": str(uuid4()),
+                "execution_id": lease.execution_id,
+                "generation": 1,
+                "cancellation_epoch": 2,
+                "accepted": True,
+                "reason": "task_cancelled",
+                "stop_confirmation_required": True,
+                "received_at": now,
+            },
+            retry_after_seconds=None,
+        ),
+    )
+    assert repository.calls[0][0] == "cancel_accepted"
+
+
+@pytest.mark.asyncio
+async def test_cancel_errors_never_fail_or_replan_the_task() -> None:
+    repository = _Repository()
+    dispatcher = _dispatcher(repository)
+    lease = WorkerDispatchLease(
+        command_id=str(uuid4()),
+        execution_id=str(uuid4()),
+        lease_owner="dispatcher",
+        lease_token=str(uuid4()),
+        attempt=0,
+        command={
+            "command_id": str(uuid4()),
+            "execution_id": str(uuid4()),
+            "generation": 1,
+            "cancellation_epoch": 2,
+            "reason": "task_cancelled",
+        },
+        command_type="cancel",
+    )
+    await dispatcher._handle_cancel_response(
+        lease,
+        WorkerTaskPostResponse(
+            status_code=422,
+            body={
+                "protocol_version": "1.0",
+                "request_id": str(uuid4()),
+                "code": "TASK_INPUT_INVALID",
+                "message": "not applicable to cancellation",
+                "directive": "root_replan",
+            },
+            retry_after_seconds=None,
+        ),
+    )
+    assert repository.calls == [("await", {})]

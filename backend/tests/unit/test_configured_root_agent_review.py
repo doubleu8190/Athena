@@ -1,155 +1,101 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from application.orchestration.agents.root_agent import ConfiguredRootAgent
-from domain.orchestration import ReviewAction, ReviewContext
+from application.orchestration.root_decision import (
+    AnswerIntent,
+    RootAgentInput,
+    RootMessage,
+    RootWorkerCapability,
+)
+from application.orchestration.root_completed_plan import RootCompletedPlanModel, RootPlanTaskFactModel
 
 
-class ReviewLLM:
+class StructuredLLM:
     def __init__(self, response: object):
         self.response = response
         self.messages = None
+        self.schema = None
 
-    async def invoke(self, messages):
+    async def invoke_structured(self, messages, schema):
         self.messages = messages
-        return {"content": self.response}
+        self.schema = schema
+        return self.response
 
 
-class RepairingReviewLLM:
-    def __init__(self, responses: list[str]):
-        self.responses = iter(responses)
-        self.calls = []
-
-    async def invoke(self, messages):
-        self.calls.append(messages)
-        return {"content": next(self.responses)}
-
-
-def review_context() -> ReviewContext:
-    return ReviewContext(
-        original_goal="Prepare an evidence-backed report",
-        plan_id="plan-1",
-        plan_version=3,
-        round_id="round-7",
-        full_dag_summary={"nodes": [{"task_id": "task-a"}], "edges": []},
-        round_results=({"task_id": "task-a", "status": "completed"},),
+def root_input() -> RootAgentInput:
+    return RootAgentInput(
+        session_id="session-1",
+        run_id="run-1",
+        message_id="message-1",
+        messages=(RootMessage(role="user", content="Prepare a report"),),
+        worker_capabilities=(
+            RootWorkerCapability(
+                contract_id="research",
+                contract_revision=3,
+                can_do=("Find source material",),
+                cannot_do=("Invent citations",),
+                input_schema={"type": "object"},
+                output_schema={"type": "object"},
+            ),
+        ),
+        completed_plans=(
+            RootCompletedPlanModel(
+                run_id="run-1",
+                plan_id="plan-1",
+                sequence=1,
+                root_wait_generation=1,
+                goal="Prepare a report",
+                status="failed",
+                tasks=(
+                    RootPlanTaskFactModel(
+                        task_ref="research-1",
+                        status="failed",
+                        error={"code": "source_unavailable"},
+                        resource_ids=("artifact-1",),
+                    ),
+                ),
+            ),
+        ),
+        remaining_turns=2,
     )
 
 
 @pytest.mark.asyncio
-async def test_configured_root_agent_decodes_review_decision_and_sends_round_context():
-    llm = ReviewLLM(
-        json.dumps(
-            {
-                "action": "REPLAN",
-                "reason": "The evidence shows another check is needed.",
-                "revision": {
-                    "base_version": 3,
-                    "keep_task_ids": ["task-a"],
-                    "cancel_task_ids": [],
-                    "new_tasks": [
-                        {
-                            "task_id": "task-b",
-                            "title": "Verify metric",
-                            "objective": "Check the metric source",
-                            "depends_on": ["task-a"],
-                            "allowed_tools": [],
-                            "input": {"source": "metric"},
-                            "expected_output": {"format": "verified metric"},
-                        }
-                    ],
-                },
-            }
-        )
-    )
-    agent = ConfiguredRootAgent(llm)
-
-    decision = await agent.review(
-        review_context(),
-        worker_tools=(),
-        request={"run_id": "run-1", "session_id": "session-1"},
-    )
-
-    assert decision.action is ReviewAction.REPLAN
-    assert decision.revision is not None
-    assert decision.revision.base_version == 3
-    user_payload = json.loads(llm.messages[1]["content"])
-    assert user_payload["round_id"] == "round-7"
-    assert user_payload["round_results"][0]["task_id"] == "task-a"
-    assert "requested point to start another Plan Version" in llm.messages[0]["content"]
-    assert "Every decision requires a non-empty reason" in llm.messages[0]["content"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "response",
-    [
-        '{"action":"CONTINUE","reason":"Keep going."}',
-        '{"action":"FINISH","reason":"The goal is met.","final_status":"completed"}',
-    ],
-)
-async def test_configured_root_agent_accepts_continue_and_finish(response: str):
-    decision = await ConfiguredRootAgent(ReviewLLM(response)).review(
-        review_context(),
-        worker_tools=(),
-        request={"run_id": "run-1", "session_id": "session-1"},
-    )
-
-    assert decision.action in {ReviewAction.CONTINUE, ReviewAction.FINISH}
-
-
-@pytest.mark.asyncio
-async def test_configured_root_agent_repairs_review_missing_required_reason():
-    llm = RepairingReviewLLM(
-        [
-            '{"action":"FINISH","final_status":"completed"}',
-            '{"action":"FINISH","reason":"The requested goal is complete.","final_status":"completed"}',
-        ]
-    )
-
-    decision = await ConfiguredRootAgent(llm).review(
-        review_context(),
-        worker_tools=(),
-        request={"run_id": "run-1", "session_id": "session-1"},
-    )
-
-    assert decision.action is ReviewAction.FINISH
-    assert decision.reason == "The requested goal is complete."
-    assert len(llm.calls) == 2
-    assert "non-empty reason" in llm.calls[1][0]["content"]
-
-
-@pytest.mark.asyncio
-async def test_configured_root_agent_rejects_revision_for_another_plan_version():
-    llm = ReviewLLM(
+async def test_root_redecides_from_completed_plan_facts_and_authorized_capabilities():
+    llm = StructuredLLM(
         {
-            "action": "REPLAN",
-            "reason": "Need more work.",
-            "revision": {
-                "base_version": 2,
-                "keep_task_ids": ["task-a"],
-                "cancel_task_ids": [],
-                "new_tasks": [],
-            },
+            "action": "plan",
+            "goal": "Use another source and finish the report",
+            "instructions": "Avoid the unavailable source",
         }
     )
 
-    with pytest.raises(ValueError, match="review_revision_base_version_mismatch"):
-        await ConfiguredRootAgent(llm).review(
-            review_context(),
-            worker_tools=(),
-            request={"run_id": "run-1", "session_id": "session-1"},
-        )
+    decision = await ConfiguredRootAgent(llm).redecide(root_input())
+
+    assert decision.action == "plan"
+    assert llm.schema.__name__ == "RootReDecisionStructuredOutput"
+    prompt = llm.messages[0]["content"]
+    assert "completed_plans" in prompt
+    assert "source_unavailable" in prompt
+    assert "artifact-1" in prompt
+    assert '"contract_id": "research"' in prompt
+    assert "worker_tools" not in prompt
+    assert "Round Review" not in prompt
 
 
 @pytest.mark.asyncio
-async def test_configured_root_agent_rejects_malformed_review_json():
-    with pytest.raises(ValueError, match="root_review_response_invalid_json"):
-        await ConfiguredRootAgent(ReviewLLM("not JSON")).review(
-            review_context(),
-            worker_tools=(),
-            request={"run_id": "run-1", "session_id": "session-1"},
-        )
+async def test_root_redecision_can_finish_after_partial_failure():
+    llm = StructuredLLM(
+        {
+            "action": "answer",
+            "kind": "final",
+            "instructions": "Summarize available evidence and identify the failed task.",
+        }
+    )
+
+    decision = await ConfiguredRootAgent(llm).redecide(root_input())
+
+    assert isinstance(decision, AnswerIntent)
+    assert '"status": "failed"' in llm.messages[0]["content"]

@@ -469,13 +469,13 @@ Worker 提供独立取消接口。Orchestrator 接到有效逻辑取消请求后
 
 取消已落库后，即使 Worker 已在本地执行完成但尚未回传，后续成功/失败结果都不能更新该任务状态、覆盖输出、增加本轮计数或触发重试；结果接口返回 `ignored/task_cancelled`。ResultSubmission 不表示物理停止，也不包含 `cancelled` 变体。
 
-Worker 对 CancelCommand 的 HTTP `202` 回执只证明取消意图被持久保存。Worker 实际停止后，使用独立的 StopConfirmation（包含 stop_confirmation_id、原 cancel_command_id、execution_id、generation、cancellation_epoch、reason 和 stopped_at）上报；该接口的幂等回执独立于原 CancelReceipt，因此原取消回执保持不变也不会阻塞容量清理。StopConfirmation 仅按旧 execution_id/generation 释放容量一次，并明确保证 Task 状态不变。超时重试期间 Task 可以处于 retry_pending 或新代次 running，旧代次停止确认不能取消它。
+Worker 对 CancelCommand 的 HTTP `202` 回执只证明取消意图被持久保存。Worker 实际停止后，使用独立的 StopConfirmation（包含 stop_confirmation_id、原 cancel_command_id、execution_id、generation、cancellation_epoch、reason 和 stopped_at）上报；该接口的幂等回执独立于原 CancelReceipt，因此原取消回执保持不变也不会阻塞容量清理。StopConfirmation 按旧 execution_id/generation 释放容量一次；如果旧 Execution 仍为 `cancelling`，同时收敛为 `cancelled` 并记录首次 `completed_at`，其他已有终态的完成时间不变。该事务不得改写 Task、Plan、Run、cancellation_epoch 或重试代次。超时重试期间 Task 可以处于 retry_pending 或新代次 running，旧代次停止确认不能取消它。
 
 取消和正常终态并发时，在同一任务/执行行上原子裁决：取消先提交则迟到结果被忽略；正常最终结果先提交则取消不能把已完成任务倒退。已取消任务的超时扫描、迟到审批决定和恢复命令也必须无效。
 
 中心标为取消不代表远程物理操作已经停止。Worker 的取消接口负责停止后续操作并做内部收尾；实际资源占用在确认停止或服务端清理策略满足后再释放，不能因逻辑取消就把仍繁忙实例当成空闲实例。
 
-StopConfirmation 是所有取消原因的唯一远程停止确认。即使 Worker 停止后立即返回取消请求，Worker 仍须通过独立 StopConfirmation outbox 提交；CancelReceipt 永远只返回原始 `202`。中心按 execution_id + generation 比较并只清理旧槽位一次，不允许停止确认减少新代次容量或改写逻辑 Task。没有 StopConfirmation 时保留旧执行占用，重试优先分配其他有空闲容量的实例；无可用实例时有界排队。超时尝试采用相同收尾规则。
+StopConfirmation 是所有取消原因的唯一远程停止确认。即使 Worker 停止后立即返回取消请求，Worker 仍须通过独立 StopConfirmation outbox 提交；CancelReceipt 永远只返回原始 `202`。中心按 execution_id + generation 比较并只清理旧槽位一次；仅对仍处于 `cancelling` 的旧 Execution 收敛为 `cancelled` 并记录首次 `completed_at`，其他既有终态保持原时间，不允许停止确认减少新代次容量或改写 Task、Plan、Run、cancellation_epoch、重试代次。没有 StopConfirmation 时保留旧执行占用，重试优先分配其他有空闲容量的实例；无可用实例时有界排队。超时尝试采用相同收尾规则。
 
 Run 级停止覆盖其全部未结束任务，并阻止 Root 创建下一轮 Plan；单个任务取消只结束该任务，其他 Worker 不被连带停止。
 

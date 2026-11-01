@@ -9,6 +9,7 @@ from .worker_approval import WorkerApprovalService
 from .protocols import RootWorkflowPort, WorkerWorkflowPort
 from .query_service import OrchestrationQueryService
 from .worker_results import WorkerResultStore
+from .worker_timeouts import WorkerTimeoutScanner, WorkerTimeoutService
 
 __all__ = [
     "OrchestrationCommandHandler",
@@ -17,6 +18,8 @@ __all__ = [
     "WorkerWorkflow",
     "WorkerToolExecutor",
     "WorkerResultStore",
+    "WorkerTimeoutScanner",
+    "WorkerTimeoutService",
     "WorkerApprovalService",
     "OrchestrationQueryService",
     "RootWorkflowPort",

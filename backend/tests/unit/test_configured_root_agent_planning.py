@@ -12,7 +12,6 @@ from application.orchestration.agents.root_agent import (
     ConfiguredRootAgent,
     RootDecisionFormatError,
 )
-from application.orchestration.plan_versions import partition_plan_versions
 from application.orchestration.root_decision import (
     AnswerIntent,
     ContextRequest,
@@ -61,20 +60,18 @@ def _inputs() -> RootAgentInput:
 
 def _plan(*, explicit_version: bool = False) -> dict[str, Any]:
     task = {
-        "task_id": "task-1",
-        "title": "Complete task",
+        "task_ref": "task-1",
+        "contract_id": "worker.text",
+        "contract_revision": 1,
         "objective": "Return a result",
-        "allowed_tools": [],
         "input": {"goal": "Complete one task"},
-        "expected_output": {"format": "text"},
+        "acceptance_criteria": "Return non-empty text",
     }
     if explicit_version:
         task["plan_version"] = 1
     return {
         "action": "plan",
         "goal": "Complete one task",
-        "max_parallelism": 1,
-        "edges": [],
         "tasks": [task],
     }
 
@@ -109,7 +106,7 @@ async def test_root_agent_uses_separate_structured_calls_for_plan_intent_and_dra
 
     assert isinstance(intent, PlanIntent)
     assert isinstance(result, PlanDraft)
-    assert result.tasks[0].task_id == "task-1"
+    assert result.tasks[0].task_ref == "task-1"
     assert result.tasks[0].input == {"goal": "Complete one task"}
     assert llm.schemas == [RootDecisionStructuredOutput, RootPlanStructuredOutput]
 
@@ -170,60 +167,78 @@ def test_root_agent_accepts_only_complete_json_or_a_single_outer_fence() -> None
         ConfiguredRootAgent._decode_decision("Plan: " + json.dumps(_plan_intent()))
 
 
-def test_root_decision_parser_keeps_explicit_task_version_for_materialization() -> None:
-    decision = ROOT_PLAN_ADAPTER.validate_python(_plan(explicit_version=True))
+def test_root_plan_rejects_dag_edges_and_explicit_future_version() -> None:
+    with pytest.raises(ValidationError):
+        ROOT_PLAN_ADAPTER.validate_python(_plan(explicit_version=True))
 
-    assert isinstance(decision, PlanDraft)
-    assert "plan_version" in decision.tasks[0].model_fields_set
-
-
-def test_plan_version_partition_preserves_only_first_version_for_submission() -> None:
-    plan = {
-        "action": "plan",
-        "goal": "Draft then review",
-        "tasks": [
+    with pytest.raises(ValidationError):
+        ROOT_PLAN_ADAPTER.validate_python(
             {
-                "task_id": "draft",
-                "title": "Draft",
-                "objective": "Write draft",
-                "plan_version": 1,
-                "allowed_tools": [],
-                "input": {"topic": "x"},
-                "expected_output": {"format": "text"},
-            },
-            {
-                "task_id": "review",
-                "title": "Review",
-                "objective": "Review draft",
-                "plan_version": 2,
-                "allowed_tools": [],
-                "depends_on": ["draft"],
-                "input": {"topic": "x"},
-                "expected_output": {"format": "review"},
-            },
-        ],
-        "edges": [],
+                **_plan(),
+                "edges": [{"from_task_id": "a", "to_task_id": "b"}],
+            }
+        )
+
+
+@pytest.mark.parametrize("response_type", [dict, RootPlanStructuredOutput])
+def test_root_plan_decoder_filters_known_other_action_fields(response_type: type) -> None:
+    response = {
+        **_plan(),
+        "missing_information": None,
+        "reason": None,
     }
+    value = (
+        response_type(**response)
+        if response_type is RootPlanStructuredOutput
+        else response
+    )
+    result = ConfiguredRootAgent._decode_plan(value)
+    assert isinstance(result, PlanDraft)
 
-    current, deferred = partition_plan_versions(plan)
 
-    assert [task["task_id"] for task in current["tasks"]] == ["draft"]
-    assert current["edges"] == []
-    assert deferred["2"][0]["depends_on"] == ["draft"]
-
-
-def test_plan_version_partition_rejects_dependency_on_a_later_version() -> None:
-    plan = {
-        "tasks": [
-            {"task_id": "draft", "plan_version": 1},
-            {"task_id": "review", "plan_version": 2, "depends_on": ["later"]},
-            {"task_id": "later", "plan_version": 3},
-        ],
-        "edges": [],
+@pytest.mark.parametrize("response_type", [dict, RootPlanStructuredOutput])
+def test_root_plan_decoder_filters_plan_fields_for_information_feedback(
+    response_type: type,
+) -> None:
+    response = {
+        "action": "needs_information",
+        "missing_information": ["worker input"],
+        "reason": "required",
+        "goal": "irrelevant for this action",
+        "tasks": [],
     }
+    value = (
+        response_type(**response)
+        if response_type is RootPlanStructuredOutput
+        else response
+    )
+    result = ConfiguredRootAgent._decode_plan(value)
+    assert result.action == "needs_information"
 
-    with pytest.raises(ValueError, match="root_plan_version_dependency_invalid"):
-        partition_plan_versions(plan)
+
+def test_root_plan_decoder_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        ConfiguredRootAgent._decode_plan({**_plan(), "unexpected": True})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_type", [dict, RootPlanStructuredOutput])
+async def test_root_plan_repair_uses_action_specific_decoder(
+    repair_type: type,
+) -> None:
+    # 未知字段必须触发一次修复；修复响应则验证已知跨 action 字段会被清理。
+    repaired = {**_plan(), "missing_information": None, "reason": None}
+    repaired_value = (
+        repair_type(**repaired)
+        if repair_type is RootPlanStructuredOutput
+        else repaired
+    )
+    llm = _SequenceLLM([{**_plan(), "unexpected": True}, repaired_value])
+    result = await ConfiguredRootAgent(llm).plan(_plan_inputs())
+
+    assert isinstance(result, PlanDraft)
+    assert len(llm.messages) == 2
+    assert "Validation error" in llm.messages[1][-1]["content"]
 
 
 def test_root_contract_rejects_blank_required_text_and_duplicate_providers() -> None:

@@ -17,9 +17,6 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from application.orchestration.langgraph.runtime.worker_executor import (
-    LangGraphWorkerExecutor,
-)
 from application.orchestration.langgraph.graphs.worker import (
     build_worker_graph,
     invoke_worker_graph,
@@ -171,7 +168,7 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart(
     expected_tool_status: str,
     expected_error: str | None,
 ) -> None:
-    """重建 checkpointer 和 executor 后找回 interrupt 并继续同一执行。
+    """重建 checkpointer 和 Worker graph 后找回 interrupt 并继续同一执行。
 
     该测试需要可连接且允许创建临时 schema 的 PostgreSQL 测试库；
     测试结束会删除 schema。
@@ -183,7 +180,7 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart(
     base_url = make_url(DATABASE_URL).set(drivername="postgresql")
     checkpoint_options: dict[str, str | int] = {
         "host": base_url.host or "",
-        "port": base_url.port or 5432,
+        "port": base_url.port or 8190,
         "dbname": base_url.database or "",
         "user": base_url.username or "",
         "password": base_url.password or "",
@@ -262,28 +259,34 @@ async def test_worker_approval_resumes_after_postgres_checkpointer_restart(
         )
         checkpointers.append(second_checkpointer)
         await second_checkpointer.start()
-        recovered_executor = LangGraphWorkerExecutor(
-            workflow_factory=workflow_factory,
-            checkpointer=second_checkpointer,
-        )
         # 模拟新 app 进程：checkpointer 和 Worker agent 都重新创建。
         agent = _WorkerAgent()
+        recovered_graph = build_worker_graph(
+            workflow=workflow_factory(),
+            checkpointer=second_checkpointer.get_saver(),
+        )
+        snapshot = await recovered_graph.aget_state(
+            {"configurable": {"thread_id": execution.worker_thread_id}}
+        )
+        interrupts = [
+            pending for task in snapshot.tasks for pending in task.interrupts
+        ]
+        assert len(interrupts) == 1
+        recovered_approval = dict(interrupts[0].value)
+        recovered_approval["interrupt_id"] = str(interrupts[0].id)
 
-        recovered_approval = await recovered_executor.pending_interrupt(execution)
-
-        assert recovered_approval is not None
         assert recovered_approval["interrupt_id"] == interrupt_id
         assert recovered_approval["approval_id"] == approval["approval_id"]
-        resumed = await recovered_executor.resume(
-            execution,
-            {
-                **recovered_approval,
-                "decision": decision,
-            },
+        resumed = await invoke_worker_graph(
+            recovered_graph,
+            task_id=execution.task.task_id,
+            execution_generation=execution.execution_generation,
+            execution=execution,
+            resume_value={**recovered_approval, "decision": decision},
         )
 
-        assert resumed.status is TaskStatus.COMPLETED
-        assert resumed.output == {"confirmed": True}
+        assert resumed["status"] == "completed"
+        assert resumed["result"]["output"] == {"confirmed": True}
         assert len(agent.observed_tool_results) == 1
         tool_result = agent.observed_tool_results[0]
         assert tool_result["status"] == expected_tool_status
@@ -324,7 +327,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
     )
     checkpoint_options: dict[str, str | int] = {
         "host": base_url.host or "",
-        "port": base_url.port or 5432,
+        "port": base_url.port or 8190,
         "dbname": base_url.database or "",
         "user": base_url.username or "",
         "password": base_url.password or "",
@@ -472,21 +475,28 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         first_checkpointer = PostgresCheckpointer(checkpoint_connection_string)
         checkpointers.append(first_checkpointer)
         await first_checkpointer.start()
-        first_executor = LangGraphWorkerExecutor(
-            workflow_factory=lambda: WorkerWorkflow(
+        first_graph = build_worker_graph(
+            workflow=WorkerWorkflow(
                 execute=first_agent,
                 execute_tool=first_tool_executor,
             ),
-            checkpointer=first_checkpointer,
+            checkpointer=first_checkpointer.get_saver(),
         )
-        paused = await first_executor.execute(first_execution)
-        assert paused.status is TaskStatus.WAITING_APPROVAL
-        assert paused.approval_batch is not None
+        paused = await invoke_worker_graph(
+            first_graph,
+            task_id=first_execution.task.task_id,
+            execution_generation=first_execution.execution_generation,
+            execution=first_execution,
+        )
+        interrupts = paused.get("__interrupt__", ())
+        assert len(interrupts) == 1
+        approval_batch = dict(interrupts[0].value)
+        approval_batch["interrupt_id"] = str(interrupts[0].id)
         assert not external_effects
         assert await worker_jobs.wait_for_approval(
-            first_lease, paused.approval_batch
+            first_lease, approval_batch
         )
-        approval_id = str(paused.approval_batch["approval_id"])
+        approval_id = str(approval_batch["approval_id"])
 
         approvals = PostgresApprovalRepository(
             session_factory, clock=lambda: now
@@ -553,16 +563,22 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
             operation_ledger=CrashAfterOperationCommit(),
         )
         restarted_agent = _WorkerAgent()
-        restarted_executor = LangGraphWorkerExecutor(
-            workflow_factory=lambda: WorkerWorkflow(
+        restarted_graph = build_worker_graph(
+            workflow=WorkerWorkflow(
                 execute=restarted_agent,
                 execute_tool=restarted_tool_executor,
             ),
-            checkpointer=restarted_checkpointer,
+            checkpointer=restarted_checkpointer.get_saver(),
         )
-        recovered_interrupt = await restarted_executor.pending_interrupt(
-            resumed_execution
+        snapshot = await restarted_graph.aget_state(
+            {"configurable": {"thread_id": resumed_execution.worker_thread_id}}
         )
+        pending_interrupts = [
+            pending for task in snapshot.tasks for pending in task.interrupts
+        ]
+        assert len(pending_interrupts) == 1
+        recovered_interrupt = dict(pending_interrupts[0].value)
+        recovered_interrupt["interrupt_id"] = str(pending_interrupts[0].id)
         assert recovered_interrupt is not None
         assert recovered_interrupt["approval_id"] == approval_id
         assert recovered_interrupt["interrupt_id"] == resumed_lease.resume_value[
@@ -570,15 +586,22 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
         ]
 
         with pytest.raises(NodeCancelledError):
-            await restarted_executor.resume(
-                resumed_execution, dict(resumed_lease.resume_value)
+            await invoke_worker_graph(
+                restarted_graph,
+                task_id=resumed_execution.task.task_id,
+                execution_generation=resumed_execution.execution_generation,
+                execution=resumed_execution,
+                resume_value=dict(resumed_lease.resume_value),
             )
         assert len(external_effects) == 1
-        pending_after_crash = await restarted_executor.pending_interrupt(
-            resumed_execution
+        snapshot = await restarted_graph.aget_state(
+            {"configurable": {"thread_id": resumed_execution.worker_thread_id}}
         )
-        assert pending_after_crash is not None
-        assert pending_after_crash["approval_id"] == approval_id
+        pending_after_crash = [
+            pending for task in snapshot.tasks for pending in task.interrupts
+        ]
+        assert len(pending_after_crash) == 1
+        assert pending_after_crash[0].value["approval_id"] == approval_id
         async with session_factory() as session:
             committed_operation = await session.get(
                 WorkerToolOperationModel,
@@ -636,21 +659,30 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
                 session_factory, clock=lambda: recovery_time
             ),
         )
-        final_executor = LangGraphWorkerExecutor(
-            workflow_factory=lambda: WorkerWorkflow(
+        final_graph = build_worker_graph(
+            workflow=WorkerWorkflow(
                 execute=final_agent,
                 execute_tool=final_tool_executor,
             ),
-            checkpointer=final_checkpointer,
+            checkpointer=final_checkpointer.get_saver(),
         )
-        still_pending = await final_executor.pending_interrupt(final_execution)
-        assert still_pending is not None
-        assert still_pending["approval_id"] == approval_id
-        result = await final_executor.resume(
-            final_execution, dict(final_lease.resume_value)
+        snapshot = await final_graph.aget_state(
+            {"configurable": {"thread_id": final_execution.worker_thread_id}}
         )
-        assert result.status is TaskStatus.COMPLETED
-        assert result.output == {"confirmed": True}
+        still_pending = [
+            pending for task in snapshot.tasks for pending in task.interrupts
+        ]
+        assert len(still_pending) == 1
+        assert still_pending[0].value["approval_id"] == approval_id
+        result = await invoke_worker_graph(
+            final_graph,
+            task_id=final_execution.task.task_id,
+            execution_generation=final_execution.execution_generation,
+            execution=final_execution,
+            resume_value=dict(final_lease.resume_value),
+        )
+        assert result["status"] == "completed"
+        assert result["result"]["output"] == {"confirmed": True}
         assert final_agent.calls == 1
         assert len(final_agent.observed_tool_results) == 1
         assert len(external_effects) == 1
@@ -677,7 +709,7 @@ async def test_approved_worker_effect_resumes_once_after_full_app_restart() -> N
                 cancellation_epoch=final_lease.cancellation_epoch,
                 status=TaskStatus.COMPLETED,
                 result={
-                    "output": dict(result.output),
+                    "output": dict(result["result"]["output"]),
                     "evidence": [],
                     "uncertainties": [],
                     "metrics": {},

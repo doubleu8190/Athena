@@ -64,10 +64,10 @@ def test_controller_error_mappings_for_approval_tools_files_and_knowledge() -> N
         async def delete_document(self, *args): raise KnowledgeDocumentNotFoundError("a")
     from  interfaces.http.controllers.files_controller import build_files_router
     client = TestClient(create_app(
-        approval_service_factory=lambda: Approval(),
-        tool_service_factory=lambda: Tool(),
-        attachment_service_factory=lambda: Files(),
-        knowledge_service_factory=lambda: Knowledge(),
+        approval_service=Approval(),
+        tool_service=Tool(),
+        attachment_service=Files(),
+        knowledge_service=Knowledge(),
     ))
     assert client.get("/api/sessions/s/attachments").status_code == 404
     assert client.get("/api/sessions/s/attachment-types").status_code == 404

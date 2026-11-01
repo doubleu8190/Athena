@@ -124,7 +124,12 @@ async def test_success_completes_run_and_publishes_the_reply():
 async def test_root_wait_keeps_run_open_and_arms_checkpoint():
     lifecycle, events = Lifecycle(), Events()
     checkpoint = RootWaitCheckpoint(
-        "run-1", "plan-1", "round-1", 1, "interrupt-1", "checkpoint-1"
+        run_id="run-1",
+        plan_id="plan-1",
+        plan_sequence=1,
+        root_wait_generation=1,
+        interrupt_id="interrupt-1",
+        checkpoint_id="checkpoint-1",
     )
     service = RunExecutionService(
         lifecycle, Executor(CommandExecutionResult(root_wait=checkpoint)), events
@@ -144,7 +149,12 @@ async def test_transactional_root_wait_wakes_subscribers_without_republishing():
     lifecycle, events = Lifecycle(), Events()
     lifecycle.writes_root_wait_event = True
     checkpoint = RootWaitCheckpoint(
-        "run-1", "plan-1", "round-1", 1, "interrupt-1", "checkpoint-1"
+        run_id="run-1",
+        plan_id="plan-1",
+        plan_sequence=1,
+        root_wait_generation=1,
+        interrupt_id="interrupt-1",
+        checkpoint_id="checkpoint-1",
     )
     service = RunExecutionService(
         lifecycle, Executor(CommandExecutionResult(root_wait=checkpoint)), events
@@ -171,11 +181,17 @@ async def test_executor_error_marks_the_run_failed():
 
 
 @pytest.mark.asyncio
-async def test_executor_exception_is_converted_to_a_run_failure():
+async def test_executor_exception_is_logged_with_run_id_and_converted_to_failure(
+    caplog: pytest.LogCaptureFixture,
+):
     lifecycle, events = Lifecycle(), Events()
     service = RunExecutionService(lifecycle, Executor(RuntimeError("boom")), events)
 
     await service.execute(invocation())
+
+    assert "run_execution_failed" in caplog.text
+    assert "run-1" in caplog.text
+    assert "RuntimeError: boom" in caplog.text
 
     assert lifecycle.failed == [
         ("run-1", {"code": "run_failed", "message": "boom"})

@@ -40,6 +40,132 @@ class WorkerTaskCommandModel(BaseModel):
     execution_grant: WorkerExecutionGrantModel
 
 
+class WorkerApprovalItemModel(BaseModel):
+    """单个待审批操作及其冻结参数摘要。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_id: UUID
+    tool_name: str = Field(min_length=1, max_length=200)
+    summary: str = Field(min_length=1, max_length=4000)
+    risk_level: Literal["low", "medium", "high", "critical"]
+    arguments: dict[str, JsonValue]
+    arguments_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class WorkerApprovalRequestModel(BaseModel):
+    """Worker 发起的单项或批量审批请求。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.0"]
+    approval_request_id: UUID
+    pause_id: UUID
+    run_id: str = Field(min_length=1, max_length=255)
+    plan_id: str = Field(min_length=1, max_length=255)
+    task_id: str = Field(min_length=1, max_length=255)
+    execution_id: str = Field(min_length=1, max_length=255)
+    generation: int = Field(ge=1)
+    cancellation_epoch: int = Field(ge=0)
+    items: list[WorkerApprovalItemModel] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_unique_items(self) -> "WorkerApprovalRequestModel":
+        """确保批次中的 item_id 唯一。"""
+        if len({item.item_id for item in self.items}) != len(self.items):
+            raise ValueError("worker_approval_item_id_duplicate")
+        return self
+
+
+class WorkerApprovalReceiptItemModel(BaseModel):
+    """审批请求中单项与中心 approval_id 的稳定映射。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_id: UUID
+    approval_id: str = Field(min_length=1, max_length=255)
+    arguments_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class WorkerApprovalReceiptModel(BaseModel):
+    """中心接收审批请求的幂等回执。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.0"] = "1.0"
+    approval_request_id: UUID
+    pause_id: UUID
+    approval_batch_id: str | None = Field(default=None, min_length=1, max_length=255)
+    disposition: Literal["accepted", "duplicate"]
+    status: Literal["accepted"]
+    expires_at: datetime
+    items: list[WorkerApprovalReceiptItemModel] = Field(min_length=1, max_length=100)
+    received_at: datetime
+
+    @model_validator(mode="after")
+    def validate_receipt_items(self) -> "WorkerApprovalReceiptModel":
+        """确保回执单项映射唯一且批次标识与项目数一致。"""
+        if len({item.item_id for item in self.items}) != len(self.items):
+            raise ValueError("worker_approval_receipt_item_duplicate")
+        if (len(self.items) == 1) != (self.approval_batch_id is None):
+            raise ValueError("worker_approval_receipt_batch_identity_invalid")
+        return self
+
+
+class WorkerResumeDecisionModel(BaseModel):
+    """单个审批项目的最终决定。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    item_id: UUID
+    decision: Literal["approved", "denied", "expired"]
+    arguments_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    decided_at: datetime
+
+
+class WorkerResumeCommandModel(BaseModel):
+    """发送给 Worker 的完整审批恢复命令。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.0"] = "1.0"
+    command_id: UUID
+    execution_id: str = Field(min_length=1, max_length=255)
+    generation: int = Field(ge=1)
+    cancellation_epoch: int = Field(ge=0)
+    pause_id: UUID
+    approval_request_id: UUID
+    approval_id: str | None = Field(default=None, min_length=1, max_length=255)
+    approval_batch_id: str | None = Field(default=None, min_length=1, max_length=255)
+    decisions: list[WorkerResumeDecisionModel] = Field(min_length=1, max_length=100)
+    decision_set_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    execution_grant: WorkerExecutionGrantModel
+
+    @model_validator(mode="after")
+    def validate_approval_reference(self) -> "WorkerResumeCommandModel":
+        """确保单项和批量恢复命令使用互斥的审批标识。"""
+        if len(self.decisions) == 1:
+            if not self.approval_id or self.approval_batch_id is not None:
+                raise ValueError("worker_resume_single_approval_identity_invalid")
+        elif self.approval_batch_id is None or self.approval_id is not None:
+            raise ValueError("worker_resume_batch_approval_identity_invalid")
+        if len({item.item_id for item in self.decisions}) != len(self.decisions):
+            raise ValueError("worker_resume_decision_item_duplicate")
+        return self
+
+
+class WorkerResumeReceiptModel(BaseModel):
+    """Worker 对恢复命令的持久收件回执。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.0"] = "1.0"
+    command_id: UUID
+    receipt_id: str = Field(min_length=1, max_length=255)
+    disposition: Literal["accepted", "duplicate"]
+    received_at: datetime
+
+
 class WorkerCommandReceiptModel(BaseModel):
     """验证 Worker 对 TaskCommand 的持久收件确认。"""
 
@@ -282,12 +408,19 @@ class WorkerRegistrationResponseModel(BaseModel):
 
 
 __all__ = [
+    "WorkerApprovalItemModel",
+    "WorkerApprovalReceiptItemModel",
+    "WorkerApprovalReceiptModel",
+    "WorkerApprovalRequestModel",
     "WorkerCancelCommandModel",
     "WorkerCancelReceiptModel",
     "WorkerErrorModel",
     "WorkerExecutionGrantModel",
     "WorkerResultReceiptModel",
     "WorkerResultSubmissionModel",
+    "WorkerResumeCommandModel",
+    "WorkerResumeDecisionModel",
+    "WorkerResumeReceiptModel",
     "WorkerRegistrationResponseModel",
     "WorkerStopConfirmationModel",
     "WorkerStopConfirmationReceiptModel",

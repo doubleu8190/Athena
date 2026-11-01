@@ -16,10 +16,9 @@ import type {
   ConnectionStatus,
   ExecutionTimelineEntry,
   Message,
-  OrchestrationPlan,
-  OrchestrationTask,
+  RunOrchestrationSnapshot,
 } from "../types"
-import { deriveOrchestrationView } from "../utils/orchestrationProjection"
+import { OrchestrationSummary } from "./OrchestrationSummary"
 
 interface ExecutionContextPanelProps {
   id?: string
@@ -27,40 +26,9 @@ interface ExecutionContextPanelProps {
   agentStatus: AgentStatus
   connectionStatus: ConnectionStatus
   executionTimeline: ExecutionTimelineEntry[]
-  orchestrationPlans: OrchestrationPlan[]
-  orchestrationTasks: OrchestrationTask[]
+  orchestrationSnapshot?: RunOrchestrationSnapshot
   attachments: Attachment[]
   onClose: () => void
-}
-
-function statusLabel(status: OrchestrationTask["status"]): string {
-  switch (status) {
-    case "completed": return "已完成"
-    case "running": return "处理中"
-    case "waiting_approval": return "待确认"
-    case "retry_wait": return "准备重试"
-    case "failed":
-    case "invalid_output": return "失败"
-    case "cancelled":
-    case "cancel_requested": return "已取消"
-    default: return "排队中"
-  }
-}
-
-function taskTone(status: OrchestrationTask["status"]): string {
-  if (status === "completed") return "text-athena-success"
-  if (["failed", "invalid_output"].includes(status)) return "text-athena-danger"
-  if (status === "waiting_approval") return "text-athena-warning"
-  if (["running", "retry_wait"].includes(status)) return "text-athena-accent"
-  return "text-athena-muted"
-}
-
-function TaskIcon({ status }: { status: OrchestrationTask["status"] }) {
-  if (status === "completed") return <CheckCircle2 className="h-4 w-4 text-athena-success" />
-  if (["failed", "invalid_output"].includes(status)) return <XCircle className="h-4 w-4 text-athena-danger" />
-  if (status === "waiting_approval") return <ShieldAlert className="h-4 w-4 text-athena-warning" />
-  if (["running", "retry_wait"].includes(status)) return <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />
-  return <Clock3 className="h-4 w-4 text-athena-muted" />
 }
 
 function timelineIcon(entry: ExecutionTimelineEntry) {
@@ -91,19 +59,16 @@ export function ExecutionContextPanel({
   agentStatus,
   connectionStatus,
   executionTimeline,
-  orchestrationPlans,
-  orchestrationTasks,
+  orchestrationSnapshot,
   attachments,
   onClose,
 }: ExecutionContextPanelProps) {
   const [showAllEvents, setShowAllEvents] = useState(false)
   const runId = currentRunId(executionTimeline, messages)
-  const plan = [...orchestrationPlans].reverse().find((item) => !runId || item.run_id === runId)
-  const planTasks = orchestrationTasks.filter((task) => plan ? task.plan_id === plan.plan_id : !runId || task.run_id === runId)
-  const view = useMemo(
-    () => deriveOrchestrationView(plan, planTasks),
-    [plan, planTasks],
-  )
+  const workerPlans = orchestrationSnapshot?.run.run_id === runId
+    ? [...orchestrationSnapshot.worker_plans].sort((left, right) => left.sequence - right.sequence)
+    : []
+  const latestPlan = workerPlans.at(-1)
   const timeline = useMemo(() => {
     const filtered = executionTimeline.filter((entry) => !runId || entry.run_id === runId)
     return [...filtered].sort((a, b) => {
@@ -136,15 +101,17 @@ export function ExecutionContextPanel({
             {active && <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
           </div>
           <div className="mt-3 grid grid-cols-2 gap-3 border-t border-athena-border/70 pt-3">
-            <div><div className="text-[10px] text-athena-muted">任务</div><div className="mt-1 text-xs text-athena-text">{view ? `${view.counts.completed} / ${view.counts.total} 完成` : "无并行任务"}</div></div>
+            <div><div className="text-[10px] text-athena-muted">任务</div><div className="mt-1 text-xs text-athena-text">{latestPlan ? `${latestPlan.terminal_task_count} / ${latestPlan.expected_task_count} 已结束` : "无并行任务"}</div></div>
             <div><div className="text-[10px] text-athena-muted">附件</div><div className="mt-1 flex items-center gap-1 text-xs text-athena-text"><FileText className="h-3.5 w-3.5 text-athena-muted" />{attachments.length}</div></div>
           </div>
         </section>
 
-        <section className="context-panel-card rounded-lg border border-athena-border bg-athena-bg/40 p-3">
-          <div className="flex items-center justify-between"><div className="text-xs font-semibold text-athena-text">任务进度</div>{view && <span className="font-mono text-[10px] text-athena-muted">{view.counts.completed}/{view.counts.total}</span>}</div>
-          {!view ? <p className="mt-3 text-xs text-athena-muted">当前请求没有并行任务。</p> : <div className="mt-2 divide-y divide-athena-border/60">{view.tasks.map((task) => <div key={`${task.plan_id}:${task.task_id}`} className="flex items-start gap-2 py-2 first:pt-1 last:pb-0"><TaskIcon status={task.status} /><div className="min-w-0 flex-1"><div className="truncate text-xs text-athena-text">{task.title || "未命名任务"}</div><div className={`mt-1 text-[10px] ${taskTone(task.status)}`}>{statusLabel(task.status)}{task.attempt && task.attempt > 1 ? ` · 第 ${task.attempt} 次尝试` : ""}</div></div></div>)}</div>}
-        </section>
+        {workerPlans.length > 0 && <div className="space-y-2">{workerPlans.map((plan) => <OrchestrationSummary key={plan.plan_id} plan={plan} />)}</div>}
+        {orchestrationSnapshot?.approvals.filter((request) => request.status === "pending").map((request) => <section key={request.approval_request_id} className="rounded-lg border border-yellow-500/30 bg-athena-bg/40 p-3">
+          <div className="text-xs font-semibold text-athena-text">{request.approval_batch_id ? "批量操作待确认" : "操作待确认"}</div>
+          <div className="mt-1 text-[10px] text-athena-muted">到期时间：{formatTime(request.expires_at)} · {request.items.length} 项</div>
+          <div className="mt-2 space-y-2">{request.items.map((item) => <div key={item.item_id} className="border-t border-athena-border/60 pt-2 text-xs"><div className="font-medium">{item.summary}</div><div className="mt-1 text-[10px] text-athena-muted">{item.tool_name} · {item.risk_level}</div><pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[10px] text-athena-muted">{JSON.stringify(item.arguments, null, 2)}</pre></div>)}</div>
+        </section>)}
 
         <section className="context-panel-card rounded-lg border border-athena-border bg-athena-bg/40 p-3">
           <div className="flex items-center justify-between"><div className="text-xs font-semibold text-athena-text">操作记录</div><div className="flex items-center gap-2"><span className="font-mono text-[10px] text-athena-muted">{timeline.length} 条</span>{timeline.length > 5 && <button type="button" onClick={() => setShowAllEvents((value) => !value)} className="text-[10px] text-athena-accent hover:underline" aria-expanded={showAllEvents}>{showAllEvents ? "收起" : "全部"}</button>}</div></div>

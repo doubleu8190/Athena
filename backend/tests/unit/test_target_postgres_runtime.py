@@ -430,8 +430,8 @@ def test_postgres_dependency_graph_is_explicit(monkeypatch):
     assert len(graph.resources) == 6
     app = create_app(dependencies=graph)
     assert "/api/sessions" in app.openapi()["paths"]
-    assert graph.provider("memory_service_factory") is not None
-    assert graph.provider("orchestration_repository_factory") is not None
+    assert graph.service("memory_service") is not None
+    assert graph.service("orchestration_repository") is not None
     monkeypatch.setenv("ATHENA_WORKERS_ENABLED", "true")
     worker_graph = build_default_dependencies()
     assert len(worker_graph.resources) == 7

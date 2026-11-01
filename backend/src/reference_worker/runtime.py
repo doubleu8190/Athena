@@ -360,13 +360,24 @@ class ReferenceWorker:
             raise _request_error("APPROVAL_REQUEST_INVALID", 422, "operator_action")
         pause_item_ids = json.loads(str(pause["item_ids_json"]))
         pause_hashes = json.loads(str(pause["arguments_hashes_json"]))
-        expected_items = list(zip(pause_item_ids, pause_hashes, strict=True))
-        actual_items = [
-            (item.get("item_id"), item.get("arguments_sha256"))
+        expected_hashes_by_item_id = dict(zip(pause_item_ids, pause_hashes, strict=True))
+        actual_hashes_by_item_id = {
+            item["item_id"]: item["arguments_sha256"]
             for item in decisions
             if isinstance(item, dict)
+            and isinstance(item.get("item_id"), str)
+            and isinstance(item.get("arguments_sha256"), str)
+        }
+        decision_item_ids = [
+            item["item_id"]
+            for item in decisions
+            if isinstance(item, dict) and isinstance(item.get("item_id"), str)
         ]
-        if len(actual_items) != len(decisions) or actual_items != expected_items:
+        if (
+            len(actual_hashes_by_item_id) != len(decisions)
+            or actual_hashes_by_item_id != expected_hashes_by_item_id
+            or decision_item_ids != sorted(decision_item_ids)
+        ):
             raise _request_error("APPROVAL_STALE", 409, "stop")
         try:
             receipt = self.store.validate_and_accept_resume(
@@ -482,7 +493,26 @@ class ReferenceWorker:
             task_input = request["input"]
             if not isinstance(task_input, dict):
                 raise _WorkerExecutionFailure("WORKER_INVALID_INPUT", retryable=False)
-            output = await self._execute_resource_copy(task_input, request)
+            approval_decisions = execution.get("approval_decisions")
+            if approval_decisions is None and "approval_items" in task_input:
+                await self._request_approval(execution, request, task_input)
+                return
+            if approval_decisions is not None:
+                if not isinstance(approval_decisions, list):
+                    raise _WorkerExecutionFailure("WORKER_INVALID_INPUT", retryable=False)
+                output = {
+                    "echo": task_input,
+                    "decisions": [
+                        {
+                            "item_id": item["item_id"],
+                            "decision": item["decision"],
+                        }
+                        for item in approval_decisions
+                        if isinstance(item, dict)
+                    ],
+                }
+            else:
+                output = await self._execute_resource_copy(task_input, request)
         except asyncio.CancelledError:
             # 关机时保留 running 供下次启动恢复；持久取消栅栏禁止复活执行。
             raise
@@ -529,6 +559,83 @@ class ReferenceWorker:
             generation=generation,
             output=output,
             result_id=result_id,
+        )
+
+    async def _request_approval(
+        self,
+        execution: dict[str, object],
+        request: dict[str, JsonValue],
+        task_input: dict[str, JsonValue],
+    ) -> None:
+        """为带 approval_items 的任务建立持久暂停点和审批申请 outbox。
+
+        参数：
+        - `execution`（dict[str, object]）：本地领取的 Execution 快照。
+        - `request`（dict[str, JsonValue]）：原始 TaskCommand，包含运行身份。
+        - `task_input`（dict[str, JsonValue]）：已通过能力 Schema 校验的任务输入。
+
+        返回：暂停事实和同一审批请求已写入本地事务。
+
+        异常：`_WorkerExecutionFailure` 表示审批项形状不满足参考 Worker 约定。
+        """
+        raw_items = task_input.get("approval_items")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise _WorkerExecutionFailure("WORKER_INVALID_INPUT", retryable=False)
+        items: list[dict[str, JsonValue]] = []
+        item_ids: list[str] = []
+        argument_hashes: list[str] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise _WorkerExecutionFailure("WORKER_INVALID_INPUT", retryable=False)
+            tool_name = raw_item.get("tool_name")
+            summary = raw_item.get("summary")
+            risk_level = raw_item.get("risk_level")
+            arguments = raw_item.get("arguments")
+            if (
+                not isinstance(tool_name, str)
+                or not isinstance(summary, str)
+                or risk_level not in {"low", "medium", "high", "critical"}
+                or not isinstance(arguments, dict)
+            ):
+                raise _WorkerExecutionFailure("WORKER_INVALID_INPUT", retryable=False)
+            item_id = str(uuid4())
+            arguments_hash = _hash_json(arguments)
+            item_ids.append(item_id)
+            argument_hashes.append(arguments_hash)
+            items.append(
+                {
+                    "item_id": item_id,
+                    "tool_name": tool_name,
+                    "summary": summary,
+                    "risk_level": risk_level,
+                    "arguments": arguments,
+                    "arguments_sha256": arguments_hash,
+                }
+            )
+        pause_id = str(uuid4())
+        approval_request_id = str(uuid4())
+        approval_request: dict[str, JsonValue] = {
+            "protocol_version": "1.0",
+            "approval_request_id": approval_request_id,
+            "pause_id": pause_id,
+            "run_id": str(request["run_id"]),
+            "plan_id": str(request["plan_id"]),
+            "task_id": str(request["task_id"]),
+            "execution_id": str(request["execution_id"]),
+            "generation": int(request["generation"]),
+            "cancellation_epoch": int(request["cancellation_epoch"]),
+            "items": items,
+        }
+        self.store.save_pause_snapshot(
+            pause_id=pause_id,
+            execution_id=str(execution["execution_id"]),
+            generation=int(execution["generation"]),
+            cancellation_epoch=int(execution["cancellation_epoch"]),
+            approval_request_id=approval_request_id,
+            approval_batch_id=None,
+            item_ids=item_ids,
+            arguments_hashes=argument_hashes,
+            approval_request=approval_request,
         )
 
     def _complete_execution_failure(
@@ -652,18 +759,38 @@ class ReferenceWorker:
         elif kind == "stop_confirmation":
             execution_id = str(body["execution_id"])
             path = f"/api/worker-executions/{execution_id}/stop-confirmation"
+        elif kind == "approval_request":
+            execution_id = ""
+            path = "/api/worker-approvals"
         else:
             self.store.reject_outbox(int(item["outbox_id"]), error="outbox_kind_unknown")
+            return
+        idempotency_value = (
+            body.get("result_id")
+            if kind == "result"
+            else body.get("stop_confirmation_id")
+            if kind == "stop_confirmation"
+            else body.get("approval_request_id")
+        )
+        if not isinstance(idempotency_value, str):
+            self.store.reject_outbox(int(item["outbox_id"]), error="outbox_identity_invalid")
             return
         retry_after: str | None = None
         try:
             status, response_headers, receipt = await self._post_json(
                 f"{self.config.orchestrator_url}{path}",
                 body=body,
-                headers={"Idempotency-Key": str(body.get("result_id") or body["stop_confirmation_id"])},
+                headers={"Idempotency-Key": idempotency_value},
             )
-            if status == 200:
-                schema_name = "ResultReceipt" if kind == "result" else "StopConfirmationReceipt"
+            expected_statuses = {200, 202} if kind == "approval_request" else {200}
+            if status in expected_statuses:
+                schema_name = (
+                    "ResultReceipt"
+                    if kind == "result"
+                    else "StopConfirmationReceipt"
+                    if kind == "stop_confirmation"
+                    else "ApprovalReceipt"
+                )
                 validate_worker_request(schema_name, receipt)
                 if kind == "result" and (
                     receipt["result_id"] != body["result_id"]
@@ -680,6 +807,29 @@ class ReferenceWorker:
                     or receipt["reason"] != body["reason"]
                 ):
                     raise ValueError("worker_stop_receipt_identity_mismatch")
+                if kind == "approval_request":
+                    if (
+                        receipt["approval_request_id"] != body["approval_request_id"]
+                        or receipt["pause_id"] != body["pause_id"]
+                    ):
+                        raise ValueError("worker_approval_receipt_identity_mismatch")
+                    request_items = body.get("items")
+                    receipt_items = receipt.get("items")
+                    if not isinstance(request_items, list) or not isinstance(receipt_items, list):
+                        raise ValueError("worker_approval_receipt_items_invalid")
+                    expected = {
+                        (str(item["item_id"]), str(item["arguments_sha256"]))
+                        for item in request_items
+                        if isinstance(item, dict)
+                    }
+                    actual = {
+                        (str(item["item_id"]), str(item["arguments_sha256"]))
+                        for item in receipt_items
+                        if isinstance(item, dict)
+                    }
+                    if len(expected) != len(request_items) or actual != expected:
+                        raise ValueError("worker_approval_receipt_items_mismatch")
+                    self.store.record_approval_receipt(receipt)
                 self.store.acknowledge_outbox(int(item["outbox_id"]))
                 return
             if status < 500 and status not in {408, 425, 429}:

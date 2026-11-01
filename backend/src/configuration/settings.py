@@ -96,7 +96,15 @@ class Settings(BaseSettings):
     worker_dispatch_retry_initial_seconds: float = Field(default=1.0, ge=0.1, le=60)
     worker_dispatch_retry_max_seconds: float = Field(default=30.0, ge=0.1, le=300)
     worker_dispatch_retry_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
-    worker_approval_timeout_seconds: float = Field(default=86400.0, gt=0)
+    worker_execution_retry_initial_seconds: float = Field(default=2.0, ge=0.1, le=300)
+    worker_execution_retry_max_seconds: float = Field(default=60.0, ge=0.1, le=3600)
+    worker_execution_retry_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
+    worker_timeout_scan_interval_seconds: float = Field(default=1.0, ge=0.1, le=60)
+    worker_timeout_scan_batch_size: int = Field(default=100, ge=1, le=10000)
+    worker_queue_max_wait_seconds: float = Field(default=300.0, ge=1, le=86400)
+    worker_queue_max_pending_tasks: int = Field(default=10000, ge=1, le=1000000)
+    worker_approval_timeout_seconds: Literal[120] = 120
+    worker_resume_dispatch_max_wait_seconds: float = Field(default=300.0, ge=1, le=86400)
     evaluation_enabled: bool = False
     evaluation_dataset_root: str = "./data/evaluations/datasets"
     evaluation_output_root: str = "./data/evaluations/runs"
@@ -121,7 +129,7 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     postgres_db: str = "athena"
     postgres_host: str = "localhost"
-    postgres_port: int = 5432
+    postgres_port: int = 8190
     postgres_pool_size: int = Field(default=10, ge=1)
     postgres_max_overflow: int = Field(default=10, ge=0)
     embedding_provider: str = "sentence_transformers"
@@ -245,6 +253,8 @@ class Settings(BaseSettings):
             raise ValueError("worker_dispatch_timeout_must_be_below_heartbeat_interval")
         if self.worker_dispatch_retry_initial_seconds > self.worker_dispatch_retry_max_seconds:
             raise ValueError("worker_dispatch_retry_initial_must_not_exceed_max")
+        if self.worker_execution_retry_initial_seconds > self.worker_execution_retry_max_seconds:
+            raise ValueError("worker_execution_retry_initial_must_not_exceed_max")
         if self.worker_protocol_service_tokens:
             if not self.worker_orchestrator_token.get_secret_value():
                 raise ValueError("worker_orchestrator_token_required")

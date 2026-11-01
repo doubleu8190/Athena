@@ -127,6 +127,12 @@ class WorkerStore:
                     decisions_json TEXT,
                     state TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS approval_receipts (
+                    approval_request_id TEXT PRIMARY KEY,
+                    pause_id TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS outbox (
                     outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind TEXT NOT NULL,
@@ -403,12 +409,27 @@ class WorkerStore:
                         "AND state IN ('queued','running','waiting_approval')",
                         (now, resolved_task_id, cancellation_epoch),
                     )
+                    # 逻辑取消后审批申请已无业务意义，隔离尚未投递的申请，
+                    # 防止 Worker 重启后继续通知中心并诱发无效恢复。
+                    connection.execute(
+                        "UPDATE outbox SET state='rejected',last_error=? "
+                        "WHERE kind='approval_request' AND state='pending' "
+                        "AND json_extract(body_json,'$.task_id')=?",
+                        ("approval_cancelled", resolved_task_id),
+                    )
             else:
                 connection.execute(
                     "UPDATE executions SET state='stopped',updated_at=? "
                     "WHERE execution_id=? AND generation=? "
                     "AND state IN ('queued','running','waiting_approval')",
                     (now, execution_id, generation),
+                )
+                connection.execute(
+                    "UPDATE outbox SET state='rejected',last_error=? "
+                    "WHERE kind='approval_request' AND state='pending' "
+                    "AND json_extract(body_json,'$.execution_id')=? "
+                    "AND json_extract(body_json,'$.generation')=?",
+                    ("approval_cancelled", execution_id, generation),
                 )
             receipt = {
                 "protocol_version": "1.0",
@@ -525,8 +546,9 @@ class WorkerStore:
             command = connection.execute(
                 "SELECT request_json FROM protocol_commands WHERE command_type='task' "
                 "AND state='accepted' AND json_extract(request_json,'$.execution_id')=? "
+                "AND json_extract(request_json,'$.generation')=? "
                 "ORDER BY received_at LIMIT 1",
-                (row["execution_id"],),
+                (row["execution_id"], row["generation"]),
             ).fetchone()
             if command is None:
                 connection.execute(
@@ -540,12 +562,26 @@ class WorkerStore:
                 "WHERE execution_id=? AND generation=?",
                 (row["execution_id"], row["generation"]),
             ).fetchone()
+            resume = connection.execute(
+                "SELECT request_json FROM protocol_commands "
+                "WHERE command_type='resume' AND state IN ('accepted','approval_receipt_pending') "
+                "AND json_extract(request_json,'$.execution_id')=? "
+                "AND json_extract(request_json,'$.generation')=? "
+                "ORDER BY received_at DESC LIMIT 1",
+                (row["execution_id"], row["generation"]),
+            ).fetchone()
+            resume_request = None if resume is None else json.loads(resume["request_json"])
             return {
                 "execution_id": row["execution_id"],
                 "generation": int(row["generation"]),
                 "task_id": row["task_id"],
                 "cancellation_epoch": int(row["cancellation_epoch"]),
                 "request": json.loads(command["request_json"]),
+                "approval_decisions": (
+                    None
+                    if not isinstance(resume_request, dict)
+                    else resume_request.get("decisions")
+                ),
                 "contract_snapshot": (
                     None
                     if snapshot is None
@@ -732,6 +768,7 @@ class WorkerStore:
         approval_batch_id: str | None,
         item_ids: list[str],
         arguments_hashes: list[str],
+        approval_request: dict[str, object] | None = None,
     ) -> None:
         """保存执行器在发起审批前生成的完整暂停事实。
 
@@ -783,6 +820,111 @@ class WorkerStore:
                 "WHERE execution_id=? AND generation=?",
                 (_utc_now(), execution_id, generation),
             )
+            if approval_request is not None:
+                connection.execute(
+                    "INSERT OR IGNORE INTO outbox(kind,dedupe_key,body_json) VALUES(?,?,?)",
+                    (
+                        "approval_request",
+                        f"approval:{approval_request['approval_request_id']}",
+                        _json(approval_request),
+                    ),
+                )
+
+    def record_approval_receipt(self, receipt: dict[str, object]) -> None:
+        """保存审批中心回执，不改变暂停或恢复状态。
+
+        参数：
+        - `receipt`（dict[str, object]）：已通过协议校验且身份匹配的 ApprovalReceipt。
+
+        返回：无；重复回执保持首次持久内容。
+
+        异常：sqlite3.Error 表示本地事务失败。
+        """
+        with self._connection() as connection:
+            pending_resume = connection.execute(
+                "SELECT request_json FROM protocol_commands "
+                "WHERE command_type='resume' AND state='approval_receipt_pending' "
+                "AND json_extract(request_json,'$.approval_request_id')=?",
+                (str(receipt["approval_request_id"]),),
+            ).fetchone()
+            if pending_resume is not None:
+                resume = json.loads(pending_resume["request_json"])
+                self._validate_approval_reference(resume, receipt)
+            connection.execute(
+                "INSERT OR IGNORE INTO approval_receipts "
+                "(approval_request_id,pause_id,receipt_json,received_at) VALUES(?,?,?,?)",
+                (
+                    str(receipt["approval_request_id"]),
+                    str(receipt["pause_id"]),
+                    _json(receipt),
+                    str(receipt["received_at"]),
+                ),
+            )
+            if pending_resume is not None:
+                resume = json.loads(pending_resume["request_json"])
+                connection.execute(
+                    "UPDATE approval_pauses SET decisions_json=?,state='resumed' "
+                    "WHERE pause_id=? AND approval_request_id=? AND state='waiting'",
+                    (
+                        _json(resume["decisions"]),
+                        str(resume["pause_id"]),
+                        str(resume["approval_request_id"]),
+                    ),
+                )
+                connection.execute(
+                    "UPDATE executions SET state='queued',updated_at=? "
+                    "WHERE execution_id=? AND generation=? AND state='waiting_approval'",
+                    (_utc_now(), str(resume["execution_id"]), int(resume["generation"])),
+                )
+                connection.execute(
+                    "UPDATE protocol_commands SET state='accepted' "
+                    "WHERE command_type='resume' AND state='approval_receipt_pending' "
+                    "AND json_extract(request_json,'$.approval_request_id')=?",
+                    (str(receipt["approval_request_id"]),),
+                )
+
+    @staticmethod
+    def _validate_approval_reference(
+        resume: dict[str, object], receipt: dict[str, object]
+    ) -> None:
+        """核对 ResumeCommand 中审批身份与中心回执映射一致。
+
+        参数：
+        - `resume`（dict[str, object]）：暂停点对应的恢复命令。
+        - `receipt`（dict[str, object]）：中心返回的审批申请回执。
+
+        返回：身份及 item→approval 映射一致时返回 `None`。
+
+        异常：ValueError 表示批次 ID 或单项 approval_id 不匹配。
+        """
+        receipt_items = receipt.get("items")
+        decisions = resume.get("decisions")
+        if not isinstance(receipt_items, list) or not isinstance(decisions, list):
+            raise ValueError("worker_approval_reference_invalid")
+        approval_by_item = {
+            str(item["item_id"]): str(item["approval_id"])
+            for item in receipt_items
+            if isinstance(item, dict)
+        }
+        if len(approval_by_item) != len(receipt_items):
+            raise ValueError("worker_approval_receipt_mapping_invalid")
+        if len(decisions) == 1:
+            item = decisions[0]
+            if (
+                not isinstance(item, dict)
+                or resume.get("approval_id") != approval_by_item.get(str(item.get("item_id")))
+                or resume.get("approval_batch_id") is not None
+                or receipt.get("approval_batch_id") is not None
+            ):
+                raise ValueError("worker_resume_approval_identity_mismatch")
+        elif (
+            resume.get("approval_id") is not None
+            or resume.get("approval_batch_id") != receipt.get("approval_batch_id")
+            or not receipt.get("approval_batch_id")
+            or {str(item.get("item_id")) for item in decisions if isinstance(item, dict)}
+            != set(approval_by_item)
+        ):
+            raise ValueError("worker_resume_approval_batch_mismatch")
 
     def validate_and_accept_resume(
         self,
@@ -832,12 +974,26 @@ class WorkerStore:
                 for item in decisions
                 if isinstance(item, dict)
             }
+            decision_item_ids = [
+                str(item["item_id"])
+                for item in decisions
+                if isinstance(item, dict) and "item_id" in item
+            ]
             if (
                 len(actual) != len(decisions)
                 or actual != expected
                 or any(not isinstance(item, dict) for item in decisions)
+                or decision_item_ids != sorted(decision_item_ids)
             ):
                 raise ValueError("worker_approval_decisions_mismatch")
+            approval_receipt = connection.execute(
+                "SELECT receipt_json FROM approval_receipts WHERE approval_request_id=?",
+                (str(request["approval_request_id"]),),
+            ).fetchone()
+            if approval_receipt is not None:
+                self._validate_approval_reference(
+                    request, json.loads(approval_receipt["receipt_json"])
+                )
             receipt = _command_receipt(
                 receipt_id,
                 command_id,
@@ -860,11 +1016,22 @@ class WorkerStore:
                 "UPDATE approval_pauses SET decisions_json=?,state='resumed' WHERE pause_id=?",
                 (_json(decisions), str(request["pause_id"])),
             )
-            connection.execute(
-                "UPDATE executions SET state='queued',updated_at=? "
-                "WHERE execution_id=? AND generation=?",
-                (_utc_now(), str(request["execution_id"]), int(request["generation"])),
-            )
+            if approval_receipt is None:
+                connection.execute(
+                    "UPDATE approval_pauses SET state='waiting' WHERE pause_id=?",
+                    (str(request["pause_id"]),),
+                )
+                connection.execute(
+                    "UPDATE protocol_commands SET state='approval_receipt_pending' "
+                    "WHERE command_id=?",
+                    (command_id,),
+                )
+            else:
+                connection.execute(
+                    "UPDATE executions SET state='queued',updated_at=? "
+                    "WHERE execution_id=? AND generation=?",
+                    (_utc_now(), str(request["execution_id"]), int(request["generation"])),
+                )
             return StoredReceipt(receipt, False)
 
     def _enqueue_stop_confirmation(

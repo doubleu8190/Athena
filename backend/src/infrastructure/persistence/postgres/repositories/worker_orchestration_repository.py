@@ -4,23 +4,27 @@ from __future__ import annotations
 
 import hashlib
 import math
+import random
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any
-from uuid import uuid4
+from typing import Any, Literal
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import jsonschema
 import rfc8785
 from jsonschema import Draft202012Validator, FormatChecker
 from sqlalchemy import func, select, text, tuple_, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from application.orchestration.worker_protocol_models import (
+    WorkerCancelReceiptModel,
     WorkerCommandReceiptModel,
     WorkerTaskCommandModel,
     WorkerRegistrationResponseModel,
     WorkerResultReceiptModel as WorkerResultReceiptProtocolModel,
+    WorkerResumeReceiptModel,
     WorkerStopConfirmationModel as WorkerStopConfirmationProtocolModel,
     WorkerStopConfirmationReceiptModel,
 )
@@ -33,12 +37,21 @@ from domain.orchestration.worker_entities import (
     WorkerRegistrationIntent,
     WorkerRegistrationReceipt,
     WorkerResultSubmission,
+    WorkerExecutionError,
     WorkerResultReceipt,
     WorkerStopConfirmation,
     WorkerStopReceipt,
+    WorkerApprovalIntent,
     WorkerTaskStatus,
     TASK_TERMINAL_STATUSES,
 )
+from domain.orchestration import (
+    RootExecutionAttemptFact,
+    RootPlanFacts,
+    RootPlanTaskFact,
+    WorkerCapabilityRevision,
+)
+from domain.leases import LeaseGrant, LeaseKey
 from domain.orchestration.worker_registry import WorkerInstancePrincipalMismatch
 from ..models import (
     AgentRunModel,
@@ -52,7 +65,13 @@ from ..models import (
     WorkerRegistrationReceiptModel,
     WorkerResultReceiptModel,
     WorkerStopConfirmationModel,
+    WorkerApprovalRequestModel,
+    WorkerResourceModel,
+    ApprovalRecordModel,
+    OrchestrationOutboxModel,
+    SessionModel,
 )
+from .lease_center import PostgresLeaseCenter
 
 
 class WorkerPlanRejected(ValueError):
@@ -69,6 +88,11 @@ class PostgresWorkerOrchestrationRepository:
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
         max_execution_attempts: int = 3,
+        execution_retry_initial_seconds: float = 2.0,
+        execution_retry_max_seconds: float = 60.0,
+        execution_retry_jitter_ratio: float = 0.2,
+        queue_max_pending_tasks: int = 10000,
+        resume_dispatch_max_wait_seconds: float = 300.0,
     ) -> None:
         """初始化仓储依赖。
 
@@ -77,20 +101,164 @@ class PostgresWorkerOrchestrationRepository:
         - `id_factory`（Callable[[], str] | None）：生成持久对象 ID 的函数；默认使用 UUID。
         - `clock`（Callable[[], datetime] | None）：测试时注入的带时区时钟；生产默认读取 PostgreSQL 时间。
         - `max_execution_attempts`（int）：一个逻辑 Task 可执行的总尝试数；范围为 1 到 10。
+        - `execution_retry_initial_seconds`（float）：执行失败后首次重试的退避基数，必须为正数。
+        - `execution_retry_max_seconds`（float）：执行级指数退避上限，必须不小于首次间隔。
+        - `execution_retry_jitter_ratio`（float）：相对退避基数的抖动比例，范围为 0–1。
 
         返回：无。
 
         异常：此构造函数不主动抛出业务异常。
         """
         self._session_factory = session_factory
+        self._leases = PostgresLeaseCenter(session_factory)
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._clock = clock
         if not 1 <= max_execution_attempts <= 10:
             raise ValueError("worker_max_attempts_out_of_range")
+        if queue_max_pending_tasks < 1:
+            raise ValueError("worker_queue_max_pending_tasks_invalid")
+        if not math.isfinite(resume_dispatch_max_wait_seconds) or not 1 <= resume_dispatch_max_wait_seconds <= 86400:
+            raise ValueError("worker_resume_dispatch_max_wait_out_of_range")
+        if (
+            not math.isfinite(execution_retry_initial_seconds)
+            or not math.isfinite(execution_retry_max_seconds)
+            or execution_retry_initial_seconds <= 0
+            or execution_retry_max_seconds < execution_retry_initial_seconds
+            or not 0 <= execution_retry_jitter_ratio <= 1
+        ):
+            raise ValueError("worker_execution_retry_configuration_invalid")
         self._max_execution_attempts = max_execution_attempts
+        self._execution_retry_initial = execution_retry_initial_seconds
+        self._execution_retry_max = execution_retry_max_seconds
+        self._execution_retry_jitter_ratio = execution_retry_jitter_ratio
+        self._queue_max_pending_tasks = queue_max_pending_tasks
+        self._resume_dispatch_max_wait_seconds = resume_dispatch_max_wait_seconds
+
+    async def list_authorized_capabilities(
+        self, run_id: str
+    ) -> tuple[WorkerCapabilityRevision, ...]:
+        """读取当前活动 Run 可使用的部署级健康 Worker 能力目录。
+
+        Worker 注册是部署级授权；本方法不代表用户级工具或数据权限。
+        """
+        async with self._session_factory() as session:
+            run = await session.get(AgentRunModel, run_id)
+            if run is None or run.status != "running":
+                return ()
+            owner_session = await session.get(SessionModel, run.session_id)
+            if (
+                owner_session is None
+                or owner_session.deleted_time is not None
+                or owner_session.active_run_id != run_id
+            ):
+                return ()
+            rows = (await session.execute(
+                select(WorkerContractModel)
+                .join(WorkerInstanceModel,
+                    (WorkerInstanceModel.contract_id == WorkerContractModel.contract_id)
+                    & (WorkerInstanceModel.contract_revision == WorkerContractModel.revision))
+                .where(
+                    WorkerInstanceModel.status == "ready",
+                    WorkerInstanceModel.accepting_tasks.is_(True),
+                )
+                .order_by(WorkerContractModel.contract_id, WorkerContractModel.revision)
+            )).scalars().all()
+            unique = {(row.contract_id, row.revision): row for row in rows}
+            return tuple(
+                WorkerCapabilityRevision(
+                    contract_id=row.contract_id,
+                    revision=row.revision,
+                    can_do=tuple(row.can_do_json),
+                    cannot_do=tuple(row.cannot_do_json),
+                    input_schema=row.input_schema_json,
+                    output_schema=row.output_schema_json,
+                )
+                for _, row in sorted(unique.items())
+            )
+
+    async def read_completed_plan(
+        self, run_id: str, plan_id: str, root_wait_generation: int
+    ) -> RootPlanFacts | None:
+        """按 Root 等待身份读取已关闭 Plan 的任务、尝试和可信资源引用。"""
+        async with self._session_factory() as session:
+            run = await session.get(AgentRunModel, run_id)
+            plan = await session.get(OrchestratorPlanModel, plan_id)
+            owner_session = (
+                None if run is None else await session.get(SessionModel, run.session_id)
+            )
+            if (
+                run is None or plan is None or plan.run_id != run_id
+                or run.status != "running"
+                or owner_session is None
+                or owner_session.deleted_time is not None
+                or owner_session.active_run_id != run_id
+                or plan.status != "completed"
+                or plan.root_wait_generation != root_wait_generation
+                or run.root_wait_generation != root_wait_generation
+                or run.orchestrator_plan_sequence != plan.sequence
+            ):
+                return None
+            task_rows = (await session.scalars(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.plan_id == plan_id)
+                .order_by(OrchestratorTaskModel.task_ref)
+            )).all()
+            task_facts: list[RootPlanTaskFact] = []
+            for task in task_rows:
+                executions = (await session.scalars(
+                    select(OrchestratorExecutionModel)
+                    .where(OrchestratorExecutionModel.task_id == task.task_id)
+                    .order_by(OrchestratorExecutionModel.generation)
+                )).all()
+                resource_ids = tuple((await session.scalars(
+                    select(WorkerResourceModel.resource_id)
+                    .where(
+                        WorkerResourceModel.task_id == task.task_id,
+                        WorkerResourceModel.execution_id == task.active_execution_id,
+                        WorkerResourceModel.run_id == run_id,
+                        WorkerResourceModel.plan_id == plan_id,
+                        WorkerResourceModel.status == "ready",
+                    )
+                    .order_by(WorkerResourceModel.resource_id)
+                )).all())
+                task_facts.append(RootPlanTaskFact(
+                    task_ref=task.task_ref,
+                    status=task.status,
+                    output=task.output_json,
+                    error=task.error_json,
+                    objective=task.objective,
+                    acceptance_criteria=task.acceptance_criteria,
+                    attempts=tuple(
+                        RootExecutionAttemptFact(
+                            generation=execution.generation,
+                            status=execution.status,
+                            error=execution.error_json,
+                            started_at=execution.started_at,
+                            deadline_at=execution.deadline_at,
+                            completed_at=execution.completed_at,
+                        )
+                        for execution in executions
+                    ),
+                    resource_ids=resource_ids,
+                ))
+            if len(task_facts) != plan.expected_task_count or plan.terminal_task_count != plan.expected_task_count:
+                return None
+            return RootPlanFacts(
+                run_id=run.run_id,
+                plan_id=plan.plan_id,
+                sequence=plan.sequence,
+                root_wait_generation=plan.root_wait_generation,
+                goal=plan.goal,
+                status=plan.status,
+                tasks=tuple(task_facts),
+            )
 
     async def claim_dispatch_command(
-        self, *, owner_id: str, lease_seconds: float
+        self,
+        *,
+        owner_id: str,
+        lease_seconds: float,
+        command_types: tuple[str, ...] = ("execute", "cancel"),
     ) -> WorkerDispatchLease | None:
         """用短事务领取一条待发送命令，网络请求不占用数据库锁。
 
@@ -102,14 +270,15 @@ class PostgresWorkerOrchestrationRepository:
 
         异常：ValueError 表示租约时长无效；数据库错误原样传播。
         """
-        if not owner_id.strip() or lease_seconds <= 0:
+        if not owner_id.strip() or lease_seconds <= 0 or not command_types:
             raise ValueError("worker_dispatch_lease_invalid")
+        allowed_command_types = tuple(dict.fromkeys(command_types))
         async with self._session_factory() as session, session.begin():
             now = await self._now(session)
             command = await session.scalar(
                 select(OrchestratorWorkerCommandModel)
                 .where(
-                    OrchestratorWorkerCommandModel.command_type == "execute",
+                    OrchestratorWorkerCommandModel.command_type.in_(allowed_command_types),
                     OrchestratorWorkerCommandModel.status.in_(
                         ("awaiting_assignment", "pending", "retry", "dispatching")
                     ),
@@ -140,6 +309,7 @@ class PostgresWorkerOrchestrationRepository:
                 lease_token=token,
                 attempt=command.attempt,
                 command=dict(command.command_json),
+                command_type=command.command_type,
             )
 
     async def start_dispatch(
@@ -317,6 +487,609 @@ class PostgresWorkerOrchestrationRepository:
                 started_at=execution.started_at,
                 deadline_at=execution.deadline_at,
             )
+
+    async def prepare_cancel_dispatch(
+        self, lease: WorkerDispatchLease, *, lease_seconds: float
+    ) -> WorkerDispatchStart | None:
+        """在当前 fencing 租约下准备一个取消命令的 HTTP 路由快照。
+
+        参数：
+        - `lease`（WorkerDispatchLease）：已领取的取消命令租约。
+        - `lease_seconds`（float）：网络请求覆盖租约时长，必须大于零。
+
+        返回：命令仍属于该租约且实例地址有效时返回发送快照，否则返回 `None`。
+
+        异常：ValueError 表示租约失效；数据库错误原样传播。
+        """
+        if lease_seconds <= 0:
+            raise ValueError("worker_dispatch_lease_invalid")
+        async with self._session_factory() as session, session.begin():
+            command_hint = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+            )
+            if command_hint is None or command_hint.command_type != "cancel":
+                return None
+            execution_hint = await session.get(
+                OrchestratorExecutionModel, lease.execution_id
+            )
+            if execution_hint is None:
+                return None
+            task_hint = await session.get(OrchestratorTaskModel, execution_hint.task_id)
+            if task_hint is None:
+                return None
+            plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
+            if plan_hint is None:
+                return None
+            run = await session.scalar(
+                select(AgentRunModel)
+                .where(AgentRunModel.run_id == plan_hint.run_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            plan = await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            task = await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == task_hint.task_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            execution = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == lease.execution_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            command = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            now = await self._now(session)
+            if (
+                run is None
+                or plan is None
+                or task is None
+                or execution is None
+                or command is None
+                or command.command_type != "cancel"
+                or command.execution_id != execution.execution_id
+                or command.status != "dispatching"
+                or command.lease_owner != lease.lease_owner
+                or command.lease_token != lease.lease_token
+                or command.lease_until is None
+                or command.lease_until <= now
+            ):
+                return None
+            if execution.instance_id != command.instance_id:
+                command.status = "superseded"
+                self._clear_command_lease(command, now)
+                return None
+            instance = await session.scalar(
+                select(WorkerInstanceModel)
+                .where(WorkerInstanceModel.instance_id == execution.instance_id)
+                .execution_options(populate_existing=True)
+            )
+            if instance is None or instance.status == "disabled":
+                command.status = "retry"
+                command.available_at = now + timedelta(seconds=1)
+                self._clear_command_lease(command, now)
+                return None
+            command.lease_until = now + timedelta(seconds=lease_seconds)
+            command.updated_at = now
+            return WorkerDispatchStart(
+                command_id=command.command_id,
+                execution_id=execution.execution_id,
+                instance_id=instance.instance_id,
+                instance_key=instance.instance_key,
+                service_principal=instance.service_principal,
+                base_url=instance.base_url,
+                command=dict(command.command_json),
+                request_hash=command.request_hash,
+                started_at=execution.started_at,
+                deadline_at=execution.deadline_at,
+            )
+
+    async def prepare_resume_dispatch(
+        self, lease: WorkerDispatchLease, *, lease_seconds: float
+    ) -> WorkerDispatchStart | None:
+        """验证审批恢复命令的父级状态、原实例健康和发送租约。"""
+        if lease_seconds <= 0:
+            raise ValueError("worker_dispatch_lease_invalid")
+        async with self._session_factory() as session, session.begin():
+            command_hint = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+                .execution_options(populate_existing=True)
+            )
+            if command_hint is None or command_hint.command_type != "resume":
+                return None
+            execution_hint = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == lease.execution_id)
+                .execution_options(populate_existing=True)
+            )
+            task_hint = None if execution_hint is None else await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == execution_hint.task_id)
+                .execution_options(populate_existing=True)
+            )
+            plan_hint = None if task_hint is None else await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
+                .execution_options(populate_existing=True)
+            )
+            if execution_hint is None or task_hint is None or plan_hint is None:
+                return None
+            run = await session.scalar(
+                select(AgentRunModel)
+                .where(AgentRunModel.run_id == plan_hint.run_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            plan = await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == plan_hint.plan_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            task = await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == task_hint.task_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            execution = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == lease.execution_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            command = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            now = await self._now(session)
+            if (
+                run is None
+                or plan is None
+                or task is None
+                or execution is None
+                or command is None
+                or command.command_type != "resume"
+                or command.execution_id != execution.execution_id
+                or command.generation != execution.generation
+                or command.status != "dispatching"
+                or command.lease_owner != lease.lease_owner
+                or command.lease_token != lease.lease_token
+                or command.lease_until is None
+                or command.lease_until <= now
+            ):
+                return None
+            request_id = command.command_json.get("approval_request_id")
+            request = await session.scalar(
+                select(WorkerApprovalRequestModel)
+                .where(
+                    WorkerApprovalRequestModel.approval_request_id == request_id,
+                    WorkerApprovalRequestModel.instance_id == command.instance_id,
+                    WorkerApprovalRequestModel.execution_id == execution.execution_id,
+                    WorkerApprovalRequestModel.pause_id
+                    == command.command_json.get("pause_id"),
+                )
+                .execution_options(populate_existing=True)
+            )
+            if (
+                request is None
+                or request.execution_id != execution.execution_id
+                or request.generation != execution.generation
+                or request.cancellation_epoch != execution.cancellation_epoch
+                or execution.current_approval_request_id != request.approval_request_id
+                or execution.current_pause_id != request.pause_id
+                or request.pause_id != command.command_json.get("pause_id")
+                or request.resume_command_id != command.command_id
+                or run.status != "running"
+                or plan.status != "running"
+                or task.active_execution_id != execution.execution_id
+                or task.execution_generation != execution.generation
+                or task.cancellation_epoch != execution.cancellation_epoch
+                or execution.instance_id != command.instance_id
+            ):
+                command.status = "superseded"
+                self._clear_command_lease(command, now)
+                return None
+            first_send = "assignment_required" in command.command_json
+            if first_send:
+                if (
+                    task.status != WorkerTaskStatus.WAITING_APPROVAL.value
+                    or execution.status != WorkerTaskStatus.WAITING_APPROVAL.value
+                    or execution.deadline_at is not None
+                ):
+                    command.status = "superseded"
+                    self._clear_command_lease(command, now)
+                    return None
+            elif (
+                task.status != WorkerTaskStatus.RUNNING.value
+                or execution.status != WorkerTaskStatus.RUNNING.value
+                or execution.deadline_at is None
+                or execution.deadline_at <= now
+                or not execution.capacity_reserved
+            ):
+                command.status = "awaiting_result"
+                self._clear_command_lease(command, now)
+                return None
+            instance = await session.scalar(
+                select(WorkerInstanceModel)
+                .where(WorkerInstanceModel.instance_id == execution.instance_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if (
+                instance is None
+                or instance.status != "ready"
+                or not instance.accepting_tasks
+                or not instance.health_identity_valid
+            ):
+                command.status = "retry"
+                command.available_at = now + timedelta(seconds=2)
+                self._clear_command_lease(command, now)
+                return None
+            command.lease_until = now + timedelta(seconds=lease_seconds)
+            if not first_send:
+                command.delivery_uncertain_before_send = command.send_attempt_count > 0
+                command.send_attempt_count += 1
+            command.updated_at = now
+            return WorkerDispatchStart(
+                command_id=command.command_id,
+                execution_id=execution.execution_id,
+                instance_id=instance.instance_id,
+                instance_key=instance.instance_key,
+                service_principal=instance.service_principal,
+                base_url=instance.base_url,
+                command=dict(command.command_json),
+                request_hash=command.request_hash,
+                started_at=execution.started_at,
+                deadline_at=execution.deadline_at,
+            )
+
+    async def prepare_first_resume_send(
+        self,
+        lease: WorkerDispatchLease,
+        *,
+        lease_seconds: float,
+        command_builder: Callable[[WorkerDispatchStart], dict[str, Any]],
+    ) -> WorkerDispatchStart | None:
+        """在恢复首次发送前按剩余时长启动执行并冻结命令。"""
+        async with self._session_factory() as session, session.begin():
+            command_hint = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+                .execution_options(populate_existing=True)
+            )
+            execution_hint = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == lease.execution_id)
+                .execution_options(populate_existing=True)
+            )
+            if command_hint is None or execution_hint is None or command_hint.command_type != "resume":
+                return None
+            task_hint = await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == execution_hint.task_id)
+                .execution_options(populate_existing=True)
+            )
+            plan_hint = None if task_hint is None else await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
+                .execution_options(populate_existing=True)
+            )
+            if task_hint is None or plan_hint is None:
+                return None
+            # 依次锁 Run、Plan、Task、Execution、Command，避免恢复与取消/结果事务交叉。
+            run = await session.scalar(
+                select(AgentRunModel)
+                .where(AgentRunModel.run_id == plan_hint.run_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            plan = await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            task = await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == task_hint.task_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            execution = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == lease.execution_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            command = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            now = await self._now(session)
+            if (
+                run is None or plan is None or task is None or execution is None or command is None
+                or command.command_type != "resume"
+                or command.execution_id != execution.execution_id
+                or command.generation != execution.generation
+                or command.status != "dispatching"
+                or command.lease_owner != lease.lease_owner
+                or command.lease_token != lease.lease_token
+                or command.lease_until is None
+                or command.lease_until <= now
+                or run.status != "running"
+                or plan.status != "running"
+                or task.status != WorkerTaskStatus.WAITING_APPROVAL.value
+                or task.active_execution_id != execution.execution_id
+                or task.execution_generation != execution.generation
+                or task.cancellation_epoch != execution.cancellation_epoch
+                or execution.status != WorkerTaskStatus.WAITING_APPROVAL.value
+                or execution.instance_id is None
+                or execution.deadline_at is not None
+                or execution.remaining_seconds is None
+                or execution.remaining_seconds <= 0
+            ):
+                return None
+            request = await session.scalar(
+                select(WorkerApprovalRequestModel)
+                .where(
+                    WorkerApprovalRequestModel.approval_request_id
+                    == command.command_json.get("approval_request_id"),
+                    WorkerApprovalRequestModel.instance_id == command.instance_id,
+                    WorkerApprovalRequestModel.execution_id == execution.execution_id,
+                    WorkerApprovalRequestModel.pause_id
+                    == command.command_json.get("pause_id"),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                request is None
+                or request.resume_command_id != command.command_id
+                or request.pause_id != command.command_json.get("pause_id")
+                or request.execution_id != execution.execution_id
+                or request.generation != execution.generation
+                or request.cancellation_epoch != execution.cancellation_epoch
+                or execution.current_approval_request_id != request.approval_request_id
+                or execution.current_pause_id != request.pause_id
+            ):
+                command.status = "superseded"
+                self._clear_command_lease(command, now)
+                return None
+            instance = await session.scalar(
+                select(WorkerInstanceModel)
+                .where(WorkerInstanceModel.instance_id == execution.instance_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if (
+                instance is None
+                or instance.status != "ready"
+                or not instance.accepting_tasks
+                or not instance.health_identity_valid
+                or instance.contract_id != task.contract_id
+                or instance.contract_revision != task.contract_revision
+            ):
+                command.status = "retry"
+                command.available_at = now + timedelta(seconds=2)
+                self._clear_command_lease(command, now)
+                return None
+            reserved = await session.scalar(
+                select(func.count())
+                .select_from(OrchestratorExecutionModel)
+                .where(
+                    OrchestratorExecutionModel.instance_id == instance.instance_id,
+                    OrchestratorExecutionModel.capacity_reserved.is_(True),
+                    OrchestratorExecutionModel.execution_id != execution.execution_id,
+                )
+            )
+            if int(reserved or 0) >= instance.max_concurrency:
+                command.status = "retry"
+                command.available_at = now + timedelta(seconds=2)
+                self._clear_command_lease(command, now)
+                return None
+            execution.status = WorkerTaskStatus.RUNNING.value
+            execution.started_at = now
+            execution.deadline_at = now + timedelta(seconds=execution.remaining_seconds)
+            execution.capacity_reserved = True
+            execution.capacity_released_at = None
+            task.status = WorkerTaskStatus.RUNNING.value
+            request.resume_wait_deadline_at = None
+            command.instance_id = instance.instance_id
+            start = WorkerDispatchStart(
+                command_id=command.command_id,
+                execution_id=execution.execution_id,
+                instance_id=instance.instance_id,
+                instance_key=instance.instance_key,
+                service_principal=instance.service_principal,
+                base_url=instance.base_url,
+                command=dict(command.command_json),
+                request_hash=command.request_hash,
+                started_at=execution.started_at,
+                deadline_at=execution.deadline_at,
+            )
+            body = command_builder(start)
+            command.command_json = body
+            command.request_hash = self._hash_json(body)
+            command.send_attempt_count += 1
+            command.lease_until = now + timedelta(seconds=lease_seconds)
+            command.updated_at = now
+            return WorkerDispatchStart(
+                command_id=start.command_id,
+                execution_id=start.execution_id,
+                instance_id=start.instance_id,
+                instance_key=start.instance_key,
+                service_principal=start.service_principal,
+                base_url=start.base_url,
+                command=body,
+                request_hash=command.request_hash,
+                started_at=execution.started_at,
+                deadline_at=execution.deadline_at,
+            )
+
+    async def record_resume_receipt(
+        self, lease: WorkerDispatchLease, receipt: WorkerResumeReceiptModel
+    ) -> bool:
+        """保存 ResumeReceipt 并释放当前发送租约。"""
+        async with self._session_factory() as session, session.begin():
+            now = await self._now(session)
+            execution_hint = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == lease.execution_id)
+                .execution_options(populate_existing=True)
+            )
+            task_hint = None if execution_hint is None else await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == execution_hint.task_id)
+                .execution_options(populate_existing=True)
+            )
+            plan_hint = None if task_hint is None else await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
+                .execution_options(populate_existing=True)
+            )
+            run = None if plan_hint is None else await session.scalar(
+                select(AgentRunModel)
+                .where(AgentRunModel.run_id == plan_hint.run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            plan = None if plan_hint is None else await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == plan_hint.plan_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            task = None if task_hint is None else await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == task_hint.task_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            execution = None if execution_hint is None else await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == execution_hint.execution_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            command = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            body = {} if command is None else command.command_json
+            request = None
+            if command is not None and body.get("approval_request_id"):
+                request = await session.scalar(
+                    select(WorkerApprovalRequestModel)
+                    .where(
+                        WorkerApprovalRequestModel.approval_request_id
+                        == body["approval_request_id"],
+                        WorkerApprovalRequestModel.instance_id == command.instance_id,
+                        WorkerApprovalRequestModel.execution_id == execution.execution_id,
+                        WorkerApprovalRequestModel.pause_id == body.get("pause_id"),
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            if command is None or command.command_type != "resume":
+                return False
+            if (
+                command.status != "dispatching"
+                or command.lease_owner != lease.lease_owner
+                or command.lease_token != lease.lease_token
+                or command.lease_until is None
+                or command.lease_until <= now
+                or run is None
+                or plan is None
+                or task is None
+                or execution is None
+                or request is None
+                or run.status != "running"
+                or plan.status != "running"
+                or task.active_execution_id != execution.execution_id
+                or task.execution_generation != execution.generation
+                or execution.instance_id != command.instance_id
+                or execution.generation != command.generation
+                or execution.status != WorkerTaskStatus.RUNNING.value
+                or execution.cancellation_epoch != int(body.get("cancellation_epoch", -1))
+                or request.resume_command_id != command.command_id
+                or request.pause_id != body.get("pause_id")
+                or execution.current_approval_request_id != request.approval_request_id
+                or execution.current_pause_id != request.pause_id
+            ):
+                return False
+            if str(receipt.command_id) != command.command_id:
+                raise ValueError("worker_resume_receipt_identity_mismatch")
+            command.status = "accepted"
+            command.receipt_json = receipt.model_dump(mode="json", exclude_none=True)
+            self._clear_command_lease(command, await self._now(session))
+            return True
+
+    async def record_cancel_receipt(
+        self, lease: WorkerDispatchLease, receipt: WorkerCancelReceiptModel
+    ) -> bool:
+        """记录取消命令的 HTTP 收件回执，保留 StopConfirmation 独立语义。
+
+        参数：
+        - `lease`（WorkerDispatchLease）：发送取消命令时持有的 fencing 租约。
+        - `receipt`（WorkerCancelReceiptModel）：Worker 返回的 202 收件回执。
+
+        返回：租约仍有效且回执被持久化时返回 `True`，停止确认已经先收敛或租约失效时返回 `False`。
+
+        异常：ValueError 表示回执没有完整匹配已冻结的取消命令身份。
+        """
+        async with self._session_factory() as session, session.begin():
+            now = await self._now(session)
+            command = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(OrchestratorWorkerCommandModel.command_id == lease.command_id)
+                .with_for_update()
+            )
+            if (
+                command is None
+                or command.command_type != "cancel"
+                or command.status != "dispatching"
+                or command.lease_owner != lease.lease_owner
+                or command.lease_token != lease.lease_token
+                or command.lease_until is None
+                or command.lease_until <= now
+            ):
+                return False
+            command_body = command.command_json
+            if (
+                str(receipt.command_id) != command.command_id
+                or str(receipt.execution_id) != command.execution_id
+                or receipt.generation != command.generation
+                or receipt.cancellation_epoch
+                != int(command_body.get("cancellation_epoch", -1))
+                or receipt.reason != command_body.get("reason")
+                or receipt.accepted is not True
+                or receipt.stop_confirmation_required is not True
+            ):
+                raise ValueError("worker_cancel_receipt_identity_mismatch")
+            command.status = "accepted"
+            command.receipt_json = receipt.model_dump(mode="json", exclude_none=True)
+            self._clear_command_lease(command, now)
+            return True
 
     async def prepare_dispatch_send(
         self, lease: WorkerDispatchLease, *, lease_seconds: float
@@ -715,23 +1488,76 @@ class PostgresWorkerOrchestrationRepository:
                 or command.lease_until <= now
             ):
                 return False
-            if (
-                run.status != "running"
-                or plan.status != "running"
-                or task.status in {status.value for status in TASK_TERMINAL_STATUSES}
-                or task.active_execution_id != execution.execution_id
-                or task.execution_generation != execution.generation
-                or execution.status != "running"
-                or task.cancellation_epoch != execution.cancellation_epoch
-            ):
+            if lease.command_type == "cancel":
+                invalid_command = (
+                    command.command_type != "cancel"
+                    or command.instance_id != execution.instance_id
+                )
+            elif lease.command_type == "resume":
+                request_id = command.command_json.get("approval_request_id")
+                pause_id = command.command_json.get("pause_id")
+                request = await session.scalar(
+                    select(WorkerApprovalRequestModel)
+                    .where(
+                        WorkerApprovalRequestModel.approval_request_id == request_id,
+                        WorkerApprovalRequestModel.instance_id == command.instance_id,
+                        WorkerApprovalRequestModel.execution_id == execution.execution_id,
+                        WorkerApprovalRequestModel.pause_id == pause_id,
+                    )
+                    .execution_options(populate_existing=True)
+                )
+                current_pause = (
+                    request is not None
+                    and request.resume_command_id == command.command_id
+                    and execution.current_approval_request_id == request.approval_request_id
+                    and execution.current_pause_id == request.pause_id
+                    and request.generation == execution.generation
+                    and request.cancellation_epoch == execution.cancellation_epoch
+                    and run.status == "running"
+                    and plan.status == "running"
+                    and task.active_execution_id == execution.execution_id
+                    and task.execution_generation == execution.generation
+                    and task.cancellation_epoch == execution.cancellation_epoch
+                )
+                if "assignment_required" in command.command_json:
+                    invalid_command = not (
+                        current_pause
+                        and task.status == WorkerTaskStatus.WAITING_APPROVAL.value
+                        and execution.status == WorkerTaskStatus.WAITING_APPROVAL.value
+                        and execution.deadline_at is None
+                    )
+                else:
+                    invalid_command = not (
+                        current_pause
+                        and task.status == WorkerTaskStatus.RUNNING.value
+                        and execution.status == WorkerTaskStatus.RUNNING.value
+                        and execution.deadline_at is not None
+                        and execution.deadline_at > now
+                        and execution.capacity_reserved
+                    )
+            else:
+                invalid_command = (
+                    command.command_type != "execute"
+                    or run.status != "running"
+                    or plan.status != "running"
+                    or task.status in {status.value for status in TASK_TERMINAL_STATUSES}
+                    or task.active_execution_id != execution.execution_id
+                    or task.execution_generation != execution.generation
+                    or execution.status != "running"
+                    or task.cancellation_epoch != execution.cancellation_epoch
+                )
+            if invalid_command:
                 command.status = "superseded"
                 self._clear_command_lease(command, now)
                 return False
             next_available_at = now + timedelta(seconds=delay_seconds)
-            if execution.deadline_at is None or next_available_at >= execution.deadline_at:
-                command.status = "awaiting_result"
-                self._clear_command_lease(command, now)
-                return True
+            if lease.command_type in {"execute", "resume"} and (
+                execution.deadline_at is None or next_available_at >= execution.deadline_at
+            ):
+                if lease.command_type == "execute" or "assignment_required" not in command.command_json:
+                    command.status = "awaiting_result"
+                    self._clear_command_lease(command, now)
+                    return True
             command.attempt += 1
             command.status = "retry"
             command.available_at = next_available_at
@@ -858,6 +1684,7 @@ class PostgresWorkerOrchestrationRepository:
                 self._clear_command_lease(command, now)
                 return False
             execution.status = "failed"
+            execution.completed_at = execution.completed_at or now
             execution.capacity_reserved = False
             execution.capacity_released_at = now
             execution.error_json = {"code": error_code, "message": message}
@@ -874,18 +1701,12 @@ class PostgresWorkerOrchestrationRepository:
                 plan.status = "completed"
                 plan.completed_at = now
                 if run.status == "running":
-                    session.add(
-                        OrchestratorRootResumeJobModel(
-                            job_id=self._id_factory(),
-                            run_id=run.run_id,
-                            plan_id=plan.plan_id,
-                            root_wait_generation=plan.root_wait_generation,
-                            status="pending",
-                            attempt=0,
-                            available_at=now,
-                            created_at=now,
-                            updated_at=now,
-                        )
+                    await self._ensure_root_resume_job(
+                        session,
+                        run_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        root_wait_generation=plan.root_wait_generation,
+                        now=now,
                     )
             command.status = "failed"
             self._clear_command_lease(command, now)
@@ -900,6 +1721,42 @@ class PostgresWorkerOrchestrationRepository:
         command.lease_token = None
         command.lease_until = None
         command.updated_at = now
+
+    async def _has_queued_task_capacity(
+        self, session: AsyncSession, *, additional_tasks: int
+    ) -> bool:
+        """在统一队列锁内检查待派发逻辑任务是否仍有容量。
+
+        参数：
+        - `session`（AsyncSession）：当前已经开启事务的 PostgreSQL 会话。
+        - `additional_tasks`（int）：本次事务准备新增的 queued Task 数量，必须非负。
+
+        返回：获取锁后统计到的 queued Task 加新增数量未超过配置上限时返回 `True`。
+
+        异常：ValueError 表示新增数量为负数；数据库错误原样传播。
+        """
+        if additional_tasks < 0:
+            raise ValueError("worker_queue_capacity_increment_invalid")
+        # submit_plan 与重试都按同一顺序先锁所属 Run，再获取此事务级队列锁，
+        # 使“统计现状”和“插入新 Execution”成为一个不可交错的决策。
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": "worker-queued-task-capacity"},
+        )
+        queued_task_count = await session.scalar(
+            select(func.count(func.distinct(OrchestratorTaskModel.task_id)))
+            .join(
+                OrchestratorExecutionModel,
+                OrchestratorExecutionModel.task_id == OrchestratorTaskModel.task_id,
+            )
+            .where(
+                OrchestratorExecutionModel.status == "queued",
+                OrchestratorTaskModel.status.in_(
+                    (WorkerTaskStatus.PENDING.value, WorkerTaskStatus.RETRY_PENDING.value)
+                ),
+            )
+        )
+        return int(queued_task_count or 0) + additional_tasks <= self._queue_max_pending_tasks
 
     async def find_registration_receipt(
         self,
@@ -940,8 +1797,284 @@ class PostgresWorkerOrchestrationRepository:
             replayed=True,
         )
 
+    async def submit_approval_request(
+        self, intent: WorkerApprovalIntent, *, instance_id: str
+    ) -> dict[str, Any]:
+        """持久接收审批批次并在同一事务暂停当前 Worker Execution。"""
+        async with self._session_factory() as session, session.begin():
+            # 先从 Execution 取得真实父级身份，再按照 Run→Plan→Task→Execution
+            # 锁定。请求体中的父级 ID 只能在锁后作为一致性声明复验，不能决定锁定对象。
+            execution_hint = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == intent.execution_id)
+                .execution_options(populate_existing=True)
+            )
+            if execution_hint is None:
+                raise ValueError("worker_approval_execution_unknown")
+            task_hint = await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == execution_hint.task_id)
+                .execution_options(populate_existing=True)
+            )
+            plan_hint = None if task_hint is None else await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
+                .execution_options(populate_existing=True)
+            )
+            if task_hint is None or plan_hint is None:
+                raise ValueError("worker_approval_execution_unknown")
+            run = await session.scalar(
+                select(AgentRunModel)
+                .where(AgentRunModel.run_id == plan_hint.run_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            plan = await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == plan_hint.plan_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            task = await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == task_hint.task_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            execution = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == intent.execution_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            instance = await session.scalar(
+                select(WorkerInstanceModel)
+                .where(WorkerInstanceModel.instance_id == instance_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if any(item is None for item in (run, plan, task, execution, instance)):
+                raise ValueError("worker_approval_execution_identity_unknown")
+
+            if (
+                intent.run_id != run.run_id
+                or intent.plan_id != plan.plan_id
+                or intent.task_id != task.task_id
+                or execution.task_id != task.task_id
+                or task.plan_id != plan.plan_id
+                or plan.run_id != run.run_id
+                or intent.execution_id != execution.execution_id
+            ):
+                raise ValueError("worker_approval_execution_identity_mismatch")
+
+            prior = await session.scalar(
+                select(WorkerApprovalRequestModel)
+                .where(
+                    WorkerApprovalRequestModel.instance_id == instance_id,
+                    WorkerApprovalRequestModel.approval_request_id
+                    == intent.approval_request_id,
+                )
+                .with_for_update()
+            )
+            if prior is not None:
+                if prior.request_hash != intent.request_hash:
+                    raise WorkerIdempotencyConflict(
+                        "worker_approval_request_idempotency_conflict"
+                    )
+                replay = dict(prior.receipt_json)
+                replay["disposition"] = "duplicate"
+                return replay
+
+            now = await self._now(session)
+            if (
+                execution.instance_id != instance_id
+                or execution.generation != intent.generation
+                or task.execution_generation != intent.generation
+                or task.active_execution_id != intent.execution_id
+                or task.cancellation_epoch != intent.cancellation_epoch
+                or execution.cancellation_epoch != intent.cancellation_epoch
+                or task.status != "running"
+                or execution.status != "running"
+                or run.status != "running"
+                or plan.status != "running"
+                or execution.deadline_at is None
+                or execution.deadline_at <= now
+            ):
+                raise ValueError("worker_approval_execution_not_eligible")
+            remaining_seconds = (execution.deadline_at - now).total_seconds()
+            if remaining_seconds <= 0:
+                raise ValueError("worker_approval_execution_deadline_exceeded")
+
+            if execution.current_approval_request_id is not None:
+                old_commands = (
+                    await session.scalars(
+                        select(OrchestratorWorkerCommandModel)
+                        .where(
+                            OrchestratorWorkerCommandModel.execution_id
+                            == execution.execution_id,
+                            OrchestratorWorkerCommandModel.command_type == "resume",
+                            OrchestratorWorkerCommandModel.command_json[
+                                "approval_request_id"
+                            ].as_string()
+                            == execution.current_approval_request_id,
+                            OrchestratorWorkerCommandModel.status.in_(
+                                ("pending", "retry", "dispatching", "accepted")
+                            ),
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+                for old_command in old_commands:
+                    old_command.status = "superseded"
+                    self._clear_command_lease(old_command, now)
+                    old_command.updated_at = now
+
+            batch_id = self._id_factory() if len(intent.items) > 1 else None
+            expires_at = now + timedelta(seconds=120)
+            receipt_id = self._id_factory()
+            item_receipts: list[dict[str, str]] = []
+            for item in intent.items:
+                approval_id = self._id_factory()
+                item_receipts.append(
+                    {
+                        "item_id": item.item_id,
+                        "approval_id": approval_id,
+                        "arguments_sha256": item.arguments_sha256,
+                    }
+                )
+                session.add(
+                    ApprovalRecordModel(
+                        approval_id=approval_id,
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        approval_batch_id=batch_id,
+                        approval_request_id=intent.approval_request_id,
+                        pause_id=intent.pause_id,
+                        item_id=item.item_id,
+                        plan_id=plan.plan_id,
+                        task_id=task.task_id,
+                        execution_id=execution.execution_id,
+                        generation=execution.generation,
+                        cancellation_epoch=task.cancellation_epoch,
+                        # 远程审批身份由 request/pause/item 唯一确定，不复用旧
+                        # LangGraph worker_thread/interrupt 唯一键。
+                        worker_thread_id=None,
+                        interrupt_id=None,
+                        tool_call_id=item.item_id,
+                        tool_name=item.tool_name,
+                        arguments_json=item.arguments,
+                        risk_level=item.risk_level,
+                        args_hash=item.arguments_sha256,
+                        arguments_sha256=item.arguments_sha256,
+                        operation_key=f"{execution.execution_id}:{item.item_id}",
+                        status="pending",
+                        decision=None,
+                        created_at=now,
+                        expires_at=expires_at,
+                        decided_at=None,
+                    )
+                )
+                session.add(
+                    OrchestrationOutboxModel(
+                        message_id=self._id_factory(),
+                        dedupe_key=f"worker-approval:{intent.approval_request_id}:{item.item_id}",
+                        event_type="ApprovalRequested",
+                        correlation_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        plan_version=plan.sequence,
+                        round_id=None,
+                        payload_json={
+                            "approval_id": approval_id,
+                            "approval_request_id": intent.approval_request_id,
+                            "pause_id": intent.pause_id,
+                            "item_id": item.item_id,
+                            "task_id": task.task_id,
+                            "execution_id": execution.execution_id,
+                            "tool_name": item.tool_name,
+                            "summary": item.summary,
+                            "risk_level": item.risk_level,
+                        },
+                        schema_version=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        occurred_at=now,
+                    )
+                )
+
+            execution.remaining_seconds = remaining_seconds
+            execution.deadline_at = None
+            execution.status = "waiting_approval"
+            execution.current_approval_request_id = intent.approval_request_id
+            execution.current_pause_id = intent.pause_id
+            execution.capacity_reserved = False
+            execution.capacity_released_at = now
+            execution.updated_at = now
+            task.status = "waiting_approval"
+            task.updated_at = now
+            receipt_data = {
+                "protocol_version": "1.0",
+                "approval_request_id": intent.approval_request_id,
+                "pause_id": intent.pause_id,
+                "approval_batch_id": batch_id,
+                "disposition": "accepted",
+                "status": "accepted",
+                "expires_at": expires_at.isoformat(),
+                "items": item_receipts,
+                "received_at": now.isoformat(),
+            }
+            # 先插回执聚合，再由重试请求读取相同 item→approval 映射。
+            session.add(
+                WorkerApprovalRequestModel(
+                    receipt_id=receipt_id,
+                    instance_id=instance_id,
+                    approval_request_id=intent.approval_request_id,
+                    pause_id=intent.pause_id,
+                    run_id=run.run_id,
+                    plan_id=plan.plan_id,
+                    task_id=task.task_id,
+                    execution_id=execution.execution_id,
+                    generation=execution.generation,
+                    cancellation_epoch=task.cancellation_epoch,
+                    request_hash=intent.request_hash,
+                    request_json={
+                        "items": [
+                            {
+                                "item_id": item.item_id,
+                                "tool_name": item.tool_name,
+                                "summary": item.summary,
+                                "risk_level": item.risk_level,
+                                "arguments": item.arguments,
+                                "arguments_sha256": item.arguments_sha256,
+                            }
+                            for item in intent.items
+                        ]
+                    },
+                    status="pending",
+                    expires_at=expires_at,
+                    received_at=now,
+                    receipt_json=receipt_data,
+                    resume_command_id=None,
+                    resume_wait_deadline_at=None,
+                )
+            )
+            return receipt_data
+
     async def submit_plan(
         self, submission: WorkerPlanSubmission
+    ) -> WorkerPlanReceipt:
+        return await self._submit_plan(submission, root_lease=None)
+
+    async def submit_root_plan(
+        self, submission: WorkerPlanSubmission, *, lease: LeaseGrant
+    ) -> WorkerPlanReceipt:
+        """以当前 Root execution fencing lease 提交一轮 Plan。"""
+        if lease.key != LeaseKey("root_execution", submission.run_id):
+            raise WorkerPlanRejected("root_execution_lease_mismatch")
+        return await self._submit_plan(submission, root_lease=lease)
+
+    async def _submit_plan(
+        self, submission: WorkerPlanSubmission, *, root_lease: LeaseGrant | None
     ) -> WorkerPlanReceipt:
         """校验并原子保存 Run 的一轮 Plan 及其无依赖任务。
 
@@ -957,6 +2090,21 @@ class PostgresWorkerOrchestrationRepository:
         request_hash = self._plan_hash(submission)
         async with self._session_factory() as session, session.begin():
             # 重放先查原回执，使 Run 后续停止或 Plan 已完成不改变旧提交的结果。
+            session_row = None
+            if root_lease is not None:
+                # Root 提交遵循 Session → Run → Plan 的锁序，并确认仍属于当前活动会话。
+                session_id = await session.scalar(
+                    select(AgentRunModel.session_id).where(
+                        AgentRunModel.run_id == submission.run_id
+                    )
+                )
+                if session_id is None:
+                    raise WorkerPlanRejected("worker_run_unknown")
+                session_row = await session.scalar(
+                    select(SessionModel)
+                    .where(SessionModel.id == session_id)
+                    .with_for_update()
+                )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == submission.run_id)
@@ -964,6 +2112,14 @@ class PostgresWorkerOrchestrationRepository:
             )
             if run is None:
                 raise WorkerPlanRejected("worker_run_unknown")
+            if root_lease is not None:
+                if (
+                    session_row is None
+                    or session_row.deleted_time is not None
+                    or session_row.active_run_id != run.run_id
+                ):
+                    raise WorkerPlanRejected("worker_run_session_not_active")
+                await self._leases.assert_current_in_transaction(session, root_lease)
             # Run行锁串行化首次提交；重查必须早于停止状态和新序号校验。
             existing = await session.scalar(
                 select(OrchestratorPlanModel).where(
@@ -985,6 +2141,12 @@ class PostgresWorkerOrchestrationRepository:
                 raise WorkerPlanRejected("worker_run_not_accepting_plans")
             if submission.sequence != run.orchestrator_plan_sequence + 1:
                 raise WorkerPlanRejected("worker_plan_sequence_conflict")
+
+            # 所有 Run 共用一个待派发容量上限；事务锁把计数与整轮插入串行化。
+            if not await self._has_queued_task_capacity(
+                session, additional_tasks=len(submission.tasks)
+            ):
+                raise WorkerPlanRejected("worker_queue_capacity_exceeded")
 
             contract_keys = {
                 (task.contract_id, task.contract_revision) for task in submission.tasks
@@ -1065,6 +2227,7 @@ class PostgresWorkerOrchestrationRepository:
                         status=WorkerTaskStatus.PENDING.value,
                         execution_generation=1,
                         cancellation_epoch=run.cancellation_epoch,
+                        active_execution_id=execution_id,
                         created_at=now,
                         updated_at=now,
                     )
@@ -1120,6 +2283,9 @@ class PostgresWorkerOrchestrationRepository:
                 )
             run.orchestrator_plan_sequence = submission.sequence
             run.root_wait_generation = plan.root_wait_generation
+            run.root_wait_interrupt_id = None
+            run.root_wait_checkpoint_id = None
+            run.root_wait_armed_at = None
             return WorkerPlanReceipt(
                 plan_id=plan.plan_id,
                 run_id=plan.run_id,
@@ -1127,6 +2293,34 @@ class PostgresWorkerOrchestrationRepository:
                 accepted=True,
                 replayed=False,
             )
+
+    async def _ensure_root_resume_job(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: str,
+        plan_id: str,
+        root_wait_generation: int,
+        now: datetime,
+    ) -> None:
+        """按等待身份幂等创建 Root 恢复作业，兼容 checkpoint 先 arm 的竞态。"""
+        await session.execute(
+            pg_insert(OrchestratorRootResumeJobModel)
+            .values(
+                job_id=self._id_factory(),
+                run_id=run_id,
+                plan_id=plan_id,
+                root_wait_generation=root_wait_generation,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["run_id", "plan_id", "root_wait_generation"]
+            )
+        )
 
     async def register_worker(
         self, intent: WorkerRegistrationIntent
@@ -1330,11 +2524,350 @@ class PostgresWorkerOrchestrationRepository:
                 registered_at=now,
             )
 
+    async def find_timeout_candidates(
+        self, *, batch_size: int, queue_max_wait_seconds: float = 300.0
+    ) -> list[str]:
+        """按数据库时钟读取当前到期且仍有效的执行候选。
+
+        参数：
+        - `batch_size`（int）：本轮最多返回的 Execution 数量，必须为正数。
+
+        返回：可能需要内部超时裁决的 Execution ID；候选仍须由结果用例加锁复验。
+
+        异常：ValueError 表示批量大小无效；数据库错误原样传播。
+        """
+        if batch_size < 1 or queue_max_wait_seconds <= 0:
+            raise ValueError("worker_timeout_batch_size_invalid")
+        async with self._session_factory() as session, session.begin():
+            now = await self._now(session)
+            result = await session.scalars(
+                select(OrchestratorExecutionModel.execution_id)
+                .join(
+                    OrchestratorTaskModel,
+                    OrchestratorTaskModel.task_id == OrchestratorExecutionModel.task_id,
+                )
+                .where(
+                    (
+                        (
+                            (OrchestratorExecutionModel.status == "running")
+                            & OrchestratorExecutionModel.deadline_at.is_not(None)
+                            & (OrchestratorExecutionModel.deadline_at <= now)
+                            & (OrchestratorTaskModel.status == "running")
+                            & (
+                                OrchestratorTaskModel.active_execution_id
+                                == OrchestratorExecutionModel.execution_id
+                            )
+                            & (
+                                OrchestratorTaskModel.execution_generation
+                                == OrchestratorExecutionModel.generation
+                            )
+                        )
+                        | (
+                            (OrchestratorExecutionModel.status == "queued")
+                            & (
+                                OrchestratorExecutionModel.created_at
+                                <= now - timedelta(seconds=queue_max_wait_seconds)
+                            )
+                            & OrchestratorTaskModel.status.in_(("pending", "retry_pending"))
+                        )
+                        | (
+                            (OrchestratorExecutionModel.status == "waiting_approval")
+                            & (OrchestratorTaskModel.status == "waiting_approval")
+                            & (
+                                OrchestratorTaskModel.active_execution_id
+                                == OrchestratorExecutionModel.execution_id
+                            )
+                            & (
+                                OrchestratorExecutionModel.generation
+                                == OrchestratorTaskModel.execution_generation
+                            )
+                            & select(WorkerApprovalRequestModel.execution_id)
+                            .where(
+                                WorkerApprovalRequestModel.execution_id
+                                == OrchestratorExecutionModel.execution_id,
+                                WorkerApprovalRequestModel.approval_request_id
+                                == OrchestratorExecutionModel.current_approval_request_id,
+                                WorkerApprovalRequestModel.pause_id
+                                == OrchestratorExecutionModel.current_pause_id,
+                                WorkerApprovalRequestModel.resume_command_id.is_not(None),
+                                WorkerApprovalRequestModel.resume_wait_deadline_at.is_not(None),
+                                WorkerApprovalRequestModel.resume_wait_deadline_at <= now,
+                            )
+                            .exists()
+                        )
+                    )
+                )
+                .order_by(
+                    OrchestratorExecutionModel.deadline_at,
+                    OrchestratorExecutionModel.execution_id,
+                )
+                .limit(batch_size)
+            )
+            return list(result.all())
+
+    async def expire_queued_execution(
+        self, *, execution_id: str, queue_max_wait_seconds: float
+    ) -> bool:
+        """收束排队或恢复等待超过上限的执行，并保留必要清理命令。
+
+        参数：
+        - `execution_id`（str）：扫描候选执行标识。
+        - `queue_max_wait_seconds`（float）：排队允许的最长等待时间，必须大于零。
+
+        返回：本事务首次将任务收束时返回 `True`；候选已变化时返回 `False`。
+
+        异常：ValueError 表示等待上限无效；数据库错误原样传播。
+        """
+        if queue_max_wait_seconds <= 0:
+            raise ValueError("worker_queue_max_wait_invalid")
+        async with self._session_factory() as session, session.begin():
+            execution_hint = await session.get(OrchestratorExecutionModel, execution_id)
+            if execution_hint is None:
+                return False
+            task_hint = await session.get(OrchestratorTaskModel, execution_hint.task_id)
+            if task_hint is None:
+                return False
+            plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
+            if plan_hint is None:
+                return False
+            run = await session.scalar(
+                select(AgentRunModel)
+                .where(AgentRunModel.run_id == plan_hint.run_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            plan = await session.scalar(
+                select(OrchestratorPlanModel)
+                .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            task = await session.scalar(
+                select(OrchestratorTaskModel)
+                .where(OrchestratorTaskModel.task_id == task_hint.task_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            execution = await session.scalar(
+                select(OrchestratorExecutionModel)
+                .where(OrchestratorExecutionModel.execution_id == execution_id)
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if any(item is None for item in (run, plan, task, execution)):
+                return False
+            now = await self._now(session)
+            if (
+                execution.status == WorkerTaskStatus.WAITING_APPROVAL.value
+                and task.status == WorkerTaskStatus.WAITING_APPROVAL.value
+                and task.active_execution_id == execution.execution_id
+                and task.execution_generation == execution.generation
+                and run.status == "running"
+                and plan.status == "running"
+            ):
+                request = await session.scalar(
+                    select(WorkerApprovalRequestModel)
+                    .where(
+                        WorkerApprovalRequestModel.execution_id == execution.execution_id,
+                        WorkerApprovalRequestModel.approval_request_id
+                        == execution.current_approval_request_id,
+                        WorkerApprovalRequestModel.pause_id == execution.current_pause_id,
+                        WorkerApprovalRequestModel.resume_command_id.is_not(None),
+                        WorkerApprovalRequestModel.resume_wait_deadline_at.is_not(None),
+                        WorkerApprovalRequestModel.resume_wait_deadline_at <= now,
+                    )
+                    .with_for_update()
+                )
+                if request is None:
+                    return False
+                execution.status = WorkerTaskStatus.FAILED.value
+                execution.completed_at = execution.completed_at or now
+                execution.error_json = {
+                    "code": "TEMPORARY_UNAVAILABLE",
+                    "message": "Worker did not resume before the configured wait deadline",
+                    "retryable": False,
+                }
+                execution.deadline_at = None
+                execution.remaining_seconds = None
+                execution.capacity_reserved = False
+                execution.capacity_released_at = now
+                execution.updated_at = now
+                task.status = WorkerTaskStatus.FAILED.value
+                task.error_json = execution.error_json
+                task.updated_at = now
+                resume_commands = (
+                    await session.scalars(
+                        select(OrchestratorWorkerCommandModel)
+                        .where(
+                            OrchestratorWorkerCommandModel.execution_id == execution.execution_id,
+                            OrchestratorWorkerCommandModel.command_type == "resume",
+                            OrchestratorWorkerCommandModel.status.in_(
+                                ("pending", "retry", "dispatching", "awaiting_assignment")
+                            ),
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+                for command in resume_commands:
+                    command.status = "superseded"
+                    command.updated_at = now
+                    self._clear_command_lease(command, now)
+                cancel_id = self._id_factory()
+                cancel_body = {
+                    "protocol_version": "1.0",
+                    "command_id": cancel_id,
+                    "execution_id": execution.execution_id,
+                    "generation": execution.generation,
+                    "cancellation_epoch": execution.cancellation_epoch,
+                    "reason": "execution_superseded",
+                }
+                session.add(
+                    OrchestratorWorkerCommandModel(
+                        command_id=cancel_id,
+                        execution_id=execution.execution_id,
+                        instance_id=execution.instance_id,
+                        generation=execution.generation,
+                        idempotency_key=f"resume-timeout-cancel:{request.approval_request_id}",
+                        command_type="cancel",
+                        request_hash=self._hash_json(cancel_body),
+                        command_json=cancel_body,
+                        status="pending",
+                        attempt=0,
+                        send_attempt_count=0,
+                        delivery_uncertain_before_send=False,
+                        lease_owner=None,
+                        lease_token=None,
+                        lease_until=None,
+                        available_at=now,
+                        receipt_json=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                plan.terminal_task_count += 1
+                if plan.terminal_task_count >= plan.expected_task_count:
+                    plan.status = "completed"
+                    plan.completed_at = now
+                    await self._ensure_root_resume_job(
+                        session,
+                        run_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        root_wait_generation=plan.root_wait_generation,
+                        now=now,
+                    )
+                request.status = "resume_timed_out"
+                return True
+            if (
+                execution.status != "queued"
+                or task.status not in {WorkerTaskStatus.PENDING.value, WorkerTaskStatus.RETRY_PENDING.value}
+                or task.active_execution_id != execution.execution_id
+                or task.execution_generation != execution.generation
+                or run.status != "running"
+                or plan.status != "running"
+            ):
+                return False
+            if execution.created_at > now - timedelta(seconds=queue_max_wait_seconds):
+                return False
+            execution.status = "failed"
+            execution.completed_at = execution.completed_at or now
+            execution.error_json = {
+                "code": "CAPABILITY_UNAVAILABLE",
+                "message": "No healthy Worker capacity became available before queue timeout",
+                "retryable": False,
+            }
+            execution.updated_at = now
+            task.status = WorkerTaskStatus.FAILED.value
+            task.error_json = execution.error_json
+            task.updated_at = now
+            pending_commands = (
+                await session.scalars(
+                    select(OrchestratorWorkerCommandModel)
+                    .where(
+                        OrchestratorWorkerCommandModel.execution_id == execution.execution_id,
+                        OrchestratorWorkerCommandModel.command_type == "execute",
+                        OrchestratorWorkerCommandModel.status.in_(("awaiting_assignment", "pending", "retry")),
+                    )
+                    .with_for_update()
+                )
+            ).all()
+            for command in pending_commands:
+                command.status = "superseded"
+                command.updated_at = now
+            plan.terminal_task_count += 1
+            if plan.terminal_task_count >= plan.expected_task_count:
+                plan.status = "completed"
+                plan.completed_at = now
+                if run.status == "running":
+                    await self._ensure_root_resume_job(
+                        session,
+                        run_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        root_wait_generation=plan.root_wait_generation,
+                        now=now,
+                    )
+            return True
+
+    async def timeout_execution(self, *, execution_id: str) -> WorkerResultReceipt | None:
+        """将一个执行候选转交稳定的内部超时结果裁决。
+
+        参数：
+        - `execution_id`（str）：扫描器读出的候选执行 ID。
+
+        返回：候选当前仍有效并已裁决时返回结果回执；状态已变化时返回 `None`。
+
+        异常：ValueError 表示执行身份不存在；数据库错误原样传播。
+        """
+        async with self._session_factory() as session:
+            execution = await session.get(OrchestratorExecutionModel, execution_id)
+            if execution is None:
+                return None
+            instance_id = execution.instance_id
+            if instance_id is None:
+                return None
+            submission = WorkerResultSubmission(
+                execution_id=execution.execution_id,
+                instance_id=instance_id,
+                generation=execution.generation,
+                result_id=str(uuid5(NAMESPACE_URL, f"athena:execution-timeout:{execution_id}")),
+                status="failed",
+                error=WorkerExecutionError(
+                    code="EXECUTION_DEADLINE_EXCEEDED",
+                    message="Worker execution exceeded its persisted deadline",
+                    retryable=False,
+                ),
+                internal_timeout=True,
+            )
+        return await self._record_result(
+            submission=submission, result_source="internal_timeout"
+        )
+
     async def record_result(
         self,
         *,
         submission: WorkerResultSubmission,
     ) -> WorkerResultReceipt:
+        """记录远程 Worker 的结果，并保证调用方始终收到稳定回执。
+
+        参数：
+        - `submission`（WorkerResultSubmission）：Worker 提交的执行结果。
+
+        返回：首次裁决或幂等重放的非空结果回执。
+
+        异常：身份无效、幂等冲突或数据库错误时向调用方抛出。
+        """
+        if submission.internal_timeout:
+            raise ValueError("worker_result_internal_timeout_not_public")
+        receipt = await self._record_result(submission=submission, result_source="worker")
+        if receipt is None:
+            raise RuntimeError("remote_worker_result_cannot_be_internal_timeout")
+        return receipt
+
+    async def _record_result(
+        self,
+        *,
+        submission: WorkerResultSubmission,
+        result_source: Literal["worker", "internal_timeout"],
+    ) -> WorkerResultReceipt | None:
         """原子记录 Worker 结果、Task 终态计数和唯一 Root 恢复作业。
 
         参数：
@@ -1346,6 +2879,8 @@ class PostgresWorkerOrchestrationRepository:
         - WorkerIdempotencyConflict：相同 Execution/result ID 的内容不同。
         - ValueError：身份不存在或结果状态不合法。
         """
+        if (result_source == "internal_timeout") != submission.internal_timeout:
+            raise ValueError("worker_result_source_mismatch")
         request_hash = submission.request_hash or self._hash_json(asdict(submission))
         async with self._session_factory() as session, session.begin():
             # 先无锁读取父级身份，再统一按 Run→Plan→Task→Execution 顺序加锁。
@@ -1394,6 +2929,7 @@ class PostgresWorkerOrchestrationRepository:
             prior = await session.scalar(
                 select(WorkerResultReceiptModel).where(
                     WorkerResultReceiptModel.execution_id == submission.execution_id,
+                    WorkerResultReceiptModel.result_source == result_source,
                     WorkerResultReceiptModel.result_id == submission.result_id,
                 )
             )
@@ -1413,29 +2949,20 @@ class PostgresWorkerOrchestrationRepository:
                 )
 
             now = await self._now(session)
-            # 结果可能先于 POST 收件回执到达；持久终态立即夺取命令行，防止 HTTP 回执倒退状态。
-            dispatch_command = await session.scalar(
-                select(OrchestratorWorkerCommandModel)
-                .where(
-                    OrchestratorWorkerCommandModel.execution_id
-                    == submission.execution_id,
-                    OrchestratorWorkerCommandModel.generation
-                    == submission.generation,
-                    OrchestratorWorkerCommandModel.command_type == "execute",
-                )
-                .with_for_update()
-            )
-            if dispatch_command is not None and dispatch_command.status not in {
-                "result_received",
-                "failed",
-                "superseded",
-            }:
-                dispatch_command.status = "result_received"
-                self._clear_command_lease(dispatch_command, now)
+            if submission.internal_timeout and (
+                execution.status != "running"
+                or task.status != "running"
+                or task.active_execution_id != execution.execution_id
+                or task.execution_generation != execution.generation
+                or execution.deadline_at is None
+                or now < execution.deadline_at
+            ):
+                return None
             stale_reason = None
             disposition = "recorded"
             reason = "success_recorded"
             next_execution_id = None
+            queue_capacity_exhausted = False
             if task.status in {status.value for status in TASK_TERMINAL_STATUSES}:
                 stale_reason = "task_cancelled" if task.status == "cancelled" else "execution_superseded"
             elif task.active_execution_id != submission.execution_id:
@@ -1448,13 +2975,78 @@ class PostgresWorkerOrchestrationRepository:
                 stale_reason = "task_cancelled"
             elif execution.status != "running" or task.status != "running":
                 stale_reason = "execution_superseded"
-            elif execution.deadline_at is not None and now >= execution.deadline_at:
+            elif (
+                not submission.internal_timeout
+                and execution.deadline_at is not None
+                and now >= execution.deadline_at
+            ):
                 stale_reason = "execution_deadline_exceeded"
 
             if stale_reason is not None:
                 disposition = "ignored"
                 reason = stale_reason
             else:
+                # 只有当前执行的有效结果才能收束命令。审批等待期的迟到同代结果
+                # 会被忽略，不能提前把仍待派发的 ResumeCommand 标成已完成。
+                dispatch_command = await session.scalar(
+                    select(OrchestratorWorkerCommandModel)
+                    .where(
+                        OrchestratorWorkerCommandModel.execution_id
+                        == submission.execution_id,
+                        OrchestratorWorkerCommandModel.generation
+                        == submission.generation,
+                        OrchestratorWorkerCommandModel.command_type == "execute",
+                    )
+                    .with_for_update()
+                )
+                if dispatch_command is not None and dispatch_command.status not in {
+                    "result_received",
+                    "failed",
+                    "superseded",
+                }:
+                    dispatch_command.status = "result_received"
+                    self._clear_command_lease(dispatch_command, now)
+                # Resume receipt and terminal result are independent HTTP requests.
+                # A valid result can win the race, so converge the matching command.
+                resume_command_id = await session.scalar(
+                    select(WorkerApprovalRequestModel.resume_command_id)
+                    .where(
+                        WorkerApprovalRequestModel.execution_id
+                        == submission.execution_id,
+                        WorkerApprovalRequestModel.generation
+                        == submission.generation,
+                        WorkerApprovalRequestModel.cancellation_epoch
+                        == execution.cancellation_epoch,
+                        WorkerApprovalRequestModel.approval_request_id
+                        == execution.current_approval_request_id,
+                        WorkerApprovalRequestModel.pause_id == execution.current_pause_id,
+                        WorkerApprovalRequestModel.resume_command_id.is_not(None),
+                    )
+                    .order_by(WorkerApprovalRequestModel.received_at.desc())
+                    .limit(1)
+                )
+                if resume_command_id is not None:
+                    resume_command = await session.scalar(
+                        select(OrchestratorWorkerCommandModel)
+                        .where(
+                            OrchestratorWorkerCommandModel.command_id
+                            == resume_command_id,
+                            OrchestratorWorkerCommandModel.execution_id
+                            == submission.execution_id,
+                            OrchestratorWorkerCommandModel.generation
+                            == submission.generation,
+                            OrchestratorWorkerCommandModel.command_type == "resume",
+                        )
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if resume_command is not None and resume_command.status not in {
+                        "result_received",
+                        "failed",
+                        "superseded",
+                    }:
+                        resume_command.status = "result_received"
+                        self._clear_command_lease(resume_command, now)
                 result_status = submission.status
                 output = submission.output
                 error = (
@@ -1500,29 +3092,56 @@ class PostgresWorkerOrchestrationRepository:
                         "WORKER_CAPACITY_LOST",
                     }
                     if (
-                        error_code in retryable_codes
+                        (submission.internal_timeout or error_code in retryable_codes)
                         and submission.generation < self._max_execution_attempts
                     ):
-                        disposition = "retry_scheduled"
-                        reason = "worker_error_retryable"
+                        if await self._has_queued_task_capacity(
+                            session, additional_tasks=1
+                        ):
+                            disposition = "retry_scheduled"
+                            reason = "worker_error_retryable"
+                        else:
+                            # 队列容量不足时保留原错误内容，但把当前逻辑 Task
+                            # 收束为最终失败，避免重试路径绕过全局队列上限。
+                            queue_capacity_exhausted = True
+                            reason = "worker_error_final"
                     elif error_code in retryable_codes:
                         reason = "execution_attempts_exhausted"
                     else:
                         reason = "worker_error_final"
 
+                if queue_capacity_exhausted:
+                    original_details = (
+                        dict(error.get("details") or {})
+                        if isinstance(error, dict)
+                        and isinstance(error.get("details"), dict)
+                        else {}
+                    )
+                    original_details["queue_capacity"] = {
+                        "code": "CAPABILITY_UNAVAILABLE",
+                        "message": "Worker retry queue capacity is exhausted",
+                    }
+                    error = {
+                        **(error or {}),
+                        "details": original_details,
+                    }
+
                 execution.status = result_status
+                execution.completed_at = execution.completed_at or now
                 execution.worker_result_id = submission.result_id
                 execution.result_json = output if output_valid else None
                 execution.error_json = error
                 execution.updated_at = now
                 # 有效终态回执证明该 Execution 已停止；取消后的迟到结果走 ignored，不能释放旧槽位。
-                if execution.capacity_reserved:
+                if execution.capacity_reserved and not submission.internal_timeout:
                     execution.capacity_reserved = False
                     execution.capacity_released_at = now
                 if disposition == "retry_scheduled":
                     next_execution_id = self._id_factory()
                     next_generation = submission.generation + 1
                     next_command_id = self._id_factory()
+                    retry_delay = self._execution_retry_delay(submission.generation - 1)
+                    retry_available_at = now + timedelta(seconds=retry_delay)
                     session.add(
                         OrchestratorExecutionModel(
                             execution_id=next_execution_id,
@@ -1566,7 +3185,7 @@ class PostgresWorkerOrchestrationRepository:
                             command_json=retry_command,
                             status="awaiting_assignment",
                             attempt=0,
-                            available_at=now,
+                            available_at=retry_available_at,
                             created_at=now,
                             updated_at=now,
                         )
@@ -1582,6 +3201,34 @@ class PostgresWorkerOrchestrationRepository:
                 else:
                     task.status = WorkerTaskStatus.FAILED.value
                     task.error_json = error
+                if submission.internal_timeout and execution.capacity_reserved:
+                    # 最后一次超时也必须发送物理停止命令，否则容量会永久占用。
+                    cancel_command_id = self._id_factory()
+                    cancel_body = {
+                        "protocol_version": "1.0",
+                        "command_id": cancel_command_id,
+                        "execution_id": execution.execution_id,
+                        "generation": execution.generation,
+                        "cancellation_epoch": execution.cancellation_epoch,
+                        "reason": "execution_timed_out",
+                    }
+                    session.add(
+                        OrchestratorWorkerCommandModel(
+                            command_id=cancel_command_id,
+                            execution_id=execution.execution_id,
+                            instance_id=execution.instance_id,
+                            generation=execution.generation,
+                            idempotency_key=cancel_command_id,
+                            command_type="cancel",
+                            request_hash=self._hash_json(cancel_body),
+                            command_json=cancel_body,
+                            status="pending",
+                            attempt=0,
+                            available_at=now,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
                 task.updated_at = now
                 if task.status in {status.value for status in TASK_TERMINAL_STATUSES}:
                     plan.terminal_task_count += 1
@@ -1589,18 +3236,12 @@ class PostgresWorkerOrchestrationRepository:
                         plan.status = "completed"
                         plan.completed_at = now
                         if run.status == "running":
-                            session.add(
-                                OrchestratorRootResumeJobModel(
-                                    job_id=self._id_factory(),
-                                    run_id=run.run_id,
-                                    plan_id=plan.plan_id,
-                                    root_wait_generation=plan.root_wait_generation,
-                                    status="pending",
-                                    attempt=0,
-                                    available_at=now,
-                                    created_at=now,
-                                    updated_at=now,
-                                )
+                            await self._ensure_root_resume_job(
+                                session,
+                                run_id=run.run_id,
+                                plan_id=plan.plan_id,
+                                root_wait_generation=plan.root_wait_generation,
+                                now=now,
                             )
             receipt_id = self._id_factory()
             receipt_data = WorkerResultReceiptProtocolModel.model_validate(
@@ -1619,6 +3260,7 @@ class PostgresWorkerOrchestrationRepository:
                     receipt_id=receipt_id,
                     execution_id=submission.execution_id,
                     task_id=resolved_task_id,
+                    result_source=result_source,
                     result_id=submission.result_id,
                     request_hash=request_hash,
                     disposition=disposition,
@@ -1638,6 +3280,30 @@ class PostgresWorkerOrchestrationRepository:
                 received_at=now,
                 next_execution_id=next_execution_id,
             )
+
+    def _execution_retry_delay(self, retry_index: int) -> float:
+        """计算执行级重试的指数退避间隔。
+
+        参数：
+        - `retry_index`（int）：即将创建的重试序号，从零开始；负数会被拒绝。
+
+        返回：应用配置上限和抖动后的秒数。
+
+        异常：ValueError 表示序号为负数。
+        """
+        if retry_index < 0:
+            raise ValueError("worker_execution_retry_index_invalid")
+        base = min(
+            self._execution_retry_max,
+            self._execution_retry_initial * (2**retry_index),
+        )
+        spread = base * self._execution_retry_jitter_ratio
+        if spread == 0:
+            return base
+        return min(
+            self._execution_retry_max,
+            max(0.0, random.uniform(base - spread, base + spread)),
+        )
 
     async def cancel_task(self, *, run_id: str, task_id: str) -> str | None:
         """逻辑取消一个 Task 并持久化对应远端取消指令。
@@ -1727,6 +3393,24 @@ class PostgresWorkerOrchestrationRepository:
                     ),
                     None,
                 )
+                pending_physical_stop = next(
+                    (
+                        command
+                        for command in commands
+                        if command.command_type == "cancel"
+                        and command.command_json.get("reason")
+                        in {"execution_timed_out", "execution_superseded"}
+                    ),
+                    None,
+                )
+                if (
+                    task_was_terminal
+                    and execution.capacity_reserved
+                    and pending_physical_stop is not None
+                ):
+                    # 已有的超时/替代停止意图绑定旧 epoch，逻辑取消不能改写其确认身份。
+                    command_id = pending_physical_stop.command_id
+                    continue
                 for command in commands:
                     if (
                         command.command_type == "cancel"
@@ -1779,6 +3463,7 @@ class PostgresWorkerOrchestrationRepository:
                     "timed_out",
                 }:
                     execution.status = "cancelled"
+                    execution.completed_at = execution.completed_at or now
                     execution.cancellation_epoch = cancellation_epoch
                     execution.capacity_reserved = False
                     execution.updated_at = now
@@ -1792,18 +3477,12 @@ class PostgresWorkerOrchestrationRepository:
                 plan.status = "completed"
                 plan.completed_at = now
                 if run.status == "running":
-                    session.add(
-                        OrchestratorRootResumeJobModel(
-                            job_id=self._id_factory(),
-                            run_id=run_id,
-                            plan_id=plan.plan_id,
-                            root_wait_generation=plan.root_wait_generation,
-                            status="pending",
-                            attempt=0,
-                            available_at=now,
-                            created_at=now,
-                            updated_at=now,
-                        )
+                    await self._ensure_root_resume_job(
+                        session,
+                        run_id=run_id,
+                        plan_id=plan.plan_id,
+                        root_wait_generation=plan.root_wait_generation,
+                        now=now,
                     )
                 else:
                     plan.status = "cancelled"
@@ -1851,6 +3530,7 @@ class PostgresWorkerOrchestrationRepository:
                     OrchestratorWorkerCommandModel.command_id
                     == confirmation.cancel_command_id
                 )
+                .execution_options(populate_existing=True)
             )
             if command is None or command.command_type != "cancel":
                 raise ValueError("worker_stop_cancel_command_unknown")
@@ -1895,6 +3575,19 @@ class PostgresWorkerOrchestrationRepository:
                 .execution_options(populate_existing=True)
                 .with_for_update()
             )
+            # 按 Run→Plan→Task→Execution→Command 顺序锁定命令，令 StopConfirmation
+            # 与正在返回的 CancelReceipt 在同一条命令状态线上原子收敛。
+            command = await session.scalar(
+                select(OrchestratorWorkerCommandModel)
+                .where(
+                    OrchestratorWorkerCommandModel.command_id
+                    == confirmation.cancel_command_id
+                )
+                .execution_options(populate_existing=True)
+                .with_for_update()
+            )
+            if command is None or command.command_type != "cancel":
+                raise ValueError("worker_stop_cancel_command_unknown")
             prior = await session.scalar(
                 select(WorkerStopConfirmationModel).where(
                     WorkerStopConfirmationModel.instance_id == confirmation.instance_id,
@@ -1939,6 +3632,10 @@ class PostgresWorkerOrchestrationRepository:
                 execution.capacity_reserved = False
                 execution.capacity_released_at = now
                 execution.updated_at = now
+            if execution.status == "cancelling":
+                execution.status = "cancelled"
+                execution.completed_at = execution.completed_at or now
+                execution.updated_at = now
             receipt_data = WorkerStopConfirmationReceiptModel.model_validate(
                 {
                     "stop_confirmation_id": confirmation.stop_confirmation_id,
@@ -1968,6 +3665,9 @@ class PostgresWorkerOrchestrationRepository:
                     created_at=now,
                 )
             )
+            command.status = "stopped"
+            command.receipt_json = receipt_data
+            self._clear_command_lease(command, now)
             return WorkerStopReceipt(
                 stop_confirmation_id=confirmation.stop_confirmation_id,
                 cancel_command_id=confirmation.cancel_command_id,

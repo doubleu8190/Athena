@@ -3,78 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
-
-
-class OrchestrationExecutionResponse(BaseModel):
-    execution_id: str
-    attempt: int
-    worker_thread_id: str
-    status: str
-    fencing_token: int | None = None
-    cancellation_epoch: int
-    lease_until: datetime | None = None
-    result_ref: str | None = None
-    error: dict[str, Any] | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class OrchestrationTaskResponse(BaseModel):
-    task_id: str
-    title: str
-    objective: str
-    status: str
-    active_execution_id: str | None = None
-    terminal_at: datetime | None = None
-    executions: list[OrchestrationExecutionResponse]
-
-
-class OrchestrationRoundResponse(BaseModel):
-    round_id: str
-    plan_version: int
-    round_number: int
-    status: str
-    expected_task_count: int
-    terminal_task_count: int
-    created_at: datetime
-    completed_at: datetime | None = None
-    tasks: list[OrchestrationTaskResponse]
-
-
-class OrchestrationApprovalResponse(BaseModel):
-    approval_id: str
-    plan_id: str | None = None
-    task_id: str | None = None
-    execution_id: str | None = None
-    interrupt_id: str | None = None
-    tool_name: str
-    risk_level: str
-    status: str
-    decision: str | None = None
-    created_at: datetime | str
-    decided_at: datetime | str | None = None
-
-
-class PlanVersionSummaryResponse(BaseModel):
-    version: int
-    change_reason: str | None = None
-    based_on_round_id: str | None = None
-    created_at: datetime
-
-
-class OrchestrationPlanResponse(BaseModel):
-    plan_id: str
-    status: str
-    user_goal: str
-    max_parallelism: int
-    current_version: int
-    active_round_id: str | None = None
-    cancellation_epoch: int
-    versions: list[PlanVersionSummaryResponse]
-    rounds: list[OrchestrationRoundResponse]
 
 
 class OrchestrationRunResponse(BaseModel):
@@ -84,29 +13,73 @@ class OrchestrationRunResponse(BaseModel):
     root_thread_id: str
     cancellation_epoch: int
     cancellation_external_effect_status: str
-    created_at: datetime | str
-    updated_at: datetime | str
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkerApprovalItemSnapshotResponse(BaseModel):
+    """S6 审批批次中的单项事实。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    approval_id: str
+    tool_name: str
+    summary: str
+    risk_level: str
+    arguments: dict[str, JsonValue]
+    arguments_sha256: str
+    status: str
+    decision: str | None = None
+    created_at: datetime
+    decided_at: datetime | None = None
+
+
+class WorkerApprovalSnapshotResponse(BaseModel):
+    """按 Worker ApprovalRequest 聚合的展示快照。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_request_id: str
+    pause_id: str
+    approval_batch_id: str | None = None
+    run_id: str
+    plan_id: str
+    task_id: str
+    execution_id: str
+    generation: int
+    # request.status 描述审批批次的中心生命周期，区别于 item.status。
+    status: str
+    expires_at: datetime
+    received_at: datetime
+    items: list[WorkerApprovalItemSnapshotResponse] = Field(min_length=1)
 
 
 class RunOrchestrationSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     run: OrchestrationRunResponse
-    plan: OrchestrationPlanResponse | None = None
-    approvals: list[OrchestrationApprovalResponse]
     worker_plans: list[WorkerPlanSnapshotResponse] = Field(default_factory=list)
+    approvals: list[WorkerApprovalSnapshotResponse] = Field(default_factory=list)
 
 
 class WorkerExecutionSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     execution_id: str
     generation: int
     status: str
     started_at: datetime | None = None
     deadline_at: datetime | None = None
+    completed_at: datetime | None = None
     cancellation_epoch: int
     capacity_reserved: bool
     error: dict[str, JsonValue] | None = None
 
 
 class WorkerTaskSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str
     operation_id: str
     task_ref: str
@@ -115,12 +88,13 @@ class WorkerTaskSnapshotResponse(BaseModel):
     status: str
     active_execution_id: str | None = None
     generation: int
-    output: dict[str, JsonValue] | None = None
-    error: dict[str, JsonValue] | None = None
+    output: JsonValue | None = None
+    error: JsonValue | None = None
     executions: list[WorkerExecutionSnapshotResponse]
 
 
 class WorkerPlanSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     plan_id: str
     run_id: str
     sequence: int
@@ -132,14 +106,3 @@ class WorkerPlanSnapshotResponse(BaseModel):
     created_at: datetime
     completed_at: datetime | None = None
     tasks: list[WorkerTaskSnapshotResponse]
-
-
-class PlanVersionResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    plan_id: str
-    version: int
-    dag_json: dict[str, Any]
-    change_reason: str | None = None
-    based_on_round_id: str | None = None
-    created_at: datetime

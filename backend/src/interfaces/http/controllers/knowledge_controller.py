@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -27,38 +26,35 @@ class KnowledgeBaseUpdateRequest(KnowledgeBaseCreateRequest):
 
 
 def build_knowledge_router(
-    service_factory: Callable[[], KnowledgeBaseService],
+    knowledge_service: KnowledgeBaseService,
 ) -> APIRouter:
     router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
-
-    def service() -> KnowledgeBaseService:
-        return service_factory()
 
     @router.get("")
     async def list_knowledge_bases() -> list[KnowledgeBaseResponse]:
         return [
             KnowledgeBaseResponse.from_application(value)
-            for value in await service().list_knowledge_bases()
+            for value in await knowledge_service.list_knowledge_bases()
         ]
 
     @router.post("", status_code=201)
     async def create_knowledge_base(body: KnowledgeBaseCreateRequest) -> KnowledgeBaseResponse:
         try:
-            value = await service().create_knowledge_base(body.name, body.description)
+            value = await knowledge_service.create_knowledge_base(body.name, body.description)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return KnowledgeBaseResponse.from_application(value)
 
     @router.get("/attachment-types")
     async def attachment_types() -> dict[str, list[str]]:
-        return {"extensions": await service().supported_extensions()}
+        return {"extensions": await knowledge_service.supported_extensions()}
 
     @router.patch("/{knowledge_base_id}")
     async def update_knowledge_base(
         knowledge_base_id: str, body: KnowledgeBaseUpdateRequest
     ) -> KnowledgeBaseResponse:
         try:
-            value = await service().update_knowledge_base(
+            value = await knowledge_service.update_knowledge_base(
                 knowledge_base_id, body.name, body.description
             )
         except KnowledgeBaseNotFoundError as exc:
@@ -70,7 +66,7 @@ def build_knowledge_router(
     @router.delete("/{knowledge_base_id}")
     async def delete_knowledge_base(knowledge_base_id: str) -> dict[str, str]:
         try:
-            await service().delete_knowledge_base(knowledge_base_id)
+            await knowledge_service.delete_knowledge_base(knowledge_base_id)
         except KnowledgeBaseNotFoundError as exc:
             raise HTTPException(status_code=404, detail="knowledge_base_not_found") from exc
         return {"status": "deleted", "knowledge_base_id": knowledge_base_id}
@@ -78,7 +74,7 @@ def build_knowledge_router(
     @router.get("/{knowledge_base_id}/documents")
     async def list_documents(knowledge_base_id: str) -> list[AttachmentResponse]:
         try:
-            values = await service().list_documents(knowledge_base_id)
+            values = await knowledge_service.list_documents(knowledge_base_id)
         except KnowledgeBaseNotFoundError as exc:
             raise HTTPException(status_code=404, detail="knowledge_base_not_found") from exc
         return [AttachmentResponse.from_application(value) for value in values]
@@ -101,7 +97,7 @@ def build_knowledge_router(
                         yield chunk
 
                 created.append(
-                    await service().upload_document(
+                    await knowledge_service.upload_document(
                         knowledge_base_id,
                         filename=upload.filename or "upload.bin",
                         mime_type=upload.content_type or "application/octet-stream",
@@ -120,7 +116,7 @@ def build_knowledge_router(
     @router.get("/{knowledge_base_id}/documents/{attachment_id}/versions")
     async def list_versions(knowledge_base_id: str, attachment_id: str) -> list[AttachmentResponse]:
         try:
-            values = await service().list_versions(knowledge_base_id, attachment_id)
+            values = await knowledge_service.list_versions(knowledge_base_id, attachment_id)
         except (KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError) as exc:
             raise HTTPException(status_code=404, detail="knowledge_document_not_found") from exc
         return [AttachmentResponse.from_application(value) for value in values]
@@ -128,7 +124,7 @@ def build_knowledge_router(
     @router.delete("/{knowledge_base_id}/documents/{attachment_id}")
     async def delete_document(knowledge_base_id: str, attachment_id: str) -> dict[str, str]:
         try:
-            await service().delete_document(knowledge_base_id, attachment_id)
+            await knowledge_service.delete_document(knowledge_base_id, attachment_id)
         except (KnowledgeBaseNotFoundError, KnowledgeDocumentNotFoundError) as exc:
             raise HTTPException(status_code=404, detail="knowledge_document_not_found") from exc
         return {"status": "deleted", "attachment_id": attachment_id}

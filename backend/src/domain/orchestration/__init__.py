@@ -29,6 +29,10 @@ from .contracts import (
     TaskAttempt,
     WorkerJobLease,
     WorkerTaskTerminalEvent,
+    RootExecutionAttemptFact,
+    RootPlanFacts,
+    RootPlanResumeLease,
+    RootPlanTaskFact,
 )
 from .validation import PlanValidationError, PlanValidator
 from .rounds import NoReadyTasksError, freeze_ready_round
@@ -40,6 +44,7 @@ from .ports import (
     TaskEventRepository,
     WorkerJobRepository,
     WorkerExecutionMessageRepository,
+    RootResumeJobRepository,
 )
 from .worker_execution_messages import (
     WorkerExecutionEntryType,
@@ -112,10 +117,15 @@ __all__ = [
     "WorkerExecutionMessageAppend",
     "WorkerExecutionMessageContent",
     "WorkerExecutionMessageRepository",
+    "RootResumeJobRepository",
     "WorkerLLMRole",
     "WorkerToolCallContent",
     "WorkerToolResultContent",
     "WorkerTaskTerminalEvent",
+    "RootExecutionAttemptFact",
+    "RootPlanFacts",
+    "RootPlanResumeLease",
+    "RootPlanTaskFact",
     "TASK_TERMINAL_STATUSES",
     "WorkerCapabilityRevision",
     "WorkerExecutionDeadline",

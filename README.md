@@ -180,7 +180,7 @@ POSTGRES_USER=doubleu
 POSTGRES_PASSWORD=your-password
 POSTGRES_DB=athena
 POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
+POSTGRES_PORT=8190
 POSTGRES_POOL_SIZE=10
 POSTGRES_MAX_OVERFLOW=10
 EMBEDDING_PROVIDER=sentence_transformers
@@ -203,6 +203,7 @@ SANDBOX_ENABLED=false
 首次切换时无需迁移旧数据库文件；确保 PostgreSQL 服务已启动并重新启动应用，
 应用会自动创建缺失的 schema 对象。`create_all` 不会修改已有表结构；升级到调整过的
 `memories` 表结构时，需要按项目约定重建开发数据库，当前代码不提供旧数据迁移。
+Worker 编排与审批模型也依赖 `create_all` 创建缺失对象，已有表的新增列和约束不会自动升级，旧数据也不会自动迁移。切换到包含这些 schema 变更的版本前，请先备份数据库，并使用独立的新开发数据库；本应用不会替你修改或重建已有数据库。
 
 `LLM_PROVIDERS` 是 JSON 数组，列表顺序决定 Provider 优先级。当前代码支持 `openai`、`anthropic`、`deepseek` 和 `ollama`；`ollama` 可以不填写 API Key，并可通过 `base_url` 指定地址。
 

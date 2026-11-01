@@ -25,6 +25,7 @@ from domain.runs import (
     RunQueryPort,
     RunStatus,
     RunSummary,
+    RootPlanWait,
 )
 from domain.runs.ports import RunLifecyclePort, RunQueuePort, RunSubmissionPort
 from domain.sessions import Session
@@ -641,16 +642,62 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         self,
         run_id: str,
         *,
-        plan_id: str,
-        round_id: str,
-        plan_version: int,
-        interrupt_id: str,
-        checkpoint_id: str,
+        wait: RootPlanWait,
         lease: LeaseGrant,
         wait_payload: dict[str, object] | None = None,
     ) -> bool:
-        """停用旧 Round 专属等待入口；S2 的 Root 恢复以唯一作业建模。"""
-        raise RuntimeError("worker_round_wait_unavailable_in_s2")
+        """以 Run 租约 fencing 原子登记当前 Plan checkpoint 与唯一恢复作业。"""
+        if wait.run_id != run_id or lease.key != LeaseKey("root_execution", run_id):
+            return False
+        async with self._session_factory() as db:
+            async with db.begin():
+                now = await db.scalar(select(func.clock_timestamp()))
+                if now is None:
+                    raise RuntimeError("database_clock_unavailable")
+                now = now.astimezone(timezone.utc)
+                session_id = await db.scalar(
+                    select(AgentRunModel.session_id).where(AgentRunModel.run_id == run_id)
+                )
+                if session_id is None:
+                    return False
+                session_row = await db.scalar(
+                    select(SessionModel).where(SessionModel.id == session_id).with_for_update()
+                )
+                run = await db.get(AgentRunModel, run_id, with_for_update=True)
+                plan = await db.scalar(select(OrchestratorPlanModel).where(
+                    OrchestratorPlanModel.plan_id == wait.plan_id,
+                    OrchestratorPlanModel.run_id == run_id,
+                ).with_for_update())
+                if session_row is None or session_row.active_run_id != run_id or run is None or plan is None or run.status != RunStatus.RUNNING.value:
+                    return False
+                try:
+                    await self._leases.assert_current_in_transaction(db, lease)
+                except LeaseLostError:
+                    return False
+                if plan.sequence != wait.plan_sequence or plan.root_wait_generation != wait.root_wait_generation:
+                    return False
+                if run.root_wait_generation != wait.root_wait_generation or run.orchestrator_plan_sequence != wait.plan_sequence:
+                    return False
+                if run.root_wait_interrupt_id is not None:
+                    return (
+                        run.root_wait_interrupt_id == wait.interrupt_id
+                        and run.root_wait_checkpoint_id == wait.checkpoint_id
+                    )
+                run.root_wait_interrupt_id = wait.interrupt_id
+                run.root_wait_checkpoint_id = wait.checkpoint_id
+                run.root_wait_armed_at = now
+                existing = await db.scalar(select(OrchestratorRootResumeJobModel).where(
+                    OrchestratorRootResumeJobModel.run_id == run_id,
+                    OrchestratorRootResumeJobModel.plan_id == wait.plan_id,
+                    OrchestratorRootResumeJobModel.root_wait_generation == wait.root_wait_generation,
+                ).with_for_update())
+                if existing is None:
+                    db.add(OrchestratorRootResumeJobModel(
+                        job_id=str(uuid4()), run_id=run_id, plan_id=wait.plan_id,
+                        root_wait_generation=wait.root_wait_generation, status="pending",
+                        attempt=0, available_at=now, created_at=now, updated_at=now,
+                    ))
+                return True
 
     async def complete(
         self, run_id: str, result: dict[str, object], *, lease: LeaseGrant,
@@ -1293,6 +1340,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         "timed_out",
                     }:
                         execution.status = "cancelled"
+                        execution.completed_at = execution.completed_at or now
                         execution.cancellation_epoch = cancellation_epoch
                         execution.capacity_reserved = False
                         execution.updated_at = now
@@ -1528,6 +1576,16 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         self, session: AsyncSession, run_id: str, now: datetime
     ) -> None:
         """撤销尚未执行的 Root 恢复作业，避免取消后重新进入 Root Graph。"""
+        job_ids = (
+            await session.scalars(
+                select(OrchestratorRootResumeJobModel.job_id).where(
+                    OrchestratorRootResumeJobModel.run_id == run_id,
+                    OrchestratorRootResumeJobModel.status.in_(
+                        ("pending", "running")
+                    ),
+                )
+            )
+        ).all()
         await session.execute(
             update(OrchestratorRootResumeJobModel)
             .where(
@@ -1539,6 +1597,12 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 updated_at=now,
             )
         )
+        # 取消事务稍后会撤销仍活跃的租约；这里关闭尚未领取的资源，避免
+        # cancelled job 遗留一个永远可领取的 pending LeaseKey。
+        for job_id in job_ids:
+            await self._leases.complete_unclaimed_in_transaction(
+                session, LeaseKey("root_resume", job_id)
+            )
 
     async def _revoke_run_leases(
         self,

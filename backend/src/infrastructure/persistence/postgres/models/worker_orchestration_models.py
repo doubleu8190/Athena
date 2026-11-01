@@ -97,6 +97,43 @@ class WorkerRegistrationReceiptModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class WorkerApprovalRequestModel(Base):
+    """保存 Worker 审批批次幂等身份与稳定接收回执。"""
+
+    __tablename__ = "worker_approval_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "instance_id", "approval_request_id", name="uq_worker_approval_request_identity"
+        ),
+        Index("idx_worker_approval_request_execution", "execution_id", "generation"),
+    )
+
+    receipt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    instance_id: Mapped[str] = mapped_column(
+        ForeignKey("worker_instances.instance_id"), nullable=False
+    )
+    approval_request_id: Mapped[str] = mapped_column(String, nullable=False)
+    pause_id: Mapped[str] = mapped_column(String, nullable=False)
+    run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.run_id"), nullable=False)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("agent_plans.plan_id"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("agent_tasks.task_id"), nullable=False)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_executions.execution_id"), nullable=False
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    cancellation_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_hash: Mapped[str] = mapped_column(String, nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(_JSON_DOCUMENT, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    receipt_json: Mapped[dict[str, Any]] = mapped_column(_JSON_DOCUMENT, nullable=False)
+    resume_command_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    resume_wait_deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class OrchestratorPlanModel(Base):
     """保存 Run 中一轮不可变 Plan 及其完成计数。"""
 
@@ -187,9 +224,12 @@ class OrchestratorExecutionModel(Base):
     execution_timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cancellation_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     capacity_reserved: Mapped[bool] = mapped_column(default=False, nullable=False)
+    current_approval_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    current_pause_id: Mapped[str | None] = mapped_column(String, nullable=True)
     capacity_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     remaining_seconds: Mapped[float | None] = mapped_column(nullable=True)
     worker_result_id: Mapped[str | None] = mapped_column(String, nullable=True)
     result_json: Mapped[dict[str, Any] | None] = mapped_column(_JSON_DOCUMENT, nullable=True)
@@ -258,13 +298,21 @@ class WorkerResultReceiptModel(Base):
 
     __tablename__ = "worker_result_receipts"
     __table_args__ = (
-        UniqueConstraint("execution_id", "result_id", name="uq_worker_result_receipt_idempotency"),
+        UniqueConstraint(
+            "execution_id",
+            "result_source",
+            "result_id",
+            name="uq_worker_result_receipt_idempotency",
+        ),
         Index("idx_worker_result_receipt_task", "task_id", "created_at"),
     )
 
     receipt_id: Mapped[str] = mapped_column(String, primary_key=True)
     execution_id: Mapped[str] = mapped_column(ForeignKey("task_executions.execution_id"), nullable=False)
     task_id: Mapped[str] = mapped_column(ForeignKey("agent_tasks.task_id"), nullable=False)
+    result_source: Mapped[str] = mapped_column(
+        String, nullable=False, default="worker", server_default="worker"
+    )
     result_id: Mapped[str] = mapped_column(String, nullable=False)
     request_hash: Mapped[str] = mapped_column(String, nullable=False)
     disposition: Mapped[str] = mapped_column(String, nullable=False)

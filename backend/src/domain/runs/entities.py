@@ -99,8 +99,8 @@ class RootWaitCheckpoint:
 
     run_id: str
     plan_id: str
-    round_id: str
-    plan_version: int
+    plan_sequence: int
+    root_wait_generation: int
     interrupt_id: str
     checkpoint_id: str
 
@@ -108,14 +108,15 @@ class RootWaitCheckpoint:
         identity = (
             self.run_id,
             self.plan_id,
-            self.round_id,
             self.interrupt_id,
             self.checkpoint_id,
         )
         if any(not isinstance(value, str) or not value.strip() for value in identity):
             raise ValueError("Root wait identity fields must not be empty")
-        if type(self.plan_version) is not int or self.plan_version < 1:
-            raise ValueError("plan_version must be a positive integer")
+        if type(self.plan_sequence) is not int or self.plan_sequence < 1:
+            raise ValueError("plan_sequence must be a positive integer")
+        if type(self.root_wait_generation) is not int or self.root_wait_generation < 1:
+            raise ValueError("root_wait_generation must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)

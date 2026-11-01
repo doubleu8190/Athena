@@ -14,7 +14,7 @@ from .entities import (
     RunStatus,
     RunSummary,
 )
-from .payloads import RunStartPayload
+from .payloads import RootPlanWait, RunStartPayload
 
 
 class RunQueuePort(Protocol):
@@ -123,14 +123,12 @@ class RunLifecyclePort(Protocol):
         self,
         run_id: str,
         *,
-        plan_id: str,
-        round_id: str,
-        plan_version: int,
-        interrupt_id: str,
-        checkpoint_id: str,
+        wait: RootPlanWait,
         lease: LeaseGrant,
         wait_payload: dict[str, object] | None = None,
     ) -> bool: ...
+
+    async def cancel_root_wait(self, run_id: str, *, lease: LeaseGrant) -> bool: ...
 
 
 class RunQueryPort(Protocol):

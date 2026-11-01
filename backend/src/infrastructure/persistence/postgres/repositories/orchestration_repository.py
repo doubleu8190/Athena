@@ -24,6 +24,7 @@ from ..models import (
     AgentTaskModel,
     ApprovalRecordModel,
     TaskExecutionModel,
+    WorkerApprovalRequestModel,
 )
 from domain.leases import LeaseRecord
 from .lease_center import PostgresLeaseCenter
@@ -134,11 +135,24 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                     .order_by(AgentPlanModel.sequence)
                 )
             ).scalars().all()
-            approvals = (
+            approval_requests = (
+                await session.execute(
+                    select(WorkerApprovalRequestModel)
+                    .where(WorkerApprovalRequestModel.run_id == run_id)
+                    .order_by(
+                        WorkerApprovalRequestModel.received_at,
+                        WorkerApprovalRequestModel.approval_request_id,
+                    )
+                )
+            ).scalars().all()
+            approval_records = (
                 await session.execute(
                     select(ApprovalRecordModel)
-                    .where(ApprovalRecordModel.run_id == run_id)
-                    .order_by(ApprovalRecordModel.created_at, ApprovalRecordModel.approval_id)
+                    .where(
+                        ApprovalRecordModel.run_id == run_id,
+                        ApprovalRecordModel.approval_request_id.is_not(None),
+                    )
+                    .order_by(ApprovalRecordModel.item_id, ApprovalRecordModel.approval_id)
                 )
             ).scalars().all()
 
@@ -161,6 +175,81 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
             executions_by_task: dict[str, list[TaskExecutionModel]] = {}
             for execution in executions:
                 executions_by_task.setdefault(execution.task_id, []).append(execution)
+            approval_records_by_request: dict[str, dict[str, ApprovalRecordModel]] = {}
+            for approval in approval_records:
+                if approval.approval_request_id is None or approval.item_id is None:
+                    continue
+                records_for_request = approval_records_by_request.setdefault(
+                    approval.approval_request_id, {}
+                )
+                if approval.item_id in records_for_request:
+                    raise RuntimeError("worker_approval_item_identity_duplicate")
+                records_for_request[approval.item_id] = approval
+            approval_snapshots: list[dict[str, object]] = []
+            for request in approval_requests:
+                request_items = request.request_json.get("items")
+                if not isinstance(request_items, list):
+                    raise RuntimeError("worker_approval_request_items_invalid")
+                item_records = approval_records_by_request.get(
+                    request.approval_request_id, {}
+                )
+                items: list[dict[str, object]] = []
+                request_item_ids: set[str] = set()
+                for item in request_items:
+                    if not isinstance(item, Mapping):
+                        raise RuntimeError("worker_approval_request_item_invalid")
+                    item_id = item.get("item_id")
+                    if not isinstance(item_id, str) or item_id in request_item_ids:
+                        raise RuntimeError("worker_approval_request_item_identity_invalid")
+                    request_item_ids.add(item_id)
+                    approval = item_records.get(item_id) if isinstance(item_id, str) else None
+                    if approval is None:
+                        raise RuntimeError("worker_approval_item_record_missing")
+                    if (
+                        approval.run_id != request.run_id
+                        or approval.plan_id != request.plan_id
+                        or approval.task_id != request.task_id
+                        or approval.execution_id != request.execution_id
+                        or approval.generation != request.generation
+                        or approval.pause_id != request.pause_id
+                    ):
+                        raise RuntimeError("worker_approval_item_parent_identity_mismatch")
+                    items.append(
+                        {
+                            "item_id": item_id,
+                            "approval_id": approval.approval_id,
+                            "tool_name": item.get("tool_name"),
+                            "summary": item.get("summary"),
+                            "risk_level": item.get("risk_level"),
+                            "arguments": item.get("arguments"),
+                            "arguments_sha256": item.get("arguments_sha256"),
+                            "status": approval.status,
+                            "decision": approval.decision,
+                            "created_at": approval.created_at,
+                            "decided_at": approval.decided_at,
+                        }
+                    )
+                if request_item_ids != set(item_records):
+                    raise RuntimeError("worker_approval_request_item_set_mismatch")
+                batch_id = request.receipt_json.get("approval_batch_id")
+                if (len(items) == 1) != (batch_id is None):
+                    raise RuntimeError("worker_approval_batch_identity_invalid")
+                approval_snapshots.append(
+                    {
+                        "approval_request_id": request.approval_request_id,
+                        "pause_id": request.pause_id,
+                        "approval_batch_id": batch_id,
+                        "run_id": request.run_id,
+                        "plan_id": request.plan_id,
+                        "task_id": request.task_id,
+                        "execution_id": request.execution_id,
+                        "generation": request.generation,
+                        "status": request.status,
+                        "expires_at": request.expires_at,
+                        "received_at": request.received_at,
+                        "items": items,
+                    }
+                )
             tasks_by_plan: dict[str, list[dict[str, object]]] = {}
             for task in task_rows:
                 tasks_by_plan.setdefault(task.plan_id, []).append(
@@ -184,6 +273,7 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                                 "status": execution.status,
                                 "started_at": execution.started_at,
                                 "deadline_at": execution.deadline_at,
+                                "completed_at": execution.completed_at,
                                 "cancellation_epoch": execution.cancellation_epoch,
                                 "capacity_reserved": execution.capacity_reserved,
                                 "error": execution.error_json,
@@ -208,9 +298,6 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                 }
                 for plan in plan_rows
             ]
-            # 旧 plan 字段表示 DAG+Round；S2 返回新结构时不伪装为旧 DTO。
-            plan_document: dict[str, object] | None = None
-
         return {
             "run": {
                 "run_id": run_row.run_id,
@@ -222,24 +309,8 @@ class PostgresOrchestrationRepository(ReviewContextRepository):
                 "created_at": run_row.created_at,
                 "updated_at": run_row.updated_at,
             },
-            "plan": plan_document,
             "worker_plans": worker_plans,
-            "approvals": [
-                {
-                    "approval_id": approval.approval_id,
-                    "plan_id": approval.plan_id,
-                    "task_id": approval.task_id,
-                    "execution_id": approval.execution_id,
-                    "interrupt_id": approval.interrupt_id,
-                    "tool_name": approval.tool_name,
-                    "risk_level": approval.risk_level,
-                    "status": approval.status,
-                    "decision": approval.decision,
-                    "created_at": approval.created_at,
-                    "decided_at": approval.decided_at,
-                }
-                for approval in approvals
-            ],
+            "approvals": approval_snapshots,
         }
 
     async def get_plan_version(

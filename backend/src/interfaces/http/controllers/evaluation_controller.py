@@ -37,20 +37,20 @@ class GateEvaluationRequest(BaseModel):
 
 def build_evaluation_router(
     *,
-    repository_factory: Callable[[], Any],
+    repository: Any,
     target_factory: Callable[[Any], Any] | None = None,
-    dataset_loader_factory: Callable[[str], Any] | None = None,
-    event_sink_factory: Callable[[], Any] | None = None,
-    progress_hub_factory: Callable[[], Any] | None = None,
+    dataset_loader: Callable[[str], Any] | None = None,
+    event_sink: Any | None = None,
+    progress_hub: Any | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/evaluations", tags=["evaluations"])
 
     @router.get("/runs/{run_id}/events")
     async def evaluation_events(run_id: str, request: Request) -> StreamingResponse:
-        if progress_hub_factory is None:
+        if progress_hub is None:
             raise HTTPException(status_code=503, detail="evaluation_progress_not_configured")
         async def stream():
-            async for event in progress_hub_factory().subscribe(run_id):
+            async for event in progress_hub.subscribe(run_id):
                 if await request.is_disconnected():
                     break
                 yield f"event: {event['event_type']}\ndata: {json.dumps(event['payload'], ensure_ascii=False)}\n\n"
@@ -58,53 +58,53 @@ def build_evaluation_router(
 
     @router.get("/datasets")
     async def list_datasets() -> dict[str, Any]:
-        service = EvaluationQueryService(repository_factory())
+        service = EvaluationQueryService(repository)
         if not hasattr(service.repository, "list_manifests"):
             return {"items": []}
         return {"items": await service.list_datasets()}
 
     @router.get("/datasets/{dataset_id}/versions")
     async def list_dataset_versions(dataset_id: str) -> dict[str, Any]:
-        service = EvaluationQueryService(repository_factory())
+        service = EvaluationQueryService(repository)
         values = [item for item in await service.list_datasets() if item["dataset_name"] == dataset_id]
         return {"items": values}
 
     @router.post("/datasets/validate")
     async def validate_dataset(body: DatasetImportRequest) -> dict[str, Any]:
         try:
-            if dataset_loader_factory is None:
+            if dataset_loader is None:
                 raise RuntimeError("evaluation_dataset_loader_not_configured")
-            manifest = dataset_loader_factory(body.path)
+            manifest = dataset_loader(body.path)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"dataset_name": manifest.dataset_name, "version_id": manifest.version_id, "manifest_sha256": manifest.manifest_sha256, "case_count": manifest.case_count, "tag_counts": manifest.tag_counts}
 
     @router.post("/datasets")
     async def create_dataset(body: DatasetImportRequest) -> dict[str, Any]:
-        if dataset_loader_factory is None:
+        if dataset_loader is None:
             raise HTTPException(status_code=503, detail="evaluation_dataset_loader_not_configured")
         try:
-            manifest = dataset_loader_factory(body.path)
-            await repository_factory().create_manifest(manifest)
+            manifest = dataset_loader(body.path)
+            await repository.create_manifest(manifest)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"dataset_name": manifest.dataset_name, "version_id": manifest.version_id, "manifest_sha256": manifest.manifest_sha256, "case_count": manifest.case_count}
 
     @router.get("/runs")
     async def list_runs(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), status: str | None = None, dataset_version: str | None = None) -> dict[str, Any]:
-        items, total = await EvaluationQueryService(repository_factory()).list_runs(limit=limit, offset=offset, status=status, dataset_version=dataset_version)
+        items, total = await EvaluationQueryService(repository).list_runs(limit=limit, offset=offset, status=status, dataset_version=dataset_version)
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     @router.get("/runs/{run_id}")
     async def get_run(run_id: str) -> dict[str, Any]:
-        value = await EvaluationQueryService(repository_factory()).get_run(run_id)
+        value = await EvaluationQueryService(repository).get_run(run_id)
         if value is None:
             raise HTTPException(status_code=404, detail="evaluation_run_not_found")
         return value
 
     @router.get("/runs/{run_id}/metrics")
     async def get_metrics(run_id: str, metric_name: str | None = None) -> dict[str, Any]:
-        value = await EvaluationQueryService(repository_factory()).get_run(run_id)
+        value = await EvaluationQueryService(repository).get_run(run_id)
         if value is None:
             raise HTTPException(status_code=404, detail="evaluation_run_not_found")
         metrics = value["metrics"] if metric_name is None else [item for item in value["metrics"] if item["metric_name"] == metric_name]
@@ -112,21 +112,21 @@ def build_evaluation_router(
 
     @router.get("/runs/{run_id}/cases")
     async def get_cases(run_id: str) -> dict[str, Any]:
-        value = await EvaluationQueryService(repository_factory()).get_run(run_id)
+        value = await EvaluationQueryService(repository).get_run(run_id)
         if value is None:
             raise HTTPException(status_code=404, detail="evaluation_run_not_found")
         return {"run_id": run_id, "items": value["cases"]}
 
     @router.get("/runs/{run_id}/compare")
     async def compare_run(run_id: str, baseline_run_id: str = Query(...)) -> dict[str, Any]:
-        value = await EvaluationQueryService(repository_factory()).compare(run_id, baseline_run_id)
+        value = await EvaluationQueryService(repository).compare(run_id, baseline_run_id)
         if value is None:
             raise HTTPException(status_code=404, detail="evaluation_run_not_found")
         return value
 
     @router.post("/runs/{run_id}/cancel")
     async def cancel_run(run_id: str) -> dict[str, Any]:
-        value = await repository_factory().cancel_run(run_id)
+        value = await repository.cancel_run(run_id)
         if value is None:
             raise HTTPException(status_code=404, detail="evaluation_run_not_found")
         if str(value.status) != "cancelled":
@@ -139,7 +139,7 @@ def build_evaluation_router(
             rules = make_gate_rules(body.gates)
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="invalid_gate_rule") from exc
-        items = await EvaluationQueryService(repository_factory()).evaluate_gates(run_id, rules)
+        items = await EvaluationQueryService(repository).evaluate_gates(run_id, rules)
         if items is None:
             raise HTTPException(status_code=404, detail="evaluation_run_not_found")
         return {"run_id": run_id, "items": items}
@@ -149,18 +149,17 @@ def build_evaluation_router(
         if body.mode not in {"retrieval", "chat", "agent"}:
             raise HTTPException(status_code=422, detail="evaluation_mode_not_supported")
         try:
-            if dataset_loader_factory is None:
+            if dataset_loader is None:
                 raise RuntimeError("evaluation_dataset_loader_not_configured")
-            manifest = dataset_loader_factory(body.dataset_path)
+            manifest = dataset_loader(body.dataset_path)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        repository = repository_factory()
         await repository.create_manifest(manifest)
         config = make_evaluation_config(body.model_dump(), manifest.version_id)
         if target_factory is None and body.mode == "retrieval":
             raise HTTPException(status_code=503, detail="evaluation_target_not_configured")
         target = target_factory(manifest) if target_factory is not None and body.mode == "retrieval" else FixtureChatTarget()
-        service = EvaluationService(repository, target=target, event_sink=event_sink_factory() if event_sink_factory is not None else None)
+        service = EvaluationService(repository, target=target, event_sink=event_sink)
         queued = await service.queue(manifest, config)
         background_tasks.add_task(service.run, manifest, config, run_id=queued.run_id)
         return {"run_id": queued.run_id, "status": str(queued.status), "case_count": queued.case_count}

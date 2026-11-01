@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from application.events import (
@@ -48,26 +48,20 @@ def _format_event(event: EventResponse) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def build_events_router(
-    stream_service_factory: Callable[[], EventStreamService],
-) -> APIRouter:
+def build_events_router(stream_service: EventStreamService) -> APIRouter:
     router = APIRouter(prefix="/sessions", tags=["events"])
-
-    def service() -> EventStreamService:
-        return stream_service_factory()
 
     @router.get("/{session_id}/events")
     async def session_events(
         session_id: str,
         request: Request,
         after: int = Query(default=0, ge=0),
-        events: EventStreamService = Depends(service),
     ) -> StreamingResponse:
         last_header = request.headers.get("last-event-id")
         if last_header and last_header.isdigit():
             after = int(last_header)
         try:
-            queue, watermark = await events.open_subscription(session_id)
+            queue, watermark = await stream_service.open_subscription(session_id)
         except EventSessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
 
@@ -75,7 +69,7 @@ def build_events_router(
             cursor = after
             try:
                 while cursor < watermark:
-                    page = await events.replay(session_id, cursor, watermark, limit=256)
+                    page = await stream_service.replay(session_id, cursor, watermark, limit=256)
                     if not page:
                         break
                     for event in page:
@@ -93,7 +87,7 @@ def build_events_router(
                         event = await asyncio.wait_for(queue.get(), timeout=15)
                     except asyncio.TimeoutError:
                         while True:
-                            page = await events.replay(session_id, cursor, None, limit=256)
+                            page = await stream_service.replay(session_id, cursor, None, limit=256)
                             if not page:
                                 break
                             for value in page:
@@ -105,12 +99,12 @@ def build_events_router(
                         yield ": heartbeat\n\n"
                         continue
                     if event.session_seq is None:
-                        yield _format_event(events.response(event))
+                        yield _format_event(stream_service.response(event))
                         continue
                     # Durable notification is only a wake-up. The database log
                     # supplies the ordered events and closes concurrent publish gaps.
                     while True:
-                        page = await events.replay(session_id, cursor, None, limit=256)
+                        page = await stream_service.replay(session_id, cursor, None, limit=256)
                         if not page:
                             break
                         for value in page:
@@ -120,7 +114,7 @@ def build_events_router(
                         if len(page) < 256:
                             break
             finally:
-                await events.close(session_id, queue)
+                await stream_service.close(session_id, queue)
 
         return StreamingResponse(
             stream(),

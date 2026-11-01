@@ -16,7 +16,7 @@ def test_render_plan_results_extracts_text_from_worker_result_envelopes() -> Non
                 },
             }
         },
-        [{"task_id": "task-1", "title": "Summarize the result"}],
+        [{"task_ref": "task-1", "objective": "Summarize the result"}],
     )
 
     assert content == "Summarize the result：A concise worker answer."
@@ -41,7 +41,7 @@ def test_render_plan_results_extracts_command_stdout_from_worker_result() -> Non
                 },
             }
         },
-        [{"task_id": "task-1", "title": "执行 Python 版本查询命令"}],
+        [{"task_ref": "task-1", "objective": "执行 Python 版本查询命令"}],
     )
 
     assert content == "执行 Python 版本查询命令：3.12.14\n"

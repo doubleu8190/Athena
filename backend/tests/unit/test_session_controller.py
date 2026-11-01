@@ -63,7 +63,7 @@ def make_client() -> TestClient:
         id_factory=lambda: "session-controller-1",
         clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
-    return TestClient(create_app(session_service_factory=lambda: service))
+    return TestClient(create_app(session_service=service))
 
 
 def test_session_controller_routes_crud_through_service() -> None:

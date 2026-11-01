@@ -290,6 +290,7 @@ class WorkerDispatchLease:
     instance_key: str | None = None
     service_principal: str | None = None
     base_url: str | None = None
+    command_type: str = "execute"
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +346,7 @@ class WorkerResultSubmission:
     output: dict[str, JsonValue] | None = None
     error: WorkerExecutionError | None = None
     request_hash: str | None = None
+    internal_timeout: bool = False
 
     def __post_init__(self) -> None:
         """校验结果请求的身份和成功/失败内容互斥关系。
@@ -375,6 +377,34 @@ class WorkerResultSubmission:
                 raise ValueError("worker_failure_result_content_invalid")
         else:
             raise ValueError("worker_result_status_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerApprovalItem:
+    """冻结一个待审批操作及其参数摘要。"""
+
+    item_id: str
+    tool_name: str
+    summary: str
+    risk_level: str
+    arguments: dict[str, JsonValue]
+    arguments_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerApprovalIntent:
+    """描述 Worker 发起的、绑定当前 Execution 的审批批次。"""
+
+    approval_request_id: str
+    pause_id: str
+    run_id: str
+    plan_id: str
+    task_id: str
+    execution_id: str
+    generation: int
+    cancellation_epoch: int
+    items: tuple[WorkerApprovalItem, ...]
+    request_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,6 +444,8 @@ __all__ = [
     "WorkerCapabilityRevision",
     "WorkerExecutionDeadline",
     "WorkerExecutionError",
+    "WorkerApprovalItem",
+    "WorkerApprovalIntent",
     "WorkerExecutionStatus",
     "WorkerDispatchLease",
     "WorkerDispatchStart",

@@ -438,12 +438,20 @@ class PostgresWorkerResourceRepository:
             return None
         run, plan, task, execution, instance = result
         now = await self._database_now(session)
+        allowed_waiting_resume = (
+            not require_live_deadline
+            and task.status == "waiting_approval"
+            and execution.status == "waiting_approval"
+            and execution.deadline_at is None
+            and execution.remaining_seconds is not None
+            and execution.remaining_seconds > 0
+        )
         if (
             run.status != "running"
             or plan.status != "running"
-            or task.status != "running"
+            or (task.status != "running" and not allowed_waiting_resume)
             or task.active_execution_id != execution.execution_id
-            or execution.status != "running"
+            or (execution.status != "running" and not allowed_waiting_resume)
             or execution.instance_id != instance.instance_id
             or execution.generation != task.execution_generation
             or execution.cancellation_epoch != task.cancellation_epoch

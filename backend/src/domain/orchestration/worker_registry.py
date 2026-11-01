@@ -53,6 +53,34 @@ class WorkerAvailableInstance:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerRegistryInstanceSnapshot:
+    """供管理页面展示的完整 Worker 实例与契约快照。"""
+
+    instance_id: str
+    instance_key: str
+    service_principal: str
+    base_url: str
+    status: str
+    accepting_tasks: bool
+    health_identity_valid: bool
+    consecutive_health_failures: int
+    consecutive_health_successes: int
+    last_health_check_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    contract_id: str
+    contract_revision: int
+    execution_timeout_seconds: int
+    max_concurrency: int
+    current_concurrency: int
+    available_concurrency: int
+    can_do: tuple[str, ...]
+    cannot_do: tuple[str, ...]
+    input_schema: dict[str, JsonValue]
+    output_schema: dict[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerHealthTransition:
     """记录一次 CAS 成功的健康探测及接单状态转换。"""
 
@@ -67,6 +95,7 @@ class WorkerHealthTransition:
 __all__ = [
     "WorkerInstancePrincipalMismatch",
     "WorkerAvailableInstance",
+    "WorkerRegistryInstanceSnapshot",
     "WorkerHealthProbeResult",
     "WorkerHealthProbeTarget",
     "WorkerHealthTransition",

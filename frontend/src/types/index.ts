@@ -270,61 +270,76 @@ export interface RunTimelineResponse {
   links: { retrieval_run_ids: string[]; plan_ids: string[]; task_ids: string[] }
 }
 
-export interface PlanVersionSummary {
-  version: number
-  change_reason?: string | null
-  based_on_round_id?: string | null
-  created_at: string
-}
+/** Worker 编排快照中的开放 JSON 值。后端不限制 Worker 输出的对象形状。 */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
-export interface OrchestrationExecutionSnapshot {
+export interface WorkerExecutionSnapshot {
   execution_id: string
-  attempt: number
-  worker_thread_id: string
+  generation: number
   status: string
-  fencing_token: number | null
+  started_at?: string | null
+  deadline_at?: string | null
+  completed_at?: string | null
   cancellation_epoch: number
-  lease_until?: string | null
-  result_ref?: string | null
-  error?: { code?: string; message?: string; retryable?: boolean; stage?: string } | null
-  created_at: string
-  updated_at: string
+  capacity_reserved: boolean
+  error?: JsonValue | null
 }
 
-export interface OrchestrationTaskSnapshot {
+export interface WorkerTaskSnapshot {
   task_id: string
-  title: string
+  operation_id: string
+  task_ref: string
   objective: string
+  acceptance_criteria: string
   status: string
   active_execution_id?: string | null
-  terminal_at?: string | null
-  executions: OrchestrationExecutionSnapshot[]
+  generation: number
+  output?: JsonValue | null
+  error?: JsonValue | null
+  executions: WorkerExecutionSnapshot[]
 }
 
-export interface OrchestrationRoundSnapshot {
-  round_id: string
-  plan_version: number
-  round_number: number
+export interface WorkerPlanSnapshot {
+  plan_id: string
+  run_id: string
+  sequence: number
+  goal: string
   status: string
   expected_task_count: number
   terminal_task_count: number
+  root_wait_generation: number
   created_at: string
   completed_at?: string | null
-  tasks: OrchestrationTaskSnapshot[]
+  tasks: WorkerTaskSnapshot[]
 }
 
-export interface OrchestrationApprovalSnapshot {
+export interface WorkerApprovalItemSnapshot {
+  item_id: string
   approval_id: string
-  plan_id?: string | null
-  task_id?: string | null
-  execution_id?: string | null
-  interrupt_id?: string | null
   tool_name: string
+  summary: string
   risk_level: string
+  arguments: JsonValue
+  arguments_sha256: string
   status: string
   decision?: string | null
   created_at: string
   decided_at?: string | null
+}
+
+export interface WorkerApprovalRequestSnapshot {
+  approval_request_id: string
+  pause_id: string
+  approval_batch_id?: string | null
+  run_id: string
+  plan_id: string
+  task_id: string
+  execution_id: string
+  generation: number
+  status: string
+  expires_at: string
+  received_at: string
+  items: WorkerApprovalItemSnapshot[]
 }
 
 export interface RunOrchestrationSnapshot {
@@ -338,27 +353,8 @@ export interface RunOrchestrationSnapshot {
     created_at: string
     updated_at: string
   }
-  plan?: {
-    plan_id: string
-    status: string
-    user_goal: string
-    max_parallelism: number
-    current_version: number
-    active_round_id?: string | null
-    cancellation_epoch: number
-    versions: PlanVersionSummary[]
-    rounds: OrchestrationRoundSnapshot[]
-  } | null
-  approvals: OrchestrationApprovalSnapshot[]
-}
-
-export interface PlanVersionDetail extends PlanVersionSummary {
-  plan_id: string
-  dag_json: {
-    nodes: Array<Record<string, unknown>>
-    edges: Array<Record<string, unknown>>
-    [key: string]: unknown
-  }
+  worker_plans: WorkerPlanSnapshot[]
+  approvals: WorkerApprovalRequestSnapshot[]
 }
 
 // ─── 工具调用相关 ────────────────────────────────────────────────
@@ -377,7 +373,7 @@ export interface ToolCall {
   error?: string
   error_stack?: string
   error_detail?: ExecutionError | null
-  risk_level: "low" | "medium" | "high"
+  risk_level: "low" | "medium" | "high" | "critical"
   /** 实时流由 TOOL_CALL_START 事件补全，用于归组 */
   step_id?: string
   run_id?: string
@@ -402,7 +398,7 @@ export interface ApprovalRequest {
   approval_id: string
   tool_name: string
   arguments: Record<string, unknown>
-  risk_level: "low" | "medium" | "high"
+  risk_level: "low" | "medium" | "high" | "critical"
   approval_batch_id?: string | null
   description?: string
   session_id?: string
@@ -417,6 +413,12 @@ export interface ApprovalRequest {
 export interface ApprovalResult {
   approval_id: string
   decision: "approved" | "denied" | "expired" | "cancelled"
+}
+
+export interface ApprovalStatusSnapshot {
+  approval_id: string
+  resolved: boolean
+  resolution: string
 }
 
 // ─── 事件相关 ────────────────────────────────────────────────────
@@ -579,6 +581,32 @@ export type AppView =
   | "mcp"
   | "retrieval"
   | "evaluation"
+  | "worker-registry"
+
+export interface WorkerRegistryInstance {
+  instance_id: string
+  instance_key: string
+  service_principal: string
+  base_url: string
+  status: "ready" | "not_ready" | "disabled" | string
+  accepting_tasks: boolean
+  health_identity_valid: boolean
+  consecutive_health_failures: number
+  consecutive_health_successes: number
+  last_health_check_at: string | null
+  created_at: string
+  updated_at: string
+  contract_id: string
+  contract_revision: number
+  execution_timeout_seconds: number
+  max_concurrency: number
+  current_concurrency: number
+  available_concurrency: number
+  can_do: string[]
+  cannot_do: string[]
+  input_schema: Record<string, unknown>
+  output_schema: Record<string, unknown>
+}
 
 export interface EvaluationRunSummary {
   run_id: string

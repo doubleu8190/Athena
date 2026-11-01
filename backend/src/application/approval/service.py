@@ -28,6 +28,21 @@ class ApprovalService:
         """
         self._repository = repository
 
+    async def get(self, approval_id: str) -> ApprovalResponse | None:
+        """按 ID 查询审批当前状态，供客户端确认不确定的决定结果。
+
+        参数：
+        - `approval_id`（str）：待查询审批的稳定标识。
+
+        返回：
+        - ApprovalResponse | None：当前审批状态；记录不存在时返回 None。
+
+        异常：
+        - 未列出的依赖异常按当前实现传播。
+        """
+        value = await self._repository.get(approval_id)
+        return None if value is None else _to_response(value)
+
     async def resolve(
         self,
         approval_id: str,

@@ -11,6 +11,7 @@ import type {
   ApprovalRequest,
   ApprovalHistoryEntry,
   ApprovalStats,
+  ApprovalStatusSnapshot,
   MemoryEntry,
   MemoryRelationEntry,
   MemoryEpisodeListResponse,
@@ -20,7 +21,6 @@ import type {
   RunListResponse,
   RunTimelineResponse,
   RunOrchestrationSnapshot,
-  PlanVersionDetail,
   ProviderInfo,
   SettingsView,
   TestProviderResult,
@@ -35,11 +35,23 @@ import type {
   RetrievalRunListResponse,
   EvaluationRunSummary,
   EvaluationRunDetail,
+  WorkerRegistryInstance,
 } from "../types"
 
 export interface AuthSession {
   authenticated: boolean
   username?: string | null
+}
+
+export interface ApprovalSubmissionResult {
+  attemptId: string
+  submittedDecisions: Record<string, "approved" | "denied">
+  succeededApprovalIds: string[]
+  failures: Array<{ approvalId: string; message: string }>
+  retryableApprovalIds: string[]
+  recoverableApprovalIds: string[]
+  statusUnknownApprovalIds: string[]
+  refreshError?: string
 }
 
 export interface LoginResponse extends AuthSession {
@@ -239,12 +251,6 @@ class ApiClient {
     )
   }
 
-  async getPlanVersion(planId: string, version: number): Promise<PlanVersionDetail> {
-    return this.request<PlanVersionDetail>(
-      `/api/plans/${encodeURIComponent(planId)}/versions/${version}`,
-    )
-  }
-
   /** 分页读取召回运行摘要，可按范围、状态、会话或查询文本过滤。 */
   async listRetrievalRuns(opts?: {
     limit?: number
@@ -423,6 +429,11 @@ class ApiClient {
     return this.request<ApprovalRequest[]>(`/api/approvals${params}`)
   }
 
+  /** 按审批 ID 查询权威的当前决定与状态。 */
+  async getApprovalStatus(approvalId: string): Promise<ApprovalStatusSnapshot> {
+    return this.request<ApprovalStatusSnapshot>(`/api/approvals/${encodeURIComponent(approvalId)}`)
+  }
+
   async respondApproval(
     approval: Pick<ApprovalRequest, "approval_id">,
     decision: "approved" | "denied",
@@ -440,7 +451,8 @@ class ApiClient {
   async respondApprovalsIndividually(
     requests: ApprovalRequest[],
     decisions: Record<string, "approved" | "denied" | "cancelled">,
-  ): Promise<void> {
+    attemptId: string = globalThis.crypto?.randomUUID?.() ?? `attempt-${Date.now()}-${Math.random()}`,
+  ): Promise<ApprovalSubmissionResult> {
     const results = await Promise.allSettled(
       requests.map((request) => {
         const decision = decisions[request.approval_id]
@@ -450,8 +462,34 @@ class ApiClient {
         return this.respondApproval(request, decision)
       }),
     )
-    const failure = results.find((result) => result.status === "rejected")
-    if (failure?.status === "rejected") throw failure.reason
+    return {
+      attemptId,
+      submittedDecisions: Object.fromEntries(requests.flatMap((request) => {
+        const decision = decisions[request.approval_id]
+        return decision === "approved" || decision === "denied"
+          ? [[request.approval_id, decision]]
+          : []
+      })),
+      succeededApprovalIds: results.flatMap((result, index) =>
+        result.status === "fulfilled" ? [requests[index].approval_id] : [],
+      ),
+      failures: results.flatMap((result, index) =>
+        result.status === "rejected"
+          ? [{
+              approvalId: requests[index].approval_id,
+              message: result.reason instanceof Error ? result.reason.message : String(result.reason),
+            }]
+          : [],
+      ),
+      retryableApprovalIds: [],
+      recoverableApprovalIds: [],
+      statusUnknownApprovalIds: results.flatMap((result, index) =>
+        result.status === "rejected"
+          && (!(result.reason instanceof ApiError) || result.reason.status >= 500)
+          ? [requests[index].approval_id]
+          : [],
+      ),
+    }
   }
 
   /** 修改会话标题。 */
@@ -634,6 +672,11 @@ class ApiClient {
   /** 查询已注册的 MCP 服务器及其连接状态。 */
   async listMcpServers(): Promise<McpServerListResponse> {
     return this.request<McpServerListResponse>("/api/mcp/servers")
+  }
+
+  /** 查询完整的 Worker 注册实例、健康状态、容量和契约快照。 */
+  async listWorkerRegistryInstances(): Promise<WorkerRegistryInstance[]> {
+    return this.request<WorkerRegistryInstance[]>("/api/worker-registry/instances")
   }
 
   /** 注册或更新 MCP 服务器配置。 */

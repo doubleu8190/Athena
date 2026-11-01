@@ -54,7 +54,7 @@ def test_file_and_knowledge_controller_error_mappings() -> None:
         async def upload_document(self, *args, **kwargs): raise ValueError("unsupported")
         async def list_versions(self, *args): return []
         async def delete_document(self, *args): return None
-    client = TestClient(create_app(attachment_service_factory=lambda: Files(), knowledge_service_factory=lambda: Knowledge()))
+    client = TestClient(create_app(attachment_service=Files(), knowledge_service=Knowledge()))
     assert client.get("/api/sessions/s/attachments").status_code == 200
     assert client.get("/api/sessions/s/attachment-types").json() == {"extensions": [".txt"]}
     assert client.get("/api/sessions/s/attachments/a").status_code == 404
@@ -129,16 +129,19 @@ def test_approval_controller_maps_conflicts_and_serializes_history() -> None:
         plan_id="plan-1",
     )
     class Approval:
+        async def get(self, approval_id): return request if approval_id == "a" else None
         async def pending(self, session_id=None): return [request]
         async def history(self, *args, **kwargs): return [request]
         async def resolve(self, *args, **kwargs): return False
-    client = TestClient(create_app(approval_service_factory=lambda: Approval()))
+    client = TestClient(create_app(approval_service=Approval()))
     pending = client.get("/api/approvals").json()[0]
     assert pending["approval_id"] == "a"
     assert pending["run_id"] == "r"
     assert pending["plan_id"] == "plan-1"
     assert pending["task_id"] == "task-1"
     assert client.get("/api/approvals/logs").json()[0]["tool_name"] == "tool"
+    assert client.get("/api/approvals/a").json()["resolution"] == "pending"
+    assert client.get("/api/approvals/missing").status_code == 404
     assert client.post("/api/approvals/a/resolve", json={"decision": "approved"}).status_code == 404
     assert client.post("/api/approvals/batches/b/resolve", json={"decisions": {}}).status_code == 404
     assert client.post("/api/approvals/a/decision", json={"decision": "approved"}).status_code == 409
@@ -154,7 +157,7 @@ def test_approval_decision_endpoint_records_one_decision() -> None:
             return True
 
     service = Approval()
-    client = TestClient(create_app(approval_service_factory=lambda: service))
+    client = TestClient(create_app(approval_service=service))
 
     response = client.post(
         "/api/approvals/approval-1/decision",
@@ -185,13 +188,13 @@ async def test_sse_heartbeat_and_untagged_event_paths() -> None:
         async def replay(self, *args, limit=256): return []
         async def close(self, *args): self.closed = True
     events = Events(); service = SimpleNamespace(open_subscription=events.open_subscription, replay=events.replay, close=events.close)
-    router = build_events_router(lambda: service)
+    router = build_events_router(service)
     app = FastAPI(); app.include_router(router)
     disconnected = iter([False, True])
     request = Request({"type": "http", "method": "GET", "path": "/sessions/s/events", "headers": [], "app": app})
     async def is_disconnected(): return next(disconnected)
     request.is_disconnected = is_disconnected  # type: ignore[method-assign]
-    response = await router.routes[0].endpoint("s", request, 0, service)
+    response = await router.routes[0].endpoint("s", request, 0)
     chunks = [item async for item in response.body_iterator]
     assert chunks == [": heartbeat\n\n"]
     assert events.closed

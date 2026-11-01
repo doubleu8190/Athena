@@ -51,12 +51,12 @@ def test_lifespan_cleans_up_resources_when_startup_fails() -> None:
     assert events == ["start:first", "start:second", "stop:first"]
 
 
-def test_dependency_graph_can_supply_service_factory() -> None:
+def test_dependency_graph_can_supply_service_instance() -> None:
     marker = object()
     app = create_app(
         dependencies=build_dependencies(
-            factories={"session_service_factory": lambda: marker},
+            services={"session_service": marker},
         )
     )
 
-    assert app.state.dependencies.provider("session_service_factory")() is marker
+    assert app.state.dependencies.service("session_service") is marker

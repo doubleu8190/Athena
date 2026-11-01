@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from domain.runs import (
     CommandType,
-    RoundCompletedResumeValue,
+    RootPlanCheckpointRecovery,
+    RootPlanCompletedResumeValue,
     RunCommandPayload,
     RunResumePayload,
     RunStartPayload,
@@ -83,52 +84,50 @@ class RunStartPayloadSchema(BaseModel):
         )
 
 
-class RoundCompletedResumeValueSchema(BaseModel):
-    """Worker 完成事件的 Root 恢复身份 schema。"""
+class RootPlanCompletedResumeValueSchema(BaseModel):
+    """Plan 完成事件的 Root checkpoint 恢复身份。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    type: Literal["round_completed"]
+    type: Literal["plan_completed"]
     run_id: str
     plan_id: str
-    round_id: str
-    plan_version: int = Field(gt=0)
+    plan_sequence: int = Field(gt=0)
     root_wait_generation: int = Field(gt=0)
     interrupt_id: str
 
-    def to_domain(self) -> RoundCompletedResumeValue:
+    def to_domain(self) -> RootPlanCompletedResumeValue:
         """把已校验的恢复身份转换为领域类型。
 
         参数：
         - 无参数。
 
         返回：
-        - RoundCompletedResumeValue：与当前请求契约对应的运行时领域对象。
+        - RootPlanCompletedResumeValue：与当前请求契约对应的运行时领域对象。
 
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        return RoundCompletedResumeValue(
+        return RootPlanCompletedResumeValue(
             type=self.type,
             run_id=self.run_id,
             plan_id=self.plan_id,
-            round_id=self.round_id,
-            plan_version=self.plan_version,
+            plan_sequence=self.plan_sequence,
             root_wait_generation=self.root_wait_generation,
             interrupt_id=self.interrupt_id,
         )
 
     @classmethod
     def from_domain(
-        cls, value: RoundCompletedResumeValue
-    ) -> RoundCompletedResumeValueSchema:
+        cls, value: RootPlanCompletedResumeValue
+    ) -> RootPlanCompletedResumeValueSchema:
         """把领域恢复身份转换为可序列化 schema。
 
         参数：
-        - `value`（RoundCompletedResumeValue）：待解析、校验或转换的输入值；约束：无额外运行时限制。
+        - `value`（RootPlanCompletedResumeValue）：待解析、校验或转换的输入值；约束：无额外运行时限制。
 
         返回：
-        - RoundCompletedResumeValueSchema：由领域对象字段构造的不可变请求 schema。
+        - RootPlanCompletedResumeValueSchema：由领域对象字段构造的不可变请求 schema。
 
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
@@ -137,10 +136,44 @@ class RoundCompletedResumeValueSchema(BaseModel):
             type=value.type,
             run_id=value.run_id,
             plan_id=value.plan_id,
-            round_id=value.round_id,
-            plan_version=value.plan_version,
+            plan_sequence=value.plan_sequence,
             root_wait_generation=value.root_wait_generation,
             interrupt_id=value.interrupt_id,
+        )
+
+
+class RootPlanCheckpointRecoverySchema(BaseModel):
+    """已消费中断后的 Root graph cursor 恢复身份。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    type: Literal["plan_checkpoint_recovery"]
+    run_id: str
+    plan_id: str
+    plan_sequence: int = Field(gt=0)
+    root_wait_generation: int = Field(gt=0)
+
+    def to_domain(self) -> RootPlanCheckpointRecovery:
+        """将检查点恢复身份转成领域对象。"""
+        return RootPlanCheckpointRecovery(
+            type=self.type,
+            run_id=self.run_id,
+            plan_id=self.plan_id,
+            plan_sequence=self.plan_sequence,
+            root_wait_generation=self.root_wait_generation,
+        )
+
+    @classmethod
+    def from_domain(
+        cls, value: RootPlanCheckpointRecovery
+    ) -> RootPlanCheckpointRecoverySchema:
+        """将领域检查点恢复身份转为 JSON schema。"""
+        return cls(
+            type=value.type,
+            run_id=value.run_id,
+            plan_id=value.plan_id,
+            plan_sequence=value.plan_sequence,
+            root_wait_generation=value.root_wait_generation,
         )
 
 
@@ -149,7 +182,7 @@ class RunResumePayloadSchema(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    resume_value: RoundCompletedResumeValueSchema
+    resume_value: RootPlanCompletedResumeValueSchema | RootPlanCheckpointRecoverySchema
 
     def to_domain(self) -> RunResumePayload:
         """把已校验的恢复参数转换为领域类型。
@@ -178,11 +211,13 @@ class RunResumePayloadSchema(BaseModel):
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        return cls(
-            resume_value=RoundCompletedResumeValueSchema.from_domain(
-                value.resume_value
-            )
-        )
+        if isinstance(value.resume_value, RootPlanCompletedResumeValue):
+            resume_value = RootPlanCompletedResumeValueSchema.from_domain(value.resume_value)
+        elif isinstance(value.resume_value, RootPlanCheckpointRecovery):
+            resume_value = RootPlanCheckpointRecoverySchema.from_domain(value.resume_value)
+        else:
+            raise TypeError("unsupported_root_resume_value")
+        return cls(resume_value=resume_value)
 
 
 def parse_run_command_payload(
@@ -223,7 +258,8 @@ def parse_run_command_payload(
 
 
 __all__ = [
-    "RoundCompletedResumeValueSchema",
+    "RootPlanCheckpointRecoverySchema",
+    "RootPlanCompletedResumeValueSchema",
     "RunResumePayloadSchema",
     "RunStartPayloadSchema",
     "parse_run_command_payload",

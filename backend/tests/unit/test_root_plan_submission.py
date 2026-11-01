@@ -5,211 +5,123 @@ from types import SimpleNamespace
 import pytest
 
 from application.orchestration.root_workflow import RootWorkflow
-from application.orchestration.plan_versions import deferred_version_review_decision
-from domain.orchestration import OrchestrationCommandType, ReviewAction, ReviewContext
+from domain.orchestration import WorkerPlanReceipt
 from tests.fakes.leases import lease_context, lease_grant
 
 
-class CommandHandler:
-    def __init__(self):
+class RootOrchestration:
+    def __init__(self) -> None:
         self.submissions = []
 
-    async def submit_plan(self, command, plan, tasks, *, legal_tools=None):
-        self.submissions.append((command, plan, tasks, legal_tools))
-
-
-def _workflow(handler):
-    return RootWorkflow(
-        SimpleNamespace(
-            orchestration_command_handler=handler,
-            event_publisher=None,
+    async def submit_plan(self, submission, *, lease):
+        assert lease.key.resource_type == "root_execution"
+        assert lease.key.resource_id == submission.run_id
+        self.submissions.append(submission)
+        return WorkerPlanReceipt(
+            plan_id=submission.plan_id,
+            run_id=submission.run_id,
+            sequence=submission.sequence,
+            accepted=True,
+            replayed=len(self.submissions) > 1,
         )
-    )
 
 
-def _plan_task(task_id="gather", **updates):
-    return {
-        "task_id": task_id,
-        "title": "Gather data",
-        "objective": "Collect local source data",
-        "allowed_tools": [],
-        "input": {"source": "workspace"},
-        "expected_output": {"format": "summary"},
-        **updates,
-    }
+def _workflow(orchestration: RootOrchestration) -> RootWorkflow:
+    return RootWorkflow(SimpleNamespace(root_orchestration=orchestration))
 
 
-def _plan_state(*, run_id="run-42", tasks=None, edges=None, tools=None):
+def _state(*, completed_plans=(), tasks=None, extra=None):
     return {
         "request": {
-            "run_id": run_id,
+            "run_id": "run-42",
             "session_id": "session-9",
             "user_message": "Prepare a report with evidence.",
         },
-        "execution_lease": lease_context(
-            lease_grant("root_execution", run_id)
-        ),
-        "worker_tools": tools or [
-            {"name": "read_local_file"},
-            {"name": "exec_shell"},
-        ],
+        "execution_lease": lease_context(lease_grant("root_execution", "run-42")),
+        "completed_plans": list(completed_plans),
         "plan_draft": {
             "action": "plan",
             "goal": "Prepare a report",
-            "max_parallelism": 2,
-            "edges": edges or [],
-            "tasks": tasks or [_plan_task()],
+            "tasks": tasks or [
+                {
+                    "task_ref": "gather",
+                    "contract_id": "research",
+                    "contract_revision": 3,
+                    "objective": "Collect source data",
+                    "input": {"topic": "workspace"},
+                    "acceptance_criteria": "Cite source IDs",
+                },
+                {
+                    "task_ref": "summarize",
+                    "contract_id": "writer",
+                    "contract_revision": 2,
+                    "objective": "Summarize collected source data",
+                    "input": {"source": "prior run facts"},
+                    "acceptance_criteria": "Return a concise report",
+                },
+            ],
+            **(extra or {}),
         },
     }
 
 
 @pytest.mark.asyncio
-async def test_root_submits_initial_plan_through_atomic_command_handler():
-    handler = CommandHandler()
-    workflow = _workflow(handler)
-    tasks = [
-        _plan_task(
-            "gather",
-            allowed_tools=["read_local_file"],
-            input={"source": "local files"},
-        ),
-        _plan_task(
-            "summarize",
-            title="Summarize data",
-            objective="Summarize the collected source data",
-            input={"source_task": "gather"},
-            expected_output={"format": "report"},
-        ),
-    ]
-    state = _plan_state(
-        tasks=tasks,
-        edges=[{"from_task_id": "gather", "to_task_id": "summarize"}],
-    )
+async def test_root_submits_one_independent_plan_through_orchestration_port():
+    orchestration = RootOrchestration()
+    workflow = _workflow(orchestration)
+    state = _state()
 
     result = await workflow.materialize_execution_plan(state)
 
-    assert len(handler.submissions) == 1
-    command, plan, submitted_tasks, legal_tools = handler.submissions[0]
-    assert command.command_type is OrchestrationCommandType.SUBMIT_PLAN
-    assert command.message_id == "root-submit-plan:run-42"
-    assert command.idempotency_key == "submit-plan:run-42"
-    assert command.correlation_id == command.scope_key == "run-42"
-    assert command.plan_id == plan.plan_id == "plan:run-42"
-    assert command.plan_version == 1
-    assert plan.session_id == "session-9"
-    assert plan.run_id == "run-42"
-    assert plan.goal == "Prepare a report with evidence."
-    assert submitted_tasks[0].task_id == "gather:run-42"
-    assert submitted_tasks[0].allowed_tools == ("read_local_file",)
-    assert [(edge.from_task_id, edge.to_task_id) for edge in plan.edges] == [
-        ("gather:run-42", "summarize:run-42")
-    ]
-    assert legal_tools == {"read_local_file", "exec_shell"}
-    assert result["plan"]["plan_id"] == plan.plan_id
+    assert len(orchestration.submissions) == 1
+    submission = orchestration.submissions[0]
+    assert submission.run_id == "run-42"
+    assert submission.sequence == 1
+    assert submission.idempotency_key == "root-plan:run-42:1"
+    assert submission.plan_id == result["plan"]["plan_id"]
+    assert [task.task_ref for task in submission.tasks] == ["gather", "summarize"]
+    assert submission.tasks[0].contract_id == "research"
+    assert submission.tasks[0].contract_revision == 3
+    assert submission.tasks[1].input == {"source": "prior run facts"}
+    assert result["plan"]["root_wait_generation"] == 1
 
 
 @pytest.mark.asyncio
-async def test_root_rejects_a_tool_that_is_not_in_the_system_catalog():
-    handler = CommandHandler()
-    workflow = _workflow(handler)
-    state = _plan_state(
-        tasks=[_plan_task(allowed_tools=["disabled_tool"])],
-        tools=[{"name": "read_local_file"}],
-    )
+async def test_plan_submission_identity_replays_stably_after_checkpoint_retry():
+    orchestration = RootOrchestration()
+    workflow = _workflow(orchestration)
+    state = _state()
 
-    with pytest.raises(ValueError, match="root_plan_requests_unavailable_tools"):
-        await workflow.materialize_execution_plan(state)
+    first = await workflow.materialize_execution_plan(state)
+    second = await workflow.materialize_execution_plan(state)
 
-    assert handler.submissions == []
-
-
-@pytest.mark.asyncio
-async def test_user_task_input_does_not_grant_tool_permission():
-    handler = CommandHandler()
-    workflow = _workflow(handler)
-    state = _plan_state(
-        tasks=[
-            _plan_task(
-                "command",
-                input={"exec_shell": {"command": "python --version"}},
-            )
-        ]
-    )
-
-    await workflow.materialize_execution_plan(state)
-
-    _, _, tasks, _ = handler.submissions[0]
-    assert tasks[0].allowed_tools == ()
+    assert first["plan"] == second["plan"]
+    assert orchestration.submissions[0].idempotency_key == orchestration.submissions[1].idempotency_key
+    assert orchestration.submissions[0].plan_id == orchestration.submissions[1].plan_id
 
 
 @pytest.mark.asyncio
-async def test_materialization_splits_explicit_versions_before_atomic_submission():
-    handler = CommandHandler()
-    workflow = _workflow(handler)
-    state = _plan_state(
-        run_id="run-versioned",
-        tasks=[
-            _plan_task("draft", plan_version=1),
-            _plan_task(
-                "review",
-                title="Review",
-                objective="Review the draft",
-                plan_version=2,
-                depends_on=["draft"],
-            ),
-        ],
-    )
+async def test_next_plan_sequence_is_derived_from_completed_plan_facts():
+    orchestration = RootOrchestration()
+    workflow = _workflow(orchestration)
+    previous = {"plan_id": "old-plan", "sequence": 1, "status": "failed"}
 
-    result = await workflow.materialize_execution_plan(state)
+    result = await workflow.materialize_execution_plan(_state(completed_plans=[previous]))
 
-    assert [task.task_id for task in handler.submissions[0][2]] == ["draft:run-versioned"]
-    assert result["deferred_plan_versions"] == {
-        "2": [
-            {
-                "task_id": "review",
-                "title": "Review",
-                "objective": "Review the draft",
-                "allowed_tools": [],
-                "input": {"source": "workspace"},
-                "expected_output": {"format": "summary"},
-                "depends_on": ["draft"],
-            }
-        ]
-    }
+    submission = orchestration.submissions[0]
+    assert submission.sequence == 2
+    assert submission.idempotency_key == "root-plan:run-42:2"
+    assert result["plan"]["root_wait_generation"] == 2
 
 
-def test_completed_version_review_automatically_submits_deferred_version():
-    context = ReviewContext(
-        original_goal="Version 1 drafts; Version 2 reviews after Root Review",
-        plan_id="plan:run-1",
-        plan_version=1,
-        round_id="round-1",
-        full_dag_summary={},
-        round_results=({"task_id": "draft:run-1", "status": "completed"},),
-    )
-    decision = deferred_version_review_decision(
-        context,
-        {
-            "request": {"run_id": "run-1"},
-            "plan": {"task_ids": ["draft:run-1"]},
-            "deferred_plan_versions": {
-                "2": [
-                    {
-                        "task_id": "review",
-                        "title": "Review",
-                        "objective": "Review the draft",
-                        "input": {"source": "draft"},
-                        "expected_output": {"format": "review"},
-                        "allowed_tools": [],
-                        "depends_on": ["draft"],
-                    }
-                ]
-            },
-        },
-    )
+@pytest.mark.asyncio
+async def test_root_rejects_dag_edges_and_future_plan_version_fields():
+    orchestration = RootOrchestration()
+    workflow = _workflow(orchestration)
 
-    assert decision is not None
-    assert decision.action is ReviewAction.REPLAN
-    assert decision.revision is not None
-    assert decision.revision.keep_task_ids == ("draft:run-1",)
-    assert decision.revision.new_tasks[0]["depends_on"] == ["draft:run-1"]
+    with pytest.raises(ValueError):
+        await workflow.materialize_execution_plan(
+            _state(extra={"edges": [{"from_task_id": "gather", "to_task_id": "summarize"}]})
+        )
+
+    assert orchestration.submissions == []

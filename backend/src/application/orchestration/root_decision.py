@@ -19,6 +19,7 @@ from application.runs.context.contracts import (
     ContextQueryOutcome,
 )
 from application.runs.request_contracts import RootAttachment, RootKnowledgeBase
+from .root_completed_plan import RootCompletedPlanModel
 
 
 class RootMessage(BaseModel):
@@ -40,6 +41,19 @@ class RootWorkerTool(BaseModel):
     parameters: dict[str, JsonValue]
     risk_level: Literal["low", "medium", "high"]
     requires_approval: bool
+
+
+class RootWorkerCapability(BaseModel):
+    """提供给 Root 的已授权能力契约，不包含实例路由或运行参数。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    contract_id: str = Field(min_length=1)
+    contract_revision: int = Field(strict=True, ge=1)
+    can_do: tuple[str, ...] = Field(min_length=1)
+    cannot_do: tuple[str, ...] = Field(min_length=1)
+    input_schema: dict[str, JsonValue]
+    output_schema: dict[str, JsonValue]
 
 
 class PlanningFeedback(BaseModel):
@@ -105,7 +119,8 @@ class RootAgentInput(BaseModel):
     messages: tuple[RootMessage, ...] = Field(min_length=1)
     attachments: list[RootAttachment] = Field(default_factory=list)
     knowledge_bases: list[RootKnowledgeBase] = Field(default_factory=list)
-    worker_tools: tuple[RootWorkerTool, ...] = ()
+    worker_capabilities: tuple[RootWorkerCapability, ...] = ()
+    completed_plans: tuple[RootCompletedPlanModel, ...] = ()
     available_context_providers: tuple[
         Literal["memory", "episode", "file", "knowledge", "graph"], ...
     ] = ()
@@ -187,11 +202,12 @@ class RootPlanInput(BaseModel):
     messages: tuple[RootMessage, ...] = Field(min_length=1)
     attachments: list[RootAttachment] = Field(default_factory=list)
     knowledge_bases: list[RootKnowledgeBase] = Field(default_factory=list)
-    worker_tools: tuple[RootWorkerTool, ...] = ()
+    worker_capabilities: tuple[RootWorkerCapability, ...] = ()
     context_items: tuple[ContextItem, ...] = ()
     context_queries: tuple[ContextQueryOutcome, ...] = ()
     goal: str = Field(min_length=1)
     instructions: str = Field(min_length=1, max_length=2000)
+    completed_plans: tuple[RootCompletedPlanModel, ...] = ()
 
 
 class ContextRequest(BaseModel):
@@ -225,50 +241,19 @@ class ContextRequest(BaseModel):
         return queries
 
 
-class PlanEdgeDraft(BaseModel):
-    """计划草稿中的前置任务关系。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    from_task_id: str = Field(min_length=1)
-    to_task_id: str = Field(min_length=1)
-
-    @field_validator("from_task_id", "to_task_id")
-    @classmethod
-    def non_empty_task_ids(cls, value: str) -> str:
-        """规范化计划边两端的任务 ID。
-
-        参数：
-        - `value`（str）：待解析、校验或转换的输入值；约束：无额外运行时限制。
-
-        返回：
-        - str：去重并按稳定规则拼接的非空 Task 标识。
-
-        异常：
-        - ValueError：校验条件 `not normalized` 成立时（异常说明：root_plan_edge_task_id_required）。
-        - 未列出的依赖异常按当前实现传播。
-        """
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("root_plan_edge_task_id_required")
-        return normalized
-
-
 class PlanTaskDraft(BaseModel):
     """一个交给 Worker 执行的任务草稿。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    task_id: str = Field(min_length=1)
-    title: str = Field(min_length=1)
+    task_ref: str = Field(min_length=1)
+    contract_id: str = Field(min_length=1)
+    contract_revision: int = Field(strict=True, ge=1)
     objective: str = Field(min_length=1)
-    allowed_tools: tuple[str, ...]
-    depends_on: tuple[str, ...] = ()
     input: dict[str, JsonValue]
-    expected_output: dict[str, JsonValue]
-    plan_version: int = Field(default=1, strict=True, ge=1)
+    acceptance_criteria: str = Field(min_length=1)
 
-    @field_validator("task_id", "title", "objective")
+    @field_validator("task_ref", "contract_id", "objective", "acceptance_criteria")
     @classmethod
     def non_empty_task_text(cls, value: str) -> str:
         """去掉必填任务文本的首尾空白。
@@ -288,49 +273,6 @@ class PlanTaskDraft(BaseModel):
             raise ValueError("root_plan_task_text_required")
         return normalized
 
-    @field_validator("allowed_tools")
-    @classmethod
-    def unique_tool_names(cls, tools: tuple[str, ...]) -> tuple[str, ...]:
-        """清理允许工具名称并拒绝空名称或重复名称。
-
-        参数：
-        - `tools`（tuple[str, ...]）：待按名称去重的工具集合；约束：无额外运行时限制。
-
-        返回：
-        - tuple[str, ...]：去重并保留首次出现顺序的工具名称。
-
-        异常：
-        - ValueError：校验条件 `any((not tool for tool in normalized)) or len(normalized) != len(set(normalized))` 成立时（异常说明：plan_task_tools_must_be_unique_non_empty_names）。
-        - 未列出的依赖异常按当前实现传播。
-        """
-        normalized = tuple(tool.strip() for tool in tools)
-        if any(not tool for tool in normalized) or len(normalized) != len(
-            set(normalized)
-        ):
-            raise ValueError("plan_task_tools_must_be_unique_non_empty_names")
-        return normalized
-
-    @field_validator("depends_on")
-    @classmethod
-    def unique_dependencies(cls, dependencies: tuple[str, ...]) -> tuple[str, ...]:
-        """规范化任务依赖标识，并拒绝空值或重复项。
-
-        参数：
-        - `dependencies`（tuple[str, ...]）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
-
-        返回：
-        - tuple[str, ...]：去重并保留首次出现顺序的依赖 Task 标识。
-
-        异常：
-        - ValueError：校验条件 `any((not dependency for dependency in normalized)) or len(normalized) != len(set(normalized))` 成立时（异常说明：plan_task_dependencies_must_be_unique_non_empty_ids）。
-        - 未列出的依赖异常按当前实现传播。
-        """
-        normalized = tuple(dependency.strip() for dependency in dependencies)
-        if any(not dependency for dependency in normalized) or len(normalized) != len(
-            set(normalized)
-        ):
-            raise ValueError("plan_task_dependencies_must_be_unique_non_empty_ids")
-        return normalized
 
 
 class PlanDraft(BaseModel):
@@ -341,8 +283,15 @@ class PlanDraft(BaseModel):
     action: Literal["plan"]
     goal: str = Field(min_length=1)
     tasks: tuple[PlanTaskDraft, ...] = Field(min_length=1)
-    edges: tuple[PlanEdgeDraft, ...] = ()
-    max_parallelism: int = Field(default=1, strict=True, ge=1)
+
+    @field_validator("tasks")
+    @classmethod
+    def task_refs_are_unique(cls, tasks: tuple[PlanTaskDraft, ...]) -> tuple[PlanTaskDraft, ...]:
+        """拒绝同一 Plan 中重复的任务引用。"""
+        refs = tuple(task.task_ref for task in tasks)
+        if len(refs) != len(set(refs)):
+            raise ValueError("root_plan_task_ref_duplicate")
+        return tasks
 
     @field_validator("goal")
     @classmethod
@@ -398,8 +347,6 @@ class RootPlanStructuredOutput(BaseModel):
     action: Literal["plan", "needs_information"]
     goal: str | None = None
     tasks: tuple[PlanTaskDraft, ...] | None = None
-    edges: tuple[PlanEdgeDraft, ...] | None = None
-    max_parallelism: int | None = None
     missing_information: tuple[str, ...] | None = None
     reason: str | None = None
 
@@ -418,7 +365,6 @@ __all__ = [
     "AnswerIntent",
     "ContextRequest",
     "PlanDraft",
-    "PlanEdgeDraft",
     "PlanIntent",
     "PlanTaskDraft",
     "PlanningFeedback",
@@ -437,4 +383,5 @@ __all__ = [
     "RootKnowledgeBase",
     "RootMessage",
     "RootWorkerTool",
+    "RootWorkerCapability",
 ]

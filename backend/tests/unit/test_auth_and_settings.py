@@ -6,6 +6,7 @@ import base64
 import json
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from fastapi import FastAPI
@@ -20,6 +21,18 @@ from interfaces.http.auth.routes import (
 from interfaces.http.auth import middleware as auth_middleware
 from interfaces.http.auth import routes as auth_routes
 from application.auth.service import HmacTokenSigner
+
+
+def test_worker_approval_and_resume_wait_limits_are_fixed_and_bounded() -> None:
+    settings = Settings()
+    assert settings.worker_approval_timeout_seconds == 120
+    assert settings.worker_resume_dispatch_max_wait_seconds == 300
+    with pytest.raises(ValueError):
+        Settings(worker_approval_timeout_seconds=121)
+    with pytest.raises(ValueError):
+        Settings(worker_resume_dispatch_max_wait_seconds=0)
+    with pytest.raises(ValueError):
+        Settings(worker_resume_dispatch_max_wait_seconds=86401)
 
 
 def test_target_settings_keep_database_and_provider_contract() -> None:

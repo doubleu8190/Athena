@@ -5,6 +5,7 @@ import type { ApplicationEventEnvelope, ExecutionError } from "../types/events"
 import type { ExecutionTimelineEntry, Message, ToolCall, OrchestrationPlan, OrchestrationTask, RunTimelineEvent } from "../types"
 import { approvalActionDescription, toolActionLabel } from "../utils/executionCopy"
 import { summarizeResult } from "../utils/orchestrationProjection"
+import { shouldHandleStreamCallback } from "../utils/workerSnapshotProjection"
 
 interface StreamProjection {
   nextChunkId: number
@@ -40,11 +41,13 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     updateSession,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
     upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans,
+    beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots,
     upsertExecutionTimelineEntry, clearExecutionTimeline,
     appendRunTimelineEvent, clearRunTimelineEvents,
   } = useChatStore()
 
   useEffect(() => {
+    let disposed = false
     const finalConfirmations = new Map<string, { controller: AbortController; timer: ReturnType<typeof setTimeout> }>()
     const confirmationAttempts = new Set<string>()
     sourceRef.current?.close()
@@ -58,6 +61,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     clearErrorDetail()
     clearOrchestrationTasks()
     clearOrchestrationPlans()
+    clearOrchestrationSnapshots()
     clearExecutionTimeline()
     clearRunTimelineEvents()
     if (!sessionId) {
@@ -76,7 +80,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     const syncPendingApprovals = () => {
       void apiClient.listPendingApprovals(sessionId)
         .then((approvals) => {
-          if (useChatStore.getState().activeSessionId !== sessionId) return
+          if (disposed || useChatStore.getState().activeSessionId !== sessionId) return
           const pending = approvals.map((approval) => ({
             ...approval,
             session_id: approval.session_id || sessionId,
@@ -88,14 +92,35 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           // API 暂时不可用时保留已有事件状态，等待下一次重连同步。
         })
     }
+    const orchestrationRefreshGeneration = new Map<string, number>()
+    const orchestrationRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const refreshOrchestrationSnapshot = (runId: string) => {
+      if (!runId) return
+      const previous = orchestrationRefreshTimers.get(runId)
+      if (previous) clearTimeout(previous)
+      orchestrationRefreshTimers.set(runId, setTimeout(() => {
+        if (disposed) return
+        const generation = beginOrchestrationSnapshotRequest(runId)
+        orchestrationRefreshGeneration.set(runId, generation)
+        void apiClient.getRunOrchestration(runId)
+          .then((snapshot) => {
+            if (disposed || useChatStore.getState().activeSessionId !== sessionId || orchestrationRefreshGeneration.get(runId) !== generation) return
+            setOrchestrationSnapshot(snapshot, generation)
+          })
+          .catch(() => {
+            // SSE 只负责触发刷新；快照接口短暂不可用时保留最后一个持久快照。
+          })
+      }, 150))
+    }
     let lifecycleSyncGeneration = 0
     const syncRunLifecycle = async () => {
       const generation = ++lifecycleSyncGeneration
       try {
         const runs = await apiClient.listSessionRuns(sessionId)
-        if (generation !== lifecycleSyncGeneration || useChatStore.getState().activeSessionId !== sessionId) return
+        if (disposed || generation !== lifecycleSyncGeneration || useChatStore.getState().activeSessionId !== sessionId) return
         const active = runs.find((run) => run.status === "running" || run.status === "stopping")
         const queued = runs.some((run) => run.status === "queued")
+        if (active) refreshOrchestrationSnapshot(active.run_id)
         updateSession(sessionId, { active_run_id: active?.run_id ?? null })
         const status = active?.status === "stopping"
           ? "cancelling"
@@ -110,10 +135,14 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       }
     }
     currentSource.onopen = () => {
+      if (!shouldHandleStreamCallback(disposed, 0, connectionGeneration)) return
       setConnectionStatus("connected")
       syncPendingApprovals()
     }
-    currentSource.onerror = () => setConnectionStatus("error")
+    currentSource.onerror = () => {
+      if (!shouldHandleStreamCallback(disposed, 0, connectionGeneration)) return
+      setConnectionStatus("error")
+    }
     syncPendingApprovals()
     void syncRunLifecycle()
 
@@ -174,7 +203,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       finalConfirmations.set(messageId, { controller, timer })
       void apiClient.getMessages(sessionId, undefined, controller.signal).then((history) => {
         const currentConfirmation = finalConfirmations.get(messageId)
-        if (currentConfirmation?.controller !== controller || controller.signal.aborted) return
+        if (disposed || currentConfirmation?.controller !== controller || controller.signal.aborted) return
         const message = history.find((item) => item.id === messageId)
         if (message) {
           clearTimeout(timer)
@@ -207,7 +236,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
 
     const parse = (event: MessageEvent, generation = connectionGeneration) => {
       try {
-        if (generation !== connectionGeneration) return
+        if (!shouldHandleStreamCallback(disposed, generation, connectionGeneration)) return
         const envelope = JSON.parse(event.data) as ApplicationEventEnvelope
         const type = envelope.event_type || event.type
         const data: Record<string, unknown> = envelope.payload ?? (envelope as Record<string, unknown>)
@@ -219,6 +248,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
         const occurredAt = envelope.occurred_at || new Date().toISOString()
         const runId = envelope.run_id || String(data.run_id || "")
+        if (runId && (type.startsWith("plan.") || type.startsWith("task.") || type.startsWith("approval.") || type.startsWith("run."))) {
+          refreshOrchestrationSnapshot(runId)
+        }
         const streamId = envelope.stream_id || String(data.stream_id || (runId ? `answer-${runId}` : ""))
         const outputEvents = [
           "message.started",
@@ -281,7 +313,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           }
           if (Array.isArray(data.attachment_ids) && data.attachment_ids.length > 0) {
             void apiClient.listAttachments(sessionId).then((items) => {
-              if (useChatStore.getState().activeSessionId === sessionId) setAttachments(items)
+              if (!disposed && useChatStore.getState().activeSessionId === sessionId) setAttachments(items)
             }).catch(() => {})
           }
         }
@@ -607,12 +639,12 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       currentSource = new EventSource(targetUrl, { withCredentials: true })
       sourceRef.current = currentSource
       currentSource.onopen = () => {
-        if (generation !== connectionGeneration) return
+        if (!shouldHandleStreamCallback(disposed, generation, connectionGeneration)) return
         setConnectionStatus("connected")
         syncPendingApprovals()
       }
       currentSource.onerror = () => {
-        if (generation === connectionGeneration) setConnectionStatus("error")
+        if (shouldHandleStreamCallback(disposed, generation, connectionGeneration)) setConnectionStatus("error")
       }
       attachListeners(currentSource, generation)
     }
@@ -634,7 +666,10 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     }
     attachListeners(currentSource, connectionGeneration)
     return () => {
+      disposed = true
       currentSource.close()
+      for (const timer of orchestrationRefreshTimers.values()) clearTimeout(timer)
+      orchestrationRefreshTimers.clear()
       for (const pending of finalConfirmations.values()) {
         clearTimeout(pending.timer)
         pending.controller.abort()
@@ -642,7 +677,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       finalConfirmations.clear()
       if (sourceRef.current === currentSource) sourceRef.current = null
     }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
 
   return sourceRef
 }

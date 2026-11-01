@@ -11,7 +11,9 @@ from .entities import (
     RootWaitCheckpoint,
 )
 from .payloads import (
-    RoundCompletedResumeValue,
+    RootPlanCompletedResumeValue,
+    RootPlanCheckpointRecovery,
+    RootPlanWait,
     RunCommandPayload,
     RunResumePayload,
     RunStartPayload,
@@ -27,7 +29,9 @@ from .ports import (
 __all__ = [
     "CommandExecutionResult",
     "CommandType",
-    "RoundCompletedResumeValue",
+    "RootPlanCompletedResumeValue",
+    "RootPlanCheckpointRecovery",
+    "RootPlanWait",
     "RunCancellationResult",
     "RunCommand",
     "RunCommandPayload",

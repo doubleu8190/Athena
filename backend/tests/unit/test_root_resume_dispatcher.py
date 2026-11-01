@@ -1,32 +1,58 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
 
-from application.orchestration.langgraph.graphs.root import (
-    _wait_for_plan_completion_node,
-    invoke_root_graph as _invoke_root_graph,
-)
-from tests.fakes.leases import lease_grant
-from application.orchestration.langgraph.graphs.state import RootGraphState
-from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
-from domain.orchestration import PlanStatus
+from domain.runs import RootPlanCompletedResumeValue
 from tests.fakes.leases import LeaseCenter, lease_grant
-from infrastructure.persistence.postgres.repositories.orchestration_repository import (
-    PostgresPlanLoader,
-)
 from workers.root_resume_dispatcher import RootResumeDispatcher
 
 
+def _lease(*, interrupt_id: str | None = "interrupt-1", checkpoint_id: str | None = "checkpoint-1"):
+    return SimpleNamespace(
+        job_id="job-1", run_id="run-1", session_id="session-1", plan_id="plan-1",
+        sequence=1, root_wait_generation=2, interrupt_id=interrupt_id,
+        checkpoint_id=checkpoint_id, lease=lease_grant("root_resume", "job-1"),
+    )
+
+
+class _Jobs:
+    def __init__(self, *, current: bool = True) -> None:
+        self.current = current
+        self.completed: list[object] = []
+        self.retried: list[object] = []
+
+    async def is_wait_current(self, _lease):
+        return self.current
+
+    async def complete(self, lease):
+        self.completed.append(lease)
+        return True
+
+    async def retry(self, lease, *, delay_seconds):
+        self.retried.append((lease, delay_seconds))
+        return True
+
+
+class _Lifecycle:
+    async def acquire_execution_lease(self, run_id, *, owner, lease_seconds):
+        return lease_grant("root_execution", run_id, owner_id=owner)
+
+    async def arm_root_wait(self, *_args, **_kwargs):
+        return True
+
+
+class _Runs:
+    status = "running"
+
+    async def get(self, _run_id):
+        return SimpleNamespace(status=self.status)
+
+
 @pytest.mark.asyncio
-async def test_dispatcher_does_not_claim_more_than_eight_concurrent_jobs():
+async def test_dispatcher_limits_inflight_claims_to_eight():
     class Jobs:
         def __init__(self):
             self.claims = 0
@@ -37,551 +63,154 @@ async def test_dispatcher_does_not_claim_more_than_eight_concurrent_jobs():
 
     jobs = Jobs()
     dispatcher = RootResumeDispatcher(
-        jobs, None, None, None, worker_id="test", poll_interval=0.01,
+        jobs, None, None, None, None, worker_id="test", poll_interval=0.01,
         lease_center=LeaseCenter(),
     )
     release = asyncio.Event()
 
-    async def resume(_lease):
+    async def hold(_lease):
         await release.wait()
 
-    dispatcher._resume = resume
+    dispatcher._resume = hold
     await dispatcher.start()
     try:
         await asyncio.sleep(0.08)
         assert jobs.claims == 8
         assert len(dispatcher._inflight) == 8
     finally:
+        release.set()
         await dispatcher.stop()
 
 
-async def invoke_root_graph(graph, **kwargs):
-    """Attach a synthetic root grant to direct graph unit invocations."""
-    kwargs.setdefault(
-        "lease", lease_grant("root_execution", str(kwargs["run_id"]))
-    )
-    return await _invoke_root_graph(graph, **kwargs)
-
-
 @pytest.mark.asyncio
-async def test_root_wait_node_interrupts_and_rechecks_after_resume():
-    class Workflow:
-        def __init__(self):
-            self.calls = 0
-
-        async def wait_for_plan_completion(self, _state):
-            self.calls += 1
-            if self.calls == 1:
-                return {
-                    "waiting": True,
-                    "root_wait": {
-                        "type": "round_wait",
-                        "run_id": "run-1",
-                        "plan_id": "plan-1",
-                        "round_id": "round-1",
-                        "plan_version": 1,
-                    },
-                }
-            return {"waiting": False, "plan_results": {"task-1": {"ok": True}}}
-
-    workflow = Workflow()
-    builder = StateGraph(RootGraphState)
-    builder.add_node("wait", _wait_for_plan_completion_node(workflow))
-    builder.add_edge(START, "wait")
-    builder.add_edge("wait", END)
-    graph = builder.compile(checkpointer=InMemorySaver())
-    config = {"configurable": {"thread_id": "run:run-1"}}
-
-    paused = await invoke_root_graph(
-        graph, session_id="session-1", run_id="run-1"
-    )
-
-    assert len(paused["__interrupt__"]) == 1
-    assert paused["__interrupt__"][0].value["round_id"] == "round-1"
-    assert paused["__root_checkpoint_id__"]
-    class ThreadLock:
-        @asynccontextmanager
-        async def hold(self, _thread_id):
-            yield
-
-    class Checkpointer:
-        def get_saver(self):
-            return InMemorySaver()
-
-    adapter = LangGraphRootGraph(
-        workflow=None,
-        dependencies=None,
-        checkpointer=Checkpointer(),
-        thread_lock=ThreadLock(),
-        lease_center=LeaseCenter(),
-    )
-    adapter._graph = graph
-    identity = {
-        "run_id": "run-1",
-        "plan_id": "plan-1",
-        "round_id": "round-1",
-        "plan_version": 1,
-        "interrupt_id": paused["__interrupt__"][0].id,
-        "checkpoint_id": paused["__root_checkpoint_id__"],
-    }
-    assert await adapter.has_pending_round_wait(**identity) is True
-    assert await adapter.has_pending_round_wait(
-        **{**identity, "interrupt_id": "stale-interrupt"}
-    ) is False
-    assert await adapter.has_pending_round_wait(
-        **{**identity, "checkpoint_id": "stale-checkpoint"}
-    ) is False
-    resumed = await graph.ainvoke(
-        Command(
-            resume={
-                "type": "round_completed",
-                "run_id": "run-1",
-                "plan_id": "plan-1",
-                "round_id": "round-1",
-            }
-        ),
-        config=config,
-    )
-
-    assert resumed["waiting"] is False
-    assert resumed["plan_results"] == {"task-1": {"ok": True}}
-
-
-@pytest.mark.asyncio
-async def test_root_wait_node_reviews_completed_round_before_waiting_again():
-    class Workflow:
-        def __init__(self):
-            self.wait_calls = 0
-            self.reviewed = []
-
-        async def wait_for_plan_completion(self, _state):
-            self.wait_calls += 1
-            if len(self.reviewed) == 0:
-                return {
-                    "waiting": True,
-                    "root_wait": {
-                        "type": "round_wait",
-                        "run_id": "run-1",
-                        "plan_id": "plan-1",
-                        "round_id": "round-1",
-                        "plan_version": 1,
-                    },
-                }
-            if len(self.reviewed) == 1:
-                return {
-                    "waiting": True,
-                    "root_wait": {
-                        "type": "round_wait",
-                        "run_id": "run-1",
-                        "plan_id": "plan-1",
-                        "round_id": "round-2",
-                        "plan_version": 1,
-                    },
-                }
-            return {"waiting": False, "plan_results": {"task-1": {"ok": True}}}
-
-        async def review_completed_round(self, state):
-            self.reviewed.append(state)
-
-    workflow = Workflow()
-    builder = StateGraph(RootGraphState)
-    builder.add_node("wait", _wait_for_plan_completion_node(workflow))
-    builder.add_edge(START, "wait")
-    builder.add_conditional_edges(
-        "wait",
-        lambda state: "wait" if state.get("waiting") else END,
-        {"wait": "wait", END: END},
-    )
-    graph = builder.compile(checkpointer=InMemorySaver())
-    config = {"configurable": {"thread_id": "run:run-1"}}
-    paused = await invoke_root_graph(graph, session_id="session-1", run_id="run-1")
-
-    first_resumed = await graph.ainvoke(
-        Command(
-            resume={
-                "type": "round_completed",
-                "run_id": "run-1",
-                "plan_id": "plan-1",
-                "round_id": "round-1",
-                "plan_version": 1,
-            }
-        ),
-        config=config,
-    )
-
-    assert len(paused["__interrupt__"]) == 1
-    assert paused["__interrupt__"][0].value["round_id"] == "round-1"
-    assert len(first_resumed["__interrupt__"]) == 1
-    assert first_resumed["__interrupt__"][0].value["round_id"] == "round-2"
-
-    resumed = await graph.ainvoke(
-        Command(
-            resume={
-                "type": "round_completed",
-                "run_id": "run-1",
-                "plan_id": "plan-1",
-                "round_id": "round-2",
-                "plan_version": 1,
-            }
-        ),
-        config=config,
-    )
-
-    assert resumed["waiting"] is False
-    assert workflow.wait_calls == 6
-    assert [item["root_wait"]["round_id"] for item in workflow.reviewed] == [
-        "round-1",
-        "round-2",
-    ]
-    assert workflow.reviewed[0]["root_wait"]["round_id"] == "round-1"
-    assert workflow.reviewed[0]["resume_value"]["type"] == "round_completed"
-
-
-@pytest.mark.asyncio
-async def test_resume_exception_fails_run_instead_of_replaying_checkpoint():
-    """恢复调用发生异常时启动失败收尾，避免重放已经产生副作用的调用。"""
-    class Jobs:
-        def __init__(self):
-            self.retries = []
-
-        async def retry(self, lease, *, delay_seconds):
-            self.retries.append(lease)
+async def test_dispatcher_resumes_matching_plan_wait_and_converges_job():
+    jobs = _Jobs()
 
     class Graph:
-        async def has_pending_round_wait(self, **_identity):
+        async def has_pending_plan_wait(self, **_kwargs):
             return True
 
-    class Execution:
-        def __init__(self):
-            self.failures = []
+        async def find_pending_plan_wait(self, **_kwargs):
+            return None
 
-        async def execute(self, _command):
-            raise RuntimeError("checkpoint failure")
-
-        async def fail(self, command, error):
-            self.failures.append((command, error))
-
-    class Runs:
-        def __init__(self):
-            self.releases = []
-
-        async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
-            return lease_grant("root_execution", _run_id, owner_id=owner)
-
-        async def release_execution_lease(self, run_id, *, owner, generation):
-            self.releases.append((run_id, owner, generation))
-            return True
-
-    jobs, execution, runs = Jobs(), Execution(), Runs()
-    dispatcher = RootResumeDispatcher(
-        jobs, Graph(), execution, runs, worker_id="resumer",
-        lease_center=LeaseCenter(),
-    )
-    lease = SimpleNamespace(job_id="job", run_id="run", session_id="session", plan_id="plan",
-        round_id="round", plan_version=1, root_wait_generation=1,
-        interrupt_id="interrupt", checkpoint_id="checkpoint",
-        lease=lease_grant("root_resume", "job"))
-
-    await dispatcher._resume(lease)
-
-    assert execution.failures[0][1]["code"] == "root_checkpoint_resume_failed"
-    assert jobs.retries == []
-    assert not runs.releases
-
-
-@pytest.mark.asyncio
-async def test_root_resume_dispatcher_retries_until_matching_interrupt_exists():
-    class Jobs:
-        def __init__(self):
-            self.retries = []
-            self.completed = []
-
-        async def retry(self, lease, *, delay_seconds):
-            self.retries.append((lease, delay_seconds))
-            return True
-
-        async def complete(self, lease):
-            self.completed.append(lease)
-            return True
-
-        async def renew(self, lease, *, lease_seconds):
-            return lease
-
-    class Graph:
-        async def has_pending_round_wait(self, **_identity):
+        async def is_plan_checkpoint_recoverable(self, **_kwargs):
             return False
 
     class Execution:
-        async def execute(self, _command):
-            raise AssertionError("must not invoke a Root without its interrupt")
-
-    class Runs:
-        async def get(self, _run_id):
-            return SimpleNamespace(status="completed")
-
-    jobs = Jobs()
-    dispatcher = RootResumeDispatcher(
-        jobs,
-        Graph(),
-        Execution(),
-        Runs(),
-        worker_id="root-resumer-1",
-        lease_center=LeaseCenter(),
-    )
-    lease = SimpleNamespace(
-        job_id="resume-1",
-        run_id="run-1",
-        session_id="session-1",
-        plan_id="plan-1",
-        round_id="round-1",
-        plan_version=1,
-        root_wait_generation=3,
-        interrupt_id="interrupt-1",
-        checkpoint_id="checkpoint-1",
-        worker_id="root-resumer-1",
-        lease=lease_grant("root_resume", "resume-1"),
-    )
-
-    await dispatcher._resume(lease)
-
-    assert len(jobs.retries) == 1
-    assert jobs.completed == []
-
-
-@pytest.mark.asyncio
-async def test_root_resume_recovers_checkpoint_identity_before_dispatch():
-    """Run 行登记缺失时从 checkpoint 找回身份并继续恢复 Root。
-
-    参数：无。
-    返回：无。
-    异常：断言失败时由 pytest 将测试标记为失败。
-    """
-    class Jobs:
         def __init__(self):
-            """初始化完成与重试记录；本构造函数不接收参数。"""
-            self.completed = []
-            self.retries = []
-
-        async def retry(self, lease, *, delay_seconds):
-            """记录待重试的 Root Resume lease。"""
-            self.retries.append((lease, delay_seconds))
-
-        async def complete(self, lease):
-            """记录已完成的 Root Resume lease。"""
-            self.completed.append(lease)
-
-        async def renew(self, lease, *, lease_seconds):
-            """返回当前 lease，模拟成功续租。"""
-            return lease
-
-    class Graph:
-        async def find_pending_round_wait(self, **identity):
-            """返回匹配 checkpoint 中的中断身份。"""
-            assert identity["round_id"] == "round-1"
-            return "interrupt-recovered", "checkpoint-recovered"
-
-        async def has_pending_round_wait(self, **identity):
-            """确认恢复出的中断和 checkpoint 与图状态一致。"""
-            return identity == {
-                "run_id": "run-1",
-                "plan_id": "plan-1",
-                "round_id": "round-1",
-                "plan_version": 1,
-                "interrupt_id": "interrupt-recovered",
-                "checkpoint_id": "checkpoint-recovered",
-            }
-
-    class Execution:
-        def __init__(self, runs):
-            """初始化命令记录；本构造函数不接收参数。"""
             self.command = None
-            self.runs = runs
-
-        async def execute(self, command):
-            """记录 Root 恢复命令并模拟执行成功。"""
-            self.command = command
-            self.runs.status = "completed"
-
-    class Runs:
-        def __init__(self):
-            """初始化 Root wait 登记记录；本构造函数不接收参数。"""
-            self.armed = []
-            self.status = "running"
-
-        async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
-            return lease_grant("root_execution", _run_id, owner_id=owner)
-
-        async def renew_execution_lease(self, _run_id, **_kwargs):
-            return True
-
-        async def release_execution_lease(self, _run_id, *, owner, generation):
-            return True
-
-        async def arm_root_wait(self, run_id, **identity):
-            """记录从 checkpoint 修复的 Run wait 身份。"""
-            self.armed.append((run_id, identity))
-            return True
-
-        async def get(self, _run_id):
-            """返回当前 Run 状态。"""
-            return SimpleNamespace(status=self.status)
-
-    jobs, runs = Jobs(), Runs()
-    execution = Execution(runs)
-    dispatcher = RootResumeDispatcher(
-        jobs,
-        Graph(),
-        execution,
-        runs,
-        worker_id="root-resumer-1",
-        lease_center=LeaseCenter(),
-    )
-    lease = SimpleNamespace(
-        job_id="resume-unarmed",
-        run_id="run-1",
-        session_id="session-1",
-        plan_id="plan-1",
-        round_id="round-1",
-        plan_version=1,
-        root_wait_generation=3,
-        interrupt_id=None,
-        checkpoint_id=None,
-        worker_id="root-resumer-1",
-        lease=lease_grant("root_resume", "resume-unarmed"),
-    )
-
-    await dispatcher._resume(lease)
-
-    assert len(runs.armed) == 1
-    armed_run_id, armed_identity = runs.armed[0]
-    assert armed_run_id == "run-1"
-    assert {
-        key: armed_identity[key]
-        for key in (
-            "plan_id",
-            "round_id",
-            "plan_version",
-            "interrupt_id",
-            "checkpoint_id",
-        )
-    } == {
-        "plan_id": "plan-1",
-        "round_id": "round-1",
-        "plan_version": 1,
-        "interrupt_id": "interrupt-recovered",
-        "checkpoint_id": "checkpoint-recovered",
-    }
-    assert armed_identity["lease"].key.resource_id == "run-1"
-    assert execution.command.payload.resume_value.interrupt_id == (
-        "interrupt-recovered"
-    )
-    assert jobs.completed == [lease]
-    assert jobs.retries == []
-
-
-@pytest.mark.asyncio
-async def test_root_resume_dispatcher_uses_same_run_thread_and_completes_job():
-    class Jobs:
-        def __init__(self):
-            self.completed = []
-
-        async def retry(self, *_args, **_kwargs):
-            raise AssertionError("matching checkpoint should resume")
-
-        async def complete(self, lease):
-            self.completed.append(lease)
-            return True
-
-        async def renew(self, lease, *, lease_seconds):
-            return lease
-
-    class Graph:
-        async def has_pending_round_wait(self, **identity):
-            return identity == {
-                "run_id": "run-1",
-                "plan_id": "plan-1",
-                "round_id": "round-1",
-                "plan_version": 1,
-                "interrupt_id": "interrupt-1",
-                "checkpoint_id": "checkpoint-1",
-            }
-
-    class Execution:
-        def __init__(self, runs):
-            self.command = None
-            self.runs = runs
 
         async def execute(self, command):
             self.command = command
-            self.runs.status = "completed"
-            return {"content": "done"}
+            jobs.current = False
 
-    class Runs:
-        status = "running"
-
-        async def acquire_execution_lease(self, _run_id, *, owner, lease_seconds):
-            return lease_grant("root_execution", _run_id, owner_id=owner)
-
-        async def renew_execution_lease(self, _run_id, **_kwargs):
-            return True
-
-        async def release_execution_lease(self, _run_id, *, owner, generation):
-            return True
-
-        async def get(self, _run_id):
-            return SimpleNamespace(status=self.status)
-
-    jobs, runs = Jobs(), Runs()
-    execution = Execution(runs)
+    execution = Execution()
     dispatcher = RootResumeDispatcher(
-        jobs,
-        Graph(),
-        execution,
-        runs,
-        worker_id="root-resumer-1",
-        lease_center=LeaseCenter(),
+        jobs, Graph(), execution, _Lifecycle(), _Runs(), worker_id="root", lease_center=LeaseCenter()
     )
-    lease = SimpleNamespace(
-        job_id="resume-1",
-        run_id="run-1",
-        session_id="session-1",
-        plan_id="plan-1",
-        round_id="round-1",
-        plan_version=1,
-        root_wait_generation=3,
-        interrupt_id="interrupt-1",
-        checkpoint_id="checkpoint-1",
-        worker_id="root-resumer-1",
-        lease=lease_grant("root_resume", "resume-1"),
-    )
-
-    await dispatcher._resume(lease)
-
-    assert execution.command.run_id == "run-1"
-    assert execution.command.payload.resume_value.round_id == "round-1"
-    assert execution.command.payload.resume_value.interrupt_id == "interrupt-1"
+    await dispatcher._resume(_lease())
+    assert execution.command is not None
+    value = execution.command.payload.resume_value
+    assert isinstance(value, RootPlanCompletedResumeValue)
+    assert value.plan_sequence == 1
     assert len(jobs.completed) == 1
 
 
 @pytest.mark.asyncio
-async def test_plan_loader_keeps_completed_round_waiting_for_root_review():
-    class Repository:
-        async def get_plan_status(self, _plan_id):
-            return PlanStatus.WAITING_REVIEW
+async def test_dispatcher_retries_when_checkpoint_is_not_ready():
+    jobs = _Jobs()
 
-        async def get_results(self, _plan_id):
-            return {"task-1": {"status": "completed"}}
+    class Graph:
+        async def has_pending_plan_wait(self, **_kwargs):
+            return False
 
-        async def get_wait_context(self, _plan_id):
-            return {
-                "type": "round_wait",
-                "run_id": "run-1",
-                "plan_id": "plan-1",
-                "round_id": "round-1",
-                "plan_version": 1,
-            }
+        async def find_pending_plan_wait(self, **_kwargs):
+            return None
 
-    value = await PostgresPlanLoader(Repository())(plan_id="plan-1")
+        async def is_plan_checkpoint_recoverable(self, **_kwargs):
+            return False
 
-    assert value["completed"] is False
-    assert value["root_wait"]["round_id"] == "round-1"
+    class Execution:
+        async def execute(self, _command):
+            raise AssertionError("Root must not resume without a matching checkpoint")
+
+    dispatcher = RootResumeDispatcher(
+        jobs, Graph(), Execution(), _Lifecycle(), _Runs(), worker_id="root", lease_center=LeaseCenter()
+    )
+    await dispatcher._resume(_lease())
+    assert jobs.retried and not jobs.completed
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_retries_resume_exception_for_checkpoint_recovery():
+    jobs = _Jobs()
+
+    class Graph:
+        async def has_pending_plan_wait(self, **_kwargs):
+            return True
+
+        async def find_pending_plan_wait(self, **_kwargs):
+            return None
+
+        async def is_plan_checkpoint_recoverable(self, **_kwargs):
+            return True
+
+    class Execution:
+        async def execute(self, _command):
+            raise RuntimeError("transient graph failure")
+
+    dispatcher = RootResumeDispatcher(
+        jobs, Graph(), Execution(), _Lifecycle(), _Runs(), worker_id="root", lease_center=LeaseCenter()
+    )
+    await dispatcher._resume(_lease())
+    assert jobs.retried and not jobs.completed
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_completes_job_when_wait_is_already_superseded():
+    jobs = _Jobs(current=False)
+
+    class Graph:
+        async def has_pending_plan_wait(self, **_kwargs):
+            raise AssertionError("stale Root wait must not inspect or resume the graph")
+
+    class Execution:
+        async def execute(self, _command):
+            raise AssertionError("stale Root wait must not invoke the graph")
+
+    dispatcher = RootResumeDispatcher(
+        jobs, Graph(), Execution(), _Lifecycle(), _Runs(), worker_id="root", lease_center=LeaseCenter()
+    )
+    await dispatcher._resume(_lease())
+    assert jobs.completed and not jobs.retried
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_uses_checkpoint_recovery_after_interrupt_consumed():
+    jobs = _Jobs()
+
+    class Graph:
+        async def has_pending_plan_wait(self, **_kwargs):
+            return False
+
+        async def find_pending_plan_wait(self, **_kwargs):
+            return None
+
+        async def is_plan_checkpoint_recoverable(self, **_kwargs):
+            return True
+
+    class Execution:
+        def __init__(self):
+            self.command = None
+
+        async def execute(self, command):
+            self.command = command
+            jobs.current = False
+
+    execution = Execution()
+    dispatcher = RootResumeDispatcher(
+        jobs, Graph(), execution, _Lifecycle(), _Runs(), worker_id="root", lease_center=LeaseCenter()
+    )
+    await dispatcher._resume(_lease())
+    assert execution.command.payload.resume_value.type == "plan_checkpoint_recovery"
+    assert jobs.completed

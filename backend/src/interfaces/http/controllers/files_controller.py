@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -59,17 +58,14 @@ class AttachmentResponse(BaseModel):
 
 
 def build_files_router(
-    service_factory: Callable[[], AttachmentService],
+    attachment_service: AttachmentService,
 ) -> APIRouter:
     router = APIRouter(prefix="/sessions/{session_id}", tags=["files"])
-
-    def service() -> AttachmentService:
-        return service_factory()
 
     @router.get("/attachments", response_model=list[AttachmentResponse])
     async def list_attachments(session_id: str) -> list[AttachmentResponse]:
         try:
-            values = await service().list_for_session(session_id)
+            values = await attachment_service.list_for_session(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return [AttachmentResponse.from_application(value) for value in values]
@@ -94,7 +90,7 @@ def build_files_router(
                         yield chunk
 
                 created.append(
-                    await service().upload(
+                    await attachment_service.upload(
                         session_id,
                         filename=filename,
                         mime_type=upload.content_type or "application/octet-stream",
@@ -113,7 +109,7 @@ def build_files_router(
     @router.get("/attachment-types")
     async def supported_attachment_types(session_id: str) -> dict[str, list[str]]:
         try:
-            values = await service().supported_extensions(session_id)
+            values = await attachment_service.supported_extensions(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return {"extensions": values}
@@ -121,7 +117,7 @@ def build_files_router(
     @router.get("/attachments/{attachment_id}", response_model=AttachmentResponse)
     async def get_attachment(session_id: str, attachment_id: str) -> AttachmentResponse:
         try:
-            value = await service().get(session_id, attachment_id)
+            value = await attachment_service.get(session_id, attachment_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except AttachmentNotFoundError as exc:
@@ -131,7 +127,7 @@ def build_files_router(
     @router.delete("/attachments/{attachment_id}")
     async def delete_attachment(session_id: str, attachment_id: str) -> dict[str, str]:
         try:
-            await service().delete(session_id, attachment_id)
+            await attachment_service.delete(session_id, attachment_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except AttachmentNotFoundError as exc:

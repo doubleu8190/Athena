@@ -25,6 +25,8 @@ class RootPlanIdentity(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
 
     plan_id: str
+    sequence: int = Field(strict=True, ge=1)
+    root_wait_generation: int = Field(strict=True, ge=1)
 
 
 class RootWaitIdentity(BaseModel):
@@ -32,11 +34,13 @@ class RootWaitIdentity(BaseModel):
 
     model_config = ConfigDict(extra="allow", frozen=True)
 
-    type: Literal["round_wait"]
+    type: Literal["plan_wait"]
     run_id: str = Field(min_length=1)
     plan_id: str = Field(min_length=1)
-    round_id: str = Field(min_length=1)
-    plan_version: int = Field(strict=True, gt=0)
+    plan_sequence: int = Field(strict=True, gt=0)
+    root_wait_generation: int = Field(strict=True, gt=0)
+    interrupt_id: str | None = None
+    checkpoint_id: str | None = None
 
 
 class RootResumeIdentity(BaseModel):
@@ -44,13 +48,12 @@ class RootResumeIdentity(BaseModel):
 
     model_config = ConfigDict(extra="allow", frozen=True)
 
-    type: Literal["round_completed"]
+    type: Literal["plan_completed"]
     run_id: str = Field(min_length=1)
     plan_id: str = Field(min_length=1)
-    round_id: str = Field(min_length=1)
-    plan_version: int = Field(strict=True, gt=0)
-    interrupt_id: str | None = None
-    root_wait_generation: int | None = Field(default=None, gt=0)
+    plan_sequence: int = Field(strict=True, gt=0)
+    root_wait_generation: int = Field(strict=True, gt=0)
+    interrupt_id: str = Field(min_length=1)
 
 
 __all__ = [

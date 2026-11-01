@@ -106,26 +106,26 @@ def build_test_dependencies() -> ApplicationDependencies:
         async def soft_delete(self, key, *, knowledge_base_id):
             return await documents.soft_delete(key, knowledge_base_id=knowledge_base_id)
 
-    providers = {
-        "session_service_factory": lambda: SessionService(sessions, id_factory=now_id),
-        "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
-        "run_query_factory": lambda: RunQueryService(sessions, runs, events),
-        "run_service_factory": lambda: RunService(runs, runs, id_factory=now_id),
-        "event_stream_factory": lambda: EventStreamService(sessions, events),
-        "tool_query_factory": lambda: ToolQueryService(tools, queries),
-        "tool_service_factory": lambda: ToolService(tools, InMemoryToolExecution()),
-        "approval_service_factory": lambda: ApprovalService(approvals),
-        "mcp_service_factory": lambda: MCPService(mcp),
-        "provider_query_factory": lambda: ProviderQueryService(queries),
-        "settings_query_factory": lambda: SettingsQueryService(type("SettingsPort", (), {"get_settings": staticmethod(settings_payload)})()),
-        "memory_query_factory": lambda: MemoryQueryService(queries),
-        "memory_service_factory": lambda: MemoryService(memory),
-        "retrieval_query_factory": lambda: RetrievalQueryService(queries),
-        "knowledge_query_factory": lambda: KnowledgeBaseQueryService(knowledge),
-        "attachment_service_factory": lambda: AttachmentService(sessions, attachments, storage, adapters, StorageJob(), id_factory=now_id),
-        "knowledge_service_factory": lambda: KnowledgeBaseService(knowledge, KnowledgeDocs(), storage, adapters, StorageJob(), id_factory=now_id),
+    services = {
+        "session_service": SessionService(sessions, id_factory=now_id),
+        "message_query_service": SessionMessageQueryService(sessions, messages),
+        "run_query_service": RunQueryService(sessions, runs, events),
+        "run_service": RunService(runs, runs, id_factory=now_id),
+        "event_stream_service": EventStreamService(sessions, events),
+        "tool_query_service": ToolQueryService(tools, queries),
+        "tool_service": ToolService(tools, InMemoryToolExecution()),
+        "approval_service": ApprovalService(approvals),
+        "mcp_service": MCPService(mcp),
+        "provider_query_service": ProviderQueryService(queries),
+        "settings_query_service": SettingsQueryService(type("SettingsPort", (), {"get_settings": staticmethod(settings_payload)})()),
+        "memory_query_service": MemoryQueryService(queries),
+        "memory_service": MemoryService(memory),
+        "retrieval_query_service": RetrievalQueryService(queries),
+        "knowledge_query_service": KnowledgeBaseQueryService(knowledge),
+        "attachment_service": AttachmentService(sessions, attachments, storage, adapters, StorageJob(), id_factory=now_id),
+        "knowledge_service": KnowledgeBaseService(knowledge, KnowledgeDocs(), storage, adapters, StorageJob(), id_factory=now_id),
     }
-    return build_dependencies(factories=providers)
+    return build_dependencies(services=services)
 
 
 __all__ = ["build_test_dependencies"]

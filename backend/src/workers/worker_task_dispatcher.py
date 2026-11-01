@@ -11,6 +11,7 @@ import httpx
 from jsonschema.exceptions import ValidationError
 
 from application.orchestration.worker_protocol_models import (
+    WorkerCancelReceiptModel,
     WorkerCommandReceiptModel,
     WorkerHttpErrorResponseModel,
     WorkerTaskCommandModel,
@@ -20,6 +21,7 @@ from application.orchestration.worker_protocol_validation import validate_worker
 from domain.orchestration.worker_entities import WorkerDispatchLease, WorkerDispatchStart
 from infrastructure.integrations.worker_http import (
     PinnedWorkerHttpClient,
+    WorkerTaskPostResponse,
     WorkerOriginRejected,
     WorkerTaskResponseInvalid,
 )
@@ -220,6 +222,9 @@ class WorkerTaskDispatcher:
 
     async def _dispatch(self, lease: WorkerDispatchLease) -> None:
         """完成分配、Grant 构造、命令冻结和一次有界 HTTP 发送。"""
+        if lease.command_type == "cancel":
+            await self._dispatch_cancel(lease)
+            return
         try:
             start = await self._repository.start_dispatch(
                 lease,
@@ -337,6 +342,100 @@ class WorkerTaskDispatcher:
         except Exception:
             logger.error("worker_task_dispatch_unexpected_error", extra={"command_id": lease.command_id}, exc_info=True)
             await self._retry_or_wait(lease)
+
+    async def _dispatch_cancel(self, lease: WorkerDispatchLease) -> None:
+        """投递取消命令并只记录远端收件，不改变逻辑任务状态或容量。"""
+        try:
+            start = await self._repository.prepare_cancel_dispatch(
+                lease, lease_seconds=self._lease_seconds
+            )
+            if start is None:
+                return
+            response = await self._http.send_cancel(
+                start,
+                max_response_bytes=self._max_response_bytes,
+                timeout_seconds=self._request_timeout,
+            )
+            await self._handle_cancel_response(lease, response)
+        except asyncio.CancelledError:
+            raise
+        except WorkerOriginRejected as exc:
+            logger.error(
+                "worker_cancel_origin_rejected",
+                extra={"command_id": lease.command_id, "reason": str(exc)},
+            )
+            await self._repository.await_dispatch_result(lease)
+        except (httpx.HTTPError, WorkerTaskResponseInvalid):
+            await self._retry_or_wait(lease)
+        except ValueError as exc:
+            if str(exc) == "worker_dispatch_lease_lost":
+                logger.warning(
+                    "worker_cancel_dispatch_fencing_rejected",
+                    extra={"command_id": lease.command_id},
+                )
+                return
+            # 取消命令的未知协议/状态错误不能释放容量，保留租约事实等待下一次处理。
+            await self._repository.await_dispatch_result(lease)
+        except Exception:
+            logger.error(
+                "worker_cancel_dispatch_unexpected_error",
+                extra={"command_id": lease.command_id},
+                exc_info=True,
+            )
+            await self._retry_or_wait(lease)
+
+    async def _handle_cancel_response(
+        self, lease: WorkerDispatchLease, response: WorkerTaskPostResponse
+    ) -> None:
+        """校验取消回执的命令和执行身份，再持久记录 202 意图回执。"""
+        status_code = response.status_code
+        body = response.body
+        retry_after_seconds = response.retry_after_seconds
+        if status_code in {200, 202}:
+            try:
+                receipt = WorkerCancelReceiptModel.model_validate(body)
+            except ValueError:
+                await self._repository.await_dispatch_result(lease)
+                return
+            expected = lease.command
+            if (
+                str(receipt.command_id) != lease.command_id
+                or str(receipt.execution_id) != lease.execution_id
+                or receipt.generation != int(expected.get("generation", -1))
+                or receipt.cancellation_epoch
+                != int(expected.get("cancellation_epoch", -1))
+                or receipt.reason != expected.get("reason")
+                or receipt.accepted is not True
+                or receipt.stop_confirmation_required is not True
+                or status_code != 202
+            ):
+                await self._repository.await_dispatch_result(lease)
+                return
+            await self._repository.record_cancel_receipt(lease, receipt)
+            return
+        try:
+            validate_worker_request("ErrorResponse", body)
+            error = WorkerHttpErrorResponseModel.model_validate(body)
+        except (ValidationError, ValueError):
+            await self._repository.await_dispatch_result(lease)
+            return
+        if (
+            status_code == _RETRY_STATUS_BY_CODE.get(error.code)
+            and error.directive == "retry_same_command"
+        ):
+            if lease.attempt >= self._max_retries:
+                await self._repository.exhaust_dispatch_retries(lease)
+                return
+            retry_after = _max_optional(
+                retry_after_seconds, error.retry_after_seconds
+            )
+            await self._repository.retry_dispatch_command(
+                lease,
+                delay_seconds=self._retry_delay(lease.attempt, retry_after),
+            )
+            return
+        # Cancel 请求的拒绝不能沿用 Execute 错误的 Task/Root 状态转移。
+        await self._repository.await_dispatch_result(lease)
 
     async def _handle_response(
         self,

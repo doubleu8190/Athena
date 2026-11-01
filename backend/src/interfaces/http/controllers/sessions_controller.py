@@ -1,14 +1,13 @@
 """会话 Controller 的新实现。
 
-该 Router 不自行查数据库。应用启动时通过 ``service_factory`` 注入
+该 Router 不自行查数据库。应用启动时通过 ``session_service`` 注入
 ``SessionService``，因此 HTTP 层可以独立测试。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Response
 
 from application.runs import RunQueryService
 from application.sessions import (
@@ -31,41 +30,22 @@ from interfaces.http.dto.runs import RunTimelineResponse
 
 
 def build_sessions_router(
-    service_factory: Callable[[], SessionService],
+    session_service: SessionService,
     *,
-    message_query_factory: Callable[[], SessionMessageQueryService] | None = None,
-    run_query_factory: Callable[[], RunQueryService] | None = None,
-    memory_settings_factory: Callable[[], SessionMemorySettingsService] | None = None,
+    message_query_service: SessionMessageQueryService | None = None,
+    run_query_service: RunQueryService | None = None,
+    memory_settings_service: SessionMemorySettingsService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/sessions", tags=["sessions"])
-
-    def service() -> SessionService:
-        return service_factory()
-
-    def message_query() -> SessionMessageQueryService:
-        if message_query_factory is None:
-            raise RuntimeError("message query service is not configured")
-        return message_query_factory()
-
-    def run_query() -> RunQueryService:
-        if run_query_factory is None:
-            raise RuntimeError("run query service is not configured")
-        return run_query_factory()
-
-    def memory_settings() -> SessionMemorySettingsService:
-        if memory_settings_factory is None:
-            raise RuntimeError("session memory settings service is not configured")
-        return memory_settings_factory()
 
     @router.post("", response_model=SessionResponse)
     async def create_session(
         request: CreateSessionRequest,
         response: Response,
         idempotency_key: str = Header(alias="Idempotency-Key"),
-        sessions: SessionService = Depends(service),
     ) -> SessionResponse:
         try:
-            value = await sessions.create(
+            value = await session_service.create(
                 project_id=request.project_id,
                 creation_request_id=idempotency_key,
                 title=request.title,
@@ -84,20 +64,18 @@ def build_sessions_router(
     @router.get("", response_model=list[SessionResponse])
     async def list_sessions(
         project_id: str | None = Query(default=None),
-        sessions: SessionService = Depends(service),
     ) -> list[SessionResponse]:
         return [
             SessionResponse.from_application(item)
-            for item in await sessions.list_sessions(project_id=project_id)
+            for item in await session_service.list_sessions(project_id=project_id)
         ]
 
     @router.get("/{session_id}", response_model=SessionResponse)
     async def get_session(
         session_id: str,
-        sessions: SessionService = Depends(service),
     ) -> SessionResponse:
         try:
-            return SessionResponse.from_application(await sessions.get(session_id))
+            return SessionResponse.from_application(await session_service.get(session_id))
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
 
@@ -105,10 +83,9 @@ def build_sessions_router(
     async def rename_session(
         session_id: str,
         request: UpdateSessionRequest,
-        sessions: SessionService = Depends(service),
     ) -> SessionResponse:
         try:
-            updated = await sessions.rename(session_id, request.title)
+            updated = await session_service.rename(session_id, request.title)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except ValueError as exc:
@@ -119,25 +96,23 @@ def build_sessions_router(
     @router.delete("/{session_id}", response_model=SessionDeletionResponse)
     async def delete_session(
         session_id: str,
-        sessions: SessionService = Depends(service),
     ) -> SessionDeletionResponse:
         try:
-            await sessions.delete(session_id)
+            await session_service.delete(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return SessionDeletionResponse(status="deleted", session_id=session_id)
 
-    if memory_settings_factory is not None:
+    if memory_settings_service is not None:
         @router.get(
             "/{session_id}/memory-settings",
             response_model=SessionMemorySettingsResponse,
         )
         async def get_session_memory_settings(
             session_id: str,
-            settings: SessionMemorySettingsService = Depends(memory_settings),
         ) -> SessionMemorySettingsResponse:
             try:
-                value = await settings.get(session_id)
+                value = await memory_settings_service.get(session_id)
             except LookupError as exc:
                 raise HTTPException(status_code=404, detail="session_not_found") from exc
             return SessionMemorySettingsResponse(
@@ -152,10 +127,9 @@ def build_sessions_router(
         async def update_session_memory_settings(
             session_id: str,
             request: SessionMemorySettingsRequest,
-            settings: SessionMemorySettingsService = Depends(memory_settings),
         ) -> SessionMemorySettingsResponse:
             try:
-                value = await settings.update(
+                value = await memory_settings_service.update(
                     session_id,
                     use_memories=request.use_memories,
                 )
@@ -173,10 +147,9 @@ def build_sessions_router(
     async def list_session_messages(
         session_id: str,
         limit: int | None = None,
-        messages: SessionMessageQueryService = Depends(message_query),
     ) -> list[MessageResponse]:
         try:
-            values = await messages.list_messages(session_id, limit=limit)
+            values = await message_query_service.list_messages(session_id, limit=limit)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return [MessageResponse.from_application(value) for value in values]
@@ -184,10 +157,9 @@ def build_sessions_router(
     @router.get("/{session_id}/runs", response_model=list[RunSummaryResponse])
     async def list_session_runs(
         session_id: str,
-        runs: RunQueryService = Depends(run_query),
     ) -> list[RunSummaryResponse]:
         try:
-            values = await runs.list_for_session(session_id)
+            values = await run_query_service.list_for_session(session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return [RunSummaryResponse.from_application(value) for value in values]
@@ -198,10 +170,9 @@ def build_sessions_router(
         run_id: str,
         after: int = 0,
         limit: int = 200,
-        runs: RunQueryService = Depends(run_query),
     ) -> RunTimelineResponse:
         try:
-            value = await runs.timeline(session_id, run_id, after=after, limit=limit)
+            value = await run_query_service.timeline(session_id, run_id, after=after, limit=limit)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         except LookupError as exc:

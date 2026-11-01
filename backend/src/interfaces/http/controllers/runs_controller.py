@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Header, HTTPException, Query, Response
 
 from application.runs import RunNotFoundError, RunQueryService, RunRejectedError, RunService
 from application.sessions import SessionNotFoundError
@@ -19,7 +18,7 @@ from interfaces.http.dto.sessions import RunSummaryResponse
 
 
 def build_run_query_router(
-    query_service_factory: Callable[[], RunQueryService],
+    run_query_service: RunQueryService,
 ) -> APIRouter:
     router = APIRouter(tags=["runs"])
 
@@ -28,10 +27,9 @@ def build_run_query_router(
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
         session_id: str | None = None,
-        runs: RunQueryService = Depends(query_service_factory),
     ) -> RunListResponse:
         try:
-            value = await runs.list_recent(limit=limit, offset=offset, session_id=session_id)
+            value = await run_query_service.list_recent(limit=limit, offset=offset, session_id=session_id)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return RunListResponse(
@@ -43,10 +41,9 @@ def build_run_query_router(
     @router.get("/runs/{run_id}", response_model=RunSummaryResponse)
     async def get_run(
         run_id: str,
-        runs: RunQueryService = Depends(query_service_factory),
     ) -> RunSummaryResponse:
         try:
-            return RunSummaryResponse.from_application(await runs.get(run_id))
+            return RunSummaryResponse.from_application(await run_query_service.get(run_id))
         except RunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run_not_found") from exc
 
@@ -54,7 +51,7 @@ def build_run_query_router(
 
 
 def build_runs_router(
-    run_service_factory: Callable[[], RunService],
+    run_service: RunService,
 ) -> APIRouter:
     router = APIRouter(tags=["runs"])
 
@@ -63,10 +60,9 @@ def build_runs_router(
         request: SubmitRunRequest,
         response: Response,
         idempotency_key: str = Header(alias="Idempotency-Key"),
-        runs: RunService = Depends(run_service_factory),
     ) -> SubmitRunResponse:
         try:
-            value = await runs.submit(
+            value = await run_service.submit(
                 request.session_id,
                 project_id=request.project_id,
                 request_id=idempotency_key,
@@ -94,10 +90,9 @@ def build_runs_router(
         request: StopRunRequest,
         response: Response,
         idempotency_key: str = Header(alias="Idempotency-Key"),
-        runs: RunService = Depends(run_service_factory),
     ) -> StopRunResponse:
         try:
-            value = await runs.stop_session(
+            value = await run_service.stop_session(
                 session_id,
                 request_id=idempotency_key,
                 expected_run_id=request.expected_run_id,

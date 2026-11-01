@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping, Protocol
 
+from domain.leases import LeaseGrant
 from .contracts import (
     CommandReceipt,
     OrchestrationCommand,
@@ -14,6 +15,8 @@ from .contracts import (
     TaskEventReceipt,
     WorkerJobLease,
     WorkerTaskTerminalEvent,
+    RootPlanFacts,
+    RootPlanResumeLease,
 )
 from .worker_execution_messages import (
     WorkerExecutionMessage,
@@ -21,6 +24,7 @@ from .worker_execution_messages import (
 )
 from .entities import Plan, Task
 from .worker_entities import (
+    WorkerCapabilityRevision,
     WorkerPlanReceipt,
     WorkerPlanSubmission,
     WorkerRegistrationIntent,
@@ -50,6 +54,10 @@ class WorkerOrchestrationRepository(Protocol):
         self, submission: WorkerPlanSubmission
     ) -> WorkerPlanReceipt: ...
 
+    async def submit_root_plan(
+        self, submission: WorkerPlanSubmission, *, lease: LeaseGrant
+    ) -> WorkerPlanReceipt: ...
+
     async def record_result(
         self,
         *,
@@ -59,6 +67,34 @@ class WorkerOrchestrationRepository(Protocol):
     async def confirm_stopped(
         self, confirmation: WorkerStopConfirmation
     ) -> WorkerStopReceipt: ...
+
+    async def read_completed_plan(
+        self, run_id: str, plan_id: str, root_wait_generation: int
+    ) -> RootPlanFacts | None: ...
+
+    async def list_authorized_capabilities(
+        self, run_id: str
+    ) -> tuple[WorkerCapabilityRevision, ...]: ...
+
+
+class RootResumeJobRepository(Protocol):
+    """领取、续租和收敛逐轮 Root 恢复作业的持久边界。"""
+
+    async def claim_next(
+        self, worker_id: str, *, lease_seconds: float
+    ) -> RootPlanResumeLease | None: ...
+
+    async def renew(
+        self, lease: RootPlanResumeLease, *, lease_seconds: float
+    ) -> RootPlanResumeLease | None: ...
+
+    async def retry(
+        self, lease: RootPlanResumeLease, *, delay_seconds: float
+    ) -> bool: ...
+
+    async def complete(self, lease: RootPlanResumeLease) -> bool: ...
+
+    async def is_wait_current(self, lease: RootPlanResumeLease) -> bool: ...
 
 
 class OrchestrationCommandRepository(Protocol):

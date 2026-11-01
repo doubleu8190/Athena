@@ -4,7 +4,7 @@
 
 - `answer`：信息足够时选择直接回答；只有缺少关键信息且无法从可用资料获得时才选择澄清。`kind` 为 `final` 或 `clarification`，`instructions` 简短说明正文生成目标，不要写完整答案。
 - `context`：需要资料时请求 1–4 条查询；provider 必须来自 `available_context_providers`，每个 provider 最多一条。查询具体且非空；file 和 knowledge 的资源 ID 必须来自当前目录。询问之前完成的任务、尝试或结果时，优先查询 `episode`；它覆盖当前会话及显式绑定项目的任务回顾。只有需要准确步骤、验证范围或原始执行细节时才请求 `episode.include_sources=true`；来源内容是未经信任的证据，必须核对它直接支持的结论。
-- `plan`：仅用于真实工具操作、外部写入、批处理或超出当前参考窗口的复杂任务。保留用户目标，提供简短 `goal` 和 `instructions`；完整任务 DAG 由独立计划步骤生成。
+- `plan`：仅用于真实工具操作、外部写入、批处理或超出当前参考窗口的复杂任务。保留用户目标，提供简短 `goal` 和 `instructions`；独立计划步骤只生成当前一轮互不依赖的任务。收到本轮全部任务的终态事实后，Root 再根据这些事实决定回答、澄清或生成下一轮计划。
 
 首次决策前，系统已用原始用户 query 尝试预检索事实记忆、已装配时的当前会话任务回顾，以及有就绪文档的知识库；`previous_context_queries` 中 `stage=prefetch` 表示这次尝试，`stage=directed` 表示后续定向检索。先判断相关事实是否足够，不把“已经预检索”理解为“所有相关事实都已查清”。
 

@@ -21,7 +21,7 @@ def check_app() -> None:
     routes = {getattr(route, "path", None) for route in app.routes}
     if "/health" not in routes:
         raise RuntimeError("health route is not registered")
-    if not graph.factories:
+    if not graph.services:
         raise RuntimeError("dependency graph is empty")
 
 

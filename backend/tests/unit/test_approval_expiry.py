@@ -52,7 +52,10 @@ class ExpirySession:
 
     async def execute(self, statement):
         self.statements.append(statement)
-        return Result([("approval-1", "run-1", "plan-1")])
+        return Result([("approval-1", "run-1", "plan-1", None)])
+
+    async def scalar(self, _statement):
+        return NOW
 
     async def get(self, model, _key, **_kwargs):
         if model is AgentRunModel:

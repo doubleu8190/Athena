@@ -42,7 +42,7 @@ def test_target_approval_tools_and_mcp_controllers_are_wired() -> None:
     approval = ApprovalService(ApprovalRepo())
     tools = ToolService(ToolRepo(), ToolExec())
     mcp = MCPService(MCPPort())
-    client = TestClient(create_app(approval_service_factory=lambda: approval, tool_service_factory=lambda: tools, mcp_service_factory=lambda: mcp))
+    client = TestClient(create_app(approval_service=approval, tool_service=tools, mcp_service=mcp))
 
     assert client.get("/api/approvals").json() == []
     assert client.get("/api/tools").json()["items"][0]["name"] == "search"

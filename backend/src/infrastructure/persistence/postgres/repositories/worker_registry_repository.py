@@ -14,6 +14,7 @@ from domain.orchestration.worker_registry import (
     WorkerHealthProbeResult,
     WorkerHealthProbeTarget,
     WorkerHealthTransition,
+    WorkerRegistryInstanceSnapshot,
 )
 from ..models import (
     OrchestratorExecutionModel,
@@ -241,6 +242,71 @@ class PostgresWorkerRegistryRepository:
                 )
                 for instance, contract, current_concurrency in rows
                 if int(current_concurrency) < instance.max_concurrency
+            ]
+
+    async def list_registry_instances(self) -> list[WorkerRegistryInstanceSnapshot]:
+        """读取注册中心管理页需要的全部实例及对应能力契约。
+
+        参数：无。
+
+        返回：按实例 ID 排序的完整快照，包含不可用、禁用及容量已满的实例。
+
+        异常：数据库查询错误原样传播。
+        """
+        async with self._session_factory() as session:
+            active_reservation_count = (
+                select(func.count())
+                .select_from(OrchestratorExecutionModel)
+                .where(
+                    OrchestratorExecutionModel.instance_id == WorkerInstanceModel.instance_id,
+                    OrchestratorExecutionModel.capacity_reserved.is_(True),
+                )
+                .correlate(WorkerInstanceModel)
+                .scalar_subquery()
+            )
+            rows = (
+                await session.execute(
+                    select(
+                        WorkerInstanceModel,
+                        WorkerContractModel,
+                        active_reservation_count.label("current_concurrency"),
+                    )
+                    .join(
+                        WorkerContractModel,
+                        (WorkerContractModel.contract_id == WorkerInstanceModel.contract_id)
+                        & (WorkerContractModel.revision == WorkerInstanceModel.contract_revision),
+                    )
+                    .order_by(WorkerInstanceModel.instance_id)
+                )
+            ).all()
+            return [
+                WorkerRegistryInstanceSnapshot(
+                    instance_id=instance.instance_id,
+                    instance_key=instance.instance_key,
+                    service_principal=instance.service_principal,
+                    base_url=instance.base_url,
+                    status=instance.status,
+                    accepting_tasks=instance.accepting_tasks,
+                    health_identity_valid=instance.health_identity_valid,
+                    consecutive_health_failures=instance.consecutive_health_failures,
+                    consecutive_health_successes=instance.consecutive_health_successes,
+                    last_health_check_at=instance.last_health_check_at,
+                    created_at=instance.created_at,
+                    updated_at=instance.updated_at,
+                    contract_id=contract.contract_id,
+                    contract_revision=contract.revision,
+                    execution_timeout_seconds=instance.execution_timeout_seconds,
+                    max_concurrency=instance.max_concurrency,
+                    current_concurrency=int(current_concurrency),
+                    available_concurrency=max(
+                        0, instance.max_concurrency - int(current_concurrency)
+                    ),
+                    can_do=tuple(contract.can_do_json),
+                    cannot_do=tuple(contract.cannot_do_json),
+                    input_schema=contract.input_schema_json,
+                    output_schema=contract.output_schema_json,
+                )
+                for instance, contract, current_concurrency in rows
             ]
 
     async def resolve_execution_instance(

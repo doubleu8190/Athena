@@ -32,6 +32,7 @@ export const NAV_ITEMS: NavItem[] = [
   { view: "mcp", label: "MCP 服务器", icon: Network },
   { view: "retrieval", label: "召回分析", icon: GitBranch },
   { view: "evaluation", label: "评测实验", icon: FlaskConical },
+  { view: "worker-registry", label: "Worker 注册中心", icon: Network },
   { view: "session-detail", label: "会话详情", icon: History },
   { view: "run-chain", label: "运行链路", icon: GitCommitVertical },
   { view: "settings", label: "系统设置", icon: Settings },

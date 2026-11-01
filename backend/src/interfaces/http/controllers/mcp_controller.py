@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter
@@ -20,13 +19,13 @@ class MCPServerRequest(BaseModel):
     enabled: bool = True
 
 
-def build_mcp_router(factory: Callable[[], MCPService]) -> APIRouter:
+def build_mcp_router(mcp_service: MCPService) -> APIRouter:
     """构建 MCP 服务端管理路由。"""
     router = APIRouter(prefix="/mcp", tags=["mcp"])
 
     @router.get("/servers")
     async def list_servers() -> dict[str, Any]:
-        values = await factory().list_servers()
+        values = await mcp_service.list_servers()
         return {"items": values, "total": len(values)}
 
     @router.post("/servers")
@@ -34,13 +33,13 @@ def build_mcp_router(factory: Callable[[], MCPService]) -> APIRouter:
         results = []
         for name, item in payload.items():
             config = McpServerConfigInput(item.command if isinstance(item.command, str) else tuple(item.command), tuple(item.args), dict(item.env), item.image_id, item.network_policy, item.enabled)
-            results.append(await factory().register(name, config))
+            results.append(await mcp_service.register(name, config))
         registered = sum(value.get("status") == "connected" for value in results)
         return {"total": len(results), "registered": registered, "failed": len(results) - registered, "results": results}
 
     @router.delete("/servers/{name:path}")
     async def unregister_server(name: str) -> dict[str, str]:
-        await factory().unregister(name)
+        await mcp_service.unregister(name)
         return {"status": "deleted", "name": name}
 
     return router

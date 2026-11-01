@@ -31,19 +31,17 @@ from application.sessions import SessionMessageQueryService, SessionService
 from application.projects import ProjectService
 from application.tools import MCPService, ToolQueryService, ToolService
 from application.orchestration import (
-    OrchestrationCommandHandler,
     RootWorkflow,
     RootWorkflowDependencies,
     WorkerApprovalService,
-    WorkerToolExecutor,
-    WorkerResultStore,
-    WorkerWorkflow,
     OrchestrationQueryService,
 )
 from application.orchestration.worker_plan_submission import WorkerPlanSubmissionService
 from application.orchestration.worker_registration import WorkerRegistrationService
 from application.orchestration.worker_result_submission import WorkerResultSubmissionService
 from application.orchestration.worker_stop_confirmation import WorkerStopConfirmationService
+from application.orchestration.worker_approval_requests import WorkerApprovalRequestService
+from application.orchestration.worker_timeouts import WorkerTimeoutScanner, WorkerTimeoutService
 from application.orchestration.worker_registry import WorkerRegistryService
 from application.orchestration.worker_resources import WorkerResourceService
 from application.orchestration.worker_execution_grants import WorkerExecutionGrantSigner
@@ -99,9 +97,11 @@ from infrastructure.integrations.storage.storage import LocalFileStorage
 from application.orchestration.langgraph import (
     LangGraphRootGraph,
     LangGraphRunExecutor,
-    LangGraphWorkerExecutor,
 )
-from application.orchestration.agents import ConfiguredRootAgent, ConfiguredWorkerAgent
+from application.orchestration.agents import ConfiguredRootAgent
+from application.orchestration.root_orchestration import RootOrchestrationService
+from application.orchestration.protocols import RootAgent
+from domain.integrations.llm_ports import LLMPort
 from infrastructure.configuration import (
     ConfiguredSettingsQueries,
     PublicConfiguration,
@@ -139,16 +139,13 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresToolConfigRepository,
     PostgresFileChunkRepository,
     PostgresOrchestrationRepository,
-    PostgresOrchestrationCommandRepository,
     PostgresOrchestrationEventRepository,
     PostgresWorkerJobRepository,
-    PostgresWorkerToolOperationRepository,
-    PostgresWorkerExecutionMessageRepository,
     PostgresWorkerOrchestrationRepository,
     PostgresOrchestrationOutboxRepository,
-    PostgresPlanLoader,
     PostgresEvaluationRepository,
     PostgresLeaseCenter,
+    PostgresRootResumeJobRepository,
 )
 from infrastructure.persistence.postgres.repositories.worker_registry_repository import (
     PostgresWorkerRegistryRepository,
@@ -158,6 +155,9 @@ from infrastructure.persistence.postgres.repositories.worker_resource_repository
 )
 from interfaces.http.controllers.worker_registry_controller import (
     build_worker_registry_router,
+)
+from interfaces.http.controllers.worker_registry_management_controller import (
+    build_worker_registry_management_router,
 )
 from interfaces.http.controllers.worker_resources_controller import (
     build_worker_resources_router,
@@ -176,11 +176,18 @@ from workers import (
     WorkerHealthMonitor,
 )
 from workers.worker_task_dispatcher import WorkerTaskDispatcher
+from workers.worker_resume_dispatcher import WorkerResumeDispatcher
+from workers.root_resume_dispatcher import RootResumeDispatcher
 
-from .dependencies import ApplicationDependencies, Provider, build_dependencies
+from .dependencies import ApplicationDependencies, build_dependencies
 
 
-def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
+def build_postgres_dependencies(
+    settings: Settings,
+    *,
+    root_agent: RootAgent | None = None,
+    llm_provider: LLMPort | None = None,
+) -> ApplicationDependencies:
     """Assemble the complete target graph for a PostgreSQL deployment.
 
     No connection is opened here.  ``PostgresEngine`` owns startup and is
@@ -206,7 +213,10 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     messages = PostgresMessageRepository(session_factory)
     runs = PostgresRunRepository(session_factory, lease_center=lease_center)
     events = PostgresEventRepository(session_factory)
-    approvals = PostgresApprovalRepository(session_factory)
+    approvals = PostgresApprovalRepository(
+        session_factory,
+        resume_dispatch_max_wait_seconds=settings.worker_resume_dispatch_max_wait_seconds,
+    )
     memory = PostgresMemoryRepository(session_factory, lease_center=lease_center)
     memory_jobs = PostgresMemoryJobRepository(session_factory, lease_center=lease_center)
     memory_snapshots = PostgresMemorySnapshotRepository(session_factory, lease_center=lease_center)
@@ -217,9 +227,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     tools = PostgresToolConfigRepository(session_factory)
     mcp_repository = PostgresMCPServerRepository(session_factory)
     orchestration_repository = PostgresOrchestrationRepository(session_factory)
-    orchestration_command_repository = PostgresOrchestrationCommandRepository(
-        session_factory, lease_center=lease_center
-    )
     orchestration_event_repository = PostgresOrchestrationEventRepository(
         session_factory,
         max_attempts=settings.worker_max_attempts,
@@ -228,19 +235,19 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     worker_job_repository = PostgresWorkerJobRepository(
         session_factory, lease_center=lease_center
     )
-    worker_tool_operation_repository = PostgresWorkerToolOperationRepository(
-        session_factory, lease_center=lease_center
-    )
-    worker_execution_message_repository = PostgresWorkerExecutionMessageRepository(
-        session_factory, lease_center=lease_center
-    )
     worker_orchestration_repository = PostgresWorkerOrchestrationRepository(
         session_factory,
         max_execution_attempts=settings.worker_max_attempts,
+        execution_retry_initial_seconds=settings.worker_execution_retry_initial_seconds,
+        execution_retry_max_seconds=settings.worker_execution_retry_max_seconds,
+        execution_retry_jitter_ratio=settings.worker_execution_retry_jitter_ratio,
+        queue_max_pending_tasks=settings.worker_queue_max_pending_tasks,
+        resume_dispatch_max_wait_seconds=settings.worker_resume_dispatch_max_wait_seconds,
     )
     worker_plan_submission = WorkerPlanSubmissionService(
         worker_orchestration_repository
     )
+    root_orchestration = RootOrchestrationService(worker_orchestration_repository)
     worker_registration = WorkerRegistrationService(worker_orchestration_repository)
     worker_result_submission = WorkerResultSubmissionService(
         worker_orchestration_repository
@@ -248,13 +255,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     worker_stop_confirmation = WorkerStopConfirmationService(
         worker_orchestration_repository
     )
+    worker_approval_request = WorkerApprovalRequestService(
+        worker_orchestration_repository
+    )
     worker_registry_repository = PostgresWorkerRegistryRepository(session_factory)
     worker_registry = WorkerRegistryService(worker_registry_repository)
     orchestration_outbox_repository = PostgresOrchestrationOutboxRepository(
         session_factory, lease_center=lease_center
-    )
-    orchestration_command_handler = OrchestrationCommandHandler(
-        orchestration_command_repository
     )
     llm_options = LLMOptions(
         providers=tuple(
@@ -358,7 +365,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         )
     )
     ids = monotonic_timestamp_id_factory()
-    llm_provider = ConfiguredLLMProvider(llm_options)
+    llm_provider = llm_provider or ConfiguredLLMProvider(llm_options)
     memory_extractor = LLMFactExtractor(
         llm_provider,
         snapshots=memory_snapshots,
@@ -443,34 +450,6 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             sandbox_workspace_root=Path(settings.sandbox_workspace_root),
         ),
     )
-    worker_result_storage = LocalFileStorage(
-        settings.files_path.parent
-        / f"{settings.files_path.name}-worker-results",
-        settings.file_max_upload_bytes,
-    )
-    worker_result_store = WorkerResultStore(worker_result_storage)
-    worker_tool_executor = WorkerToolExecutor(
-        builtin_tool_service,
-        result_store=worker_result_store,
-        operation_ledger=worker_tool_operation_repository,
-        events=events,
-    )
-    worker_agent = ConfiguredWorkerAgent(
-        llm_provider,
-        events,
-        tool_service=builtin_tool_service,
-        execution_messages=worker_execution_message_repository,
-    )
-    worker_executor = LangGraphWorkerExecutor(
-        workflow_factory=lambda: WorkerWorkflow(
-            execute=worker_agent,
-            execute_tool=worker_tool_executor,
-            execution_messages=worker_execution_message_repository,
-            max_tool_rounds=settings.worker_max_tool_rounds,
-            max_tool_calls_per_round=settings.worker_max_tool_calls_per_round,
-        ),
-        checkpointer=checkpointer,
-    )
     approval_service = ApprovalService(approvals)
     worker_approval_service = WorkerApprovalService(
         worker_job_repository,
@@ -480,9 +459,8 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         context_acquisition=context_service,
         context_planner=context_planner,
         request_preparation=request_preparation,
-        plan_loader=PostgresPlanLoader(orchestration_repository),
         memory_settings=session_memory_settings,
-        agent=ConfiguredRootAgent(llm_provider, events),
+        agent=root_agent or ConfiguredRootAgent(llm_provider, events),
         answer_generation=AnswerGenerationService(
             llm_provider,
             events,
@@ -500,8 +478,7 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         available_context_providers=tuple(context_providers),
         root_max_turns=settings.root_max_turns,
         context_prefetch_timeout_seconds=settings.context_prefetch_timeout_seconds,
-        review_context_repository=orchestration_repository,
-        orchestration_command_handler=orchestration_command_handler,
+        root_orchestration=root_orchestration,
         event_publisher=events,
     )
     root_workflow = RootWorkflow(dependencies)
@@ -514,73 +491,81 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
     )
 
     root_run_executor = LangGraphRunExecutor(root_graph)
-    providers: dict[str, Provider] = {
-        "session_service_factory": lambda: SessionService(
+    services: dict[str, object] = {
+        "session_service": SessionService(
             sessions, id_factory=ids, projects=projects
         ),
-        "session_memory_settings_factory": lambda: SessionMemorySettingsService(
+        "session_memory_settings": SessionMemorySettingsService(
             sessions, session_memory_settings
         ),
-        "project_factory": lambda: ProjectService(
+        "project_service": ProjectService(
             projects,
             id_factory=ids,
         ),
-        "message_query_factory": lambda: SessionMessageQueryService(sessions, messages),
-        "run_query_factory": lambda: RunQueryService(sessions, runs, events),
-        "run_service_factory": lambda: RunService(
+        "message_query_service": SessionMessageQueryService(sessions, messages),
+        "run_query_service": RunQueryService(sessions, runs, events),
+        "run_service": RunService(
             runs, runs, id_factory=ids, executor=root_run_executor
         ),
-        "event_stream_factory": lambda: EventStreamService(sessions, events),
-        "tool_query_factory": lambda: ToolQueryService(tools),
-        "tool_service_factory": lambda: builtin_tool_service,
-        "approval_service_factory": lambda: approval_service,
-        "mcp_service_factory": lambda: MCPService(mcp),
-        "provider_query_factory": lambda: ProviderQueryService(settings_queries),
-        "settings_query_factory": lambda: SettingsQueryService(settings_queries),
-        "memory_service_factory": lambda: MemoryService(memory),
-        "memory_episode_service_factory": lambda: MemoryEpisodeManagementService(
+        "event_stream_service": EventStreamService(sessions, events),
+        "tool_query_service": ToolQueryService(tools),
+        "tool_service": builtin_tool_service,
+        "approval_service": approval_service,
+        "mcp_service": MCPService(mcp),
+        "provider_query_service": ProviderQueryService(settings_queries),
+        "settings_query_service": SettingsQueryService(settings_queries),
+        "memory_service": MemoryService(memory),
+        "memory_episode_service": MemoryEpisodeManagementService(
             memory_episodes
         ),
-        "memory_job_service_factory": lambda: MemoryJobManagementService(memory_jobs),
-        "retrieval_query_factory": lambda: RetrievalQueryService(retrieval),
-        "evaluation_repository_factory": lambda: evaluation_repository,
+        "memory_job_service": MemoryJobManagementService(memory_jobs),
+        "retrieval_query_service": RetrievalQueryService(retrieval),
+        "evaluation_repository": evaluation_repository,
         "evaluation_target_factory": lambda manifest: EmbeddingRetrievalTarget(
             manifest.corpus, embedding
         ),
-        "evaluation_dataset_loader_factory": lambda path: load_dataset(path),
-        "evaluation_event_sink_factory": lambda: EvaluationEventPublisher(
+        "evaluation_dataset_loader": load_dataset,
+        "evaluation_event_sink": EvaluationEventPublisher(
             events, fanout=evaluation_progress
         ),
-        "evaluation_progress_hub_factory": lambda: evaluation_progress,
-        "knowledge_query_factory": lambda: KnowledgeBaseQueryService(knowledge),
-        "attachment_service_factory": lambda: AttachmentService(
+        "evaluation_progress_hub": evaluation_progress,
+        "knowledge_query_service": KnowledgeBaseQueryService(knowledge),
+        "attachment_service": AttachmentService(
             sessions, attachments, storage, adapters, jobs, id_factory=ids
         ),
-        "knowledge_service_factory": lambda: KnowledgeBaseService(
+        "knowledge_service": KnowledgeBaseService(
             knowledge, documents, storage, adapters, jobs, id_factory=ids
         ),
-        "orchestration_repository_factory": lambda: orchestration_repository,
-        "orchestration_query_factory": lambda: OrchestrationQueryService(
+        "orchestration_repository": orchestration_repository,
+        "orchestration_query_service": OrchestrationQueryService(
             orchestration_repository
         ),
-        "orchestration_command_handler_factory": lambda: orchestration_command_handler,
-        "worker_orchestration_repository_factory": lambda: worker_orchestration_repository,
-        "worker_plan_submission_service_factory": lambda: worker_plan_submission,
-        "worker_registration_service_factory": lambda: worker_registration,
-        "worker_result_submission_service_factory": lambda: worker_result_submission,
-        "worker_stop_confirmation_service_factory": lambda: worker_stop_confirmation,
-        "worker_registry_service_factory": lambda: worker_registry,
-        "root_graph_factory": lambda: root_graph,
-        "run_executor_factory": lambda: root_run_executor,
-        "ingestion_service_factory": lambda: ingestion,
-        "llm_provider": lambda: llm_provider,
-        "embedding_provider": lambda: embedding,
-        "sandbox": lambda: sandbox,
-        "context_service_factory": lambda: context_service,
+        "worker_orchestration_repository": worker_orchestration_repository,
+        "root_orchestration": root_orchestration,
+        "worker_plan_submission_service": worker_plan_submission,
+        "worker_registration_service": worker_registration,
+        "worker_result_submission_service": worker_result_submission,
+        "worker_stop_confirmation_service": worker_stop_confirmation,
+        "worker_approval_request_service": worker_approval_request,
+        "worker_registry_service": worker_registry,
+        "root_graph": root_graph,
+        "run_executor": root_run_executor,
+        "ingestion_service": ingestion,
+        "llm_provider": llm_provider,
+        "embedding_provider": embedding,
+        "sandbox": sandbox,
+        "context_service": context_service,
     }
     resources: list[object] = [postgres, checkpointer, root_graph, neo4j, embedding]
     routers: list[object] = []
+    registry_management_routes = APIRouter()
+    registry_management_routes.include_router(
+        build_worker_registry_management_router(worker_registry),
+        prefix="/api",
+    )
+    routers.append(registry_management_routes)
     remote_worker_task_dispatcher: WorkerTaskDispatcher | None = None
+    remote_worker_resume_dispatcher: WorkerResumeDispatcher | None = None
     resources.append(sandbox)
     if settings.worker_protocol_service_tokens:
         worker_protocol = WorkerProtocolHttp(
@@ -600,12 +585,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
         worker_routes = APIRouter()
         worker_routes.include_router(
             build_worker_registry_router(
-                lambda: worker_registration,
-                lambda: worker_registry,
-                lambda: worker_result_submission,
-                lambda: worker_stop_confirmation,
+                worker_registration,
+                worker_registry,
+                worker_result_submission,
+                worker_stop_confirmation,
                 worker_http,
                 worker_protocol,
+                worker_approval_request,
             ),
             prefix="/api",
         )
@@ -634,9 +620,29 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             retry_jitter_ratio=settings.worker_dispatch_retry_jitter_ratio,
             poll_interval_seconds=settings.worker_job_poll_interval_seconds,
         )
+        remote_worker_resume_dispatcher = WorkerResumeDispatcher(
+            worker_orchestration_repository,
+            worker_resource_service,
+            worker_http,
+            worker_id=f"worker-resume-dispatcher:{ids()}",
+            max_concurrency=settings.worker_dispatch_max_concurrency,
+            request_timeout_seconds=settings.worker_dispatch_http_timeout_seconds,
+            max_response_bytes=settings.worker_max_json_body_bytes,
+            max_retries=settings.worker_dispatch_max_retries,
+            retry_initial_seconds=settings.worker_dispatch_retry_initial_seconds,
+            retry_max_seconds=settings.worker_dispatch_retry_max_seconds,
+            retry_jitter_ratio=settings.worker_dispatch_retry_jitter_ratio,
+            poll_interval_seconds=settings.worker_job_poll_interval_seconds,
+        )
+        worker_timeout_scanner = WorkerTimeoutScanner(
+            WorkerTimeoutService(worker_orchestration_repository),
+            interval_seconds=settings.worker_timeout_scan_interval_seconds,
+            batch_size=settings.worker_timeout_scan_batch_size,
+            queue_max_wait_seconds=settings.worker_queue_max_wait_seconds,
+        )
         worker_routes.include_router(
             build_worker_resources_router(
-                lambda: worker_resource_service,
+                worker_resource_service,
                 worker_protocol,
             ),
             prefix="/api",
@@ -656,11 +662,13 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
                 )
             )
         )
-        providers.update(
+        services.update(
             {
-                "worker_protocol_http": lambda: worker_protocol,
-                "worker_execution_grant_service_factory": lambda: worker_resource_service,
-                "worker_task_dispatcher_factory": lambda: remote_worker_task_dispatcher,
+                "worker_protocol_http": worker_protocol,
+                "worker_execution_grant_service": worker_resource_service,
+                "worker_task_dispatcher": remote_worker_task_dispatcher,
+                "worker_resume_dispatcher": remote_worker_resume_dispatcher,
+                "worker_timeout_scanner": worker_timeout_scanner,
             }
         )
     if settings.workers_enabled:
@@ -710,12 +718,32 @@ def build_postgres_dependencies(settings: Settings) -> ApplicationDependencies:
             orchestration_outbox_dispatcher,
             approval_expiry_worker,
         ]
+        root_resume_jobs = PostgresRootResumeJobRepository(
+            session_factory, lease_center=lease_center
+        )
+        root_resume_dispatcher = RootResumeDispatcher(
+            root_resume_jobs,
+            root_graph,
+            run_execution,
+            runs,
+            runs,
+            worker_id=f"root-resume-dispatcher:{ids()}",
+            lease_seconds=settings.root_execution_lease_seconds,
+            poll_interval=settings.worker_job_poll_interval_seconds,
+            lease_center=lease_center,
+        )
+        background_workers.append(root_resume_dispatcher)
+        services["run_consumer"] = run_worker
+        services["root_resume_dispatcher"] = root_resume_dispatcher
         if remote_worker_task_dispatcher is not None:
             background_workers.append(remote_worker_task_dispatcher)
-        resources.append(
-            WorkerSupervisor(background_workers)
-        )
-    return build_dependencies(factories=providers, resources=resources, routers=routers)
+            background_workers.append(worker_timeout_scanner)
+        if remote_worker_resume_dispatcher is not None:
+            background_workers.append(remote_worker_resume_dispatcher)
+        background_supervisor = WorkerSupervisor(background_workers)
+        services["worker_supervisor"] = background_supervisor
+        resources.append(background_supervisor)
+    return build_dependencies(services=services, resources=resources, routers=routers)
 
 
 __all__ = ["build_postgres_dependencies"]

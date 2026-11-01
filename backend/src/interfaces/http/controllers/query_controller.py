@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import asdict
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Response
@@ -155,32 +155,32 @@ class ProjectCreateRequest(BaseModel):
 class ProjectResponse(BaseModel):
     id: str
     name: str
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
 
 def build_query_router(
     *,
-    tool_factory: Callable[[], ToolQueryService] | None = None,
-    provider_factory: Callable[[], ProviderQueryService] | None = None,
-    settings_factory: Callable[[], SettingsQueryService] | None = None,
-    memory_factory: Callable[[], MemoryQueryService] | None = None,
-    memory_service_factory: Callable[[], MemoryService] | None = None,
-    memory_episode_service_factory: Callable[[], MemoryEpisodeManagementService] | None = None,
-    memory_job_service_factory: Callable[[], MemoryJobManagementService] | None = None,
-    project_factory: Callable[[], ProjectService] | None = None,
-    retrieval_factory: Callable[[], RetrievalQueryService] | None = None,
-    knowledge_factory: Callable[[], KnowledgeBaseQueryService] | None = None,
+    tool_query_service: ToolQueryService | None = None,
+    provider_query_service: ProviderQueryService | None = None,
+    settings_query_service: SettingsQueryService | None = None,
+    memory_query_service: MemoryQueryService | None = None,
+    memory_service: MemoryService | None = None,
+    memory_episode_service: MemoryEpisodeManagementService | None = None,
+    memory_job_service: MemoryJobManagementService | None = None,
+    project_service: ProjectService | None = None,
+    retrieval_query_service: RetrievalQueryService | None = None,
+    knowledge_query_service: KnowledgeBaseQueryService | None = None,
     include_tools: bool = True,
 ) -> APIRouter:
-    """创建只依赖 application service 工厂的查询路由。"""
+    """创建直接接收 application service 实例的查询路由。"""
 
     router = APIRouter(tags=["queries"])
 
-    if project_factory is not None:
+    if project_service is not None:
         @router.get("/projects", response_model=list[ProjectResponse])
         async def list_projects() -> list[ProjectResponse]:
-            projects = await project_factory().list()
+            projects = await project_service.list()
             return [
                 ProjectResponse(
                     id=project.id,
@@ -196,7 +196,7 @@ def build_query_router(
             request: ProjectCreateRequest,
         ) -> ProjectResponse:
             try:
-                project = await project_factory().create(request.name)
+                project = await project_service.create(request.name)
             except ValueError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
             return ProjectResponse(
@@ -209,7 +209,7 @@ def build_query_router(
         @router.delete("/projects/{project_id}", status_code=204)
         async def delete_project(project_id: str) -> Response:
             try:
-                await project_factory().delete(project_id)
+                await project_service.delete(project_id)
             except ProjectNotFoundError as error:
                 raise HTTPException(status_code=404, detail="project_not_found") from error
             except ValueError as error:
@@ -224,7 +224,7 @@ def build_query_router(
             request: ProjectCreateRequest,
         ) -> ProjectResponse:
             try:
-                project = await project_factory().rename(project_id, request.name)
+                project = await project_service.rename(project_id, request.name)
             except ValueError as error:
                 raise HTTPException(status_code=400, detail=str(error)) from error
             except ProjectNotFoundError as error:
@@ -236,14 +236,14 @@ def build_query_router(
                 updated_at=project.updated_at,
             )
 
-    if memory_episode_service_factory is not None:
+    if memory_episode_service is not None:
         @router.get("/memory/episodes")
         async def list_memory_episodes(
             limit: int = Query(default=50, ge=1, le=100),
             offset: int = Query(default=0, ge=0),
             session_id: str | None = None,
         ) -> dict[str, Any]:
-            items, total = await memory_episode_service_factory().list_recent(
+            items, total = await memory_episode_service.list_recent(
                 limit=limit, offset=offset, session_id=session_id
             )
             return {
@@ -253,18 +253,18 @@ def build_query_router(
 
         @router.delete("/memory/episodes/{episode_id}", status_code=204)
         async def forget_memory_episode(episode_id: str) -> Response:
-            if not await memory_episode_service_factory().forget(episode_id):
+            if not await memory_episode_service.forget(episode_id):
                 raise HTTPException(status_code=404, detail="memory_episode_not_found")
             return Response(status_code=204)
 
-    if memory_job_service_factory is not None:
+    if memory_job_service is not None:
         @router.get("/memory/jobs")
         async def list_memory_jobs(
             limit: int = Query(default=30, ge=1, le=100),
             offset: int = Query(default=0, ge=0),
             session_id: str | None = None,
         ) -> dict[str, Any]:
-            items, total = await memory_job_service_factory().list_recent(
+            items, total = await memory_job_service.list_recent(
                 limit=limit, offset=offset, session_id=session_id
             )
             return {
@@ -277,9 +277,9 @@ def build_query_router(
     if include_tools:
         @router.get("/tools")
         async def list_tools() -> dict[str, Any]:
-            if tool_factory is None:
+            if tool_query_service is None:
                 raise HTTPException(status_code=503, detail="tool_query_not_configured")
-            service = tool_factory()
+            service = tool_query_service
             last_called, calls_today = await service.usage()
             items = [ToolResponse.from_application(item, last_called_at=last_called.get(item.name)) for item in await service.list_tools()]
             return {
@@ -292,7 +292,7 @@ def build_query_router(
 
     @router.get("/providers", response_model=list[ProviderResponse])
     async def list_providers() -> list[ProviderResponse]:
-        if provider_factory is None:
+        if provider_query_service is None:
             raise HTTPException(status_code=503, detail="provider_query_not_configured")
         return [ProviderResponse(
             name=item.name,
@@ -303,37 +303,37 @@ def build_query_router(
             api_key_masked=item.api_key_masked,
             temperature=item.temperature,
             max_tokens=item.max_tokens,
-        ) for item in await provider_factory().list_providers()]
+        ) for item in await provider_query_service.list_providers()]
 
     @router.post("/providers/test")
     async def test_provider(body: dict[str, Any]) -> dict[str, Any]:
-        if provider_factory is None:
+        if provider_query_service is None:
             raise HTTPException(status_code=503, detail="provider_query_not_configured")
-        values = await provider_factory().list_providers()
+        values = await provider_query_service.list_providers()
         name = str(body.get("provider") or body.get("name") or "")
         matched = next((item for item in values if item.get("name") == name), None)
         return {"status": "ok" if matched is not None else "not_found", "provider": name}
 
     @router.get("/settings", response_model=SettingsResponse)
     async def get_settings() -> SettingsResponse:
-        if settings_factory is None:
+        if settings_query_service is None:
             raise HTTPException(status_code=503, detail="settings_query_not_configured")
-        value = await settings_factory().get_settings()
+        value = await settings_query_service.get_settings()
         return SettingsResponse.model_validate(value.values if hasattr(value, "values") else value)
 
     @router.get("/knowledge-bases", response_model=list[KnowledgeBaseResponse])
     async def list_knowledge_bases() -> list[KnowledgeBaseResponse]:
-        if knowledge_factory is None:
+        if knowledge_query_service is None:
             raise HTTPException(status_code=503, detail="knowledge_query_not_configured")
         return [
             KnowledgeBaseResponse.from_application(item)
-            for item in await knowledge_factory().list_knowledge_bases()
+            for item in await knowledge_query_service.list_knowledge_bases()
         ]
 
     @router.post("/memory/search")
     async def search_memory(body: dict[str, Any]) -> list[dict[str, Any]]:
-        if memory_service_factory is not None:
-            values = await memory_service_factory().search(
+        if memory_service is not None:
+            values = await memory_service.search(
                 MemorySearchRequest(
                     query=str(body.get("query", "")),
                     limit=int(body.get("n_results", 5)),
@@ -341,9 +341,9 @@ def build_query_router(
                 )
             )
             return [_memory_response(value) for value in values]
-        if memory_factory is None:
+        if memory_query_service is None:
             raise HTTPException(status_code=503, detail="memory_query_not_configured")
-        values = await memory_factory().search(
+        values = await memory_query_service.search(
             query=str(body.get("query", "")),
             n_results=int(body.get("n_results", 5)),
             where=body.get("where"),
@@ -357,8 +357,8 @@ def build_query_router(
         expired: bool = False,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        if memory_service_factory is not None:
-            page = await memory_service_factory().list_memories(
+        if memory_service is not None:
+            page = await memory_service.list_memories(
                 MemoryListRequest(
                     limit=limit,
                     offset=offset,
@@ -367,55 +367,55 @@ def build_query_router(
                 )
             )
             return {"items": [_memory_response(value) for value in page.items], **page.stats, "total": page.total}
-        if memory_factory is None:
+        if memory_query_service is None:
             raise HTTPException(status_code=503, detail="memory_query_not_configured")
-        page = await memory_factory().list_memories(limit=limit, offset=offset, expired=expired, session_id=session_id)
+        page = await memory_query_service.list_memories(limit=limit, offset=offset, expired=expired, session_id=session_id)
         if hasattr(page, "items"):
             return {"items": [_memory_response(value) for value in page.items], **page.stats, "total": page.total}
         return page
 
     @router.get("/memory/{memory_id}")
     async def get_memory(memory_id: str) -> dict[str, Any]:
-        if memory_service_factory is not None:
-            value = await memory_service_factory().get(memory_id)
+        if memory_service is not None:
+            value = await memory_service.get(memory_id)
             if value is None:
                 raise HTTPException(status_code=404, detail="memory_not_found")
             return _memory_response(value)
-        if memory_factory is None:
+        if memory_query_service is None:
             raise HTTPException(status_code=503, detail="memory_query_not_configured")
-        value = await memory_factory().get(memory_id)
+        value = await memory_query_service.get(memory_id)
         if value is None:
             raise HTTPException(status_code=404, detail="memory_not_found")
         return _memory_response(value)
 
     @router.get("/memory/{memory_id}/revisions")
     async def list_memory_revisions(memory_id: str) -> list[dict[str, Any]]:
-        if memory_service_factory is not None:
-            values = await memory_service_factory().revisions(memory_id)
+        if memory_service is not None:
+            values = await memory_service.revisions(memory_id)
             if not values:
                 raise HTTPException(status_code=404, detail="memory_not_found")
             return [_memory_response(value) for value in values]
-        if memory_factory is None:
+        if memory_query_service is None:
             raise HTTPException(status_code=503, detail="memory_query_not_configured")
-        values = await memory_factory().revisions(memory_id)
+        values = await memory_query_service.revisions(memory_id)
         if not values:
             raise HTTPException(status_code=404, detail="memory_not_found")
         return [_memory_response(value) for value in values]
 
     @router.get("/memory/{memory_id}/relations")
     async def list_memory_relations(memory_id: str) -> list[dict[str, Any]]:
-        if memory_service_factory is None:
+        if memory_service is None:
             raise HTTPException(status_code=503, detail="memory_service_not_configured")
-        service = memory_service_factory()
+        service = memory_service
         if await service.get(memory_id) is None:
             raise HTTPException(status_code=404, detail="memory_not_found")
         return [asdict(value) for value in await service.related_entries(memory_id)]
 
     @router.delete("/memory/{memory_id}", status_code=204)
     async def forget_memory(memory_id: str) -> Response:
-        if memory_service_factory is None:
+        if memory_service is None:
             raise HTTPException(status_code=503, detail="memory_service_not_configured")
-        if not await memory_service_factory().delete(memory_id):
+        if not await memory_service.delete(memory_id):
             raise HTTPException(status_code=404, detail="memory_not_found")
         return Response(status_code=204)
 
@@ -432,9 +432,9 @@ def build_query_router(
         q: str | None = None,
         provider: str | None = None,
     ) -> dict[str, Any]:
-        if retrieval_factory is None:
+        if retrieval_query_service is None:
             raise HTTPException(status_code=503, detail="retrieval_query_not_configured")
-        items, total = await retrieval_factory().list_runs(
+        items, total = await retrieval_query_service.list_runs(
             limit=limit,
             offset=offset,
             scope=scope,
@@ -450,9 +450,9 @@ def build_query_router(
         "/retrieval/runs/{run_id}", response_model=RetrievalRunHttpResponse
     )
     async def get_retrieval_run(run_id: str) -> dict[str, Any]:
-        if retrieval_factory is None:
+        if retrieval_query_service is None:
             raise HTTPException(status_code=503, detail="retrieval_query_not_configured")
-        value = await retrieval_factory().get_run(run_id)
+        value = await retrieval_query_service.get_run(run_id)
         if value is None:
             raise HTTPException(status_code=404, detail="retrieval_run_not_found")
         return asdict(value)

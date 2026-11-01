@@ -7,7 +7,10 @@ import { ExecutionTimeline } from "./ExecutionTimeline"
 import { useChatStore } from "../store/chatStore"
 import { apiClient } from "../api/client"
 import { ClientEventType } from "../types/events"
-import type { ApprovalRequest, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
+import type { ApprovalRequest, ApprovalStatusSnapshot, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
+import { mergePendingApprovals } from "../utils/workerSnapshotProjection"
+import { submitAndRefresh } from "../utils/submitAndRefresh"
+import { reconcileApprovalSubmission } from "../utils/approvalSubmission"
 
 const STOP_REQUESTS_STORAGE_KEY = "athena:pending-stop-requests"
 
@@ -62,8 +65,8 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const {
     messages,
     sessions,
-    orchestrationTasks,
-    orchestrationPlans,
+    orchestrationSnapshots,
+    beginOrchestrationSnapshotRequest,
     activeSessionId,
     agentStatus,
     connectionStatus,
@@ -78,6 +81,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     clearToolCalls,
     clearOrchestrationTasks,
     clearOrchestrationPlans,
+    clearOrchestrationSnapshots,
     clearApprovals,
     executionTimeline,
     runTimelineEvents,
@@ -133,6 +137,52 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     return !item || item.status !== "ready"
   })
   const activeRunId = sessions.find((session) => session.id === activeSessionId)?.active_run_id ?? null
+  const latestKnownRunId = activeRunId
+    ?? [...runTimelineEvents].reverse().find((event) => event.run_id)?.run_id
+    ?? [...messages].reverse().find((message) => message.run_id)?.run_id
+  const workerPendingApprovals = (latestKnownRunId ? orchestrationSnapshots[latestKnownRunId]?.approvals : [])
+    ?.filter((request) => request.status === "pending")
+    .flatMap((request) => request.items.filter((item) => item.status === "pending").map((item) => ({
+      approval_id: item.approval_id,
+      tool_name: item.tool_name,
+      arguments: item.arguments as Record<string, unknown>,
+      risk_level: item.risk_level as "low" | "medium" | "high" | "critical",
+      approval_batch_id: request.approval_batch_id,
+      description: item.summary,
+      session_id: activeSessionId || undefined,
+      run_id: request.run_id,
+      plan_id: request.plan_id,
+      task_id: request.task_id,
+      expires_at: request.expires_at,
+    }))) ?? []
+  const canonicalApprovalRequests = latestKnownRunId ? orchestrationSnapshots[latestKnownRunId]?.approvals ?? [] : []
+  const visibleApprovals = mergePendingApprovals(pendingApprovals, canonicalApprovalRequests, workerPendingApprovals)
+  useEffect(() => {
+    if (!activeSessionId || !latestKnownRunId || demoMode) return
+    let cancelled = false
+    let inFlight = false
+    const refresh = async () => {
+      if (cancelled || inFlight || document.hidden) return
+      inFlight = true
+      try {
+        const generation = beginOrchestrationSnapshotRequest(latestKnownRunId)
+        const snapshot = await apiClient.getRunOrchestration(latestKnownRunId)
+        if (cancelled || useChatStore.getState().activeSessionId !== activeSessionId) return
+        useChatStore.getState().setOrchestrationSnapshot(snapshot, generation)
+      } catch {
+        // Preserve the last persisted snapshot while the API is temporarily unavailable.
+      } finally {
+        inFlight = false
+      }
+    }
+    void refresh()
+    const active = Boolean(activeRunId || ["queued", "running", "cancelling", "waiting_approval"].includes(agentStatus))
+    const timer = active ? window.setInterval(() => { void refresh() }, 2500) : null
+    return () => {
+      cancelled = true
+      if (timer != null) window.clearInterval(timer)
+    }
+  }, [activeSessionId, latestKnownRunId, activeRunId, agentStatus, demoMode])
   const isAgentActive = Boolean(activeRunId || hasQueuedRuns)
     || agentStatus === "queued"
     || agentStatus === "thinking"
@@ -214,6 +264,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       clearToolCalls()
       clearOrchestrationTasks()
       clearOrchestrationPlans()
+      clearOrchestrationSnapshots()
       clearApprovals()
       clearThinking()
       setAgentStatus("idle")
@@ -238,6 +289,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       clearToolCalls()
       clearOrchestrationTasks()
       clearOrchestrationPlans()
+      clearOrchestrationSnapshots()
       clearApprovals()
       clearThinking()
       setAgentStatus("idle")
@@ -618,10 +670,23 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     }
   }
 
+  const refreshApprovalStatus = useCallback(async (requests: ApprovalRequest[]): Promise<Map<string, ApprovalStatusSnapshot>> => {
+    const statuses = await Promise.all(requests.map((request) => apiClient.getApprovalStatus(request.approval_id)))
+    const statusById = new Map(statuses.map((status) => [status.approval_id, status]))
+    const runIds = [...new Set(requests.map((request) => request.run_id).filter((runId): runId is string => Boolean(runId)))]
+    for (const runId of runIds) {
+      const generation = beginOrchestrationSnapshotRequest(runId)
+      const snapshot = await apiClient.getRunOrchestration(runId)
+      if (useChatStore.getState().activeSessionId === activeSessionId) useChatStore.getState().setOrchestrationSnapshot(snapshot, generation)
+    }
+    return statusById
+  }, [activeSessionId, beginOrchestrationSnapshotRequest])
+
   const handleApproval = useCallback(async (
     batchId: string,
     requests: ApprovalRequest[],
     decisions: Record<string, "approved" | "denied" | "cancelled">,
+    attemptId: string,
   ) => {
     if (demoMode) {
       const store = useChatStore.getState()
@@ -652,17 +717,37 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       }
       store.setAgentStatus("idle")
       store.upsertExecutionTimelineEntry({ id: `demo-run:${batchId}`, run_id: "demo-run", event_type: "run.completed", label: approved ? "任务已完成" : "操作已拒绝", detail: approved ? "已在项目看板创建事项 ATH-204。" : "项目看板未发生变更。", status: "completed", timestamp: new Date().toISOString() })
-      return
+      return {
+        attemptId,
+        submittedDecisions: Object.fromEntries(Object.entries(decisions).flatMap(([approvalId, decision]) =>
+          decision === "approved" || decision === "denied" ? [[approvalId, decision]] : [],
+        )),
+        succeededApprovalIds: requests.map((request) => request.approval_id),
+        failures: [],
+        retryableApprovalIds: [],
+        recoverableApprovalIds: [],
+        statusUnknownApprovalIds: [],
+      }
     }
-    try {
-      await apiClient.respondApprovalsIndividually(requests, decisions)
+    let approvalStatuses: Map<string, ApprovalStatusSnapshot> | null = null
+    const { submission, refreshed } = await submitAndRefresh(
+      () => apiClient.respondApprovalsIndividually(requests, decisions, attemptId),
+      async () => {
+        approvalStatuses = await refreshApprovalStatus(requests)
+      },
+    )
+    const refreshError = "Decision status could not be confirmed. Reload the run before trying these approvals again."
+    if (!submission.failures.length && refreshed) {
       clearError()
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Approval response failed"
-      setError(message)
-      throw err
+    } else if (!refreshed) {
+      setError("Decision submitted, but the run status could not be refreshed. Reload the run to check its current state.")
     }
-  }, [clearError, demoMode, setError])
+    return reconcileApprovalSubmission(
+      submission,
+      refreshed ? approvalStatuses : null,
+      refreshed ? undefined : refreshError,
+    )
+  }, [activeSessionId, beginOrchestrationSnapshotRequest, clearError, demoMode, refreshApprovalStatus, setError])
 
   useEffect(() => {
     if (!isAgentActive) return
@@ -859,14 +944,14 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
             </>
           )}
 
-          {pendingApprovals.length > 0 && (
+          {visibleApprovals.length > 0 && (
             <div className="my-4 space-y-3">
-              {Object.entries(pendingApprovals.reduce<Record<string, typeof pendingApprovals>>((groups, approval) => {
+              {Object.entries(visibleApprovals.reduce<Record<string, typeof visibleApprovals>>((groups, approval) => {
                 const batchId = approval.approval_batch_id || approval.approval_id
                 groups[batchId] = [...(groups[batchId] || []), approval]
                 return groups
               }, {})).map(([batchId, requests]) => (
-                <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={handleApproval} />
+                <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={handleApproval} onRefreshStatus={refreshApprovalStatus} />
               ))}
             </div>
           )}
@@ -1052,8 +1137,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
             agentStatus={agentStatus}
             connectionStatus={connectionStatus}
             executionTimeline={executionTimeline}
-            orchestrationPlans={orchestrationPlans}
-            orchestrationTasks={orchestrationTasks}
+            orchestrationSnapshot={latestKnownRunId ? orchestrationSnapshots[latestKnownRunId] : undefined}
             attachments={attachments}
             onClose={() => setShowActivity(false)}
           />

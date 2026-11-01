@@ -3,7 +3,7 @@ import { CheckCircle, Clock, Loader2, MessageSquare, Pause, X, XCircle } from "l
 import type { AgentStatus, Message } from "../types"
 import { buildActivityGroups, type ActivityRequestGroup } from "../utils/activityModel"
 import { useChatStore } from "../store/chatStore"
-import { deriveOrchestrationView } from "../utils/orchestrationProjection"
+import { OrchestrationSummary } from "./OrchestrationSummary"
 
 interface ActivityPanelProps {
   messages: Message[]
@@ -15,11 +15,12 @@ interface ActivityPanelProps {
 export function ActivityPanel({ messages, agentStatus = "idle", onClose }: ActivityPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const groups = useMemo(() => buildActivityGroups(messages, [], []), [messages])
-  const { orchestrationPlans, orchestrationTasks } = useChatStore()
-  const planView = useMemo(() => {
-    const plan = [...orchestrationPlans].reverse()[0]
-    return deriveOrchestrationView(plan, orchestrationTasks)
-  }, [orchestrationPlans, orchestrationTasks])
+  const { activeSessionId, sessions, orchestrationSnapshots } = useChatStore()
+  const activeRunId = sessions.find((session) => session.id === activeSessionId)?.active_run_id
+  const latestPlan = useMemo(() => {
+    const snapshot = activeRunId ? orchestrationSnapshots[activeRunId] : undefined
+    return snapshot ? [...snapshot.worker_plans].sort((left, right) => left.sequence - right.sequence).at(-1) : undefined
+  }, [activeRunId, orchestrationSnapshots])
   const latestGroupKey = groups[groups.length - 1]?.key
   const isAgentActive = agentStatus === "thinking" || agentStatus === "running" || agentStatus === "cancelling" || agentStatus === "waiting_approval"
   const isAgentPaused = agentStatus === "paused"
@@ -46,15 +47,7 @@ export function ActivityPanel({ messages, agentStatus = "idle", onClose }: Activ
       </div>
 
       <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto p-3">
-        {planView && (
-          <section className="rounded-lg border border-athena-border bg-athena-bg/40 px-3 py-3 text-xs">
-            <div className="font-semibold text-athena-text">当前执行计划</div>
-            <div className="mt-1 text-athena-muted">共 {planView.counts.total} 个并行任务 · 已完成 {planView.counts.completed} · 处理中 {planView.counts.running} · 等待确认 {planView.counts.waitingApproval} · 失败 {planView.counts.failed}</div>
-            {planView.tasks.filter((task) => ["running", "waiting_approval", "retry_wait"].includes(task.status)).map((task) => (
-              <div key={`${task.plan_id}:${task.task_id}`} className="mt-2 truncate text-athena-accent">{task.title || "并行任务"}</div>
-            ))}
-          </section>
-        )}
+        {latestPlan && <OrchestrationSummary plan={latestPlan} />}
         {groups.length === 0 ? (
           <p className="text-xs text-athena-muted">还没有请求记录</p>
         ) : (

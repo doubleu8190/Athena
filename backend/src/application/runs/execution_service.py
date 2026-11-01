@@ -11,6 +11,7 @@ from domain.leases import LeaseGrant
 from application.runs.ports import RunExecutorPort
 from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 from domain.memory import MemoryJobPort
+from backend.src.shared.logging import get_logger
 from domain.runs import (
     CommandType,
     RunCommand,
@@ -19,8 +20,11 @@ from domain.runs import (
     RunResumePayload,
     RunStartPayload,
     RunStatus,
+    RootPlanWait,
     RootWaitCheckpoint,
 )
+
+logger = get_logger(__name__)
 
 
 class RunExecutionService:
@@ -138,6 +142,12 @@ class RunExecutionService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logger.error(
+                "run_execution_failed",
+                run_id=run_id,
+                exception_type=type(exc).__name__,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             await self.fail(
                 invocation,
                 {"code": "run_failed", "message": str(exc) or type(exc).__name__},
@@ -207,18 +217,21 @@ class RunExecutionService:
 
         异常：
         - ValueError：校验条件 `root_wait.run_id != run_id` 成立时（异常说明：root_wait_run_identity_mismatch）。
-        - RuntimeError：校验条件 `not await self._lifecycle.arm_root_wait(run_id, plan_id=root_wait.plan_id, round_id=root_wait.round_id, plan_version=root_wait.plan_version, interrupt_id=root_wait.interrupt_id, checkpoint_id=root_wait.checkpoint_id, lease=lease, wait_payload=wait_payload)` 成立时（异常说明：root_wait_checkpoint_not_armed）。
+        - RuntimeError：生命周期仓储拒绝登记当前 Plan 等待身份时抛出。
         - 未列出的依赖异常按当前实现传播。
         """
         if root_wait.run_id != run_id:
             raise ValueError("root_wait_run_identity_mismatch")
         if not await self._lifecycle.arm_root_wait(
             run_id,
-            plan_id=root_wait.plan_id,
-            round_id=root_wait.round_id,
-            plan_version=root_wait.plan_version,
-            interrupt_id=root_wait.interrupt_id,
-            checkpoint_id=root_wait.checkpoint_id,
+            wait=RootPlanWait(
+                run_id=root_wait.run_id,
+                plan_id=root_wait.plan_id,
+                plan_sequence=root_wait.plan_sequence,
+                root_wait_generation=root_wait.root_wait_generation,
+                interrupt_id=root_wait.interrupt_id,
+                checkpoint_id=root_wait.checkpoint_id,
+            ),
             lease=lease,
             wait_payload=wait_payload,
         ):

@@ -10,6 +10,7 @@ import KnowledgeBaseView from "./KnowledgeBaseView"
 import RetrievalView from "./RetrievalView"
 import EvaluationView from "./EvaluationView"
 import RunChainView from "./RunChainView"
+import WorkerRegistryView from "./WorkerRegistryView"
 
 interface PageViewProps {
   view: AppView
@@ -43,6 +44,8 @@ function PageView({ view }: PageViewProps) {
       return <RetrievalView />
     case "evaluation":
       return <EvaluationView />
+    case "worker-registry":
+      return <WorkerRegistryView />
     default:
       return null
   }

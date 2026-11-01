@@ -31,7 +31,7 @@ async def test_postgres_worker_thread_lock_serializes_separate_app_instances() -
     connection_string = make_conninfo(
         **{
             "host": url.host or "",
-            "port": url.port or 5432,
+            "port": url.port or 8190,
             "dbname": url.database or "",
             "user": url.username or "",
             "password": url.password or "",

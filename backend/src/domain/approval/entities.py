@@ -44,6 +44,12 @@ class ApprovalRequest:
     operation_key: str | None = None
     expires_at: datetime | None = None
     decided_by: str | None = None
+    approval_request_id: str | None = None
+    pause_id: str | None = None
+    item_id: str | None = None
+    generation: int | None = None
+    cancellation_epoch: int | None = None
+    arguments_sha256: str | None = None
 
 
 __all__ = ["ApprovalDecision", "ApprovalRequest", "ApprovalStatus"]

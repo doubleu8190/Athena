@@ -14,6 +14,7 @@ from application.runs.ports import RunExecutorPort
 from domain.runs import (
     CommandExecutionResult,
     RootWaitCheckpoint,
+    RootPlanCompletedResumeValue,
     RunCommand,
     RunResumePayload,
     RunStartPayload,
@@ -172,7 +173,7 @@ def _root_wait_checkpoint(
     异常：
     - RuntimeError：校验条件 `not isinstance(interrupts, (list, tuple)) or len(interrupts) != 1` 成立时（异常说明：root_round_interrupt_count_invalid）。
     - RuntimeError：校验条件 `not isinstance(interrupt, Interrupt)` 成立时（异常说明：root_round_interrupt_invalid）。
-    - RuntimeError：校验条件 `not isinstance(value, Mapping) or value.get('type') != 'round_wait'` 成立时（异常说明：root_round_interrupt_payload_invalid）。
+    - RuntimeError：校验条件 `not isinstance(value, Mapping) or value.get('type') != 'plan_wait'` 成立时（异常说明：root_plan_interrupt_payload_invalid）。
     - RuntimeError：校验条件 `not isinstance(run_id, str) or run_id != expected_run_id or (not isinstance(plan_id, str)) or (not isinstance(round_id, str)) or (not isinstance(plan_version, int)) or isinstance(plan_version, bool) or (not isinstance(interrupt_id, str)) or (not isinstance(checkpoint_id, str))` 成立时（异常说明：root_round_interrupt_identity_invalid）。
     - 未列出的依赖异常按当前实现传播。
     """
@@ -185,19 +186,20 @@ def _root_wait_checkpoint(
     value = interrupt.value
     interrupt_id = interrupt.id
     checkpoint_id = result.get("__root_checkpoint_id__")
-    if not isinstance(value, Mapping) or value.get("type") != "round_wait":
-        raise RuntimeError("root_round_interrupt_payload_invalid")
+    if not isinstance(value, Mapping) or value.get("type") != "plan_wait":
+        raise RuntimeError("root_plan_interrupt_payload_invalid")
     run_id = value.get("run_id")
     plan_id = value.get("plan_id")
-    round_id = value.get("round_id")
-    plan_version = value.get("plan_version")
+    plan_sequence = value.get("plan_sequence")
+    root_wait_generation = value.get("root_wait_generation")
     if (
         not isinstance(run_id, str)
         or run_id != expected_run_id
         or not isinstance(plan_id, str)
-        or not isinstance(round_id, str)
-        or not isinstance(plan_version, int)
-        or isinstance(plan_version, bool)
+        or not isinstance(plan_sequence, int)
+        or isinstance(plan_sequence, bool)
+        or not isinstance(root_wait_generation, int)
+        or isinstance(root_wait_generation, bool)
         or not isinstance(interrupt_id, str)
         or not isinstance(checkpoint_id, str)
     ):
@@ -205,8 +207,8 @@ def _root_wait_checkpoint(
     return RootWaitCheckpoint(
         run_id=run_id,
         plan_id=plan_id,
-        round_id=round_id,
-        plan_version=plan_version,
+        plan_sequence=plan_sequence,
+        root_wait_generation=root_wait_generation,
         interrupt_id=interrupt_id,
         checkpoint_id=checkpoint_id,
     )

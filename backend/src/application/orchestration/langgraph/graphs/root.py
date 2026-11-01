@@ -26,10 +26,9 @@ from application.orchestration.root_decision import (
     PlanDraft,
     PlanningFeedback,
 )
-from domain.runs import RoundCompletedResumeValue
+from domain.runs import RootPlanCheckpointRecovery, RootPlanCompletedResumeValue
 from domain.leases import LeaseGrant
 from shared.serialization import json_value
-from application.contracts.runs import RoundCompletedResumeValueSchema
 from application.runs.request_contracts import RootRequestState
 from shared import get_logger
 
@@ -401,7 +400,7 @@ def _route_after_plan_generation(state: RootGraphState) -> str:
 
 
 def _route_after_wait(state: RootGraphState) -> str:
-    """根据等待状态选择继续等待或构建计划响应。
+    """根据等待状态选择继续等待或让 Root 基于完成事实再决策。
 
     参数：
     - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
@@ -412,11 +411,11 @@ def _route_after_wait(state: RootGraphState) -> str:
     异常：
     - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
-    return "wait_for_plan_completion" if state.get("waiting") else "build_plan_response"
+    return "wait_for_plan_completion" if state.get("waiting") else "redecide_root_action"
 
 
 def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
-    """暂停 Root，直至持久化的 Round 完成事件恢复其 checkpoint。
+    """暂停 Root，直至当前 Plan 的所有任务完成。
 
     参数：
     - `workflow`（RootWorkflowPort）：负责执行业务步骤的应用工作流；约束：无额外运行时限制。
@@ -438,37 +437,44 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
         - dict[str, Any]：包含等待状态及恢复身份的 Root 图状态补丁。
 
         异常：
-        - RuntimeError：校验条件 `not isinstance(wait_context, Mapping)` 成立时（异常说明：root_round_wait_identity_missing）。
-        - RuntimeError：校验条件 `捕获 ValidationError 后` 成立时（异常说明：root_round_wait_identity_missing）。
-        - RuntimeError：校验条件 `wait_identity.run_id != request.run_id` 成立时（异常说明：root_round_wait_run_mismatch）。
-        - RuntimeError：校验条件 `捕获 ValidationError 后` 成立时（异常说明：root_round_resume_value_invalid）。
-        - RuntimeError：校验条件 `any((getattr(resume_identity, name) != getattr(wait_identity, name) for name in ('run_id', 'plan_id', 'round_id', 'plan_version')))` 成立时（异常说明：root_round_resume_identity_mismatch）。
+        - RuntimeError：等待身份缺失或格式错误时，说明为 `root_plan_wait_identity_missing`。
+        - RuntimeError：等待身份与当前 Run 不一致时，说明为 `root_plan_wait_run_mismatch`。
+        - RuntimeError：恢复值缺失、格式错误或身份不一致时，说明为对应的 `root_plan_resume_*` 错误。
+        - RuntimeError：校验条件 `恢复值与等待中的 Run、Plan、序号或代次不一致` 成立时（异常说明：root_plan_resume_identity_mismatch）。
         - 未列出的依赖异常按当前实现传播。
         """
+        # 恢复命令已经明确确认当前 Plan 完成，直接进入消费节点；否则图从节点起点重放时会先读到完成事实，绕过 interrupt 后的消费逻辑。
+        if state.get("resume_value"):
+            return await workflow.consume_completed_plan(state)
         result = await workflow.wait_for_plan_completion(state)
         if not result.get("waiting"):
             return result
         wait_context = result.get("root_wait")
         request = RootRequestState.model_validate(state.get("request", {}))
         if not isinstance(wait_context, Mapping):
-            raise RuntimeError("root_round_wait_identity_missing")
+            raise RuntimeError("root_plan_wait_identity_missing")
         try:
             wait_identity = RootWaitIdentity.model_validate(wait_context)
         except ValidationError as error:
-            raise RuntimeError("root_round_wait_identity_missing") from error
+            raise RuntimeError("root_plan_wait_identity_missing") from error
         if wait_identity.run_id != request.run_id:
-            raise RuntimeError("root_round_wait_run_mismatch")
+            raise RuntimeError("root_plan_wait_run_mismatch")
         resume_value = interrupt(dict(wait_context))
         try:
             resume_identity = RootResumeIdentity.model_validate(resume_value)
         except ValidationError as error:
-            raise RuntimeError("root_round_resume_value_invalid") from error
+            raise RuntimeError("root_plan_resume_value_invalid") from error
         if any(
             getattr(resume_identity, name) != getattr(wait_identity, name)
-            for name in ("run_id", "plan_id", "round_id", "plan_version")
+            for name in (
+                "run_id",
+                "plan_id",
+                "plan_sequence",
+                "root_wait_generation",
+            )
         ):
-            raise RuntimeError("root_round_resume_identity_mismatch")
-        await workflow.review_completed_round(
+            raise RuntimeError("root_plan_resume_identity_mismatch")
+        return await workflow.consume_completed_plan(
             {
                 **state,
                 "root_wait": wait_identity.model_dump(mode="json"),
@@ -477,8 +483,6 @@ def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
                 ),
             }
         )
-        # 审查可能开启新一轮；返回等待状态，让图以新的 LangGraph 任务重新进入此节点并创建新中断。
-        return await workflow.wait_for_plan_completion(state)
 
     wait_for_plan_completion.__name__ = "wait_for_plan_completion"
     return wait_for_plan_completion
@@ -593,7 +597,7 @@ def build_root_graph(
         _route_after_wait,
         {
             "wait_for_plan_completion": "wait_for_plan_completion",
-            "build_plan_response": "build_plan_response",
+            "redecide_root_action": "redecide_root_action",
         },
     )
     graph.add_edge("build_plan_response", "generate_answer")
@@ -611,10 +615,10 @@ async def invoke_root_graph(
     message_id: str = "",
     run_sequence: int = 1,
     attachment_ids: list[str] | None = None,
-    resume_value: RoundCompletedResumeValue | Mapping[str, Any] | None = None,
+    resume_value: RootPlanCompletedResumeValue | RootPlanCheckpointRecovery | Mapping[str, Any] | None = None,
     stop_signal: asyncio.Event | None = None,
 ) -> Mapping | dict[str, str] | Any:
-    """启动 Root 图，或用已验证的 Round 身份恢复持久化 checkpoint。
+    """启动 Root 图，或用已验证的 Plan 身份恢复持久化 checkpoint。
 
     参数：
     - `graph`（CompiledStateGraph[Any, Any, Any, Any]）：已编译或待执行的工作流图；约束：无额外运行时限制。
@@ -625,7 +629,7 @@ async def invoke_root_graph(
     - `message_id`（str）：关联消息的稳定标识；None 表示未绑定消息；约束：可省略，默认值为 `''`。
     - `run_sequence`（int）：会话内 Run 的单调递增序号；约束：可省略，默认值为 `1`。
     - `attachment_ids`（list[str] | None）：当前请求已授权使用的附件标识集合；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
-    - `resume_value`（RoundCompletedResumeValue | Mapping[str, Any] | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`；须通过方法内校验；失败条件见下方异常说明。
+    - `resume_value`（RootPlanCompletedResumeValue | RootPlanCheckpointRecovery | Mapping[str, Any] | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`；须通过方法内校验；失败条件见下方异常说明。
     - `stop_signal`（asyncio.Event | None）：通知当前执行应停止的异步信号；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
 
     返回：
@@ -634,8 +638,7 @@ async def invoke_root_graph(
     异常：
     - ValueError：校验条件 `not run_id` 成立时（异常说明：run_id is required）。
     - RuntimeError：校验条件 `resume_value is not None；isinstance(resume_value, Mapping)；捕获 ValidationError 后` 成立时（异常说明：root_resume_value_type_invalid）。
-    - RuntimeError：校验条件 `resume_value is not None；not (isinstance(resume_value, Mapping))；not isinstance(resume_value, RoundCompletedResumeValue)` 成立时（异常说明：root_resume_value_type_invalid）。
-    - RuntimeError：校验条件 `resume_value is not None；resume_value.type != 'round_completed'` 成立时（异常说明：root_resume_value_type_invalid）。
+    - RuntimeError：校验条件 `resume_value 不符合已定义的恢复类型` 成立时（异常说明：root_resume_value_type_invalid）。
     - RuntimeError：校验条件 `isinstance(result, Mapping) and result.get('__interrupt__')；not checkpoint_id` 成立时（异常说明：root_wait_checkpoint_identity_missing）。
     - 未列出的依赖异常按当前实现传播。
     """
@@ -662,27 +665,45 @@ async def invoke_root_graph(
     if resume_value is not None:
         if isinstance(resume_value, Mapping):
             try:
-                resume_value = RoundCompletedResumeValueSchema.model_validate(
-                    resume_value
-                ).to_domain()
+                if resume_value.get("type") == "plan_checkpoint_recovery":
+                    resume_value = RootPlanCheckpointRecovery(**dict(resume_value))
+                elif resume_value.get("type") == "plan_completed":
+                    resume_value = RootPlanCompletedResumeValue(**dict(resume_value))
+                else:
+                    raise ValueError("root_resume_value_type_invalid")
             except ValidationError as error:
                 raise RuntimeError("root_resume_value_type_invalid") from error
-        elif not isinstance(resume_value, RoundCompletedResumeValue):
+            except ValueError as error:
+                raise RuntimeError("root_resume_value_type_invalid") from error
+        if isinstance(resume_value, RootPlanCheckpointRecovery):
+            logger.info(f"Recovering root checkpoint for run {run_id}")
+            # 已消费的 interrupt 不再 resume；先把当前调用租约写回原 checkpoint，再从游标继续。
+            await graph.aupdate_state(
+                config,
+                {
+                    "execution_lease": json_value(lease),
+                    "resume_value": json_value(resume_value),
+                },
+            )
+            result = await graph.ainvoke(
+                None, config=config
+            )
+        elif isinstance(resume_value, RootPlanCompletedResumeValue):
+            logger.info(
+                f"Resuming root graph for run {run_id} from plan {resume_value.plan_id}"
+            )
+            result = await graph.ainvoke(
+                Command(
+                    update={
+                        "execution_lease": json_value(lease),
+                        "resume_value": json_value(resume_value),
+                    },
+                    resume=json_value(resume_value),
+                ),
+                config=config,
+            )
+        else:
             raise RuntimeError("root_resume_value_type_invalid")
-        if resume_value.type != "round_completed":
-            raise RuntimeError("root_resume_value_type_invalid")
-        logger.info(
-            f"Resuming root graph for run {run_id} from round {resume_value.round_id}"
-        )
-        result = await graph.ainvoke(
-            Command(
-                update={"execution_lease": json_value(lease)},
-                resume=RoundCompletedResumeValueSchema.from_domain(
-                    resume_value
-                ).model_dump(mode="json")
-            ),
-            config=config,
-        )
     else:
         logger.info(f"Invoking root graph for run {run_id}")
         result = await graph.ainvoke(state, config=config)

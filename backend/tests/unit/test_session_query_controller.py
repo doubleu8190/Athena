@@ -137,9 +137,9 @@ def make_client(events=None) -> TestClient:
     runs = RunRepository()
     return TestClient(
         create_app(
-            session_service_factory=lambda: session_service,
-            message_query_factory=lambda: SessionMessageQueryService(sessions, messages),
-            run_query_factory=lambda: RunQueryService(sessions, runs, events),
+            session_service=session_service,
+            message_query_service=SessionMessageQueryService(sessions, messages),
+            run_query_service=RunQueryService(sessions, runs, events),
         )
     )
 

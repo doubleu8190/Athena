@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 
 from application.orchestration import RootWorkflow, RootWorkflowDependencies
 from application.orchestration.root_workflow import (
@@ -15,6 +21,7 @@ from application.orchestration.root_decision import (
     ContextRequest,
     PlanIntent,
     PlanningFeedback,
+    PlanDraft,
 )
 from application.orchestration.answer_generation import (
     AnswerGenerationResult,
@@ -28,9 +35,12 @@ from application.runs.context import (
     MemoryQuery,
     ProviderResult,
 )
+from domain.orchestration import RootPlanFacts, RootPlanTaskFact
+from domain.runs import RootPlanCheckpointRecovery, RootPlanCompletedResumeValue
 from application.runs.request_contracts import RootRequestState
 from application.orchestration.langgraph import build_root_graph
 from application.orchestration.langgraph import invoke_root_graph as _invoke_root_graph
+from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
 from tests.fakes.leases import lease_context, lease_grant
 
 
@@ -160,11 +170,68 @@ class _Tools:
         return []
 
 
+class _RootOrchestration:
+    def __init__(self):
+        self.completed_plan = None
+        self.submissions = []
+
+    async def list_authorized_capabilities(self, _run_id):
+        return ()
+
+    async def submit_plan(self, submission, *, lease):
+        self.submissions.append((submission, lease))
+        return SimpleNamespace(plan_id=submission.plan_id, sequence=submission.sequence)
+
+    async def read_completed_plan(self, run_id, plan_id, root_wait_generation):
+        if self.completed_plan is None:
+            return None
+        assert self.completed_plan.run_id == run_id
+        assert self.completed_plan.plan_id == plan_id
+        assert self.completed_plan.root_wait_generation == root_wait_generation
+        return self.completed_plan
+
+
+class _AutoCompleteRootOrchestration(_RootOrchestration):
+    """在图测试中根据提交内容生成确定的完成事实。"""
+
+    def __init__(self, outcomes: Sequence[tuple[str, Mapping[str, Any]]]) -> None:
+        super().__init__()
+        self.outcomes = list(outcomes)
+
+    async def submit_plan(self, submission, *, lease):
+        receipt = await super().submit_plan(submission, lease=lease)
+        status, outputs = self.outcomes.pop(0)
+        self.completed_plan = RootPlanFacts(
+            run_id=submission.run_id,
+            plan_id=submission.plan_id,
+            sequence=submission.sequence,
+            root_wait_generation=submission.sequence,
+            goal=submission.goal,
+            status="completed",
+            tasks=tuple(
+                RootPlanTaskFact(
+                    task_ref=task.task_ref,
+                    status=status,
+                    output=outputs.get(task.task_ref),
+                    error=(
+                        {"code": "source_unavailable"}
+                        if status == "failed"
+                        else None
+                    ),
+                    objective=task.objective,
+                    acceptance_criteria=task.acceptance_criteria,
+                )
+                for task in submission.tasks
+            ),
+        )
+        return receipt
+
+
 def _dependencies(agent, *, provider=None, root_max_turns=4, events=None):
     events = events or _Events()
     memory_repository = _MemoryValidationRepository()
     providers = {"memory": _Provider(provider, memory_repository)} if provider else {}
-    return RootWorkflowDependencies(
+    dependencies = RootWorkflowDependencies(
         context_acquisition=ContextAcquisitionService(
             providers,
             trace_repository=_TraceRepository(),
@@ -180,11 +247,15 @@ def _dependencies(agent, *, provider=None, root_max_turns=4, events=None):
         available_context_providers=tuple(providers),
         root_max_turns=root_max_turns,
     )
+    dependencies.root_orchestration = _RootOrchestration()
+    return dependencies
 
 
-def _build_graph(dependencies):
+def _build_graph(dependencies, *, checkpointer=None):
     return build_root_graph(
-        workflow=RootWorkflow(dependencies), dependencies=dependencies
+        workflow=RootWorkflow(dependencies),
+        dependencies=dependencies,
+        checkpointer=checkpointer,
     )
 
 
@@ -328,14 +399,23 @@ def test_root_graph_has_no_removed_understanding_or_harness_nodes() -> None:
 @pytest.mark.asyncio
 async def test_root_workflow_loads_plan_results_once_and_renders_response() -> None:
     dependencies = _dependencies(_Agent([]))
-    load_calls = 0
-
-    async def load_plan(*, plan_id):
-        nonlocal load_calls
-        load_calls += 1
-        return {"completed": True, "results": {"task-1": {"output": "done"}}}
-
-    dependencies.plan_loader = load_plan
+    dependencies.root_orchestration.completed_plan = RootPlanFacts(
+        run_id="run-1",
+        plan_id="plan-1",
+        sequence=1,
+        root_wait_generation=1,
+        goal="Summarize plan results",
+        status="completed",
+        tasks=(
+            RootPlanTaskFact(
+                task_ref="task-1",
+                status="succeeded",
+                output={"content": "done"},
+                objective="Produce the summary",
+                acceptance_criteria="Return a non-empty summary",
+            ),
+        ),
+    )
     workflow = RootWorkflow(dependencies)
     state = {
         "execution_lease": lease_context(lease_grant("root_execution", "run-1")),
@@ -347,14 +427,19 @@ async def test_root_workflow_loads_plan_results_once_and_renders_response() -> N
         },
         "plan": {
             "plan_id": "plan-1",
-            "tasks": [{"task_id": "task-1", "title": "Task one"}],
+            "sequence": 1,
+            "root_wait_generation": 1,
+            "tasks": [{"task_ref": "task-1", "objective": "Task one"}],
         },
     }
 
     wait_result = await workflow.wait_for_plan_completion(state)
+    assert wait_result["plan_results"]["tasks"][0]["objective"] == "Produce the summary"
+    assert wait_result["plan_results"]["tasks"][0]["acceptance_criteria"] == (
+        "Return a non-empty summary"
+    )
     response_result = await workflow.build_plan_response({**state, **wait_result})
 
-    assert load_calls == 1
     assert response_result == {
         "answer_input": {
             "source": "plan_summary",
@@ -417,6 +502,166 @@ async def test_root_graph_routes_clarification_from_unified_answer_decision() ->
 
     assert result["result"]["content"] == "请用户选择目标文件。"
     assert result["result"]["kind"] == "clarification"
+
+
+@pytest.mark.asyncio
+async def test_root_graph_answers_when_completed_facts_satisfy_requested_goal() -> None:
+    task = {
+        "task_ref": "report",
+        "contract_id": "worker.report",
+        "contract_revision": 1,
+        "objective": "Prepare the requested report",
+        "input": {"topic": "quarterly summary"},
+        "acceptance_criteria": "Return the completed report text",
+    }
+    agent = _Agent(
+        [
+            PlanIntent(
+                action="plan",
+                goal="Prepare and return the quarterly report",
+                instructions="Create the requested report.",
+            ),
+            PlanDraft(
+                action="plan",
+                goal="Prepare and return the quarterly report",
+                tasks=(task,),
+            ),
+            AnswerIntent(
+                action="answer",
+                kind="final",
+                instructions="Summarize the completed report for the user.",
+            ),
+        ]
+    )
+    dependencies = _dependencies(agent)
+    auto_complete = _AutoCompleteRootOrchestration(
+        [("succeeded", {"report": {"text": "Quarterly report complete."}})]
+    )
+    dependencies.root_orchestration = auto_complete
+
+    result = await invoke_root_graph(
+        _build_graph(dependencies),
+        session_id="session-1",
+        run_id="run-completed-goal",
+        message_id="message-completed-goal",
+        user_message="Prepare and return the quarterly report.",
+    )
+
+    assert result["status"] == "completed"
+    assert result["result"]["kind"] == "final"
+    assert agent.inputs[-1].completed_plans[0].goal == (
+        "Prepare and return the quarterly report"
+    )
+    completed_task = agent.inputs[-1].completed_plans[0].tasks[0]
+    assert completed_task.objective == "Prepare the requested report"
+    assert completed_task.acceptance_criteria == "Return the completed report text"
+    assert completed_task.output == {"text": "Quarterly report complete."}
+
+
+@pytest.mark.asyncio
+async def test_root_graph_can_replan_a_concrete_goal_after_partial_failure() -> None:
+    task = {
+        "task_ref": "source",
+        "contract_id": "worker.source",
+        "contract_revision": 1,
+        "objective": "Fetch source material",
+        "input": {"source": "approved"},
+        "acceptance_criteria": "Return verified source material",
+    }
+    agent = _Agent(
+        [
+            PlanIntent(
+                action="plan",
+                goal="Prepare a report using source material",
+                instructions="Fetch the approved source.",
+            ),
+            PlanDraft(
+                action="plan",
+                goal="Prepare a report using source material",
+                tasks=(task,),
+            ),
+            PlanIntent(
+                action="plan",
+                goal="Complete the report using an alternative approved source",
+                instructions="Recover the missing source material.",
+            ),
+            PlanDraft(
+                action="plan",
+                goal="Complete the report using an alternative approved source",
+                tasks=(task,),
+            ),
+            AnswerIntent(
+                action="answer",
+                kind="final",
+                instructions="Summarize the recovered result.",
+            ),
+        ]
+    )
+    dependencies = _dependencies(agent, root_max_turns=8)
+    auto_complete = _AutoCompleteRootOrchestration(
+        [
+            ("failed", {}),
+            ("succeeded", {"source": {"text": "Alternative source found."}}),
+        ]
+    )
+    dependencies.root_orchestration = auto_complete
+
+    result = await invoke_root_graph(
+        _build_graph(dependencies),
+        session_id="session-1",
+        run_id="run-partial-failure-replan",
+        message_id="message-partial-failure-replan",
+        user_message="Prepare a report using approved source material.",
+    )
+
+    assert result["status"] == "completed"
+    assert len(auto_complete.submissions) == 2
+    assert agent.inputs[2].completed_plans[0].tasks[0].status == "failed"
+    assert agent.inputs[2].completed_plans[0].tasks[0].error == {
+        "code": "source_unavailable"
+    }
+    assert agent.inputs[2].messages[-1].content == (
+        "Prepare a report using approved source material."
+    )
+    assert agent.inputs[-1].completed_plans[1].tasks[0].output == {
+        "text": "Alternative source found."
+    }
+
+
+@pytest.mark.asyncio
+async def test_root_graph_turns_stale_planning_feedback_into_clarification() -> None:
+    agent = _Agent(
+        [
+            PlanIntent(
+                action="plan",
+                goal="Prepare the requested report",
+                instructions="Use a Worker for the report.",
+            ),
+            PlanningFeedback(
+                action="needs_information",
+                missing_information=("目标报告的收件人",),
+                reason="没有足够信息确定报告的目标受众。",
+            ),
+            PlanIntent(
+                action="plan",
+                goal="Prepare the requested report",
+                instructions="Continue planning if possible.",
+            ),
+        ]
+    )
+    result = await invoke_root_graph(
+        _build_graph(_dependencies(agent)),
+        session_id="session-1",
+        run_id="run-planning-feedback-clarification",
+        message_id="message-planning-feedback-clarification",
+        user_message="Prepare the requested report.",
+    )
+
+    assert result["status"] == "completed"
+    assert result["result"]["kind"] == "clarification"
+    assert "目标报告的收件人" in result["result"]["content"]
+    assert "目标受众" in result["result"]["content"]
+    assert len(agent.inputs) == 3
 
 
 @pytest.mark.asyncio
@@ -583,3 +828,190 @@ async def test_root_rejects_legacy_state_based_resume() -> None:
             user_message="",
             resume_value={"tool_call_id": "old-root-approval"},
         )
+
+
+@pytest.mark.asyncio
+async def test_domain_plan_resume_value_is_serialized_for_langgraph_command() -> None:
+    class CapturingGraph:
+        def __init__(self):
+            self.command = None
+
+        async def ainvoke(self, command, *, config):
+            self.command = command
+            return {"status": "completed"}
+
+    graph = CapturingGraph()
+    resume_value = RootPlanCompletedResumeValue(
+        type="plan_completed",
+        run_id="run-domain-resume",
+        plan_id="plan-1",
+        plan_sequence=1,
+        root_wait_generation=1,
+        interrupt_id="interrupt-1",
+    )
+
+    await invoke_root_graph(
+        graph,
+        session_id="session-1",
+        run_id="run-domain-resume",
+        user_message="",
+        resume_value=resume_value,
+    )
+
+    assert graph.command.resume == {
+        "type": "plan_completed",
+        "run_id": "run-domain-resume",
+        "plan_id": "plan-1",
+        "plan_sequence": 1,
+        "root_wait_generation": 1,
+        "interrupt_id": "interrupt-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_recovery_after_plan_consumption_uses_new_lease() -> None:
+    class Agent(_Agent):
+        def __init__(self):
+            super().__init__(
+                [
+                    PlanIntent(action="plan", goal="Collect evidence", instructions="Use the Worker."),
+                    PlanDraft(
+                        action="plan",
+                        goal="Collect evidence",
+                        tasks=(
+                            {
+                                "task_ref": "echo",
+                                "contract_id": "echo",
+                                "contract_revision": 1,
+                                "objective": "Return the supplied value.",
+                                "input": {"value": "first-round-output"},
+                                "acceptance_criteria": "Return the same value.",
+                            },
+                        ),
+                    ),
+                    AnswerIntent(action="answer", kind="final", instructions="Summarize the results."),
+                ]
+            )
+            self.redecision_count = 0
+
+        async def redecide(self, inputs):
+            self.inputs.append(inputs)
+            self.redecision_count += 1
+            if self.redecision_count == 1:
+                raise asyncio.CancelledError()
+            return self.decisions.pop(0)
+
+    class Checkpointer:
+        def __init__(self, saver):
+            self.saver = saver
+
+        def get_saver(self):
+            return self.saver
+
+    class ThreadLock:
+        @asynccontextmanager
+        async def hold(self, _key):
+            yield
+
+    class LeaseCenter:
+        async def assert_current(self, _lease):
+            return None
+
+    agent = Agent()
+    dependencies = _dependencies(agent)
+    saver = InMemorySaver()
+    workflow = RootWorkflow(dependencies)
+    graph = build_root_graph(
+        workflow=workflow,
+        dependencies=dependencies,
+        checkpointer=saver,
+    )
+    lease = lease_grant("root_execution", "run-checkpoint-recovery")
+    interrupted = await invoke_root_graph(
+        graph,
+        session_id="session-1",
+        run_id="run-checkpoint-recovery",
+        message_id="message-1",
+        user_message="Collect evidence.",
+        lease=lease,
+    )
+    interrupt = interrupted["__interrupt__"][0]
+    wait_identity = interrupt.value
+    dependencies.root_orchestration.completed_plan = RootPlanFacts(
+        run_id="run-checkpoint-recovery",
+        plan_id=wait_identity["plan_id"],
+        sequence=wait_identity["plan_sequence"],
+        root_wait_generation=wait_identity["root_wait_generation"],
+        goal="Collect evidence",
+        status="completed",
+        tasks=(
+            RootPlanTaskFact(
+                task_ref="echo",
+                status="succeeded",
+                output={"value": "first-round-output"},
+            ),
+        ),
+    )
+    resume = RootPlanCompletedResumeValue(
+        type="plan_completed",
+        run_id="run-checkpoint-recovery",
+        plan_id=wait_identity["plan_id"],
+        plan_sequence=wait_identity["plan_sequence"],
+        root_wait_generation=wait_identity["root_wait_generation"],
+        interrupt_id=interrupt.id,
+    )
+
+    with pytest.raises(BaseException):
+        await invoke_root_graph(
+            graph,
+            session_id="session-1",
+            run_id="run-checkpoint-recovery",
+            lease=lease,
+            resume_value=resume,
+        )
+
+    config = {"configurable": {"thread_id": "run:run-checkpoint-recovery"}}
+    snapshot = await graph.aget_state(config)
+    assert not any(task.interrupts for task in snapshot.tasks)
+    assert snapshot.next == ("redecide_root_action",)
+    assert len(snapshot.values["completed_plans"]) == 1
+
+    root_graph = LangGraphRootGraph(
+        workflow=workflow,
+        dependencies=dependencies,
+        checkpointer=Checkpointer(saver),
+        thread_lock=ThreadLock(),
+        lease_center=LeaseCenter(),
+    )
+    assert await root_graph.is_plan_checkpoint_recoverable(
+        run_id="run-checkpoint-recovery",
+        plan_id=wait_identity["plan_id"],
+        plan_sequence=wait_identity["plan_sequence"],
+        root_wait_generation=wait_identity["root_wait_generation"],
+    )
+    resumed_lease = lease_grant(
+        "root_execution", "run-checkpoint-recovery", fencing_token=2
+    )
+    result = await invoke_root_graph(
+        graph,
+        session_id="session-1",
+        run_id="run-checkpoint-recovery",
+        lease=resumed_lease,
+        resume_value=RootPlanCheckpointRecovery(
+            type="plan_checkpoint_recovery",
+            run_id="run-checkpoint-recovery",
+            plan_id=wait_identity["plan_id"],
+            plan_sequence=wait_identity["plan_sequence"],
+            root_wait_generation=wait_identity["root_wait_generation"],
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert agent.redecision_count == 2
+    assert len(dependencies.root_orchestration.submissions) == 1
+    assert len(agent.inputs[-1].completed_plans) == 1
+    assert agent.inputs[-1].completed_plans[0].tasks[0].output == {
+        "value": "first-round-output"
+    }
+    final_snapshot = await graph.aget_state(config)
+    assert final_snapshot.values["execution_lease"]["fencing_token"] == 2

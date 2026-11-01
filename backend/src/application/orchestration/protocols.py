@@ -12,20 +12,25 @@ from domain.orchestration import (
     CommandReceipt,
     OrchestrationCommand,
     Plan,
-    ReviewContext,
-    ReviewDecision,
+    RootPlanFacts,
     Task,
     TaskExecution,
     TaskResult,
+    WorkerPlanReceipt,
+    WorkerPlanSubmission,
 )
-from domain.runs import RoundCompletedResumeValue
+from domain.runs import (
+    RootPlanCheckpointRecovery,
+    RootPlanCompletedResumeValue,
+)
+from domain.runs.payloads import RootPlanWait
 from .root_decision import (
     RootAgentInput,
     RootDecision,
     RootPlanInput,
     RootPlanResult,
     RootReDecision,
-    RootWorkerTool,
+    RootWorkerCapability,
 )
 
 if TYPE_CHECKING:
@@ -77,29 +82,6 @@ class RootAgent(Protocol):
         """
         ...
 
-    async def review(
-        self,
-        context: ReviewContext,
-        *,
-        worker_tools: tuple[RootWorkerTool, ...],
-        request: Mapping[str, Any],
-    ) -> ReviewDecision:
-        """根据固定轮次上下文生成审查决策。
-
-        参数：
-        - `context`（ReviewContext）：供决策或生成步骤使用的上下文资料；约束：无额外运行时限制。
-        - `worker_tools`（tuple[RootWorkerTool, ...]）：当前系统允许 Worker 调用的工具集合；约束：无额外运行时限制。
-        - `request`（Mapping[str, Any]）：当前请求及其关联身份，用于限定操作范围；约束：无额外运行时限制。
-
-        返回：
-        - ReviewDecision：Root 对已完成 Round 选择的继续、修订或结束动作。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
-
-
 class RootGraphPort(Protocol):
     """由 LangGraph 适配器实现的 Root 图执行边界。
     """
@@ -114,7 +96,7 @@ class RootGraphPort(Protocol):
         message_id: str = "",
         run_sequence: int = 1,
         attachment_ids: list[str] | None = None,
-        resume_value: RoundCompletedResumeValue | None = None,
+        resume_value: RootPlanCompletedResumeValue | RootPlanCheckpointRecovery | None = None,
         stop_signal: asyncio.Event | None = None,
     ) -> object:
         """执行一次绑定 Run 身份的 Root 图调用。
@@ -127,7 +109,7 @@ class RootGraphPort(Protocol):
         - `message_id`（str）：关联消息的稳定标识；None 表示未绑定消息；约束：可省略，默认值为 `''`。
         - `run_sequence`（int）：会话内 Run 的单调递增序号；约束：可省略，默认值为 `1`。
         - `attachment_ids`（list[str] | None）：当前请求已授权使用的附件标识集合；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
-        - `resume_value`（RoundCompletedResumeValue | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `resume_value`（RootPlanCompletedResumeValue | None）：图中断后用于恢复执行的持久化值；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
         - `stop_signal`（asyncio.Event | None）：通知当前执行应停止的异步信号；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
 
         返回：
@@ -138,57 +120,34 @@ class RootGraphPort(Protocol):
         """
         ...
 
-    async def has_pending_round_wait(
+    async def has_pending_plan_wait(
         self,
         *,
         run_id: str,
         plan_id: str,
-        round_id: str,
-        plan_version: int,
+        plan_sequence: int,
+        root_wait_generation: int,
         interrupt_id: str,
         checkpoint_id: str,
-    ) -> bool:
-        """确认检查点是否仍等待指定 Round 的完成事件。
+    ) -> bool: ...
 
-        参数：
-        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
-        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
-        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
-        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
-        - `interrupt_id`（str）：目标图中断的稳定标识；约束：无额外运行时限制。
-        - `checkpoint_id`（str）：目标 LangGraph 检查点的稳定标识；约束：无额外运行时限制。
-
-        返回：
-        - bool：操作是否成功或条件是否成立。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
-
-    async def find_pending_round_wait(
+    async def find_pending_plan_wait(
         self,
         *,
         run_id: str,
         plan_id: str,
-        round_id: str,
-        plan_version: int,
-    ) -> tuple[str, str] | None:
-        """查找指定 Run、Plan 和 Round 对应的未恢复等待检查点。
+        plan_sequence: int,
+        root_wait_generation: int,
+    ) -> tuple[str, str] | None: ...
 
-        参数：
-        - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
-        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
-        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
-        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
-
-        返回：
-        - tuple[str, str] | None：检查点标识和中断标识；没有符合身份的等待时返回 None。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
+    async def is_plan_checkpoint_recoverable(
+        self,
+        *,
+        run_id: str,
+        plan_id: str,
+        plan_sequence: int,
+        root_wait_generation: int,
+    ) -> bool: ...
 
 
 class WorkerExecutor(Protocol):
@@ -264,25 +223,6 @@ class GraphThreadLock(Protocol):
         ...
 
 
-class PlanLoader(Protocol):
-    """为 Root 工作流读取已持久化的计划状态和结果。
-    """
-
-    async def __call__(self, *, plan_id: str | None) -> Mapping[str, Any]:
-        """按计划身份读取执行状态和结果。
-
-        参数：
-        - `plan_id`（str | None）：目标计划的稳定标识；约束：允许为 None，按未提供值的分支处理。
-
-        返回：
-        - Mapping[str, Any]：由计划加载器提供的执行快照字段映射。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
-
-
 class RootPlanCommandPort(Protocol):
     """Root 提交和审查计划时使用的应用命令端口。
     """
@@ -311,48 +251,31 @@ class RootPlanCommandPort(Protocol):
         """
         ...
 
-    async def apply_review_decision(
-        self, command: OrchestrationCommand, decision: ReviewDecision
-    ) -> CommandReceipt:
-        """将审查决策转换为幂等领域命令并提交。
+    async def list_authorized_capabilities(
+        self, run_id: str
+    ) -> tuple[RootWorkerCapability, ...]: ...
 
-        参数：
-        - `command`（OrchestrationCommand）：领域命令，携带幂等身份和目标对象；约束：无额外运行时限制。
-        - `decision`（ReviewDecision）：经过校验的决策内容，用于驱动后续状态转换；约束：无额外运行时限制。
+    async def submit_worker_plan(self, submission: WorkerPlanSubmission) -> WorkerPlanReceipt: ...
 
-        返回：
-        - CommandReceipt：命令处理结果及其幂等标识、持久化状态。
+    async def read_completed_plan(
+        self, run_id: str, plan_id: str, root_wait_generation: int
+    ) -> RootPlanFacts | None: ...
 
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
 
-    async def load_review_decision(
-        self,
-        *,
-        scope_key: str,
-        idempotency_key: str,
-        plan_id: str,
-        plan_version: int,
-        round_id: str,
-    ) -> ReviewDecision | None:
-        """按幂等身份读取已持久化的审查决策。
+class RootOrchestrationPort(Protocol):
+    """Root 调用 Orchestrator 应用用例的能力、提交和事实读取边界。"""
 
-        参数：
-        - `scope_key`（str）：限定幂等命令作用范围的稳定键；约束：无额外运行时限制。
-        - `idempotency_key`（str）：同一业务命令重试时保持不变的幂等键；约束：无额外运行时限制。
-        - `plan_id`（str）：目标计划的稳定标识；约束：无额外运行时限制。
-        - `plan_version`（int）：目标计划版本号，用于固定读取或恢复的版本；约束：无额外运行时限制。
-        - `round_id`（str）：目标执行轮次的稳定标识；约束：无额外运行时限制。
+    async def list_authorized_capabilities(
+        self, run_id: str
+    ) -> tuple[RootWorkerCapability, ...]: ...
 
-        返回：
-        - ReviewDecision | None：Root 对已完成 Round 选择的继续、修订或结束动作。
+    async def submit_plan(
+        self, submission: WorkerPlanSubmission, *, lease: LeaseGrant
+    ) -> WorkerPlanReceipt: ...
 
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
+    async def read_completed_plan(
+        self, run_id: str, plan_id: str, root_wait_generation: int
+    ) -> RootPlanFacts | None: ...
 
 
 class RootWorkflowPort(Protocol):
@@ -479,18 +402,8 @@ class RootWorkflowPort(Protocol):
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         ...
-    async def review_completed_round(self, state: RootGraphState) -> dict[str, Any]:
-        """审查已完成的 Worker Round 并更新 Root 决策状态。
-
-        参数：
-        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
-
-        返回：
-        - dict[str, Any]：审查决策和下一步路由信息对应的图状态字段。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
+    async def consume_completed_plan(self, state: RootGraphState) -> dict[str, Any]:
+        """读取已经到达当前等待代次的完整 Plan 事实。"""
         ...
     async def build_plan_response(self, state: RootGraphState) -> dict[str, Any]:
         """根据计划执行结果构造返回给 Root 的状态补丁。
@@ -636,11 +549,11 @@ class WorkerWorkflowPort(Protocol):
 
 __all__ = [
     "RootAgent",
-    "PlanLoader",
     "RootGraphPort",
     "WorkerExecutor",
     "GraphThreadLock",
     "RootPlanCommandPort",
+    "RootOrchestrationPort",
     "RootWorkflowPort",
     "WorkerWorkflowPort",
 ]

@@ -7,6 +7,7 @@ import {
   ChevronRight,
 } from "lucide-react"
 import { apiClient } from "../../api/client"
+import { reconcileApprovalSubmission } from "../../utils/approvalSubmission"
 import type { ApprovalHistoryEntry, ApprovalStats } from "../../types"
 import { formatDateTime, truncate } from "../../utils/format"
 import ViewShell from "./ViewShell"
@@ -17,7 +18,7 @@ import Toolbar from "../ui/Toolbar"
 import Badge from "../ui/Badge"
 import DataTable from "../ui/DataTable"
 import type { Column } from "../ui/DataTable"
-import type { ApprovalRequest } from "../../types"
+import type { ApprovalRequest, ApprovalStatusSnapshot } from "../../types"
 import { ApprovalCard } from "../ApprovalDialog"
 
 const PAGE_SIZE = 20
@@ -45,7 +46,7 @@ function ApprovalsView() {
   const [page, setPage] = useState(0)
   const [pending, setPending] = useState<ApprovalRequest[]>([])
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (): Promise<string[] | null> => {
     setLoading(true)
     try {
       const [logsRes, statsRes, pendingRes] = await Promise.all([
@@ -61,8 +62,10 @@ function ApprovalsView() {
       setStats(statsRes)
       setPending(pendingRes)
       setError(null)
+      return pendingRes.map((request) => request.approval_id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      return null
     } finally {
       setLoading(false)
     }
@@ -155,9 +158,25 @@ function ApprovalsView() {
                 const key = item.approval_batch_id || item.approval_id
                 groups[key] = [...(groups[key] || []), item]
                 return groups
-              }, {})).map(([batchId, requests]) => <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={async (_id, approvalRequests, decisions) => {
-                await apiClient.respondApprovalsIndividually(approvalRequests, decisions)
-                await reload()
+              }, {})).map(([batchId, requests]) => <ApprovalCard key={batchId} batchId={batchId} requests={requests} onSubmit={async (_id, approvalRequests, decisions, attemptId) => {
+                const result = await apiClient.respondApprovalsIndividually(approvalRequests, decisions, attemptId)
+                const pendingIds = await reload()
+                const statuses = pendingIds === null
+                  ? null
+                  : new Map((await Promise.all(approvalRequests.map((request) => apiClient.getApprovalStatus(request.approval_id))))
+                    .map((status) => [status.approval_id, status] as const))
+                return reconcileApprovalSubmission(
+                  result,
+                  statuses,
+                  pendingIds === null ? "Decision status could not be confirmed. Refresh the approval list before trying again." : undefined,
+                )
+              }} onRefreshStatus={async (approvalRequests) => {
+                const pendingIds = await reload()
+                if (pendingIds === null) throw new Error("Approval status refresh failed")
+                const statuses: ApprovalStatusSnapshot[] = await Promise.all(
+                  approvalRequests.map((request) => apiClient.getApprovalStatus(request.approval_id)),
+                )
+                return new Map(statuses.map((status) => [status.approval_id, status]))
               }} />)}
             </section> : <div className="rounded-md border border-athena-border px-4 py-3 text-sm text-athena-muted">当前没有待审批操作</div>}
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">

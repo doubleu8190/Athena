@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_type_hints
 
 from fastapi.testclient import TestClient
 
 from bootstrap import create_app
+from interfaces.http.controllers.evaluation_controller import build_evaluation_router
 from infrastructure.evaluation import load_dataset
 from infrastructure.evaluation.memory_repository import InMemoryEvaluationRepository
 from infrastructure.evaluation.retrieval_target import StaticRankingTarget
@@ -13,13 +15,17 @@ from infrastructure.evaluation.retrieval_target import StaticRankingTarget
 def _client() -> TestClient:
     repository = InMemoryEvaluationRepository()
     return TestClient(create_app(
-        evaluation_repository_factory=lambda: repository,
-        evaluation_dataset_loader_factory=lambda path: load_dataset(path),
+        evaluation_repository=repository,
+        evaluation_dataset_loader=load_dataset,
         evaluation_target_factory=lambda manifest: StaticRankingTarget({case.case_id: tuple(manifest.corpus) for case in manifest.cases}),
     ))
 
 
 _DATASET_PATH = str(Path(__file__).parents[1] / "retrieval_eval" / "chinese_cases.jsonl")
+
+
+def test_evaluation_router_annotations_resolve() -> None:
+    assert get_type_hints(build_evaluation_router)
 
 
 def test_evaluation_api_validates_queues_and_reads_run() -> None:

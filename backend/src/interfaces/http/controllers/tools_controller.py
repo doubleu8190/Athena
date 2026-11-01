@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -17,13 +16,13 @@ class ToolGovernanceRequest(BaseModel):
     require_approval: bool | None = None
 
 
-def build_tools_router(factory: Callable[[], ToolService]) -> APIRouter:
+def build_tools_router(tool_service: ToolService) -> APIRouter:
     """构建工具治理路由。"""
     router = APIRouter(prefix="/tools", tags=["tools"])
 
     @router.get("")
     async def list_tools() -> dict[str, Any]:
-        values = await factory().list_tools()
+        values = await tool_service.list_tools()
         items = [
             {
                 "name": value.name,
@@ -43,7 +42,7 @@ def build_tools_router(factory: Callable[[], ToolService]) -> APIRouter:
         if body.enabled is None and body.risk_level is None and body.require_approval is None:
             raise HTTPException(status_code=400, detail="at least one tool governance field is required")
         try:
-            value = await factory().update_governance(
+            value = await tool_service.update_governance(
                 name,
                 risk_level=body.risk_level,
                 require_approval=body.require_approval,

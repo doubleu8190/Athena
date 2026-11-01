@@ -6,6 +6,7 @@ import type { ExecutionTimelineEntry, Message, ToolCall, OrchestrationPlan, Orch
 import { approvalActionDescription, toolActionLabel } from "../utils/executionCopy"
 import { summarizeResult } from "../utils/orchestrationProjection"
 import { shouldHandleStreamCallback } from "../utils/workerSnapshotProjection"
+import { canApplyRunStatusEvent, preserveTerminalRunStatuses, runStatusFromEvent, shouldApplyRunStatusSnapshot, summarizeSessionRuns } from "../utils/runLifecycle"
 
 interface StreamProjection {
   nextChunkId: number
@@ -39,6 +40,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, setAttachments,
     addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval,
     updateSession,
+    setSessionRunStatus, replaceSessionRunStatuses,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
     upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans,
     beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots,
@@ -113,23 +115,35 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       }, 150))
     }
     let lifecycleSyncGeneration = 0
+    let lifecycleRevision = 0
     const syncRunLifecycle = async () => {
       const generation = ++lifecycleSyncGeneration
+      const revision = lifecycleRevision
+      const storeRevision = useChatStore.getState().sessionRunStatusRevisions[sessionId] || 0
       try {
         const runs = await apiClient.listSessionRuns(sessionId)
-        if (disposed || generation !== lifecycleSyncGeneration || useChatStore.getState().activeSessionId !== sessionId) return
-        const active = runs.find((run) => run.status === "running" || run.status === "stopping")
-        const queued = runs.some((run) => run.status === "queued")
+        const currentStoreRevision = useChatStore.getState().sessionRunStatusRevisions[sessionId] || 0
+        if (!shouldApplyRunStatusSnapshot({
+          disposed,
+          snapshotSessionId: sessionId,
+          activeSessionId: useChatStore.getState().activeSessionId,
+          snapshotRevision: revision,
+          currentRevision: lifecycleRevision,
+          snapshotStoreRevision: storeRevision,
+          currentStoreRevision,
+          requestGeneration: generation,
+          currentGeneration: lifecycleSyncGeneration,
+        })) return
+        const statuses = preserveTerminalRunStatuses(
+          useChatStore.getState().sessionRunStatuses[sessionId] || {},
+          Object.fromEntries(runs.map((run) => [run.run_id, run.status])),
+        )
+        if (!replaceSessionRunStatuses(sessionId, statuses, storeRevision)) return
+        const { activeRunId, agentStatus } = summarizeSessionRuns(statuses)
+        const active = activeRunId ? runs.find((run) => run.run_id === activeRunId) : undefined
         if (active) refreshOrchestrationSnapshot(active.run_id)
-        updateSession(sessionId, { active_run_id: active?.run_id ?? null })
-        const status = active?.status === "stopping"
-          ? "cancelling"
-          : active
-            ? "running"
-            : queued
-              ? "queued"
-              : runs.at(-1)?.status === "failed" ? "error" : "idle"
-        setAgentStatus(status)
+        updateSession(sessionId, { active_run_id: activeRunId })
+        setAgentStatus(agentStatus === "idle" && runs.at(-1)?.status === "failed" ? "error" : agentStatus)
       } catch {
         // Keep event-derived state while the status query is temporarily unavailable.
       }
@@ -138,6 +152,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       if (!shouldHandleStreamCallback(disposed, 0, connectionGeneration)) return
       setConnectionStatus("connected")
       syncPendingApprovals()
+      void syncRunLifecycle()
     }
     currentSource.onerror = () => {
       if (!shouldHandleStreamCallback(disposed, 0, connectionGeneration)) return
@@ -248,6 +263,9 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         }
         const occurredAt = envelope.occurred_at || new Date().toISOString()
         const runId = envelope.run_id || String(data.run_id || "")
+        if (type.startsWith("run.")) lifecycleRevision += 1
+        const incomingRunStatus = runStatusFromEvent(type)
+        if (runId && incomingRunStatus && !canApplyRunStatusEvent(useChatStore.getState().sessionRunStatuses[sessionId]?.[runId], incomingRunStatus)) return
         if (runId && (type.startsWith("plan.") || type.startsWith("task.") || type.startsWith("approval.") || type.startsWith("run."))) {
           refreshOrchestrationSnapshot(runId)
         }
@@ -518,17 +536,19 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (stepId) updateStep(stepId, { status: status === "success" ? "completed" : "failed", completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
         }
         if (type === "run.queued") {
-          if (!useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id) setAgentStatus("queued")
-          void syncRunLifecycle()
+          if (!setSessionRunStatus(sessionId, runId, "queued")) return
+          const projected = summarizeSessionRuns(useChatStore.getState().sessionRunStatuses[sessionId] || {})
+          if (projected.agentStatus === "queued") setAgentStatus("queued")
         } else if (type === "run.started" || type === "run.resumed") {
+          if (!setSessionRunStatus(sessionId, runId, "running")) return
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
           updateSession(sessionId, { active_run_id: runId || null })
-          void syncRunLifecycle()
         } else if (type === "run.stopping") {
+          if (!setSessionRunStatus(sessionId, runId, "stopping")) return
           setAgentStatus("cancelling")
           clearThinking()
-          void syncRunLifecycle()
         } else if (type === "run.cancelled") {
+          if (!setSessionRunStatus(sessionId, runId, "cancelled")) return
           closeRunStreams(runId, "cancelled")
           const completedAt = occurredAt
           for (const entry of useChatStore.getState().executionTimeline) {
@@ -563,13 +583,11 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
               updateToolCall(toolCall.id, { status: "failed", completed_at: completedAt, error: "Stopped by user" })
             }
           }
-          setAgentStatus("idle")
-          if (useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id === runId) {
-            updateSession(sessionId, { active_run_id: null })
-          }
+          const projected = summarizeSessionRuns(useChatStore.getState().sessionRunStatuses[sessionId] || {})
+          setAgentStatus(projected.agentStatus === "idle" ? "idle" : projected.agentStatus)
+          updateSession(sessionId, { active_run_id: projected.activeRunId })
           clearApprovals()
           clearThinking()
-          void syncRunLifecycle()
         }
         else if (type === "run.root_suspended") {
           // The root run can wait while workers continue. Clear transient
@@ -578,12 +596,10 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("running")
         }
         else if (type === "run.failed" || type === "run.budget_exceeded") {
+          if (!setSessionRunStatus(sessionId, runId, "failed")) return
           closeRunStreams(runId, "failed")
           setAgentStatus("error")
           setErrorDetail(errorDetail || null)
-          if (useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id === runId) {
-            updateSession(sessionId, { active_run_id: null })
-          }
           clearThinking()
           const phase = text(errorDetail?.phase) || text((data.error as Record<string, unknown> | undefined)?.phase)
           const hasCompletedPlan = useChatStore.getState().orchestrationPlans.some((plan) => plan.run_id === runId && plan.status === "completed")
@@ -596,16 +612,17 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             || text(data.message)
             || (type === "run.budget_exceeded" ? "运行已达到限制" : "任务未能完成")
           setError(errorMessage)
-          void syncRunLifecycle()
+          const projected = summarizeSessionRuns(useChatStore.getState().sessionRunStatuses[sessionId] || {})
+          if (projected.agentStatus !== "idle") setAgentStatus(projected.agentStatus)
+          updateSession(sessionId, { active_run_id: projected.activeRunId })
         }
         else if (type === "run.completed") {
-          setAgentStatus("idle")
-          if (useChatStore.getState().sessions.find((item) => item.id === sessionId)?.active_run_id === runId) {
-            updateSession(sessionId, { active_run_id: null })
-          }
+          if (!setSessionRunStatus(sessionId, runId, "completed")) return
+          const projected = summarizeSessionRuns(useChatStore.getState().sessionRunStatuses[sessionId] || {})
+          setAgentStatus(projected.agentStatus)
+          updateSession(sessionId, { active_run_id: projected.activeRunId })
           clearThinking()
           if (runId) confirmFinalMessage(runId)
-          void syncRunLifecycle()
         }
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }
@@ -642,6 +659,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         if (!shouldHandleStreamCallback(disposed, generation, connectionGeneration)) return
         setConnectionStatus("connected")
         syncPendingApprovals()
+        void syncRunLifecycle()
       }
       currentSource.onerror = () => {
         if (shouldHandleStreamCallback(disposed, generation, connectionGeneration)) setConnectionStatus("error")
@@ -677,7 +695,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       finalConfirmations.clear()
       if (sourceRef.current === currentSource) sourceRef.current = null
     }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, setSessionRunStatus, replaceSessionRunStatuses, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
 
   return sourceRef
 }

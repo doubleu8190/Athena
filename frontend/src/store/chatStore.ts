@@ -18,6 +18,7 @@ import type {
   RunOrchestrationSnapshot,
 } from "../types"
 import { shouldAcceptSnapshotState, shouldApplySnapshotResponse } from "../utils/workerSnapshotProjection.ts"
+import { canApplyRunStatusEvent, preserveTerminalRunStatuses } from "../utils/runLifecycle"
 
 interface ChatStore {
   // 连接状态
@@ -34,6 +35,10 @@ interface ChatStore {
   setSessions: (sessions: Session[]) => void
   removeSession: (sessionId: string) => void
   updateSession: (sessionId: string, updates: Partial<Session>) => void
+  sessionRunStatuses: Record<string, Record<string, string>>
+  sessionRunStatusRevisions: Record<string, number>
+  setSessionRunStatus: (sessionId: string, runId: string, status: string) => boolean
+  replaceSessionRunStatuses: (sessionId: string, statuses: Record<string, string>, expectedRevision?: number) => boolean
 
   // 活跃会话
   activeSessionId: string | null
@@ -144,6 +149,43 @@ export const useChatStore = create<ChatStore>((set) => ({
         s.id === sessionId ? { ...s, ...updates } : s,
       ),
     })),
+  sessionRunStatuses: {},
+  sessionRunStatusRevisions: {},
+  setSessionRunStatus: (sessionId, runId, status) => {
+    let applied = false
+    set((state) => {
+      const currentStatus = state.sessionRunStatuses[sessionId]?.[runId]
+      if (!canApplyRunStatusEvent(currentStatus, status)) return {}
+      applied = true
+      return {
+        sessionRunStatuses: {
+          ...state.sessionRunStatuses,
+          [sessionId]: { ...state.sessionRunStatuses[sessionId], [runId]: status },
+        },
+        sessionRunStatusRevisions: {
+          ...state.sessionRunStatusRevisions,
+          [sessionId]: (state.sessionRunStatusRevisions[sessionId] || 0) + 1,
+        },
+      }
+    })
+    return applied
+  },
+  replaceSessionRunStatuses: (sessionId, statuses, expectedRevision) => {
+    let replaced = false
+    set((state) => {
+      if (expectedRevision !== undefined && (state.sessionRunStatusRevisions[sessionId] || 0) !== expectedRevision) return {}
+      replaced = true
+      const mergedStatuses = preserveTerminalRunStatuses(state.sessionRunStatuses[sessionId] || {}, statuses)
+      return {
+        sessionRunStatuses: { ...state.sessionRunStatuses, [sessionId]: mergedStatuses },
+        sessionRunStatusRevisions: {
+          ...state.sessionRunStatusRevisions,
+          [sessionId]: (state.sessionRunStatusRevisions[sessionId] || 0) + 1,
+        },
+      }
+    })
+    return replaced
+  },
 
   // 活跃会话
   activeSessionId: null,

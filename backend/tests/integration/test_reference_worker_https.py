@@ -168,6 +168,7 @@ def _worker_process(
         {
             "ATHENA_REFERENCE_WORKER_ORCHESTRATOR_URL": base_url,
             "ATHENA_REFERENCE_WORKER_PUBLIC_BASE_URL": public_url,
+            "ATHENA_REFERENCE_WORKER_NAME": f"Worker {port}",
             "ATHENA_REFERENCE_WORKER_SERVICE_TOKEN": _SERVICE_TOKEN,
             "ATHENA_REFERENCE_WORKER_ORCHESTRATOR_TOKEN": _ORCHESTRATOR_TOKEN,
             "ATHENA_REFERENCE_WORKER_DATA_DIR": str(data_dir),
@@ -287,6 +288,7 @@ async def test_reference_worker_tls_registration_resource_restart_and_health(
                 worker_origin,
                 data_dir / "worker.sqlite3",
                 instance_key,
+                f"Worker {port}",
                 capability_file,
             )
             assert registration_replay.status_code == 200
@@ -660,6 +662,7 @@ async def _replay_registration(
     worker_origin: str,
     database_path: Path,
     instance_key: str,
+    worker_name: str,
     capability_file: Path,
 ) -> httpx.Response:
     """以 Worker 持久 request ID 重放真实注册并返回中心回执。"""
@@ -674,6 +677,7 @@ async def _replay_registration(
         "protocol_version": "1.0",
         "registration_request_id": request_id,
         "worker_instance_key": instance_key,
+        "worker_name": worker_name,
         "base_url": worker_origin,
         "execution_timeout_seconds": 300,
         "max_concurrency": 4,

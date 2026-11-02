@@ -12,6 +12,7 @@ from pathlib import Path
 import rfc8785
 import pytest
 from jsonschema import ValidationError
+from pydantic import ValidationError as PydanticValidationError
 
 from application.orchestration.worker_registration import WorkerRegistrationService
 from application.orchestration.worker_result_submission import (
@@ -95,6 +96,21 @@ async def test_registration_hash_uses_original_json_before_uuid_and_defaults_nor
     assert repository.requests[0].request_hash == _hash(source)
     assert repository.requests[1].request_hash == _hash(changed)
     assert repository.requests[0].request_hash != repository.requests[1].request_hash
+    assert repository.requests[0].worker_name == "Worker A"
+
+
+@pytest.mark.asyncio
+async def test_registration_requires_a_non_empty_worker_name() -> None:
+    repository = _Repository()
+    service = WorkerRegistrationService(repository)
+    body = dict(_EXAMPLES["registration_request"]["payload"])
+    body.pop("worker_name")
+    with pytest.raises(ValidationError):
+        await service.register(body, service_principal="worker-service")
+
+    body["worker_name"] = "   "
+    with pytest.raises(PydanticValidationError):
+        await service.register(body, service_principal="worker-service")
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,7 @@ class ReferenceWorkerConfig:
     service_token: str = field(repr=False)
     orchestrator_token: str = field(repr=False)
     instance_key: UUID
+    worker_name: str
     database_path: Path
     capability_path: Path
     tls_certificate_path: Path
@@ -90,6 +91,8 @@ class ReferenceWorkerConfig:
             raise ValueError("worker_service_token_required")
         if not self.orchestrator_token.strip():
             raise ValueError("worker_orchestrator_token_required")
+        if not self.worker_name.strip() or len(self.worker_name.strip()) > 120:
+            raise ValueError("worker_name_required")
         if not 1 <= self.port <= 65535:
             raise ValueError("worker_port_out_of_range")
         if not 1 <= self.max_concurrency <= 256:
@@ -171,6 +174,7 @@ class ReferenceWorkerConfig:
             service_token=required("SERVICE_TOKEN"),
             orchestrator_token=required("ORCHESTRATOR_TOKEN"),
             instance_key=instance_key,
+            worker_name=required("NAME").strip(),
             database_path=data_root / "worker.sqlite3",
             capability_path=capability_path,
             tls_certificate_path=Path(required("TLS_CERTIFICATE")).expanduser().resolve(),

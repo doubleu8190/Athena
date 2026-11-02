@@ -24,6 +24,7 @@ from .lease_center import PostgresLeaseCenter
 _USER_EVENT_TYPES = (
     "PlanCreated", "PlanAccepted", "PlanRevised", "PlanCompleted", "PlanFailed",
     "ApprovalRequested", "ApprovalResolved", "ApprovalCancelled", "TaskStarted",
+    "TaskCancelling",
     "TaskRetrying", "TaskCompleted", "TaskFailed", "TaskCancelled", "RoundStarted",
     "RoundCompleted", "PlanCancelling", "PlanCancelled", "RunStopping",
     "RunCancelled", "RunAnswerCompleted", "RunCompleted", "RunFailed",

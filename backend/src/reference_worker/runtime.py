@@ -193,6 +193,7 @@ class ReferenceWorker:
         base_body: dict[str, JsonValue] = {
             "protocol_version": "1.0",
             "worker_instance_key": str(self.config.instance_key),
+            "worker_name": self.config.worker_name.strip(),
             "base_url": self.config.public_base_url,
             "execution_timeout_seconds": self.config.execution_timeout_seconds,
             "max_concurrency": self.config.max_concurrency,

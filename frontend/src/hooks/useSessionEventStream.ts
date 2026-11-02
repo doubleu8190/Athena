@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react"
 import { useChatStore } from "../store/chatStore"
+import { workerResultText } from "../utils/executionTimeline.ts"
 import { apiClient } from "../api/client"
 import type { ApplicationEventEnvelope, ExecutionError } from "../types/events"
 import type { ExecutionTimelineEntry, Message, ToolCall, OrchestrationPlan, OrchestrationTask, RunTimelineEvent } from "../types"
@@ -44,7 +45,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
     upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans,
     beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots,
-    upsertExecutionTimelineEntry, clearExecutionTimeline,
+    upsertExecutionTimelineEntry, closeExecutionTimelineEntry, clearExecutionTimeline,
     appendRunTimelineEvent, clearRunTimelineEvents,
   } = useChatStore()
 
@@ -308,6 +309,36 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           timestamp: occurredAt,
         })
         if (timelineEntry) upsertExecutionTimelineEntry(timelineEntry)
+        if (["task.completed", "task.failed", "task.cancelled", "task.cancelling", "task.retrying"].includes(type)) {
+          const startedEntry = projectTimelineEvent({
+            type: "task.started",
+            data,
+            envelope,
+            runId,
+            timestamp: occurredAt,
+          })
+          if (startedEntry && timelineEntry) {
+            closeExecutionTimelineEntry({
+              ...startedEntry,
+              status: timelineEntry.status,
+            })
+          }
+          if (type === "task.cancelled" && timelineEntry) {
+            const cancellingEntry = projectTimelineEvent({
+              type: "task.cancelling",
+              data,
+              envelope,
+              runId,
+              timestamp: occurredAt,
+            })
+            if (cancellingEntry) {
+              closeExecutionTimelineEntry({
+                ...cancellingEntry,
+                status: timelineEntry.status,
+              })
+            }
+          }
+        }
         if (type === "message.persisted") {
           const persistedMessageId = String(data.message_id || envelope.message_id || "")
           if (persistedMessageId && data.role === "user") {
@@ -475,6 +506,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           type === "task.queued" ||
           type === "task.started" ||
           type === "task.retrying" ||
+          type === "task.cancelling" ||
           type === "task.waiting_approval" ||
           type === "task.completed" ||
           type === "task.failed" ||
@@ -484,6 +516,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             type === "task.queued" ? "queued"
             : type === "task.started" ? "running"
             : type === "task.retrying" ? "retry_wait"
+            : type === "task.cancelling" ? "cancel_requested"
             : type === "task.waiting_approval" ? "waiting_approval"
             : type === "task.completed" ? "completed"
             : type === "task.cancelled" ? "cancelled"
@@ -639,7 +672,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       "thinking.started", "thinking.summary", "thinking.completed",
       "plan.accepted", "plan.created", "plan.cancelling", "plan.revised", "plan.completed", "plan.failed", "plan.cancelled",
       "round.started", "round.completed",
-      "task.queued", "task.started", "task.retrying", "task.waiting_approval", "task.completed", "task.failed", "task.cancelled",
+      "task.queued", "task.started", "task.retrying", "task.cancelling", "task.waiting_approval", "task.completed", "task.failed", "task.cancelled",
       "synthesis.started", "synthesis.completed",
       "agent.waiting_for_files", "attachment_updated",
       "file_processing_started", "file_processing_completed", "file_processing_failed",
@@ -695,7 +728,7 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       finalConfirmations.clear()
       if (sourceRef.current === currentSource) sourceRef.current = null
     }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, setSessionRunStatus, replaceSessionRunStatuses, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots, upsertExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
+  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, setSessionRunStatus, replaceSessionRunStatuses, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots, upsertExecutionTimelineEntry, closeExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
 
   return sourceRef
 }
@@ -885,28 +918,39 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
     const taskId = text(data.task_id)
     if (!taskId) return null
     const title = text(data.title || data.objective) || "执行任务"
+    const workerName = text(data.worker_name)
     const status = type === "task.started" ? "running"
-      : type === "task.waiting_approval" ? "waiting"
+      : type === "task.waiting_approval" || type === "task.cancelling" ? "waiting"
         : type === "task.failed" ? "failed"
           : type === "task.cancelled" ? "cancelled"
             : type === "task.completed" ? "completed" : "info"
     const statusCopy: Record<string, string> = {
       "task.queued": "已加入执行计划",
-      "task.started": `正在执行：${title}`,
-      "task.retrying": `准备重试：${title}`,
+      "task.started": workerName ? `已分配给${workerName}，准备执行：${title}` : `任务已开始：${title}`,
+      "task.retrying": workerName ? `${workerName}执行遇到问题，准备重试：${title}` : `准备重试：${title}`,
       "task.waiting_approval": `等待确认：${title}`,
-      "task.completed": `已完成：${title}`,
-      "task.failed": `未能完成：${title}`,
-      "task.cancelled": `已取消：${title}`,
+      "task.completed": workerName ? `${workerName}执行成功：${title}` : `已完成：${title}`,
+      "task.failed": workerName ? `${workerName}执行失败：${title}` : `未能完成：${title}`,
+      "task.cancelled": workerName ? `${workerName}执行已取消：${title}` : `已取消：${title}`,
+      "task.cancelling": workerName ? `正在请求${workerName}停止：${title}` : `正在请求停止任务：${title}`,
     }
-    const result = summarizeResult(data.result ?? data.output)
+    const result = workerResultText(data.result ?? data.output ?? data.result_summary, text(data.result_ref), data.result_available_in_final === true)
     const taskError = text(data.error) || text((data.error as Record<string, unknown> | undefined)?.message)
+    const objective = text(data.objective)
+    const roundNumber = number(data.round_number ?? data.plan_version)
+    const parallelTaskCount = number(data.parallel_task_count)
+    const detail = [
+      roundNumber ? `第 ${roundNumber} 轮${parallelTaskCount && parallelTaskCount > 1 ? `（${parallelTaskCount} 项并行任务）` : ""}` : "",
+      objective ? `任务目标：${objective}` : "",
+      taskError ? `执行错误：${taskError}` : "",
+      result ? `执行结果：\n${result}` : "",
+    ].filter(Boolean).join("\n")
     return base({
-      id: `task:${text(data.plan_id)}:${taskId}`,
+      id: `task:${text(data.plan_id)}:${taskId}:${text(data.execution_id) || number(data.attempt) || "task"}:${type}`,
       label: statusCopy[type] || title,
-      detail: taskError || result || text(data.objective) || undefined,
+      detail: detail || undefined,
       status,
-      metadata: { task_id: taskId, plan_id: text(data.plan_id), worker_type: text(data.worker_type), attempt: number(data.attempt) },
+      metadata: { task_id: taskId, plan_id: text(data.plan_id), worker_name: workerName || undefined, worker_type: text(data.worker_type) || undefined, attempt: number(data.attempt), round_number: roundNumber, parallel_task_count: parallelTaskCount },
     })
   }
   if (type.startsWith("synthesis.")) return base({ id: `synthesis:${text(data.plan_id)}`, label: type === "synthesis.started" ? "正在汇总处理结果" : "处理结果已汇总", status: type === "synthesis.started" ? "running" : "completed" })

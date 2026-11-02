@@ -76,6 +76,7 @@ async def test_registry_snapshot_includes_unavailable_disabled_and_full_instance
                     instance_id=instance_id,
                     service_principal="worker-service",
                     instance_key=instance_key,
+                    worker_name="Test Worker",
                     contract_id=contract_id,
                     contract_revision=1,
                     base_url="https://worker.example",

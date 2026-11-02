@@ -78,6 +78,7 @@ class WorkerRegistrationIntent:
     registration_request_id: str
     service_principal: str
     instance_key: str
+    worker_name: str
     base_url: str
     execution_timeout_seconds: int
     max_concurrency: int

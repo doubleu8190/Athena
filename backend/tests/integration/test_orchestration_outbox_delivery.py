@@ -157,7 +157,13 @@ class _FailOnceAfterPublishOutbox:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> None:
+@pytest.mark.parametrize(
+    ("event_type", "event_status"),
+    [("RunCancelled", "cancelled"), ("TaskCancelling", "cancelling")],
+)
+async def test_outbox_replay_after_publish_before_ack_persists_one_event(
+    event_type: str, event_status: str
+) -> None:
     """事件提交后 Dispatcher 崩溃，租约恢复后只保留一条历史事件。
 
     PostgreSQL 测试库需允许创建 schema；本测试所有写入都限制在随机 schema，
@@ -215,11 +221,15 @@ async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> No
                 OrchestrationOutboxModel(
                     message_id="run-cancelled-message-1",
                     dedupe_key="run:run-outbox-1:cancelled:1",
-                    event_type="RunCancelled",
+                    event_type=event_type,
                     correlation_id="run-outbox-1",
                     plan_id="plan-outbox-1",
                     plan_version=1,
                     payload_json={
+                        "task_id": "task-outbox-1",
+                        "execution_id": "execution-outbox-1",
+                        "worker_name": "Writer",
+                        "status": event_status,
                         "cancellation_epoch": 1,
                         "external_effect_status": "unknown",
                     },
@@ -293,10 +303,13 @@ async def test_outbox_replay_after_publish_before_ack_persists_one_event() -> No
         assert len(persisted_events) == 1
         assert persisted_events[0].session_seq == 1
         assert persisted_events[0].run_id == "run-outbox-1"
+        assert persisted_events[0].event_type == (
+            "task.cancelling" if event_type == "TaskCancelling" else "run.cancelled"
+        )
         assert persisted_events[0].transition_id == (
             "orchestration-outbox:run-cancelled-message-1"
         )
-        assert json.loads(persisted_events[0].payload_json)["status"] == "cancelled"
+        assert persisted_events[0].payload_json["status"] == event_status
         assert outbox_row is not None
         assert outbox_row.status == "published"
         assert outbox_row.attempt == 2

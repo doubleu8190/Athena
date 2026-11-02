@@ -8,6 +8,7 @@
         "protocol_version": "1.0",
         "registration_request_id": "11000000-0000-4000-8000-000000000001",
         "worker_instance_key": "10000000-0000-4000-8000-000000000001",
+        "worker_name": "Worker A",
         "base_url": "https://worker.example.test",
         "execution_timeout_seconds": 1800,
         "max_concurrency": 4,

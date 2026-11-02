@@ -42,6 +42,7 @@ from infrastructure.persistence.postgres.models import (
     OrchestratorRootResumeJobModel,
     OrchestratorTaskModel,
     OrchestratorWorkerCommandModel,
+    OrchestrationOutboxModel,
     WorkerContractModel,
     WorkerApprovalRequestModel,
     WorkerInstanceModel,
@@ -402,6 +403,7 @@ async def test_s8_real_https_worker_100_tasks_8_concurrency_and_response_loss_re
                 registered_instance = await session.scalar(select(WorkerInstanceModel))
                 assert registered_instance is not None
                 contract_id = registered_instance.contract_id
+                worker_name = registered_instance.worker_name
             run_id, plan_id = str(uuid4()), str(uuid4())
             now = datetime.now(UTC)
             async with sessions() as session, session.begin():
@@ -461,6 +463,14 @@ async def test_s8_real_https_worker_100_tasks_8_concurrency_and_response_loss_re
                         )
                     ).all()
                 )
+                execution_names = list((await session.scalars(
+                    select(OrchestratorExecutionModel.worker_name)
+                    .join(
+                        OrchestratorTaskModel,
+                        OrchestratorExecutionModel.task_id == OrchestratorTaskModel.task_id,
+                    )
+                    .where(OrchestratorTaskModel.plan_id == plan_id)
+                )).all())
                 result_count = await session.scalar(
                     select(func.count()).select_from(
                         WorkerResultReceiptModel
@@ -495,6 +505,15 @@ async def test_s8_real_https_worker_100_tasks_8_concurrency_and_response_loss_re
                     )
                 )
                 commands = list(command_rows.scalars().all())
+                task_events = list((await session.scalars(
+                    select(OrchestrationOutboxModel)
+                    .where(
+                        OrchestrationOutboxModel.plan_id == plan_id,
+                        OrchestrationOutboxModel.event_type.in_(
+                            ("TaskStarted", "TaskCompleted", "TaskFailed")
+                        ),
+                    )
+                )).all())
                 backlog = await session.scalar(
                     select(func.count()).select_from(
                         OrchestratorWorkerCommandModel
@@ -517,6 +536,15 @@ async def test_s8_real_https_worker_100_tasks_8_concurrency_and_response_loss_re
             assert backlog == 0
             assert len(commands) == tasks_count
             assert all(command.status == "result_received" for command in commands)
+            assert len(task_events) == tasks_count * 2
+            started_events = [event for event in task_events if event.event_type == "TaskStarted"]
+            completed_events = [event for event in task_events if event.event_type == "TaskCompleted"]
+            assert len(started_events) == len(completed_events) == tasks_count
+            assert all(event.payload_json["worker_name"] == worker_name for event in task_events)
+            assert all(event.payload_json["parallel_task_count"] == tasks_count for event in started_events)
+            assert all(event.payload_json["round_number"] == 1 for event in started_events)
+            assert len(execution_names) == tasks_count
+            assert set(execution_names) == {worker_name}
             # The dropped 202 can race with the Worker result callback; either the
             # idempotent retry or the result-before-receipt path may settle first.
             assert proxy.task_requests >= tasks_count
@@ -598,6 +626,7 @@ async def test_s8_timeout_scanner_batch_clears_due_backlog_and_is_idempotent(
                 instance_id=instance_id,
                 service_principal="s8-scanner-service",
                 instance_key=f"s8-scanner-instance-{instance_id}",
+                worker_name="Test Worker",
                 contract_id=contract_id,
                 contract_revision=1,
                 base_url="https://worker.invalid",

@@ -54,7 +54,7 @@ Schema 无法单独验证 HTTP 头、路径/body 绑定、服务身份、动态�
 **Body：** RegistrationRequest
 **Header：** Authorization、X-Athena-Protocol-Version、Idempotency-Key = registration_request_id
 
-body 必须包含持久 worker_instance_key、HTTPS origin 形式的 base_url（不带路径、查询或片段）、正整数 execution_timeout_seconds、max_concurrency 和 capability。服务端只连接部署允许列表中的地址，并在解析和连接时执行网络地址策略校验。实例 timeout 范围为 1–604800 秒；并发范围为 1–256。capability 恰含 can_do、cannot_do、input_schema、output_schema 四项。两份 schema 的根类型为 object，且注册时通过 Draft 2020-12 Meta-Schema 校验。
+body 必须包含持久 worker_instance_key、必填 worker_name（去除首尾空白后 1–120 字符）、HTTPS origin 形式的 base_url（不带路径、查询或片段）、正整数 execution_timeout_seconds、max_concurrency 和 capability。服务端只连接部署允许列表中的地址，并在解析和连接时执行网络地址策略校验。实例 timeout 范围为 1–604800 秒；并发范围为 1–256。capability 恰含 can_do、cannot_do、input_schema、output_schema 四项。两份 schema 的根类型为 object，且注册时通过 Draft 2020-12 Meta-Schema 校验。
 
 新注册返回 201 RegistrationResponse。精确重放返回 200 和原注册响应。通过相同 worker_instance_key 的新 registration_request_id 更新该实例；认证主体不匹配时返回 403。contract_revision 在能力内容变化时递增，不能改写旧版本。首次注册后实例保持不可分配，直到满足心跳恢复阈值。
 

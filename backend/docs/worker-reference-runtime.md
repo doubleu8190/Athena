@@ -10,6 +10,7 @@
 | --- | --- |
 | ATHENA_REFERENCE_WORKER_ORCHESTRATOR_URL | Athena HTTPS origin，例如 https://athena.example:8000 |
 | ATHENA_REFERENCE_WORKER_PUBLIC_BASE_URL | Worker HTTPS origin，必须与注册中心允许的 Worker 地址一致 |
+| ATHENA_REFERENCE_WORKER_NAME | 注册时展示给用户的 Worker 名称，1–120 字符 |
 | ATHENA_REFERENCE_WORKER_SERVICE_TOKEN | Worker 调用注册、结果和资源接口的服务 Bearer token |
 | ATHENA_REFERENCE_WORKER_ORCHESTRATOR_TOKEN | Worker 接收端验证 Athena Orchestrator 的独立 Bearer token |
 | ATHENA_REFERENCE_WORKER_DATA_DIR | SQLite 和持久实例键目录；需要 Worker 重启后保留 |

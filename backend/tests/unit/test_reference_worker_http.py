@@ -51,6 +51,7 @@ def _config(tmp_path) -> ReferenceWorkerConfig:
         service_token="worker-service-token",
         orchestrator_token="athena-orchestrator-token",
         instance_key=uuid4(),
+        worker_name="Worker HTTP Test",
         database_path=tmp_path / "worker.sqlite3",
         capability_path=capability,
         tls_certificate_path=certificate,
@@ -81,6 +82,36 @@ def _command(*, command_id: str | None = None, input_body: object = None) -> dic
             "expires_at": "2026-10-30T08:30:00Z",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_registration_sends_the_configured_worker_name(tmp_path) -> None:
+    """注册请求包含将用于聊天执行记录的 Worker 名称。"""
+    config = _config(tmp_path)
+    worker = ReferenceWorker(config)
+    request_body: dict[str, object] = {}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(await request.aread()))
+        return httpx.Response(
+            201,
+            json={
+                "protocol_version": "1.0",
+                "worker_instance_id": "worker-instance",
+                "worker_instance_key": str(config.instance_key),
+                "contract_id": "worker-contract",
+                "contract_revision": 1,
+                "status": "inactive",
+                "registered_at": "2026-11-01T00:00:00Z",
+            },
+        )
+
+    worker._client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    try:
+        await worker._register_once()
+        assert request_body["worker_name"] == "Worker HTTP Test"
+    finally:
+        await worker._client.aclose()
 
 
 @pytest.mark.asyncio

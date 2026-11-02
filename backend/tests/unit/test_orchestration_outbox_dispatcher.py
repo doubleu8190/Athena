@@ -221,6 +221,13 @@ async def test_dispatcher_persists_stable_run_cancelled_event_before_ack():
             "cancelled",
             {"task_id": "task-1", "execution_id": "execution-1", "status": "cancelled"},
         ),
+        (
+            "TaskCancelling",
+            "task.cancelling",
+            "task:task-1",
+            "cancelling",
+            {"task_id": "task-1", "execution_id": "execution-1", "status": "cancelling"},
+        ),
     ],
 )
 async def test_dispatcher_maps_durable_plan_and_round_events(

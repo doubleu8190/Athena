@@ -1282,6 +1282,14 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     )
                 ).all()
                 for execution in executions:
+                    execution_was_cancelling = execution.status == "cancelling"
+                    execution_was_terminal = execution.status in {
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "superseded",
+                        "timed_out",
+                    }
                     commands = (
                         await session.scalars(
                             select(OrchestratorWorkerCommandModel)
@@ -1297,6 +1305,13 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         )
                     ).all()
                     for command in commands:
+                        if (
+                            execution_was_cancelling
+                            and command.command_type == "cancel"
+                            and command.command_json.get("cancellation_epoch")
+                            == cancellation_epoch
+                        ):
+                            continue
                         command.status = "superseded"
                         command.updated_at = now
 
@@ -1304,34 +1319,35 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         execution.status = "cancelling"
                         execution.cancellation_epoch = cancellation_epoch
                         execution.updated_at = now
-                        command_id = str(uuid4())
-                        command_body = {
-                            "protocol_version": "1.0",
-                            "command_id": command_id,
-                            "execution_id": execution.execution_id,
-                            "generation": execution.generation,
-                            "cancellation_epoch": cancellation_epoch,
-                            "reason": "run_cancelled",
-                        }
-                        session.add(
-                            OrchestratorWorkerCommandModel(
-                                command_id=command_id,
-                                execution_id=execution.execution_id,
-                                instance_id=execution.instance_id,
-                                generation=execution.generation,
-                                idempotency_key=command_id,
-                                command_type="cancel",
-                                request_hash=hashlib.sha256(
-                                    rfc8785.dumps(command_body)
-                                ).hexdigest(),
-                                command_json=command_body,
-                                status="pending",
-                                attempt=0,
-                                available_at=now,
-                                created_at=now,
-                                updated_at=now,
+                        if not execution_was_cancelling:
+                            command_id = str(uuid4())
+                            command_body = {
+                                "protocol_version": "1.0",
+                                "command_id": command_id,
+                                "execution_id": execution.execution_id,
+                                "generation": execution.generation,
+                                "cancellation_epoch": cancellation_epoch,
+                                "reason": "run_cancelled",
+                            }
+                            session.add(
+                                OrchestratorWorkerCommandModel(
+                                    command_id=command_id,
+                                    execution_id=execution.execution_id,
+                                    instance_id=execution.instance_id,
+                                    generation=execution.generation,
+                                    idempotency_key=command_id,
+                                    command_type="cancel",
+                                    request_hash=hashlib.sha256(
+                                        rfc8785.dumps(command_body)
+                                    ).hexdigest(),
+                                    command_json=command_body,
+                                    status="pending",
+                                    attempt=0,
+                                    available_at=now,
+                                    created_at=now,
+                                    updated_at=now,
+                                )
                             )
-                        )
                     elif execution.status not in {
                         "completed",
                         "failed",
@@ -1344,6 +1360,56 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         execution.cancellation_epoch = cancellation_epoch
                         execution.capacity_reserved = False
                         execution.updated_at = now
+
+                    if (
+                        not execution_was_terminal
+                        and not execution_was_cancelling
+                        and execution.status in {
+                            "cancelling",
+                            "cancelled",
+                        }
+                    ):
+                        event_type = (
+                            "TaskCancelling"
+                            if execution.status == "cancelling"
+                            else "TaskCancelled"
+                        )
+                        session.add(
+                            OrchestrationOutboxModel(
+                                message_id=uuid4().hex,
+                                dedupe_key=(
+                                    f"execution:{execution.execution_id}:run-{execution.status}:{cancellation_epoch}"
+                                ),
+                                event_type=event_type,
+                                correlation_id=run_id,
+                                plan_id=plan.plan_id,
+                                plan_version=plan.sequence,
+                                round_id=None,
+                                task_id=task.task_id,
+                                execution_id=execution.execution_id,
+                                payload_json={
+                                    "task_id": task.task_id,
+                                    "execution_id": execution.execution_id,
+                                    "execution_generation": execution.generation,
+                                    "attempt": execution.generation,
+                                    "title": task.objective,
+                                    "objective": task.objective,
+                                    "worker_name": execution.worker_name,
+                                    "round_number": plan.sequence,
+                                    "parallel_task_count": plan.expected_task_count,
+                                    "status": execution.status,
+                                    "error": {
+                                        "code": "RUN_CANCELLED",
+                                        "message": reason,
+                                    },
+                                },
+                                schema_version=1,
+                                status="pending",
+                                attempt=0,
+                                available_at=now,
+                                occurred_at=now,
+                            )
+                        )
 
                 if task.status not in {"completed", "failed", "cancelled"}:
                     task.status = "cancelled"

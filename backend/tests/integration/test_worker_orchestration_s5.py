@@ -23,6 +23,7 @@ from infrastructure.persistence.postgres.models import (
     OrchestratorRootResumeJobModel,
     OrchestratorTaskModel,
     OrchestratorWorkerCommandModel,
+    OrchestrationOutboxModel,
     ProjectModel,
     SessionModel,
     WorkerContractModel,
@@ -87,6 +88,7 @@ async def _seed_single_execution(
                     instance_id=instance_id,
                     service_principal="test-service",
                     instance_key=f"worker-{instance_id}",
+                    worker_name="Test Worker",
                     contract_id=contract_id,
                     contract_revision=1,
                     base_url="https://worker.invalid",
@@ -224,6 +226,7 @@ async def test_result_timeout_and_task_cancel_race_converges_once(worker_store) 
                 instance_id=instance_id,
                 service_principal="test-service",
                 instance_key=f"worker-{instance_id}",
+                worker_name="Test Worker",
                 contract_id=contract_id,
                 contract_revision=1,
                 base_url="https://worker.invalid",
@@ -277,6 +280,7 @@ async def test_result_timeout_and_task_cancel_race_converges_once(worker_store) 
                 instance_id=instance_id,
                 generation=1,
                 status="running",
+                worker_name="Test Worker",
                 execution_timeout_seconds=1,
                 cancellation_epoch=0,
                 capacity_reserved=True,
@@ -363,6 +367,12 @@ async def test_result_timeout_and_task_cancel_race_converges_once(worker_store) 
             )
         )
         task = await session.get(OrchestratorTaskModel, task_id)
+        cancellation_event = await session.scalar(
+            select(OrchestrationOutboxModel).where(
+                OrchestrationOutboxModel.dedupe_key
+                == f"execution:{execution_id}:cancelling:1"
+            )
+        )
         resume_jobs = list(
             (
                 await session.scalars(
@@ -384,6 +394,11 @@ async def test_result_timeout_and_task_cancel_race_converges_once(worker_store) 
             "task_cancelled",
         }
         assert task is not None and task.status == "cancelled"
+        assert cancellation_event is not None
+        assert cancellation_event.event_type == "TaskCancelling"
+        assert cancellation_event.payload_json["execution_id"] == execution_id
+        assert cancellation_event.payload_json["worker_name"] == "Test Worker"
+        assert cancellation_event.payload_json["status"] == "cancelling"
         assert task.cancellation_epoch == 1
         assert executions[0].status in {"failed", "cancelled", "cancelling"}
         assert executions[0].capacity_reserved or any(
@@ -457,6 +472,7 @@ async def test_stop_active_persists_cancel_for_reserved_worker_execution(worker_
                 instance_id=instance_id,
                 service_principal="test-service",
                 instance_key=f"worker-{instance_id}",
+                worker_name="Test Worker",
                 contract_id=contract_id,
                 contract_revision=1,
                 base_url="https://worker.invalid",

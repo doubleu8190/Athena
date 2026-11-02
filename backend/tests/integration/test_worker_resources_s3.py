@@ -158,6 +158,7 @@ async def _seed_execution(
                     instance_id=instance_id,
                     service_principal=service_principal,
                     instance_key=str(uuid4()),
+                    worker_name="Test Worker",
                     contract_id=contract_id,
                     contract_revision=1,
                     base_url="https://worker.invalid",

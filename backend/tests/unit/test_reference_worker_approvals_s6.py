@@ -76,6 +76,7 @@ def _worker(tmp_path, *, count: int = 1) -> ReferenceWorker:
         service_token="worker-service-token",
         orchestrator_token="athena-orchestrator-token",
         instance_key=uuid4(),
+        worker_name="Worker Approval Test",
         database_path=tmp_path / "worker.sqlite3",
         capability_path=capability,
         tls_certificate_path=cert,

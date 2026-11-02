@@ -139,6 +139,8 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     return !item || item.status !== "ready"
   })
   const activeRunId = sessions.find((session) => session.id === activeSessionId)?.active_run_id ?? null
+  // 聊天流只显示用户可理解的实际操作；Root 节点细节保留在执行上下文面板。
+  const chatExecutionTimeline = executionTimeline.filter((entry) => !entry.event_type.startsWith("node."))
   const currentRunStatuses = activeSessionId ? sessionRunStatuses[activeSessionId] ?? {} : {}
   const hasQueuedRuns = Object.values(currentRunStatuses).some((status) => status === "queued")
   const canSubmitFromRunState = canSubmitNewRun(currentRunStatuses)
@@ -825,12 +827,12 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     }
   }
   const activeExecutionEntry = activeRunId
-    ? [...executionTimeline].reverse().find((entry) => entry.status === "running" && entry.run_id === activeRunId)
+    ? [...chatExecutionTimeline].reverse().find((entry) => entry.status === "running" && entry.run_id === activeRunId)
     : undefined
   const runIds = new Set([
     ...runStartById.keys(),
     ...orderedMessages.map((message) => message.run_id).filter((runId): runId is string => Boolean(runId)),
-    ...executionTimeline.map((entry) => entry.run_id).filter((runId): runId is string => Boolean(runId)),
+    ...chatExecutionTimeline.map((entry) => entry.run_id).filter((runId): runId is string => Boolean(runId)),
   ])
   const runHeaders: ChatFeedItem[] = [...runIds].flatMap((runId) => {
     const started = runStartById.get(runId)
@@ -847,7 +849,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       sessionSeq: message.session_seq,
       runSequence: message.run_id ? runSequenceById.get(message.run_id) : undefined,
     })),
-    ...executionTimeline.map((entry) => ({
+    ...chatExecutionTimeline.map((entry) => ({
       kind: "event" as const,
       id: `event:${entry.id}`,
       timestamp: entry.timestamp,
@@ -908,7 +910,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
           )}
 
           {/* 空会话状态 */}
-          {!isLoadingHistory && messages.length === 0 && executionTimeline.length === 0 && !thinking && !isAgentActive && (
+          {!isLoadingHistory && messages.length === 0 && chatExecutionTimeline.length === 0 && !thinking && !isAgentActive && (
             <div className="text-center py-16 text-athena-muted">
               <Sparkles className="w-12 h-12 mx-auto mb-4 text-athena-accent" />
               <p className="text-lg font-medium mb-2">{draft ? "开始一段新的聊天" : "How can Athena help you?"}</p>
@@ -919,7 +921,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
           )}
 
           {/* 错误状态 */}
-          {!isLoadingHistory && messages.length === 0 && executionTimeline.length === 0 && error && !thinking && !isAgentActive && (
+          {!isLoadingHistory && messages.length === 0 && chatExecutionTimeline.length === 0 && error && !thinking && !isAgentActive && (
             <div className="text-center py-16">
               <p className="text-sm text-athena-danger mb-2">{error}</p>
               <p className="text-xs text-athena-muted">
@@ -929,7 +931,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
           )}
 
           {/* 消息与执行事件进入同一时间排序的聊天流。 */}
-          {!isLoadingHistory && (messages.length > 0 || executionTimeline.length > 0) && (
+          {!isLoadingHistory && (messages.length > 0 || chatExecutionTimeline.length > 0) && (
             <>
               {timelineFeed.filter((item) => item.kind !== "event" || !item.entry.run_id || !collapsedRunIds.has(item.entry.run_id)).map((item, index, visibleFeed) => {
                 const previous = visibleFeed[index - 1]
@@ -953,7 +955,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
                             startedAt={item.timestamp}
                             endedAt={runTerminalById.get(item.runId)?.timestamp}
                             active={isAgentActive && activeRunId === item.runId}
-                            activeLabel={executionTimeline.find((entry) => entry.run_id === item.runId && entry.status === "running")?.label}
+                            activeLabel={chatExecutionTimeline.find((entry) => entry.run_id === item.runId && entry.status === "running")?.label}
                             failed={runTerminalById.get(item.runId)?.eventType === "run.failed" || runTerminalById.get(item.runId)?.eventType === "run.budget_exceeded"}
                             collapsed={collapsedRunIds.has(item.runId)}
                             onToggle={() => setCollapsedRunIds((current) => {

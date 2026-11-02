@@ -27,6 +27,7 @@ _EVENT_TYPES = {
     "ApprovalResolved": (EventType.APPROVAL_RESOLVED, "resolved", "approval"),
     "ApprovalCancelled": (EventType.APPROVAL_RESOLVED, "cancelled", "approval"),
     "TaskStarted": (EventType.TASK_STARTED, "running", "task"),
+    "TaskCancelling": (EventType.TASK_CANCELLING, "cancelling", "task"),
     "TaskRetrying": (EventType.TASK_RETRYING, "retry_wait", "task"),
     "TaskCompleted": (EventType.TASK_COMPLETED, "completed", "task"),
     "TaskFailed": (EventType.TASK_FAILED, "failed", "task"),

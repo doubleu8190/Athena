@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 from collections.abc import Callable
@@ -72,6 +73,19 @@ from ..models import (
     SessionModel,
 )
 from .lease_center import PostgresLeaseCenter
+
+
+def _worker_result_summary(output: Any) -> str:
+    """将 Worker 输出投影为正文原文或完整的格式化 JSON。"""
+    if isinstance(output, dict) and len(output) == 1:
+        key, value = next(iter(output.items()))
+        if (
+            key in {"summary", "content", "output", "message", "result"}
+            and isinstance(value, str)
+            and value.strip()
+        ):
+            return value
+    return json.dumps(output, ensure_ascii=False, indent=2)
 
 
 class WorkerPlanRejected(ValueError):
@@ -458,7 +472,9 @@ class PostgresWorkerOrchestrationRepository:
                 self._clear_command_lease(command, now)
                 return None
             if execution.instance_id is None:
+                first_assignment = True
                 execution.instance_id = instance.instance_id
+                execution.worker_name = instance.worker_name
                 execution.execution_timeout_seconds = instance.execution_timeout_seconds
                 execution.capacity_reserved = True
                 execution.status = "running"
@@ -466,15 +482,52 @@ class PostgresWorkerOrchestrationRepository:
                 task.execution_generation = execution.generation
                 task.status = WorkerTaskStatus.RUNNING.value
             elif execution.started_at is None:
+                first_assignment = False
+                execution.worker_name = execution.worker_name or instance.worker_name
                 # 分配恢复只保留原 Worker 和容量；耗时授权准备不占 Execution 时限。
                 execution.capacity_reserved = True
                 execution.status = "running"
                 task.active_execution_id = execution.execution_id
                 task.execution_generation = execution.generation
                 task.status = WorkerTaskStatus.RUNNING.value
+            else:
+                first_assignment = False
+                execution.worker_name = execution.worker_name or instance.worker_name
             command.instance_id = instance.instance_id
             command.lease_until = now + timedelta(seconds=lease_seconds)
             command.updated_at = now
+            if first_assignment:
+                # 将第一次真实分配和开始事件放在同一事务，重投命令不会重复生成开始记录。
+                session.add(
+                    OrchestrationOutboxModel(
+                        message_id=self._id_factory(),
+                        dedupe_key=f"execution:{execution.execution_id}:started",
+                        event_type="TaskStarted",
+                        correlation_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        plan_version=plan.sequence,
+                        round_id=None,
+                        task_id=task.task_id,
+                        execution_id=execution.execution_id,
+                        payload_json={
+                            "task_id": task.task_id,
+                            "execution_id": execution.execution_id,
+                            "execution_generation": execution.generation,
+                            "attempt": execution.generation,
+                            "title": task.objective,
+                            "objective": task.objective,
+                            "worker_name": execution.worker_name,
+                            "round_number": plan.sequence,
+                            "parallel_task_count": plan.expected_task_count,
+                            "started_at": now.isoformat(),
+                        },
+                        schema_version=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        occurred_at=now,
+                    )
+                )
             return WorkerDispatchStart(
                 command_id=command.command_id,
                 execution_id=execution.execution_id,
@@ -1710,6 +1763,37 @@ class PostgresWorkerOrchestrationRepository:
                     )
             command.status = "failed"
             self._clear_command_lease(command, now)
+            session.add(
+                OrchestrationOutboxModel(
+                    message_id=self._id_factory(),
+                    dedupe_key=f"execution:{execution.execution_id}:dispatch-failed:{command.command_id}",
+                    event_type="TaskFailed",
+                    correlation_id=run.run_id,
+                    plan_id=plan.plan_id,
+                    plan_version=plan.sequence,
+                    round_id=None,
+                    task_id=task.task_id,
+                    execution_id=execution.execution_id,
+                    payload_json={
+                        "task_id": task.task_id,
+                        "execution_id": execution.execution_id,
+                        "execution_generation": execution.generation,
+                        "attempt": execution.generation,
+                        "title": task.objective,
+                        "objective": task.objective,
+                        "worker_name": execution.worker_name,
+                        "round_number": plan.sequence,
+                        "parallel_task_count": plan.expected_task_count,
+                        "status": "failed",
+                        "error": {"code": error_code, "message": message},
+                    },
+                    schema_version=1,
+                    status="pending",
+                    attempt=0,
+                    available_at=now,
+                    occurred_at=now,
+                )
+            )
             return True
 
     @staticmethod
@@ -1721,6 +1805,63 @@ class PostgresWorkerOrchestrationRepository:
         command.lease_token = None
         command.lease_until = None
         command.updated_at = now
+
+    def _add_task_cancellation_event(
+        self,
+        session: AsyncSession,
+        *,
+        run: AgentRunModel,
+        plan: OrchestratorPlanModel,
+        task: OrchestratorTaskModel,
+        execution: OrchestratorExecutionModel,
+        cancellation_epoch: int,
+        now: datetime,
+    ) -> None:
+        """将一次 Execution 取消状态变更写入同事务 Outbox。"""
+        if execution.status not in {"cancelling", "cancelled"}:
+            return
+        event_type = "TaskCancelling" if execution.status == "cancelling" else "TaskCancelled"
+        session.add(
+            OrchestrationOutboxModel(
+                message_id=self._id_factory(),
+                dedupe_key=(
+                    f"execution:{execution.execution_id}:"
+                    f"{execution.status}:{cancellation_epoch}"
+                ),
+                event_type=event_type,
+                correlation_id=run.run_id,
+                plan_id=plan.plan_id,
+                plan_version=plan.sequence,
+                round_id=None,
+                task_id=task.task_id,
+                execution_id=execution.execution_id,
+                payload_json={
+                    "task_id": task.task_id,
+                    "execution_id": execution.execution_id,
+                    "execution_generation": execution.generation,
+                    "attempt": execution.generation,
+                    "title": task.objective,
+                    "objective": task.objective,
+                    "worker_name": execution.worker_name,
+                    "round_number": plan.sequence,
+                    "parallel_task_count": plan.expected_task_count,
+                    "status": execution.status,
+                    "error": {
+                        "code": "TASK_CANCELLED",
+                        "message": (
+                            "正在请求 Worker 停止"
+                            if execution.status == "cancelling"
+                            else "Task 已被取消"
+                        ),
+                    },
+                },
+                schema_version=1,
+                status="pending",
+                attempt=0,
+                available_at=now,
+                occurred_at=now,
+            )
+        )
 
     async def _has_queued_task_capacity(
         self, session: AsyncSession, *, additional_tasks: int
@@ -2469,6 +2610,7 @@ class PostgresWorkerOrchestrationRepository:
                     instance_id=self._id_factory(),
                     service_principal=intent.service_principal,
                     instance_key=intent.instance_key,
+                    worker_name=intent.worker_name,
                     contract_id=contract.contract_id,
                     contract_revision=contract.revision,
                     base_url=intent.base_url,
@@ -2483,6 +2625,7 @@ class PostgresWorkerOrchestrationRepository:
                 )
                 session.add(instance)
             else:
+                instance.worker_name = intent.worker_name
                 instance.contract_id = contract.contract_id
                 instance.contract_revision = contract.revision
                 instance.base_url = intent.base_url
@@ -3243,6 +3386,67 @@ class PostgresWorkerOrchestrationRepository:
                                 root_wait_generation=plan.root_wait_generation,
                                 now=now,
                             )
+                instance = await session.get(WorkerInstanceModel, execution.instance_id)
+                if instance is None:
+                    raise ValueError("worker_result_instance_identity_missing")
+                output_json = json.dumps(
+                    output, ensure_ascii=False, separators=(",", ":")
+                )
+                output_summary = _worker_result_summary(output)
+                result_is_large = (
+                    result_status == "completed"
+                    and len(output_json.encode("utf-8")) > 8192
+                )
+                event_type = (
+                    "TaskRetrying"
+                    if disposition == "retry_scheduled"
+                    else "TaskCompleted"
+                    if result_status == "completed"
+                    else "TaskFailed"
+                )
+                payload: dict[str, Any] = {
+                    "task_id": task.task_id,
+                    "execution_id": execution.execution_id,
+                    "execution_generation": execution.generation,
+                    "attempt": execution.generation,
+                    "title": task.objective,
+                    "objective": task.objective,
+                    "worker_name": execution.worker_name or instance.worker_name,
+                    "round_number": plan.sequence,
+                    "parallel_task_count": plan.expected_task_count,
+                    "status": result_status,
+                    "result_available_in_final": result_is_large,
+                }
+                if result_status == "completed" and not result_is_large:
+                    # 单字段正文保持原文；复合结果以完整、可读的 JSON 传递。
+                    payload["result_summary"] = output_summary
+                if error is not None:
+                    payload["error"] = {
+                        key: error[key]
+                        for key in ("code", "message", "retryable")
+                        if key in error
+                    }
+                session.add(
+                    OrchestrationOutboxModel(
+                        message_id=self._id_factory(),
+                        dedupe_key=(
+                            f"execution:{execution.execution_id}:result:{submission.result_id}"
+                        ),
+                        event_type=event_type,
+                        correlation_id=run.run_id,
+                        plan_id=plan.plan_id,
+                        plan_version=plan.sequence,
+                        round_id=None,
+                        task_id=task.task_id,
+                        execution_id=execution.execution_id,
+                        payload_json=payload,
+                        schema_version=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        occurred_at=now,
+                    )
+                )
             receipt_id = self._id_factory()
             receipt_data = WorkerResultReceiptProtocolModel.model_validate(
                 {
@@ -3363,6 +3567,7 @@ class PostgresWorkerOrchestrationRepository:
                 )
             ).all()
             for execution in executions:
+                execution_status_before = execution.status
                 commands = (
                     await session.scalars(
                         select(OrchestratorWorkerCommandModel)
@@ -3428,6 +3633,16 @@ class PostgresWorkerOrchestrationRepository:
                     execution.updated_at = now
                     if matching_cancel is not None:
                         command_id = matching_cancel.command_id
+                        if execution.status != execution_status_before:
+                            self._add_task_cancellation_event(
+                                session,
+                                run=run,
+                                plan=plan,
+                                task=task,
+                                execution=execution,
+                                cancellation_epoch=cancellation_epoch,
+                                now=now,
+                            )
                         continue
                     command_id = self._id_factory()
                     command_body = {
@@ -3467,6 +3682,17 @@ class PostgresWorkerOrchestrationRepository:
                     execution.cancellation_epoch = cancellation_epoch
                     execution.capacity_reserved = False
                     execution.updated_at = now
+
+                if execution.status != execution_status_before:
+                    self._add_task_cancellation_event(
+                        session,
+                        run=run,
+                        plan=plan,
+                        task=task,
+                        execution=execution,
+                        cancellation_epoch=cancellation_epoch,
+                        now=now,
+                    )
 
             if not task_was_terminal:
                 plan.terminal_task_count += 1
@@ -3628,6 +3854,7 @@ class PostgresWorkerOrchestrationRepository:
                 else "capacity_released"
             )
             now = await self._now(session)
+            was_cancelling = execution.status == "cancelling"
             if execution.capacity_reserved:
                 execution.capacity_reserved = False
                 execution.capacity_released_at = now
@@ -3636,6 +3863,44 @@ class PostgresWorkerOrchestrationRepository:
                 execution.status = "cancelled"
                 execution.completed_at = execution.completed_at or now
                 execution.updated_at = now
+            if was_cancelling:
+                session.add(
+                    OrchestrationOutboxModel(
+                        message_id=self._id_factory(),
+                        dedupe_key=(
+                            f"execution:{execution.execution_id}:stopped:"
+                            f"{confirmation.cancellation_epoch}"
+                        ),
+                        event_type="TaskCancelled",
+                        correlation_id=plan_hint.run_id,
+                        plan_id=plan_hint.plan_id,
+                        plan_version=plan_hint.sequence,
+                        round_id=None,
+                        task_id=task_hint.task_id,
+                        execution_id=execution.execution_id,
+                        payload_json={
+                            "task_id": task_hint.task_id,
+                            "execution_id": execution.execution_id,
+                            "execution_generation": execution.generation,
+                            "attempt": execution.generation,
+                            "title": task_hint.objective,
+                            "objective": task_hint.objective,
+                            "worker_name": execution.worker_name,
+                            "round_number": plan_hint.sequence,
+                            "parallel_task_count": plan_hint.expected_task_count,
+                            "status": "cancelled",
+                            "error": {
+                                "code": "WORKER_STOP_CONFIRMED",
+                                "message": "Worker 已确认停止执行",
+                            },
+                        },
+                        schema_version=1,
+                        status="pending",
+                        attempt=0,
+                        available_at=now,
+                        occurred_at=now,
+                    )
+                )
             receipt_data = WorkerStopConfirmationReceiptModel.model_validate(
                 {
                     "stop_confirmation_id": confirmation.stop_confirmation_id,

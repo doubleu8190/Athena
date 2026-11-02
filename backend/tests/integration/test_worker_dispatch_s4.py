@@ -20,6 +20,7 @@ from infrastructure.persistence.postgres.models import (
     OrchestratorRootResumeJobModel,
     OrchestratorTaskModel,
     OrchestratorWorkerCommandModel,
+    OrchestrationOutboxModel,
     WorkerContractModel,
     WorkerInstanceModel,
     WorkerResultReceiptModel,
@@ -84,6 +85,7 @@ async def _submit_plan(
                     instance_id=f"instance-{contract_id}",
                     service_principal="worker-service",
                     instance_key=str(uuid4()),
+                    worker_name="Test Worker",
                     contract_id=contract_id,
                     contract_revision=1,
                     base_url="https://worker.invalid",
@@ -314,6 +316,39 @@ async def test_later_permanent_rejection_keeps_capacity_after_uncertain_delivery
     assert command.delivery_uncertain_before_send is True
     assert execution is not None and execution.capacity_reserved
     assert task is not None and task.status == "running"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_permanent_dispatch_failure_emits_terminal_event(worker_store) -> None:
+    session_factory, _ = worker_store
+    contract_id = str(uuid4())
+    repository, _ = await _submit_plan(
+        session_factory,
+        task_contracts=(contract_id,),
+        available_contracts=(contract_id,),
+    )
+    lease, start = await _claim_and_start(repository)
+    assert start is not None
+
+    assert await repository.fail_dispatch_command(
+        lease,
+        error_code="AUTHENTICATION_FAILED",
+        message="credential rejected before send",
+        root_replan=False,
+    )
+
+    async with session_factory() as session:
+        event = await session.scalar(
+            select(OrchestrationOutboxModel).where(
+                OrchestrationOutboxModel.dedupe_key
+                == f"execution:{start.execution_id}:dispatch-failed:{lease.command_id}"
+            )
+        )
+    assert event is not None and event.event_type == "TaskFailed"
+    assert event.payload_json["execution_id"] == start.execution_id
+    assert event.payload_json["worker_name"]
+    assert event.payload_json["error"]["code"] == "AUTHENTICATION_FAILED"
 
 
 @pytest.mark.integration

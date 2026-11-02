@@ -104,10 +104,28 @@ class WorkerRegistrationRequest(BaseModel):
     protocol_version: Literal["1.0"]
     registration_request_id: UUID
     worker_instance_key: UUID
+    worker_name: str = Field(min_length=1, max_length=120)
     base_url: AnyUrl
     execution_timeout_seconds: int = Field(ge=1, le=604800)
     max_concurrency: int = Field(ge=1, le=256)
     capability: WorkerCapabilityContract
+
+    @field_validator("worker_name")
+    @classmethod
+    def require_worker_name(cls, value: str) -> str:
+        """要求 Worker 名称去除首尾空白后仍非空。
+
+        参数：
+        - `value`（str）：注册请求中的可读 Worker 名称，长度上限为 120。
+
+        返回：去除首尾空白后的名称。
+
+        异常：ValueError 表示名称只包含空白字符。
+        """
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("worker_name_required")
+        return normalized
 
     @field_validator("base_url")
     @classmethod
@@ -144,6 +162,7 @@ class WorkerRegistrationRequest(BaseModel):
             registration_request_id=str(self.registration_request_id),
             service_principal=service_principal,
             instance_key=str(self.worker_instance_key),
+            worker_name=self.worker_name,
             base_url=str(self.base_url).rstrip("/"),
             execution_timeout_seconds=self.execution_timeout_seconds,
             max_concurrency=self.max_concurrency,

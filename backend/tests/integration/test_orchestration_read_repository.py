@@ -95,7 +95,7 @@ async def test_run_snapshot_reads_worker_plans_executions_and_approval_batch() -
             ))
             session.add(WorkerInstanceModel(
                 instance_id="instance-read-1", service_principal="test-service",
-                instance_key="instance-key-read-1", contract_id="contract-read-1", contract_revision=1,
+                instance_key="instance-key-read-1", worker_name="Test Worker", contract_id="contract-read-1", contract_revision=1,
                 base_url="https://worker.invalid", execution_timeout_seconds=60,
                 max_concurrency=1, status="ready", accepting_tasks=True, created_at=now, updated_at=now,
             ))

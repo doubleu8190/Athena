@@ -311,6 +311,7 @@ def test_retry_configuration_matches_protocol_bounds(
         "service_token": "worker-token",
         "orchestrator_token": "orchestrator-token",
         "instance_key": uuid4(),
+        "worker_name": "Worker Store Test",
         "database_path": tmp_path / "worker.sqlite3",
         "capability_path": tmp_path / "capability.json",
         "tls_certificate_path": tls,

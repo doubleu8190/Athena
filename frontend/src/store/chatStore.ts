@@ -19,6 +19,7 @@ import type {
 } from "../types"
 import { shouldAcceptSnapshotState, shouldApplySnapshotResponse } from "../utils/workerSnapshotProjection.ts"
 import { canApplyRunStatusEvent, preserveTerminalRunStatuses } from "../utils/runLifecycle"
+import { closeTimelineEntry, upsertTimelineEntry } from "../utils/executionTimeline.ts"
 
 interface ChatStore {
   // 连接状态
@@ -86,7 +87,9 @@ interface ChatStore {
   // 面向用户的受控执行过程时间线
   executionTimeline: ExecutionTimelineEntry[]
   upsertExecutionTimelineEntry: (entry: ExecutionTimelineEntry) => void
+  closeExecutionTimelineEntry: (entry: ExecutionTimelineEntry) => void
   clearExecutionTimeline: () => void
+  executionTimelineTerminalMarkers: Record<string, ExecutionTimelineEntry["status"]>
   runTimelineEvents: RunTimelineEvent[]
   appendRunTimelineEvent: (event: RunTimelineEvent) => void
   clearRunTimelineEvents: () => void
@@ -280,6 +283,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   clearThinking: () => set({ thinking: null }),
 
   executionTimeline: [],
+  executionTimelineTerminalMarkers: {},
   runTimelineEvents: [],
   suppressedRunOutput: (() => {
     try {
@@ -306,22 +310,27 @@ export const useChatStore = create<ChatStore>((set) => ({
   clearRunTimelineEvents: () => set({ runTimelineEvents: [] }),
   upsertExecutionTimelineEntry: (entry) =>
     set((state) => {
-      const existingIndex = state.executionTimeline.findIndex((item) => item.id === entry.id)
-      if (existingIndex < 0) {
-        return { executionTimeline: [...state.executionTimeline, entry] }
+      return {
+        executionTimeline: upsertTimelineEntry(
+          state.executionTimeline,
+          state.executionTimelineTerminalMarkers,
+          entry,
+        ),
       }
-      const executionTimeline = [...state.executionTimeline]
-      executionTimeline[existingIndex] = {
-        ...executionTimeline[existingIndex],
-        ...entry,
-        metadata: {
-          ...executionTimeline[existingIndex].metadata,
-          ...entry.metadata,
-        },
-      }
-      return { executionTimeline }
     }),
-  clearExecutionTimeline: () => set({ executionTimeline: [] }),
+  closeExecutionTimelineEntry: (entry) =>
+    set((state) => {
+      const result = closeTimelineEntry(
+        state.executionTimeline,
+        state.executionTimelineTerminalMarkers,
+        entry,
+      )
+      return {
+        executionTimeline: result.entries,
+        executionTimelineTerminalMarkers: result.terminalMarkers,
+      }
+    }),
+  clearExecutionTimeline: () => set({ executionTimeline: [], executionTimelineTerminalMarkers: {} }),
 
   // 中心编排
   orchestrationTasks: [],

@@ -194,8 +194,9 @@ async def test_normal_run_failure_finalizes_and_enqueues_empty_answer_memory_job
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_before_stop", [False, True])
 async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmation(
-    worker_store,
+    worker_store, cancel_before_stop: bool
 ) -> None:
     """停止保留多条历史 Plan，只撤销活动任务并等 Worker 确认释放容量。"""
     session_factory, _ = worker_store
@@ -235,6 +236,7 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
                 instance_id=instance_id,
                 service_principal="test-service",
                 instance_key=str(uuid4()),
+                worker_name="Test Worker",
                 contract_id=contract_id,
                 contract_revision=1,
                 base_url="https://worker.invalid",
@@ -291,7 +293,7 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
                 request_hash="active-plan-hash",
                 goal="当前活动 Plan",
                 status="running",
-                expected_task_count=1,
+                expected_task_count=2 if cancel_before_stop else 1,
                 terminal_task_count=0,
                 root_wait_generation=3,
                 created_at=now,
@@ -325,6 +327,7 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
                 instance_id=instance_id,
                 generation=1,
                 status="running",
+                worker_name="Test Worker",
                 execution_timeout_seconds=60,
                 cancellation_epoch=0,
                 capacity_reserved=True,
@@ -366,6 +369,10 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
             )
         )
 
+    if cancel_before_stop:
+        worker_repository = PostgresWorkerOrchestrationRepository(session_factory)
+        await worker_repository.cancel_task(run_id=run_id, task_id=active_task_id)
+
     stopped, replayed = await run_repository.stop_active(
         session_id,
         request_id=f"stop-{run_id}",
@@ -405,6 +412,20 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
                 OrchestratorWorkerCommandModel.command_type == "cancel",
             )
         )
+        cancellation_events = list(
+            (
+                await session.scalars(
+                    select(OrchestrationOutboxModel)
+                    .where(
+                        OrchestrationOutboxModel.event_type.in_(
+                            ("TaskCancelling", "TaskCancelled")
+                        ),
+                        OrchestrationOutboxModel.task_id == active_task_id,
+                    )
+                    .order_by(OrchestrationOutboxModel.execution_id)
+                )
+            ).all()
+        )
 
     assert [plan.status for plan in stored_plans] == ["completed", "completed", "cancelled"]
     task_status_by_id = {task.task_id: task.status for task in stored_tasks}
@@ -421,6 +442,22 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
     assert cancel_command is not None and cancel_command.status == "pending"
     assert cancel_command.command_json["command_id"] == cancel_command.command_id
     _validate_s1_schema(cancel_command.command_json, "CancelCommand")
+    assert {event.execution_id for event in cancellation_events} == {
+        execution_id,
+        queued_execution_id,
+    }
+    cancellation_payloads = {
+        event.execution_id: event.payload_json for event in cancellation_events
+    }
+    cancellation_types = {
+        event.execution_id: event.event_type for event in cancellation_events
+    }
+    assert cancellation_types[execution_id] == "TaskCancelling"
+    assert cancellation_types[queued_execution_id] == "TaskCancelled"
+    assert cancellation_payloads[execution_id]["status"] == "cancelling"
+    assert cancellation_payloads[queued_execution_id]["status"] == "cancelled"
+    assert cancellation_payloads[execution_id]["worker_name"] == "Test Worker"
+    assert cancellation_payloads[queued_execution_id]["worker_name"] is None
 
     confirmation_id = str(uuid4())
     worker_repository = PostgresWorkerOrchestrationRepository(session_factory)
@@ -431,7 +468,7 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
         "execution_id": execution_id,
         "generation": 1,
         "cancellation_epoch": 1,
-        "reason": "run_cancelled",
+        "reason": cancel_command.command_json["reason"],
         "stopped": True,
         "stopped_at": now.isoformat(),
     }
@@ -451,7 +488,16 @@ async def test_stop_cancels_only_active_plan_work_and_waits_for_worker_confirmat
         released_execution = await session.get(
             OrchestratorExecutionModel, execution_id
         )
+        confirmed_event = await session.scalar(
+            select(OrchestrationOutboxModel).where(
+                OrchestrationOutboxModel.dedupe_key
+                == "execution:" + execution_id + ":stopped:1"
+            )
+        )
     assert run is not None and run.status == "cancelled"
     assert session_row is not None and session_row.active_run_id is None
     assert released_execution is not None
     assert released_execution.capacity_reserved is False
+    assert confirmed_event is not None
+    assert confirmed_event.event_type == "TaskCancelled"
+    assert confirmed_event.payload_json["status"] == "cancelled"

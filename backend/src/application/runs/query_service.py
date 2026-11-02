@@ -219,6 +219,7 @@ _TIMELINE_FIELDS = {
     "execution_generation", "worker_run_id", "tool_call_id", "call_id", "retrieval_run_id",
     "provider", "model", "attempt", "input_tokens", "output_tokens", "raw_hit_count", "candidate_count", "result_count", "selected_count", "bundle_count", "context_count", "selection_status",
     "decision", "tool_name", "title", "stage", "retryable", "code", "error", "trace_status",
+    "worker_name", "round_number", "parallel_task_count", "result_summary", "result_available_in_final",
     "approval_id", "risk_level",
 }
 
@@ -263,7 +264,11 @@ def _safe_payload(payload: dict[str, object]) -> dict[str, object]:
                 if nested_key in {"code", "message", "retryable", "stage"}
             }
         elif isinstance(value, (str, int, float, bool)) or value is None:
-            safe[key] = _safe_text(value) if isinstance(value, str) else value
+            safe[key] = (
+                _safe_text(value, limit=12000)
+                if isinstance(value, str) and key == "result_summary"
+                else _safe_text(value) if isinstance(value, str) else value
+            )
     if "error" not in safe and isinstance(payload.get("error_detail"), dict):
         error = payload["error_detail"]
         safe["error"] = {

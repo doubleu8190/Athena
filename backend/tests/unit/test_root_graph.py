@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from application.orchestration import RootWorkflow, RootWorkflowDependencies
 from application.orchestration.root_workflow import (
@@ -18,7 +19,6 @@ from application.orchestration.root_workflow import (
 )
 from application.orchestration.root_decision import (
     AnswerIntent,
-    ContextRequest,
     PlanIntent,
     PlanningFeedback,
     PlanDraft,
@@ -39,6 +39,8 @@ from domain.orchestration import RootPlanFacts, RootPlanTaskFact
 from domain.runs import RootPlanCheckpointRecovery, RootPlanCompletedResumeValue
 from application.runs.request_contracts import RootRequestState
 from application.orchestration.langgraph import build_root_graph
+from application.orchestration.langgraph.graphs.root import _wait_for_plan_completion_node
+from application.orchestration.langgraph.graphs.state import RootGraphState
 from application.orchestration.langgraph import invoke_root_graph as _invoke_root_graph
 from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
 from tests.fakes.leases import lease_context, lease_grant
@@ -260,7 +262,7 @@ def _build_graph(dependencies, *, checkpointer=None):
 
 
 @pytest.mark.asyncio
-async def test_root_decides_to_retrieve_then_uses_memory_before_answering() -> None:
+async def test_root_decides_after_prefetch_and_uses_memory_before_answering() -> None:
     observed = {}
 
     async def retrieve(*, session_id, run_id, plan):
@@ -274,10 +276,6 @@ async def test_root_decides_to_retrieve_then_uses_memory_before_answering() -> N
 
     agent = _Agent(
         [
-            ContextRequest(
-                action="context",
-                queries=(MemoryQuery(provider="memory", query="最喜欢的水果"),),
-            ),
             AnswerIntent(
                 action="answer", kind="final", instructions="你最喜欢吃苹果。"
             ),
@@ -295,12 +293,9 @@ async def test_root_decides_to_retrieve_then_uses_memory_before_answering() -> N
 
     assert result["status"] == "completed"
     assert observed["plan"].providers == ("memory",)
-    assert len(agent.inputs) == 2
-    assert agent.inputs[1].context_items[0].content == "fruit_preference: 苹果"
+    assert len(agent.inputs) == 1
     assert agent.inputs[0].context_items[0].content == "fruit_preference: 苹果"
     assert all(outcome.stage == "prefetch" for outcome in agent.inputs[0].context_queries)
-    assert agent.inputs[1].context_queries[-1].status == "succeeded"
-    assert agent.inputs[1].context_queries[-1].stage == "directed"
 
 
 @pytest.mark.asyncio
@@ -309,13 +304,8 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
         return ProviderResult("memory", "succeeded", result_count=0)
 
     events = _Events()
-    request_context = ContextRequest(
-        action="context",
-        queries=(MemoryQuery(provider="memory", query="check latest policy"),),
-    )
     agent = _Agent(
         [
-            request_context,
             PlanIntent(
                 action="plan",
                 goal="检索政策并判断是否需要更新",
@@ -326,7 +316,6 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
                 missing_information=("最新政策内容",),
                 reason="尚未取得所需的政策资料。",
             ),
-            request_context,
             AnswerIntent(
                 action="answer", kind="final", instructions="No matching policy found."
             ),
@@ -346,9 +335,8 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
     expected_invocations = {
         "prefetch_context": 1,
         "decide_root_action": 2,
-        "redecide_root_action": 2,
+        "redecide_root_action": 0,
         "generate_plan": 1,
-        "acquire_context": 2,
     }
     for node_name, expected_count in expected_invocations.items():
         started = {
@@ -384,6 +372,7 @@ def test_root_graph_has_no_removed_understanding_or_harness_nodes() -> None:
 
     assert "decide_root_action" in node_names
     assert "prefetch_context" in node_names
+    # 该节点只为恢复旧 checkpoint 注册，新 Root 决策没有到它的边。
     assert "acquire_context" in node_names
     assert "wait_for_plan_completion" in node_names
     assert "build_plan_response" in node_names
@@ -673,11 +662,7 @@ async def test_root_budget_reserves_a_turn_before_context_retrieval() -> None:
         provider_calls += 1
         return ProviderResult("memory", "succeeded", result_count=0)
 
-    request_context = ContextRequest(
-        action="context",
-        queries=(MemoryQuery(provider="memory", query="same query"),),
-    )
-    agent = _Agent([request_context])
+    agent = _Agent([AnswerIntent(action="answer", kind="final", instructions="直接答复。")])
     dependencies = _dependencies(agent, provider=retrieve, root_max_turns=1)
 
     result = await invoke_root_graph(
@@ -688,9 +673,8 @@ async def test_root_budget_reserves_a_turn_before_context_retrieval() -> None:
         user_message="查找资料",
     )
 
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "root_budget_exhausted"
-    assert provider_calls == 1  # 只执行入口预检索，最后一轮不能发起定向检索。
+    assert result["status"] == "completed"
+    assert provider_calls == 1
     assert len(agent.inputs) == 1
 
 
@@ -788,13 +772,9 @@ def test_context_window_uses_configured_tokenizer_for_multilingual_content() -> 
 
 
 @pytest.mark.asyncio
-async def test_unavailable_provider_result_is_returned_to_root_for_next_decision() -> None:
+async def test_unavailable_prefetch_result_is_returned_to_root_decision() -> None:
     agent = _Agent(
         [
-            ContextRequest(
-                action="context",
-                queries=(MemoryQuery(provider="memory", query="old memory"),),
-            ),
             AnswerIntent(
                 action="answer",
                 kind="final",
@@ -803,6 +783,7 @@ async def test_unavailable_provider_result_is_returned_to_root_for_next_decision
         ]
     )
     dependencies = _dependencies(agent)
+    dependencies.available_context_providers = ("memory",)
 
     result = await invoke_root_graph(
         _build_graph(dependencies),
@@ -813,9 +794,9 @@ async def test_unavailable_provider_result_is_returned_to_root_for_next_decision
     )
 
     assert result["status"] == "completed"
-    assert agent.inputs[1].context_queries[-1].status == "skipped"
-    assert agent.inputs[1].context_queries[-1].stage == "directed"
-    assert agent.inputs[1].context_queries[-1].error_message == "context_provider_unavailable"
+    assert agent.inputs[0].context_queries[-1].status == "skipped"
+    assert agent.inputs[0].context_queries[-1].stage == "prefetch"
+    assert agent.inputs[0].context_queries[-1].error_message == "provider unavailable"
 
 
 @pytest.mark.asyncio
@@ -1015,3 +996,86 @@ async def test_checkpoint_recovery_after_plan_consumption_uses_new_lease() -> No
     }
     final_snapshot = await graph.aget_state(config)
     assert final_snapshot.values["execution_lease"]["fencing_token"] == 2
+
+
+@pytest.mark.asyncio
+async def test_legacy_plan_wait_checkpoint_resumes_with_current_root_graph() -> None:
+    """旧版拓扑生成的计划等待 checkpoint 可由当前图恢复。"""
+    agent = _Agent(
+        [AnswerIntent(action="answer", kind="final", instructions="总结执行结果。")]
+    )
+    dependencies = _dependencies(agent)
+    saver = InMemorySaver()
+    workflow = RootWorkflow(dependencies)
+
+    # 复现旧拓扑：计划等待节点之后直接进入旧版再决策节点。
+    legacy_graph_builder = StateGraph(RootGraphState)
+    legacy_graph_builder.add_node(
+        "wait_for_plan_completion", _wait_for_plan_completion_node(workflow)
+    )
+    legacy_graph_builder.add_node("redecide_root_action", lambda _state: {})
+    legacy_graph_builder.add_edge(START, "wait_for_plan_completion")
+    legacy_graph_builder.add_edge("wait_for_plan_completion", "redecide_root_action")
+    legacy_graph_builder.add_edge("redecide_root_action", END)
+    legacy_graph = legacy_graph_builder.compile(checkpointer=saver)
+
+    run_id = "run-legacy-plan-checkpoint"
+    plan_id = "plan-legacy-1"
+    thread_config = {"configurable": {"thread_id": f"run:{run_id}"}}
+    initial_state: RootGraphState = {
+        "request": {
+            "session_id": "session-1",
+            "run_id": run_id,
+            "message_id": "message-legacy",
+            "run_sequence": 1,
+            "user_message": "执行并总结。",
+            "attachment_ids": [],
+        },
+        "plan": {
+            "plan_id": plan_id,
+            "sequence": 1,
+            "root_wait_generation": 1,
+        },
+        "root_turn_count": 1,
+    }
+    interrupted = await legacy_graph.ainvoke(initial_state, config=thread_config)
+    interrupt = interrupted["__interrupt__"][0]
+
+    dependencies.root_orchestration.completed_plan = RootPlanFacts(
+        run_id=run_id,
+        plan_id=plan_id,
+        sequence=1,
+        root_wait_generation=1,
+        goal="执行并总结",
+        status="completed",
+        tasks=(
+            RootPlanTaskFact(
+                task_ref="task-1",
+                status="succeeded",
+                output={"result": "已完成"},
+            ),
+        ),
+    )
+    current_graph = build_root_graph(
+        workflow=workflow,
+        dependencies=dependencies,
+        checkpointer=saver,
+    )
+    result = await invoke_root_graph(
+        current_graph,
+        session_id="session-1",
+        run_id=run_id,
+        resume_value=RootPlanCompletedResumeValue(
+            type="plan_completed",
+            run_id=run_id,
+            plan_id=plan_id,
+            plan_sequence=1,
+            root_wait_generation=1,
+            interrupt_id=interrupt.id,
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert len(agent.inputs) == 1
+    assert len(agent.inputs[0].completed_plans) == 1
+    assert agent.inputs[0].completed_plans[0].tasks[0].output == {"result": "已完成"}

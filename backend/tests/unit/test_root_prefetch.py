@@ -3,22 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 
 import pytest
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
 from tests.fakes.leases import lease_grant
 from pydantic import ValidationError
+from pydantic import BaseModel
 from domain.memory import MemoryRecord
+from domain.retrieval.trace_contracts import RetrievalCandidateSelection
 
 from application.orchestration import RootWorkflow
+from application.orchestration.root_workflow import _context_bundle_from_state
+from application.orchestration.agents.root_agent import ConfiguredRootAgent
 from application.orchestration.answer_generation import AnswerGenerationInput, AnswerGenerationService
-from application.orchestration.root_decision import AnswerIntent, ContextRequest, RootMessage
+from application.orchestration.root_decision import AnswerIntent, RootMessage
+from application.runs.request_contracts import RootRequestState
 from tests.unit.test_root_graph import invoke_root_graph
 from application.runs.context import (
-    ContextAcquisitionService, ContextItem, ContextQueryOutcome,
-    MemoryQuery, ProviderResult,
+    ContextAcquisitionService, ContextBundle, ContextItem, ContextQueryOutcome,
+    ContextPlanner, FileQuery, MemoryQuery, ProviderResult,
 )
-from configuration.settings import Settings
+from configuration.settings import LLMProviderConfig, LLMRetrySettings, Settings
+from infrastructure.integrations.llm.llm_provider import ConfiguredLLMProvider
 from tests.unit.test_root_graph import (
     _Agent, _Events, _Provider, _TraceRepository, _build_graph, _dependencies,
 )
@@ -61,8 +70,8 @@ async def test_prefetch_hit_reaches_first_decision_and_answer_without_directed_l
 
 
 @pytest.mark.asyncio
-async def test_prefetch_miss_allows_rewritten_lookup_and_retains_both_stages() -> None:
-    """原 query 未命中后实际执行改写查询；无参数，异常即测试失败。"""
+async def test_original_and_rewritten_queries_are_prefetched_before_one_decision() -> None:
+    """两条不同查询均在 Root 决策前检索并合并；无参数，异常即失败。"""
     calls = []
 
     async def retrieve(*, session_id, run_id, plan):
@@ -71,19 +80,404 @@ async def test_prefetch_miss_allows_rewritten_lookup_and_retains_both_stages() -
         items = (ContextItem("memory", "喜欢吃苹果", "fruit"),) if plan.memory_query == "用户水果偏好" else ()
         return ProviderResult("memory", "succeeded", items, result_count=len(items))
 
-    agent = _Agent([
-        ContextRequest(action="context", queries=(MemoryQuery(provider="memory", query="用户水果偏好"),)),
-        AnswerIntent(action="answer", kind="final", instructions="你喜欢吃苹果。"),
-    ])
+    class RewritingAgent(_Agent):
+        async def rewrite_query(self, query, messages, **_kwargs):
+            assert query == "你知道我喜欢吃什么水果吗？"
+            assert messages[-1].content == query
+            return "用户水果偏好"
+
+    agent = RewritingAgent([AnswerIntent(action="answer", kind="final", instructions="你喜欢吃苹果。")])
     deps = _dependencies(agent, provider=retrieve)
     result = await invoke_root_graph(_build_graph(deps), session_id="new-session", run_id="two-stages",
                                      message_id="question", user_message="你知道我喜欢吃什么水果吗？")
     assert result["status"] == "completed"
-    assert [plan.provider_timeout_seconds for plan in calls] == [10.0, None]
-    outcomes = [outcome for outcome in agent.inputs[1].context_queries if outcome.query.provider == "memory"]
-    assert [(outcome.stage, outcome.status) for outcome in outcomes] == [("prefetch", "empty"), ("directed", "succeeded")]
-    assert agent.inputs[1].context_items[0].content == "喜欢吃苹果"
-    assert result["root_turn_count"] == 2
+    assert [plan.memory_query for plan in calls] == ["你知道我喜欢吃什么水果吗？", "用户水果偏好"]
+    assert [plan.provider_timeout_seconds for plan in calls] == [10.0, 10.0]
+    outcomes = [outcome for outcome in agent.inputs[0].context_queries if outcome.query.provider == "memory"]
+    assert [(outcome.stage, outcome.status) for outcome in outcomes] == [("prefetch", "empty"), ("prefetch", "succeeded")]
+    assert agent.inputs[0].context_items[0].content == "喜欢吃苹果"
+    assert len(agent.inputs) == 1
+    assert result["root_turn_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_query_rewrite_failure_falls_back_to_original_query(monkeypatch) -> None:
+    calls = []
+    degradation_events = []
+
+    from application.orchestration import root_workflow
+
+    monkeypatch.setattr(
+        root_workflow.logger,
+        "warning",
+        lambda event, **fields: degradation_events.append((event, fields)),
+    )
+
+    async def retrieve(*, session_id, run_id, plan):
+        calls.append(plan.memory_query)
+        return ProviderResult("memory", "succeeded", result_count=0)
+
+    class FailingRewriteAgent(_Agent):
+        async def rewrite_query(self, *_args, **_kwargs):
+            raise TimeoutError("rewrite timed out")
+
+    agent = FailingRewriteAgent([AnswerIntent(action="answer", kind="final", instructions="完成。")])
+    deps = _dependencies(agent, provider=retrieve)
+    result = await invoke_root_graph(
+        _build_graph(deps), session_id="new-session", run_id="rewrite-fallback",
+        message_id="question", user_message="请查找我的偏好",
+    )
+
+    assert result["status"] == "completed"
+    assert calls == ["请查找我的偏好"]
+    assert len(agent.inputs) == 1
+    assert degradation_events == [
+        ("root_query_rewrite_degraded", {"reason": "secondary_timeout"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_identical_rewritten_query_is_prefetched_only_once() -> None:
+    calls = []
+
+    async def retrieve(*, session_id, run_id, plan):
+        calls.append(plan.memory_query)
+        return ProviderResult("memory", "succeeded", result_count=0)
+
+    class RewritingAgent(_Agent):
+        async def rewrite_query(self, query, *_args, **_kwargs):
+            return query
+
+    deps = _dependencies(RewritingAgent([]), provider=retrieve)
+    await RootWorkflow(deps).prefetch_context(_request_state("相同的问题"))
+
+    assert calls == ["相同的问题"]
+
+
+def test_memory_context_revalidation_default_timeout_is_ten_seconds() -> None:
+    parameter = inspect.signature(
+        ContextAcquisitionService.validate_memory_context
+    ).parameters["timeout_seconds"]
+
+    assert parameter.default == 10.0
+
+
+@pytest.mark.asyncio
+async def test_configured_secondary_timeout_falls_back_to_original_prefetch(monkeypatch) -> None:
+    from infrastructure.integrations.llm import llm_provider
+
+    query_calls = []
+
+    async def slow_secondary(_messages):
+        await asyncio.sleep(0.05)
+        return AIMessage(content="rewritten query")
+
+    class Model:
+        def __init__(self, model_name):
+            self.model_name = model_name
+
+        def with_structured_output(self, schema, *, include_raw=False):
+            assert schema.__name__ == "QueryRewriteOutput"
+            assert include_raw is False
+            return RunnableLambda(slow_secondary)
+
+    def create_model(options, *, sdk_max_retries=None):
+        return Model(options.primary.model)
+
+    monkeypatch.setattr(llm_provider, "_create_model", create_model)
+    provider = ConfiguredLLMProvider(
+        Settings(
+            _env_file=None,
+            llm_providers=[
+                LLMProviderConfig(provider="ollama", model="main"),
+                LLMProviderConfig(provider="ollama", model="light"),
+            ],
+            llm_retry=LLMRetrySettings(max_attempts=1, timeout_ms=1000, min_delay_ms=0),
+            llm_secondary_retry=LLMRetrySettings(max_attempts=1, timeout_ms=5, min_delay_ms=0),
+        )
+    )
+
+    async def retrieve(*, session_id, run_id, plan):
+        query_calls.append(plan.memory_query)
+        return ProviderResult("memory", "succeeded", result_count=0)
+
+    deps = _dependencies(_Agent([]), provider=retrieve)
+    deps.agent = ConfiguredRootAgent(provider)
+    state = _request_state("请查询我的偏好")
+
+    await RootWorkflow(deps).prefetch_context(state)
+
+    assert query_calls == ["请查询我的偏好"]
+
+
+@pytest.mark.asyncio
+async def test_secondary_structured_validation_error_has_invalid_output_reason(monkeypatch) -> None:
+    from infrastructure.integrations.llm import llm_provider
+    from application.orchestration import root_workflow
+
+    class RewriteOutput(BaseModel):
+        rewritten_query: str
+
+    async def invalid_structured_result(_messages):
+        return RewriteOutput.model_validate({})
+
+    class Model:
+        def with_structured_output(self, _schema, *, include_raw=False):
+            return RunnableLambda(afunc=invalid_structured_result, func=lambda _messages: None)
+
+    monkeypatch.setattr(
+        llm_provider,
+        "_create_model",
+        lambda _options, **_kwargs: Model(),
+    )
+    degradation_events = []
+    monkeypatch.setattr(
+        root_workflow.logger,
+        "warning",
+        lambda event, **fields: degradation_events.append((event, fields)),
+    )
+    provider = ConfiguredLLMProvider(
+        Settings(
+            _env_file=None,
+            llm_providers=[
+                LLMProviderConfig(provider="ollama", model="main"),
+                LLMProviderConfig(provider="ollama", model="light"),
+            ],
+            llm_retry=LLMRetrySettings(max_attempts=1, timeout_ms=1000, min_delay_ms=0),
+            llm_secondary_retry=LLMRetrySettings(max_attempts=1, timeout_ms=1000, min_delay_ms=0),
+        )
+    )
+    query_calls = []
+
+    async def retrieve(*, session_id, run_id, plan):
+        query_calls.append(plan.memory_query)
+        return ProviderResult("memory", "succeeded", result_count=0)
+
+    deps = _dependencies(_Agent([]), provider=retrieve)
+    deps.agent = ConfiguredRootAgent(provider)
+    await RootWorkflow(deps).prefetch_context(_request_state("原始问题"))
+
+    assert query_calls == ["原始问题"]
+    assert degradation_events == [
+        ("root_query_rewrite_degraded", {"reason": "invalid_structured_output"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_authorized_attachments_are_prefetched_with_both_queries() -> None:
+    calls = []
+
+    async def retrieve(*, session_id, run_id, plan):
+        calls.append(plan)
+        return ProviderResult(
+            "file", "succeeded",
+            (ContextItem("file", "附件中的报告内容", "attachment-1"),),
+            result_count=1,
+        )
+
+    class RewritingAgent(_Agent):
+        async def rewrite_query(self, *_args, **_kwargs):
+            return "报告结论"
+
+    deps = _dependencies(RewritingAgent([]))
+    deps.available_context_providers = ("file",)
+    deps.context_acquisition = ContextAcquisitionService(
+        {"file": _Provider(retrieve)}, _TraceRepository(), _Events()
+    )
+    state = _request_state("总结这个附件")
+    state["request"]["attachment_refs"] = [
+        {
+            "id": "attachment-1", "filename": "report.pdf", "mime_type": "application/pdf",
+            "size_bytes": 10, "status": "ready",
+        }
+    ]
+
+    update = await RootWorkflow(deps).prefetch_context(state)
+
+    assert [plan.file_query for plan in calls] == ["总结这个附件", "报告结论"]
+    assert all(plan.file_ids == ("attachment-1",) for plan in calls)
+    assert all(isinstance(outcome.query, FileQuery) for outcome in map(ContextQueryOutcome.model_validate, update["context_queries"]))
+    assert update["context_bundle"]["items"][0]["content"] == "附件中的报告内容"
+
+
+@pytest.mark.asyncio
+async def test_prefetch_confirms_only_final_window_and_deduplicates_memory_access() -> None:
+    accessed = []
+    selections_by_run = {}
+    retrieval_run = 0
+
+    class MemoryAccess:
+        def __init__(self):
+            self.items = {}
+
+        async def get(self, memory_id):
+            return self.items.get(memory_id)
+
+        async def list_fact_group_by_identity(self, _identity):
+            return []
+
+        async def record_access(self, memory_ids):
+            accessed.extend(memory_ids)
+
+    class RecordingTrace(_TraceRepository):
+        async def record_context(self, **_kwargs):
+            nonlocal retrieval_run
+            retrieval_run += 1
+            return f"retrieval-{retrieval_run}"
+
+        async def update_context_selection(self, *, run_id, selections):
+            selections_by_run[run_id] = selections
+            return True
+
+    memory = MemoryAccess()
+
+    async def retrieve(*, session_id, run_id, plan):
+        source_id = "raw-memory" if plan.memory_query == "原始问题" else "rewritten-memory"
+        content = "原始结果内容" if source_id == "raw-memory" else "改写结果内容"
+        return ProviderResult(
+            "memory", "succeeded",
+            (ContextItem("memory", content, source_id, {"category": "preference"}),),
+            result_count=1,
+        )
+
+    class RewritingAgent(_Agent):
+        async def rewrite_query(self, *_args, **_kwargs):
+            return "改写问题"
+
+    deps = _dependencies(RewritingAgent([]))
+    deps.available_context_providers = ("memory",)
+    deps.context_planner = ContextPlanner(max_items=1)
+    deps.context_acquisition = ContextAcquisitionService(
+        {"memory": _Provider(retrieve, memory)}, RecordingTrace(), _Events(),
+        memory_repository=memory,
+    )
+    state = _request_state("原始问题")
+
+    update = await RootWorkflow(deps).prefetch_context(state)
+
+    assert [item["source_id"] for item in update["context_bundle"]["items"]] == [
+        "rewritten-memory"
+    ]
+    assert accessed == ["rewritten-memory"]
+    assert selections_by_run["retrieval-1"][0].context_selected is False
+    assert selections_by_run["retrieval-1"][0].filter_reason == "context_window_budget"
+    assert selections_by_run["retrieval-2"][0].context_selected is True
+
+
+@pytest.mark.asyncio
+async def test_prefetch_duplicate_memory_candidate_is_accessed_once_across_batches() -> None:
+    accessed = []
+    selections_by_run = {}
+
+    class MemoryAccess:
+        async def record_access(self, memory_ids):
+            accessed.extend(memory_ids)
+
+    class RecordingTrace(_TraceRepository):
+        async def update_context_selection(self, *, run_id, selections):
+            selections_by_run[run_id] = selections
+            return True
+
+    deps = _dependencies(_Agent([]))
+    deps.context_acquisition = ContextAcquisitionService(
+        {}, RecordingTrace(), _Events(), memory_repository=MemoryAccess()
+    )
+    workflow = RootWorkflow(deps)
+    duplicate = RetrievalCandidateSelection(
+        provider="memory", source_id="same-memory", source_ids=("same-memory",),
+        context_selected=True,
+    )
+
+    await workflow._confirm_prefetch_selections(
+        [("original-run", (duplicate,)), ("rewritten-run", (duplicate,))],
+        ContextBundle(
+            items=(ContextItem("memory", "相同事实", "same-memory"),),
+            provider_results=(),
+        ),
+        request_state=RootRequestState(session_id="session-1", run_id="run-1"),
+    )
+
+    assert accessed == ["same-memory"]
+    assert selections_by_run["original-run"][0].context_selected is False
+    assert selections_by_run["rewritten-run"][0].context_selected is True
+
+
+@pytest.mark.asyncio
+async def test_permission_change_updates_selection_for_every_prefetch_trace() -> None:
+    updates_by_run = {}
+    retrieval_id = 0
+
+    class MemoryAccess:
+        def __init__(self):
+            self.items = {}
+
+        async def get(self, memory_id):
+            return self.items.get(memory_id)
+
+        async def list_fact_group_by_identity(self, _identity):
+            return []
+
+        async def record_access(self, _memory_ids):
+            return None
+
+    class RecordingTrace(_TraceRepository):
+        async def record_context(self, **_kwargs):
+            nonlocal retrieval_id
+            retrieval_id += 1
+            return f"trace-{retrieval_id}"
+
+        async def update_context_selection(self, *, run_id, selections):
+            updates_by_run[run_id] = selections
+            return True
+
+    class MemorySettings:
+        use_memories = True
+
+        async def get(self, session_id):
+            return type(
+                "SettingsValue",
+                (),
+                {"session_id": session_id, "use_memories": self.use_memories, "project_id": None},
+            )()
+
+    async def retrieve(*, session_id, run_id, plan):
+        source_id = f"memory-{plan.memory_query}"
+        return ProviderResult(
+            "memory", "succeeded",
+            (ContextItem("memory", f"事实 {plan.memory_query}", source_id, {"category": "preference"}),),
+            result_count=1,
+        )
+
+    class RewritingAgent(_Agent):
+        async def rewrite_query(self, *_args, **_kwargs):
+            return "改写问题"
+
+    memory = MemoryAccess()
+    deps = _dependencies(RewritingAgent([]))
+    deps.available_context_providers = ("memory",)
+    deps.context_acquisition = ContextAcquisitionService(
+        {"memory": _Provider(retrieve, memory)}, RecordingTrace(), _Events(),
+        memory_repository=memory,
+    )
+    settings = MemorySettings()
+    deps.memory_settings = settings
+    workflow = RootWorkflow(deps)
+    state = _request_state("原始问题")
+    state.update(await workflow.prefetch_context(state))
+    bundle = _context_bundle_from_state(state["context_bundle"])
+    assert len(bundle.selection_batches) == 2
+
+    settings.use_memories = False
+    effective = await workflow._effective_context_bundle("new-session", bundle)
+
+    assert effective.items == ()
+    assert set(updates_by_run) == {"trace-1", "trace-2"}
+    assert all(
+        not selection.context_selected
+        and selection.filter_reason == "session_memory_read_disabled"
+        for selections in updates_by_run.values()
+        for selection in selections
+    )
 
 
 @pytest.mark.asyncio
@@ -170,8 +564,8 @@ async def test_prefetch_passes_empty_knowledge_scope_to_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_directed_lookup_retains_prefetch_material_without_double_access() -> None:
-    """第二批失败保留第一批材料，旧材料不重复确认访问；无参数。"""
+async def test_failed_rewritten_lookup_retains_original_material_without_double_access() -> None:
+    """改写 query 失败时保留原 query 材料，且不重复确认访问；无参数。"""
     accessed = []
 
     class MemoryAccess:
@@ -190,7 +584,7 @@ async def test_failed_directed_lookup_retains_prefetch_material_without_double_a
             accessed.extend(ids)
 
     async def retrieve(*, session_id, run_id, plan):
-        """原 query 命中；定向 query 故障。"""
+        """原 query 命中；改写 query 故障。"""
         if plan.memory_query == "查偏好":
             return ProviderResult(
                 "memory",
@@ -207,7 +601,11 @@ async def test_failed_directed_lookup_retains_prefetch_material_without_double_a
             )
         raise RuntimeError("lookup unavailable")
 
-    deps = _dependencies(_Agent([]), provider=retrieve)
+    class RewritingAgent(_Agent):
+        async def rewrite_query(self, _query, _messages, **_kwargs):
+            return "改写偏好"
+
+    deps = _dependencies(RewritingAgent([]), provider=retrieve)
     deps.context_acquisition = ContextAcquisitionService(
         {"memory": _Provider(retrieve)}, _TraceRepository(), _Events(), memory_repository=MemoryAccess()
     )
@@ -215,8 +613,6 @@ async def test_failed_directed_lookup_retains_prefetch_material_without_double_a
     state["available_context_providers"] = ["memory"]
     workflow = RootWorkflow(deps)
     state.update(await workflow.prefetch_context(state))
-    state["root_decision"] = ContextRequest(action="context", queries=(MemoryQuery(provider="memory", query="补充偏好"),)).model_dump(mode="json")
-    state.update(await workflow.acquire_context(state))
     assert state["context_bundle"]["items"][0]["content"] == "苹果"
     assert state["context_queries"][-1]["status"] == "failed"
     assert accessed == ["fruit"]

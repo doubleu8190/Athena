@@ -71,7 +71,8 @@ def build_runs_router(
             )
         except RunRejectedError as exc:
             status = 404 if exc.code in {"session_not_found", "project_not_found"} else 409 if exc.code in {
-                "idempotency_conflict", "session_project_mismatch", "active_run_changed"
+                "idempotency_conflict", "session_project_mismatch", "active_run_changed",
+                "session_run_in_progress", "session_run_queued",
             } else 400
             raise HTTPException(status_code=status, detail=exc.code) from exc
         except ValueError as exc:

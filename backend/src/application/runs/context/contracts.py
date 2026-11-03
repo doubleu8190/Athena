@@ -256,6 +256,15 @@ class ContextBundle:
     truncated: bool = False
     retrieval_run_id: str | None = None
     context_selection: tuple[RetrievalCandidateSelection, ...] = ()
+    selection_batches: tuple["ContextSelectionBatch", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSelectionBatch:
+    """保留一次检索运行及其 Root 窗口选择，供后续权限复核同步。"""
+
+    retrieval_run_id: str | None
+    selections: tuple[RetrievalCandidateSelection, ...]
 
 
 __all__ = [
@@ -264,6 +273,7 @@ __all__ = [
     "ContextPlan",
     "ContextQuery",
     "ContextQueryOutcome",
+    "ContextSelectionBatch",
     "EpisodeQuery",
     "FileQuery",
     "GraphQuery",

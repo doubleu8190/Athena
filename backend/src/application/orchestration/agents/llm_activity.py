@@ -83,6 +83,26 @@ async def invoke_structured_llm_with_activity(
     )
 
 
+async def invoke_secondary_structured_llm_with_activity(
+    llm: LLMPort,
+    event_publisher: EventPort | None,
+    messages: list[Any],
+    schema: StructuredOutputSchema,
+    *,
+    session_id: str,
+    run_id: str,
+    parent_activity_id: str,
+) -> Any:
+    """调用第二模型的结构化输出并记录标准模型活动。"""
+    return await _invoke_with_activity(
+        lambda: llm.invoke_secondary_structured(messages, schema),
+        event_publisher,
+        session_id=session_id,
+        run_id=run_id,
+        parent_activity_id=parent_activity_id,
+    )
+
+
 async def _invoke_with_activity(
     invoke: Callable[[], Awaitable[Any]],
     event_publisher: EventPort | None,
@@ -215,4 +235,8 @@ async def _publish_llm_event(
         )
     except Exception:
         return
-__all__ = ["invoke_llm_with_activity", "invoke_structured_llm_with_activity"]
+__all__ = [
+    "invoke_llm_with_activity",
+    "invoke_secondary_structured_llm_with_activity",
+    "invoke_structured_llm_with_activity",
+]

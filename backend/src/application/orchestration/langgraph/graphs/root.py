@@ -229,7 +229,7 @@ def _node_result_summary(node_name: str, value: Any) -> str | None:
             f"可用知识库 {len(knowledge_bases) if isinstance(knowledge_bases, list) else 0} 个。"
         )
 
-    if node_name in {"prefetch_context", "acquire_context"}:
+    if node_name == "prefetch_context":
         bundle = value.get("context_bundle", {})
         items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
         outcomes = value.get("context_queries", [])
@@ -242,7 +242,6 @@ def _node_result_summary(node_name: str, value: Any) -> str | None:
         action = decision.get("action") if isinstance(decision, Mapping) else None
         action_labels = {
             "answer": "直接回答",
-            "context": "继续查询资料",
             "plan": "制定执行计划",
         }
         if action in action_labels:
@@ -308,23 +307,8 @@ def _route_after_prefetch(state: RootGraphState) -> str:
     return "assemble_final_response" if state.get("error") else "decide_root_action"
 
 
-def _route_after_context(state: RootGraphState) -> str:
-    """不可恢复的采集错误终止；其余结果进入专用再决策节点。
-
-    参数：
-    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
-
-    返回：
-    - str：Root 图中表示下一节点名称的路由键。
-
-    异常：
-    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-    """
-    return "assemble_final_response" if state.get("error") else "redecide_root_action"
-
-
 def _route_after_decision(state: RootGraphState) -> str:
-    """校验 Root 决策后，按回答、检索、计划或终止动作选择后续节点。
+    """校验统一 Root 决策后，按回答、计划或终止动作选择后续节点。
 
     参数：
     - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
@@ -345,34 +329,23 @@ def _route_after_decision(state: RootGraphState) -> str:
         return "assemble_final_response"
     return {
         "answer": "generate_answer",
-        "context": "acquire_context",
         "plan": "generate_plan",
     }.get(str(action), "assemble_final_response")
 
 
-def _route_after_redecision(state: RootGraphState) -> str:
-    """根据重新生成的 Root 决策选择回答、计划或终止路径。
+def _route_after_context(state: RootGraphState) -> str:
+    """把旧 checkpoint 的检索结果接回计划生命周期再决策节点。
 
     参数：
-    - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+    - `state`（RootGraphState）：旧版检索节点生成的可恢复状态。
 
     返回：
-    - str：Root 图中表示下一节点名称的路由键。
+    - str：下一节点的路由名称。
 
     异常：
     - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
-    if state.get("error"):
-        return "assemble_final_response"
-    try:
-        action = ROOT_DECISION_ADAPTER.validate_python(
-            state.get("root_decision", {})
-        ).action
-    except ValidationError:
-        return "assemble_final_response"
-    return {"answer": "generate_answer", "plan": "generate_plan"}.get(
-        action, "assemble_final_response"
-    )
+    return "assemble_final_response" if state.get("error") else "redecide_root_action"
 
 
 def _route_after_plan_generation(state: RootGraphState) -> str:
@@ -511,7 +484,9 @@ def build_root_graph(
         "prepare_request": workflow.prepare_request,
         "prefetch_context": workflow.prefetch_context,
         "decide_root_action": workflow.decide_root_action,
+        # 计划完成后的既有再决策节点保留，以兼容等待中的持久化 checkpoint。
         "redecide_root_action": workflow.redecide_root_action,
+        # 仅旧版图可能保存此 next node；新入口没有到这里的边。
         "acquire_context": workflow.acquire_context,
         "generate_plan": workflow.generate_plan,
         "generate_answer": workflow.generate_answer,
@@ -547,7 +522,15 @@ def build_root_graph(
         {
             "assemble_final_response": "assemble_final_response",
             "generate_answer": "generate_answer",
-            "acquire_context": "acquire_context",
+            "generate_plan": "generate_plan",
+        },
+    )
+    graph.add_conditional_edges(
+        "redecide_root_action",
+        _route_after_decision,
+        {
+            "assemble_final_response": "assemble_final_response",
+            "generate_answer": "generate_answer",
             "generate_plan": "generate_plan",
         },
     )
@@ -557,15 +540,6 @@ def build_root_graph(
         {
             "assemble_final_response": "assemble_final_response",
             "redecide_root_action": "redecide_root_action",
-        },
-    )
-    graph.add_conditional_edges(
-        "redecide_root_action",
-        _route_after_redecision,
-        {
-            "assemble_final_response": "assemble_final_response",
-            "generate_answer": "generate_answer",
-            "generate_plan": "generate_plan",
         },
     )
     graph.add_conditional_edges(

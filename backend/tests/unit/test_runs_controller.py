@@ -13,8 +13,11 @@ from domain.runs import RunCancellationResult, RunEnqueueResult, RunStatus
 class Submissions:
     def __init__(self):
         self.items = {}
+        self.error_code = None
 
     async def enqueue_run(self, **values):
+        if self.error_code:
+            raise ValueError(self.error_code)
         request_id = values["request_id"]
         if request_id in self.items:
             return self.items[request_id], True
@@ -38,10 +41,10 @@ class Lifecycle:
         return False
 
 
-def make_client() -> TestClient:
+def make_client(submissions=None) -> TestClient:
     ids = iter(["session-1", "run-1", "message-1"])
     service = RunService(
-        Submissions(),
+        submissions or Submissions(),
         Lifecycle(),
         id_factory=lambda: next(ids),
         clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -65,6 +68,18 @@ def test_submit_run_requires_idempotency_key_and_uses_server_ids():
         "status": "queued",
     }
     assert "command_id" not in response.json()
+
+
+def test_submit_run_returns_busy_session_as_a_business_conflict():
+    submissions = Submissions()
+    submissions.error_code = "session_run_in_progress"
+    response = make_client(submissions).post(
+        "/api/runs",
+        json={"session_id": "session-1", "message": "hello"},
+        headers={"Idempotency-Key": "request-1"},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"detail": "session_run_in_progress"}
 
 
 def test_stop_route_is_session_scoped_and_carries_display_cursor():

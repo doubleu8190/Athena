@@ -19,6 +19,12 @@ class LLMPort(Protocol):
         schema: StructuredOutputSchema,
         **kwargs: Any,
     ) -> Any: ...
+    async def invoke_secondary_structured(
+        self,
+        messages: list[Any],
+        schema: StructuredOutputSchema,
+        **kwargs: Any,
+    ) -> Any: ...
     def stream(
         self, messages: list[Any], **kwargs: Any
     ) -> AsyncIterator[LLMStreamEvent]: ...

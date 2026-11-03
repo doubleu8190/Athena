@@ -5,7 +5,7 @@ import { ApprovalCard } from "./ApprovalDialog"
 import { ExecutionContextPanel } from "./ExecutionContextPanel"
 import { ExecutionTimeline } from "./ExecutionTimeline"
 import { useChatStore } from "../store/chatStore"
-import { apiClient } from "../api/client"
+import { apiClient, ApiError } from "../api/client"
 import { ClientEventType } from "../types/events"
 import type { ApprovalRequest, ApprovalStatusSnapshot, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
 import { mergePendingApprovals } from "../utils/workerSnapshotProjection"
@@ -139,11 +139,19 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     return !item || item.status !== "ready"
   })
   const activeRunId = sessions.find((session) => session.id === activeSessionId)?.active_run_id ?? null
-  // 聊天流只显示用户可理解的实际操作；Root 节点细节保留在执行上下文面板。
-  const chatExecutionTimeline = executionTimeline.filter((entry) => !entry.event_type.startsWith("node."))
+  // 聊天流隐藏排队和资料检索过程；失败项仍显示，节点细节保留在执行上下文面板。
+  const chatExecutionTimeline = executionTimeline.filter((entry) =>
+    !entry.event_type.startsWith("node.")
+    && entry.event_type !== "run.queued"
+    && (!entry.event_type.startsWith("retrieval.") || entry.status === "failed")
+  )
   const currentRunStatuses = activeSessionId ? sessionRunStatuses[activeSessionId] ?? {} : {}
   const hasQueuedRuns = Object.values(currentRunStatuses).some((status) => status === "queued")
+  const hasRunningRuns = Object.values(currentRunStatuses).some((status) => status === "running")
   const canSubmitFromRunState = canSubmitNewRun(currentRunStatuses)
+  const activeRunStatus = activeRunId ? currentRunStatuses[activeRunId] : undefined
+  const stoppingRun = activeRunStatus === "stopping" || (Boolean(activeRunId) && agentStatus === "cancelling")
+  const canQueueDuringStopping = stoppingRun && !hasQueuedRuns && !hasRunningRuns
   const latestKnownRunId = activeRunId
     ?? [...runTimelineEvents].reverse().find((event) => event.run_id)?.run_id
     ?? [...messages].reverse().find((message) => message.run_id)?.run_id
@@ -201,7 +209,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     && !isSending
     && !isUploading
     && canSubmitFromRunState
-    && !isAgentActive
+    && (!isAgentActive || canQueueDuringStopping)
     && Boolean(activeSessionId || draft)
   const hasPendingAttachmentProcessing = attachments.some(
     (item) => item.status === "uploaded" || item.status === "processing",
@@ -390,8 +398,13 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const handleSend = useCallback(async () => {
     const text = input.trim()
     const status = useChatStore.getState().agentStatus
-    const currentlyActive = Boolean(activeRunId || hasQueuedRuns)
-      || ["queued", "thinking", "running", "cancelling", "waiting_approval"].includes(status)
+    const latestStatuses = activeSessionId ? useChatStore.getState().sessionRunStatuses[activeSessionId] ?? {} : {}
+    const hasQueuedOrRunningRun = Object.values(latestStatuses).some((runStatus) => runStatus === "queued" || runStatus === "running")
+    const activeRunIsStopping = Boolean(activeRunId && latestStatuses[activeRunId] === "stopping")
+      || (Boolean(activeRunId) && status === "cancelling")
+    const currentlyActive = hasQueuedOrRunningRun
+      || (Boolean(activeRunId) && !activeRunIsStopping)
+      || (!activeRunId && ["queued", "thinking", "running", "waiting_approval"].includes(status))
     if ((!text && selectedAttachmentIds.length === 0) || (!activeSessionId && !draft) || isSending || isUploading || hasPendingSelectedAttachments || currentlyActive || !canSubmitFromRunState) return
 
     const targetComposerId = activeSessionId ?? draft!.id
@@ -462,8 +475,17 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
         if (knownRunStatus !== "failed") clearError()
       }
     } catch (error) {
+      useChatStore.getState().removeMessage(optimisticId)
       if (composerKeyRef.current === targetComposerId) {
-        setError(error instanceof Error ? error.message : "消息发送失败，请重试。")
+        const conflictCode = error instanceof ApiError
+          ? ["session_run_in_progress", "session_run_queued"].find((code) => error.message.includes(code))
+          : undefined
+        const message = conflictCode === "session_run_in_progress"
+          ? "当前会话有任务正在运行，请等待任务停止后再发送。"
+          : conflictCode === "session_run_queued"
+            ? "当前会话已有排队任务，请等待其开始后再发送。"
+            : error instanceof Error ? error.message : "消息发送失败，请重试。"
+        setError(message)
       }
     }
     setIsSending(false)
@@ -473,7 +495,6 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     draft,
     isSending,
     activeRunId,
-    hasQueuedRuns,
     canSubmitFromRunState,
     addMessage,
     setAgentStatus,
@@ -920,16 +941,6 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
             </div>
           )}
 
-          {/* 错误状态 */}
-          {!isLoadingHistory && messages.length === 0 && chatExecutionTimeline.length === 0 && error && !thinking && !isAgentActive && (
-            <div className="text-center py-16">
-              <p className="text-sm text-athena-danger mb-2">{error}</p>
-              <p className="text-xs text-athena-muted">
-                Try selecting the session again, or create a new one.
-              </p>
-            </div>
-          )}
-
           {/* 消息与执行事件进入同一时间排序的聊天流。 */}
           {!isLoadingHistory && (messages.length > 0 || chatExecutionTimeline.length > 0) && (
             <>
@@ -969,14 +980,14 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
                   </div>
                 )
               })}
-              {isAgentActive && !activeExecutionEntry && (
+              {isAgentActive && !activeExecutionEntry && ["cancelling", "waiting_approval"].includes(agentStatus) && (
                 <div className="processing-group py-3">
                   <div className="timeline-node thinking-node">
                     <div className="flex items-center gap-3 text-sm text-athena-muted">
                       {agentStatus === "cancelling"
                         ? <Clock className="h-4 w-4 text-athena-muted" />
                         : <Loader2 className="h-4 w-4 animate-spin text-athena-accent" />}
-                      {agentStatus === "cancelling" ? "正在停止任务" : agentStatus === "waiting_approval" ? "等待你的确认" : "正在准备下一步操作"}
+                      {agentStatus === "cancelling" ? "正在停止任务" : "等待你的确认"}
                     </div>
                   </div>
                 </div>
@@ -1042,6 +1053,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
               })}
             </div>
           )}
+          {error && <p role="alert" className="mb-2 text-center text-xs text-athena-danger">{error}</p>}
           <div className="composer-tools flex items-stretch gap-2">
             <input
               ref={fileInputRef}
@@ -1085,7 +1097,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
                 style={{ maxHeight: "200px", minHeight: "48px" }}
               />
             </div>
-            {isAgentActive && activeRunId ? (
+            {isAgentActive && activeRunId && !canQueueDuringStopping ? (
               <>
                 <button
                   onClick={handleStop}
@@ -1100,7 +1112,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
             ) : (
               <button
                 onClick={handleSend}
-                disabled={!canSend || isAgentActive}
+                disabled={!canSend || (isAgentActive && !canQueueDuringStopping)}
                 className="inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-athena-accent text-white hover:bg-athena-accent-hover flex-shrink-0 min-h-[48px] w-[48px]"
                 title={isAgentActive ? "等待当前任务完成" : "发送消息"}
                 aria-label="发送消息"

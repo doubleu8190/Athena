@@ -281,6 +281,11 @@ def build_postgres_dependencies(
             timeout_seconds=settings.llm_retry.timeout_ms / 1000,
             delay_seconds=settings.llm_retry.min_delay_ms / 1000,
         ),
+        secondary_retry=RetryOptions(
+            attempts=settings.llm_secondary_retry.max_attempts,
+            timeout_seconds=settings.llm_secondary_retry.timeout_ms / 1000,
+            delay_seconds=settings.llm_secondary_retry.min_delay_ms / 1000,
+        ),
     )
     embedding_options = EmbeddingOptions(
         provider=settings.embedding_provider,

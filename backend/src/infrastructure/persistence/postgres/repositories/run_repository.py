@@ -220,6 +220,28 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         raise ValueError("session_not_found")
                     if project_id is not None and session_row.project_id != project_id:
                         raise ValueError("session_project_mismatch")
+
+                    # 会话行锁同时串行化提交与领取任务；只有停止中的活动项可以接收一个后继 Run。
+                    if session_row.active_run_id is not None:
+                        active_run = await db.get(
+                            AgentRunModel,
+                            session_row.active_run_id,
+                            with_for_update=True,
+                        )
+                        if active_run is None or active_run.status != RunStatus.STOPPING.value:
+                            raise ValueError("session_run_in_progress")
+                    queued_run_exists = bool(
+                        await db.scalar(
+                            select(AgentRunModel.run_id)
+                            .where(
+                                AgentRunModel.session_id == session_id,
+                                AgentRunModel.status == RunStatus.QUEUED.value,
+                            )
+                            .limit(1)
+                        )
+                    )
+                    if queued_run_exists:
+                        raise ValueError("session_run_queued")
                     writable = await ensure_writable_run_scope(
                         db, session_id=session_id, turn_id=run_id, now=now
                     )

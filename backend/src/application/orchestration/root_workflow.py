@@ -10,6 +10,8 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from pydantic import ValidationError
+
 from shared.logging import get_logger
 from application.orchestration.lease_context import lease_grant_from_context
 from domain.orchestration import (
@@ -44,7 +46,9 @@ from application.runs.context.contracts import (
     ContextItem,
     ContextPlan,
     ContextQuery,
+    ContextSelectionBatch,
     EpisodeQuery,
+    FileQuery,
     ContextQueryOutcome,
     KnowledgeQuery,
     MemoryQuery,
@@ -224,6 +228,18 @@ def _context_bundle_from_state(value: Mapping[str, Any]) -> ContextBundle:
         context_selection=tuple(
             RetrievalCandidateSelectionSchema.model_validate(item).to_domain()
             for item in value.get("context_selection", ())
+            if isinstance(item, Mapping)
+        ),
+        selection_batches=tuple(
+            ContextSelectionBatch(
+                retrieval_run_id=item.get("retrieval_run_id"),
+                selections=tuple(
+                    RetrievalCandidateSelectionSchema.model_validate(selection).to_domain()
+                    for selection in item.get("selections", ())
+                    if isinstance(selection, Mapping)
+                ),
+            )
+            for item in value.get("selection_batches", ())
             if isinstance(item, Mapping)
         ),
     )
@@ -476,6 +492,119 @@ def _context_item_identity(item: ContextItem) -> tuple[str, str]:
     return item.provider, item.content
 
 
+def _finalize_selection_batches(
+    batches: tuple[ContextSelectionBatch, ...],
+    final_items: tuple[ContextItem, ...],
+) -> tuple[ContextSelectionBatch, ...]:
+    """按当前最终窗口重算每批候选选择，并为重复来源保留唯一归属。
+
+    参数：
+    - `batches`（tuple[ContextSelectionBatch, ...]）：按原始检索顺序保存的候选选择批次。
+    - `final_items`（tuple[ContextItem, ...]）：经范围复核和预算裁剪后的最终窗口。
+
+    返回：
+    - tuple[ContextSelectionBatch, ...]：每批对应当前最终窗口的选择结果。
+
+    异常：
+    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+    """
+    finalized: list[list[RetrievalCandidateSelection]] = [
+        [] for _ in batches
+    ]
+    claimed_item_keys: set[tuple[str, str]] = set()
+    confirmed_memory_ids: set[str] = set()
+    # 后一批在窗口合并时优先，因此重复来源只归给最近一批。
+    for batch_index in range(len(batches) - 1, -1, -1):
+        for selection in batches[batch_index].selections:
+            if not selection.context_selected:
+                finalized[batch_index].append(selection)
+                continue
+            match = next(
+                (
+                    item
+                    for item in final_items
+                    if item.provider == selection.provider
+                    and (
+                        selection.source_id == _context_item_identity(item)[1]
+                        or bool(
+                            set(selection.source_ids)
+                            & set(_selection_source_ids(item))
+                        )
+                    )
+                ),
+                None,
+            )
+            if match is None:
+                reason = next(
+                    (
+                        candidate.filter_reason
+                        for candidate in batches[batch_index].selections
+                        if candidate.provider == selection.provider
+                        and candidate.source_id == selection.source_id
+                        and candidate.filter_reason
+                    ),
+                    None,
+                )
+                finalized[batch_index].append(
+                    replace(
+                        selection,
+                        context_selected=False,
+                        filter_reason=reason or "context_window_budget",
+                    )
+                )
+                continue
+            item_key = _context_item_identity(match)
+            if item_key in claimed_item_keys:
+                finalized[batch_index].append(
+                    replace(
+                        selection,
+                        context_selected=False,
+                        filter_reason="duplicate_in_context_window",
+                    )
+                )
+                continue
+            claimed_item_keys.add(item_key)
+            if selection.provider == "memory":
+                final_ids = set(_selection_source_ids(match))
+                candidate_ids = selection.source_ids or (selection.source_id,)
+                unique_ids = tuple(
+                    memory_id
+                    for memory_id in candidate_ids
+                    if memory_id in final_ids and memory_id not in confirmed_memory_ids
+                )
+                if not unique_ids:
+                    finalized[batch_index].append(
+                        replace(
+                            selection,
+                            context_selected=False,
+                            filter_reason="duplicate_in_context_window",
+                        )
+                    )
+                    continue
+                confirmed_memory_ids.update(unique_ids)
+                finalized[batch_index].append(
+                    replace(selection, source_ids=unique_ids)
+                )
+            else:
+                finalized[batch_index].append(selection)
+    return tuple(
+        replace(batch, selections=tuple(selections))
+        for batch, selections in zip(batches, finalized, strict=True)
+    )
+
+
+def _synchronize_bundle_selections(bundle: ContextBundle) -> ContextBundle:
+    """让 checkpoint 中的逐批选择与当前资料窗口保持一致。"""
+    if not bundle.selection_batches:
+        return bundle
+    batches = _finalize_selection_batches(bundle.selection_batches, bundle.items)
+    return replace(
+        bundle,
+        selection_batches=batches,
+        context_selection=batches[-1].selections if batches else bundle.context_selection,
+    )
+
+
 def _filter_memory_context_scope(
     bundle: ContextBundle,
     *,
@@ -568,12 +697,35 @@ def _filter_memory_context_scope(
         )
         for selection in bundle.context_selection
     )
-    if len(retained) == len(bundle.items) and selections == bundle.context_selection:
+    selection_batches = tuple(
+        replace(
+            batch,
+            selections=tuple(
+                replace(
+                    selection,
+                    context_selected=False,
+                    source_ids=(),
+                    filter_reason=reason,
+                )
+                if selection.context_selected
+                and (selection.provider, selection.source_id) in rejected_source_ids
+                else selection
+                for selection in batch.selections
+            ),
+        )
+        for batch in bundle.selection_batches
+    )
+    if (
+        len(retained) == len(bundle.items)
+        and selections == bundle.context_selection
+        and selection_batches == bundle.selection_batches
+    ):
         return bundle
     return replace(
         bundle,
         items=tuple(retained),
         context_selection=selections,
+        selection_batches=selection_batches,
     )
 
 
@@ -934,9 +1086,11 @@ class RootWorkflow(RootWorkflowPort):
             project_id=None if settings is None else settings.project_id,
             enabled=settings is None or settings.use_memories,
         )
+        effective = _synchronize_bundle_selections(effective)
         if (
             effective.items != bundle.items
             or effective.context_selection != bundle.context_selection
+            or effective.selection_batches != bundle.selection_batches
         ):
             await self.dependencies.context_acquisition.persist_revalidated_selection(
                 effective
@@ -954,9 +1108,11 @@ class RootWorkflow(RootWorkflowPort):
             memory_token_budget=planner.memory_token_budget,
             token_counter=planner.count_tokens,
         )
+        effective = _synchronize_bundle_selections(effective)
         if (
             effective.items != bundle.items
             or effective.context_selection != bundle.context_selection
+            or effective.selection_batches != bundle.selection_batches
         ):
             await self.dependencies.context_acquisition.persist_revalidated_selection(
                 effective
@@ -1004,7 +1160,7 @@ class RootWorkflow(RootWorkflowPort):
         }
 
     async def prefetch_context(self, state: RootGraphState) -> dict[str, Any]:
-        """用原始问题预检索记忆、可用任务回顾和就绪知识库，不占决策轮数。
+        """用原始问题和轻量改写查询预检索可用资料，不占 Root 决策轮数。
 
         参数：
         - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
@@ -1016,31 +1172,107 @@ class RootWorkflow(RootWorkflowPort):
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         request = _request_state(state)
-        query = request.user_message.strip()[:500]
-        if not query:
+        original_query = request.user_message.strip()[:500]
+        if not original_query:
             return {}
+
+        rewritten_query = original_query
+        rewrite = getattr(self.dependencies.agent, "rewrite_query", None)
+        if callable(rewrite):
+            try:
+                candidate = await rewrite(
+                    original_query,
+                    self._conversation_messages(state),
+                    session_id=request.session_id,
+                    run_id=request.run_id,
+                )
+                if isinstance(candidate, str):
+                    candidate = candidate.strip()
+                    if candidate and len(candidate) <= 500:
+                        rewritten_query = candidate
+            except Exception as error:
+                # 改写是检索增强步骤；模型故障时继续用原问题完成本次请求。
+                causes: list[BaseException] = []
+                cause: BaseException | None = error
+                seen_causes: set[int] = set()
+                while cause is not None and id(cause) not in seen_causes:
+                    seen_causes.add(id(cause))
+                    causes.append(cause)
+                    cause = cause.__cause__ or cause.__context__
+                if str(error) == "secondary_structured_output_unavailable":
+                    reason = "structured_output_unavailable"
+                elif any(isinstance(item, TimeoutError) for item in causes):
+                    reason = "secondary_timeout"
+                elif any(isinstance(item, ValidationError) for item in causes) or str(
+                    error
+                ) == "root_query_rewrite_invalid_output":
+                    reason = "invalid_structured_output"
+                else:
+                    reason = "secondary_call_failed"
+                logger.warning("root_query_rewrite_degraded", reason=reason)
 
         ready_ids = tuple(
             item.id for item in request.knowledge_bases if item.ready_document_count > 0
         )
-        queries: list[ContextQuery] = []
-        if "memory" in self.dependencies.available_context_providers:
-            queries.append(MemoryQuery(provider="memory", query=query))
-        if "episode" in self.dependencies.available_context_providers:
-            queries.append(EpisodeQuery(provider="episode", query=query))
-        if "knowledge" in self.dependencies.available_context_providers:
-            queries.append(
-                KnowledgeQuery(
-                    provider="knowledge", query=query, knowledge_base_ids=ready_ids
+        updates: dict[str, Any] = {}
+        current_state = dict(state)
+        deferred_confirmations: list[
+            tuple[str | None, tuple[RetrievalCandidateSelection, ...]]
+        ] = []
+        for query in dict.fromkeys((original_query, rewritten_query)):
+            queries: list[ContextQuery] = []
+            if "memory" in self.dependencies.available_context_providers:
+                queries.append(MemoryQuery(provider="memory", query=query))
+            if "episode" in self.dependencies.available_context_providers:
+                queries.append(EpisodeQuery(provider="episode", query=query))
+            if "knowledge" in self.dependencies.available_context_providers:
+                queries.append(
+                    KnowledgeQuery(
+                        provider="knowledge", query=query, knowledge_base_ids=ready_ids
+                    )
                 )
+            if (
+                request.attachment_refs
+                and "file" in self.dependencies.available_context_providers
+            ):
+                queries.append(
+                    FileQuery(
+                        provider="file",
+                        query=query,
+                        file_ids=tuple(item.id for item in request.attachment_refs),
+                    )
+                )
+            if not queries:
+                continue
+            update = await self._acquire_context_queries(
+                current_state,
+                queries=tuple(queries),
+                stage="prefetch",
+                provider_timeout_seconds=self.dependencies.context_prefetch_timeout_seconds,
+                deferred_confirmations=deferred_confirmations,
             )
-
-        return await self._acquire_context_queries(
-            state,
-            queries=tuple(queries),
-            stage="prefetch",
-            provider_timeout_seconds=self.dependencies.context_prefetch_timeout_seconds,
-        )
+            updates.update(update)
+            current_state.update(update)
+        if deferred_confirmations:
+            finalized_batches = await self._confirm_prefetch_selections(
+                deferred_confirmations,
+                _context_bundle_from_state(current_state.get("context_bundle", {})),
+                request_state=request,
+            )
+            final_bundle = _context_bundle_from_state(
+                current_state.get("context_bundle", {})
+            )
+            final_bundle = replace(
+                final_bundle,
+                selection_batches=finalized_batches,
+                context_selection=(
+                    finalized_batches[-1].selections
+                    if finalized_batches
+                    else final_bundle.context_selection
+                ),
+            )
+            updates["context_bundle"] = as_dict(final_bundle)
+        return updates
 
     async def decide_root_action(self, state: RootGraphState) -> dict[str, Any]:
         """调用 Root 一次并保存决策及本次轮数。
@@ -1088,11 +1320,6 @@ class RootWorkflow(RootWorkflowPort):
             and not inputs.planning_context_updated
         ):
             return {**update, **_planning_feedback_clarification(inputs.planning_feedback)}
-        elif (
-            isinstance(decision, ContextRequest)
-            and next_turn_count >= deps.root_max_turns
-        ):
-            update.update(_root_budget_exhausted(next_turn_count))
         return update
 
     async def redecide_root_action(self, state: RootGraphState) -> dict[str, Any]:
@@ -1139,24 +1366,58 @@ class RootWorkflow(RootWorkflowPort):
         return update
 
     async def acquire_context(self, state: RootGraphState) -> dict[str, Any]:
-        """执行 Root 请求的检索并更新有界参考资料窗口。
+        """恢复旧 checkpoint 中的定向查询，并合并查询结果。
 
         参数：
-        - `state`（RootGraphState）：包含 ContextRequest、资源目录及旧资料窗口的图状态；约束：无额外运行时限制。
+        - `state`（RootGraphState）：包含旧版 Root 查询决策及已有资料窗口的图状态。
 
         返回：
-        - dict[str, Any]：新资料窗口和本轮各查询的轻量结果摘要。
+        - dict[str, Any]：资料窗口和检索结果状态补丁。
 
         异常：
-        - ValueError：校验条件 `not isinstance(decision, ContextRequest)` 成立时（异常说明：root_context_request_missing）。
-        - 未列出的依赖异常按当前实现传播。
+        - ValueError：checkpoint 中的查询决策格式错误时抛出。
         """
-        decision = ROOT_DECISION_ADAPTER.validate_python(state.get("root_decision", {}))
-        if not isinstance(decision, ContextRequest):
-            raise ValueError("root_context_request_missing")
+        decision = ContextRequest.model_validate(state.get("root_decision", {}))
         return await self._acquire_context_queries(
             state, queries=decision.queries, stage="directed"
         )
+
+    async def _confirm_prefetch_selections(
+        self,
+        batches: list[tuple[str | None, tuple[RetrievalCandidateSelection, ...]]],
+        final_bundle: ContextBundle,
+        *,
+        request_state: RootRequestState,
+    ) -> tuple[ContextSelectionBatch, ...]:
+        """只确认最终窗口保留的候选，并把重复来源归给最近的查询批次。
+
+        参数：
+        - `batches`（list[tuple[str | None, tuple[RetrievalCandidateSelection, ...]]]）：每批检索运行及其窗口候选。
+        - `final_bundle`（ContextBundle）：合并并经过最终校验和预算裁剪的资料窗口。
+        - `request_state`（RootRequestState）：用于确认来源所属 Run 和会话的请求。
+
+        返回：
+        - tuple[ContextSelectionBatch, ...]：已写入逐批选择轨迹的批次身份和选择。
+
+        异常：
+        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
+        """
+        selection_batches = tuple(
+            ContextSelectionBatch(retrieval_run_id=run_id, selections=selections)
+            for run_id, selections in batches
+        )
+        finalized_batches = _finalize_selection_batches(
+            selection_batches, final_bundle.items
+        )
+        for batch in finalized_batches:
+            await self.dependencies.context_acquisition.confirm_selection(
+                run_id=batch.retrieval_run_id or None,
+                session_id=request_state.session_id,
+                agent_run_id=request_state.run_id,
+                selections=batch.selections,
+                stage="prefetch",
+            )
+        return finalized_batches
 
     async def _acquire_context_queries(
         self,
@@ -1165,6 +1426,9 @@ class RootWorkflow(RootWorkflowPort):
         queries: tuple[ContextQuery, ...],
         stage: RetrievalStage,
         provider_timeout_seconds: float | None = None,
+        deferred_confirmations: list[
+            tuple[str | None, tuple[RetrievalCandidateSelection, ...]]
+        ] | None = None,
     ) -> dict[str, Any]:
         """共用两阶段的范围校验、采集、窗口合并与选择确认。
 
@@ -1173,6 +1437,7 @@ class RootWorkflow(RootWorkflowPort):
         - `queries`（tuple[ContextQuery, ...]）：按检索通道组织的已校验查询；约束：无额外运行时限制。
         - `stage`（RetrievalStage）：当前处理阶段，用于标记结果所属环节；约束：无额外运行时限制。
         - `provider_timeout_seconds`（float | None）：单个检索提供方允许使用的最长秒数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `deferred_confirmations`（list[...] | None）：可选的选择确认队列；提供时推迟确认到全部 query 合并之后。
 
         返回：
         - dict[str, Any]：上下文查询结果、选择追踪和状态摘要对应的状态补丁。
@@ -1261,13 +1526,18 @@ class RootWorkflow(RootWorkflowPort):
             token_counter=deps.context_planner.count_tokens,
         )
         context_progress = _has_context_progress(previous_bundle, merged_bundle)
-        await deps.context_acquisition.confirm_selection(
-            run_id=new_bundle.retrieval_run_id,
-            session_id=request_state.session_id,
-            agent_run_id=request_state.run_id,
-            selections=merged_bundle.context_selection,
-            stage=stage,
-        )
+        if deferred_confirmations is None:
+            await deps.context_acquisition.confirm_selection(
+                run_id=new_bundle.retrieval_run_id,
+                session_id=request_state.session_id,
+                agent_run_id=request_state.run_id,
+                selections=merged_bundle.context_selection,
+                stage=stage,
+            )
+        else:
+            deferred_confirmations.append(
+                (new_bundle.retrieval_run_id, merged_bundle.context_selection)
+            )
         previous_outcomes = tuple(
             ContextQueryOutcome.model_validate(item)
             for item in state.get("context_queries", ())

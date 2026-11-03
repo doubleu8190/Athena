@@ -123,9 +123,19 @@ class ConfiguredLLMProvider(LLMPort):
         """
         self._options = coerce_llm_options(options)
         self._model = _create_model(self._options)
+        self._policy = self._options.retry
+        self._secondary_options = (
+            LLMOptions(
+                providers=(self._options.providers[1],),
+                retry=self._options.retry,
+            )
+            if len(self._options.providers) > 1
+            else None
+        )
+        self._secondary_model: BaseChatModel | None = None
+        self._secondary_policy = self._options.secondary_retry or self._policy
         # model_copy 不会重建内部 SDK 客户端；必须在构造时关闭流式重试。
         self._stream_model = _create_model(self._options, sdk_max_retries=0)
-        self._policy = self._options.retry
 
     async def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
         """在线程中按需加载模型，再执行带重试的调用。
@@ -169,6 +179,46 @@ class ConfiguredLLMProvider(LLMPort):
         异常：重试耗尽时抛出 ``RuntimeError``。
         """
         return await self.invoke(messages, **kwargs)
+
+    async def complete_secondary(self, messages: list[Any], **kwargs: Any) -> Any:
+        """使用配置中的第二个模型完成轻量文本任务。
+
+        参数：
+        - `messages`（list[Any]）：按顺序排列的模型对话消息。
+        - `kwargs`（Any）：传给底层模型调用的其他参数。
+
+        返回：
+        - Any：第二个模型返回的消息对象。
+
+        异常：
+        - RuntimeError：未配置第二个模型或调用重试耗尽时抛出。
+        """
+        if self._secondary_options is None:
+            raise RuntimeError("secondary_llm_not_configured")
+        if self._secondary_model is None:
+            self._secondary_model = _create_model(self._secondary_options)
+        return await _invoke_with_retry(
+            self._secondary_model, self._secondary_policy, messages, **kwargs
+        )
+
+    async def invoke_secondary_structured(
+        self,
+        messages: list[Any],
+        schema: StructuredOutputSchema,
+        **kwargs: Any,
+    ) -> Any:
+        """使用第二个模型和专属重试策略调用结构化输出。"""
+        if self._secondary_options is None:
+            raise RuntimeError("secondary_llm_not_configured")
+        if self._secondary_model is None:
+            self._secondary_model = _create_model(self._secondary_options)
+        structured_model = self._secondary_model.with_structured_output(
+            dict(schema) if isinstance(schema, Mapping) else schema,
+            include_raw=False,
+        )
+        return await _invoke_with_retry(
+            structured_model, self._secondary_policy, messages, **kwargs
+        )
 
     def stream(self, messages: list[Any], **kwargs: Any) -> AsyncIterator[LLMStreamEvent]:
         """以供应商无关事件读取模型文本，首个文本前按统一策略重试。"""

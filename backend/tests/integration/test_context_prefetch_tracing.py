@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from application.memory.retrieval_service import MemoryContextProvider
 from application.orchestration import RootWorkflow
-from application.orchestration.root_decision import ContextRequest
+from application.orchestration.root_decision import RootMessage
 from application.runs.context import ContextAcquisitionService, MemoryQuery
 from domain.memory import MemoryWriteCommand
 from infrastructure.persistence.postgres.models import Base, MemoryModel, RetrievalCandidateModel, RetrievalRunModel
@@ -23,8 +23,8 @@ from tests.unit.test_root_graph import _Agent, _Events, _dependencies
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_prefetch_and_directed_trace_stage_survive_postgres_round_trip() -> None:
-    """真实 PostgreSQL 保存各批 query/阶段/选择，旧窗口不重复计访问；无参数。
+async def test_original_and_rewritten_prefetch_traces_survive_postgres_round_trip() -> None:
+    """真实 PostgreSQL 保存原始与改写 query 的轨迹及选择；无参数。
 
     返回：无。异常：数据库连接、SQL 或断言错误使测试失败。
     未提供 ATHENA_TEST_DATABASE_URL 时明确跳过。
@@ -62,25 +62,30 @@ async def test_prefetch_and_directed_trace_stage_survive_postgres_round_trip() -
             metadata={"session_id": "old-session", "category": "preference"},
             operation_key="fruit",
         ))
-        deps = _dependencies(_Agent([]))
+        class RewritingAgent(_Agent):
+            async def rewrite_query(self, _query, _messages, **_kwargs):
+                return "火星基地编号"
+
+        deps = _dependencies(RewritingAgent([]))
         deps.context_acquisition = ContextAcquisitionService(
             {"memory": MemoryContextProvider(memory)}, traces, _Events(), memory_repository=memory
         )
         deps.available_context_providers = ("memory",)
         workflow = RootWorkflow(deps)
         state = {
-            "request": {"session_id": "new-session", "run_id": "round-trip", "message_id": "m", "user_message": "苹果"},
+            "request": {
+                "session_id": "new-session", "run_id": "round-trip", "message_id": "m",
+                "user_message": "苹果", "history": [], "attachment_refs": [], "knowledge_bases": [],
+            },
             "available_context_providers": ["memory"], "knowledge_bases": [],
         }
         state.update(await workflow.prefetch_context(state))
-        state["root_decision"] = ContextRequest(action="context", queries=(MemoryQuery(provider="memory", query="火星基地编号"),)).model_dump(mode="json")
-        state.update(await workflow.acquire_context(state))
         rows, total = await traces.list_runs(agent_run_id="round-trip")
         assert total == 2
-        by_stage = {row["providers"][0]["effective_params"]["retrieval_stage"]: row for row in rows}
-        assert by_stage["prefetch"]["providers"][0]["query"] == "苹果"
-        assert by_stage["directed"]["providers"][0]["query"] == "火星基地编号"
-        detail = await traces.get_run(by_stage["prefetch"]["run_id"])
+        assert {row["providers"][0]["query"] for row in rows} == {"苹果", "火星基地编号"}
+        assert all(row["providers"][0]["effective_params"]["retrieval_stage"] == "prefetch" for row in rows)
+        original_row = next(row for row in rows if row["providers"][0]["query"] == "苹果")
+        detail = await traces.get_run(original_row["run_id"])
         assert detail["candidates"][0]["context_selected"] is True
         assert (await memory.get("fruit")).access_count == 1
         assert any(

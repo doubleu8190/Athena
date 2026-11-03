@@ -334,13 +334,13 @@ class RootWorkflowPort(Protocol):
         """
         ...
     async def acquire_context(self, state: RootGraphState) -> dict[str, Any]:
-        """获取上下文。
+        """恢复旧 checkpoint 中已保存的 Root 检索请求。
 
         参数：
-        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
+        - `state`（RootGraphState）：旧版图保存的检索决策和请求上下文。
 
         返回：
-        - dict[str, Any]：上下文检索和预算选择结果对应的图状态字段。
+        - dict[str, Any]：检索完成后的图状态补丁。
 
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。

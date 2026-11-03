@@ -175,6 +175,24 @@ def _without_unvalidated_memory(bundle: ContextBundle) -> ContextBundle:
         else selection
         for selection in bundle.context_selection
     )
+    selection_batches = tuple(
+        replace(
+            batch,
+            selections=tuple(
+                replace(
+                    selection,
+                    context_selected=False,
+                    source_ids=(),
+                    filter_reason="memory_final_validation_failed",
+                )
+                if selection.provider in {"memory", "memory_index"}
+                and selection.context_selected
+                else selection
+                for selection in batch.selections
+            ),
+        )
+        for batch in bundle.selection_batches
+    )
     return replace(
         bundle,
         items=tuple(
@@ -183,6 +201,7 @@ def _without_unvalidated_memory(bundle: ContextBundle) -> ContextBundle:
             if item.provider not in {"memory", "memory_index"}
         ),
         context_selection=selections,
+        selection_batches=selection_batches,
     )
 
 
@@ -222,13 +241,13 @@ class ContextAcquisitionService:
         self._events = event_publisher
 
     async def validate_memory_context(
-        self, bundle: ContextBundle, *, timeout_seconds: float = 1.0
+        self, bundle: ContextBundle, *, timeout_seconds: float = 15.0
     ) -> ContextBundle:
         """在选择落库和模型调用前，重新确认记忆仍然有效且冲突组完整。
 
         参数：
         - `bundle`（ContextBundle）：本轮已经裁剪并固定的上下文资料集合；约束：无额外运行时限制。
-        - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `1.0`。
+        - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `10.0`。
 
         返回：
         - ContextBundle：经过条数和 token 预算裁剪的上下文，以及对应的来源和选择追踪信息。
@@ -828,23 +847,32 @@ class ContextAcquisitionService:
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        if bundle.retrieval_run_id is None or not bundle.context_selection:
-            return
-        try:
-            persisted = await self._trace_repository.update_context_selection(
-                run_id=bundle.retrieval_run_id,
-                selections=bundle.context_selection,
+        batches = (
+            tuple(
+                (batch.retrieval_run_id, batch.selections)
+                for batch in bundle.selection_batches
             )
-            if not persisted:
-                logger.warning(
-                    "Retrieval run was not found while persisting revalidated context selection; retrieval_run_id=%s",
-                    bundle.retrieval_run_id,
+            if bundle.selection_batches
+            else ((bundle.retrieval_run_id, bundle.context_selection),)
+        )
+        for run_id, selections in batches:
+            if run_id is None or not selections:
+                continue
+            try:
+                persisted = await self._trace_repository.update_context_selection(
+                    run_id=run_id,
+                    selections=selections,
                 )
-        except Exception:
-            logger.exception(
-                "Failed to persist revalidated context selection; retrieval_run_id=%s",
-                bundle.retrieval_run_id,
-            )
+                if not persisted:
+                    logger.warning(
+                        "Retrieval run was not found while persisting revalidated context selection; retrieval_run_id=%s",
+                        run_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to persist revalidated context selection; retrieval_run_id=%s",
+                    run_id,
+                )
 
     async def _publish_selection_event(
         self,

@@ -39,8 +39,9 @@ test("unknown and suspended states are not terminal lifecycle values", () => {
   assert.equal(isSessionRunTerminal("queued"), false)
 })
 
-test("the composer stays blocked during stopping and opens only after terminal status", () => {
-  assert.equal(canSubmitNewRun({ run: "stopping" }), false)
+test("the composer permits one queued run while stopping but blocks queued or running work", () => {
+  assert.equal(canSubmitNewRun({ run: "stopping" }), true)
+  assert.equal(canSubmitNewRun({ run: "stopping", next: "queued" }), false)
   assert.equal(canSubmitNewRun({ run: "running" }), false)
   assert.equal(canSubmitNewRun({ run: "queued" }), false)
   assert.equal(canSubmitNewRun({ run: "cancelled" }), true)

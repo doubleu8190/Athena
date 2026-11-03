@@ -29,6 +29,7 @@ class LLMOptions:
         default_factory=lambda: (LLMProviderOptions(),)
     )
     retry: RetryOptions = field(default_factory=RetryOptions)
+    secondary_retry: RetryOptions | None = None
 
     @property
     def primary(self) -> LLMProviderOptions:
@@ -52,6 +53,7 @@ def coerce_llm_options(value: LLMOptions | Any) -> LLMOptions:
     if isinstance(value, LLMOptions):
         return value
     retry = value.llm_retry
+    secondary_retry = getattr(value, "llm_secondary_retry", retry)
     return LLMOptions(
         providers=tuple(
             LLMProviderOptions(
@@ -70,6 +72,11 @@ def coerce_llm_options(value: LLMOptions | Any) -> LLMOptions:
             attempts=retry.max_attempts,
             timeout_seconds=retry.timeout_ms / 1000,
             delay_seconds=retry.min_delay_ms / 1000,
+        ),
+        secondary_retry=RetryOptions(
+            attempts=secondary_retry.max_attempts,
+            timeout_seconds=secondary_retry.timeout_ms / 1000,
+            delay_seconds=secondary_retry.min_delay_ms / 1000,
         ),
     )
 

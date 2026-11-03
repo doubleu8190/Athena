@@ -416,11 +416,14 @@ async def test_target_file_parser_and_document_job_queue():
 
 
 def test_postgres_dependency_graph_is_explicit(monkeypatch):
-    from configuration import LLMProviderConfig, Settings
+    from configuration import LLMProviderConfig, LLMRetrySettings, Settings
 
     settings = Settings(
         database_backend="postgres",
         llm_providers=[LLMProviderConfig(provider="openai", api_key="test-key")],
+        llm_secondary_retry=LLMRetrySettings(
+            max_attempts=1, timeout_ms=17, min_delay_ms=0
+        ),
         embedding_provider="echo",
         embedding_dimension=2,
     )
@@ -432,6 +435,7 @@ def test_postgres_dependency_graph_is_explicit(monkeypatch):
     assert "/api/sessions" in app.openapi()["paths"]
     assert graph.service("memory_service") is not None
     assert graph.service("orchestration_repository") is not None
+    assert graph.service("llm_provider")._secondary_policy.timeout_seconds == 0.017
     monkeypatch.setenv("ATHENA_WORKERS_ENABLED", "true")
     worker_graph = build_default_dependencies()
     assert len(worker_graph.resources) == 7

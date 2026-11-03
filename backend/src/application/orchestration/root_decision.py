@@ -211,7 +211,10 @@ class RootPlanInput(BaseModel):
 
 
 class ContextRequest(BaseModel):
-    """Root 针对已知资源提出的一批检索查询。"""
+    """旧 checkpoint 恢复时读取的历史 Root 检索请求。
+
+    新的 Root 决策契约不接受此动作；保留模型仅用于恢复已保存的查询状态。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -223,19 +226,18 @@ class ContextRequest(BaseModel):
     def unique_providers(
         cls, queries: tuple[ContextQuery, ...]
     ) -> tuple[ContextQuery, ...]:
-        """按 Provider 去重上下文查询，并保留首次出现的查询。
+        """保留旧格式的一通道一查询约束，避免恢复时计划字段互相覆盖。
 
         参数：
-        - `queries`（tuple[ContextQuery, ...]）：按检索通道组织的已校验查询；约束：无额外运行时限制。
+        - `queries`（tuple[ContextQuery, ...]）：checkpoint 保存的历史查询。
 
         返回：
-        - tuple[ContextQuery, ...]：按 Provider 去重并保留首次出现顺序的上下文查询。
+        - tuple[ContextQuery, ...]：通过 Provider 唯一性校验的查询。
 
         异常：
-        - ValueError：校验条件 `len(providers) != len(set(providers))` 成立时（异常说明：one_query_per_context_provider）。
-        - 未列出的依赖异常按当前实现传播。
+        - ValueError：同一 Provider 出现多条查询时抛出。
         """
-        providers = [query.provider for query in queries]
+        providers = tuple(query.provider for query in queries)
         if len(providers) != len(set(providers)):
             raise ValueError("one_query_per_context_provider")
         return queries
@@ -322,10 +324,9 @@ class RootDecisionStructuredOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    action: Literal["answer", "context", "plan"]
+    action: Literal["answer", "plan"]
     kind: Literal["final", "clarification"] | None = None
     instructions: str | None = None
-    queries: tuple[ContextQuery, ...] | None = None
     goal: str | None = None
 
 class RootReDecisionStructuredOutput(BaseModel):
@@ -352,7 +353,7 @@ class RootPlanStructuredOutput(BaseModel):
 
 
 RootDecision = Annotated[
-    AnswerIntent | ContextRequest | PlanIntent, Field(discriminator="action")
+    AnswerIntent | PlanIntent, Field(discriminator="action")
 ]
 ROOT_DECISION_ADAPTER = TypeAdapter(RootDecision)
 RootReDecision = Annotated[AnswerIntent | PlanIntent, Field(discriminator="action")]

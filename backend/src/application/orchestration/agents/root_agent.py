@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import json
-from typing import Any, TypeVar
+from typing import Annotated, Any, TypeVar
 
 from langchain_core.messages import BaseMessage
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, ValidationError
 
 from application.runs.context.contracts import ContextItem
 from domain.events.ports import EventPort
@@ -17,6 +17,7 @@ from shared import get_logger, read_system_prompt, render_prompt_template
 from ..protocols import RootAgent
 from .llm_activity import (
     invoke_llm_with_activity,
+    invoke_secondary_structured_llm_with_activity,
     invoke_structured_llm_with_activity,
 )
 from ..root_decision import (
@@ -29,6 +30,7 @@ from ..root_decision import (
     RootDecision,
     RootPlanInput,
     RootPlanResult,
+    RootMessage,
     RootReDecision,
     RootDecisionStructuredOutput,
     RootPlanStructuredOutput,
@@ -39,7 +41,6 @@ logger = get_logger(__name__)
 
 _ROOT_DECISION_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
     "answer": frozenset({"action", "kind", "instructions"}),
-    "context": frozenset({"action", "queries"}),
     "plan": frozenset({"action", "goal", "instructions"}),
 }
 _ROOT_DECISION_ACTION_FIELDS = frozenset().union(
@@ -59,6 +60,17 @@ _ROOT_PLAN_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
 _ROOT_PLAN_ACTION_FIELDS = frozenset().union(*_ROOT_PLAN_FIELDS_BY_ACTION.values())
 
 ContractResult = TypeVar("ContractResult")
+
+
+class QueryRewriteOutput(BaseModel):
+    """第二模型改写检索问题时唯一允许的结构化输出。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    rewritten_query: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+    ]
 
 
 class RootDecisionFormatError(ValueError):
@@ -120,7 +132,7 @@ class ConfiguredRootAgent(RootAgent):
         - `inputs`（RootAgentInput）：当前对话、已验证资源、系统能力、参考资料和剩余决策轮数；约束：无额外运行时限制。
 
         返回：
-        - RootDecision：AnswerIntent、ContextRequest 或 PlanIntent。
+        - RootDecision：AnswerIntent 或 PlanIntent。
 
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
@@ -133,6 +145,63 @@ class ConfiguredRootAgent(RootAgent):
             inputs.run_id,
             "root_decision_invalid_after_repair",
         )
+
+    async def rewrite_query(
+        self,
+        query: str,
+        messages: tuple[RootMessage, ...],
+        *,
+        session_id: str,
+        run_id: str,
+    ) -> str:
+        """用第二个模型结合对话历史消解指代并改写检索问题。
+
+        参数：
+        - `query`（str）：本轮用户原始问题。
+        - `messages`（tuple[RootMessage, ...]）：包含必要上下文的对话消息。
+        - `session_id`（str）：当前会话 ID，用于模型活动关联。
+        - `run_id`（str）：当前运行 ID，用于模型活动关联。
+
+        返回：
+        - str：适合检索的独立问题文本。
+
+        异常：
+        - RuntimeError：第二个模型未配置或调用失败时抛出，由工作流降级到原问题。
+        """
+        invoke_secondary = getattr(self._llm, "invoke_secondary_structured", None)
+        if not callable(invoke_secondary):
+            raise RuntimeError("secondary_structured_output_unavailable")
+        history = "\n".join(
+            f"{item.role}: {item.content}" for item in messages[:-1]
+        )
+        current = messages[-1].content if messages else query
+        response = await invoke_secondary_structured_llm_with_activity(
+            self._llm,
+            self._events,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "根据对话历史消解用户当前问题中的指代，并改写为一个简洁、独立的检索问题。"
+                        "只保留用户表达的意图和历史中明确的信息；不得解释、回答、猜测或补充事实。"
+                        "严格按结构化输出契约返回 rewritten_query 字段。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"对话历史：\n{history or '无'}\n\n当前问题：\n{current}",
+                },
+            ],
+            QueryRewriteOutput,
+            session_id=session_id,
+            run_id=run_id,
+            parent_activity_id=f"run:{run_id}",
+        )
+        try:
+            output = QueryRewriteOutput.model_validate(response)
+        except (TypeError, ValueError) as error:
+            raise ValueError("root_query_rewrite_invalid_output") from error
+        return output.rewritten_query
 
     def _build_messages(
         self,

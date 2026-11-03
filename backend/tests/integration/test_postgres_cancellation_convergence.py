@@ -293,11 +293,73 @@ async def test_same_session_runs_are_fifo_and_stop_keeps_the_pointer_until_relea
             message="different payload",
         )
 
-    second = await service.submit(
-        first.session_id,
-        request_id="second-request",
-        message="second",
+    with pytest.raises(RunRejectedError, match="session_run_queued"):
+        await service.submit(
+            first.session_id,
+            request_id="second-request",
+            message="second",
+        )
+
+    claimed, concurrent_claim = await asyncio.gather(
+        repository.claim_next_run(), repository.claim_next_run()
     )
+    invocation = claimed or concurrent_claim
+    assert invocation is not None
+    assert invocation.run_id == first.run_id
+    assert (claimed is None) != (concurrent_claim is None)
+    assert await repository.claim_next_run() is None
+    with pytest.raises(RunRejectedError, match="session_run_in_progress"):
+        await service.submit(
+            first.session_id,
+            request_id="second-request",
+            message="second",
+        )
+
+    accepted, replayed = await repository.stop_active(
+        first.session_id,
+        request_id="stop-first",
+        expected_run_id=first.run_id,
+        displayed_session_seq=4,
+    )
+    assert not replayed
+    assert accepted.changed is True
+    assert accepted.status is RunStatus.STOPPING
+    queued_submissions = await asyncio.gather(
+        service.submit(
+            first.session_id,
+            request_id="second-request",
+            message="second",
+        ),
+        service.submit(
+            first.session_id,
+            request_id="third-request",
+            message="third",
+        ),
+        return_exceptions=True,
+    )
+    accepted_submissions = [
+        result for result in queued_submissions if not isinstance(result, Exception)
+    ]
+    rejected_submissions = [
+        result for result in queued_submissions if isinstance(result, RunRejectedError)
+    ]
+    assert len(accepted_submissions) == 1
+    assert len(rejected_submissions) == 1
+    second = accepted_submissions[0]
+    original_retry = await service.submit(
+        None,
+        project_id="project-1",
+        request_id="first-request",
+        message="first",
+    )
+    assert original_retry.replayed is True
+    assert original_retry.run_id == first.run_id
+    with pytest.raises(RunRejectedError, match="session_run_queued"):
+        await service.submit(
+            first.session_id,
+            request_id="fourth-request",
+            message="fourth",
+        )
     assert (first.sequence, second.sequence) == (1, 2)
     async with session_factory() as session, session.begin():
         first_message = await session.get(MessageModel, first.message_id)
@@ -316,25 +378,6 @@ async def test_same_session_runs_are_fifo_and_stop_keeps_the_pointer_until_relea
         first.session_id, limit=100
     )
     assert [message.id for message in recent_messages] == [first.message_id, second.message_id]
-
-    claimed, concurrent_claim = await asyncio.gather(
-        repository.claim_next_run(), repository.claim_next_run()
-    )
-    invocation = claimed or concurrent_claim
-    assert invocation is not None
-    assert invocation.run_id == first.run_id
-    assert (claimed is None) != (concurrent_claim is None)
-    assert await repository.claim_next_run() is None
-
-    accepted, replayed = await repository.stop_active(
-        first.session_id,
-        request_id="stop-first",
-        expected_run_id=first.run_id,
-        displayed_session_seq=4,
-    )
-    assert not replayed
-    assert accepted.changed is True
-    assert accepted.status is RunStatus.STOPPING
     replay, was_replayed = await repository.stop_active(
         first.session_id,
         request_id="stop-first",

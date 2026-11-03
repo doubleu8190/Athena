@@ -21,7 +21,7 @@ export function isSessionRunTerminal(status: string): boolean {
 }
 
 export function canSubmitNewRun(statuses: Record<string, string>): boolean {
-  return !Object.values(statuses).some((status) => status === "queued" || status === "running" || status === "stopping")
+  return !Object.values(statuses).some((status) => status === "queued" || status === "running")
 }
 
 export function preserveTerminalRunStatuses(

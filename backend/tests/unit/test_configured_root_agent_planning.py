@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from typing import Any
 
 import pytest
@@ -10,14 +11,15 @@ from pydantic import ValidationError
 
 from application.orchestration.agents.root_agent import (
     ConfiguredRootAgent,
+    QueryRewriteOutput,
     RootDecisionFormatError,
 )
 from application.orchestration.root_decision import (
     AnswerIntent,
-    ContextRequest,
     PlanDraft,
     PlanIntent,
     RootPlanInput,
+    ROOT_DECISION_ADAPTER,
     ROOT_PLAN_ADAPTER,
     RootAgentInput,
     RootDecisionStructuredOutput,
@@ -94,6 +96,128 @@ def _plan_inputs() -> RootPlanInput:
         goal="Complete one task",
         instructions="Create a plan to complete one task.",
     )
+
+
+@pytest.mark.asyncio
+async def test_root_query_rewrite_uses_second_model_and_dialogue_context() -> None:
+    class SecondaryLLM:
+        def __init__(self) -> None:
+            self.messages = None
+            self.schema = None
+
+        async def invoke_secondary_structured(self, messages, schema) -> object:
+            self.messages = messages
+            self.schema = schema
+            return {"rewritten_query": "苹果的保存期限"}
+
+    llm = SecondaryLLM()
+    agent = ConfiguredRootAgent(llm)
+    rewritten = await agent.rewrite_query(
+        "这个能放多久？",
+        (
+            RootMessage(role="user", content="我买了苹果。"),
+            RootMessage(role="user", content="这个能放多久？"),
+        ),
+        session_id="session-1",
+        run_id="run-1",
+    )
+
+    assert rewritten == "苹果的保存期限"
+    assert llm.schema is QueryRewriteOutput
+    assert "我买了苹果" in llm.messages[1]["content"]
+    assert "这个能放多久" in llm.messages[1]["content"]
+    assert "不得解释、回答、猜测" in llm.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_root_query_rewrite_without_history_uses_current_question() -> None:
+    class SecondaryLLM:
+        async def invoke_secondary_structured(self, messages, _schema):
+            assert "对话历史：\n无" in messages[1]["content"]
+            assert "当前问题：\n今天下雨吗？" in messages[1]["content"]
+            return QueryRewriteOutput(rewritten_query="今天是否下雨")
+
+    result = await ConfiguredRootAgent(SecondaryLLM()).rewrite_query(
+        "今天下雨吗？", (), session_id="session-1", run_id="run-1"
+    )
+
+    assert result == "今天是否下雨"
+
+
+@pytest.mark.asyncio
+async def test_root_query_rewrite_records_model_activity_without_query_content() -> None:
+    class SecondaryLLM:
+        async def invoke_secondary_structured(self, _messages, _schema):
+            return {"rewritten_query": "改写问题"}
+
+    class Events:
+        def __init__(self):
+            self.events = []
+
+        async def publish(self, event):
+            self.events.append(event)
+            return event
+
+    events = Events()
+    agent = ConfiguredRootAgent(SecondaryLLM(), events)
+    await agent.rewrite_query(
+        "机密原始问题", (), session_id="session-1", run_id="run-1"
+    )
+
+    assert [event.event_type for event in events.events] == [
+        "llm.started",
+        "llm.completed",
+    ]
+    assert all("机密原始问题" not in str(event.payload) for event in events.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"rewritten_query": ""},
+        {"rewritten_query": " "},
+        {"rewritten_query": "x" * 501},
+        {"rewritten_query": "有效查询", "explanation": "额外字段"},
+        {"rewritten_query": 123},
+        "非结构化文字",
+    ],
+)
+async def test_root_query_rewrite_rejects_invalid_structured_output(response) -> None:
+    class SecondaryLLM:
+        async def invoke_secondary_structured(self, _messages, _schema):
+            return response
+
+    with pytest.raises(ValueError):
+        await ConfiguredRootAgent(SecondaryLLM()).rewrite_query(
+            "当前问题", (), session_id="session-1", run_id="run-1"
+        )
+
+
+@pytest.mark.asyncio
+async def test_root_query_rewrite_propagates_cancellation() -> None:
+    class SecondaryLLM:
+        async def invoke_secondary_structured(self, _messages, _schema):
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await ConfiguredRootAgent(SecondaryLLM()).rewrite_query(
+            "当前问题", (), session_id="session-1", run_id="run-1"
+        )
+
+
+@pytest.mark.asyncio
+async def test_initial_decision_prompt_uses_prefetched_context_and_has_no_context_action() -> None:
+    llm = _SequenceLLM(
+        [{"action": "answer", "kind": "final", "instructions": "回答问题。"}]
+    )
+    await ConfiguredRootAgent(llm).decide(_inputs())
+
+    prompt = llm.messages[0][0]["content"]
+    assert "原始用户 query" in prompt
+    assert "改写后的 query" in prompt
+    assert "只选择直接回答、向用户澄清或生成执行计划" in prompt
+    assert "`context`：" not in prompt
 
 
 @pytest.mark.asyncio
@@ -248,14 +372,8 @@ def test_root_contract_rejects_blank_required_text_and_duplicate_providers() -> 
     with pytest.raises(ValidationError, match="root_plan_goal_required"):
         PlanDraft(action="plan", goal=" ", tasks=(_plan()["tasks"][0],))
 
-    with pytest.raises(ValidationError, match="one_query_per_context_provider"):
-        ContextRequest(
-            action="context",
-            queries=(
-                MemoryQuery(provider="memory", query="first"),
-                MemoryQuery(provider="memory", query="second"),
-            ),
-        )
+    with pytest.raises(ValidationError):
+        ROOT_DECISION_ADAPTER.validate_python({"action": "context", "queries": []})
 
 
 def test_worker_reply_decodes_provider_textual_tool_call() -> None:

@@ -23,8 +23,8 @@ from interfaces.http.dto.sessions import (
     UpdateSessionRequest,
     SessionMemorySettingsRequest,
     SessionMemorySettingsResponse,
-    MessageResponse,
     RunSummaryResponse,
+    SessionMessageHistoryResponse,
 )
 from interfaces.http.dto.runs import RunTimelineResponse
 
@@ -143,16 +143,19 @@ def build_sessions_router(
                 use_memories=value.use_memories,
             )
 
-    @router.get("/{session_id}/messages", response_model=list[MessageResponse])
+    @router.get("/{session_id}/messages", response_model=SessionMessageHistoryResponse)
     async def list_session_messages(
         session_id: str,
-        limit: int | None = None,
-    ) -> list[MessageResponse]:
+        limit: int = Query(default=20, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> SessionMessageHistoryResponse:
         try:
-            values = await message_query_service.list_messages(session_id, limit=limit)
+            values = await message_query_service.list_messages(session_id, limit=limit, cursor=cursor)
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
-        return [MessageResponse.from_application(value) for value in values]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid_history_cursor") from exc
+        return SessionMessageHistoryResponse.from_application(values)
 
     @router.get("/{session_id}/runs", response_model=list[RunSummaryResponse])
     async def list_session_runs(

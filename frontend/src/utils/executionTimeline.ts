@@ -39,7 +39,10 @@ export function upsertTimelineEntry(
     && terminalMarkers[entry.id]
     ? { ...entry, status: terminalMarkers[entry.id] }
     : entry
-  const existingIndex = entries.findIndex((item) => item.id === entry.id)
+  const existingIndex = entries.findIndex((item) =>
+    item.id === entry.id
+    || entry.session_seq !== undefined && item.session_seq === entry.session_seq
+  )
   const next = [...entries]
   if (existingIndex < 0) {
     next.push(resolvedEntry)

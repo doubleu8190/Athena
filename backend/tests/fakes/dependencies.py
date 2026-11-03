@@ -15,6 +15,7 @@ from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseServic
 from application.memory import MemoryService
 from application.runs import RunQueryService, RunService
 from application.sessions import SessionMessageQueryService, SessionService
+from application.sessions.history_port import HistoryRunRecord, SessionHistorySnapshot
 from application.tools import MCPService, ToolQueryService, ToolService
 from bootstrap import ApplicationDependencies, build_dependencies
 from configuration import get_settings
@@ -76,6 +77,35 @@ def build_test_dependencies() -> ApplicationDependencies:
     )
     now_id = lambda: uuid4().hex
 
+    class SessionHistoryReader:
+        async def read_snapshot(self, session_id, *, before_sequence, limit):
+            terminal_runs = [
+                run for run in await runs.list_for_session(session_id)
+                if run.status.value in {"completed", "failed", "cancelled"}
+                and (before_sequence is None or run.sequence < before_sequence)
+            ]
+            terminal_runs.sort(key=lambda run: run.sequence, reverse=True)
+            selected_runs = terminal_runs[:limit]
+            events_for_runs = []
+            for run in selected_runs:
+                batch, has_more_events = await events.list_events_for_run(session_id, run.run_id, limit=10000)
+                events_for_runs.extend(batch)
+                while has_more_events and batch:
+                    batch, has_more_events = await events.list_events_for_run(
+                        session_id, run.run_id, after=batch[-1].session_seq or 0, limit=10000
+                    )
+                    events_for_runs.extend(batch)
+            return SessionHistorySnapshot(
+                runs=tuple(HistoryRunRecord(run.run_id, run.message_id, run.sequence) for run in selected_runs),
+                messages=tuple(await messages.list_by_session(session_id)),
+                events=tuple(sorted(events_for_runs, key=lambda event: event.session_seq or 0)),
+                has_more=len(terminal_runs) > limit,
+                snapshot_event_seq=max(
+                    (event.session_seq or 0 for event in events_for_runs),
+                    default=0,
+                ),
+            )
+
     async def settings_payload() -> dict[str, Any]:
         current = get_settings()
         return {"host": current.host, "port": current.port, "debug": current.debug}
@@ -108,7 +138,7 @@ def build_test_dependencies() -> ApplicationDependencies:
 
     services = {
         "session_service": SessionService(sessions, id_factory=now_id),
-        "message_query_service": SessionMessageQueryService(sessions, messages),
+        "message_query_service": SessionMessageQueryService(sessions, SessionHistoryReader()),
         "run_query_service": RunQueryService(sessions, runs, events),
         "run_service": RunService(runs, runs, id_factory=now_id),
         "event_stream_service": EventStreamService(sessions, events),

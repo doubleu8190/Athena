@@ -64,6 +64,46 @@ class MessageResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryContentResponse:
+    """历史展示条目的时间和文本。"""
+
+    time: datetime
+    content: str
+    id: str | None = None
+    session_seq: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryTaskResponse:
+    """一次 Worker 执行及其已持久化过程。"""
+
+    time: datetime
+    process: tuple[HistoryContentResponse, ...]
+    content: str | None = None
+    session_seq: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryTurnResponse:
+    """用户消息及其 Run 执行历史。"""
+
+    run_id: str
+    user: HistoryContentResponse
+    root_process: tuple[HistoryContentResponse, ...]
+    tasks: tuple[HistoryTaskResponse, ...]
+    assistant: HistoryContentResponse | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMessageHistoryResponse:
+    """分页后的已结束会话轮次。"""
+
+    items: tuple[HistoryTurnResponse, ...]
+    next_cursor: str | None
+    snapshot_event_seq: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunSummaryResponse:
     """Run 状态、摘要、结果和时间信息的响应模型。
     """

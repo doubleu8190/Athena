@@ -25,16 +25,13 @@ from ..root_decision import (
     PlanIntent,
     ROOT_DECISION_ADAPTER,
     ROOT_PLAN_ADAPTER,
-    ROOT_REDECISION_ADAPTER,
     RootAgentInput,
     RootDecision,
     RootPlanInput,
     RootPlanResult,
     RootMessage,
-    RootReDecision,
     RootDecisionStructuredOutput,
     RootPlanStructuredOutput,
-    RootReDecisionStructuredOutput,
 )
 
 logger = get_logger(__name__)
@@ -45,13 +42,6 @@ _ROOT_DECISION_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
 }
 _ROOT_DECISION_ACTION_FIELDS = frozenset().union(
     *_ROOT_DECISION_FIELDS_BY_ACTION.values()
-)
-_ROOT_REDECISION_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
-    "answer": frozenset({"action", "kind", "instructions"}),
-    "plan": frozenset({"action", "goal", "instructions"}),
-}
-_ROOT_REDECISION_ACTION_FIELDS = frozenset().union(
-    *_ROOT_REDECISION_FIELDS_BY_ACTION.values()
 )
 _ROOT_PLAN_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
     "plan": frozenset({"action", "goal", "tasks"}),
@@ -122,7 +112,6 @@ class ConfiguredRootAgent(RootAgent):
         self._llm = llm
         self._events = event_publisher
         self._system_prompt = read_system_prompt("root_decision.md").strip()
-        self._redecision_prompt = read_system_prompt("root_redecision.md").strip()
         self._plan_prompt = read_system_prompt("root_plan.md").strip()
 
     async def decide(self, inputs: RootAgentInput) -> RootDecision:
@@ -319,29 +308,6 @@ class ConfiguredRootAgent(RootAgent):
         )
 
     @staticmethod
-    def _decode_redecision(value: Any) -> RootReDecision:
-        """解析 Root 再决策响应，清理跨动作字段并校验决策契约。
-
-        参数：
-        - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
-
-        返回：
-        - RootReDecision：Root 根据检索结果和反馈生成的后续动作。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        return ConfiguredRootAgent._decode_action_contract(
-            value,
-            ROOT_REDECISION_ADAPTER,
-            _ROOT_REDECISION_FIELDS_BY_ACTION,
-            _ROOT_REDECISION_ACTION_FIELDS,
-            invalid_json_code="root_redecision_invalid_json",
-            invalid_type_code="root_redecision_response_invalid_type",
-            invalid_shape_code="root_redecision_response_invalid_shape",
-        )
-
-    @staticmethod
     def _decode_action_contract(
         value: Any,
         adapter: TypeAdapter[Any],
@@ -413,27 +379,6 @@ class ConfiguredRootAgent(RootAgent):
         if isinstance(value, Mapping):
             return json.dumps(value, ensure_ascii=False)
         return str(value)
-
-    async def redecide(self, inputs: RootAgentInput) -> RootReDecision:
-        """根据已完成的采集结果重新选择回答、澄清或计划。
-
-        参数：
-        - `inputs`（RootAgentInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
-
-        返回：
-        - RootReDecision：AnswerIntent 或 PlanIntent，不包含再次检索的 ContextRequest。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        return await self._invoke_contract(
-            self._messages_with_prompt(inputs, self._redecision_prompt),
-            RootReDecisionStructuredOutput,
-            self._decode_redecision,
-            inputs.session_id,
-            inputs.run_id,
-            "root_redecision_invalid_after_repair",
-        )
 
     async def plan(self, inputs: RootPlanInput) -> RootPlanResult:
         """独立生成完整计划，或返回必要信息缺口。

@@ -5,9 +5,9 @@ import type {
   CreateSessionResponse,
   SubmitRunResponse,
   Session,
+  SessionMessageHistory,
   SessionMemorySettings,
   Project,
-  Message,
   ApprovalRequest,
   ApprovalHistoryEntry,
   ApprovalStats,
@@ -223,9 +223,10 @@ class ApiClient {
   }
 
   /** 查询会话消息，可选限制返回条数。 */
-  async getMessages(sessionId: string, limit?: number, signal?: AbortSignal): Promise<Message[]> {
-    const params = limit ? `?limit=${limit}` : ""
-    return this.request<Message[]>(`/api/sessions/${sessionId}/messages${params}`, { signal })
+  async getMessages(sessionId: string, limit = 20, signal?: AbortSignal, cursor?: string): Promise<SessionMessageHistory> {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (cursor) params.set("cursor", cursor)
+    return this.request<SessionMessageHistory>(`/api/sessions/${encodeURIComponent(sessionId)}/messages?${params}`, { signal })
   }
 
   async listSessionRuns(sessionId: string): Promise<SessionRunSummary[]> {

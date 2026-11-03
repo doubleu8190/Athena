@@ -7,7 +7,7 @@ import ErrorBoundary from "./components/ErrorBoundary"
 import { NAV_ITEMS } from "./components/NavRail"
 import PageView from "./components/pages/PageView"
 import { useChatStore } from "./store/chatStore"
-import { useSessionEventStream } from "./hooks/useSessionEventStream"
+import { clearSessionEventCache, useBackgroundSessionEventStream, useSessionEventStream } from "./hooks/useSessionEventStream"
 import { ClientEventType } from "./types/events"
 import { apiClient } from "./api/client"
 import LoginPage from "./components/LoginPage"
@@ -36,6 +36,7 @@ function AppContent() {
   const activeDraftRef = useRef(activeDraft)
   activeDraftRef.current = activeDraft
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false)
+  const openSessions = useCallback(() => setMobileSessionsOpen(true), [])
   const demoMode = useState(() => new URLSearchParams(window.location.search).get("demo") === "execution")[0]
   const [authState, setAuthState] = useState<"loading" | "authenticated" | "unauthenticated">(demoMode ? "authenticated" : "loading")
 
@@ -109,6 +110,9 @@ function AppContent() {
   }, [setSessions])
 
   useSessionEventStream(demoMode || authState !== "authenticated" ? null : activeSessionId, apiBase)
+  const backgroundSessionIds = demoMode || authState !== "authenticated"
+    ? []
+    : sessions.filter((session) => session.id !== activeSessionId && Boolean(session.active_run_id)).map((session) => session.id)
 
   useEffect(() => {
     if (!demoMode) return
@@ -310,6 +314,7 @@ function AppContent() {
     async (sessionId: string) => {
       try {
         await apiClient.deleteSession(sessionId)
+        clearSessionEventCache(sessionId)
         removeSession(sessionId)
         if (activeSessionId === sessionId) {
           const nextSession = useChatStore.getState().sessions[0] ?? null
@@ -407,8 +412,10 @@ function AppContent() {
       setActiveDraft(null)
       setProjects([])
       setActiveProjectId(null)
+      for (const session of useChatStore.getState().sessions) clearSessionEventCache(session.id)
       setSessions([])
       setActiveSession(null)
+      useChatStore.getState().clearAllSessionCaches()
       setAuthState("unauthenticated")
     }
   }, [setActiveSession, setSessions, setDrafts])
@@ -422,6 +429,7 @@ function AppContent() {
 
   return (
     <div className="flex h-screen w-screen flex-col-reverse overflow-hidden md:flex-row">
+      {backgroundSessionIds.map((sessionId) => <BackgroundSessionStream key={sessionId} sessionId={sessionId} apiBase={apiBase} />)}
       {mobileSessionsOpen && (
         <button
           type="button"
@@ -494,20 +502,26 @@ function AppContent() {
             <LogOut size={16} />
           </button>}
         </header>
-        {activeView === "chat" ? (
+        <div className="flex-1 min-h-0" style={{ display: activeView === "chat" ? "flex" : "none" }}>
             <Chat
               sendEvent={sendEvent}
               draft={activeDraft}
               ensureSession={ensureSession}
-              onOpenSessions={() => setMobileSessionsOpen(true)}
+              onOpenSessions={openSessions}
               demoMode={demoMode}
             />
-        ) : (
+        </div>
+        {activeView !== "chat" && (
           <PageView view={activeView} />
         )}
       </main>
     </div>
   )
+}
+
+function BackgroundSessionStream({ sessionId, apiBase }: { sessionId: string; apiBase: string }) {
+  useBackgroundSessionEventStream(sessionId, apiBase)
+  return null
 }
 
 /** 应用根组件，使用错误边界保护主界面。 */

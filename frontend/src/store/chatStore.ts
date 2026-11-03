@@ -18,10 +18,16 @@ import type {
   RunOrchestrationSnapshot,
 } from "../types"
 import { shouldAcceptSnapshotState, shouldApplySnapshotResponse } from "../utils/workerSnapshotProjection.ts"
-import { canApplyRunStatusEvent, preserveTerminalRunStatuses } from "../utils/runLifecycle"
+import { canApplyRunStatusEvent, preserveTerminalRunStatuses } from "../utils/runLifecycle.ts"
 import { closeTimelineEntry, upsertTimelineEntry } from "../utils/executionTimeline.ts"
 
 interface ChatStore {
+  sessionViewCache: Record<string, Partial<SessionViewState>>
+  sessionHistoryLoaded: Record<string, boolean>
+  sessionEventCursors: Record<string, number>
+  setSessionHistoryLoaded: (sessionId: string, loaded: boolean) => void
+  setSessionEventCursor: (sessionId: string, cursor: number) => void
+  clearAllSessionCaches: () => void
   // 连接状态
   connectionStatus: ConnectionStatus
   setConnectionStatus: (status: ConnectionStatus) => void
@@ -87,6 +93,7 @@ interface ChatStore {
   // 面向用户的受控执行过程时间线
   executionTimeline: ExecutionTimelineEntry[]
   upsertExecutionTimelineEntry: (entry: ExecutionTimelineEntry) => void
+  replaceRunExecutionTimeline: (runId: string, entries: ExecutionTimelineEntry[]) => void
   closeExecutionTimelineEntry: (entry: ExecutionTimelineEntry) => void
   clearExecutionTimeline: () => void
   executionTimelineTerminalMarkers: Record<string, ExecutionTimelineEntry["status"]>
@@ -125,7 +132,37 @@ interface ChatStore {
   removeAttachment: (id: string) => void
 }
 
+export type SessionViewState = Pick<ChatStore,
+  | "messages" | "steps" | "toolCalls" | "pendingApprovals" | "thinking"
+  | "executionTimeline" | "executionTimelineTerminalMarkers" | "runTimelineEvents"
+  | "orchestrationTasks" | "orchestrationPlans" | "orchestrationSnapshots"
+  | "agentStatus" | "error" | "errorDetail" | "attachments"
+>
+
 export const useChatStore = create<ChatStore>((set) => ({
+  sessionViewCache: {},
+  sessionHistoryLoaded: {},
+  sessionEventCursors: {},
+  setSessionHistoryLoaded: (sessionId, loaded) => set((state) => ({
+    sessionHistoryLoaded: { ...state.sessionHistoryLoaded, [sessionId]: loaded },
+  })),
+  setSessionEventCursor: (sessionId, cursor) => set((state) => {
+    // 快照水位只负责建立首次订阅基线；后续历史或分页响应不能越过已经开始的 SSE。
+    if (state.sessionEventCursors[sessionId] !== undefined) return {}
+    return {
+      sessionEventCursors: {
+        ...state.sessionEventCursors,
+        [sessionId]: Math.max(0, cursor),
+      },
+    }
+  }),
+  clearAllSessionCaches: () => set({
+    sessionViewCache: {},
+    sessionHistoryLoaded: {},
+    sessionEventCursors: {},
+    sessionRunStatuses: {},
+    sessionRunStatusRevisions: {},
+  }),
   // 连接状态
   connectionStatus: "disconnected",
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -143,9 +180,26 @@ export const useChatStore = create<ChatStore>((set) => ({
     }),
   setSessions: (sessions) => set({ sessions }),
   removeSession: (sessionId) =>
-    set((state) => ({
-      sessions: state.sessions.filter((s) => s.id !== sessionId),
-    })),
+    set((state) => {
+      const sessionViewCache = { ...state.sessionViewCache }
+      const sessionHistoryLoaded = { ...state.sessionHistoryLoaded }
+      const sessionEventCursors = { ...state.sessionEventCursors }
+      const sessionRunStatuses = { ...state.sessionRunStatuses }
+      const sessionRunStatusRevisions = { ...state.sessionRunStatusRevisions }
+      delete sessionViewCache[sessionId]
+      delete sessionHistoryLoaded[sessionId]
+      delete sessionEventCursors[sessionId]
+      delete sessionRunStatuses[sessionId]
+      delete sessionRunStatusRevisions[sessionId]
+      return {
+        sessions: state.sessions.filter((s) => s.id !== sessionId),
+        sessionViewCache,
+        sessionHistoryLoaded,
+        sessionEventCursors,
+        sessionRunStatuses,
+        sessionRunStatusRevisions,
+      }
+    }),
   updateSession: (sessionId, updates) =>
     set((state) => ({
       sessions: state.sessions.map((s) =>
@@ -192,7 +246,40 @@ export const useChatStore = create<ChatStore>((set) => ({
 
   // 活跃会话
   activeSessionId: null,
-  setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
+  setActiveSession: (sessionId) => set((state) => {
+    const sessionViewCache = { ...state.sessionViewCache }
+    if (state.activeSessionId && state.sessions.some((item) => item.id === state.activeSessionId)) {
+      sessionViewCache[state.activeSessionId] = {
+        messages: state.messages,
+        steps: state.steps,
+        toolCalls: state.toolCalls,
+        pendingApprovals: state.pendingApprovals,
+        thinking: state.thinking,
+        executionTimeline: state.executionTimeline,
+        executionTimelineTerminalMarkers: state.executionTimelineTerminalMarkers,
+        runTimelineEvents: state.runTimelineEvents,
+        orchestrationTasks: state.orchestrationTasks,
+        orchestrationPlans: state.orchestrationPlans,
+        orchestrationSnapshots: state.orchestrationSnapshots,
+        agentStatus: state.agentStatus,
+        error: state.error,
+        errorDetail: state.errorDetail,
+        attachments: state.attachments,
+      }
+    }
+    const cached = sessionId ? sessionViewCache[sessionId] : undefined
+    return {
+      activeSessionId: sessionId,
+      sessionViewCache,
+      ...{
+        messages: [], steps: [], toolCalls: [], pendingApprovals: [], thinking: null,
+        executionTimeline: [], executionTimelineTerminalMarkers: {}, runTimelineEvents: [],
+        orchestrationTasks: [], orchestrationPlans: [], orchestrationSnapshots: {},
+        agentStatus: "idle", error: null, errorDetail: null, attachments: [],
+      },
+      ...(cached ?? {}),
+    }
+  }),
 
   // 当前视图：优先从 localStorage 恢复，默认 "chat"
   activeView: ((): AppView => {
@@ -318,6 +405,28 @@ export const useChatStore = create<ChatStore>((set) => ({
         ),
       }
     }),
+  replaceRunExecutionTimeline: (runId, entries) => set((state) => {
+    let executionTimeline = state.executionTimeline
+    const existingSequences = new Set(
+      executionTimeline
+        .filter((item) => item.run_id === runId && item.session_seq !== undefined)
+        .map((item) => item.session_seq),
+    )
+    for (const entry of entries.filter((item) => item.run_id === runId)) {
+      if (entry.session_seq !== undefined) {
+        if (existingSequences.has(entry.session_seq)) continue
+        existingSequences.add(entry.session_seq)
+      }
+      executionTimeline = upsertTimelineEntry(
+        executionTimeline,
+        state.executionTimelineTerminalMarkers,
+        entry,
+      )
+    }
+    return executionTimeline === state.executionTimeline
+      ? {}
+      : { executionTimeline }
+  }),
   closeExecutionTimelineEntry: (entry) =>
     set((state) => {
       const result = closeTimelineEntry(

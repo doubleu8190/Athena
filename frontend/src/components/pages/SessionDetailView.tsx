@@ -12,6 +12,7 @@ import {
   Brain,
 } from "lucide-react"
 import { apiClient } from "../../api/client"
+import { historyMessages } from "../../utils/sessionHistory"
 import type {
   Project,
   Message,
@@ -51,8 +52,15 @@ function SessionDetailView() {
         apiClient.getMessages(sessionId),
         apiClient.listSessionRuns(sessionId),
       ])
+      const allTurns = [...msgs.items]
+      let cursor = msgs.next_cursor
+      while (cursor) {
+        const page = await apiClient.getMessages(sessionId, 100, undefined, cursor)
+        allTurns.push(...page.items)
+        cursor = page.next_cursor
+      }
       setSession(s)
-      setMessages(msgs)
+      setMessages(historyMessages(allTurns, sessionId))
       setRuns(runList)
       try {
         const [settings, projects] = await Promise.all([

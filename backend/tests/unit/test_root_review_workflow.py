@@ -19,7 +19,7 @@ class Agent:
         self.decision = decision
         self.inputs = []
 
-    async def redecide(self, inputs):
+    async def decide(self, inputs):
         self.inputs.append(inputs)
         return self.decision
 
@@ -78,7 +78,7 @@ def _workflow(agent):
 
 
 @pytest.mark.asyncio
-async def test_root_redecides_from_typed_completed_plan_facts() -> None:
+async def test_root_decides_from_typed_completed_plan_facts() -> None:
     agent = Agent(
         PlanIntent(
             action="plan",
@@ -87,7 +87,7 @@ async def test_root_redecides_from_typed_completed_plan_facts() -> None:
         )
     )
 
-    result = await _workflow(agent).redecide_root_action(_state())
+    result = await _workflow(agent).decide_root_action(_state())
 
     assert result["root_decision"]["action"] == "plan"
     assert agent.inputs[0].completed_plans[0].tasks[0].error == {
@@ -96,7 +96,7 @@ async def test_root_redecides_from_typed_completed_plan_facts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_root_redecision_can_finish_after_partial_failure() -> None:
+async def test_root_decision_can_finish_after_partial_failure() -> None:
     agent = Agent(
         AnswerIntent(
             action="answer",
@@ -105,7 +105,7 @@ async def test_root_redecision_can_finish_after_partial_failure() -> None:
         )
     )
 
-    result = await _workflow(agent).redecide_root_action(_state())
+    result = await _workflow(agent).decide_root_action(_state())
 
     assert result["root_decision"]["action"] == "answer"
     assert result["answer_input"]["source"] == "decision"

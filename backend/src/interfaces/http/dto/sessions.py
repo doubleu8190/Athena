@@ -11,6 +11,12 @@ from application.sessions.responses import (
     RunSummaryResponse as ApplicationRunSummaryResponse,
     SessionResponse as ApplicationSessionResponse,
 )
+from application.common.responses import (
+    HistoryContentResponse as ApplicationHistoryContentResponse,
+    HistoryTaskResponse as ApplicationHistoryTaskResponse,
+    HistoryTurnResponse as ApplicationHistoryTurnResponse,
+    SessionMessageHistoryResponse as ApplicationSessionMessageHistoryResponse,
+)
 
 
 class CreateSessionRequest(BaseModel):
@@ -112,6 +118,67 @@ class MessageResponse(BaseModel):
                 )
                 for item in message.attachments
             ],
+        )
+
+
+class HistoryContentResponse(BaseModel):
+    time: datetime
+    content: str
+    id: str | None = None
+    session_seq: int | None = None
+
+
+class HistoryTaskResponse(BaseModel):
+    time: datetime
+    process: list[HistoryContentResponse]
+    content: str | None = None
+    session_seq: int | None = None
+
+
+class HistoryTurnResponse(BaseModel):
+    run_id: str
+    user: HistoryContentResponse
+    root_process: list[HistoryContentResponse]
+    tasks: list[HistoryTaskResponse]
+    assistant: HistoryContentResponse | None
+
+
+class SessionMessageHistoryResponse(BaseModel):
+    items: list[HistoryTurnResponse]
+    next_cursor: str | None
+    snapshot_event_seq: int
+
+    @classmethod
+    def from_application(cls, history: ApplicationSessionMessageHistoryResponse) -> "SessionMessageHistoryResponse":
+        def content(value: ApplicationHistoryContentResponse) -> HistoryContentResponse:
+            return HistoryContentResponse(
+                time=value.time,
+                content=value.content,
+                id=value.id,
+                session_seq=value.session_seq,
+            )
+
+        return cls(
+            items=[
+                HistoryTurnResponse(
+                    run_id=turn.run_id,
+                    user=content(turn.user),
+                    root_process=[content(item) for item in turn.root_process],
+                    tasks=[
+                        HistoryTaskResponse(
+                            time=task.time,
+                            process=[content(item) for item in task.process],
+                            content=task.content,
+                            session_seq=task.session_seq,
+                        )
+                        for task in turn.tasks
+                    ],
+                    assistant=content(turn.assistant) if turn.assistant else None,
+                )
+                for turn in history.items
+            ],
+            next_cursor=history.next_cursor,
+            snapshot_event_seq=history.snapshot_event_seq,
         )
 
 

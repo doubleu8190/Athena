@@ -1,6 +1,16 @@
 import { useEffect, useRef } from "react"
-import { useChatStore } from "../store/chatStore"
-import { workerResultText } from "../utils/executionTimeline.ts"
+import { useChatStore, type SessionViewState } from "../store/chatStore"
+import { closeTimelineEntry, workerResultText } from "../utils/executionTimeline.ts"
+import {
+  backgroundSessionCanRelease,
+  cacheBackgroundLlmStep,
+  cacheSessionTimelineProjection,
+  hasCompletedAssistant,
+  projectLlmValidationFailureTimeline,
+  sessionEventResumeCursor,
+  sessionEventStreamUrl,
+} from "../utils/sessionHistory.ts"
+import { SESSION_EVENT_NAMES } from "../utils/sessionEventCatalog.ts"
 import { apiClient } from "../api/client"
 import type { ApplicationEventEnvelope, ExecutionError } from "../types/events"
 import type { ExecutionTimelineEntry, Message, ToolCall, OrchestrationPlan, OrchestrationTask, RunTimelineEvent } from "../types"
@@ -19,6 +29,156 @@ interface StreamProjection {
   startedSeq?: number
   startedAt?: string
   repairAttempts: number
+}
+
+const processedSessionCursors = new Map<string, number>()
+const backgroundReceivedCursors = new Map<string, number>()
+type BackgroundStreamState = { content: string; nextChunkId: number; pending: Map<number, string>; status: Message["stream_status"] }
+const backgroundSessionStreams = new Map<string, Map<string, BackgroundStreamState>>()
+
+export function clearSessionEventCache(sessionId: string): void {
+  processedSessionCursors.delete(sessionId)
+  backgroundReceivedCursors.delete(sessionId)
+  backgroundSessionStreams.delete(sessionId)
+}
+
+function cacheBackgroundEvent(sessionId: string, envelope: ApplicationEventEnvelope): void {
+  const runId = envelope.run_id || ""
+  const type = envelope.event_type || ""
+  const payload = envelope.payload || {}
+  const timestamp = envelope.occurred_at || new Date().toISOString()
+  const store = useChatStore.getState()
+  const previous = store.sessionViewCache[sessionId] || {}
+  const runStatus = store.sessionRunStatuses[sessionId]?.[runId]
+  const next: Partial<SessionViewState> = { ...previous }
+
+  const timeline = projectTimelineEvent({
+    type,
+    data: payload,
+    envelope,
+    runId,
+    timestamp,
+  })
+  Object.assign(
+    next,
+    cacheSessionTimelineProjection(previous, envelope, timeline),
+  )
+  const cachedSteps = cacheBackgroundLlmStep(previous.steps, sessionId, envelope)
+  if (cachedSteps) next.steps = cachedSteps
+  if (timeline) {
+    const markers = previous.executionTimelineTerminalMarkers || {}
+    let projectedEntries = next.executionTimeline || previous.executionTimeline || []
+    const terminalTaskEvents = ["task.completed", "task.failed", "task.cancelled", "task.cancelling", "task.retrying"]
+    if (terminalTaskEvents.includes(type)) {
+      const started = projectTimelineEvent({ type: "task.started", data: payload, envelope, runId, timestamp })
+      if (started) {
+        const closed = closeTimelineEntry(projectedEntries, markers, { ...started, status: timeline.status })
+        projectedEntries = closed.entries
+        next.executionTimelineTerminalMarkers = closed.terminalMarkers
+      }
+    }
+    next.executionTimeline = projectedEntries
+  }
+
+  if (type === "thinking.started" || type === "thinking.summary") {
+    next.thinking = { active: true, content: String(payload.content || ""), messageId: envelope.stream_id || null }
+  } else if (type === "thinking.completed") {
+    next.thinking = null
+  }
+  if (type === "approval.required") {
+    const approvalId = typeof payload.approval_id === "string" ? payload.approval_id : ""
+    if (approvalId) {
+      const approvals = [...(previous.pendingApprovals || [])]
+      const request = {
+        approval_id: approvalId,
+        tool_name: typeof payload.tool_name === "string" ? payload.tool_name : "tool",
+        arguments: payload.arguments && typeof payload.arguments === "object" ? payload.arguments as Record<string, unknown> : {},
+        risk_level: (typeof payload.risk_level === "string" ? payload.risk_level : "low") as "low" | "medium" | "high" | "critical",
+        session_id: sessionId,
+        run_id: runId || undefined,
+        plan_id: typeof payload.plan_id === "string" ? payload.plan_id : undefined,
+        task_id: typeof payload.task_id === "string" ? payload.task_id : undefined,
+        task_title: typeof payload.task_title === "string" ? payload.task_title : undefined,
+        worker_run_id: typeof payload.worker_run_id === "string" ? payload.worker_run_id : undefined,
+      }
+      next.pendingApprovals = approvals.some((item) => item.approval_id === approvalId)
+        ? approvals.map((item) => item.approval_id === approvalId ? { ...item, ...request } : item)
+        : [...approvals, request]
+    }
+  } else if (type === "approval.resolved" && typeof payload.approval_id === "string") {
+    next.pendingApprovals = (previous.pendingApprovals || []).filter((item) => item.approval_id !== payload.approval_id)
+  }
+
+  if (["message.started", "message.delta", "message.completed", "stream.snapshot"].includes(type) && runId) {
+    const messages = [...(previous.messages || [])]
+    const messageId = envelope.message_id || String(payload.message_id || `assistant:${runId}`)
+    const existingIndex = messages.findIndex((message) => message.id === messageId || message.run_id === runId && message.role === "assistant")
+    const existing = existingIndex >= 0 ? messages[existingIndex] : undefined
+    if (existing?.stream_status === "completed") return
+    if (["completed", "failed", "cancelled"].includes(String(runStatus))
+      && ["message.started", "message.delta", "stream.snapshot"].includes(type)) return
+    const streamId = envelope.stream_id || `answer-${runId}`
+    let sessionStreams = backgroundSessionStreams.get(sessionId)
+    if (!sessionStreams) {
+      sessionStreams = new Map()
+      backgroundSessionStreams.set(sessionId, sessionStreams)
+    }
+    const stream = sessionStreams.get(streamId) || {
+      content: existing?.content || "",
+      nextChunkId: (existing?.last_chunk_id || 0) + 1,
+      pending: new Map<number, string>(),
+      status: existing?.stream_status || "streaming",
+    }
+    const finalContent = typeof payload.content === "string" ? payload.content : undefined
+    if (type === "message.delta") {
+      const delta = typeof payload.delta === "string" ? payload.delta : typeof payload.token === "string" ? payload.token : ""
+      const chunkId = envelope.chunk_id ?? Number(payload.chunk_id || 0)
+      if (delta && chunkId > 0) {
+        stream.pending.set(chunkId, delta)
+        while (stream.pending.has(stream.nextChunkId)) {
+          stream.content += stream.pending.get(stream.nextChunkId) || ""
+          stream.pending.delete(stream.nextChunkId)
+          stream.nextChunkId += 1
+        }
+      } else if (delta) stream.content += delta
+      stream.status = "streaming"
+    } else if (type === "stream.snapshot") {
+      stream.content = String(payload.content || "")
+      stream.nextChunkId = Number(payload.last_chunk_id || 0) + 1
+      stream.pending.clear()
+      stream.status = payload.status === "completed" ? "completed" : "streaming"
+    } else if (type === "message.completed") {
+      stream.content = finalContent ?? stream.content
+      stream.status = "completed"
+    } else {
+      stream.status = "streaming"
+    }
+    sessionStreams.set(streamId, stream)
+    const content = stream.content
+    const message: Message = {
+      id: messageId,
+      role: "assistant",
+      content,
+      timestamp: String(payload.started_at || timestamp),
+      session_id: sessionId,
+      run_id: runId,
+      stream_id: envelope.stream_id || undefined,
+      stream_status: stream.status,
+      last_chunk_id: stream.nextChunkId - 1,
+    }
+    if (existingIndex >= 0) messages[existingIndex] = { ...existing, ...message }
+    else messages.push(message)
+    next.messages = messages
+  }
+
+  useChatStore.setState((state) => ({
+    sessionViewCache: {
+      ...state.sessionViewCache,
+      [sessionId]: { ...state.sessionViewCache[sessionId], ...next },
+    },
+  }))
+  const status = runStatusFromEvent(type)
+  if (runId && status) store.setSessionRunStatus(sessionId, runId, status)
 }
 
 function applyPendingChunks(stream: StreamProjection) {
@@ -42,39 +202,47 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
     addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval,
     updateSession,
     setSessionRunStatus, replaceSessionRunStatuses,
+    setSessionEventCursor, setSteps,
     clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail,
-    upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans,
-    beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots,
-    upsertExecutionTimelineEntry, closeExecutionTimelineEntry, clearExecutionTimeline,
-    appendRunTimelineEvent, clearRunTimelineEvents,
+    upsertOrchestrationTask, upsertOrchestrationPlan,
+    beginOrchestrationSnapshotRequest, setOrchestrationSnapshot,
+    upsertExecutionTimelineEntry, closeExecutionTimelineEntry,
+    appendRunTimelineEvent,
   } = useChatStore()
 
   useEffect(() => {
     let disposed = false
-    const finalConfirmations = new Map<string, { controller: AbortController; timer: ReturnType<typeof setTimeout> }>()
-    const confirmationAttempts = new Set<string>()
     sourceRef.current?.close()
     sourceRef.current = null
-    lastSeqRef.current = 0
+    lastSeqRef.current = sessionId
+      ? sessionEventResumeCursor(
+        undefined,
+        processedSessionCursors.get(sessionId) || 0,
+        backgroundReceivedCursors.get(sessionId) || 0,
+      )
+      : 0
     streamsRef.current.clear()
-    clearSteps()
-    clearToolCalls()
-    clearApprovals()
-    clearThinking()
-    clearErrorDetail()
-    clearOrchestrationTasks()
-    clearOrchestrationPlans()
-    clearOrchestrationSnapshots()
-    clearExecutionTimeline()
-    clearRunTimelineEvents()
-    if (!sessionId) {
+    let historyEventCursor: number | undefined
+    if (sessionId) {
+      historyEventCursor = useChatStore.getState().sessionEventCursors[sessionId]
+      for (const message of useChatStore.getState().messages) {
+        if (message.role !== "assistant" || !message.run_id || !message.stream_id || message.stream_status !== "streaming") continue
+        streamsRef.current.set(message.stream_id, {
+          content: message.content,
+          status: "streaming",
+          nextChunkId: (message.last_chunk_id || 0) + 1,
+          finalChunkId: null,
+          pending: new Map<number, string>(),
+          snapshotVersion: 0,
+          repairAttempts: 0,
+        })
+      }
+    } else {
       setConnectionStatus("disconnected")
       return
     }
 
-    const url = `${apiBase.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/events`
-    let currentSource = new EventSource(url, { withCredentials: true })
-    sourceRef.current = currentSource
+    let currentSource: EventSource | null = null
     let connectionGeneration = 0
     let recoveryTarget: string | null = null
     let recoveryUntil = 0
@@ -149,13 +317,13 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         // Keep event-derived state while the status query is temporarily unavailable.
       }
     }
-    currentSource.onopen = () => {
+    const onOpen = () => {
       if (!shouldHandleStreamCallback(disposed, 0, connectionGeneration)) return
       setConnectionStatus("connected")
       syncPendingApprovals()
       void syncRunLifecycle()
     }
-    currentSource.onerror = () => {
+    const onError = () => {
       if (!shouldHandleStreamCallback(disposed, 0, connectionGeneration)) return
       setConnectionStatus("error")
     }
@@ -181,7 +349,8 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         removeMessage(existingByRun.id)
       }
       if (existing) {
-        // 持久历史是成功正文；started/delta 重放不能清空或覆盖它。
+        // 完成态是单调终态，旧 started/delta/snapshot 不能覆盖已落库正文。
+        if (existing.stream_status === "completed") return
         if (!existing.stream_status && streamStatus !== "completed") return
         // Replayed events can repair a timestamp previously set to receipt time.
         // Later chunks must not move the message's original event time forward.
@@ -202,45 +371,6 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       } as Message)
     }
 
-    const confirmFinalMessage = (runId: string) => {
-      const messageId = `assistant:${runId}`
-      if (confirmationAttempts.has(messageId)) return
-      const existing = useChatStore.getState().messages.find((item) => item.id === messageId || item.run_id === runId && item.role === "assistant")
-      if (existing?.stream_status === "completed" || (existing && !existing.stream_status)) return
-      confirmationAttempts.add(messageId)
-      if (existing) updateMessage(existing.id, { stream_status: "finalizing" })
-      const controller = new AbortController()
-      const timer = setTimeout(() => {
-        controller.abort()
-        finalConfirmations.delete(messageId)
-        const current = useChatStore.getState().messages.find((item) => item.id === messageId)
-        if (current?.stream_status === "finalizing") updateMessage(current.id, { stream_status: "unconfirmed" })
-      }, 10_000)
-      finalConfirmations.set(messageId, { controller, timer })
-      void apiClient.getMessages(sessionId, undefined, controller.signal).then((history) => {
-        const currentConfirmation = finalConfirmations.get(messageId)
-        if (disposed || currentConfirmation?.controller !== controller || controller.signal.aborted) return
-        const message = history.find((item) => item.id === messageId)
-        if (message) {
-          clearTimeout(timer)
-          finalConfirmations.delete(messageId)
-          const current = useChatStore.getState().messages.find((item) => item.id === messageId)
-          if (current?.stream_status === "completed") return
-          upsertAssistant(runId, message.content, message.timestamp, current?.stream_id, messageId, "completed", current?.last_chunk_id)
-        } else {
-          clearTimeout(timer)
-          finalConfirmations.delete(messageId)
-          const current = useChatStore.getState().messages.find((item) => item.id === messageId)
-          if (current?.stream_status === "finalizing") updateMessage(current.id, { stream_status: "unconfirmed" })
-        }
-      }).catch(() => {
-        if (controller.signal.aborted) return
-        clearTimeout(timer)
-        finalConfirmations.delete(messageId)
-        const current = useChatStore.getState().messages.find((item) => item.id === messageId)
-        if (current?.stream_status === "finalizing") updateMessage(current.id, { stream_status: "unconfirmed" })
-      })
-    }
     const closeRunStreams = (runId: string, status: "paused" | "failed" | "cancelled") => {
       for (const [streamId, stream] of streamsRef.current) {
         const message = useChatStore.getState().messages.find((item) => item.stream_id === streamId || item.run_id === runId && item.role === "assistant")
@@ -261,12 +391,17 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
         if (typeof sequence === "number") {
           if (sequence <= lastSeqRef.current) return
           lastSeqRef.current = sequence
+          processedSessionCursors.set(sessionId, sequence)
+          backgroundReceivedCursors.set(sessionId, Math.max(backgroundReceivedCursors.get(sessionId) || 0, sequence))
         }
         const occurredAt = envelope.occurred_at || new Date().toISOString()
         const runId = envelope.run_id || String(data.run_id || "")
         if (type.startsWith("run.")) lifecycleRevision += 1
         const incomingRunStatus = runStatusFromEvent(type)
         if (runId && incomingRunStatus && !canApplyRunStatusEvent(useChatStore.getState().sessionRunStatuses[sessionId]?.[runId], incomingRunStatus)) return
+        const currentRunStatus = runId ? useChatStore.getState().sessionRunStatuses[sessionId]?.[runId] : undefined
+        if (runId && ["completed", "failed", "cancelled"].includes(String(currentRunStatus))
+          && ["message.started", "message.delta", "stream.snapshot"].includes(type)) return
         if (runId && (type.startsWith("plan.") || type.startsWith("task.") || type.startsWith("approval.") || type.startsWith("run."))) {
           refreshOrchestrationSnapshot(runId)
         }
@@ -439,8 +574,6 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           )
           const messageId = envelope.message_id || String(data.message_id || `assistant:${runId}`)
           upsertAssistant(runId, finalContent, String(data.started_at || occurredAt), streamId, messageId, "completed", finalChunkId)
-          const pending = finalConfirmations.get(messageId)
-          if (pending) { clearTimeout(pending.timer); pending.controller.abort(); finalConfirmations.delete(messageId) }
         } else if (type === "thinking.started" || type === "thinking.summary") {
           setThinking({ active: true, content: String(data.content || ""), messageId: streamId || null })
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("thinking")
@@ -543,20 +676,27 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
             blocked_by: stringArray(data.blocked_by),
             approval_batch_id: text(data.approval_batch_id) || null,
             error: text(data.error) || errorDetail?.message || undefined,
-            error_detail: errorDetail || null,
             session_seq: sequence,
             transition_id: envelope.transition_id,
             metadata: { ...data },
           })
         }
+        if (
+          type === "llm.started"
+          || type === "llm.completed"
+          || type === "llm.validation_failed"
+        ) {
+          const updatedSteps = cacheBackgroundLlmStep(
+            useChatStore.getState().steps,
+            sessionId,
+            envelope,
+          )
+          if (updatedSteps) setSteps(updatedSteps)
+        }
         if (type === "llm.started") {
-          const stepId = String(data.call_id || crypto.randomUUID())
-          addStep({ id: stepId, session_id: sessionId, run_id: runId, parent_run_id: envelope.parent_run_id || text(data.parent_run_id) || null, step_number: useChatStore.getState().steps.length + 1, step_type: "llm_call", status: "running", started_at: occurredAt, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
           if (useChatStore.getState().agentStatus !== "cancelling") setAgentStatus("thinking")
-        } else if (type === "llm.completed") {
-          const stepId = String(data.call_id || "")
-          if (stepId) updateStep(stepId, { status: data.status === "failed" ? "failed" : "completed", completed_at: occurredAt, duration_ms: Number(data.duration_ms || 0), error_message: data.error ? String(data.error) : null, error_detail: errorDetail || null })
-        } else if (type === "tool.started") {
+        }
+        if (type === "tool.started") {
           const toolId = String(data.tool_call_id || crypto.randomUUID())
           const stepId = String(data.call_id || crypto.randomUUID())
           addStep({ id: stepId, session_id: sessionId, run_id: runId, parent_run_id: envelope.parent_run_id || text(data.parent_run_id) || null, step_number: useChatStore.getState().steps.length + 1, step_type: "tool_execution", status: "running", started_at: occurredAt, duration_ms: 0, llm_input_tokens: 0, llm_output_tokens: 0 })
@@ -655,37 +795,19 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
           setAgentStatus(projected.agentStatus)
           updateSession(sessionId, { active_run_id: projected.activeRunId })
           clearThinking()
-          if (runId) confirmFinalMessage(runId)
         }
       } catch { /* 单条事件格式错误不应中断 EventSource。 */ }
     }
 
-    const eventNames = [
-      "run.queued", "run.started", "run.resumed", "run.stopping", "run.failed", "run.cancelled", "run.completed", "run.budget_exceeded", "run.root_suspended",
-      "node.started", "node.completed", "node.failed",
-      "retrieval.started", "retrieval.completed", "retrieval.failed",
-      "retrieval.provider.started", "retrieval.provider.completed", "retrieval.provider.failed",
-      "retrieval.selection.completed",
-      "llm.started", "llm.completed", "tool.started", "tool.completed",
-      "approval.required", "approval.resolved",
-      "message.started", "message.persisted", "message.completed", "message.delta", "stream.snapshot",
-      "thinking.started", "thinking.summary", "thinking.completed",
-      "plan.accepted", "plan.created", "plan.cancelling", "plan.revised", "plan.completed", "plan.failed", "plan.cancelled",
-      "round.started", "round.completed",
-      "task.queued", "task.started", "task.retrying", "task.cancelling", "task.waiting_approval", "task.completed", "task.failed", "task.cancelled",
-      "synthesis.started", "synthesis.completed",
-      "agent.waiting_for_files", "attachment_updated",
-      "file_processing_started", "file_processing_completed", "file_processing_failed",
-    ]
     const attachListeners = (target: EventSource, generation: number) => {
-      eventNames.forEach((name) => target.addEventListener(name, (event) => parse(event as MessageEvent, generation)))
+      SESSION_EVENT_NAMES.forEach((name) => target.addEventListener(name, (event) => parse(event as MessageEvent, generation)))
     }
     const connect = (after?: number, targetStream?: string) => {
-      currentSource.close()
+      currentSource?.close()
       connectionGeneration += 1
       const generation = connectionGeneration
       recoveryTarget = targetStream || null
-      const targetUrl = after == null ? url : `${url}?after=${after}`
+      const targetUrl = sessionEventStreamUrl(apiBase, sessionId, after)
       currentSource = new EventSource(targetUrl, { withCredentials: true })
       sourceRef.current = currentSource
       currentSource.onopen = () => {
@@ -711,26 +833,187 @@ export function useSessionEventStream(sessionId: string | null, apiBase: string)
       stream.status = "streaming"
       streamsRef.current.set(streamId, stream)
       lastSeqRef.current = replayFrom
+      processedSessionCursors.set(sessionId, replayFrom)
+      backgroundReceivedCursors.set(sessionId, replayFrom)
       upsertAssistant(runId, "", stream.startedAt || new Date().toISOString(), streamId, `assistant:${runId}`, "streaming", 0)
       recoveryUntil = priorCursor
       connect(replayFrom, streamId)
     }
-    attachListeners(currentSource, connectionGeneration)
+    const openInitialSource = async (knownEventCursor: number | undefined) => {
+      let eventCursor = knownEventCursor
+      if (eventCursor === undefined) {
+        try {
+          const history = await apiClient.getMessages(sessionId, 1)
+          if (disposed) return
+          eventCursor = history.snapshot_event_seq
+          setSessionEventCursor(sessionId, eventCursor)
+        } catch {
+          if (!disposed) setConnectionStatus("error")
+          return
+        }
+      }
+      lastSeqRef.current = sessionEventResumeCursor(
+        eventCursor,
+        processedSessionCursors.get(sessionId) || 0,
+        backgroundReceivedCursors.get(sessionId) || 0,
+      )
+      const initialUrl = sessionEventStreamUrl(
+        apiBase,
+        sessionId,
+        lastSeqRef.current,
+      )
+      try {
+        // 先取得终态 Run 快照，再建立可能从零重放的 SSE，避免旧 Run 事件复活 UI。
+        const runs = await apiClient.listSessionRuns(sessionId)
+        if (disposed) return
+        const statuses = preserveTerminalRunStatuses(
+          useChatStore.getState().sessionRunStatuses[sessionId] || {},
+          Object.fromEntries(runs.map((run) => [run.run_id, run.status])),
+        )
+        replaceSessionRunStatuses(sessionId, statuses)
+      } catch {
+        // 状态查询不可用时仍订阅事件，依赖事件自身的单调终态保护。
+      }
+      if (disposed) return
+      currentSource = new EventSource(initialUrl, { withCredentials: true })
+      sourceRef.current = currentSource
+      currentSource.onopen = onOpen
+      currentSource.onerror = onError
+      attachListeners(currentSource, connectionGeneration)
+    }
+    void openInitialSource(historyEventCursor)
     return () => {
       disposed = true
-      currentSource.close()
+      currentSource?.close()
       for (const timer of orchestrationRefreshTimers.values()) clearTimeout(timer)
       orchestrationRefreshTimers.clear()
-      for (const pending of finalConfirmations.values()) {
-        clearTimeout(pending.timer)
-        pending.controller.abort()
-      }
-      finalConfirmations.clear()
       if (sourceRef.current === currentSource) sourceRef.current = null
     }
-  }, [sessionId, apiBase, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, setSessionRunStatus, replaceSessionRunStatuses, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, clearOrchestrationTasks, upsertOrchestrationPlan, clearOrchestrationPlans, beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, clearOrchestrationSnapshots, upsertExecutionTimelineEntry, closeExecutionTimelineEntry, clearExecutionTimeline, appendRunTimelineEvent, clearRunTimelineEvents])
+  }, [sessionId, apiBase, setSessionEventCursor, setSteps, setConnectionStatus, setAgentStatus, addMessage, updateMessage, removeMessage, addStep, updateStep, addToolCall, updateToolCall, addApproval, mergeApprovals, resolveApproval, updateSession, setSessionRunStatus, replaceSessionRunStatuses, clearSteps, clearToolCalls, clearApprovals, clearThinking, setThinking, setError, setErrorDetail, clearErrorDetail, setAttachments, upsertOrchestrationTask, upsertOrchestrationPlan, beginOrchestrationSnapshotRequest, setOrchestrationSnapshot, upsertExecutionTimelineEntry, closeExecutionTimelineEntry, appendRunTimelineEvent])
 
   return sourceRef
+}
+
+/** 后台接收不活跃会话的 SSE，缓存事件供主订阅增量应用。 */
+export function useBackgroundSessionEventStream(sessionId: string | null, apiBase: string) {
+  useEffect(() => {
+    if (!sessionId) return
+    let source: EventSource | null = null
+    let listeners: Array<readonly [string, (event: Event) => void]> = []
+    let disposed = false
+    const terminalTimers = new Set<ReturnType<typeof setTimeout>>()
+    const releaseBackgroundSession = () => {
+      void apiClient.listSessionRuns(sessionId).then((runs) => {
+        if (disposed) return
+        const active = runs.find((run) =>
+          ["queued", "running", "stopping"].includes(run.status)
+        )
+        useChatStore.getState().updateSession(sessionId, {
+          active_run_id: active?.run_id ?? null,
+        })
+      }).catch(() => undefined)
+    }
+    const maybeReleaseCompletedRun = (runId: string) => {
+      const state = useChatStore.getState()
+      const status = state.sessionRunStatuses[sessionId]?.[runId]
+      const hasFinalAnswer = hasCompletedAssistant(
+        state.sessionViewCache[sessionId]?.messages,
+        runId,
+      )
+      if (!backgroundSessionCanRelease(status, hasFinalAnswer)) return
+      const timer = setTimeout(() => {
+        terminalTimers.delete(timer)
+        releaseBackgroundSession()
+      }, 0)
+      terminalTimers.add(timer)
+    }
+    const connect = async () => {
+      let baseline = sessionEventResumeCursor(
+        undefined,
+        processedSessionCursors.get(sessionId) || 0,
+        backgroundReceivedCursors.get(sessionId) || 0,
+      )
+      const knownBaseline = useChatStore.getState().sessionEventCursors[sessionId]
+      if (knownBaseline === undefined) {
+        try {
+          const history = await apiClient.getMessages(sessionId, 1)
+          if (disposed) return
+          baseline = sessionEventResumeCursor(
+            history.snapshot_event_seq,
+            baseline,
+          )
+          useChatStore.getState().setSessionEventCursor(
+            sessionId,
+            history.snapshot_event_seq,
+          )
+        } catch {
+          return
+        }
+      } else {
+        baseline = sessionEventResumeCursor(knownBaseline, baseline)
+      }
+      try {
+        const runs = await apiClient.listSessionRuns(sessionId)
+        if (disposed) return
+        const statuses = preserveTerminalRunStatuses(
+          useChatStore.getState().sessionRunStatuses[sessionId] || {},
+          Object.fromEntries(runs.map((run) => [run.run_id, run.status])),
+        )
+        useChatStore.getState().replaceSessionRunStatuses(sessionId, statuses)
+      } catch {
+        // 保持已有状态并继续监听；SSE 事件仍会逐步补全 Run 状态。
+      }
+      if (disposed) return
+      source = new EventSource(
+        sessionEventStreamUrl(apiBase, sessionId, baseline),
+        { withCredentials: true },
+      )
+      const connectedSource = source
+      listeners = SESSION_EVENT_NAMES.map((name) => {
+      const listener = (event: Event) => {
+        const data = (event as MessageEvent<string>).data
+        if (typeof data !== "string") return
+        try {
+          const envelope = JSON.parse(data) as ApplicationEventEnvelope
+          if (typeof envelope.session_seq === "number" && envelope.session_seq <= (backgroundReceivedCursors.get(sessionId) || 0)) return
+          cacheBackgroundEvent(sessionId, envelope)
+          if (typeof envelope.session_seq === "number") {
+            backgroundReceivedCursors.set(sessionId, Math.max(backgroundReceivedCursors.get(sessionId) || 0, envelope.session_seq))
+          }
+          const runId = envelope.run_id || ""
+          const status = runStatusFromEvent(envelope.event_type || "")
+          if (runId && status) {
+            const state = useChatStore.getState()
+            const projected = summarizeSessionRuns(state.sessionRunStatuses[sessionId] || {})
+            useChatStore.setState((current) => ({
+              sessionViewCache: {
+                ...current.sessionViewCache,
+                [sessionId]: { ...current.sessionViewCache[sessionId], agentStatus: projected.agentStatus },
+              },
+            }))
+            maybeReleaseCompletedRun(runId)
+          }
+          if (envelope.event_type === "message.completed" && runId) {
+            maybeReleaseCompletedRun(runId)
+          }
+        } catch {
+          // 无法解析的后台事件留给重连时服务端重放，避免污染会话缓存。
+          return
+        }
+      }
+      connectedSource.addEventListener(name, listener)
+      return [name, listener] as const
+      })
+    }
+    void connect()
+    return () => {
+      disposed = true
+      source?.close()
+      for (const timer of terminalTimers) clearTimeout(timer)
+      terminalTimers.clear()
+      for (const [name, listener] of listeners) source?.removeEventListener(name, listener)
+    }
+  }, [sessionId, apiBase])
 }
 
 interface TimelineEventInput {
@@ -846,6 +1129,9 @@ function projectTimelineEvent({ type, data, envelope, runId, timestamp }: Timeli
   if (type === "run.root_suspended") return base({ id: `run:${runId}`, label: "主任务等待子任务继续", detail: "并行任务仍在处理，完成后将继续汇总结果。", status: "waiting" })
   if (type === "run.failed" || type === "run.budget_exceeded") return base({ id: `run:${runId}`, label: type === "run.budget_exceeded" ? "任务已达到运行限制" : "任务未能完成", detail, status: "failed" })
 
+  if (type === "llm.validation_failed") {
+    return projectLlmValidationFailureTimeline(envelope, runId, timestamp)
+  }
   if (type.startsWith("llm.")) return null
 
   if (type === "tool.started") {

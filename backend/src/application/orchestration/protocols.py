@@ -29,7 +29,6 @@ from .root_decision import (
     RootDecision,
     RootPlanInput,
     RootPlanResult,
-    RootReDecision,
     RootWorkerCapability,
 )
 
@@ -48,20 +47,6 @@ class RootAgent(Protocol):
 
         返回：
         - RootDecision：Root 对当前请求选择的动作及其结构化参数。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
-
-    async def redecide(self, inputs: RootAgentInput) -> RootReDecision:
-        """根据新增结果或校验反馈重新生成 Root 决策。
-
-        参数：
-        - `inputs`（RootAgentInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
-
-        返回：
-        - RootReDecision：Root 根据检索结果和反馈生成的后续动作。
 
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
@@ -315,32 +300,6 @@ class RootWorkflowPort(Protocol):
 
         返回：
         - dict[str, Any]：Root 初始决策及其后续路由所需的图状态字段。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
-    async def redecide_root_action(self, state: RootGraphState) -> dict[str, Any]:
-        """根据新增检索结果重新生成决策并返回状态补丁。
-
-        参数：
-        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
-
-        返回：
-        - dict[str, Any]：Root 再决策及其后续路由所需的图状态字段。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        ...
-    async def acquire_context(self, state: RootGraphState) -> dict[str, Any]:
-        """恢复旧 checkpoint 中已保存的 Root 检索请求。
-
-        参数：
-        - `state`（RootGraphState）：旧版图保存的检索决策和请求上下文。
-
-        返回：
-        - dict[str, Any]：检索完成后的图状态补丁。
 
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。

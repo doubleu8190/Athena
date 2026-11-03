@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, START, StateGraph
 
 from application.orchestration import RootWorkflow, RootWorkflowDependencies
 from application.orchestration.root_workflow import (
@@ -39,7 +38,6 @@ from domain.orchestration import RootPlanFacts, RootPlanTaskFact
 from domain.runs import RootPlanCheckpointRecovery, RootPlanCompletedResumeValue
 from application.runs.request_contracts import RootRequestState
 from application.orchestration.langgraph import build_root_graph
-from application.orchestration.langgraph.graphs.root import _wait_for_plan_completion_node
 from application.orchestration.langgraph.graphs.state import RootGraphState
 from application.orchestration.langgraph import invoke_root_graph as _invoke_root_graph
 from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
@@ -61,10 +59,6 @@ class _Agent:
         self.inputs = []
 
     async def decide(self, inputs):
-        self.inputs.append(inputs)
-        return self.decisions.pop(0)
-
-    async def redecide(self, inputs):
         self.inputs.append(inputs)
         return self.decisions.pop(0)
 
@@ -335,7 +329,6 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
     expected_invocations = {
         "prefetch_context": 1,
         "decide_root_action": 2,
-        "redecide_root_action": 0,
         "generate_plan": 1,
     }
     for node_name, expected_count in expected_invocations.items():
@@ -372,8 +365,8 @@ def test_root_graph_has_no_removed_understanding_or_harness_nodes() -> None:
 
     assert "decide_root_action" in node_names
     assert "prefetch_context" in node_names
-    # 该节点只为恢复旧 checkpoint 注册，新 Root 决策没有到它的边。
-    assert "acquire_context" in node_names
+    assert "acquire_context" not in node_names
+    assert "redecide_root_action" not in node_names
     assert "wait_for_plan_completion" in node_names
     assert "build_plan_response" in node_names
     assert "assemble_final_response" in node_names
@@ -873,14 +866,6 @@ async def test_checkpoint_recovery_after_plan_consumption_uses_new_lease() -> No
                     AnswerIntent(action="answer", kind="final", instructions="Summarize the results."),
                 ]
             )
-            self.redecision_count = 0
-
-        async def redecide(self, inputs):
-            self.inputs.append(inputs)
-            self.redecision_count += 1
-            if self.redecision_count == 1:
-                raise asyncio.CancelledError()
-            return self.decisions.pop(0)
 
     class Checkpointer:
         def __init__(self, saver):
@@ -942,33 +927,12 @@ async def test_checkpoint_recovery_after_plan_consumption_uses_new_lease() -> No
         interrupt_id=interrupt.id,
     )
 
-    with pytest.raises(BaseException):
-        await invoke_root_graph(
-            graph,
-            session_id="session-1",
-            run_id="run-checkpoint-recovery",
-            lease=lease,
-            resume_value=resume,
-        )
-
-    config = {"configurable": {"thread_id": "run:run-checkpoint-recovery"}}
-    snapshot = await graph.aget_state(config)
-    assert not any(task.interrupts for task in snapshot.tasks)
-    assert snapshot.next == ("redecide_root_action",)
-    assert len(snapshot.values["completed_plans"]) == 1
-
-    root_graph = LangGraphRootGraph(
-        workflow=workflow,
-        dependencies=dependencies,
-        checkpointer=Checkpointer(saver),
-        thread_lock=ThreadLock(),
-        lease_center=LeaseCenter(),
-    )
-    assert await root_graph.is_plan_checkpoint_recoverable(
+    await invoke_root_graph(
+        graph,
+        session_id="session-1",
         run_id="run-checkpoint-recovery",
-        plan_id=wait_identity["plan_id"],
-        plan_sequence=wait_identity["plan_sequence"],
-        root_wait_generation=wait_identity["root_wait_generation"],
+        lease=lease,
+        resume_value=resume,
     )
     resumed_lease = lease_grant(
         "root_execution", "run-checkpoint-recovery", fencing_token=2
@@ -988,94 +952,13 @@ async def test_checkpoint_recovery_after_plan_consumption_uses_new_lease() -> No
     )
 
     assert result["status"] == "completed"
-    assert agent.redecision_count == 2
+    assert len(agent.inputs) == 3
     assert len(dependencies.root_orchestration.submissions) == 1
     assert len(agent.inputs[-1].completed_plans) == 1
     assert agent.inputs[-1].completed_plans[0].tasks[0].output == {
         "value": "first-round-output"
     }
-    final_snapshot = await graph.aget_state(config)
+    final_snapshot = await graph.aget_state(
+        {"configurable": {"thread_id": "run:run-checkpoint-recovery"}}
+    )
     assert final_snapshot.values["execution_lease"]["fencing_token"] == 2
-
-
-@pytest.mark.asyncio
-async def test_legacy_plan_wait_checkpoint_resumes_with_current_root_graph() -> None:
-    """旧版拓扑生成的计划等待 checkpoint 可由当前图恢复。"""
-    agent = _Agent(
-        [AnswerIntent(action="answer", kind="final", instructions="总结执行结果。")]
-    )
-    dependencies = _dependencies(agent)
-    saver = InMemorySaver()
-    workflow = RootWorkflow(dependencies)
-
-    # 复现旧拓扑：计划等待节点之后直接进入旧版再决策节点。
-    legacy_graph_builder = StateGraph(RootGraphState)
-    legacy_graph_builder.add_node(
-        "wait_for_plan_completion", _wait_for_plan_completion_node(workflow)
-    )
-    legacy_graph_builder.add_node("redecide_root_action", lambda _state: {})
-    legacy_graph_builder.add_edge(START, "wait_for_plan_completion")
-    legacy_graph_builder.add_edge("wait_for_plan_completion", "redecide_root_action")
-    legacy_graph_builder.add_edge("redecide_root_action", END)
-    legacy_graph = legacy_graph_builder.compile(checkpointer=saver)
-
-    run_id = "run-legacy-plan-checkpoint"
-    plan_id = "plan-legacy-1"
-    thread_config = {"configurable": {"thread_id": f"run:{run_id}"}}
-    initial_state: RootGraphState = {
-        "request": {
-            "session_id": "session-1",
-            "run_id": run_id,
-            "message_id": "message-legacy",
-            "run_sequence": 1,
-            "user_message": "执行并总结。",
-            "attachment_ids": [],
-        },
-        "plan": {
-            "plan_id": plan_id,
-            "sequence": 1,
-            "root_wait_generation": 1,
-        },
-        "root_turn_count": 1,
-    }
-    interrupted = await legacy_graph.ainvoke(initial_state, config=thread_config)
-    interrupt = interrupted["__interrupt__"][0]
-
-    dependencies.root_orchestration.completed_plan = RootPlanFacts(
-        run_id=run_id,
-        plan_id=plan_id,
-        sequence=1,
-        root_wait_generation=1,
-        goal="执行并总结",
-        status="completed",
-        tasks=(
-            RootPlanTaskFact(
-                task_ref="task-1",
-                status="succeeded",
-                output={"result": "已完成"},
-            ),
-        ),
-    )
-    current_graph = build_root_graph(
-        workflow=workflow,
-        dependencies=dependencies,
-        checkpointer=saver,
-    )
-    result = await invoke_root_graph(
-        current_graph,
-        session_id="session-1",
-        run_id=run_id,
-        resume_value=RootPlanCompletedResumeValue(
-            type="plan_completed",
-            run_id=run_id,
-            plan_id=plan_id,
-            plan_sequence=1,
-            root_wait_generation=1,
-            interrupt_id=interrupt.id,
-        ),
-    )
-
-    assert result["status"] == "completed"
-    assert len(agent.inputs) == 1
-    assert len(agent.inputs[0].completed_plans) == 1
-    assert agent.inputs[0].completed_plans[0].tasks[0].output == {"result": "已完成"}

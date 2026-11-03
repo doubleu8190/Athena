@@ -237,7 +237,7 @@ def _node_result_summary(node_name: str, value: Any) -> str | None:
         outcome_count = len(outcomes) if isinstance(outcomes, list) else 0
         return f"资料窗口包含 {count} 条资料；记录了 {outcome_count} 项查询结果。"
 
-    if node_name in {"decide_root_action", "redecide_root_action"}:
+    if node_name == "decide_root_action":
         decision = value.get("root_decision", {})
         action = decision.get("action") if isinstance(decision, Mapping) else None
         action_labels = {
@@ -333,21 +333,6 @@ def _route_after_decision(state: RootGraphState) -> str:
     }.get(str(action), "assemble_final_response")
 
 
-def _route_after_context(state: RootGraphState) -> str:
-    """把旧 checkpoint 的检索结果接回计划生命周期再决策节点。
-
-    参数：
-    - `state`（RootGraphState）：旧版检索节点生成的可恢复状态。
-
-    返回：
-    - str：下一节点的路由名称。
-
-    异常：
-    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-    """
-    return "assemble_final_response" if state.get("error") else "redecide_root_action"
-
-
 def _route_after_plan_generation(state: RootGraphState) -> str:
     """根据错误、规划反馈和计划草稿选择 Root 后续节点。
 
@@ -373,7 +358,7 @@ def _route_after_plan_generation(state: RootGraphState) -> str:
 
 
 def _route_after_wait(state: RootGraphState) -> str:
-    """根据等待状态选择继续等待或让 Root 基于完成事实再决策。
+    """根据等待状态选择继续等待或进入统一 Root 决策。
 
     参数：
     - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
@@ -384,7 +369,7 @@ def _route_after_wait(state: RootGraphState) -> str:
     异常：
     - 无预期业务异常；依赖调用产生的异常按当前实现传播。
     """
-    return "wait_for_plan_completion" if state.get("waiting") else "redecide_root_action"
+    return "wait_for_plan_completion" if state.get("waiting") else "decide_root_action"
 
 
 def _wait_for_plan_completion_node(workflow: RootWorkflowPort):
@@ -484,10 +469,6 @@ def build_root_graph(
         "prepare_request": workflow.prepare_request,
         "prefetch_context": workflow.prefetch_context,
         "decide_root_action": workflow.decide_root_action,
-        # 计划完成后的既有再决策节点保留，以兼容等待中的持久化 checkpoint。
-        "redecide_root_action": workflow.redecide_root_action,
-        # 仅旧版图可能保存此 next node；新入口没有到这里的边。
-        "acquire_context": workflow.acquire_context,
         "generate_plan": workflow.generate_plan,
         "generate_answer": workflow.generate_answer,
         "materialize_execution_plan": workflow.materialize_execution_plan,
@@ -526,23 +507,6 @@ def build_root_graph(
         },
     )
     graph.add_conditional_edges(
-        "redecide_root_action",
-        _route_after_decision,
-        {
-            "assemble_final_response": "assemble_final_response",
-            "generate_answer": "generate_answer",
-            "generate_plan": "generate_plan",
-        },
-    )
-    graph.add_conditional_edges(
-        "acquire_context",
-        _route_after_context,
-        {
-            "assemble_final_response": "assemble_final_response",
-            "redecide_root_action": "redecide_root_action",
-        },
-    )
-    graph.add_conditional_edges(
         "generate_plan",
         _route_after_plan_generation,
         {
@@ -571,7 +535,7 @@ def build_root_graph(
         _route_after_wait,
         {
             "wait_for_plan_completion": "wait_for_plan_completion",
-            "redecide_root_action": "redecide_root_action",
+            "decide_root_action": "decide_root_action",
         },
     )
     graph.add_edge("build_plan_response", "generate_answer")

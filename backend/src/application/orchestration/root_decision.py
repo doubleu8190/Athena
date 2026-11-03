@@ -15,7 +15,6 @@ from pydantic import (
 
 from application.runs.context.contracts import (
     ContextItem,
-    ContextQuery,
     ContextQueryOutcome,
 )
 from application.runs.request_contracts import RootAttachment, RootKnowledgeBase
@@ -210,39 +209,6 @@ class RootPlanInput(BaseModel):
     completed_plans: tuple[RootCompletedPlanModel, ...] = ()
 
 
-class ContextRequest(BaseModel):
-    """旧 checkpoint 恢复时读取的历史 Root 检索请求。
-
-    新的 Root 决策契约不接受此动作；保留模型仅用于恢复已保存的查询状态。
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    action: Literal["context"]
-    queries: tuple[ContextQuery, ...] = Field(min_length=1, max_length=4)
-
-    @field_validator("queries")
-    @classmethod
-    def unique_providers(
-        cls, queries: tuple[ContextQuery, ...]
-    ) -> tuple[ContextQuery, ...]:
-        """保留旧格式的一通道一查询约束，避免恢复时计划字段互相覆盖。
-
-        参数：
-        - `queries`（tuple[ContextQuery, ...]）：checkpoint 保存的历史查询。
-
-        返回：
-        - tuple[ContextQuery, ...]：通过 Provider 唯一性校验的查询。
-
-        异常：
-        - ValueError：同一 Provider 出现多条查询时抛出。
-        """
-        providers = tuple(query.provider for query in queries)
-        if len(providers) != len(set(providers)):
-            raise ValueError("one_query_per_context_provider")
-        return queries
-
-
 class PlanTaskDraft(BaseModel):
     """一个交给 Worker 执行的任务草稿。"""
 
@@ -329,17 +295,6 @@ class RootDecisionStructuredOutput(BaseModel):
     instructions: str | None = None
     goal: str | None = None
 
-class RootReDecisionStructuredOutput(BaseModel):
-    """检索后的三结果再决策 schema。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    action: Literal["answer", "plan"]
-    kind: Literal["final", "clarification"] | None = None
-    instructions: str | None = None
-    goal: str | None = None
-
-
 class RootPlanStructuredOutput(BaseModel):
     """完整计划或规划信息缺口的扁平结构化 schema。"""
 
@@ -356,29 +311,23 @@ RootDecision = Annotated[
     AnswerIntent | PlanIntent, Field(discriminator="action")
 ]
 ROOT_DECISION_ADAPTER = TypeAdapter(RootDecision)
-RootReDecision = Annotated[AnswerIntent | PlanIntent, Field(discriminator="action")]
-ROOT_REDECISION_ADAPTER = TypeAdapter(RootReDecision)
 RootPlanResult = Annotated[PlanDraft | PlanningFeedback, Field(discriminator="action")]
 ROOT_PLAN_ADAPTER = TypeAdapter(RootPlanResult)
 
 
 __all__ = [
     "AnswerIntent",
-    "ContextRequest",
     "PlanDraft",
     "PlanIntent",
     "PlanTaskDraft",
     "PlanningFeedback",
     "RootDecisionStructuredOutput",
-    "RootReDecisionStructuredOutput",
     "RootPlanStructuredOutput",
     "ROOT_DECISION_ADAPTER",
-    "ROOT_REDECISION_ADAPTER",
     "ROOT_PLAN_ADAPTER",
     "RootAgentInput",
     "RootAttachment",
     "RootDecision",
-    "RootReDecision",
     "RootPlanInput",
     "RootPlanResult",
     "RootKnowledgeBase",

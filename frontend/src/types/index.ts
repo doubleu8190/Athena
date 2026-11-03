@@ -87,6 +87,34 @@ export interface Message {
   attachments?: AttachmentRef[]
 }
 
+export interface SessionHistoryContent {
+  time: string
+  content: string
+  id?: string | null
+  session_seq?: number | null
+}
+
+export interface SessionHistoryTask {
+  time: string
+  process: SessionHistoryContent[]
+  content: string | null
+  session_seq?: number | null
+}
+
+export interface SessionHistoryTurn {
+  run_id: string
+  user: SessionHistoryContent
+  root_process: SessionHistoryContent[]
+  tasks: SessionHistoryTask[]
+  assistant: SessionHistoryContent | null
+}
+
+export interface SessionMessageHistory {
+  items: SessionHistoryTurn[]
+  next_cursor: string | null
+  snapshot_event_seq: number
+}
+
 export type AttachmentStatus = "uploaded" | "processing" | "ready" | "failed" | "deleted"
 
 export interface AttachmentRef {
@@ -466,7 +494,9 @@ export interface ListSessionsResponse {
 }
 
 export interface GetMessagesResponse {
-  messages: Message[]
+  items: SessionHistoryTurn[]
+  next_cursor: string | null
+  snapshot_event_seq: number
 }
 
 export type RetrievalScope = "context" | "memory" | "knowledge" | "file"

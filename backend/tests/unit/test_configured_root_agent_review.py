@@ -63,7 +63,7 @@ def root_input() -> RootAgentInput:
 
 
 @pytest.mark.asyncio
-async def test_root_redecides_from_completed_plan_facts_and_authorized_capabilities():
+async def test_root_decides_from_completed_plan_facts_and_authorized_capabilities():
     llm = StructuredLLM(
         {
             "action": "plan",
@@ -72,10 +72,10 @@ async def test_root_redecides_from_completed_plan_facts_and_authorized_capabilit
         }
     )
 
-    decision = await ConfiguredRootAgent(llm).redecide(root_input())
+    decision = await ConfiguredRootAgent(llm).decide(root_input())
 
     assert decision.action == "plan"
-    assert llm.schema.__name__ == "RootReDecisionStructuredOutput"
+    assert llm.schema.__name__ == "RootDecisionStructuredOutput"
     prompt = llm.messages[0]["content"]
     assert "completed_plans" in prompt
     assert "source_unavailable" in prompt
@@ -86,7 +86,7 @@ async def test_root_redecides_from_completed_plan_facts_and_authorized_capabilit
 
 
 @pytest.mark.asyncio
-async def test_root_redecision_can_finish_after_partial_failure():
+async def test_root_decision_can_finish_after_partial_failure():
     llm = StructuredLLM(
         {
             "action": "answer",
@@ -95,7 +95,7 @@ async def test_root_redecision_can_finish_after_partial_failure():
         }
     )
 
-    decision = await ConfiguredRootAgent(llm).redecide(root_input())
+    decision = await ConfiguredRootAgent(llm).decide(root_input())
 
     assert isinstance(decision, AnswerIntent)
     assert '"status": "failed"' in llm.messages[0]["content"]

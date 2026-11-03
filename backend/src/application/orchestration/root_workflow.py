@@ -29,12 +29,10 @@ from .graph_state import (
 )
 from .root_decision import (
     AnswerIntent,
-    ContextRequest,
     PlanDraft,
     PlanIntent,
     PlanningFeedback,
     RootPlanInput,
-    ROOT_REDECISION_ADAPTER,
     ROOT_PLAN_ADAPTER,
     PlanTaskDraft,
     ROOT_DECISION_ADAPTER,
@@ -1321,66 +1319,6 @@ class RootWorkflow(RootWorkflowPort):
         ):
             return {**update, **_planning_feedback_clarification(inputs.planning_feedback)}
         return update
-
-    async def redecide_root_action(self, state: RootGraphState) -> dict[str, Any]:
-        """采集完成后按三结果契约作一次再决策。
-
-        参数：
-        - `state`（RootGraphState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
-
-        返回：
-        - dict[str, Any]：Root 再决策结果及上下文查询计划对应的状态补丁。
-
-        异常：
-        - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-        """
-        deps = self.dependencies
-        turn_count = int(state.get("root_turn_count", 0))
-        remaining_turns = deps.root_max_turns - turn_count
-        if remaining_turns < 1:
-            logger.warning(f"Root 已用完允许的 {deps.root_max_turns} 次重新决策轮数。")
-            return _root_budget_exhausted(turn_count)
-        logger.info(f"Root 重新决策轮数 {turn_count}，剩余 {remaining_turns} 轮。")
-        inputs = await self._agent_input(state, remaining_turns=remaining_turns)
-
-        decision = ROOT_REDECISION_ADAPTER.validate_python(
-            await deps.agent.redecide(inputs)
-        )
-        next_turn_count = turn_count + 1
-        update: dict[str, Any] = {
-            "root_decision": as_dict(decision),
-            "root_turn_count": next_turn_count,
-        }
-        if isinstance(decision, AnswerIntent):
-            update["answer_input"] = RootAnswerInputState(
-                source="decision",
-                kind=decision.kind,
-                instructions=decision.instructions,
-            ).model_dump(mode="json")
-            update.update(
-                planning_feedback=None,
-                planning_context_updated=False,
-            )
-        elif inputs.planning_feedback and not inputs.planning_context_updated:
-            return {**update, **_planning_feedback_clarification(inputs.planning_feedback)}
-        return update
-
-    async def acquire_context(self, state: RootGraphState) -> dict[str, Any]:
-        """恢复旧 checkpoint 中的定向查询，并合并查询结果。
-
-        参数：
-        - `state`（RootGraphState）：包含旧版 Root 查询决策及已有资料窗口的图状态。
-
-        返回：
-        - dict[str, Any]：资料窗口和检索结果状态补丁。
-
-        异常：
-        - ValueError：checkpoint 中的查询决策格式错误时抛出。
-        """
-        decision = ContextRequest.model_validate(state.get("root_decision", {}))
-        return await self._acquire_context_queries(
-            state, queries=decision.queries, stage="directed"
-        )
 
     async def _confirm_prefetch_selections(
         self,

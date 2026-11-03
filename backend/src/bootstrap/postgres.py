@@ -135,6 +135,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresRetrievalRepository,
     PostgresRunRepository,
     PostgresSessionRepository,
+    PostgresSessionHistoryRepository,
     PostgresSessionMemorySettingsRepository,
     PostgresToolConfigRepository,
     PostgresFileChunkRepository,
@@ -211,6 +212,7 @@ def build_postgres_dependencies(
     session_memory_settings = PostgresSessionMemorySettingsRepository(session_factory)
     projects = PostgresProjectRepository(session_factory)
     messages = PostgresMessageRepository(session_factory)
+    session_history = PostgresSessionHistoryRepository(session_factory)
     runs = PostgresRunRepository(session_factory, lease_center=lease_center)
     events = PostgresEventRepository(session_factory)
     approvals = PostgresApprovalRepository(
@@ -507,7 +509,9 @@ def build_postgres_dependencies(
             projects,
             id_factory=ids,
         ),
-        "message_query_service": SessionMessageQueryService(sessions, messages),
+        "message_query_service": SessionMessageQueryService(
+            sessions, session_history
+        ),
         "run_query_service": RunQueryService(sessions, runs, events),
         "run_service": RunService(
             runs, runs, id_factory=ids, executor=root_run_executor

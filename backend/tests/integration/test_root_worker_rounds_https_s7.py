@@ -37,7 +37,6 @@ from application.orchestration.root_decision import (
     RootDecision,
     RootPlanInput,
     RootPlanResult,
-    RootReDecision,
 )
 from application.orchestration.protocols import RootAgent
 from application.orchestration.agents import ConfiguredRootAgent
@@ -96,19 +95,23 @@ class _DeterministicRoundAgent(RootAgent):
     def __init__(self) -> None:
         self.plan_inputs: list[RootPlanInput] = []
         self.decide_calls = 0
-        self.redecide_calls: list[tuple[int, str]] = []
 
     async def decide(self, inputs: RootAgentInput) -> RootDecision:
-        """首轮明确要求执行 Worker 计划。"""
+        """根据已完成计划轮数选择下一轮计划或最终回答。"""
         self.decide_calls += 1
-        return PlanIntent(action="plan", goal="先读取并回显，再基于结果复核", instructions="执行一轮 Worker 任务")
-
-    async def redecide(self, inputs: RootAgentInput) -> RootReDecision:
-        """第一轮完成后继续规划，最终轮完成后输出结果。"""
-        self.redecide_calls.append((len(inputs.completed_plans), "plan" if len(inputs.completed_plans) == 1 else "answer"))
+        if len(inputs.completed_plans) >= 2:
+            return AnswerIntent(
+                action="answer",
+                kind="final",
+                instructions="返回 Worker 两轮结果",
+            )
         if len(inputs.completed_plans) == 1:
-            return PlanIntent(action="plan", goal="根据第一轮实际结果完成复核", instructions="使用上一轮真实输出")
-        return AnswerIntent(action="answer", kind="final", instructions="返回 Worker 两轮结果")
+            return PlanIntent(
+                action="plan",
+                goal="根据第一轮实际结果完成复核",
+                instructions="使用上一轮真实输出",
+            )
+        return PlanIntent(action="plan", goal="先读取并回显，再基于结果复核", instructions="执行一轮 Worker 任务")
 
     async def plan(self, inputs: RootPlanInput) -> RootPlanResult:
         """把首轮随机值或首轮输出 nonce 放入后续任务输入。"""
@@ -219,24 +222,6 @@ class _RecordingRootAgent(RootAgent):
             {
                 "method": "decide",
                 "capability_count": len(inputs.worker_capabilities),
-                "action": decision.action,
-                "kind": getattr(decision, "kind", None),
-                "instructions_length": len(getattr(decision, "instructions", "")),
-            }
-        )
-        return decision
-
-    async def redecide(self, inputs: RootAgentInput) -> RootReDecision:
-        try:
-            decision = await self._delegate.redecide(inputs)
-        except BaseException as error:
-            self._record_failure("redecide", error)
-            raise
-        self.decisions.append(
-            {
-                "method": "redecide",
-                "capability_count": len(inputs.worker_capabilities),
-                "completed_plan_count": len(inputs.completed_plans),
                 "action": decision.action,
                 "kind": getattr(decision, "kind", None),
                 "instructions_length": len(getattr(decision, "instructions", "")),

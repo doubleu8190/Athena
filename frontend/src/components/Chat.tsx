@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react"
+import { memo, useState, useEffect, useRef, useCallback } from "react"
 import { Send, Square, Loader2, Sparkles, Clock, PanelRight, PanelLeft, Paperclip, Files, X, Trash2, ChevronDown, ChevronRight } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { ApprovalCard } from "./ApprovalDialog"
@@ -6,6 +6,12 @@ import { ExecutionContextPanel } from "./ExecutionContextPanel"
 import { ExecutionTimeline } from "./ExecutionTimeline"
 import { useChatStore } from "../store/chatStore"
 import { apiClient, ApiError } from "../api/client"
+import {
+  filterChatTimelineForLoadedRuns,
+  historyMessages,
+  historyTimeline,
+  mergeHistoryMessages,
+} from "../utils/sessionHistory"
 import { ClientEventType } from "../types/events"
 import type { ApprovalRequest, ApprovalStatusSnapshot, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
 import { mergePendingApprovals } from "../utils/workerSnapshotProjection"
@@ -78,6 +84,8 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     thinking,
     error,
     setMessages,
+    setSessionHistoryLoaded,
+    setSessionEventCursor,
     addMessage,
     updateSession,
     clearMessages,
@@ -106,6 +114,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const [stopRequestUncertain, setStopRequestUncertain] = useState(false)
   const [runSequenceState, setRunSequenceState] = useState<Record<string, number>>({})
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
+  const [hasMoreHistory, setHasMoreHistory] = useState(false)
   const [showActivity, setShowActivity] = useState(false)
   const [collapsedRunIds, setCollapsedRunIds] = useState<Set<string>>(() => new Set())
   const [activityNow, setActivityNow] = useState(Date.now())
@@ -121,6 +130,8 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const rootRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
+  const historyCursorBySessionRef = useRef(new Map<string, string>())
+  const historyPageLoadingRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pendingSendsRef = useRef(new Map<string, { fingerprint: string; requestId: string }>())
   const stopRequestsRef = useRef(readPendingStopRequests())
@@ -139,13 +150,19 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     return !item || item.status !== "ready"
   })
   const activeRunId = sessions.find((session) => session.id === activeSessionId)?.active_run_id ?? null
-  // 聊天流隐藏排队和资料检索过程；失败项仍显示，节点细节保留在执行上下文面板。
-  const chatExecutionTimeline = executionTimeline.filter((entry) =>
-    !entry.event_type.startsWith("node.")
-    && entry.event_type !== "run.queued"
-    && (!entry.event_type.startsWith("retrieval.") || entry.status === "failed")
-  )
   const currentRunStatuses = activeSessionId ? sessionRunStatuses[activeSessionId] ?? {} : {}
+  const activeRunIds = [
+    ...(activeRunId ? [activeRunId] : []),
+    ...Object.entries(currentRunStatuses)
+      .filter(([, status]) => ["queued", "running", "stopping"].includes(status))
+      .map(([runId]) => runId),
+  ]
+  // 聊天时间线只展示已加载轮次和活动 Run，避免低水位 SSE 重放旧终态。
+  const chatExecutionTimeline = filterChatTimelineForLoadedRuns(
+    executionTimeline,
+    messages,
+    activeRunIds,
+  )
   const hasQueuedRuns = Object.values(currentRunStatuses).some((status) => status === "queued")
   const hasRunningRuns = Object.values(currentRunStatuses).some((status) => status === "running")
   const canSubmitFromRunState = canSubmitNewRun(currentRunStatuses)
@@ -274,20 +291,31 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
 
     if (activeSessionId) {
       shouldFollowLatestRef.current = true
-      // 先完全清除上一个 session 的所有残留状态
-      clearMessages()
-      clearSteps()
-      clearToolCalls()
-      clearOrchestrationTasks()
-      clearOrchestrationPlans()
-      clearOrchestrationSnapshots()
-      clearApprovals()
-      clearThinking()
-      setAgentStatus("idle")
-      clearError()
+      if (useChatStore.getState().sessionHistoryLoaded[activeSessionId]) {
+        loadingSessionIdRef.current = activeSessionId
+        setIsLoadingHistory(false)
+        setHasMoreHistory(historyCursorBySessionRef.current.has(activeSessionId))
+        setSelectedAttachmentIds([])
+        return () => { cancelled = true }
+      }
+      // 已有缓存包含后台 SSE 投影，保留它并由 setActiveSession 提供隔离后的视图。
+      if (!useChatStore.getState().sessionViewCache[activeSessionId]) {
+        clearMessages()
+        clearSteps()
+        clearToolCalls()
+        clearOrchestrationTasks()
+        clearOrchestrationPlans()
+        clearOrchestrationSnapshots()
+        clearApprovals()
+        clearThinking()
+        setAgentStatus("idle")
+        clearError()
+      }
       // 再加载新 session 的历史
       loadingSessionIdRef.current = activeSessionId
       setIsLoadingHistory(true)
+      historyCursorBySessionRef.current.delete(activeSessionId)
+      setHasMoreHistory(false)
       loadHistory(activeSessionId, () => cancelled)
       setSelectedAttachmentIds([])
       setSupportedAttachmentTypes(null)
@@ -321,10 +349,10 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId, demoMode])
 
-  const loadHistory = async (sessionId: string, isCancelled?: () => boolean) => {
+  const loadHistory = async (sessionId: string, isCancelled?: () => boolean, cursor?: string) => {
     try {
       // 运行过程由 SSE Durable Event replay 重建；这里只读取持久消息正文。
-      const history = await apiClient.getMessages(sessionId)
+      const history = await apiClient.getMessages(sessionId, 20, undefined, cursor)
       // StrictMode 双调用或快速切换 session 时取消应用结果
       if (isCancelled?.()) return
       // 防止快速切换 session 导致的竞态：只在当前 session 仍匹配时应用结果
@@ -332,28 +360,20 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
         // 历史请求与 SSE replay 可能并发完成。以消息 ID 和 run_id 合并，
         // 保留已经由 SSE 构造出的实时 assistant 内容，禁止历史响应无条件清空。
         const current = useChatStore.getState().messages
-        const mergedById = new Map(history.map((message) => [message.id, message]))
-        for (const live of current) {
-          const persisted = mergedById.get(live.id)
-          if (persisted) {
-            mergedById.set(live.id, persisted)
-            continue
-          }
-          const sameRun = live.role === "assistant" && live.run_id
-            ? [...mergedById.values()].filter((item) => item.role === "assistant" && item.run_id === live.run_id)
-            : []
-          if (sameRun.length === 1) {
-            const stored = sameRun[0]
-            mergedById.set(stored.id, stored)
-          } else {
-            mergedById.set(live.id, live)
-          }
+        const persistedMessages = historyMessages(history.items, sessionId)
+        const persistedTimeline = historyTimeline(history.items)
+        for (const turn of history.items) {
+          useChatStore.getState().replaceRunExecutionTimeline(
+            turn.run_id,
+            persistedTimeline.filter((entry) => entry.run_id === turn.run_id),
+          )
         }
-        const merged = [...mergedById.values()].sort((a, b) => {
-          const delta = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-          return Number.isNaN(delta) || delta === 0 ? a.id.localeCompare(b.id) : delta
-        })
-        setMessages(merged)
+        setSessionEventCursor(sessionId, history.snapshot_event_seq)
+        setMessages(mergeHistoryMessages(persistedMessages, current))
+        setSessionHistoryLoaded(sessionId, true)
+        if (history.next_cursor) historyCursorBySessionRef.current.set(sessionId, history.next_cursor)
+        else historyCursorBySessionRef.current.delete(sessionId)
+        setHasMoreHistory(Boolean(history.next_cursor))
       }
     } catch {
       if (isCancelled?.()) return
@@ -371,10 +391,18 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     const container = messagesContainerRef.current
     if (!container) return
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
-    // A small threshold prevents sub-pixel/layout changes from disabling
-    // follow mode when the user is effectively at the bottom.
     shouldFollowLatestRef.current = distanceFromBottom <= 64
-  }, [])
+    const cursor = activeSessionId ? historyCursorBySessionRef.current.get(activeSessionId) : undefined
+    if (!cursor || !hasMoreHistory || historyPageLoadingRef.current || container.scrollTop > 48 || !activeSessionId) return
+    const previousHeight = container.scrollHeight
+    historyPageLoadingRef.current = true
+    setIsLoadingHistory(true)
+    void loadHistory(activeSessionId, undefined, cursor).finally(() => {
+      historyPageLoadingRef.current = false
+      const currentContainer = messagesContainerRef.current
+      if (currentContainer) currentContainer.scrollTop += currentContainer.scrollHeight - previousHeight
+    })
+  }, [activeSessionId, hasMoreHistory])
 
   // 自动滚动到底部，但仅在用户没有主动查看历史消息时跟随。
   useEffect(() => {
@@ -923,7 +951,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
             </div>
         <div className="max-w-3xl mx-auto px-4 py-6">
               {/* 历史消息加载指示器 */}
-          {isLoadingHistory && (
+          {isLoadingHistory && messages.length === 0 && chatExecutionTimeline.length === 0 && (
             <div className="text-center py-16 text-athena-muted">
               <Loader2 className="w-8 h-8 mx-auto mb-4 text-athena-accent animate-spin" />
               <p className="text-sm">正在加载对话记录…</p>
@@ -942,7 +970,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
           )}
 
           {/* 消息与执行事件进入同一时间排序的聊天流。 */}
-          {!isLoadingHistory && (messages.length > 0 || chatExecutionTimeline.length > 0) && (
+          {(messages.length > 0 || chatExecutionTimeline.length > 0) && (
             <>
               {timelineFeed.filter((item) => item.kind !== "event" || !item.entry.run_id || !collapsedRunIds.has(item.entry.run_id)).map((item, index, visibleFeed) => {
                 const previous = visibleFeed[index - 1]
@@ -1201,7 +1229,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   )
 }
 
-export default Chat
+export default memo(Chat)
 
 function RunActivityHeader({
   startedAt,

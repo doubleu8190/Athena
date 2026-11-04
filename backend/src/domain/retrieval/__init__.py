@@ -1,8 +1,8 @@
 """检索领域公开类型。"""
 
-from .entities import RetrievalCandidate, RetrievalRun
+from .entities import RetrievalCandidate, RetrievalRerankResult, RetrievalRun
 from .fusion import RetrievalRankFusion
-from .ports import GraphContextQueryPort, GraphSearchPort
+from .ports import GraphContextQueryPort, GraphSearchPort, RetrievalRerankPort
 from .trace_contracts import (
     RetrievalCandidateSelection,
     RetrievalCandidateTrace,
@@ -16,6 +16,8 @@ __all__ = [
     "GraphContextQueryPort",
     "GraphSearchPort",
     "RetrievalCandidate",
+    "RetrievalRerankPort",
+    "RetrievalRerankResult",
     "RetrievalCandidateSelection",
     "RetrievalCandidateTrace",
     "RetrievalChannelTrace",

@@ -43,7 +43,10 @@ class RetrievalRankFusion:
                     "score": value.metadata.get("channel_score", value.score),
                 }
             )
-        ordered = sorted(scores, key=scores.get, reverse=True)
+        ordered = sorted(
+            scores,
+            key=lambda source_id: (-scores[source_id], source_id),
+        )
         selected = ordered if limit is None else ordered[: max(0, limit)]
         return [
             RetrievalCandidate(

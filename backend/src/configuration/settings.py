@@ -195,8 +195,10 @@ class Settings(BaseSettings):
     file_rerank_device: str | None = None
     file_rerank_batch_size: int = Field(default=16, ge=1, le=128)
     file_rerank_max_chars: int = Field(default=4000, ge=256, le=20000)
+    file_rerank_min_score: float = Field(default=0.5, ge=0, le=1)
     file_rerank_candidate_k: int = Field(default=50, ge=1, le=200)
     file_rerank_k: int = Field(default=20, ge=1, le=100)
+    knowledge_rerank_min_score: float = Field(default=0.5, ge=0, le=1)
     knowledge_rerank_candidate_k: int = Field(default=100, ge=1, le=500)
     knowledge_rerank_k: int = Field(default=30, ge=1, le=200)
     knowledge_result_k: int = Field(default=12, ge=1, le=50)

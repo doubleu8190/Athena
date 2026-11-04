@@ -684,6 +684,7 @@ class ContextAcquisitionService:
             activity_id=activity_id,
             stage=stage,
         )
+        results = _order_provider_results(results, plan.providers)
         # 阶段归因由程序统一覆盖，Provider 只负责它自己的检索事实。
         results = [
             replace(
@@ -1108,12 +1109,8 @@ class ContextAcquisitionService:
         }
         tokens = 0
         memory_tokens = 0
-        token_stopped = False
-        # 先限制条目总数，再按 Provider 顺序分配 token；记忆超出子预算时跳过该条，总预算耗尽后停止收集。
+        # 先限制条目总数，再按 Provider 顺序分配 token；单条超限只跳过自身。
         for item in selected:
-            if token_stopped:
-                reasons[_item_key(item)] = "token_budget_stop"
-                continue
             count = self._token_counter(item.content)
             is_memory = item.provider in {"memory", "memory_index", "episode"}
             if is_memory and memory_tokens + count > plan.memory_token_budget:
@@ -1121,7 +1118,6 @@ class ContextAcquisitionService:
                 continue
             if tokens + count > plan.max_tokens:
                 reasons[_item_key(item)] = "bundle_token_budget"
-                token_stopped = True
                 continue
             kept.append(item)
             tokens += count
@@ -1137,7 +1133,9 @@ class ContextAcquisitionService:
             items=tuple(kept),
             provider_results=tuple(traced_results),
             providers_succeeded=tuple(
-                result.provider for result in results if result.status == "succeeded"
+                result.provider
+                for result in results
+                if result.status in {"succeeded", "partial"}
             ),
             providers_failed=tuple(
                 result.provider
@@ -1648,6 +1646,21 @@ def _provider_query(plan: ContextPlan, provider: str) -> str | None:
     }.get(provider)
 
 
+def _order_provider_results(
+    results: list[ProviderResult],
+    providers: tuple[str, ...],
+) -> list[ProviderResult]:
+    """按计划 Provider 顺序稳定排序，消除并发完成次序对窗口的影响。"""
+    order = {provider: index for index, provider in enumerate(providers)}
+    return sorted(
+        results,
+        key=lambda result: (
+            order.get(result.provider, len(order)),
+            result.provider,
+        ),
+    )
+
+
 def _run_status(
     results: list[ProviderResult] | tuple[ProviderResult, ...], *, cancelled: bool
 ) -> str:
@@ -1668,6 +1681,8 @@ def _run_status(
     active = [result for result in results if result.status != "skipped"]
     if not active:
         return "skipped"
+    if any(result.status == "partial" for result in active):
+        return "partial"
     succeeded = any(result.status == "succeeded" for result in active)
     failures = [result for result in active if result.status in {"failed", "timeout"}]
     if succeeded and failures:

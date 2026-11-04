@@ -867,9 +867,35 @@ def _context_query_outcomes(
         status = result.status
         if status == "succeeded" and result.result_count == 0:
             status = "empty"
+        elif status == "partial":
+            # Root 的轻量查询契约不区分 partial；有结果时按成功传入，
+            # 无结果时保留失败通道的可操作语义。
+            if result.result_count:
+                status = "succeeded"
+            elif any(channel.status == "timeout" for channel in result.channels):
+                status = "timeout"
+            else:
+                status = "failed"
         if status not in {"succeeded", "empty", "failed", "timeout", "skipped"}:
             status = "failed"
-        error_message = (result.error_message or "")[:500] or None
+        error_parts = [
+            message
+            for message in (
+                result.error_message,
+                *(
+                    (
+                        f"{channel.channel}: {channel.error_message}"
+                        if channel.error_message
+                        else None
+                    )
+                    for channel in result.channels
+                ),
+            )
+            if message
+        ]
+        error_message = (
+            "; ".join(dict.fromkeys(error_parts))[:500] or None
+        )
         outcomes.append(
             ContextQueryOutcome(
                 stage=stage,

@@ -84,6 +84,7 @@ from infrastructure.integrations.llm.options import (
     RetryOptions,
 )
 from infrastructure.integrations.neo4j.resource import Neo4jResource
+from infrastructure.integrations.reranking import CrossEncoderReranker
 from infrastructure.integrations.worker_http import PinnedWorkerHttpClient
 from infrastructure.integrations.neo4j.options import Neo4jOptions
 from infrastructure.integrations.neo4j.file_indexer import (
@@ -397,6 +398,12 @@ def build_postgres_dependencies(
         episode_summarizer=LLMMemoryEpisodeSummarizer(llm_provider),
         episodes=memory_episodes,
     )
+    reranker = CrossEncoderReranker(
+        settings.file_rerank_model,
+        device=settings.file_rerank_device,
+        batch_size=settings.file_rerank_batch_size,
+        max_chars=settings.file_rerank_max_chars,
+    )
     context_planner = ContextPlanner(
         max_files=settings.knowledge_context_max_files,
         limit_per_file=settings.knowledge_context_limit_per_file,
@@ -410,6 +417,8 @@ def build_postgres_dependencies(
         "memory": MemoryContextProvider(
             memory,
             memory_vectors,
+            reranker=reranker,
+            vector_min_score=settings.memory_vector_min_score,
             limit=settings.retrieval_context_k,
             timeout_seconds=settings.memory_retrieval_timeout_seconds,
             settings=session_memory_settings,
@@ -421,12 +430,22 @@ def build_postgres_dependencies(
             settings=session_memory_settings,
         ),
         "file": FileContextProvider(
-            chunks, file_vectors, limit=settings.knowledge_context_limit_per_file
+            chunks,
+            file_vectors,
+            reranker=reranker,
+            candidate_limit=settings.file_rerank_candidate_k,
+            rerank_result_limit=settings.file_rerank_k,
+            rerank_min_score=settings.file_rerank_min_score,
+            limit=settings.knowledge_context_limit_per_file,
         ),
         "knowledge": KnowledgeContextProvider(
             chunks,
             attachments,
             file_vectors,
+            reranker=reranker,
+            candidate_limit=settings.knowledge_rerank_candidate_k,
+            rerank_result_limit=settings.knowledge_rerank_k,
+            rerank_min_score=settings.knowledge_rerank_min_score,
             limit=settings.knowledge_context_limit_per_file,
         ),
         "graph": GraphContextProvider(
@@ -589,7 +608,14 @@ def build_postgres_dependencies(
         "sandbox": sandbox,
         "context_service": context_service,
     }
-    resources: list[object] = [postgres, checkpointer, root_graph, neo4j, embedding]
+    resources: list[object] = [
+        postgres,
+        checkpointer,
+        root_graph,
+        neo4j,
+        embedding,
+        reranker,
+    ]
     routers: list[object] = []
     registry_management_routes = APIRouter()
     registry_management_routes.include_router(

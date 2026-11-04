@@ -10,6 +10,9 @@ from domain.files import Attachment, FileChunk, FileVectorSearchPort, VectorInde
 from domain.memory import MemoryVectorSearchPort
 from domain.leases import LeaseGrant, LeaseKey
 from infrastructure.persistence.postgres.models import AttachmentModel, FileChunkModel, MemoryModel
+from infrastructure.persistence.postgres.memory_scope import (
+    visible_memory_scope_condition,
+)
 from infrastructure.persistence.postgres.repositories.lease_center import PostgresLeaseCenter
 
 
@@ -94,7 +97,12 @@ class PostgresMemoryVectorIndex(MemoryVectorSearchPort):
         self._embedder = embedder
 
     async def query(
-        self, text: str, limit: int = 10, *, session_id: str | None = None
+        self,
+        text: str,
+        limit: int = 10,
+        *,
+        session_id: str | None = None,
+        project_id: str | None = None,
     ) -> list[dict[str, Any]]:
         vector = await self._embedder.embed_query(text)
         async with self._session_factory() as session:
@@ -108,7 +116,9 @@ class PostgresMemoryVectorIndex(MemoryVectorSearchPort):
                   for column in (MemoryModel.expires_at, MemoryModel.valid_until)],
             )
             if session_id:
-                statement = statement.where(MemoryModel.session_id == session_id)
+                statement = statement.where(
+                    visible_memory_scope_condition(session_id, project_id)
+                )
             rows = (await session.execute(statement.order_by(distance).limit(max(0, limit)))).all()
         return [
             {"memory_id": row[0].id, "content": row[0].content, "score": 1.0 - float(row[1])}

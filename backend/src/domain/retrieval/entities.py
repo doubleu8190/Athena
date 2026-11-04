@@ -24,4 +24,18 @@ class RetrievalRun:
     candidates: tuple[RetrievalCandidate, ...] = ()
 
 
-__all__ = ["RetrievalCandidate", "RetrievalRun"]
+@dataclass(frozen=True, slots=True)
+class RetrievalRerankResult:
+    """表示重排阶段返回的单个候选及其相关性顺序。"""
+
+    candidate: RetrievalCandidate
+    score: float
+    rank: int
+
+    def __post_init__(self) -> None:
+        """拒绝非法的重排名次，避免错误顺序进入最终上下文。"""
+        if type(self.rank) is not int or self.rank < 1:
+            raise ValueError("retrieval_rerank_rank_invalid")
+
+
+__all__ = ["RetrievalCandidate", "RetrievalRerankResult", "RetrievalRun"]

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from domain.retrieval.fusion import RetrievalRankFusion
 from domain.memory import ClaimedMemoryJob, CompletedTurn
@@ -99,6 +100,12 @@ def test_target_retrieval_fuses_rankings_and_registry_supports_formats():
     service = RetrievalRankFusion()
     values = service.fuse_ranked_candidates([RetrievalCandidate("a", "a")], [RetrievalCandidate("b", "b"), RetrievalCandidate("a", "a")], limit=2)
     assert [item.source_id for item in values] == ["a", "b"]
+    tied = service.fuse_ranked_candidates(
+        [RetrievalCandidate("source-z", "z")],
+        [RetrievalCandidate("source-a", "a")],
+        limit=None,
+    )
+    assert [item.source_id for item in tied] == ["source-a", "source-z"]
     registry = NativeFileAdapterRegistry()
     assert {registry.select("x.pdf", "application/pdf").name, registry.select("x.docx", "").name} == {"pdf", "word"}
 
@@ -394,3 +401,54 @@ async def test_target_pgvector_indexers_cover_index_delete_query():
     assert (await file_index.query("q"))[0]["chunk_id"] == "c"
     memory_index = PostgresMemoryVectorIndex(factory, Embed())
     assert (await memory_index.query("q"))[0]["memory_id"] == "c"
+
+
+@pytest.mark.asyncio
+async def test_memory_vector_query_applies_visible_scope_before_limit():
+    """记忆向量查询必须在距离排序和截断前应用会话/项目作用域。"""
+    statements = []
+
+    class Result:
+        def all(self):
+            return []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def factory():
+        yield Session()
+
+    class Embed:
+        async def embed_query(self, _value):
+            return [1.0, 2.0]
+
+    index = PostgresMemoryVectorIndex(factory, Embed())
+    await index.query(
+        "query",
+        10,
+        session_id="session-current",
+        project_id="project-current",
+    )
+
+    sql = str(
+        statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "memories.session_id = 'session-current'" in sql
+    assert "memories.category IN ('preference', 'profile')" in sql
+    assert "'project-current'" in sql
+    assert "scope_kind" in sql
+    assert sql.index("scope_kind") < sql.index("ORDER BY") < sql.index("LIMIT")

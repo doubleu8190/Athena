@@ -12,6 +12,7 @@ from application.orchestration.agents.root_agent import ConfiguredRootAgent
 from application.orchestration.root_decision import AnswerIntent, RootAgentInput, RootMessage
 from application.runs.context import ContextAcquisitionService, ContextBundle, ContextItem, ContextPlan
 from domain.memory import FactCardinality, MemoryRecord, MemorySearchRequest
+from domain.retrieval import RetrievalRerankResult
 from domain.retrieval.trace_contracts import RetrievalCandidateSelection
 from application.contracts.memory import memory_domain_to_schema
 from tests.fakes.memory_pipeline import candidate
@@ -209,7 +210,261 @@ async def test_memory_context_recalls_a_memory_from_an_earlier_session() -> None
     assert repository.request.filters == {
         "memory_scope": {"session_id": "new-session", "project_id": None}
     }
-    assert "session_id" not in vectors.kwargs
+    assert vectors.kwargs == {
+        "session_id": "new-session",
+        "project_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_memory_vector_failure_keeps_keyword_results() -> None:
+    """向量通道故障时保留关键词结果并标记 partial。"""
+
+    class FailingVectorIndex(VectorIndex):
+        async def query(self, text: str, limit: int = 10, **kwargs: object):
+            raise RuntimeError("vector unavailable")
+
+    provider = MemoryContextProvider(
+        MemoryRepository(),
+        FailingVectorIndex(),
+        limit=5,
+    )
+    result = await provider.retrieve_context(
+        session_id="new-session",
+        run_id="run-1",
+        plan=ContextPlan(
+            providers=("memory",),
+            memory_query="最喜欢吃什么水果",
+            max_items=5,
+        ),
+    )
+
+    assert result.status == "partial"
+    assert [item.content for item in result.items] == [
+        "fruit_preference: 苹果"
+    ]
+    vector_channel = next(
+        channel for channel in result.channels if channel.channel == "vector"
+    )
+    assert vector_channel.status == "failed"
+    assert vector_channel.error_message == "vector unavailable"
+
+
+@pytest.mark.asyncio
+async def test_memory_low_score_vector_is_filtered_but_keyword_hit_remains() -> None:
+    """低分向量候选不进入融合，独立关键词命中仍可返回。"""
+
+    keyword = MemoryRecord(
+        "keyword",
+        "fruit keyword",
+        {"category": "preference"},
+        score=1.0,
+    )
+    low_vector = MemoryRecord(
+        "low-vector",
+        "unrelated low score",
+        {"category": "preference"},
+    )
+
+    class Repository:
+        request: MemorySearchRequest | None = None
+
+        async def search(self, request: MemorySearchRequest):
+            self.request = request
+            return [keyword]
+
+        async def get(self, memory_id: str):
+            return low_vector if memory_id == low_vector.id else keyword
+
+        async def list_scope_index(
+            self, *, session_id: str, project_id: str | None, limit: int = 80
+        ):
+            return []
+
+        async def record_access(self, memory_ids: list[str]) -> int:
+            return len(memory_ids)
+
+    class Vector:
+        async def query(self, text: str, limit: int = 10, **kwargs: object):
+            return [
+                {
+                    "memory_id": low_vector.id,
+                    "content": low_vector.content,
+                    "score": 0.2,
+                }
+            ]
+
+    result = await MemoryContextProvider(
+        Repository(),
+        Vector(),
+        vector_min_score=0.7,
+    ).retrieve_context(
+        session_id="session",
+        run_id="run",
+        plan=ContextPlan(
+            providers=("memory",),
+            memory_query="fruit",
+            max_items=5,
+        ),
+    )
+
+    assert [item.source_id for item in result.items] == ["keyword"]
+    low_trace = next(
+        candidate
+        for candidate in result.candidates
+        if candidate.source_id == low_vector.id
+    )
+    assert low_trace.filter_reason == "below_vector_min_score"
+
+
+@pytest.mark.asyncio
+async def test_memory_reranker_changes_order_and_records_scores() -> None:
+    """真实候选顺序由重排结果决定，并保留重排名次和分数。"""
+    records = [
+        MemoryRecord(
+            "first",
+            "first memory",
+            {"category": "preference"},
+        ),
+        MemoryRecord(
+            "second",
+            "second memory",
+            {"category": "preference"},
+        ),
+    ]
+
+    class Repository:
+        async def search(self, request: MemorySearchRequest):
+            return []
+
+        async def get(self, memory_id: str):
+            return next(
+                (record for record in records if record.id == memory_id),
+                None,
+            )
+
+        async def list_scope_index(
+            self, *, session_id: str, project_id: str | None, limit: int = 80
+        ):
+            return []
+
+        async def record_access(self, memory_ids: list[str]) -> int:
+            return len(memory_ids)
+
+    class Vector:
+        async def query(self, text: str, limit: int = 10, **kwargs: object):
+            return [
+                {"memory_id": "first", "content": "first memory", "score": 0.9},
+                {
+                    "memory_id": "second",
+                    "content": "second memory",
+                    "score": 0.8,
+                },
+            ]
+
+    class ReverseReranker:
+        async def rerank(self, query, candidates, *, limit):
+            reversed_candidates = list(reversed(candidates))[:limit]
+            return [
+                RetrievalRerankResult(
+                    candidate,
+                    1.0 if candidate.source_id == "second" else 0.2,
+                    rank,
+                )
+                for rank, candidate in enumerate(reversed_candidates, 1)
+            ]
+
+    result = await MemoryContextProvider(
+        Repository(),
+        Vector(),
+        reranker=ReverseReranker(),
+        vector_min_score=0.7,
+    ).retrieve_context(
+        session_id="session",
+        run_id="run",
+        plan=ContextPlan(
+            providers=("memory",),
+            memory_query="memory",
+            max_items=5,
+            rerank_limit=2,
+        ),
+    )
+
+    assert [item.source_id for item in result.items] == ["second", "first"]
+    assert result.items[0].metadata["rerank_rank"] == 1
+    assert result.items[0].metadata["rerank_score"] == 1.0
+    assert any(
+        candidate.source_id == "second"
+        and candidate.rerank_rank == 1
+        and candidate.rerank_score == 1.0
+        for candidate in result.candidates
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_reranker_failure_falls_back_to_fusion_order() -> None:
+    """重排失败时保留融合顺序，并把降级状态写入通道追踪。"""
+    records = [
+        MemoryRecord("first", "first memory", {"category": "preference"}),
+        MemoryRecord("second", "second memory", {"category": "preference"}),
+    ]
+
+    class Repository:
+        async def search(self, request: MemorySearchRequest):
+            return []
+
+        async def get(self, memory_id: str):
+            return next(
+                (record for record in records if record.id == memory_id),
+                None,
+            )
+
+        async def list_scope_index(
+            self, *, session_id: str, project_id: str | None, limit: int = 80
+        ):
+            return []
+
+        async def record_access(self, memory_ids: list[str]) -> int:
+            return len(memory_ids)
+
+    class Vector:
+        async def query(self, text: str, limit: int = 10, **kwargs: object):
+            return [
+                {"memory_id": "first", "content": "first memory", "score": 0.9},
+                {
+                    "memory_id": "second",
+                    "content": "second memory",
+                    "score": 0.8,
+                },
+            ]
+
+    class FailingReranker:
+        async def rerank(self, query, candidates, *, limit):
+            raise RuntimeError("reranker unavailable")
+
+    result = await MemoryContextProvider(
+        Repository(),
+        Vector(),
+        reranker=FailingReranker(),
+        vector_min_score=0.7,
+    ).retrieve_context(
+        session_id="session",
+        run_id="run",
+        plan=ContextPlan(
+            providers=("memory",),
+            memory_query="memory",
+            max_items=5,
+            rerank_limit=2,
+        ),
+    )
+
+    assert result.status == "partial"
+    assert [item.source_id for item in result.items] == ["first", "second"]
+    rerank_channel = next(
+        channel for channel in result.channels if channel.channel == "rerank"
+    )
+    assert rerank_channel.status == "failed"
+    assert rerank_channel.error_message == "reranker unavailable"
 
 
 @pytest.mark.asyncio

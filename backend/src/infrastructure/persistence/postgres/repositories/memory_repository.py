@@ -54,6 +54,7 @@ from application.contracts.memory import (
     memory_domain_to_schema,
 )
 
+from ..memory_scope import visible_memory_scope_condition
 from ..models import (
     MemoryModel,
     MemoryRelationModel,
@@ -78,31 +79,6 @@ def _fact_identity_conditions(
             ("fact_key", fact.fact_key),
         )
     ]
-
-
-def _visible_scope_condition(
-    session_id: str, project_id: str | None
-) -> ColumnElement[bool]:
-    """构造当前会话可访问的事实及非事实记忆范围。"""
-    metadata = MemoryModel.metadata_json
-    fact = metadata["fact"]
-    non_fact_scopes = [
-        MemoryModel.session_id == session_id,
-        MemoryModel.category.in_(("preference", "profile")),
-        and_(metadata["scope_kind"].astext == "global", metadata["scope_id"].astext == "global"),
-        and_(metadata["scope_kind"].astext == "session", metadata["scope_id"].astext == session_id),
-    ]
-    scopes = [
-        and_(fact["scope_kind"].astext == "global", fact["scope_id"].astext == "global"),
-        and_(fact["scope_kind"].astext == "session", fact["scope_id"].astext == session_id),
-    ]
-    if project_id:
-        non_fact_scopes.append(
-            and_(metadata["scope_kind"].astext == "project", metadata["scope_id"].astext == project_id)
-        )
-        scopes.append(and_(fact["scope_kind"].astext == "project", fact["scope_id"].astext == project_id))
-    scopes.append(and_(fact.astext.is_(None), or_(*non_fact_scopes)))
-    return or_(*scopes)
 
 
 def _or_chinese_queries(terms: tuple[str, ...]):
@@ -447,7 +423,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
             if isinstance(scope_filter, dict) and scope_filter.get("session_id"):
                 project_id = scope_filter.get("project_id")
                 base_statement = base_statement.where(
-                    _visible_scope_condition(
+                    visible_memory_scope_condition(
                         str(scope_filter["session_id"]),
                         project_id if isinstance(project_id, str) else None,
                     )
@@ -495,7 +471,7 @@ class PostgresMemoryRepository(MemoryRepositoryPort):
                 MemoryModel.validity_status == "valid",
                 MemoryModel.deleted_time.is_(None),
                 *self._unexpired_conditions(),
-                _visible_scope_condition(session_id, project_id),
+                visible_memory_scope_condition(session_id, project_id),
             )
             .order_by(MemoryModel.created_at.desc(), MemoryModel.id)
             .limit(bounded_limit)

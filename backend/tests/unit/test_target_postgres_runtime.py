@@ -430,7 +430,7 @@ def test_postgres_dependency_graph_is_explicit(monkeypatch):
     monkeypatch.setattr("configuration.get_settings", lambda: settings)
     monkeypatch.setenv("ATHENA_DATABASE_BACKEND", "postgres")
     graph = build_default_dependencies()
-    assert len(graph.resources) == 6
+    assert len(graph.resources) == 7
     app = create_app(dependencies=graph)
     assert "/api/sessions" in app.openapi()["paths"]
     assert graph.service("memory_service") is not None
@@ -438,7 +438,7 @@ def test_postgres_dependency_graph_is_explicit(monkeypatch):
     assert graph.service("llm_provider")._secondary_policy.timeout_seconds == 0.017
     monkeypatch.setenv("ATHENA_WORKERS_ENABLED", "true")
     worker_graph = build_default_dependencies()
-    assert len(worker_graph.resources) == 7
+    assert len(worker_graph.resources) == 8
     monkeypatch.delenv("ATHENA_WORKERS_ENABLED")
     monkeypatch.delenv("ATHENA_DATABASE_BACKEND")
     assert Settings().database_backend == "postgres"

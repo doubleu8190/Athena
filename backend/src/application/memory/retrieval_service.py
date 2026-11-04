@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,7 +18,11 @@ from domain.memory import (
     MemoryVectorSearchPort,
     SessionMemorySettingsPort,
 )
-from domain.retrieval import RetrievalCandidate, RetrievalRankFusion
+from domain.retrieval import (
+    RetrievalCandidate,
+    RetrievalRankFusion,
+    RetrievalRerankPort,
+)
 from domain.retrieval.trace_contracts import (
     RetrievalCandidateTrace,
     RetrievalChannelTrace,
@@ -29,6 +33,7 @@ from application.contracts.retrieval import RetrievalHitTraceSchema
 
 from application.runs.context.contracts import ContextItem, ContextPlan, ProviderResult
 from application.runs.context.protocols import ContextProvider
+from application.runs.context.status import aggregate_query_status
 from application.memory.fact_groups import (
     MemoryFactContextGroup,
     build_fact_context_group,
@@ -73,7 +78,11 @@ class _RetrievalState:
     vector_rows: list[dict[str, Any]] = field(default_factory=list)
     keyword_status: str = "skipped"
     vector_status: str = "skipped"
-    processing_stage: str = "keyword"
+    rerank_status: str = "skipped"
+    keyword_error: str | None = None
+    vector_error: str | None = None
+    rerank_error: str | None = None
+    rerank_hit_count: int = 0
     directory_item: ContextItem | None = None
     directory_status: str = "skipped"
 
@@ -87,6 +96,7 @@ class _CandidateState:
     vector_candidates: list[RetrievalCandidate] = field(default_factory=list)
     fused: list[RetrievalCandidate] = field(default_factory=list)
     stale_candidates: list[RetrievalCandidate] = field(default_factory=list)
+    below_score_candidates: list[RetrievalCandidate] = field(default_factory=list)
     record_by_id: dict[str, MemoryRecord] = field(default_factory=dict)
 
 
@@ -121,6 +131,8 @@ class MemoryContextProvider(ContextProvider):
         repository: MemoryRepositoryPort,
         vector_indexer: MemoryVectorSearchPort | None = None,
         *,
+        reranker: RetrievalRerankPort | None = None,
+        vector_min_score: float = 0.70,
         limit: int = 8,
         timeout_seconds: float = 3.0,
         settings: SessionMemorySettingsPort | None = None,
@@ -130,6 +142,8 @@ class MemoryContextProvider(ContextProvider):
         参数：
         - `repository`（MemoryRepositoryPort）：负责读取或持久化领域数据的仓储依赖；约束：无额外运行时限制。
         - `vector_indexer`（MemoryVectorSearchPort | None）：执行向量检索或索引操作的可选依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `reranker`（RetrievalRerankPort | None）：对融合候选执行重排的可选能力；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `vector_min_score`（float）：向量通道进入融合前的最低相关性分数；约束：可省略，默认值为 `0.70`。
         - `limit`（int）：本次读取或处理的数量上限；约束：可省略，默认值为 `8`。
         - `timeout_seconds`（float）：本次操作允许使用的最长秒数；约束：可省略，默认值为 `3.0`。
         - `settings`（SessionMemorySettingsPort | None）：当前会话的记忆读取设置；None 表示未提供会话级覆盖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
@@ -142,6 +156,8 @@ class MemoryContextProvider(ContextProvider):
         """
         self._repository = repository
         self._vector_indexer = vector_indexer
+        self._reranker = reranker
+        self._vector_min_score = vector_min_score
         self._limit = limit
         self._timeout_seconds = timeout_seconds
         self._settings = settings
@@ -197,6 +213,7 @@ class MemoryContextProvider(ContextProvider):
             candidates = await self._retrieve_candidates(state)
             await self._retrieve_directory(state)
             await self._resolve_candidate_records(state, candidates)
+            await self._rerank_candidates(plan, state, candidates)
             facts = await self._load_fact_context(state, candidates)
             selection = self._select_context_items(plan, state, candidates, facts)
             traces = self._build_candidate_traces(
@@ -211,7 +228,7 @@ class MemoryContextProvider(ContextProvider):
     async def _retrieve_candidates(
         self, state: _RetrievalState
     ) -> _CandidateState:
-        """在共享时限内读取关键词和向量通道，并生成初始候选。
+        """独立读取关键词和向量通道，并生成初始融合候选。
 
         参数：
         - `state`（_RetrievalState）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
@@ -223,20 +240,36 @@ class MemoryContextProvider(ContextProvider):
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         candidates = _CandidateState()
-        async with asyncio.timeout(self._timeout_seconds):
-            state.keyword_rows = await self._repository.search(
-                MemorySearchRequest(
-                    query=state.query,
-                    limit=state.limit,
-                    terms=extract_memory_query_terms(state.query),
-                    filters={
-                        "memory_scope": {
-                            "session_id": state.session_id,
-                            "project_id": state.project_id,
-                        }
-                    },
+        await self._retrieve_keyword_candidates(state, candidates)
+        await self._retrieve_vector_candidates(state, candidates)
+        candidates.fused = RetrievalRankFusion().fuse_ranked_candidates(
+            candidates.keyword_candidates,
+            candidates.vector_candidates,
+            limit=None,
+        )
+        return candidates
+
+    async def _retrieve_keyword_candidates(
+        self, state: _RetrievalState, candidates: _CandidateState
+    ) -> None:
+        """执行关键词通道；失败时只记录该通道状态。"""
+        try:
+            async with asyncio.timeout(
+                _remaining_timeout(state.started, self._timeout_seconds)
+            ):
+                state.keyword_rows = await self._repository.search(
+                    MemorySearchRequest(
+                        query=state.query,
+                        limit=state.limit,
+                        terms=extract_memory_query_terms(state.query),
+                        filters={
+                            "memory_scope": {
+                                "session_id": state.session_id,
+                                "project_id": state.project_id,
+                            }
+                        },
+                    )
                 )
-            )
             state.keyword_status = "succeeded"
             candidates.active_keyword = [
                 (rank, record)
@@ -265,14 +298,108 @@ class MemoryContextProvider(ContextProvider):
                 )
                 for rank, record in candidates.active_keyword
             ]
-            state.processing_stage = "vector"
-            if self._vector_indexer is not None:
+        except TimeoutError:
+            state.keyword_status = "timeout"
+            state.keyword_error = "memory keyword retrieval timed out"
+        except Exception as exc:
+            state.keyword_status = "failed"
+            state.keyword_error = str(exc)
+            logger.exception(
+                "Memory keyword retrieval failed; session_id=%s",
+                state.session_id,
+            )
+
+    async def _retrieve_vector_candidates(
+        self, state: _RetrievalState, candidates: _CandidateState
+    ) -> None:
+        """执行向量通道，并按作用域和最低分数过滤候选。"""
+        if self._vector_indexer is None:
+            return
+        try:
+            async with asyncio.timeout(
+                _remaining_timeout(state.started, self._timeout_seconds)
+            ):
                 state.vector_rows = await self._vector_indexer.query(
-                    state.query, state.limit
+                    state.query,
+                    state.limit,
+                    session_id=state.session_id,
+                    project_id=state.project_id,
                 )
-                state.vector_status = "succeeded"
-            candidates.vector_candidates = self._vector_candidates(state.vector_rows)
-        return candidates
+            state.vector_status = "succeeded"
+            for candidate in self._vector_candidates(state.vector_rows):
+                if candidate.score >= self._vector_min_score:
+                    candidates.vector_candidates.append(candidate)
+                else:
+                    candidates.below_score_candidates.append(candidate)
+        except TimeoutError:
+            state.vector_status = "timeout"
+            state.vector_error = "memory vector retrieval timed out"
+        except Exception as exc:
+            state.vector_status = "failed"
+            state.vector_error = str(exc)
+            logger.exception(
+                "Memory vector retrieval failed; session_id=%s",
+                state.session_id,
+            )
+
+    async def _rerank_candidates(
+        self,
+        plan: ContextPlan,
+        state: _RetrievalState,
+        candidates: _CandidateState,
+    ) -> None:
+        """对融合后的有界候选执行重排，失败时保留融合顺序。"""
+        if self._reranker is None or not candidates.fused:
+            return
+        rerank_input = candidates.fused[: max(0, plan.rerank_limit)]
+        if not rerank_input:
+            state.rerank_status = "skipped"
+            return
+        try:
+            async with asyncio.timeout(
+                _remaining_timeout(state.started, self._timeout_seconds)
+            ):
+                ranked = await self._reranker.rerank(
+                    state.query,
+                    rerank_input,
+                    limit=len(rerank_input),
+                )
+            if not ranked:
+                raise ValueError("reranker returned no candidates")
+            allowed = {candidate.source_id: candidate for candidate in rerank_input}
+            reranked: list[RetrievalCandidate] = []
+            seen: set[str] = set()
+            for result in ranked:
+                source_id = result.candidate.source_id
+                candidate = allowed.get(source_id)
+                if candidate is None or source_id in seen:
+                    continue
+                seen.add(source_id)
+                reranked.append(
+                    replace(
+                        candidate,
+                        metadata={
+                            **candidate.metadata,
+                            "rerank_rank": result.rank,
+                            "rerank_score": result.score,
+                        },
+                    )
+                )
+            if not reranked:
+                raise ValueError("reranker returned no known candidates")
+            candidates.fused = reranked
+            state.rerank_hit_count = len(reranked)
+            state.rerank_status = "succeeded"
+        except TimeoutError:
+            state.rerank_status = "timeout"
+            state.rerank_error = "memory rerank timed out"
+        except Exception as exc:
+            state.rerank_status = "failed"
+            state.rerank_error = str(exc)
+            logger.exception(
+                "Memory rerank failed; session_id=%s",
+                state.session_id,
+            )
 
     async def _retrieve_directory(self, state: _RetrievalState) -> None:
         """读取并构建记忆目录；超时和普通异常记录状态，任务取消自然向上传播。
@@ -331,16 +458,11 @@ class MemoryContextProvider(ContextProvider):
             for record in state.keyword_rows
             if not _is_active_record(record)
         }
-        candidates.vector_candidates = [
+        candidates.fused = [
             candidate
-            for candidate in candidates.vector_candidates
+            for candidate in candidates.fused
             if candidate.source_id not in inactive_ids
         ]
-        candidates.fused = RetrievalRankFusion().fuse_ranked_candidates(
-            candidates.keyword_candidates,
-            candidates.vector_candidates,
-            limit=None,
-        )
         scoped_keyword_ids = {record.id for record in state.keyword_rows}
         candidates.record_by_id = {
             record.id: record for _, record in candidates.active_keyword
@@ -510,6 +632,19 @@ class MemoryContextProvider(ContextProvider):
         for candidate in candidates.fused:
             record = candidates.record_by_id[candidate.source_id]
             group = facts.groups_by_candidate.get(candidate.source_id)
+            score_metadata = {
+                "fused_score": candidate.score,
+                **(
+                    {"rerank_score": candidate.metadata["rerank_score"]}
+                    if isinstance(candidate.metadata.get("rerank_score"), (int, float))
+                    else {}
+                ),
+                **(
+                    {"rerank_rank": candidate.metadata["rerank_rank"]}
+                    if isinstance(candidate.metadata.get("rerank_rank"), int)
+                    else {}
+                ),
+            }
             if group is None:
                 scope_metadata = {
                     key: record.metadata[key]
@@ -521,7 +656,7 @@ class MemoryContextProvider(ContextProvider):
                         self.name,
                         candidate.content,
                         candidate.source_id,
-                        {"fused_score": candidate.score, **scope_metadata},
+                        {**score_metadata, **scope_metadata},
                     )
                 )
                 continue
@@ -535,7 +670,7 @@ class MemoryContextProvider(ContextProvider):
                     group.content,
                     group.anchor_id,
                     {
-                        "fused_score": candidate.score,
+                        **score_metadata,
                         "memory_group_key": group.group_key,
                         "memory_member_ids": list(group.member_ids),
                         "memory_conflict": group.conflicted,
@@ -601,6 +736,7 @@ class MemoryContextProvider(ContextProvider):
         self._add_stale_traces(trace_by_id, candidates.stale_candidates)
         self._add_group_member_traces(trace_by_id, facts, selection)
         self._add_inactive_keyword_traces(trace_by_id, state)
+        self._add_below_score_traces(trace_by_id, candidates.below_score_candidates)
         self._add_missing_vector_traces(trace_by_id, state.vector_rows)
         self._add_directory_trace(trace_by_id, state, selection.selected_items)
         return trace_by_id
@@ -652,6 +788,10 @@ class MemoryContextProvider(ContextProvider):
             )
             hits = self._candidate_hits(candidate)
             single_hit = hits[0] if len(hits) == 1 else None
+            fused_rank = _positive_rank(metadata.get("fused_rank")) or rank
+            fused_score = _score(metadata.get("rrf_score")) or candidate.score
+            rerank_rank = _positive_rank(metadata.get("rerank_rank"))
+            rerank_score = _score(metadata.get("rerank_score"))
             traces[candidate.source_id] = RetrievalCandidateTrace(
                 provider=self.name,
                 source_type="memory",
@@ -659,8 +799,10 @@ class MemoryContextProvider(ContextProvider):
                 revision_id=_optional_text(metadata.get("revision_id")),
                 native_rank=single_hit.rank if single_hit else None,
                 native_score=single_hit.score if single_hit else None,
-                fused_rank=rank,
-                fused_score=candidate.score,
+                fused_rank=fused_rank,
+                fused_score=fused_score,
+                rerank_rank=rerank_rank,
+                rerank_score=rerank_score,
                 selected_for_result=selected,
                 filter_reason=filter_reason,
                 content_preview=candidate.content[:500],
@@ -881,6 +1023,35 @@ class MemoryContextProvider(ContextProvider):
                 selection_stage="provider",
             )
 
+    def _add_below_score_traces(
+        self,
+        traces: dict[str, RetrievalCandidateTrace],
+        candidates: list[RetrievalCandidate],
+    ) -> None:
+        """记录未达到向量最低分数的候选及过滤原因。"""
+        for candidate in candidates:
+            if candidate.source_id in traces:
+                continue
+            rank = _positive_rank(candidate.metadata.get("channel_rank")) or 1
+            traces[candidate.source_id] = RetrievalCandidateTrace(
+                provider=self.name,
+                source_type="memory",
+                source_id=candidate.source_id,
+                native_rank=rank,
+                native_score=candidate.score,
+                selected_for_result=False,
+                filter_reason="below_vector_min_score",
+                content_preview=candidate.content[:500],
+                hits=(
+                    RetrievalHitTrace(
+                        channel="vector",
+                        rank=rank,
+                        score=candidate.score,
+                    ),
+                ),
+                selection_stage="provider",
+            )
+
     def _add_missing_vector_traces(
         self,
         traces: dict[str, RetrievalCandidateTrace],
@@ -984,20 +1155,31 @@ class MemoryContextProvider(ContextProvider):
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        items = tuple(selection.selected_items)
+        status = aggregate_query_status(
+            state.keyword_status,
+            state.vector_status,
+            state.rerank_status,
+        )
+        items = (
+            tuple(selection.selected_items)
+            if status in {"succeeded", "partial"}
+            else ()
+        )
         conflict_count = sum(
             bool(item.metadata.get("memory_conflict")) for item in items
         )
-        channels = (
+        channels = [
             RetrievalChannelTrace(
                 channel="keyword",
-                status="succeeded",
+                status=state.keyword_status,
                 hit_count=len(state.keyword_rows),
+                error_message=state.keyword_error,
             ),
             RetrievalChannelTrace(
                 channel="vector",
                 status=state.vector_status,
                 hit_count=len(state.vector_rows),
+                error_message=state.vector_error,
             ),
             RetrievalChannelTrace(
                 channel="memory_directory",
@@ -1012,10 +1194,20 @@ class MemoryContextProvider(ContextProvider):
                     else 0
                 ),
             ),
-        )
+        ]
+        if self._reranker is not None:
+            channels.insert(
+                2,
+                RetrievalChannelTrace(
+                    channel="rerank",
+                    status=state.rerank_status,
+                    hit_count=state.rerank_hit_count,
+                    error_message=state.rerank_error,
+                ),
+            )
         return ProviderResult(
             self.name,
-            "succeeded",
+            status,
             items,
             candidate_count=len(traces),
             result_count=sum(item.provider == "memory" for item in items),
@@ -1027,15 +1219,20 @@ class MemoryContextProvider(ContextProvider):
                 "fact_group_count": len(selection.seen_group_keys),
                 "conflict_group_count": conflict_count,
                 "directory_status": state.directory_status,
+                "keyword_status": state.keyword_status,
+                "vector_status": state.vector_status,
             },
             effective_params={
                 "recall_limit": state.limit,
                 "result_limit": selection.selected_limit,
                 "memory_token_budget": plan.memory_token_budget,
+                "vector_min_score": self._vector_min_score,
+                "rerank_limit": plan.rerank_limit,
+                "rerank_status": state.rerank_status,
                 "fact_group_count": len(selection.seen_group_keys),
                 "conflict_group_count": conflict_count,
             },
-            channels=channels,
+            channels=tuple(channels),
         )
 
     def _failure_result(
@@ -1054,20 +1251,16 @@ class MemoryContextProvider(ContextProvider):
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        keyword_status = state.keyword_status
-        vector_status = state.vector_status
-        if state.processing_stage == "keyword":
-            keyword_status = status
-        elif self._vector_indexer is not None and state.vector_status != "succeeded":
-            vector_status = status
         return self._failed_result(
             status=status,
             error=error,
             query=state.query,
             keyword_rows=state.keyword_rows,
             vector_rows=state.vector_rows,
-            keyword_status=keyword_status,
-            vector_status=vector_status,
+            keyword_status=state.keyword_status,
+            vector_status=state.vector_status,
+            keyword_error=state.keyword_error,
+            vector_error=state.vector_error,
             limit=state.limit,
             started=state.started,
         )
@@ -1112,6 +1305,8 @@ class MemoryContextProvider(ContextProvider):
         vector_rows: list[dict[str, Any]],
         keyword_status: str,
         vector_status: str,
+        keyword_error: str | None,
+        vector_error: str | None,
         limit: int,
         started: float,
     ) -> ProviderResult:
@@ -1222,6 +1417,7 @@ class MemoryContextProvider(ContextProvider):
                 channel="keyword",
                 status=keyword_status,
                 hit_count=len(keyword_rows),
+                error_message=keyword_error,
             ),
         ]
         if self._vector_indexer is not None:
@@ -1230,7 +1426,7 @@ class MemoryContextProvider(ContextProvider):
                     channel="vector",
                     status=vector_status,
                     hit_count=len(vector_rows),
-                    error_message=error if vector_status in {"failed", "timeout"} else None,
+                    error_message=vector_error,
                 )
             )
         return ProviderResult(
@@ -1286,6 +1482,15 @@ def _score(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _positive_rank(value: Any) -> int | None:
+    """把追踪元数据中的名次规范化为正整数或 None。"""
+    try:
+        rank = int(value)
+    except (TypeError, ValueError):
+        return None
+    return rank if rank >= 1 else None
 
 
 def _optional_text(value: Any) -> str | None:

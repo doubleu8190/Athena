@@ -6,13 +6,18 @@ import pytest
 
 from application.runs.context import (
     ContextAcquisitionService,
+    ContextBundle,
     ContextItem,
     ContextPlan,
+    ContextQueryOutcome,
     FileQuery,
     KnowledgeQuery,
+    MemoryQuery,
     ProviderResult,
 )
 from application.runs.context.planner import ContextPlanner, InvalidContextResource
+from application.orchestration.root_workflow import _context_query_outcomes
+from domain.retrieval.trace_contracts import RetrievalChannelTrace
 
 
 def test_context_planner_rejects_file_ids_outside_current_request() -> None:
@@ -169,3 +174,168 @@ async def test_directed_lookup_uses_existing_provider_timeout_without_prefetch_d
         plan=ContextPlan(providers=("memory",), memory_query="水果"),
     )
     assert bundle.provider_results[0].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_provider_completion_order_does_not_change_bundle_order() -> None:
+    """较快完成的 Provider 不得越过计划顺序占用窗口。"""
+    knowledge_completed = asyncio.Event()
+    recorded = []
+
+    class Memory:
+        async def retrieve_context(self, **_kwargs):
+            await knowledge_completed.wait()
+            return ProviderResult(
+                "memory",
+                "partial",
+                (ContextItem("memory", "memory item", "memory-1"),),
+                result_count=1,
+            )
+
+    class Knowledge:
+        async def retrieve_context(self, **_kwargs):
+            knowledge_completed.set()
+            return ProviderResult(
+                "knowledge",
+                "succeeded",
+                (ContextItem("knowledge", "knowledge item", "knowledge-1"),),
+                result_count=1,
+            )
+
+    class Trace:
+        async def record_context(self, **kwargs):
+            recorded.append(kwargs)
+            return "retrieval-order"
+
+    class Events:
+        async def publish(self, _event):
+            return None
+
+    service = ContextAcquisitionService(
+        {"memory": Memory(), "knowledge": Knowledge()},
+        Trace(),
+        Events(),
+    )
+    bundle = await service.retrieve_context(
+        session_id="session",
+        run_id="run",
+        invocation_id="order",
+        stage="prefetch",
+        plan=ContextPlan(
+            providers=("memory", "knowledge"),
+            memory_query="memory",
+            knowledge_query="knowledge",
+            max_items=5,
+            max_tokens=100,
+        ),
+    )
+
+    assert [item.provider for item in bundle.items] == ["memory", "knowledge"]
+    assert [result.provider for result in bundle.provider_results] == [
+        "memory",
+        "knowledge",
+    ]
+    assert recorded[0]["status"] == "partial"
+
+
+def test_bundle_skips_oversized_item_and_keeps_later_short_item() -> None:
+    """单条超 token 预算不应阻断后续更短候选。"""
+    service = ContextAcquisitionService({}, None, None)
+    bundle = service._build_bundle(
+        [
+            ProviderResult(
+                "memory",
+                "succeeded",
+                (
+                    ContextItem("memory", "a b c", "long"),
+                    ContextItem("memory", "ok", "short"),
+                ),
+                result_count=2,
+            )
+        ],
+        ContextPlan(
+            providers=("memory",),
+            max_items=5,
+            max_tokens=2,
+            memory_token_budget=2,
+        ),
+    )
+
+    assert [item.source_id for item in bundle.items] == ["short"]
+
+
+def test_partial_provider_maps_to_usable_root_query_status() -> None:
+    """Root 轻量查询契约不接收 partial，但有结果时不得误标为失败。"""
+    query = MemoryQuery(provider="memory", query="memory")
+    bundle = ContextBundle(
+        items=(),
+        provider_results=(
+            ProviderResult(
+                "memory",
+                "partial",
+                (ContextItem("memory", "usable", "memory-1"),),
+                result_count=1,
+            ),
+        ),
+    )
+
+    outcome = _context_query_outcomes((query,), bundle, "prefetch")[0]
+
+    assert isinstance(outcome, ContextQueryOutcome)
+    assert outcome.status == "succeeded"
+
+
+def test_partial_zero_result_preserves_timeout_status() -> None:
+    """partial 且零结果时，失败通道为超时则保留 timeout。"""
+    query = MemoryQuery(provider="memory", query="memory")
+    bundle = ContextBundle(
+        items=(),
+        provider_results=(
+            ProviderResult(
+                "memory",
+                "partial",
+                result_count=0,
+                channels=(
+                    RetrievalChannelTrace(
+                        channel="vector",
+                        status="timeout",
+                        hit_count=0,
+                        error_message="vector timed out",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    outcome = _context_query_outcomes((query,), bundle, "prefetch")[0]
+
+    assert outcome.status == "timeout"
+    assert outcome.error_message == "vector: vector timed out"
+
+
+def test_partial_zero_result_maps_failed_channel_to_failed() -> None:
+    """partial 且零结果时，无超时通道则汇总为 failed。"""
+    query = MemoryQuery(provider="memory", query="memory")
+    bundle = ContextBundle(
+        items=(),
+        provider_results=(
+            ProviderResult(
+                "memory",
+                "partial",
+                result_count=0,
+                channels=(
+                    RetrievalChannelTrace(
+                        channel="keyword",
+                        status="failed",
+                        hit_count=0,
+                        error_message="keyword failed",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    outcome = _context_query_outcomes((query,), bundle, "prefetch")[0]
+
+    assert outcome.status == "failed"
+    assert outcome.error_message == "keyword: keyword failed"

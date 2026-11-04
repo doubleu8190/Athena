@@ -6,7 +6,14 @@ from typing import Protocol
 
 
 class MemoryVectorSearchPort(Protocol):
-    async def query(self, text: str, limit: int = 10, *, session_id: str | None = None) -> list[dict[str, object]]: ...
+    async def query(
+        self,
+        text: str,
+        limit: int = 10,
+        *,
+        session_id: str | None = None,
+        project_id: str | None = None,
+    ) -> list[dict[str, object]]: ...
 
 
 __all__ = ["MemoryVectorSearchPort"]

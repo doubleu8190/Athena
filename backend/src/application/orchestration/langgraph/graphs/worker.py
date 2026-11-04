@@ -3,11 +3,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Mapping
 
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from application.observability import (
+    RunObservabilityService,
+    WorkerNodeSpanAttributes,
+    bind_span,
+    reset_span,
+)
 from application.orchestration.protocols import WorkerWorkflowPort
 from domain.orchestration.entities import TaskExecution
 from shared.serialization import json_value
@@ -19,12 +27,15 @@ def build_worker_graph(
     *,
     workflow: WorkerWorkflowPort,
     checkpointer: Any = None,
+    observability: RunObservabilityService | None = None,
 ) -> Any:
     """构建执行单个持久化 Task 的 Worker 图。
 
     参数：
     - `workflow`（WorkerWorkflowPort）：负责执行业务步骤的应用工作流；约束：无额外运行时限制。
     - `checkpointer`（Any）：保存和恢复图执行状态的检查点依赖；约束：可省略，默认值为 `None`。
+    - `observability`（RunObservabilityService | None）：写入接入方 Trace 的服务；
+      外部 Worker 进程未接入 Athena Trace 时可省略。
 
     返回：
     - Any：已编译且可使用检查点恢复的 Worker 工作流图。
@@ -41,7 +52,7 @@ def build_worker_graph(
         "finish_worker": workflow.finalize,
     }
     for name, handler in handlers.items():
-        graph.add_node(name, handler)
+        graph.add_node(name, _node(name, handler, observability))
     graph.add_edge(START, "prepare_worker")
     graph.add_edge("prepare_worker", "worker_agent_loop")
     graph.add_edge("worker_agent_loop", "approval_gate")
@@ -73,7 +84,10 @@ def build_worker_graph(
         """
         return await _request_worker_approval(workflow, state)
 
-    graph.add_node("request_worker_approval", request_worker_approval)
+    graph.add_node(
+        "request_worker_approval",
+        _node("request_worker_approval", request_worker_approval, observability),
+    )
     graph.add_conditional_edges(
         "request_worker_approval",
         lambda state: (
@@ -88,6 +102,78 @@ def build_worker_graph(
     )
     graph.add_edge("finish_worker", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+def _node(
+    name: str,
+    handler: Callable[[WorkerGraphState], Awaitable[dict[str, Any]]],
+    observability: RunObservabilityService | None,
+) -> Callable[[WorkerGraphState], Awaitable[dict[str, Any]]]:
+    """包装 Worker 节点，将 LLM 和工具子 span 绑定到当前节点。
+
+    参数：
+    - `name`：LangGraph 节点名，同时作为 Trace span 名称。
+    - `handler`：原 Worker 节点的异步处理函数。
+    - `observability`：Athena Trace 服务；未接入时为 None。
+
+    返回：
+    - Callable：保持原节点返回和异常语义的异步包装函数。
+
+    异常：
+    - 原处理函数抛出的异常会在记录 failed span 后继续抛出。
+    """
+
+    async def wrapped(state: WorkerGraphState) -> dict[str, Any]:
+        """执行节点并按完成、失败或挂起状态收尾 Trace。"""
+        execution = state.get("execution")
+        execution = execution if isinstance(execution, Mapping) else {}
+        execution_id = execution.get("execution_id")
+        session_id = execution.get("session_id")
+        run_id = execution.get("run_id")
+        span = None
+        token = None
+        if (
+            observability is not None
+            and isinstance(execution_id, str)
+            and isinstance(session_id, str)
+            and isinstance(run_id, str)
+        ):
+            span = await observability.start_span(
+                session_id=session_id,
+                run_id=run_id,
+                name=name,
+                attributes=WorkerNodeSpanAttributes(node_name=name),
+                parent_span_id=f"worker:{execution_id}",
+            )
+            token = bind_span(span.span_id)
+        try:
+            value = await handler(state)
+        except GraphInterrupt:
+            if observability is not None and span is not None:
+                await observability.finish_span(
+                    span.span_id, status="suspended"
+                )
+            raise
+        except Exception as exc:
+            if observability is not None and span is not None:
+                await observability.finish_span(
+                    span.span_id,
+                    status="failed",
+                    error={
+                        "code": str(getattr(exc, "code", "worker_node_failed")),
+                        "message": type(exc).__name__,
+                    },
+                )
+            raise
+        finally:
+            if token is not None:
+                reset_span(token)
+        if observability is not None and span is not None:
+            await observability.finish_span(span.span_id)
+        return value or {}
+
+    wrapped.__name__ = name
+    return wrapped
 
 
 async def _request_worker_approval(

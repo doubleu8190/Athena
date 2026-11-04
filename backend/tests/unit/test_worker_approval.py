@@ -151,8 +151,29 @@ class RepositorySession:
 
 @pytest.mark.asyncio
 async def test_high_risk_worker_tool_interrupts_and_executes_same_arguments_after_approval():
+    class Observability:
+        def __init__(self) -> None:
+            self.names: dict[str, str] = {}
+            self.parents: dict[str, str | None] = {}
+            self.attributes: dict[str, object] = {}
+            self.finished: list[tuple[str, str]] = []
+
+        async def start_span(self, **kwargs):
+            span_id = f"span-{len(self.names) + 1}"
+            self.names[span_id] = kwargs["name"]
+            self.parents[span_id] = kwargs.get("parent_span_id")
+            self.attributes[span_id] = kwargs["attributes"]
+            return SimpleNamespace(span_id=span_id)
+
+        async def finish_span(self, span_id, *, status="completed", error=None):
+            self.finished.append((self.names[span_id], status))
+
+    observability = Observability()
     tools = ToolService()
-    tool_executor = WorkerToolExecutor(tools)
+    tool_executor = WorkerToolExecutor(
+        tools,
+        observability=observability,
+    )
     workflow = WorkerWorkflow(
         execute=WorkerAgent(),
         execute_tool=tool_executor,
@@ -160,6 +181,7 @@ async def test_high_risk_worker_tool_interrupts_and_executes_same_arguments_afte
     graph = build_worker_graph(
         workflow=workflow,
         checkpointer=InMemorySaver(),
+        observability=observability,
     )
     execution = {
         "plan_id": "plan-1",
@@ -189,6 +211,7 @@ async def test_high_risk_worker_tool_interrupts_and_executes_same_arguments_afte
     assert approval["arguments"] == {"path": "report.txt", "content": "ready"}
     assert approval["operation_key"] == "athena:run-1:task-1:1:0:0"
     assert tools.executed == []
+    assert ("request_worker_approval", "suspended") in observability.finished
 
     finished = await invoke_worker_graph(
         graph,
@@ -211,6 +234,20 @@ async def test_high_risk_worker_tool_interrupts_and_executes_same_arguments_afte
     }
     assert tools.executed[0].approval_decision == "approved"
     assert tools.executed[0].operation_key == approval["operation_key"]
+    tool_span_id = next(
+        span_id
+        for span_id, name in observability.names.items()
+        if name == "tool.write_file"
+    )
+    tool_node_span_id = next(
+        span_id
+        for span_id, name in observability.names.items()
+        if name == "execute_tool_batch"
+    )
+    assert observability.parents[tool_span_id] == tool_node_span_id
+    assert getattr(
+        observability.attributes[tool_span_id], "span_type"
+    ) == "tool"
 
 
 @pytest.mark.asyncio

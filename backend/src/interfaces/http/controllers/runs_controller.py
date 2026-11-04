@@ -6,9 +6,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException, Query, Response
 
 from application.runs import RunNotFoundError, RunQueryService, RunRejectedError, RunService
+from application.observability import RunObservabilityService
 from application.sessions import SessionNotFoundError
 from interfaces.http.dto.runs import (
     RunListResponse,
+    RunTraceResponse,
+    RunTraceSpanResponse,
     StopRunRequest,
     StopRunResponse,
     SubmitRunRequest,
@@ -19,6 +22,7 @@ from interfaces.http.dto.sessions import RunSummaryResponse
 
 def build_run_query_router(
     run_query_service: RunQueryService,
+    observability_service: RunObservabilityService | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["runs"])
 
@@ -27,9 +31,15 @@ def build_run_query_router(
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
         session_id: str | None = None,
+        terminal_only: bool = Query(False),
     ) -> RunListResponse:
         try:
-            value = await run_query_service.list_recent(limit=limit, offset=offset, session_id=session_id)
+            value = await run_query_service.list_recent(
+                limit=limit,
+                offset=offset,
+                session_id=session_id,
+                terminal_only=terminal_only,
+            )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session_not_found") from exc
         return RunListResponse(
@@ -46,6 +56,27 @@ def build_run_query_router(
             return RunSummaryResponse.from_application(await run_query_service.get(run_id))
         except RunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run_not_found") from exc
+
+    @router.get("/runs/{run_id}/trace", response_model=RunTraceResponse)
+    async def get_run_trace(run_id: str) -> RunTraceResponse:
+        """读取已完成 Run 的 Trace；活动 Run 不提供实时链路。"""
+        if observability_service is None:
+            raise HTTPException(status_code=503, detail="run_trace_unavailable")
+        try:
+            run = await run_query_service.get(run_id)
+        except RunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="run_not_found") from exc
+        if run.status not in {"completed", "failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="run_not_terminal")
+        spans = await observability_service.list_run_spans(run_id)
+        return RunTraceResponse(
+            run_id=run.run_id,
+            status=run.status,
+            spans=[
+                RunTraceSpanResponse.from_application(value)
+                for value in spans
+            ],
+        )
 
     return router
 

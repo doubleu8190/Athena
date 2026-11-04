@@ -10,8 +10,13 @@ from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import NodeCancelledError
 
 from application.orchestration import RootWorkflow, RootWorkflowDependencies
+from application.observability import (
+    RunObservabilityService,
+    TraceSpan,
+)
 from application.orchestration.root_workflow import (
     _merge_context_window,
     render_plan_results,
@@ -38,7 +43,10 @@ from domain.orchestration import RootPlanFacts, RootPlanTaskFact
 from domain.runs import RootPlanCheckpointRecovery, RootPlanCompletedResumeValue
 from application.runs.request_contracts import RootRequestState
 from application.orchestration.langgraph import build_root_graph
-from application.orchestration.langgraph.graphs.state import RootGraphState
+from application.orchestration.langgraph.graphs.state import (
+    RootGraphState,
+    RootPlanIdentity,
+)
 from application.orchestration.langgraph import invoke_root_graph as _invoke_root_graph
 from application.orchestration.langgraph.runtime.root_adapter import LangGraphRootGraph
 from tests.fakes.leases import lease_context, lease_grant
@@ -128,6 +136,53 @@ class _Events:
     async def publish(self, _event):
         self.events.append(_event)
         return None
+
+    async def publish_realtime(self, event):
+        self.events.append(event)
+        return event
+
+
+class _ObservabilityRepository:
+    """在内存中保存 Root 图 span，供测试核验父子关系。"""
+
+    def __init__(self) -> None:
+        self.spans: dict[str, TraceSpan] = {}
+
+    async def start_span(self, **values) -> TraceSpan:
+        attributes = values["attributes"]
+        span = TraceSpan(
+            **values,
+            span_type=attributes.span_type,
+            status="running",
+            sequence=len(self.spans) + 1,
+        )
+        self.spans[span.span_id] = span
+        return span
+
+    async def finish_span(
+        self,
+        *,
+        span_id: str,
+        status: str,
+        completed_at: datetime,
+        duration_ms: int,
+        error: dict[str, str] | None = None,
+    ) -> None:
+        current = self.spans[span_id]
+        self.spans[span_id] = current.model_copy(
+            update={
+                "status": status,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": error,
+            }
+        )
+
+    async def list_spans_for_run(self, run_id: str) -> list[TraceSpan]:
+        return sorted(
+            (span for span in self.spans.values() if span.run_id == run_id),
+            key=lambda span: span.sequence,
+        )
 
 
 class _AnswerGeneration:
@@ -227,6 +282,10 @@ def _dependencies(agent, *, provider=None, root_max_turns=4, events=None):
     events = events or _Events()
     memory_repository = _MemoryValidationRepository()
     providers = {"memory": _Provider(provider, memory_repository)} if provider else {}
+    observability = RunObservabilityService(
+        _ObservabilityRepository(),
+        events,
+    )
     dependencies = RootWorkflowDependencies(
         context_acquisition=ContextAcquisitionService(
             providers,
@@ -242,6 +301,7 @@ def _dependencies(agent, *, provider=None, root_max_turns=4, events=None):
         tool_service=_Tools(),
         available_context_providers=tuple(providers),
         root_max_turns=root_max_turns,
+        observability=observability,
     )
     dependencies.root_orchestration = _RootOrchestration()
     return dependencies
@@ -293,7 +353,7 @@ async def test_root_decides_after_prefetch_and_uses_memory_before_answering() ->
 
 
 @pytest.mark.asyncio
-async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -> None:
+async def test_repeated_root_nodes_create_distinct_trace_spans() -> None:
     async def retrieve(*, session_id, run_id, plan):
         return ProviderResult("memory", "succeeded", result_count=0)
 
@@ -331,30 +391,22 @@ async def test_repeated_root_and_context_nodes_publish_distinct_activity_ids() -
         "decide_root_action": 2,
         "generate_plan": 1,
     }
+    spans = await dependencies.observability.list_run_spans(
+        "run-repeated-activities"
+    )
     for node_name, expected_count in expected_invocations.items():
-        started = {
-            event.payload["activity_id"]: event
-            for event in events.events
-            if event.event_type == "node.started"
-            and event.payload["node"] == node_name
-        }
-        completed = {
-            event.payload["activity_id"]: event
-            for event in events.events
-            if event.event_type == "node.completed"
-            and event.payload["node"] == node_name
-        }
-
-        assert len(started) == expected_count
-        assert set(started) == set(completed)
+        node_spans = [
+            span
+            for span in spans
+            if span.span_type == "root_node"
+            and span.attributes.node_name == node_name
+        ]
+        assert len(node_spans) == expected_count
         assert all(
-            event.payload["parent_activity_id"] == "run:run-repeated-activities"
-            for event in started.values()
+            span.parent_span_id == "run:run-repeated-activities"
+            for span in node_spans
         )
-        assert all(
-            started[activity_id].occurred_at <= completed[activity_id].occurred_at
-            for activity_id in started
-        )
+        assert all(span.status == "completed" for span in node_spans)
 
 
 def test_root_graph_has_no_removed_understanding_or_harness_nodes() -> None:
@@ -902,6 +954,15 @@ async def test_checkpoint_recovery_after_plan_consumption_uses_new_lease() -> No
         lease=lease,
     )
     interrupt = interrupted["__interrupt__"][0]
+    interrupted_spans = await dependencies.observability.list_run_spans(
+        "run-checkpoint-recovery"
+    )
+    assert any(
+        span.attributes.span_type == "root_node"
+        and span.attributes.node_name == "wait_for_plan_completion"
+        and span.status == "suspended"
+        for span in interrupted_spans
+    )
     wait_identity = interrupt.value
     dependencies.root_orchestration.completed_plan = RootPlanFacts(
         run_id="run-checkpoint-recovery",
@@ -962,3 +1023,212 @@ async def test_checkpoint_recovery_after_plan_consumption_uses_new_lease() -> No
         {"configurable": {"thread_id": "run:run-checkpoint-recovery"}}
     )
     assert final_snapshot.values["execution_lease"]["fencing_token"] == 2
+
+
+@pytest.mark.asyncio
+async def test_materialized_plan_recovers_after_interrupt_has_not_been_armed() -> None:
+    """Plan 已提交但下一 interrupt 尚未 arm 时，可从当前 checkpoint 继续消费。"""
+
+    def task(ref: str, value: str) -> dict[str, object]:
+        return {
+            "task_ref": ref,
+            "contract_id": "echo",
+            "contract_revision": 1,
+            "objective": "回显输入",
+            "input": {"value": value},
+            "acceptance_criteria": "返回相同输入",
+        }
+
+    agent = _Agent(
+        [
+            PlanIntent(action="plan", goal="第一轮", instructions="执行第一轮"),
+            PlanDraft(action="plan", goal="第一轮", tasks=(task("one", "1"),)),
+            PlanIntent(action="plan", goal="第二轮", instructions="执行第二轮"),
+            PlanDraft(action="plan", goal="第二轮", tasks=(task("two", "2"),)),
+            AnswerIntent(action="answer", kind="final", instructions="总结两轮"),
+        ]
+    )
+    dependencies = _dependencies(agent)
+    orchestration = _RootOrchestration()
+    dependencies.root_orchestration = orchestration
+    saver = InMemorySaver()
+    workflow = RootWorkflow(dependencies)
+    original_wait = workflow.wait_for_plan_completion
+    crashed_second_wait = False
+
+    async def crash_before_second_interrupt(state):
+        """在第二轮等待节点入口退出，模拟 Plan 已落 checkpoint、interrupt 尚未 arm。"""
+        nonlocal crashed_second_wait
+        plan = RootPlanIdentity.model_validate(state.get("plan", {}))
+        if plan.root_wait_generation == 2 and not crashed_second_wait:
+            crashed_second_wait = True
+            raise asyncio.CancelledError
+        return await original_wait(state)
+
+    # LangGraph 在相邻节点间持久化状态；在等待节点入口退出可稳定复现
+    # “Plan 已提交、第二个 interrupt 尚未落 checkpoint”的重启窗口。
+    workflow.wait_for_plan_completion = crash_before_second_interrupt
+    graph = build_root_graph(
+        workflow=workflow,
+        dependencies=dependencies,
+        checkpointer=saver,
+    )
+
+    class Checkpointer:
+        def get_saver(self):
+            return saver
+
+    class ThreadLock:
+        @asynccontextmanager
+        async def hold(self, _key):
+            yield
+
+    class LeaseCenter:
+        async def assert_current(self, _lease):
+            return None
+
+    adapter = LangGraphRootGraph(
+        workflow=workflow,
+        dependencies=dependencies,
+        checkpointer=Checkpointer(),
+        thread_lock=ThreadLock(),
+        lease_center=LeaseCenter(),
+    )
+    # 复用发生取消的真实 compiled graph，避免测试另一个编译实例。
+    adapter._graph = graph
+    run_id = "run-materialized-recovery"
+    lease = lease_grant("root_execution", run_id)
+    interrupted = await invoke_root_graph(
+        graph,
+        session_id="session-1",
+        run_id=run_id,
+        message_id="message-1",
+        user_message="执行两轮",
+        lease=lease,
+    )
+    first_interrupt = interrupted["__interrupt__"][0]
+    first_wait = dict(first_interrupt.value)
+    # 已存在 pending interrupt 时，当前 Plan 不能被当作“已消费但未 arm”
+    # 的 checkpoint 恢复，否则 dispatcher 会绕过正常中断登记。
+    assert not await adapter.is_plan_checkpoint_recoverable(
+        run_id=run_id,
+        plan_id=first_wait["plan_id"],
+        plan_sequence=first_wait["plan_sequence"],
+        root_wait_generation=first_wait["root_wait_generation"],
+    )
+    assert not await adapter.is_plan_checkpoint_recoverable(
+        run_id="run-other",
+        plan_id=first_wait["plan_id"],
+        plan_sequence=first_wait["plan_sequence"],
+        root_wait_generation=first_wait["root_wait_generation"],
+    )
+    orchestration.completed_plan = RootPlanFacts(
+        run_id=run_id,
+        plan_id=first_wait["plan_id"],
+        sequence=first_wait["plan_sequence"],
+        root_wait_generation=first_wait["root_wait_generation"],
+        goal="第一轮",
+        status="completed",
+        tasks=(
+            RootPlanTaskFact(
+                task_ref="one",
+                status="succeeded",
+                output={"value": "1"},
+            ),
+        ),
+    )
+    first_resume = RootPlanCompletedResumeValue(
+        type="plan_completed",
+        run_id=run_id,
+        plan_id=first_wait["plan_id"],
+        plan_sequence=first_wait["plan_sequence"],
+        root_wait_generation=first_wait["root_wait_generation"],
+        interrupt_id=first_interrupt.id,
+    )
+
+    # 模拟进程在看到 Plan 2 已提交后、第二个 interrupt 落 checkpoint 前退出。
+    with pytest.raises(NodeCancelledError):
+        await invoke_root_graph(
+            graph,
+            session_id="session-1",
+            run_id=run_id,
+            lease=lease,
+            resume_value=first_resume,
+        )
+
+    snapshot = await graph.aget_state(
+        {"configurable": {"thread_id": f"run:{run_id}"}}
+    )
+    second_plan = RootPlanIdentity.model_validate(snapshot.values["plan"])
+    assert second_plan.sequence == 2
+    assert all(not pending_task.interrupts for pending_task in snapshot.tasks)
+    assert await adapter.is_plan_checkpoint_recoverable(
+        run_id=run_id,
+        plan_id=second_plan.plan_id,
+        plan_sequence=second_plan.sequence,
+        root_wait_generation=second_plan.root_wait_generation,
+    )
+    assert not await adapter.is_plan_checkpoint_recoverable(
+        run_id=run_id,
+        plan_id=second_plan.plan_id,
+        plan_sequence=second_plan.sequence + 1,
+        root_wait_generation=second_plan.root_wait_generation,
+    )
+    assert not await adapter.is_plan_checkpoint_recoverable(
+        run_id=run_id,
+        plan_id=second_plan.plan_id,
+        plan_sequence=second_plan.sequence,
+        root_wait_generation=second_plan.root_wait_generation + 1,
+    )
+    assert not await adapter.is_plan_checkpoint_recoverable(
+        run_id=run_id,
+        plan_id="plan-other",
+        plan_sequence=second_plan.sequence,
+        root_wait_generation=second_plan.root_wait_generation,
+    )
+    assert not await adapter.is_plan_checkpoint_recoverable(
+        run_id="run-other",
+        plan_id=second_plan.plan_id,
+        plan_sequence=second_plan.sequence,
+        root_wait_generation=second_plan.root_wait_generation,
+    )
+
+    orchestration.completed_plan = RootPlanFacts(
+        run_id=run_id,
+        plan_id=second_plan.plan_id,
+        sequence=second_plan.sequence,
+        root_wait_generation=second_plan.root_wait_generation,
+        goal="第二轮",
+        status="completed",
+        tasks=(
+            RootPlanTaskFact(
+                task_ref="two",
+                status="succeeded",
+                output={"value": "2"},
+            ),
+        ),
+    )
+    recovered = await invoke_root_graph(
+        graph,
+        session_id="session-1",
+        run_id=run_id,
+        lease=lease_grant(
+            "root_execution", run_id, fencing_token=2
+        ),
+        resume_value=RootPlanCheckpointRecovery(
+            type="plan_checkpoint_recovery",
+            run_id=run_id,
+            plan_id=second_plan.plan_id,
+            plan_sequence=second_plan.sequence,
+            root_wait_generation=second_plan.root_wait_generation,
+        ),
+    )
+
+    assert recovered["status"] == "completed"
+    assert len(orchestration.submissions) == 2
+    assert len(agent.inputs) == 5
+    final_snapshot = await graph.aget_state(
+        {"configurable": {"thread_id": f"run:{run_id}"}}
+    )
+    assert len(final_snapshot.values["completed_plans"]) == 2
+    assert all(not pending_task.interrupts for pending_task in final_snapshot.tasks)

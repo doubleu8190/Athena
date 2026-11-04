@@ -12,6 +12,11 @@ import re
 from typing import Any, Literal, cast
 
 from application.common.responses import ToolResponse
+from application.observability import (
+    RunObservabilityService,
+    ToolSpanAttributes,
+    current_span_id,
+)
 from application.tools.service import ToolService
 from application.orchestration.lease_context import lease_grant_from_context
 
@@ -80,6 +85,7 @@ class WorkerToolExecutor:
         result_store: WorkerResultStore | None = None,
         operation_ledger: WorkerToolOperationLedger | None = None,
         events: EventPort | None = None,
+        observability: RunObservabilityService | None = None,
     ) -> None:
         """保存对象依赖并初始化运行所需状态。
 
@@ -88,6 +94,8 @@ class WorkerToolExecutor:
         - `result_store`（WorkerResultStore | None）：存取大型或非内联工具结果的依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
         - `operation_ledger`（WorkerToolOperationLedger | None）：记录副作用操作幂等状态的依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
         - `events`（EventPort | None）：用于读取、写入或推送的事件存储依赖；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
+        - `observability`（RunObservabilityService | None）：保存工具调用子 span 的 Trace 服务；
+          本地 Worker 未接入 Athena Trace 时可省略。
 
         返回：
         - None：操作完成后不提供返回数据。
@@ -99,6 +107,7 @@ class WorkerToolExecutor:
         self._result_store = result_store
         self._operation_ledger = operation_ledger
         self._events = events
+        self._observability = observability
 
     async def __call__(
         self,
@@ -124,6 +133,72 @@ class WorkerToolExecutor:
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
+        name = (
+            str(tool_call.get("name", "")).strip()
+            if isinstance(tool_call, Mapping)
+            else "unknown"
+        )
+        session_id = str(execution.get("session_id", ""))
+        run_id = str(execution.get("run_id", ""))
+        span = None
+        if self._observability is not None and session_id and run_id:
+            span = await self._observability.start_span(
+                session_id=session_id,
+                run_id=run_id,
+                name=f"tool.{name or 'unknown'}",
+                attributes=ToolSpanAttributes(tool_name=name or "unknown"),
+                parent_span_id=current_span_id(),
+            )
+        try:
+            result = await self._invoke_tool(
+                tool_call=tool_call,
+                execution=execution,
+                tool_round=tool_round,
+                call_index=call_index,
+                **_kwargs,
+            )
+        except Exception as exc:
+            if self._observability is not None and span is not None:
+                await self._observability.finish_span(
+                    span.span_id,
+                    status="failed",
+                    error={
+                        "code": "worker_tool_failed",
+                        "message": type(exc).__name__,
+                    },
+                )
+            raise
+        if self._observability is not None and span is not None:
+            result_status = (
+                str(result.get("status", "completed"))
+                if isinstance(result, Mapping)
+                else "completed"
+            )
+            span_status = (
+                "suspended"
+                if result_status == "approval_required"
+                else "failed"
+                if result_status in {"failed", "denied"}
+                else "cancelled"
+                if result_status == "cancelled"
+                else "completed"
+            )
+            await self._observability.finish_span(
+                span.span_id,
+                status=span_status,
+            )
+        return result
+
+    async def _invoke_tool(
+        self,
+        *,
+        tool_call: Any,
+        execution: Mapping[str, Any],
+        tool_round: int,
+        call_index: int,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        """执行单次工具调用，不在此层创建 Trace span。"""
         if not isinstance(tool_call, Mapping):
             return _denied("invalid_tool_call")
         name = str(tool_call.get("name", "")).strip()

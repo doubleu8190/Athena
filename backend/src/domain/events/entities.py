@@ -74,6 +74,15 @@ class EventType(StrEnum):
     TOOL_COMPLETED = "tool.completed"
     TOOL_STARTED = "tool.started"
     MESSAGE_PERSISTED = "message.persisted"
+    SESSION_SNAPSHOT = "session.snapshot"
+    TURN_STARTED = "turn.started"
+    PROGRESS_CREATED = "progress.created"
+    TASK_RESULT = "task.result"
+    ASSISTANT_STARTED = "assistant.started"
+    ASSISTANT_DELTA = "assistant.delta"
+    ASSISTANT_COMPLETED = "assistant.completed"
+    TURN_FAILED = "turn.failed"
+    TURN_CANCELLED = "turn.cancelled"
 
 
 @dataclass(frozen=True, slots=True)

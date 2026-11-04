@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from application.common.responses import ToolResponse
+from application.observability import current_span_id
 from application.orchestration.agents.worker_agent import ConfiguredWorkerAgent
 from application.orchestration.langgraph.graphs.worker import (
     build_worker_graph,
@@ -285,6 +286,65 @@ async def test_worker_graph_passes_allowed_tool_manifest_to_worker_model():
 
     assert '"name": "exec_shell"' in llm.messages[0]["content"]
     assert '"allowed_tools": ["exec_shell"]' in llm.messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_worker_graph_nodes_are_parented_and_bind_child_context():
+    class Observability:
+        def __init__(self) -> None:
+            self.started: list[tuple[str, str, object]] = []
+            self.finished: list[tuple[str, str]] = []
+
+        async def start_span(self, **kwargs):
+            span_id = f"span-{len(self.started) + 1}"
+            self.started.append(
+                (span_id, kwargs["parent_span_id"], kwargs["attributes"])
+            )
+            return SimpleNamespace(span_id=span_id)
+
+        async def finish_span(self, span_id, *, status="completed", error=None):
+            self.finished.append((span_id, status))
+
+    observability = Observability()
+    observed_context: list[str | None] = []
+
+    async def execute(**_kwargs):
+        observed_context.append(current_span_id())
+        return {"status": "completed", "output": {"ok": True}}
+
+    workflow = WorkerWorkflow(execute=execute)
+    graph = build_worker_graph(
+        workflow=workflow,
+        observability=observability,
+    )
+    execution = TaskExecution(
+        plan_id="plan-1",
+        run_id="run-1",
+        session_id="session-1",
+        task=Task(
+            task_id="task-1",
+            title="任务",
+            objective="执行任务",
+        ),
+        execution_generation=1,
+        execution_id="execution-1",
+    )
+
+    await invoke_worker_graph(
+        graph,
+        task_id="task-1",
+        execution_generation=1,
+        execution=execution,
+    )
+
+    assert {parent for _, parent, _ in observability.started} == {
+        "worker:execution-1"
+    }
+    assert {attributes.span_type for _, _, attributes in observability.started} == {
+        "worker_node"
+    }
+    assert observed_context == ["span-2"]
+    assert {status for _, status in observability.finished} == {"completed"}
 
 
 @pytest.mark.asyncio

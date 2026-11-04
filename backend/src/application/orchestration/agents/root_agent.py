@@ -10,6 +10,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, ValidationError
 
 from application.runs.context.contracts import ContextItem
+from application.observability import RunObservabilityService
 from domain.events.ports import EventPort
 from domain.integrations import LLMPort
 from shared import get_logger, read_system_prompt, render_prompt_template
@@ -37,15 +38,17 @@ from ..root_decision import (
 logger = get_logger(__name__)
 
 _ROOT_DECISION_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
-    "answer": frozenset({"action", "kind", "instructions"}),
-    "plan": frozenset({"action", "goal", "instructions"}),
+    "answer": frozenset({"action", "kind", "instructions", "progress"}),
+    "plan": frozenset({"action", "goal", "instructions", "progress"}),
 }
 _ROOT_DECISION_ACTION_FIELDS = frozenset().union(
     *_ROOT_DECISION_FIELDS_BY_ACTION.values()
 )
 _ROOT_PLAN_FIELDS_BY_ACTION: dict[str, frozenset[str]] = {
-    "plan": frozenset({"action", "goal", "tasks"}),
-    "needs_information": frozenset({"action", "missing_information", "reason"}),
+    "plan": frozenset({"action", "goal", "tasks", "progress"}),
+    "needs_information": frozenset(
+        {"action", "missing_information", "reason", "progress"}
+    ),
 }
 _ROOT_PLAN_ACTION_FIELDS = frozenset().union(*_ROOT_PLAN_FIELDS_BY_ACTION.values())
 
@@ -95,7 +98,10 @@ class ConfiguredRootAgent(RootAgent):
     """
 
     def __init__(
-        self, llm: LLMPort, event_publisher: EventPort | None = None
+        self,
+        llm: LLMPort,
+        event_publisher: EventPort | None = None,
+        observability: RunObservabilityService | None = None,
     ) -> None:
         """保存模型依赖，并读取统一 Root 提示。
 
@@ -111,6 +117,7 @@ class ConfiguredRootAgent(RootAgent):
         """
         self._llm = llm
         self._events = event_publisher
+        self._observability = observability
         self._system_prompt = read_system_prompt("root_decision.md").strip()
         self._plan_prompt = read_system_prompt("root_plan.md").strip()
 
@@ -185,6 +192,7 @@ class ConfiguredRootAgent(RootAgent):
             session_id=session_id,
             run_id=run_id,
             parent_activity_id=f"run:{run_id}",
+            observability=self._observability,
         )
         try:
             output = QueryRewriteOutput.model_validate(response)
@@ -463,7 +471,9 @@ class ConfiguredRootAgent(RootAgent):
         value = await self._invoke_schema(messages, schema, session_id, run_id)
         response_content = self._response_content(value)
         try:
-            return decode_response(response_content)
+            decoded = decode_response(response_content)
+            await self._persist_progress(decoded, session_id, run_id)
+            return decoded
         except (ValueError, ValidationError) as error:
             logger.error("root contract 失败，失败原因：{error}，准备开始重试...", exc_info=True)
             repaired = await self._invoke_schema(
@@ -487,7 +497,9 @@ class ConfiguredRootAgent(RootAgent):
                 run_id,
             )
             try:
-                return decode_response(self._response_content(repaired))
+                decoded = decode_response(self._response_content(repaired))
+                await self._persist_progress(decoded, session_id, run_id)
+                return decoded
             except (ValueError, ValidationError) as repair_error:
                 logger.error("重试root contract 依旧失败，失败原因：{error}", exc_info=True)
                 raise RootDecisionFormatError(failure_code) from repair_error
@@ -521,6 +533,23 @@ class ConfiguredRootAgent(RootAgent):
             session_id=session_id,
             run_id=run_id,
             parent_activity_id=f"run:{run_id}",
+            observability=self._observability,
+        )
+
+    async def _persist_progress(
+        self, value: Any, session_id: str, run_id: str
+    ) -> None:
+        """在模型契约成功后保存本次调用唯一的一条 Root Progress。"""
+        progress = getattr(value, "progress", None)
+        if self._observability is None or not isinstance(progress, str):
+            return
+        normalized = progress.strip()
+        if not normalized:
+            return
+        await self._observability.append_root_progress(
+            session_id=session_id,
+            run_id=run_id,
+            content=normalized,
         )
 
     def _messages_with_prompt(
@@ -567,6 +596,7 @@ class ConfiguredRootAgent(RootAgent):
             session_id=str(request["session_id"]),
             run_id=str(request["run_id"]),
             parent_activity_id=parent_activity_id,
+            observability=self._observability,
         )
 
     @staticmethod

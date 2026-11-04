@@ -11,6 +11,7 @@ from application.tools.service import ToolService
 from .answer_generation import AnswerGenerationService
 from domain.events.ports import EventPort
 from domain.memory import SessionMemorySettingsPort
+from application.observability import RunObservabilityService
 from .protocols import RootAgent, RootOrchestrationPort
 
 
@@ -30,6 +31,7 @@ class RootWorkflowDependencies:
     context_prefetch_timeout_seconds: float = 10.0
     root_orchestration: RootOrchestrationPort | None = None
     memory_settings: SessionMemorySettingsPort | None = None
+    observability: RunObservabilityService | None = None
 
 
 __all__ = ["RootWorkflowDependencies"]

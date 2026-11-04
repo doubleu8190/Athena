@@ -6,6 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from application.common.responses import RunTimelineResponse as ApplicationRunTimelineResponse
+from application.observability import TraceSpan, TraceSpanAttributes
 from interfaces.http.dto.sessions import RunSummaryResponse
 
 
@@ -88,3 +89,43 @@ class RunTimelineResponse(BaseModel):
             has_more=value.has_more,
             links={key: list(items) for key, items in value.links.items()},
         )
+
+
+class RunTraceSpanResponse(BaseModel):
+    """链路页面可读取的后端 Trace span。"""
+
+    span_id: str
+    parent_span_id: str | None
+    span_type: str
+    name: str
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+    duration_ms: int | None
+    attributes: TraceSpanAttributes
+    error: dict[str, str] | None
+    sequence: int
+
+    @classmethod
+    def from_application(cls, value: TraceSpan) -> "RunTraceSpanResponse":
+        return cls(
+            span_id=value.span_id,
+            parent_span_id=value.parent_span_id,
+            span_type=value.span_type,
+            name=value.name,
+            status=value.status,
+            started_at=value.started_at,
+            completed_at=value.completed_at,
+            duration_ms=value.duration_ms,
+            attributes=value.attributes,
+            error=value.error,
+            sequence=value.sequence,
+        )
+
+
+class RunTraceResponse(BaseModel):
+    """完成态 Run 的不可变 span 树响应。"""
+
+    run_id: str
+    status: str
+    spans: list[RunTraceSpanResponse]

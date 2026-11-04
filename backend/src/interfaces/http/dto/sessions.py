@@ -124,19 +124,17 @@ class MessageResponse(BaseModel):
 class HistoryContentResponse(BaseModel):
     time: datetime
     content: str
-    id: str | None = None
-    session_seq: int | None = None
 
 
 class HistoryTaskResponse(BaseModel):
-    time: datetime
+    status: str
+    worker_name: str
+    task_title: str
     process: list[HistoryContentResponse]
-    content: str | None = None
-    session_seq: int | None = None
+    result: HistoryContentResponse | None = None
 
 
 class HistoryTurnResponse(BaseModel):
-    run_id: str
     user: HistoryContentResponse
     root_process: list[HistoryContentResponse]
     tasks: list[HistoryTaskResponse]
@@ -146,30 +144,25 @@ class HistoryTurnResponse(BaseModel):
 class SessionMessageHistoryResponse(BaseModel):
     items: list[HistoryTurnResponse]
     next_cursor: str | None
-    snapshot_event_seq: int
+    sync_token: str
 
     @classmethod
     def from_application(cls, history: ApplicationSessionMessageHistoryResponse) -> "SessionMessageHistoryResponse":
         def content(value: ApplicationHistoryContentResponse) -> HistoryContentResponse:
-            return HistoryContentResponse(
-                time=value.time,
-                content=value.content,
-                id=value.id,
-                session_seq=value.session_seq,
-            )
+            return HistoryContentResponse(time=value.time, content=value.content)
 
         return cls(
             items=[
                 HistoryTurnResponse(
-                    run_id=turn.run_id,
                     user=content(turn.user),
                     root_process=[content(item) for item in turn.root_process],
                     tasks=[
                         HistoryTaskResponse(
-                            time=task.time,
+                            status=task.status,
+                            worker_name=task.worker_name,
+                            task_title=task.task_title,
                             process=[content(item) for item in task.process],
-                            content=task.content,
-                            session_seq=task.session_seq,
+                            result=content(task.result) if task.result else None,
                         )
                         for task in turn.tasks
                     ],
@@ -178,7 +171,7 @@ class SessionMessageHistoryResponse(BaseModel):
                 for turn in history.items
             ],
             next_cursor=history.next_cursor,
-            snapshot_event_seq=history.snapshot_event_seq,
+            sync_token=history.sync_token,
         )
 
 

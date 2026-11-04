@@ -351,6 +351,23 @@
         "received_at": "2026-10-30T08:00:06Z"
       }
     },
+    "progress_created": {
+      "schema_ref": "ProgressSubmission",
+      "payload": {
+        "sequence": 1,
+        "content": "正在检查目标文件的可访问范围。"
+      }
+    },
+    "progress_created_receipt": {
+      "schema_ref": "ProgressReceipt",
+      "payload": {
+        "progress_id": "e0100000-0000-4000-8000-000000000001",
+        "execution_id": "80000000-0000-4000-8000-000000000001",
+        "sequence": 1,
+        "content": "正在检查目标文件的可访问范围。",
+        "received_at": "2026-10-30T08:00:20Z"
+      }
+    },
     "result_success": {
       "schema_ref": "ResultSubmission",
       "payload": {
@@ -358,7 +375,9 @@
         "result_id": "e0000000-0000-4000-8000-000000000001",
         "generation": 1,
         "status": "completed",
-        "output": {"summary": "发现一个需要修正的问题"}
+        "output": {"summary": "发现一个需要修正的问题"},
+        "last_progress_sequence": 1,
+        "display_result": "检查完成，发现一个需要修正的问题。"
       }
     },
     "result_success_receipt": {
@@ -380,7 +399,9 @@
         "result_id": "e0000000-0000-4000-8000-000000000001",
         "generation": 1,
         "status": "completed",
-        "output": {"summary": "发现一个需要修正的问题"}
+        "output": {"summary": "发现一个需要修正的问题"},
+        "last_progress_sequence": 1,
+        "display_result": "检查完成，发现一个需要修正的问题。"
       }
     },
     "result_success_duplicate_receipt": {
@@ -402,6 +423,8 @@
         "result_id": "e1000000-0000-4000-8000-000000000001",
         "generation": 1,
         "status": "failed",
+        "last_progress_sequence": 1,
+        "display_result": "依赖服务超时，任务执行失败。",
         "error": {
           "code": "WORKER_UPSTREAM_TIMEOUT",
           "message": "依赖服务在执行时限内没有响应",
@@ -430,6 +453,7 @@
         "result_id": "e2000000-0000-4000-8000-000000000001",
         "generation": 1,
         "status": "failed",
+        "last_progress_sequence": 0,
         "error": {
           "code": "VENDOR_SESSION_BROKEN",
           "message": "Worker provider session ended unexpectedly",
@@ -456,7 +480,8 @@
         "result_id": "e3000000-0000-4000-8000-000000000001",
         "generation": 1,
         "status": "completed",
-        "output": {"summary": "执行在取消到达前已经完成"}
+        "output": {"summary": "执行在取消到达前已经完成"},
+        "last_progress_sequence": 0
       }
     },
     "result_late_after_cancel_receipt": {

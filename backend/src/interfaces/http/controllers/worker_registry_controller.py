@@ -23,6 +23,11 @@ from application.orchestration.worker_stop_confirmation import (
 from application.orchestration.worker_approval_requests import (
     WorkerApprovalRequestService,
 )
+from application.orchestration.worker_progress import (
+    ProgressConflictError,
+    ProgressExecutionTerminalError,
+    WorkerProgressService,
+)
 from interfaces.http.worker_protocol import WorkerProtocolError, WorkerProtocolHttp
 
 
@@ -34,6 +39,7 @@ def build_worker_registry_router(
     origin_validator: WorkerRegistrationAddressValidator,
     protocol: WorkerProtocolHttp,
     approval_request_service: WorkerApprovalRequestService | None = None,
+    progress_service: WorkerProgressService | None = None,
 ) -> APIRouter:
     """组装使用独立 Worker Bearer 身份的 v1 注册、结果和停止路由。
 
@@ -145,9 +151,88 @@ def build_worker_registry_router(
             )
         except WorkerIdempotencyConflict as exc:
             raise _idempotency_conflict("RESULT_ID_CONFLICT") from exc
+        except ValueError as exc:
+            if str(exc) == "worker_progress_sequence_incomplete":
+                raise WorkerProtocolError(
+                    "PROGRESS_SEQUENCE_INCOMPLETE",
+                    409,
+                    "operator_action",
+                    "last_progress_sequence must close the contiguous prefix 1..N",
+                ) from exc
+            raise
         return JSONResponse(
             status_code=200,
             content=result.model_dump(mode="json", exclude_none=True),
+        )
+
+    @router.post(
+        "/worker-api/v1/worker-executions/{execution_id}/progress"
+    )
+    async def submit_worker_progress(
+        execution_id: str, request: Request
+    ) -> Response:
+        """接收 Worker 已持久确认的一条完整、不可变 Progress。
+
+        请求正文只允许 `sequence` 和 `content`；Worker、Run、Task 与 Session
+        身份均由认证主体、执行路径和数据库分配关系恢复。
+        """
+        if progress_service is None:
+            raise WorkerProtocolError(
+                "INTERNAL_ERROR",
+                503,
+                "operator_action",
+                "worker progress is unavailable",
+            )
+        principal = protocol.authenticate(request)
+        raw_body = await protocol.read_json(
+            request,
+            schema_name="ProgressSubmission",
+        )
+        protocol.validate_path_identifier(execution_id)
+        instance_id = await registry_service.resolve_execution_instance(
+            principal, execution_id
+        )
+        if instance_id is None:
+            raise WorkerProtocolError(
+                "EXECUTION_NOT_FOUND",
+                404,
+                "operator_action",
+                "execution does not belong to this service",
+            )
+        try:
+            receipt = await progress_service.submit(
+                raw_body,
+                execution_id=execution_id,
+                instance_id=instance_id,
+            )
+        except ProgressConflictError as exc:
+            raise WorkerProtocolError(
+                "PROGRESS_SEQUENCE_CONFLICT",
+                409,
+                "operator_action",
+                (
+                    "progress sequence must be the next contiguous value"
+                    if str(exc) == "worker_progress_sequence_incomplete"
+                    else "progress sequence already contains different content"
+                ),
+            ) from exc
+        except ProgressExecutionTerminalError as exc:
+            raise WorkerProtocolError(
+                "EXECUTION_ALREADY_TERMINAL",
+                409,
+                "stop",
+                "progress cannot be appended after the execution became terminal",
+            ) from exc
+        except ValueError as exc:
+            raise WorkerProtocolError(
+                "EXECUTION_NOT_FOUND",
+                404,
+                "operator_action",
+                str(exc),
+            ) from exc
+        return JSONResponse(
+            status_code=200,
+            content=receipt.model_dump(mode="json", exclude_none=True),
         )
 
     @router.post("/worker-executions/{execution_id}/stop-confirmation")

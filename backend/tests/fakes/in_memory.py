@@ -289,8 +289,26 @@ class InMemoryRunStore(
             key=lambda value: value.sequence,
         )
 
-    async def list_recent(self, *, limit: int, offset: int, session_id: str | None = None) -> tuple[list[RunSummary], int]:
+    async def list_recent(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        session_id: str | None = None,
+        terminal_only: bool = False,
+    ) -> tuple[list[RunSummary], int]:
         values = [value for value in self.runs.values() if session_id is None or value.session_id == session_id]
+        if terminal_only:
+            values = [
+                value
+                for value in values
+                if value.status
+                in {
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }
+            ]
         values.sort(key=lambda value: (str(value.created_at), value.run_id), reverse=True)
         return values[offset:offset + limit], len(values)
 

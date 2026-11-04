@@ -232,11 +232,15 @@ class LangGraphRootGraph(RootGraphPort):
         plan_sequence: int,
         root_wait_generation: int,
     ) -> bool:
-        """确认 checkpoint 已消费指定 Plan 中断并保留可继续的图状态。
+        """确认 checkpoint 属于指定 Plan，且可从当前节点继续执行。
 
-        参数：`run_id`、`plan_id`、`plan_sequence` 和 `root_wait_generation` 绑定原等待。
+        参数：`run_id`、`plan_id`、`plan_sequence` 和 `root_wait_generation`
+        共同绑定当前 Run 中已生成、尚未完成消费的计划。
 
-        返回：仅当当前 checkpoint 属于该 Run、没有待处理中断且图状态已记录该 Plan 事实时返回 True。
+        返回：仅当当前 checkpoint 属于该 Run、没有待处理中断，且 checkpoint
+        中的当前 Plan 身份与目标完全一致时返回 True。该条件同时覆盖两种恢复
+        窗口：Plan 完成事实已经写入 checkpoint，以及 Plan 已提交但 interrupt
+        尚未 arm。调用方仍必须通过数据库确认 Plan 已完成，才能执行恢复。
 
         异常：checkpointer 读取异常原样传播。
         """
@@ -258,7 +262,6 @@ class LangGraphRootGraph(RootGraphPort):
             return False
         request = values.get("request")
         plan = values.get("plan")
-        completed = values.get("completed_plans")
         return bool(
             isinstance(request, Mapping)
             and request.get("run_id") == run_id
@@ -266,13 +269,6 @@ class LangGraphRootGraph(RootGraphPort):
             and plan.get("plan_id") == plan_id
             and plan.get("sequence") == plan_sequence
             and plan.get("root_wait_generation") == root_wait_generation
-            and isinstance(completed, list)
-            and any(
-                isinstance(item, Mapping)
-                and item.get("plan_id") == plan_id
-                and item.get("root_wait_generation") == root_wait_generation
-                for item in completed
-            )
         )
 
 

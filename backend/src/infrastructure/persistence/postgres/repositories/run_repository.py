@@ -30,6 +30,11 @@ from domain.runs import (
 from domain.runs.ports import RunLifecyclePort, RunQueuePort, RunSubmissionPort
 from domain.sessions import Session
 from application.contracts.runs import RunStartPayloadSchema
+from application.observability import (
+    RunSpanAttributes,
+    run_span_id,
+    sanitize_trace_error,
+)
 
 from ..models import (
     AttachmentModel,
@@ -51,6 +56,7 @@ from ..models import (
     RootResumeJobModel,
     SessionModel,
     TaskExecutionModel,
+    TraceSpanModel,
     WorkerJobModel,
 )
 from .memory_job_repository import enqueue_memory_job_in_transaction
@@ -59,12 +65,82 @@ from .memory_suppression import (
     project_scope_is_writable,
 )
 from .lease_center import PostgresLeaseCenter
+from .trace_locking import lock_trace_span_scope
 from ..mappers.converters import session_domain_to_model
 from ..idempotency import execute_idempotent
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _add_run_span(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    run_id: str,
+    started_at: datetime,
+) -> None:
+    """在 Run 首次领取时创建唯一的 Trace 根 span。
+
+    调用方必须在锁定 Session、Run 或其他 Run 领域行之前取得对应 Run 的 Trace
+    advisory；本函数只负责在已确定的一致锁序内幂等写入 Trace 行。
+    """
+    span = await session.get(TraceSpanModel, run_span_id(run_id))
+    if span is not None:
+        return
+    session.add(
+        TraceSpanModel(
+            span_id=run_span_id(run_id),
+            session_id=session_id,
+            run_id=run_id,
+            parent_span_id=None,
+            span_type="run",
+            name="run.execute",
+            status="running",
+            started_at=started_at,
+            attributes_json=RunSpanAttributes().model_dump(mode="json"),
+            sequence=1,
+        )
+    )
+
+
+async def _finish_run_spans_in_transaction(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    status: str,
+    completed_at: datetime,
+    error: dict[str, Any] | None = None,
+) -> None:
+    """结束 Run 根 span，并兜底关闭因进程中断未收尾的子 span。
+
+    调用方必须已按 `Trace advisory → 领域行 → Trace 行` 顺序取得当前 Run 的
+    Trace advisory；本函数不会在领域行锁之后补取 advisory，以免重新形成反序。
+    """
+    spans = (
+        await session.execute(
+            select(TraceSpanModel)
+            .where(
+                TraceSpanModel.run_id == run_id,
+                TraceSpanModel.status == "running",
+            )
+            .with_for_update()
+        )
+    )
+    for span in spans.scalars().all():
+        span.status = status
+        span.completed_at = completed_at
+        span.duration_ms = max(
+            0, int((completed_at - span.started_at).total_seconds() * 1000)
+        )
+        if span.span_type == "run" and error is not None:
+            span.error_json = sanitize_trace_error(
+                {
+                    "code": str(error.get("code") or status),
+                    "status": status,
+                }
+            )
 
 
 def _final_answer_text(result: dict[str, object]) -> str:
@@ -412,42 +488,55 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     if not claimable_roots:
                         return None
                     claimable_run_ids = [key.resource_id for key in claimable_roots]
-                    candidate_session = (
-                        await db.execute(
-                            select(SessionModel)
-                            .where(
-                                SessionModel.deleted_time.is_(None),
-                                SessionModel.active_run_id.is_(None),
-                                select(AgentRunModel.run_id)
-                                .where(
-                                    AgentRunModel.session_id == SessionModel.id,
-                                    AgentRunModel.status == RunStatus.QUEUED.value,
-                                )
-                                .order_by(AgentRunModel.sequence)
-                                .limit(1)
-                                .scalar_subquery()
-                                .in_(claimable_run_ids),
-                            )
-                            .order_by(SessionModel.last_activity_at, SessionModel.id)
-                            .with_for_update(skip_locked=True)
-                            .limit(1)
+                    # 候选只做无锁预读，避免先锁 Session/Run 后才取得 Trace
+                    # advisory，与并发 start_span 的 FK 等待形成反向锁序。
+                    candidate_run_id = await db.scalar(
+                        select(AgentRunModel.run_id)
+                        .join(
+                            SessionModel,
+                            AgentRunModel.session_id == SessionModel.id,
                         )
-                    ).scalar_one_or_none()
+                        .where(
+                            SessionModel.deleted_time.is_(None),
+                            SessionModel.active_run_id.is_(None),
+                            AgentRunModel.status == RunStatus.QUEUED.value,
+                            AgentRunModel.run_id.in_(claimable_run_ids),
+                        )
+                        .order_by(
+                            SessionModel.last_activity_at,
+                            SessionModel.id,
+                            AgentRunModel.sequence,
+                        )
+                        .limit(1)
+                    )
+                    if candidate_run_id is None:
+                        after_resource_id = claimable_roots[-1].resource_id
+                        continue
+                    await lock_trace_span_scope(db, candidate_run_id)
+                    candidate_session = await db.scalar(
+                        select(SessionModel)
+                        .where(
+                            SessionModel.id
+                            == select(AgentRunModel.session_id).where(
+                                AgentRunModel.run_id == candidate_run_id
+                            ).scalar_subquery(),
+                            SessionModel.deleted_time.is_(None),
+                            SessionModel.active_run_id.is_(None),
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
                     if candidate_session is None:
                         after_resource_id = claimable_roots[-1].resource_id
                         continue
-                    run = (
-                        await db.execute(
-                            select(AgentRunModel)
-                            .where(
-                                AgentRunModel.session_id == candidate_session.id,
-                                AgentRunModel.status == RunStatus.QUEUED.value,
-                            )
-                            .order_by(AgentRunModel.sequence)
-                            .with_for_update()
-                            .limit(1)
+                    run = await db.scalar(
+                        select(AgentRunModel)
+                        .where(
+                            AgentRunModel.run_id == candidate_run_id,
+                            AgentRunModel.session_id == candidate_session.id,
+                            AgentRunModel.status == RunStatus.QUEUED.value,
                         )
-                    ).scalar_one_or_none()
+                        .with_for_update()
+                    )
                     if run is None:
                         after_resource_id = claimable_roots[-1].resource_id
                         continue
@@ -456,6 +545,19 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         run.status = RunStatus.FAILED.value
                         run.error_json = {"code": "run_request_missing"}
                         run.updated_at = now
+                        await _add_run_span(
+                            db,
+                            session_id=candidate_session.id,
+                            run_id=run.run_id,
+                            started_at=run.created_at,
+                        )
+                        await _finish_run_spans_in_transaction(
+                            db,
+                            run_id=run.run_id,
+                            status=RunStatus.FAILED.value,
+                            completed_at=now,
+                            error=run.error_json,
+                        )
                         await self._leases.complete_unclaimed_in_transaction(
                             db, LeaseKey("root_execution", run.run_id)
                         )
@@ -471,6 +573,12 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                         return None
                     run.status = RunStatus.RUNNING.value
                     run.updated_at = now
+                    await _add_run_span(
+                        db,
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        started_at=run.created_at,
+                    )
                     lease = await self._leases.acquire_in_transaction(
                         db,
                         LeaseKey("root_execution", run.run_id),
@@ -513,6 +621,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         limit: int,
         offset: int,
         session_id: str | None = None,
+        terminal_only: bool = False,
     ) -> tuple[list[RunSummary], int]:
         """分页读取未删除会话的运行，按提交时间从新到旧排列。
 
@@ -520,6 +629,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
             limit: 本页最多返回的条数。
             offset: 跳过的记录数。
             session_id: 可选会话筛选条件。
+            terminal_only: 为 True 时只返回已完成、失败或取消的 Run。
 
         Returns:
             当前页摘要及符合筛选条件的总条数。
@@ -530,6 +640,16 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         conditions = [SessionModel.deleted_time.is_(None)]
         if session_id is not None:
             conditions.append(AgentRunModel.session_id == session_id)
+        if terminal_only:
+            conditions.append(
+                AgentRunModel.status.in_(
+                    (
+                        RunStatus.COMPLETED.value,
+                        RunStatus.FAILED.value,
+                        RunStatus.CANCELLED.value,
+                    )
+                )
+            )
         async with self._session_factory() as session:
             total = int(
                 (
@@ -932,6 +1052,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 )
                 if session_id is None:
                     return False
+                await lock_trace_span_scope(db, run_id)
                 session_row = await db.scalar(
                     select(SessionModel)
                     .where(SessionModel.id == session_id)
@@ -1004,6 +1125,20 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 run.status = terminal.value
                 run.updated_at = now
                 session_row.active_run_id = None
+                # 排队中的 Run 也可能从未被 Root 领取；终态 Trace 仍需保留唯一根 span。
+                await _add_run_span(
+                    db,
+                    session_id=run.session_id,
+                    run_id=run.run_id,
+                    started_at=run.created_at,
+                )
+                await _finish_run_spans_in_transaction(
+                    db,
+                    run_id=run_id,
+                    status=terminal.value,
+                    completed_at=now,
+                    error=run.error_json,
+                )
                 await self._enqueue_memory_job(db, run, assistant_text="", now=now)
                 self._add_completion_outbox(
                     db,
@@ -1763,6 +1898,66 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
         await enqueue_memory_job_in_transaction(session, turn_id=run.run_id,
             session_id=run.session_id, user_text=user_text, assistant_text=assistant_text, now=now)
 
+    async def _finish_root_resume_job_leases_in_transaction(
+        self,
+        session: AsyncSession,
+        resume_jobs: Sequence[OrchestratorRootResumeJobModel],
+    ) -> None:
+        """把随 Run 终态折叠的恢复作业及其租约收敛到 completed。
+
+        参数：
+        - `session`（AsyncSession）：已经锁定 Session、Run 和恢复作业的终态事务。
+        - `resume_jobs`（Sequence[OrchestratorRootResumeJobModel]）：本次事务
+          折叠的 pending/running 恢复作业。
+
+        返回：无。
+
+        异常：
+        - RuntimeError：running 作业缺失有效租约，或终态收敛后租约仍未完成时抛出。
+
+        该辅助函数只能由 `_finish` 在既有
+        `Trace advisory → Session → Run → ResumeJob` 锁序内调用。running 作业
+        会按数据库当前 owner、fencing token 和到期时间构造 grant，再以同一
+        fencing 身份完成租约，不能被默认 owner 或任意 fencing token 替代。
+        """
+        for job in resume_jobs:
+            key = LeaseKey("root_resume", job.job_id)
+            if job.status == "running":
+                record = await self._leases.get_in_transaction(session, key)
+                if record is None:
+                    raise RuntimeError("root_resume_lease_missing")
+                if (
+                    record.state == "active"
+                    and record.owner_id is not None
+                    and record.fencing_token is not None
+                    and record.lease_until is not None
+                ):
+                    grant = LeaseGrant(
+                        key=key,
+                        owner_id=record.owner_id,
+                        fencing_token=record.fencing_token,
+                        lease_until=record.lease_until,
+                    )
+                    if await self._leases.finish_in_transaction(
+                        session, grant, completed=True
+                    ):
+                        continue
+                # 心跳可能在读取 record 后让租约到期；再尝试一次不带 grant 的
+                # 收敛，仅覆盖 pending/released 或已经过期的 active/revoked 状态。
+                converged = await self._leases.complete_unclaimed_in_transaction(
+                    session, key
+                )
+                if not converged:
+                    record = await self._leases.get_in_transaction(session, key)
+                    if record is None or record.state != "completed":
+                        raise RuntimeError("root_resume_lease_not_converged")
+            else:
+                await self._leases.complete_unclaimed_in_transaction(session, key)
+
+            record = await self._leases.get_in_transaction(session, key)
+            if record is None or record.state != "completed":
+                raise RuntimeError("root_resume_lease_not_converged")
+
     async def _finish(
         self,
         run_id: str,
@@ -1784,6 +1979,7 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                 )
                 if session_id is None:
                     return False
+                await lock_trace_span_scope(session, run_id)
                 session_row = await session.scalar(
                     select(SessionModel)
                     .where(SessionModel.id == session_id)
@@ -1825,9 +2021,19 @@ class PostgresRunRepository(RunQueuePort, RunSubmissionPort, RunLifecyclePort, R
                     run.response_json = response
                 if error is not None:
                     run.error_json = error
+                await _finish_run_spans_in_transaction(
+                    session,
+                    run_id=run_id,
+                    status=status.value,
+                    completed_at=now,
+                    error=error,
+                )
                 session_row.active_run_id = None
                 changed = True
                 if changed:
+                    await self._finish_root_resume_job_leases_in_transaction(
+                        session, resume_jobs
+                    )
                     for resume_job in resume_jobs:
                         resume_job.status = (
                             "cancelled" if status == RunStatus.CANCELLED else "completed"

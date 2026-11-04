@@ -9,6 +9,7 @@ from time import perf_counter
 from domain.leases import LeaseGrant
 
 from application.runs.ports import RunExecutorPort
+from application.events.assistant_hub import AssistantStreamHub
 from domain.events import ApplicationEvent, EventDurability, EventPort, EventType
 from domain.memory import MemoryJobPort
 from backend.src.shared.logging import get_logger
@@ -38,6 +39,7 @@ class RunExecutionService:
         events: EventPort,
         memory_jobs: MemoryJobPort | None = None,
         run_query: RunQueryPort | None = None,
+        assistant_streams: AssistantStreamHub | None = None,
     ) -> None:
         """保存对象依赖并初始化运行所需状态。
 
@@ -59,6 +61,7 @@ class RunExecutionService:
         self._events = events
         self._memory_jobs = memory_jobs
         self._run_query = run_query
+        self._assistant_streams = assistant_streams
         self._run_started: dict[str, tuple[datetime, float]] = {}
         self._user_message_ids_by_run_id: dict[str, str] = {}
 
@@ -184,12 +187,15 @@ class RunExecutionService:
             status = current.status if current is not None else "unknown"
             if status == RunStatus.STOPPING.value:
                 return None
-            self._clear_local_state(run_id)
+            self._clear_local_state(run_id, invocation.session_id)
             return {"status": str(getattr(status, "value", status))}
 
         if not self._lifecycle.writes_terminal_artifacts_to_outbox:
             await self._publish_result_message(invocation, result)
             await self._enqueue_memory(invocation, result)
+        # 最终 assistant 事实先于 completed 通知提交；订阅者只能把完成事件当作提交信号。
+        await self._publish_assistant_completed(invocation, result)
+        if not self._lifecycle.writes_terminal_artifacts_to_outbox:
             await self._publish(
                 invocation,
                 EventType.RUN_COMPLETED,
@@ -197,8 +203,56 @@ class RunExecutionService:
                     invocation, "completed", summary="运行已完成"
                 ),
             )
-        self._clear_local_state(run_id)
+        self._clear_local_state(run_id, invocation.session_id)
         return result
+
+    async def _publish_assistant_completed(
+        self, invocation: RunCommand, result: dict[str, object]
+    ) -> None:
+        """在 assistant 事实已提交后持久化完成通知。"""
+        run_id = invocation.run_id
+        content = _result_content(result)
+        if not run_id or not content:
+            return
+        stream = result.get("answer_stream")
+        if not isinstance(stream, dict):
+            nested = result.get("result")
+            stream = nested.get("answer_stream") if isinstance(nested, dict) else None
+        if not isinstance(stream, dict):
+            return
+        if self._assistant_streams is not None:
+            self._assistant_streams.complete(invocation.session_id, run_id)
+        try:
+            await self._events.publish(
+                ApplicationEvent(
+                    event_type=EventType.ASSISTANT_COMPLETED,
+                    durability=EventDurability.DURABLE,
+                    session_id=invocation.session_id,
+                    run_id=run_id,
+                    message_id=f"assistant:{run_id}",
+                    stream_id=str(stream.get("stream_id", "")),
+                    stream_type="answer",
+                    chunk_id=int(stream.get("last_chunk_id", 0)),
+                    is_complete=True,
+                    transition_id=f"assistant:{run_id}:completed",
+                    payload={
+                        "content": content,
+                        "started_at": stream.get("started_at"),
+                        "kind": result.get("kind", "final"),
+                    },
+                )
+            )
+        except Exception:
+            # Run 已经完成；完成通知写入失败不能反过来改写业务结果。
+            logger.warning(
+                "assistant_completed_publish_failed",
+                run_id=run_id,
+                exc_info=True,
+            )
+        finally:
+            if self._assistant_streams is not None:
+                # 最终正文已经作为持久消息提交，进程内前缀可以释放。
+                self._assistant_streams.clear(invocation.session_id, run_id)
 
     async def _arm_root_wait(
         self, run_id: str, root_wait: RootWaitCheckpoint, lease: LeaseGrant,
@@ -265,13 +319,14 @@ class RunExecutionService:
                 EventType.RUN_FAILED,
                 payload=self._run_payload(invocation, "failed", error=error),
             )
-        self._clear_local_state(run_id)
+        self._clear_local_state(run_id, invocation.session_id)
 
-    def _clear_local_state(self, run_id: str) -> None:
+    def _clear_local_state(self, run_id: str, session_id: str) -> None:
         """清除指定 Run 在当前进程中的活动调用和租约状态。
 
         参数：
         - `run_id`（str）：目标运行的稳定标识，用于关联执行及其记录；约束：无额外运行时限制。
+        - `session_id`（str）：目标运行所属会话，用于释放未完成的内存 assistant 前缀。
 
         返回：
         - None：操作完成后不提供返回数据。
@@ -280,6 +335,8 @@ class RunExecutionService:
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         self._run_started.pop(run_id, None)
+        if self._assistant_streams is not None:
+            self._assistant_streams.clear(session_id, run_id)
         self._user_message_ids_by_run_id.pop(run_id, None)
 
     async def _publish(

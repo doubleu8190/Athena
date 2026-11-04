@@ -8,6 +8,9 @@ from uuid import uuid4
 
 import pytest
 
+from application.orchestration.worker_protocol_validation import (
+    validate_worker_request,
+)
 from reference_worker.store import WorkerStore
 
 
@@ -264,6 +267,8 @@ def test_logical_cancel_waits_for_running_sibling_even_when_target_completed(tmp
     )
     result_outbox = store.claim_outbox(10**12)
     assert result_outbox is not None and result_outbox["kind"] == "result"
+    assert result_outbox["body"]["last_progress_sequence"] == 0
+    validate_worker_request("ResultSubmission", result_outbox["body"])
     store.acknowledge_outbox(int(result_outbox["outbox_id"]))
     cancel_id = str(uuid4())
     cancel_request = {

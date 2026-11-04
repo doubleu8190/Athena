@@ -69,25 +69,23 @@ class HistoryContentResponse:
 
     time: datetime
     content: str
-    id: str | None = None
-    session_seq: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class HistoryTaskResponse:
     """一次 Worker 执行及其已持久化过程。"""
 
-    time: datetime
+    status: str
+    worker_name: str
+    task_title: str
     process: tuple[HistoryContentResponse, ...]
-    content: str | None = None
-    session_seq: int | None = None
+    result: HistoryContentResponse | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class HistoryTurnResponse:
     """用户消息及其 Run 执行历史。"""
 
-    run_id: str
     user: HistoryContentResponse
     root_process: tuple[HistoryContentResponse, ...]
     tasks: tuple[HistoryTaskResponse, ...]
@@ -100,7 +98,7 @@ class SessionMessageHistoryResponse:
 
     items: tuple[HistoryTurnResponse, ...]
     next_cursor: str | None
-    snapshot_event_seq: int
+    sync_token: str
 
 
 @dataclass(frozen=True, slots=True)

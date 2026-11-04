@@ -90,19 +90,17 @@ export interface Message {
 export interface SessionHistoryContent {
   time: string
   content: string
-  id?: string | null
-  session_seq?: number | null
 }
 
 export interface SessionHistoryTask {
-  time: string
+  worker_name: string
+  task_title: string
+  status: string
   process: SessionHistoryContent[]
-  content: string | null
-  session_seq?: number | null
+  result: SessionHistoryContent | null
 }
 
 export interface SessionHistoryTurn {
-  run_id: string
   user: SessionHistoryContent
   root_process: SessionHistoryContent[]
   tasks: SessionHistoryTask[]
@@ -112,7 +110,7 @@ export interface SessionHistoryTurn {
 export interface SessionMessageHistory {
   items: SessionHistoryTurn[]
   next_cursor: string | null
-  snapshot_event_seq: number
+  sync_token: string
 }
 
 export type AttachmentStatus = "uploaded" | "processing" | "ready" | "failed" | "deleted"
@@ -296,6 +294,26 @@ export interface RunTimelineResponse {
   next_after_seq: number
   has_more: boolean
   links: { retrieval_run_ids: string[]; plan_ids: string[]; task_ids: string[] }
+}
+
+export interface RunTraceSpan {
+  span_id: string
+  parent_span_id: string | null
+  span_type: string
+  name: string
+  status: string
+  started_at: string
+  completed_at: string | null
+  duration_ms: number | null
+  attributes: Record<string, string | number | boolean | null>
+  error: Record<string, string> | null
+  sequence: number
+}
+
+export interface RunTraceResponse {
+  run_id: string
+  status: string
+  spans: RunTraceSpan[]
 }
 
 /** Worker 编排快照中的开放 JSON 值。后端不限制 Worker 输出的对象形状。 */
@@ -496,7 +514,7 @@ export interface ListSessionsResponse {
 export interface GetMessagesResponse {
   items: SessionHistoryTurn[]
   next_cursor: string | null
-  snapshot_event_seq: number
+  sync_token: string
 }
 
 export type RetrievalScope = "context" | "memory" | "knowledge" | "file"

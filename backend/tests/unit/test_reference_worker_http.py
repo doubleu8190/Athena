@@ -11,6 +11,9 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from application.orchestration.worker_protocol_validation import (
+    validate_worker_request,
+)
 from interfaces.http.worker_protocol import WorkerProtocolHttp
 from reference_worker.config import ReferenceWorkerConfig
 from reference_worker.runtime import ReferenceWorker
@@ -337,8 +340,10 @@ async def test_resource_failures_use_s1_error_classification(
     await worker._execute(execution)
     result = worker.store.claim_outbox(10**12)
     assert result is not None
+    assert result["body"]["last_progress_sequence"] == 0
     assert result["body"]["error"]["code"] == expected_code
     assert result["body"]["error"]["retryable"] is expected_retryable
+    validate_worker_request("ResultSubmission", result["body"])
     await worker.stop()
 
 

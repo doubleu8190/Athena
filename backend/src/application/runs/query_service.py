@@ -60,7 +60,12 @@ class RunQueryService:
         return [_to_response(value) for value in await self._runs.list_for_session(session_id)]
 
     async def list_recent(
-        self, *, limit: int = 50, offset: int = 0, session_id: str | None = None,
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        session_id: str | None = None,
+        terminal_only: bool = False,
     ) -> RunListResponse:
         """分页查询运行历史，可按会话筛选。
 
@@ -68,6 +73,7 @@ class RunQueryService:
         - `limit`（int）：每页条数，范围为 1 到 200；约束：可省略，默认值为 `50`。
         - `offset`（int）：已跳过的记录数，负数按零处理；约束：可省略，默认值为 `0`。
         - `session_id`（str | None）：可选会话 ID；为空时查询全部未删除会话；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`；须通过方法内校验；失败条件见下方异常说明。
+        - `terminal_only`（bool）：是否只返回已完成、失败或取消的 Run；约束：可省略，默认值为 `False`。
 
         返回：
         - RunListResponse：运行摘要、总条数及是否存在下一页。
@@ -80,7 +86,10 @@ class RunQueryService:
             raise SessionNotFoundError(session_id)
         offset = max(0, offset)
         values, total = await self._runs.list_recent(
-            limit=min(max(limit, 1), 200), offset=offset, session_id=session_id,
+            limit=min(max(limit, 1), 200),
+            offset=offset,
+            session_id=session_id,
+            terminal_only=terminal_only,
         )
         return RunListResponse(
             items=tuple(_to_response(value) for value in values),

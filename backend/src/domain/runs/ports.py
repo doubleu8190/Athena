@@ -137,7 +137,12 @@ class RunQueryPort(Protocol):
     async def list_for_session(self, session_id: str) -> list[RunSummary]: ...
 
     async def list_recent(
-        self, *, limit: int, offset: int, session_id: str | None = None,
+        self,
+        *,
+        limit: int,
+        offset: int,
+        session_id: str | None = None,
+        terminal_only: bool = False,
     ) -> tuple[list[RunSummary], int]: ...
 
     async def get(self, run_id: str) -> RunSummary | None: ...

@@ -11,6 +11,7 @@ import {
   historyMessages,
   historyTimeline,
   mergeHistoryMessages,
+  mergeHistoryTimeline,
 } from "../utils/sessionHistory"
 import { ClientEventType } from "../types/events"
 import type { ApprovalRequest, ApprovalStatusSnapshot, ExecutionTimelineEntry, Message, SupportedAttachmentTypes } from "../types"
@@ -85,7 +86,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
     error,
     setMessages,
     setSessionHistoryLoaded,
-    setSessionEventCursor,
+    setSessionSyncToken,
     addMessage,
     updateSession,
     clearMessages,
@@ -130,6 +131,7 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
   const rootRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const loadingSessionIdRef = useRef<string | null>(null)
+  const historyRenderedSessionRef = useRef<string | null>(null)
   const historyCursorBySessionRef = useRef(new Map<string, string>())
   const historyPageLoadingRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -351,26 +353,25 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
 
   const loadHistory = async (sessionId: string, isCancelled?: () => boolean, cursor?: string) => {
     try {
-      // 运行过程由 SSE Durable Event replay 重建；这里只读取持久消息正文。
       const history = await apiClient.getMessages(sessionId, 20, undefined, cursor)
       // StrictMode 双调用或快速切换 session 时取消应用结果
       if (isCancelled?.()) return
       // 防止快速切换 session 导致的竞态：只在当前 session 仍匹配时应用结果
       if (loadingSessionIdRef.current === sessionId) {
-        // 历史请求与 SSE replay 可能并发完成。以消息 ID 和 run_id 合并，
-        // 保留已经由 SSE 构造出的实时 assistant 内容，禁止历史响应无条件清空。
+        // 先应用最新页或更早页的完整事实，再保留已经从 SSE 到达的可见进度。
         const current = useChatStore.getState().messages
         const persistedMessages = historyMessages(history.items, sessionId)
         const persistedTimeline = historyTimeline(history.items)
-        for (const turn of history.items) {
-          useChatStore.getState().replaceRunExecutionTimeline(
-            turn.run_id,
-            persistedTimeline.filter((entry) => entry.run_id === turn.run_id),
-          )
+        const currentTimeline = useChatStore.getState().executionTimeline
+        useChatStore.setState({
+          executionTimeline: mergeHistoryTimeline(persistedTimeline, currentTimeline),
+        })
+        // 同步令牌只由目标会话最新历史页建立。加载更早分页不能改变
+        // SSE 水位，否则 useEffect 会因令牌变化而无谓地断开重连。
+        if (!cursor) {
+          setSessionSyncToken(sessionId, history.sync_token)
         }
-        setSessionEventCursor(sessionId, history.snapshot_event_seq)
         setMessages(mergeHistoryMessages(persistedMessages, current))
-        setSessionHistoryLoaded(sessionId, true)
         if (history.next_cursor) historyCursorBySessionRef.current.set(sessionId, history.next_cursor)
         else historyCursorBySessionRef.current.delete(sessionId)
         setHasMoreHistory(Boolean(history.next_cursor))
@@ -386,6 +387,33 @@ function Chat({ sendEvent, draft, ensureSession, onOpenSessions, demoMode = fals
       }
     }
   }
+
+  // 历史状态先提交到 React 并完成一帧渲染，再允许 App 建立聊天 SSE。
+  useEffect(() => {
+    if (!activeSessionId) {
+      historyRenderedSessionRef.current = null
+      return
+    }
+    if (
+      demoMode
+      || isLoadingHistory
+      || historyRenderedSessionRef.current === activeSessionId
+      || !useChatStore.getState().sessionSyncTokens[activeSessionId]
+    ) return
+    const frame = window.requestAnimationFrame(() => {
+      if (useChatStore.getState().activeSessionId !== activeSessionId) return
+      historyRenderedSessionRef.current = activeSessionId
+      setSessionHistoryLoaded(activeSessionId, true)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [
+    activeSessionId,
+    demoMode,
+    executionTimeline.length,
+    isLoadingHistory,
+    messages.length,
+    setSessionHistoryLoaded,
+  ])
 
   const handleMessagesScroll = useCallback(() => {
     const container = messagesContainerRef.current

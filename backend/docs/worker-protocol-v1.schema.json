@@ -501,29 +501,59 @@
       },
       "additionalProperties": false
     },
+    "ProgressSubmission": {
+      "type": "object",
+      "required": ["sequence", "content"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 1},
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProgressReceipt": {
+      "type": "object",
+      "required": ["progress_id", "execution_id", "sequence", "content", "received_at"],
+      "properties": {
+        "progress_id": {"$ref": "#/$defs/Identifier"},
+        "execution_id": {"$ref": "#/$defs/Identifier"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "content": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "received_at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "additionalProperties": false
+    },
     "ResultSubmission": {
       "oneOf": [
         {
           "type": "object",
-          "required": ["protocol_version", "result_id", "generation", "status", "output"],
+          "required": ["protocol_version", "result_id", "generation", "status", "output", "last_progress_sequence"],
           "properties": {
             "protocol_version": {"const": "1.0"},
             "result_id": {"$ref": "#/$defs/Uuid"},
             "generation": {"type": "integer", "minimum": 1},
             "status": {"const": "completed"},
-            "output": {"$ref": "#/$defs/JsonObject"}
+            "output": {"$ref": "#/$defs/JsonObject"},
+            "last_progress_sequence": {"type": "integer", "minimum": 0},
+            "display_result": {"type": "string", "minLength": 1, "maxLength": 20000}
           },
           "additionalProperties": false
         },
         {
           "type": "object",
-          "required": ["protocol_version", "result_id", "generation", "status", "error"],
+          "required": ["protocol_version", "result_id", "generation", "status", "error", "last_progress_sequence"],
           "properties": {
             "protocol_version": {"const": "1.0"},
             "result_id": {"$ref": "#/$defs/Uuid"},
             "generation": {"type": "integer", "minimum": 1},
             "status": {"const": "failed"},
-            "error": {"$ref": "#/$defs/WorkerError"}
+            "error": {"$ref": "#/$defs/WorkerError"},
+            "last_progress_sequence": {"type": "integer", "minimum": 0},
+            "display_result": {"type": "string", "minLength": 1, "maxLength": 20000}
           },
           "additionalProperties": false
         }

@@ -18,6 +18,7 @@ from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.events.ports import EventPort
 from domain.integrations import LLMPort, LLMStreamEnd, LLMTextDelta
 from domain.leases import LeaseGrant, LeaseLostError
+from application.events.assistant_hub import AssistantStreamHub
 from shared import get_logger
 from .root_decision import RootMessage
 
@@ -94,7 +95,7 @@ class AnswerStreamingOptions:
 
 
 class AnswerGenerationService:
-    """将模型文本流批量持久化为可重放的会话事件。"""
+    """把模型文本增量立即送入内存进度流，并在完成后返回最终正文。"""
 
     def __init__(
         self,
@@ -104,6 +105,7 @@ class AnswerGenerationService:
         input_budget_tokens: int = 8192,
         options: AnswerStreamingOptions = AnswerStreamingOptions(),
         prompt: str,
+        assistant_streams: AssistantStreamHub | None = None,
     ) -> None:
         """保存对象依赖并初始化运行所需状态。
 
@@ -137,6 +139,7 @@ class AnswerGenerationService:
         self._input_budget_tokens = input_budget_tokens
         self._options = options
         self._prompt = prompt.strip()
+        self._assistant_streams = assistant_streams or AssistantStreamHub()
 
     async def generate(
         self,
@@ -144,7 +147,7 @@ class AnswerGenerationService:
         *,
         stop_signal: asyncio.Event | None = None,
     ) -> AnswerGenerationResult:
-        """生成用户正文并在每次提交后发布持久增量事件。
+        """生成用户正文并在每个模型文本片段到达后立即发布。
 
         参数：
         - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
@@ -174,38 +177,12 @@ class AnswerGenerationService:
         started_at = datetime.now(timezone.utc)
         iterator: Any = None
         next_task: asyncio.Task[Any] | None = None
-        buffer = ""
         persisted: list[str] = []
         chunk_id = 0
         started_clock = monotonic()
-        last_flush_clock = started_clock
         last_text_clock = started_clock
         saw_text = False
         finish_reason = "unknown"
-
-        async def flush(*, force: bool = False) -> None:
-            """参数 force 决定是否提交短尾片段；成功更新游标，持久化异常透传。
-
-            参数：
-            - `force`（bool）：是否跳过常规幂等判断并强制执行；约束：可省略，默认值为 `False`。
-
-            返回：
-            - None：操作完成后不提供返回数据。
-
-            异常：
-            - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-            """
-            nonlocal buffer, chunk_id, last_flush_clock
-            while len(buffer) >= self._options.max_chunk_chars:
-                value, buffer = buffer[: self._options.max_chunk_chars], buffer[self._options.max_chunk_chars :]
-                chunk_id = await self._persist_delta(inputs, stream_id, chunk_id, value)
-                persisted.append(value)
-                last_flush_clock = monotonic()
-            if buffer and (force or finish_reason == "stop"):
-                value, buffer = buffer, ""
-                chunk_id = await self._persist_delta(inputs, stream_id, chunk_id, value)
-                persisted.append(value)
-                last_flush_clock = monotonic()
 
         try:
             await self._publish(
@@ -242,21 +219,13 @@ class AnswerGenerationService:
                     )
                 if next_task is None:
                     next_task = asyncio.create_task(anext(iterator))
-                # 连续到达的小片段也受刷新期限约束，不能每次读取都重新计时。
-                if buffer and monotonic() - last_flush_clock >= self._options.flush_interval_ms / 1000:
-                    await flush(force=True)
                 wait_seconds = min(
-                    self._options.flush_interval_ms / 1000,
+                    0.1,
                     self._options.total_timeout_ms / 1000 - elapsed,
                     deadline_ms / 1000 - idle,
-                    (
-                        self._options.flush_interval_ms / 1000 - (monotonic() - last_flush_clock)
-                        if buffer else self._options.flush_interval_ms / 1000
-                    ),
                 )
                 done, _ = await asyncio.wait({next_task}, timeout=max(wait_seconds, 0.001))
                 if not done:
-                    await flush(force=True)
                     continue
                 current_task = next_task
                 next_task = None
@@ -265,15 +234,13 @@ class AnswerGenerationService:
                 except StopAsyncIteration:
                     break
                 if isinstance(event, LLMTextDelta):
-                    first_text = not saw_text and bool(event.text)
                     saw_text = saw_text or bool(event.text)
                     if event.text:
                         last_text_clock = monotonic()
-                        buffer += event.text
-                        await flush(force=(
-                            first_text
-                            or monotonic() - last_flush_clock >= self._options.flush_interval_ms / 1000
-                        ))
+                        chunk_id = await self._publish_delta(
+                            inputs, stream_id, chunk_id, event.text
+                        )
+                        persisted.append(event.text)
                 elif isinstance(event, LLMStreamEnd):
                     finish_reason = event.finish_reason
                     break
@@ -282,7 +249,6 @@ class AnswerGenerationService:
 
             if finish_reason != "stop":
                 raise AnswerGenerationError("answer_generation_incomplete")
-            await flush()
             content = "".join(persisted)
             if not content.strip() or chunk_id < 1:
                 raise AnswerGenerationError("answer_generation_empty")
@@ -397,14 +363,14 @@ class AnswerGenerationService:
             raise AnswerGenerationError("answer_context_too_large")
 
 
-    async def _persist_delta(
+    async def _publish_delta(
         self,
         inputs: AnswerGenerationInput,
         stream_id: str,
         previous_chunk_id: int,
         delta: str,
     ) -> int:
-        """持久化一批正文后返回该批次的 chunk_id。
+        """立即发送一批完整增量，并只在进程内累计正文。
 
         参数：
         - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
@@ -419,9 +385,15 @@ class AnswerGenerationService:
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
         chunk_id = previous_chunk_id + 1
+        self._assistant_streams.append(
+            inputs.session_id,
+            inputs.run_id,
+            delta,
+            chunk_id=chunk_id,
+        )
         await self._publish(
             inputs,
-            EventType.MESSAGE_DELTA,
+            EventType.ASSISTANT_DELTA,
             stream_id=stream_id,
             chunk_id=chunk_id,
             transition_id=f"answer:{stream_id}:chunk:{chunk_id}",
@@ -439,7 +411,7 @@ class AnswerGenerationService:
         transition_id: str,
         payload: dict[str, Any],
     ) -> None:
-        """发布必须成功持久化的正文事件。
+        """发送聊天可见流事件；delta 不写 agent_events。
 
         参数：
         - `inputs`（AnswerGenerationInput）：经过边界校验的工作流输入，包含本次处理所需资料；约束：无额外运行时限制。
@@ -455,10 +427,17 @@ class AnswerGenerationService:
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        await self._events.publish_with_lease(
+        if event_type is EventType.MESSAGE_STARTED:
+            self._assistant_streams.start(
+                inputs.session_id,
+                inputs.run_id,
+                datetime.now(timezone.utc),
+            )
+            event_type = EventType.ASSISTANT_STARTED
+        await self._events.publish_realtime(
             ApplicationEvent(
                 event_type=event_type,
-                durability=EventDurability.DURABLE,
+                durability=EventDurability.REALTIME,
                 session_id=inputs.session_id,
                 run_id=inputs.run_id,
                 message_id=f"assistant:{inputs.run_id}",
@@ -468,8 +447,7 @@ class AnswerGenerationService:
                 is_complete=False,
                 transition_id=transition_id,
                 payload=payload,
-            ),
-            lease=inputs.execution_lease,
+            )
         )
 
 

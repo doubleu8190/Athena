@@ -41,6 +41,7 @@ from infrastructure.persistence.postgres.models import (
     SessionMemorySettingsModel,
     SessionModel,
     TaskExecutionModel,
+    TraceSpanModel,
     WorkerJobModel,
     WorkerExecutionMessageModel,
 )
@@ -92,6 +93,7 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         PlanRoundModel.__table__,
         RoundTaskModel.__table__,
         TaskExecutionModel.__table__,
+        TraceSpanModel.__table__,
         WorkerJobModel.__table__,
         WorkerExecutionMessageModel.__table__,
         AgentEventModel.__table__,

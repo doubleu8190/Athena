@@ -11,6 +11,7 @@ from uuid import uuid4
 from domain.events import ApplicationEvent, EventDurability
 from domain.events.ports import EventPort
 from domain.integrations import LLMPort, StructuredOutputSchema
+from application.observability import LLMSpanAttributes, RunObservabilityService
 
 
 async def invoke_llm_with_activity(
@@ -21,6 +22,7 @@ async def invoke_llm_with_activity(
     session_id: str,
     run_id: str,
     parent_activity_id: str,
+    observability: RunObservabilityService | None = None,
 ) -> Any:
     """调用普通模型输出并发布开始、完成或失败事件。
 
@@ -44,6 +46,7 @@ async def invoke_llm_with_activity(
         session_id=session_id,
         run_id=run_id,
         parent_activity_id=parent_activity_id,
+        observability=observability,
     )
 
 
@@ -56,6 +59,7 @@ async def invoke_structured_llm_with_activity(
     session_id: str,
     run_id: str,
     parent_activity_id: str,
+    observability: RunObservabilityService | None = None,
 ) -> Any:
     """调用结构化模型输出并发布开始、完成或失败事件。
 
@@ -80,6 +84,7 @@ async def invoke_structured_llm_with_activity(
         session_id=session_id,
         run_id=run_id,
         parent_activity_id=parent_activity_id,
+        observability=observability,
     )
 
 
@@ -92,6 +97,7 @@ async def invoke_secondary_structured_llm_with_activity(
     session_id: str,
     run_id: str,
     parent_activity_id: str,
+    observability: RunObservabilityService | None = None,
 ) -> Any:
     """调用第二模型的结构化输出并记录标准模型活动。"""
     return await _invoke_with_activity(
@@ -100,6 +106,7 @@ async def invoke_secondary_structured_llm_with_activity(
         session_id=session_id,
         run_id=run_id,
         parent_activity_id=parent_activity_id,
+        observability=observability,
     )
 
 
@@ -110,6 +117,7 @@ async def _invoke_with_activity(
     session_id: str,
     run_id: str,
     parent_activity_id: str,
+    observability: RunObservabilityService | None = None,
 ) -> Any:
     """统一包裹模型调用与活动事件；事件故障不覆盖模型结果。
 
@@ -128,6 +136,16 @@ async def _invoke_with_activity(
     - 未列出的依赖异常按当前实现传播。
     """
     call_id = f"llm:{uuid4().hex}"
+    span = (
+        await observability.start_span(
+            session_id=session_id,
+            run_id=run_id,
+            name="llm.generate",
+            attributes=LLMSpanAttributes(attempt=1),
+        )
+        if observability is not None and run_id
+        else None
+    )
     started_at = datetime.now(timezone.utc)
     started_clock = perf_counter()
     await _publish_llm_event(
@@ -142,7 +160,15 @@ async def _invoke_with_activity(
     )
     try:
         result = await invoke()
+        if observability is not None and span is not None:
+            await observability.finish_span(span.span_id)
     except Exception as error:
+        if observability is not None and span is not None:
+            await observability.finish_span(
+                span.span_id,
+                status="failed",
+                error={"code": "llm_failed", "message": type(error).__name__},
+            )
         await _publish_llm_event(
             event_publisher,
             event_type="llm.completed",

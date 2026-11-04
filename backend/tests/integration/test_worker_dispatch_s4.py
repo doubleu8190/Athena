@@ -7,20 +7,29 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from domain.orchestration.worker_entities import (
     WorkerPlanSubmission,
     WorkerResultSubmission,
     WorkerTaskSpec,
 )
+from application.observability import RunSpanAttributes, run_span_id
+from application.orchestration.worker_protocol_models import (
+    WorkerCommandReceiptModel,
+    WorkerTaskCommandModel,
+)
 from infrastructure.persistence.postgres.models import (
     AgentRunModel,
     OrchestratorExecutionModel,
+    OrchestratorPlanModel,
     OrchestratorRootResumeJobModel,
     OrchestratorTaskModel,
     OrchestratorWorkerCommandModel,
     OrchestrationOutboxModel,
+    ProjectModel,
+    SessionModel,
+    TraceSpanModel,
     WorkerContractModel,
     WorkerInstanceModel,
     WorkerResultReceiptModel,
@@ -28,9 +37,8 @@ from infrastructure.persistence.postgres.models import (
 from infrastructure.persistence.postgres.repositories.worker_orchestration_repository import (
     PostgresWorkerOrchestrationRepository,
 )
-from application.orchestration.worker_protocol_models import (
-    WorkerCommandReceiptModel,
-    WorkerTaskCommandModel,
+from infrastructure.persistence.postgres.repositories.trace_locking import (
+    lock_trace_span_scope,
 )
 from infrastructure.integrations.worker_http import PinnedWorkerHttpClient
 from tests.integration.test_worker_orchestration_s2 import worker_store
@@ -657,3 +665,215 @@ async def test_expired_dispatch_lease_is_fenced_and_deadline_is_not_reset(worker
     assert second_start.started_at == first_start.started_at
     assert second_start.command == first_start.command
     assert await repository.prepare_dispatch_send(new_lease, lease_seconds=15)
+
+
+async def _wait_until_backend_waits_for_advisory(
+    session_factory,
+    *,
+    timeout_seconds: float = 5,
+) -> None:
+    """等待 dispatcher 在测试事务持有的 advisory lock 上进入可观测等待。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while loop.time() < deadline:
+        async with session_factory() as session:
+            blocked = await session.scalar(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_stat_activity "
+                    "WHERE wait_event_type = 'Lock' "
+                    "AND wait_event = 'advisory' "
+                    "AND pid <> pg_backend_pid()"
+                    ")"
+                )
+            )
+        if blocked:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("dispatcher_did_not_wait_for_trace_advisory")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_dispatch_and_trace_writes_use_the_same_run_lock_order(
+    worker_store,
+) -> None:
+    """Trace 先持 advisory 时，dispatcher 必须等锁而不能先持 Run 行锁。"""
+    session_factory, _ = worker_store
+    contract_id = str(uuid4())
+    repository, plan_id = await _submit_plan(
+        session_factory,
+        task_contracts=(contract_id,),
+        available_contracts=(contract_id,),
+    )
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session, session.begin():
+        plan = await session.get(OrchestratorPlanModel, plan_id)
+        assert plan is not None
+        run = await session.get(AgentRunModel, plan.run_id)
+        assert run is not None
+        command = await session.scalar(
+            select(OrchestratorWorkerCommandModel)
+            .join(
+                OrchestratorExecutionModel,
+                OrchestratorWorkerCommandModel.execution_id
+                == OrchestratorExecutionModel.execution_id,
+            )
+            .join(
+                OrchestratorTaskModel,
+                OrchestratorExecutionModel.task_id
+                == OrchestratorTaskModel.task_id,
+            )
+            .where(
+                OrchestratorTaskModel.plan_id == plan_id,
+                OrchestratorWorkerCommandModel.command_type == "execute",
+            )
+        )
+        assert command is not None
+        project_id = f"project-{uuid4().hex}"
+        session.add(
+            ProjectModel(
+                id=project_id,
+                name="Trace lock order",
+                created_at=now,
+                updated_at=now,
+                deleted_time=None,
+            )
+        )
+        await session.flush()
+        session.add(
+            SessionModel(
+                id=run.session_id,
+                project_id=project_id,
+                title="Trace lock order",
+                active_run_id=None,
+                last_run_sequence=0,
+                created_at=now,
+                updated_at=now,
+                last_activity_at=now,
+                deleted_time=None,
+            )
+        )
+        await session.flush()
+        session.add(
+            TraceSpanModel(
+                span_id=run_span_id(run.run_id),
+                session_id=run.session_id,
+                run_id=run.run_id,
+                parent_span_id=None,
+                span_type="run",
+                name="run.execute",
+                status="running",
+                started_at=now,
+                completed_at=None,
+                duration_ms=None,
+                attributes_json=RunSpanAttributes().model_dump(mode="json"),
+                error_json=None,
+                sequence=1,
+            )
+        )
+        run_id = run.run_id
+        session_id = run.session_id
+        command_id = command.command_id
+
+    lease = await repository.claim_dispatch_command(
+        owner_id="trace-lock-dispatcher",
+        lease_seconds=15,
+    )
+    assert lease is not None and lease.command_id == command_id
+
+    trace_advisory_acquired = asyncio.Event()
+    allow_trace_insert = asyncio.Event()
+
+    async def append_root_trace_after_lock() -> None:
+        """先持有 Run advisory，再写入 Root 子 span。"""
+        async with session_factory() as trace_session, trace_session.begin():
+            await lock_trace_span_scope(trace_session, run_id)
+            trace_advisory_acquired.set()
+            await allow_trace_insert.wait()
+            sequence = int(
+                await trace_session.scalar(
+                    select(
+                        func.coalesce(func.max(TraceSpanModel.sequence), 0)
+                    ).where(TraceSpanModel.run_id == run_id)
+                )
+                or 0
+            ) + 1
+            trace_session.add(
+                TraceSpanModel(
+                    span_id=f"root-node:{uuid4().hex}",
+                    session_id=session_id,
+                    run_id=run_id,
+                    parent_span_id=run_span_id(run_id),
+                    span_type="root_node",
+                    name="concurrent_trace_regression",
+                    status="completed",
+                    started_at=now,
+                    completed_at=now,
+                    duration_ms=0,
+                    attributes_json={
+                        "span_type": "root_node",
+                        "node_name": "concurrent_trace_regression",
+                    },
+                    error_json=None,
+                    sequence=sequence,
+                )
+            )
+
+    trace_task = asyncio.create_task(append_root_trace_after_lock())
+    dispatch_task: asyncio.Task | None = None
+    try:
+        await asyncio.wait_for(trace_advisory_acquired.wait(), timeout=5)
+        dispatch_task = asyncio.create_task(
+            repository.start_dispatch(
+                lease,
+                lease_seconds=15,
+                assignment_retry_seconds=0.1,
+            )
+        )
+        # 直接观察 PostgreSQL 的 Lock/advisory 等待状态，不使用固定 sleep；
+        # 旧顺序即使已持 Run 行锁，也会在随后申请 advisory 时到达同一状态。
+        await _wait_until_backend_waits_for_advisory(
+            session_factory,
+        )
+
+        # 修复后的 dispatcher 仍停在 advisory；此时 Root 写 span 可取得 Run 的
+        # 外键共享锁并提交。旧顺序中 dispatcher 已持 Run 行锁，这两次等待会
+        # 形成 advisory 与 Run 行锁的闭环，由 PostgreSQL 稳定检测为死锁。
+        allow_trace_insert.set()
+        start, _ = await asyncio.wait_for(
+            asyncio.gather(dispatch_task, trace_task),
+            timeout=5,
+        )
+    finally:
+        allow_trace_insert.set()
+        tasks = [trace_task]
+        if dispatch_task is not None:
+            tasks.append(dispatch_task)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert start is not None
+    async with session_factory() as session:
+        command = await session.get(OrchestratorWorkerCommandModel, command_id)
+        execution = await session.get(
+            OrchestratorExecutionModel, lease.execution_id
+        )
+        spans = list(
+            (
+                await session.scalars(
+                    select(TraceSpanModel)
+                    .where(TraceSpanModel.run_id == run_id)
+                    .order_by(TraceSpanModel.sequence)
+                )
+            ).all()
+        )
+    assert command is not None and command.instance_id is not None
+    assert execution is not None and execution.status == "running"
+    assert {span.span_type for span in spans} == {
+        "run",
+        "root_node",
+        "worker_execution",
+    }

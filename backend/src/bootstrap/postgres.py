@@ -9,6 +9,8 @@ from fastapi import APIRouter
 from application.approval import ApprovalService
 from application.configuration import ProviderQueryService, SettingsQueryService
 from application.events import EventStreamService
+from application.events.assistant_hub import AssistantStreamHub
+from application.observability import RunObservabilityService
 from application.files import AttachmentService, IngestionService
 from application.knowledge import KnowledgeBaseQueryService, KnowledgeBaseService
 from application.memory import (
@@ -39,6 +41,7 @@ from application.orchestration import (
 from application.orchestration.worker_plan_submission import WorkerPlanSubmissionService
 from application.orchestration.worker_registration import WorkerRegistrationService
 from application.orchestration.worker_result_submission import WorkerResultSubmissionService
+from application.orchestration.worker_progress import WorkerProgressService
 from application.orchestration.worker_stop_confirmation import WorkerStopConfirmationService
 from application.orchestration.worker_approval_requests import WorkerApprovalRequestService
 from application.orchestration.worker_timeouts import WorkerTimeoutScanner, WorkerTimeoutService
@@ -146,6 +149,7 @@ from infrastructure.persistence.postgres.repositories import (
     PostgresOrchestrationOutboxRepository,
     PostgresEvaluationRepository,
     PostgresLeaseCenter,
+    PostgresObservabilityRepository,
     PostgresRootResumeJobRepository,
 )
 from infrastructure.persistence.postgres.repositories.worker_registry_repository import (
@@ -215,6 +219,9 @@ def build_postgres_dependencies(
     session_history = PostgresSessionHistoryRepository(session_factory)
     runs = PostgresRunRepository(session_factory, lease_center=lease_center)
     events = PostgresEventRepository(session_factory)
+    observability_repository = PostgresObservabilityRepository(session_factory)
+    observability = RunObservabilityService(observability_repository, events)
+    assistant_streams = AssistantStreamHub()
     approvals = PostgresApprovalRepository(
         session_factory,
         resume_dispatch_max_wait_seconds=settings.worker_resume_dispatch_max_wait_seconds,
@@ -253,6 +260,10 @@ def build_postgres_dependencies(
     worker_registration = WorkerRegistrationService(worker_orchestration_repository)
     worker_result_submission = WorkerResultSubmissionService(
         worker_orchestration_repository
+    )
+    worker_progress_service = WorkerProgressService(
+        observability_repository,
+        observability,
     )
     worker_stop_confirmation = WorkerStopConfirmationService(
         worker_orchestration_repository
@@ -467,7 +478,11 @@ def build_postgres_dependencies(
         context_planner=context_planner,
         request_preparation=request_preparation,
         memory_settings=session_memory_settings,
-        agent=root_agent or ConfiguredRootAgent(llm_provider, events),
+        agent=root_agent or ConfiguredRootAgent(
+            llm_provider,
+            events,
+            observability=observability,
+        ),
         answer_generation=AnswerGenerationService(
             llm_provider,
             events,
@@ -480,6 +495,7 @@ def build_postgres_dependencies(
                 total_timeout_ms=settings.answer_streaming.total_timeout_ms,
             ),
             prompt=(Path(__file__).resolve().parents[2] / "prompt" / "answer_generation.md").read_text(encoding="utf-8"),
+            assistant_streams=assistant_streams,
         ),
         tool_service=builtin_tool_service,
         available_context_providers=tuple(context_providers),
@@ -487,6 +503,7 @@ def build_postgres_dependencies(
         context_prefetch_timeout_seconds=settings.context_prefetch_timeout_seconds,
         root_orchestration=root_orchestration,
         event_publisher=events,
+        observability=observability,
     )
     root_workflow = RootWorkflow(dependencies)
     root_graph = LangGraphRootGraph(
@@ -516,7 +533,14 @@ def build_postgres_dependencies(
         "run_service": RunService(
             runs, runs, id_factory=ids, executor=root_run_executor
         ),
-        "event_stream_service": EventStreamService(sessions, events),
+        "event_stream_service": EventStreamService(
+            sessions,
+            events,
+            history_reader=session_history,
+            observability=observability,
+            assistant_streams=assistant_streams,
+        ),
+        "observability_service": observability,
         "tool_query_service": ToolQueryService(tools),
         "tool_service": builtin_tool_service,
         "approval_service": approval_service,
@@ -601,6 +625,7 @@ def build_postgres_dependencies(
                 worker_http,
                 worker_protocol,
                 worker_approval_request,
+                progress_service=worker_progress_service,
             ),
             prefix="/api",
         )
@@ -687,6 +712,7 @@ def build_postgres_dependencies(
             events,
             memory_jobs,
             runs,
+            assistant_streams,
         )
         run_worker = RunConsumer(
             runs,

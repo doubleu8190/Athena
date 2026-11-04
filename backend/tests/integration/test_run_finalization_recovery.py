@@ -40,6 +40,7 @@ from infrastructure.persistence.postgres.models import (
     RootResumeJobModel,
     RoundTaskModel,
     TaskExecutionModel,
+    TraceSpanModel,
     WorkerJobModel,
 )
 from infrastructure.persistence.postgres.repositories.event_repository import (
@@ -103,6 +104,7 @@ async def test_final_answer_and_memory_job_survive_completion_receipt_loss() -> 
             PlanRoundModel.__table__,
             RoundTaskModel.__table__,
             TaskExecutionModel.__table__,
+            TraceSpanModel.__table__,
             RootResumeJobModel.__table__,
             WorkerJobModel.__table__,
             AgentEventModel.__table__,

@@ -158,6 +158,9 @@ class Events:
     async def publish(self, event):
         return event
 
+    async def publish_realtime(self, event):
+        return event
+
 
 class Executor:
     async def execute(self, command):

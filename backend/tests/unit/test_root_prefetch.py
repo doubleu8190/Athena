@@ -154,12 +154,12 @@ async def test_identical_rewritten_query_is_prefetched_only_once() -> None:
     assert calls == ["相同的问题"]
 
 
-def test_memory_context_revalidation_default_timeout_is_ten_seconds() -> None:
+def test_memory_context_revalidation_default_timeout_is_fifteen_seconds() -> None:
     parameter = inspect.signature(
         ContextAcquisitionService.validate_memory_context
     ).parameters["timeout_seconds"]
 
-    assert parameter.default == 10.0
+    assert parameter.default == 15.0
 
 
 @pytest.mark.asyncio

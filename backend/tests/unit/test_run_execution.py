@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 
 import pytest
 
+from application.events import AssistantStreamHub
 from application.runs import RunExecutionService
-from domain.events import ApplicationEvent, EventType
+from domain.events import ApplicationEvent, EventDurability, EventType
 from domain.runs import (
     CommandExecutionResult,
     CommandType,
@@ -67,14 +68,24 @@ class Executor:
 class Events:
     def __init__(self) -> None:
         self.items: list[ApplicationEvent] = []
+        self.calls: list[tuple[str, ApplicationEvent]] = []
 
     async def publish(self, event):
         self.items.append(event)
+        self.calls.append(("publish", event))
         return event
 
     async def publish_realtime(self, event):
         self.items.append(event)
+        self.calls.append(("publish_realtime", event))
         return event
+
+
+class PublishFailingEvents(Events):
+    async def publish(self, event):
+        if event.event_type == EventType.ASSISTANT_COMPLETED:
+            raise RuntimeError("event store unavailable")
+        return await super().publish(event)
 
 
 def invocation() -> RunCommand:
@@ -103,8 +114,13 @@ def answer_result() -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_success_completes_run_and_publishes_the_reply():
     lifecycle, events = Lifecycle(), Events()
+    assistant_streams = AssistantStreamHub()
+    assistant_streams.start("session-1", "run-1", NOW)
     service = RunExecutionService(
-        lifecycle, Executor(CommandExecutionResult(result=answer_result())), events
+        lifecycle,
+        Executor(CommandExecutionResult(result=answer_result())),
+        events,
+        assistant_streams=assistant_streams,
     )
 
     result = await service.execute(invocation())
@@ -115,9 +131,37 @@ async def test_success_completes_run_and_publishes_the_reply():
     assert [event.event_type for event in events.items] == [
         EventType.RUN_STARTED,
         EventType.MESSAGE_COMPLETED,
+        EventType.ASSISTANT_COMPLETED,
         EventType.RUN_COMPLETED,
     ]
     assert events.items[1].payload["reply_to_message_id"] == "message-1"
+    assert events.items[2].durability == EventDurability.DURABLE
+    assert events.calls[2][0] == "publish"
+    assert assistant_streams.snapshot("session-1", "run-1") is None
+
+
+@pytest.mark.asyncio
+async def test_assistant_completed_publish_failure_keeps_completed_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """完成通知写入失败只记录告警，不把已完成的 Run 改成失败。"""
+    lifecycle, events = Lifecycle(), PublishFailingEvents()
+    assistant_streams = AssistantStreamHub()
+    assistant_streams.start("session-1", "run-1", NOW)
+    service = RunExecutionService(
+        lifecycle,
+        Executor(CommandExecutionResult(result=answer_result())),
+        events,
+        assistant_streams=assistant_streams,
+    )
+
+    result = await service.execute(invocation())
+
+    assert result == answer_result()
+    assert lifecycle.failed == []
+    assert events.items[-1].event_type == EventType.RUN_COMPLETED
+    assert "assistant_completed_publish_failed" in caplog.text
+    assert assistant_streams.snapshot("session-1", "run-1") is None
 
 
 @pytest.mark.asyncio
@@ -170,14 +214,20 @@ async def test_transactional_root_wait_wakes_subscribers_without_republishing():
 @pytest.mark.asyncio
 async def test_executor_error_marks_the_run_failed():
     lifecycle, events = Lifecycle(), Events()
+    assistant_streams = AssistantStreamHub()
+    assistant_streams.start("session-1", "run-1", NOW)
     service = RunExecutionService(
-        lifecycle, Executor(CommandExecutionResult(error={"code": "bad_input"})), events
+        lifecycle,
+        Executor(CommandExecutionResult(error={"code": "bad_input"})),
+        events,
+        assistant_streams=assistant_streams,
     )
 
     await service.execute(invocation())
 
     assert lifecycle.failed == [("run-1", {"code": "bad_input"})]
     assert events.items[-1].event_type == EventType.RUN_FAILED
+    assert assistant_streams.snapshot("session-1", "run-1") is None
 
 
 @pytest.mark.asyncio

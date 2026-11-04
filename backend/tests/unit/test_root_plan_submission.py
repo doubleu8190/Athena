@@ -27,7 +27,12 @@ class RootOrchestration:
 
 
 def _workflow(orchestration: RootOrchestration) -> RootWorkflow:
-    return RootWorkflow(SimpleNamespace(root_orchestration=orchestration))
+    return RootWorkflow(
+        SimpleNamespace(
+            root_orchestration=orchestration,
+            observability=None,
+        )
+    )
 
 
 def _state(*, completed_plans=(), tasks=None, extra=None):

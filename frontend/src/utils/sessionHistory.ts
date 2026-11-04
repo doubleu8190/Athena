@@ -1,321 +1,210 @@
-import { upsertTimelineEntry } from "./executionTimeline.ts"
-import type { ApplicationEventEnvelope } from "../types/events.ts"
 import type {
   ExecutionTimelineEntry,
+  ExecutionTimelineStatus,
   Message,
-  RunTimelineEvent,
+  SessionHistoryContent,
   SessionHistoryTurn,
-  Step,
 } from "../types/index.ts"
 
-type SessionTimelineCache = {
-  runTimelineEvents?: RunTimelineEvent[]
-  executionTimeline?: ExecutionTimelineEntry[]
-  executionTimelineTerminalMarkers?: Record<string, ExecutionTimelineEntry["status"]>
+/** 为没有后端 ID 的历史内容生成跨分页稳定的本地标识。 */
+function historyId(kind: string, ...values: string[]): string {
+  let hash = 2166136261
+  const input = values.join("\u0000")
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `history:${kind}:${(hash >>> 0).toString(36)}`
 }
 
-const LLM_STEP_EVENTS = new Set([
-  "llm.started",
-  "llm.completed",
-  "llm.validation_failed",
-])
+function contentId(role: "user" | "assistant", value: SessionHistoryContent): string {
+  return historyId(role, value.time, value.content)
+}
 
+/** 将后端任务终态映射为历史时间线状态；旧响应缺失状态时保持安全默认。 */
+function historyTaskStatus(status?: string): ExecutionTimelineStatus {
+  const normalized = status?.toLowerCase()
+  if (normalized === "failed" || normalized === "timed_out") return "failed"
+  if (normalized === "cancelled" || normalized === "superseded") return "cancelled"
+  return "completed"
+}
+
+/** 把精简历史轮次转换为聊天消息；后端内部身份不会进入前端消息模型。 */
 export function historyMessages(turns: SessionHistoryTurn[], sessionId?: string): Message[] {
-  return turns.flatMap((turn) => [
-    {
-      id: turn.user.id || `history:user:${turn.run_id}`,
-      role: "user" as const,
+  const messages: Message[] = []
+  for (const turn of turns) {
+    messages.push({
+      id: contentId("user", turn.user),
+      role: "user",
       content: turn.user.content,
       timestamp: turn.user.time,
       session_id: sessionId,
-      run_id: turn.run_id,
-    },
-    ...(turn.assistant ? [{
-      id: `assistant:${turn.run_id}`,
-      role: "assistant" as const,
-      content: turn.assistant.content,
-      timestamp: turn.assistant.time,
-      session_id: sessionId,
-      run_id: turn.run_id,
-      stream_status: "completed" as const,
-    }] : []),
-  ])
+    })
+    if (turn.assistant) {
+      messages.push({
+        id: contentId("assistant", turn.assistant),
+        role: "assistant",
+        content: turn.assistant.content,
+        timestamp: turn.assistant.time,
+        session_id: sessionId,
+        stream_status: "completed",
+      })
+    }
+  }
+  return messages
 }
 
+/** 把 Root/Worker Progress 和任务结果投影为统一的用户可见时间线。 */
 export function historyTimeline(turns: SessionHistoryTurn[]): ExecutionTimelineEntry[] {
   const entries: ExecutionTimelineEntry[] = []
   for (const turn of turns) {
-    turn.root_process.forEach((item, index) => entries.push({
-      id: `history:${turn.run_id}:root:${index}`,
-      run_id: turn.run_id,
-      event_type: "history.root",
-      label: item.content,
-      status: "info",
-      timestamp: item.time,
-      session_seq: item.session_seq ?? undefined,
-    }))
-    turn.tasks.forEach((task, taskIndex) => {
-      const terminal = task.content
-        ? task.process.find((item) => item.session_seq === task.session_seq)
-        : undefined
-      task.process.forEach((item, index) => {
-        if (task.content && item.session_seq === task.session_seq) return
-        entries.push({
-          id: `history:${turn.run_id}:task:${taskIndex}:${index}`,
-          run_id: turn.run_id,
-          event_type: "history.worker",
-          label: item.content,
-          status: "info",
-          timestamp: item.time,
-          session_seq: item.session_seq ?? undefined,
-        })
-      })
-      if (task.content) entries.push({
-        id: `history:${turn.run_id}:task:${taskIndex}:result`,
-        run_id: turn.run_id,
-        event_type: "history.worker.result",
-        label: terminal?.content || "Worker 执行结果",
-        detail: task.content,
-        status: "completed",
-        timestamp: task.time,
-        session_seq: task.session_seq ?? undefined,
+    const turnId = historyId("turn", turn.user.time, turn.user.content)
+    turn.root_process.forEach((item, index) => {
+      entries.push({
+        id: historyId("root", turnId, item.time, item.content, String(index)),
+        event_type: "history.root",
+        label: item.content,
+        status: "info",
+        timestamp: item.time,
+        metadata: { turn_id: turnId },
       })
     })
+    turn.tasks.forEach((task, taskIndex) => {
+      const taskId = historyId(
+        "task",
+        turnId,
+        task.worker_name,
+        task.task_title,
+        String(taskIndex),
+      )
+      task.process.forEach((item, index) => {
+        entries.push({
+          id: historyId("worker", taskId, item.time, item.content, String(index)),
+          event_type: "history.worker",
+          label: item.content,
+          detail: `${task.worker_name} · ${task.task_title}`,
+          status: "info",
+          timestamp: item.time,
+          metadata: {
+            turn_id: turnId,
+            worker_name: task.worker_name,
+            task_title: task.task_title,
+          },
+        })
+      })
+      if (task.result) {
+        entries.push({
+          id: historyId("worker-result", taskId),
+          event_type: "history.worker.result",
+          label: task.task_title,
+          detail: task.result.content,
+          status: historyTaskStatus(task.status),
+          timestamp: task.result.time,
+          metadata: {
+            turn_id: turnId,
+            worker_name: task.worker_name,
+            task_title: task.task_title,
+          },
+        })
+      }
+    })
   }
-  return entries.sort((left, right) => left.timestamp.localeCompare(right.timestamp))
+  return entries.sort((left, right) => (
+    left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id)
+  ))
 }
 
-export function filterChatTimelineForLoadedRuns(
-  entries: ExecutionTimelineEntry[],
-  messages: Message[],
-  activeRunIds: Iterable<string>,
-): ExecutionTimelineEntry[] {
-  const loadedRunIds = new Set(
-    messages
-      .map((item) => item.run_id)
-      .filter((runId): runId is string => Boolean(runId)),
-  )
-  const activeRunIdSet = new Set(activeRunIds)
-  return entries.filter((entry) => {
-    const belongsToLoadedRun = !entry.run_id
-      || loadedRunIds.has(entry.run_id)
-      || activeRunIdSet.has(entry.run_id)
-    return belongsToLoadedRun
-      && !entry.event_type.startsWith("node.")
-      && entry.event_type !== "run.queued"
-      && (!entry.event_type.startsWith("retrieval.") || entry.status === "failed")
-  })
-}
-
-export function projectLlmValidationFailureTimeline(
-  envelope: ApplicationEventEnvelope,
-  runId: string,
-  timestamp: string,
-): ExecutionTimelineEntry {
-  const payload = envelope.payload || {}
-  const rawError = payload.error ?? envelope.error_detail
-  const errorRecord = rawError && typeof rawError === "object"
-    ? rawError as Record<string, unknown>
-    : undefined
-  const error = typeof rawError === "string"
-    ? rawError
-    : typeof errorRecord?.message === "string"
-      ? errorRecord.message
-      : typeof errorRecord?.code === "string"
-        ? errorRecord.code
-        : ""
-  const callId = typeof payload.call_id === "string" ? payload.call_id : ""
-  return {
-    id: `llm-validation:${callId || envelope.session_seq || runId}`,
-    run_id: runId,
-    event_type: "llm.validation_failed",
-    label: "模型输出校验失败",
-    detail: error || "模型返回内容未通过校验。",
-    status: "failed",
-    timestamp,
-    session_seq: envelope.session_seq,
-    metadata: {
-      call_id: callId || undefined,
-      parent_activity_id: typeof payload.parent_activity_id === "string"
-        ? payload.parent_activity_id
-        : undefined,
-    },
-  }
-}
-
-export function cacheSessionTimelineProjection(
-  previous: SessionTimelineCache,
-  envelope: ApplicationEventEnvelope,
-  timeline: ExecutionTimelineEntry | null,
-): SessionTimelineCache {
-  const next: SessionTimelineCache = {}
-  const sequence = envelope.session_seq
-  const runId = envelope.run_id || ""
-  if (typeof sequence === "number" && runId) {
-    const events = previous.runTimelineEvents || []
-    if (!events.some((item) => item.session_seq === sequence)) {
-      next.runTimelineEvents = [...events, {
-        session_seq: sequence,
-        event_type: envelope.event_type || "",
-        occurred_at: envelope.occurred_at || new Date().toISOString(),
-        run_id: runId,
-        payload: envelope.payload || {},
-      }].sort((left, right) => left.session_seq - right.session_seq)
-    }
-  }
-  if (timeline) {
-    next.executionTimeline = upsertTimelineEntry(
-      previous.executionTimeline || [],
-      previous.executionTimelineTerminalMarkers || {},
-      timeline,
-    )
-  }
-  return next
-}
-
-export function cacheBackgroundLlmStep(
-  previousSteps: Step[] | undefined,
-  sessionId: string,
-  envelope: ApplicationEventEnvelope,
-): Step[] | undefined {
-  const type = envelope.event_type || ""
-  if (!LLM_STEP_EVENTS.has(type)) return undefined
-  const payload = envelope.payload || {}
-  const runId = envelope.run_id || ""
-  const callId = typeof payload.call_id === "string" && payload.call_id
-    ? payload.call_id
-    : `llm:${runId}:${envelope.session_seq ?? envelope.occurred_at ?? "unknown"}`
-  const steps = [...(previousSteps || [])]
-  const existingIndex = steps.findIndex((step) =>
-    step.id === callId && step.step_type === "llm_call"
-  )
-  const existing = existingIndex >= 0 ? steps[existingIndex] : undefined
-  if (existing?.status === "failed" && type !== "llm.validation_failed") return steps
-
-  const timestamp = envelope.occurred_at || new Date().toISOString()
-  const payloadError = payload.error
-  const errorMessage = typeof payloadError === "string"
-    ? payloadError
-    : payloadError && typeof payloadError === "object"
-      && typeof (payloadError as Record<string, unknown>).message === "string"
-      ? String((payloadError as Record<string, unknown>).message)
-      : envelope.error_detail?.message
-        || (type === "llm.validation_failed" ? "模型输出校验失败" : null)
-  const payloadErrorDetail = payload.error_detail
-  const errorDetail = payloadErrorDetail && typeof payloadErrorDetail === "object"
-    ? payloadErrorDetail as Step["error_detail"]
-    : envelope.error_detail || null
-  const status: Step["status"] = type === "llm.started"
-    ? "running"
-    : type === "llm.validation_failed"
-      || payload.status === "failed"
-      ? "failed"
-      : "completed"
-  const startedAt = existing?.started_at
-    || (typeof payload.started_at === "string" ? payload.started_at : timestamp)
-  const durationMs = typeof payload.duration_ms === "number"
-    ? payload.duration_ms
-    : Number(payload.duration_ms || existing?.duration_ms || 0)
-  const nextStep: Step = {
-    id: callId,
-    session_id: sessionId,
-    run_id: runId,
-    parent_run_id: envelope.parent_run_id
-      || (typeof payload.parent_run_id === "string" ? payload.parent_run_id : null),
-    step_number: existing?.step_number ?? steps.length + 1,
-    step_type: "llm_call",
-    status,
-    started_at: startedAt,
-    completed_at: type === "llm.started" ? existing?.completed_at ?? null : timestamp,
-    duration_ms: durationMs,
-    llm_input_tokens: typeof payload.llm_input_tokens === "number"
-      ? payload.llm_input_tokens
-      : existing?.llm_input_tokens ?? 0,
-    llm_output_tokens: typeof payload.llm_output_tokens === "number"
-      ? payload.llm_output_tokens
-      : existing?.llm_output_tokens ?? 0,
-    error_message: type === "llm.started" ? existing?.error_message ?? null : errorMessage,
-    error_detail: type === "llm.started" ? existing?.error_detail ?? null : errorDetail,
-  }
-  if (existingIndex >= 0) steps[existingIndex] = { ...existing, ...nextStep }
-  else steps.push(nextStep)
-  return steps
-}
-
+/** 合并同一条本地历史消息与实时快照，保留已经落库的最终正文。 */
 export function mergeHistoryMessages(
   persisted: Message[],
   live: Message[],
 ): Message[] {
-  const merged = new Map<string, Message>()
-  const semanticKeys = new Map<string, string>()
-  const add = (message: Message, authoritative: boolean) => {
-    const semanticKey = message.run_id
-      ? `${message.role}:${message.run_id}`
-      : `id:${message.id}`
-    const existingId = semanticKeys.get(semanticKey)
-    if (!existingId) {
-      merged.set(message.id, message)
-      semanticKeys.set(semanticKey, message.id)
-      return
+  const merged = [...persisted]
+  for (const candidate of live) {
+    const existingIndex = merged.findIndex((item) => (
+      item.id === candidate.id
+      || (
+        item.role === candidate.role
+        && item.timestamp === candidate.timestamp
+        && item.content === candidate.content
+      )
+      || (
+        item.role === candidate.role
+        && Boolean(item.run_id)
+        && item.run_id === candidate.run_id
+      )
+    ))
+    if (existingIndex < 0) {
+      merged.push(candidate)
+      continue
     }
-    const existing = merged.get(existingId)
-    if (!existing) {
-      merged.set(message.id, message)
-      semanticKeys.set(semanticKey, message.id)
-      return
-    }
-    const next = authoritative
-      ? { ...existing, ...message }
-      : { ...message, ...existing }
-    merged.delete(existingId)
-    merged.set(next.id, next)
-    semanticKeys.set(semanticKey, next.id)
+    const existing = merged[existingIndex]
+    merged[existingIndex] = existing.stream_status === "completed"
+      ? existing
+      : { ...candidate, ...existing, id: existing.id }
   }
-  persisted.forEach((message) => add(message, true))
-  live.forEach((message) => add(message, false))
-  return [...merged.values()].sort((left, right) => {
-    const delta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
-    return Number.isNaN(delta) || delta === 0
-      ? left.id.localeCompare(right.id)
-      : delta
+  return merged.sort((left, right) => {
+    const timeDelta = Date.parse(left.timestamp) - Date.parse(right.timestamp)
+    return Number.isFinite(timeDelta) && timeDelta !== 0
+      ? timeDelta
+      : left.id.localeCompare(right.id)
   })
 }
 
-export function hasCompletedAssistant(
-  messages: Message[] | undefined,
-  runId: string,
+/** 判断历史投影与实时投影是否表示同一条可见执行事实。 */
+export function timelineEntriesMatch(
+  left: ExecutionTimelineEntry,
+  right: ExecutionTimelineEntry,
 ): boolean {
-  return Boolean(messages?.some((message) =>
-    message.role === "assistant"
-    && message.run_id === runId
-    && message.stream_status === "completed",
+  if (left.run_id && right.run_id && left.run_id !== right.run_id) return false
+  const leftResult = left.event_type === "task.result"
+    || left.event_type === "history.worker.result"
+  const rightResult = right.event_type === "task.result"
+    || right.event_type === "history.worker.result"
+  return leftResult === rightResult
+    && left.timestamp === right.timestamp
+    && left.label === right.label
+}
+
+/** 按稳定本地 ID 合并历史时间线和实时可见进度。 */
+export function mergeHistoryTimeline(
+  persisted: ExecutionTimelineEntry[],
+  live: ExecutionTimelineEntry[],
+): ExecutionTimelineEntry[] {
+  const merged = [...persisted]
+  for (const entry of live) {
+    const index = merged.findIndex((item) => (
+      item.id === entry.id || timelineEntriesMatch(item, entry)
+    ))
+    if (index < 0) merged.push(entry)
+    else merged[index] = { ...merged[index], ...entry }
+  }
+  return merged.sort((left, right) => (
+    left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id)
   ))
 }
 
-export function sessionEventResumeCursor(
-  snapshotEventSeq: number | undefined,
-  processedCursor = 0,
-  backgroundCursor = 0,
-): number {
-  const receivedCursor = Math.max(0, processedCursor, backgroundCursor)
-  return receivedCursor > 0
-    ? receivedCursor
-    : Math.max(0, snapshotEventSeq ?? 0)
+/** 只展示已经加载的用户轮次和当前活动 Run，隔离历史分页之外的实时缓存。 */
+export function filterChatTimelineForLoadedRuns(
+  entries: ExecutionTimelineEntry[],
+  messages: Message[],
+  activeRunIds: string[],
+): ExecutionTimelineEntry[] {
+  const visibleRunIds = new Set([
+    ...messages.flatMap((message) => message.run_id ? [message.run_id] : []),
+    ...activeRunIds,
+  ])
+  return entries.filter((entry) => (
+    !entry.run_id || visibleRunIds.has(entry.run_id)
+  ))
 }
 
-export function backgroundSessionCanRelease(
-  runStatus: string | undefined,
-  hasFinalAnswer: boolean,
-): boolean {
-  if (runStatus === "failed" || runStatus === "cancelled") return true
-  return runStatus === "completed" && hasFinalAnswer
-}
-
+/** 读取最新历史页后建立聊天 SSE；后续分页不得改变该连接基线。 */
 export function sessionEventStreamUrl(
   apiBase: string,
   sessionId: string,
-  after?: number,
+  syncToken?: string,
 ): string {
-  const url = `${apiBase.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/events`
-  return after !== undefined && after > 0 ? `${url}?after=${after}` : url
+  const url = `${apiBase.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(sessionId)}/stream`
+  return syncToken ? `${url}?sync_token=${encodeURIComponent(syncToken)}` : url
 }

@@ -84,6 +84,12 @@ FastAPI 根路径为 `/api`，默认监听 `http://127.0.0.1:8000`。JSON 请求
 链路 payload 只返回活动标识、状态、关联 ID、耗时、计数和安全错误摘要；
 完整 prompt、工具参数、工具输出和 traceback 不通过该接口返回。
 
+### `GET /api/runs`
+
+分页返回未删除会话的 Run 摘要，支持 `limit`、`offset`、`session_id` 和
+`terminal_only`。`terminal_only=true` 时只统计并返回 `completed`、`failed`、
+`cancelled` 状态的 Run；默认 `false`，保持原列表语义不变。
+
 ### `POST /api/runs`（202）
 
 JSON 请求：

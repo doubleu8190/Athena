@@ -6,7 +6,14 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
 
 class WorkerExecutionGrantModel(BaseModel):
@@ -222,6 +229,8 @@ class WorkerResultSubmissionModel(BaseModel):
     status: Literal["completed", "failed"]
     output: dict[str, JsonValue] | None = None
     error: WorkerErrorModel | None = None
+    last_progress_sequence: int = Field(ge=0)
+    display_result: str | None = Field(default=None, min_length=1, max_length=20000)
 
     @model_validator(mode="after")
     def validate_result_content(self) -> WorkerResultSubmissionModel:
@@ -240,6 +249,36 @@ class WorkerResultSubmissionModel(BaseModel):
         if self.status == "failed" and (self.error is None or self.output is not None):
             raise ValueError("worker_failure_result_content_invalid")
         return self
+
+
+class WorkerProgressSubmissionModel(BaseModel):
+    """Worker 上报一条完整、不可变的用户可见进度。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    content: str = Field(min_length=1, max_length=20000)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        """去除首尾空白，并拒绝只有空白的展示内容。"""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("worker_progress_content_empty")
+        return normalized
+
+
+class WorkerProgressReceiptModel(BaseModel):
+    """返回 Progress 的稳定 Athena 身份和接收时间。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    progress_id: str = Field(min_length=1)
+    execution_id: str = Field(min_length=1)
+    sequence: int = Field(ge=1)
+    content: str = Field(min_length=1, max_length=20000)
+    received_at: datetime
 
 
 class WorkerResultReceiptModel(BaseModel):
@@ -418,6 +457,8 @@ __all__ = [
     "WorkerExecutionGrantModel",
     "WorkerResultReceiptModel",
     "WorkerResultSubmissionModel",
+    "WorkerProgressReceiptModel",
+    "WorkerProgressSubmissionModel",
     "WorkerResumeCommandModel",
     "WorkerResumeDecisionModel",
     "WorkerResumeReceiptModel",

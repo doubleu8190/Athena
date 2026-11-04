@@ -35,6 +35,7 @@ from infrastructure.persistence.postgres.models import (
     RootResumeJobModel,
     SessionMemorySettingsModel,
     SessionModel,
+    TraceSpanModel,
 )
 from infrastructure.persistence.postgres.repositories import (
     PostgresProjectRepository,
@@ -85,6 +86,7 @@ async def test_project_forget_fences_a_running_run_and_cleans_scoped_jobs() -> N
         ProjectModel.__table__,
         SessionMemorySettingsModel.__table__,
         AgentRunModel.__table__,
+        TraceSpanModel.__table__,
         AgentEventModel.__table__,
         IdempotencyReceiptModel.__table__,
         MessageModel.__table__,

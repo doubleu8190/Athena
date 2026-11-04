@@ -5,103 +5,36 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
+from application.observability import ProgressEntry, ProgressSource
 from application.sessions.history_port import (
+    ActiveSessionSnapshot,
     HistoryRunRecord,
     SessionHistoryQueryPort,
     SessionHistorySnapshot,
+    HistoryTaskRecord,
+    SessionTurnSnapshot,
 )
-from domain.events import ApplicationEvent
 from domain.sessions import Message
 
 from ..mappers.converters import message_model_to_domain
-from ..models import AgentEventModel, AgentRunModel, MessageModel
-from .event_repository import _event_from_model
-
-_OUTPUT_EVENTS = (
-    "message.started", "message.delta", "message.completed", "stream.snapshot",
-    "thinking.started", "thinking.summary", "thinking.completed",
+from ..models import (
+    AgentEventModel,
+    AgentRunModel,
+    MessageModel,
+    OrchestratorExecutionModel,
+    OrchestratorPlanModel,
+    OrchestratorTaskModel,
+    RunProgressModel,
+    SessionModel,
+    WorkerDisplayResultModel,
 )
-_ACTIVE_RUN_STATUSES = ("queued", "running", "stopping")
-
-
-def _continuous_visible_prefix_watermark(
-    candidate_max: int,
-    first_unreturned_visible_event_seq: int | None,
-) -> int:
-    """计算本页可见事件连续已消费前缀。
-
-    参数：
-    - `candidate_max`（int）：本页实际返回事件中的最大会话序号。
-    - `first_unreturned_visible_event_seq`（int | None）：候选范围内第一个可被 SSE 投递、
-      但未被本页返回的事件序号；停止后应隐藏且不会被 SSE 投递的事件不会出现在该值中。
-
-    返回：
-    - int：可安全越过所有连续已返回可见事件的最大会话序号。
-
-    异常：
-    - 无：该纯计算函数不主动抛出业务异常。
-    """
-    if first_unreturned_visible_event_seq is None:
-        return max(0, candidate_max)
-    return max(
-        0,
-        min(candidate_max, first_unreturned_visible_event_seq - 1),
-    )
-
-
-def _history_snapshot_event_seq(
-    consumed_visible_prefix_watermark: int,
-    earliest_active_event_seq: int | None,
-) -> int:
-    """计算历史响应与 SSE 之间安全的事件水位。
-
-    参数：
-    - `consumed_visible_prefix_watermark`（int）：本页连续已消费的可见事件水位。
-    - `earliest_active_event_seq`（int | None）：同一快照内未终态 Run 的最早事件序号。
-
-    返回：
-    - int：不会越过任一未消费 active 事件、且不小于零的 SSE 恢复游标。
-
-    异常：
-    - 无：该纯计算函数不主动抛出业务异常。
-    """
-    if earliest_active_event_seq is None:
-        return max(0, consumed_visible_prefix_watermark)
-    return max(
-        0,
-        min(
-            consumed_visible_prefix_watermark,
-            earliest_active_event_seq - 1,
-        ),
-    )
-
-
-def _hidden_stopped_output_condition() -> ColumnElement[bool]:
-    """返回停止后不应由历史列表或 SSE 展示的输出事件条件。
-
-    参数：
-    - 无。
-
-    返回：
-    - ColumnElement[bool]：与当前事件行相关联的 EXISTS 条件。
-
-    异常：
-    - 无：仅构造 SQLAlchemy 表达式。
-    """
-    return select(AgentRunModel.run_id).where(
-        AgentRunModel.run_id == AgentEventModel.run_id,
-        AgentRunModel.display_cutoff_session_seq.is_not(None),
-        AgentEventModel.session_seq > AgentRunModel.display_cutoff_session_seq,
-        AgentEventModel.event_type.in_(_OUTPUT_EVENTS),
-    ).exists()
 
 
 class PostgresSessionHistoryRepository(SessionHistoryQueryPort):
-    """在一个只读一致性快照中批量读取轮次、消息和持久事件。"""
+    """在一个只读一致性快照中批量读取轮次、消息和展示事实。"""
 
     def __init__(
         self,
@@ -116,7 +49,7 @@ class PostgresSessionHistoryRepository(SessionHistoryQueryPort):
         before_sequence: int | None,
         limit: int,
     ) -> SessionHistorySnapshot:
-        """读取一页完整轮次和对应事件。
+        """读取一页完整轮次和对应展示事实。
 
         参数：
         - `session_id`（str）：历史所属会话。
@@ -124,118 +57,416 @@ class PostgresSessionHistoryRepository(SessionHistoryQueryPort):
         - `limit`（int）：轮次数量上限，调用方传入 1 到 100。
 
         返回：
-        - SessionHistorySnapshot：同一 REPEATABLE READ 快照中的 Run、消息和事件。
+        - SessionHistorySnapshot：同一快照中的 Run、消息、Progress 和任务结果。
 
         异常：
         - 数据库异常：读取事务失败时由 SQLAlchemy 传播。
         """
         async with self._session_factory() as session:
             async with session.begin():
-                await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                await session.execute(
+                    text(
+                        "SET TRANSACTION ISOLATION LEVEL "
+                        "REPEATABLE READ READ ONLY"
+                    )
+                )
+                session_row = await session.get(SessionModel, session_id)
+                active_run_id = (
+                    session_row.active_run_id if session_row is not None else None
+                )
                 query = select(AgentRunModel).where(
                     AgentRunModel.session_id == session_id,
                     AgentRunModel.status.in_(("completed", "failed", "cancelled")),
                 )
                 if before_sequence is not None:
                     query = query.where(AgentRunModel.sequence < before_sequence)
-                run_rows = list((await session.execute(
-                    query.order_by(AgentRunModel.sequence.desc()).limit(limit + 1)
-                )).scalars().all())
+                run_rows = list(
+                    (
+                        await session.execute(
+                            query.order_by(
+                                AgentRunModel.sequence.desc()
+                            ).limit(limit + 1)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
                 has_more = len(run_rows) > limit
                 run_rows = run_rows[:limit]
-                earliest_active_event_seq = await session.scalar(
-                    select(func.min(AgentEventModel.session_seq))
-                    .select_from(AgentRunModel)
-                    .join(
-                        AgentEventModel,
-                        AgentEventModel.run_id == AgentRunModel.run_id,
+                snapshot_event_seq = int(
+                    await session.scalar(
+                        select(func.max(AgentEventModel.session_seq)).where(
+                            AgentEventModel.session_id == session_id
+                        )
                     )
-                    .where(
-                        AgentRunModel.session_id == session_id,
-                        AgentEventModel.session_id == session_id,
-                        AgentRunModel.status.in_(_ACTIVE_RUN_STATUSES),
-                    )
+                    or 0
                 )
-                earliest_active_seq = (
-                    int(earliest_active_event_seq)
-                    if earliest_active_event_seq is not None
-                    else None
+                snapshot_progress_ingest_seq = int(
+                    await session.scalar(
+                        select(func.max(RunProgressModel.ingest_sequence)).where(
+                            RunProgressModel.session_id == session_id
+                        )
+                    )
+                    or 0
+                )
+                snapshot_run_seq = max(
+                    (row.sequence for row in run_rows),
+                    default=0,
                 )
                 if not run_rows:
-                    snapshot_event_seq = _history_snapshot_event_seq(
-                        0,
-                        earliest_active_seq,
-                    )
                     return SessionHistorySnapshot(
+                        (),
                         (),
                         (),
                         (),
                         False,
                         snapshot_event_seq,
+                        snapshot_progress_ingest_seq,
+                        active_run_id,
+                        snapshot_run_seq,
                     )
 
                 run_ids = [row.run_id for row in run_rows]
-                message_ids = [row.message_id for row in run_rows]
-                message_rows = list((await session.execute(
-                    select(MessageModel).where(
-                        MessageModel.session_id == session_id,
-                        MessageModel.deleted_time.is_(None),
-                        (MessageModel.id.in_(message_ids))
-                        | ((MessageModel.run_id.in_(run_ids)) & (MessageModel.role == "assistant")),
-                    ).order_by(MessageModel.timestamp, MessageModel.id)
-                )).scalars().all())
-                hidden_stopped_output = _hidden_stopped_output_condition()
-                event_rows = list((await session.execute(
-                    select(AgentEventModel).where(
-                        AgentEventModel.session_id == session_id,
-                        AgentEventModel.run_id.in_(run_ids),
-                        ~hidden_stopped_output,
-                    ).order_by(AgentEventModel.session_seq)
-                )).scalars().all())
-                candidate_max = max(
-                    (int(event.session_seq) for event in event_rows),
-                    default=0,
-                )
-                returned_event_sequences = {
-                    int(event.session_seq)
-                    for event in event_rows
-                }
-                first_unreturned_visible_event_seq = (
-                    await session.scalar(
-                        select(func.min(AgentEventModel.session_seq)).where(
-                            AgentEventModel.session_id == session_id,
-                            AgentEventModel.session_seq <= candidate_max,
-                            AgentEventModel.session_seq.notin_(
-                                returned_event_sequences
-                            ),
-                            ~_hidden_stopped_output_condition(),
-                        )
-                    )
-                    if candidate_max > 0
-                    else None
-                )
-                consumed_visible_prefix_watermark = (
-                    _continuous_visible_prefix_watermark(
-                        candidate_max,
-                        (
-                            int(first_unreturned_visible_event_seq)
-                            if first_unreturned_visible_event_seq is not None
-                            else None
-                        ),
-                    )
-                )
-                snapshot_event_seq = _history_snapshot_event_seq(
-                    consumed_visible_prefix_watermark,
-                    earliest_active_seq,
+                messages, progress, tasks = await _load_history_child_rows(
+                    session,
+                    session_id=session_id,
+                    run_rows=run_rows,
                 )
 
-        runs = tuple(HistoryRunRecord(row.run_id, row.message_id, row.sequence) for row in run_rows)
-        messages: list[Message] = [message_model_to_domain(row) for row in message_rows]
-        events: list[ApplicationEvent] = [_event_from_model(row) for row in event_rows]
         return SessionHistorySnapshot(
-            runs,
-            tuple(messages),
-            tuple(events),
+            tuple(
+                HistoryRunRecord(
+                    row.run_id,
+                    row.message_id,
+                    row.sequence,
+                    row.status,
+                )
+                for row in run_rows
+            ),
+            messages,
+            progress,
+            tasks,
             has_more,
             snapshot_event_seq,
+            snapshot_progress_ingest_seq,
+            active_run_id,
+            snapshot_run_seq,
         )
+
+    async def read_stream_snapshot(
+        self,
+        session_id: str,
+        *,
+        after_event_sequence: int,
+        after_progress_ingest_sequence: int,
+        after_run_sequence: int | None,
+        active_run_id: str | None,
+        limit: int = 20,
+        include_latest_if_empty: bool = False,
+    ) -> ActiveSessionSnapshot:
+        """读取历史水位之后一个有界页的可见 Run 事实。
+
+        订阅在调用本方法前建立，队列会覆盖事务建立后的实时事件。本方法在
+        同一只读快照中返回以下候选中按 Run 序号最早的一页：
+        - 调用时仍活动的 Run；
+        - 调用 `messages` 时仍活动、连接 SSE 前已经结束的 Run；
+        - 在客户端事件或 Progress 水位之后出现终态事实的 Run；
+        - 显式允许时，在没有候选项时返回最新 Run 以覆盖首次连接竞态。
+
+        参数：
+        - `session_id`：目标会话。
+        - `after_event_sequence`：客户端历史响应已消费的持久事件水位。
+        - `after_progress_ingest_sequence`：客户端历史响应已消费的 Progress 水位。
+        - `after_run_sequence`：客户端已经消费的最后一轮 Run 序号；有值时，
+          所有后续终态 Run 都按轮次补齐，不依赖 event 或 Progress 是否已落库。
+        - `active_run_id`：`messages` 或 SSE 令牌中的活动 Run 边界；只有该 Run
+          允许使用 `sequence >= after_run_sequence` 恢复。
+        - `limit`：单页最多包含的 Run 数；每个 Run 内的 Worker 组不可拆分。
+        - `include_latest_if_empty`：仅首次无游标连接时为 True，返回最新 Run
+          覆盖建连竞态；后续分页必须为 False，避免重复返回。
+
+        返回：
+        - `ActiveSessionSnapshot`：包含完整轮次、分页状态和同一事务内的水位。
+
+        异常：
+        - 数据库异常：查询失败时由 SQLAlchemy 传播。
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                )
+                session_row = await session.get(SessionModel, session_id)
+                snapshot_event_seq = int(
+                    await session.scalar(
+                        select(func.max(AgentEventModel.session_seq)).where(
+                            AgentEventModel.session_id == session_id
+                        )
+                    )
+                    or 0
+                )
+                snapshot_progress_ingest_seq = int(
+                    await session.scalar(
+                        select(func.max(RunProgressModel.ingest_sequence)).where(
+                            RunProgressModel.session_id == session_id
+                        )
+                    )
+                    or 0
+                )
+
+                active_candidate_ids: list[str] = []
+                if session_row is not None and session_row.active_run_id:
+                    active_candidate_ids.append(session_row.active_run_id)
+                if active_run_id:
+                    active_candidate_ids.append(active_run_id)
+
+                terminal_conditions = [
+                    AgentRunModel.session_id == session_id,
+                    AgentRunModel.status.in_(
+                        ("completed", "failed", "cancelled")
+                    ),
+                ]
+                if after_run_sequence is not None:
+                    # Run 序号是历史轮次的权威边界。不能要求 outbox event
+                    # 或 Progress 已经可见，否则快速连续完成时可能漏掉中间轮次。
+                    terminal_conditions.append(
+                        AgentRunModel.sequence > after_run_sequence
+                    )
+                else:
+                    # 无 messages 令牌的手动连接仍以 event/Progress 水位为基线。
+                    has_later_event = select(AgentEventModel.session_seq).where(
+                        AgentEventModel.session_id == session_id,
+                        AgentEventModel.run_id == AgentRunModel.run_id,
+                        AgentEventModel.session_seq > after_event_sequence,
+                    ).exists()
+                    has_later_progress = select(
+                        RunProgressModel.ingest_sequence
+                    ).where(
+                        RunProgressModel.session_id == session_id,
+                        RunProgressModel.run_id == AgentRunModel.run_id,
+                        RunProgressModel.ingest_sequence
+                        > after_progress_ingest_sequence,
+                    ).exists()
+                    terminal_conditions.append(
+                        has_later_event | has_later_progress
+                    )
+                terminal_condition = and_(*terminal_conditions)
+                candidate_condition = terminal_condition
+                unique_active_ids = tuple(dict.fromkeys(active_candidate_ids))
+                if unique_active_ids:
+                    active_condition = and_(
+                        AgentRunModel.session_id == session_id,
+                        AgentRunModel.run_id.in_(unique_active_ids),
+                    )
+                    if after_run_sequence is not None:
+                        active_condition = and_(
+                            active_condition,
+                            or_(
+                                AgentRunModel.sequence > after_run_sequence,
+                                AgentRunModel.run_id == active_run_id,
+                            ),
+                        )
+                    candidate_condition = or_(
+                        terminal_condition,
+                        active_condition,
+                    )
+                page_limit = max(1, min(limit, 100))
+                page_rows = list(
+                    (
+                        await session.execute(
+                            select(AgentRunModel)
+                            .where(candidate_condition)
+                            .order_by(AgentRunModel.sequence)
+                            .limit(page_limit + 1)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                has_more = len(page_rows) > page_limit
+                run_rows = page_rows[:page_limit]
+                if not run_rows and include_latest_if_empty:
+                    latest = await session.scalar(
+                        select(AgentRunModel)
+                        .where(AgentRunModel.session_id == session_id)
+                        .order_by(AgentRunModel.sequence.desc())
+                        .limit(1)
+                    )
+                    if latest is not None:
+                        run_rows = [latest]
+
+                messages, progress, tasks = await _load_history_child_rows(
+                    session,
+                    session_id=session_id,
+                    run_rows=run_rows,
+                )
+                turns = _turn_snapshots(run_rows, messages, progress, tasks)
+                return ActiveSessionSnapshot(
+                    turns,
+                    snapshot_event_seq,
+                    snapshot_progress_ingest_seq,
+                    max(
+                        (row.sequence for row in run_rows),
+                        default=after_run_sequence or 0,
+                    ),
+                    has_more,
+                )
+
+
+async def _load_history_child_rows(
+    session: AsyncSession,
+    *,
+    session_id: str,
+    run_rows: list[AgentRunModel],
+) -> tuple[
+    tuple[Message, ...],
+    tuple[ProgressEntry, ...],
+    tuple[HistoryTaskRecord, ...],
+]:
+    """在同一数据库快照中读取一个或多个轮次的全部展示事实。"""
+    run_ids = [row.run_id for row in run_rows]
+    message_ids = [row.message_id for row in run_rows]
+    message_rows = list(
+        (
+            await session.execute(
+                select(MessageModel)
+                .where(
+                    MessageModel.session_id == session_id,
+                    MessageModel.deleted_time.is_(None),
+                    MessageModel.id.in_(message_ids)
+                    | (
+                        (MessageModel.run_id.in_(run_ids))
+                        & (MessageModel.role == "assistant")
+                    ),
+                )
+                .order_by(MessageModel.timestamp, MessageModel.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    progress_rows = (
+        await session.execute(
+            select(RunProgressModel)
+            .where(RunProgressModel.run_id.in_(run_ids))
+            .order_by(RunProgressModel.ingest_sequence)
+        )
+    ).scalars()
+    execution_rows = (
+        await session.execute(
+            select(
+                OrchestratorExecutionModel,
+                OrchestratorTaskModel,
+                OrchestratorPlanModel.run_id,
+                WorkerDisplayResultModel,
+            )
+            .join(
+                OrchestratorTaskModel,
+                OrchestratorTaskModel.task_id == OrchestratorExecutionModel.task_id,
+            )
+            .join(
+                OrchestratorPlanModel,
+                OrchestratorPlanModel.plan_id == OrchestratorTaskModel.plan_id,
+            )
+            .outerjoin(
+                WorkerDisplayResultModel,
+                WorkerDisplayResultModel.execution_id
+                == OrchestratorExecutionModel.execution_id,
+            )
+            .where(OrchestratorPlanModel.run_id.in_(run_ids))
+            .order_by(
+                OrchestratorExecutionModel.created_at,
+                OrchestratorExecutionModel.execution_id,
+            )
+        )
+    ).all()
+    tasks = tuple(
+        HistoryTaskRecord(
+            run_id=run_id,
+            task_id=task.task_id,
+            execution_id=execution.execution_id,
+            worker_name=execution.worker_name or execution.instance_id or "Worker",
+            task_title=task.objective,
+            status=execution.status,
+            created_at=execution.created_at,
+            completed_at=execution.completed_at,
+            display_result=(
+                display_result.display_result
+                if display_result is not None
+                else None
+            ),
+            display_result_at=(
+                display_result.display_result_at
+                if display_result is not None
+                else None
+            ),
+        )
+        for execution, task, run_id, display_result in execution_rows
+    )
+    progress = tuple(
+        ProgressEntry(
+            progress_id=row.progress_id,
+            session_id=row.session_id,
+            run_id=row.run_id,
+            execution_id=row.execution_id,
+            task_id=row.task_id,
+            worker_id=row.worker_id,
+            source=ProgressSource(row.source),
+            sequence=row.sequence,
+            content=row.content,
+            created_at=row.created_at,
+            ingest_sequence=row.ingest_sequence,
+        )
+        for row in progress_rows
+    )
+    return (
+        tuple(message_model_to_domain(row) for row in message_rows),
+        progress,
+        tasks,
+    )
+
+
+def _turn_snapshots(
+    run_rows: list[AgentRunModel],
+    messages: tuple[Message, ...],
+    progress: tuple[ProgressEntry, ...],
+    tasks: tuple[HistoryTaskRecord, ...],
+) -> tuple[SessionTurnSnapshot, ...]:
+    """按 Run 归组已加载事实，避免一个用户消息的执行过程跨快照拆分。
+
+    参数：
+    - `run_rows`：需要恢复的 Run，顺序已按会话序号排列。
+    - `messages`：这些 Run 的用户消息和最终 assistant 事实。
+    - `progress`：这些 Run 的 Root、Orchestrator 和 Worker Progress。
+    - `tasks`：这些 Run 下每次 Worker execution 的展示事实。
+
+    返回：
+    - `tuple[SessionTurnSnapshot, ...]`：每个 Run 一个完整展示分组。
+
+    异常：
+    - 无：纯内存归组不主动抛出业务异常。
+    """
+    return tuple(
+        SessionTurnSnapshot(
+            run=HistoryRunRecord(
+                row.run_id,
+                row.message_id,
+                row.sequence,
+                row.status,
+            ),
+            messages=tuple(
+                item
+                for item in messages
+                if item.id == row.message_id
+                or (
+                    item.role.value == "assistant"
+                    and item.run_id == row.run_id
+                )
+            ),
+            progress=tuple(
+                item for item in progress if item.run_id == row.run_id
+            ),
+            tasks=tuple(item for item in tasks if item.run_id == row.run_id),
+        )
+        for row in run_rows
+    )

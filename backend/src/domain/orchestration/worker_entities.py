@@ -346,6 +346,8 @@ class WorkerResultSubmission:
     status: str
     output: dict[str, JsonValue] | None = None
     error: WorkerExecutionError | None = None
+    last_progress_sequence: int = 0
+    display_result: str | None = None
     request_hash: str | None = None
     internal_timeout: bool = False
 

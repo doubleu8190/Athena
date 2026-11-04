@@ -15,8 +15,10 @@ from pydantic import JsonValue
 from starlette.requests import Request
 
 from application.orchestration.worker_protocol_models import (
+    WorkerProgressReceiptModel,
     WorkerResultReceiptModel,
 )
+from application.observability import ProgressConflictError
 from interfaces.http.auth.middleware import AuthenticationMiddleware
 from interfaces.http.auth.options import AuthOptions
 from interfaces.http.controllers.worker_registry_controller import (
@@ -216,6 +218,8 @@ def test_result_route_binds_execution_from_path_and_database_not_result_body() -
         "generation": 1,
         "status": "completed",
         "output": {"answer": "ok"},
+        "last_progress_sequence": 0,
+        "display_result": "处理完成",
     }
     response = client.post(
         "/api/worker-executions/execution-01/result",
@@ -233,6 +237,153 @@ def test_result_route_binds_execution_from_path_and_database_not_result_body() -
     assert identities == [("worker-a", "execution-01")]
     assert results[0][:2] == ("instance-owned-by-worker-a", "execution-01")
     assert "execution_id" not in results[0][2]
+
+
+def test_progress_route_accepts_only_sequence_and_derives_execution_identity() -> None:
+    """Progress 正文不得声明 worker/run/task，归属全部由认证和路径恢复。"""
+
+    class Service:
+        async def find_replay(self, raw_body, *, service_principal):
+            return None
+
+        async def register_with_replay(self, raw_body, *, service_principal):
+            raise AssertionError("registration route was not called")
+
+        async def confirm(self, raw_body, *, instance_id):
+            raise AssertionError("stop route was not called")
+
+    class Registry:
+        async def resolve_execution_instance(self, service_principal, execution_id):
+            assert service_principal == "worker-a"
+            assert execution_id == "execution-01"
+            return "instance-owned-by-worker-a"
+
+    class Progress:
+        def __init__(self):
+            self.calls = []
+
+        async def submit(self, raw_body, *, execution_id, instance_id):
+            self.calls.append((raw_body, execution_id, instance_id))
+            return WorkerProgressReceiptModel(
+                progress_id="progress-1",
+                execution_id=execution_id,
+                sequence=raw_body["sequence"],
+                content=raw_body["content"],
+                received_at=datetime(2026, 10, 30, 8, 10, tzinfo=timezone.utc),
+            )
+
+    progress = Progress()
+    app = FastAPI()
+    install_worker_protocol_handlers(app)
+    app.include_router(
+        build_worker_registry_router(
+            Service(),
+            Registry(),
+            Service(),
+            Service(),
+            type("Origin", (), {"validate_registration_origin": lambda *_: None})(),
+            WorkerProtocolHttp({"worker-a": "secret-token"}),
+            progress_service=progress,
+        ),
+        prefix="/api",
+    )
+    client = TestClient(app)
+    body = {"sequence": 1, "content": "正在检索资料"}
+    headers = {
+        "Authorization": "Bearer secret-token",
+        "X-Athena-Protocol-Version": "1.0",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    response = client.post(
+        "/api/worker-api/v1/worker-executions/execution-01/progress",
+        json=body,
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["progress_id"] == "progress-1"
+    assert progress.calls == [
+        (body, "execution-01", "instance-owned-by-worker-a")
+    ]
+
+    rejected = client.post(
+        "/api/worker-api/v1/worker-executions/execution-01/progress",
+        json={**body, "run_id": "forged-run"},
+        headers=headers,
+    )
+    assert rejected.status_code == 422
+
+
+def test_progress_prefix_conflicts_map_to_stable_409_for_progress_and_result() -> None:
+    """Progress 跳号和 Result 未封闭连续前缀都返回明确的协议冲突。"""
+
+    class Service:
+        async def find_replay(self, raw_body, *, service_principal):
+            return None
+
+        async def register_with_replay(self, raw_body, *, service_principal):
+            raise AssertionError("registration route was not called")
+
+        async def submit(self, raw_body, *, instance_id, execution_id):
+            raise ValueError("worker_progress_sequence_incomplete")
+
+        async def confirm(self, raw_body, *, instance_id):
+            raise AssertionError("stop route was not called")
+
+    class Registry:
+        async def resolve_execution_instance(
+            self, service_principal, execution_id
+        ):
+            return "instance-owned-by-worker-a"
+
+    class OriginValidator:
+        async def validate_registration_origin(self, base_url):
+            return None
+
+    class Progress:
+        async def submit(self, raw_body, *, execution_id, instance_id):
+            raise ProgressConflictError("worker_progress_sequence_incomplete")
+
+    app = FastAPI()
+    install_worker_protocol_handlers(app)
+    app.include_router(
+        build_worker_registry_router(
+            Service(),
+            Registry(),
+            Service(),
+            Service(),
+            OriginValidator(),
+            WorkerProtocolHttp({"worker-a": "secret-token"}),
+            progress_service=Progress(),
+        ),
+        prefix="/api",
+    )
+    client = TestClient(app)
+    headers = {
+        "Authorization": "Bearer secret-token",
+        "X-Athena-Protocol-Version": "1.0",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    result_body = _EXAMPLES["result_success"]["payload"]
+    result_response = client.post(
+        "/api/worker-executions/execution-01/result",
+        json=result_body,
+        headers={
+            **headers,
+            "Idempotency-Key": result_body["result_id"],
+        },
+    )
+    progress_response = client.post(
+        "/api/worker-api/v1/worker-executions/execution-01/progress",
+        json={"sequence": 3, "content": "跳号进度"},
+        headers=headers,
+    )
+
+    assert result_response.status_code == 409
+    assert result_response.json()["code"] == "PROGRESS_SEQUENCE_INCOMPLETE"
+    assert progress_response.status_code == 409
+    assert progress_response.json()["code"] == "PROGRESS_SEQUENCE_CONFLICT"
+    assert "next contiguous" in progress_response.json()["message"]
 
 
 @pytest.mark.parametrize(

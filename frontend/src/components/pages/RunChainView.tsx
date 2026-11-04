@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import {
   Activity,
   Bot,
@@ -24,15 +24,11 @@ import Badge from "../ui/Badge"
 import { apiClient } from "../../api/client"
 import { useChatStore } from "../../store/chatStore"
 import type {
-  RunOrchestrationSnapshot,
-  RunTimelineEvent,
+  RunTraceResponse,
+  RunTraceSpan,
   SessionRunSummary,
-  WorkerApprovalRequestSnapshot,
-  WorkerExecutionSnapshot,
 } from "../../types"
-import { formatDuration, getActivityDuration, getRunTiming } from "./runTiming"
-import { executionCapacityMessage, orderedWorkerPlans } from "../../utils/workerSnapshotProjection"
-import { shouldApplySnapshotResponse } from "../../utils/workerSnapshotProjection"
+import { formatDuration } from "./runTiming"
 
 type EventStatus = "completed" | "failed" | "retry" | "approved" | "waiting" | "review" | "running" | "cancelled" | "info"
 type EventKind = "run" | "llm" | "retrieval" | "tool" | "plan" | "worker" | "response" | "system"
@@ -107,7 +103,6 @@ type FilterKind = "all" | EventKind
 
 function RunChainView() {
   const sessionId = useChatStore((state) => state.activeSessionId)
-  const liveEvents = useChatStore((state) => state.runTimelineEvents)
   const demoMode = new URLSearchParams(window.location.search).get("demo") === "execution"
   const [runs, setRuns] = useState<SessionRunSummary[]>([])
   const [scope, setScope] = useState<"all" | "session">("all")
@@ -117,28 +112,17 @@ function RunChainView() {
   const [runsLoading, setRunsLoading] = useState(false)
   const [runsError, setRunsError] = useState<string | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
-  const [now, setNow] = useState(Date.now)
-  const [timeline, setTimeline] = useState<RunTimelineEvent[]>([])
-  const [orchestration, setOrchestration] = useState<RunOrchestrationSnapshot | null>(null)
-  const [timelineCursor, setTimelineCursor] = useState(0)
-  const [timelineHasMore, setTimelineHasMore] = useState(false)
+  const [trace, setTrace] = useState<RunTraceResponse | null>(null)
   const [selectedRun, setSelectedRun] = useState<string | null>(demoMode ? demoRuns[0].id : null)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState("root")
-  const snapshotGenerationRef = useRef(0)
   const [viewMode, setViewMode] = useState<"timeline" | "tree">("timeline")
   const [filter, setFilter] = useState<FilterKind>("all")
   const [query, setQuery] = useState("")
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["root", "context-1", "decision-1", "decision-2", "plan", "worker-trend"]))
   const scopedSessionId = scope === "session" ? sessionId : undefined
   const selectedRunSummary = runs.find((run) => run.run_id === selectedRun)
-  const selectedSessionId = selectedRunSummary?.session_id
-  const selectedRunStatus = selectedRunSummary?.status
-  const hasActiveRuns = runs.some((run) => !["completed", "failed", "cancelled"].includes(run.status))
-  const timelineIdentity = `${selectedSessionId}:${selectedRun}`
-  const timelineIdentityRef = useRef(timelineIdentity)
-  timelineIdentityRef.current = timelineIdentity
 
   useEffect(() => {
     if (demoMode || (scope === "session" && !scopedSessionId)) {
@@ -146,8 +130,7 @@ function RunChainView() {
       setRunTotal(0)
       setRunsLoading(false)
       setRunsHasMore(false)
-      setTimeline([])
-      setOrchestration(null)
+      setTrace(null)
       setSelectedRun(demoMode ? demoRuns[0].id : null)
       return
     }
@@ -158,7 +141,12 @@ function RunChainView() {
       inFlight = true
       setRunsLoading(true)
       try {
-        const response = await apiClient.listRuns(50, runPage * 50, scopedSessionId ?? undefined)
+        const response = await apiClient.listRuns(
+          50,
+          runPage * 50,
+          scopedSessionId ?? undefined,
+          true,
+        )
         if (cancelled) return
         setRuns(response.items)
         setRunTotal(response.total)
@@ -178,132 +166,50 @@ function RunChainView() {
   }, [demoMode, scope, scopedSessionId, runPage, refreshKey])
 
   useEffect(() => {
-    if (demoMode || !hasActiveRuns) return
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [demoMode, hasActiveRuns])
-
-  useEffect(() => {
-    setTimeline([])
-    setOrchestration(null)
-    setTimelineCursor(0)
-    setTimelineHasMore(false)
+    setTrace(null)
     setLoading(false)
     setLoadError(null)
-    if (demoMode || !selectedSessionId || !selectedRun) {
-      return
-    }
+    if (demoMode || !selectedRun) return
     let cancelled = false
-    const generation = ++snapshotGenerationRef.current
     setLoading(true)
-    setLoadError(null)
-    Promise.all([
-      apiClient.getRunTimeline(selectedSessionId, selectedRun),
-      apiClient.getRunOrchestration(selectedRun),
-    ])
-      .then(([timelineResponse, snapshot]) => {
-        if (cancelled || !shouldApplySnapshotResponse(snapshot.run.run_id, selectedRun, generation, snapshotGenerationRef.current)) return
-        setTimeline(timelineResponse.events)
-        setTimelineCursor(timelineResponse.next_after_seq)
-        setTimelineHasMore(timelineResponse.has_more)
-        setOrchestration(snapshot)
+    void apiClient.getRunTrace(selectedRun)
+      .then((response) => {
+        if (!cancelled) setTrace(response)
       })
       .catch((error: unknown) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : "运行链路加载失败") })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [demoMode, selectedSessionId, selectedRun, selectedRunStatus, refreshKey])
+  }, [demoMode, selectedRun, refreshKey])
 
   useEffect(() => {
-    if (demoMode || !selectedSessionId || !selectedRun || !selectedRunStatus || ["completed", "failed", "cancelled"].includes(selectedRunStatus)) return
-    let cancelled = false
-    let inFlight = false
-    const timer = window.setInterval(async () => {
-      if (document.hidden || inFlight) return
-      inFlight = true
-      try {
-        const generation = ++snapshotGenerationRef.current
-        const [response, snapshot] = await Promise.all([
-          apiClient.getRunTimeline(selectedSessionId, selectedRun, timelineCursor),
-          apiClient.getRunOrchestration(selectedRun),
-        ])
-        if (cancelled || !shouldApplySnapshotResponse(snapshot.run.run_id, selectedRun, generation, snapshotGenerationRef.current)) return
-        setTimeline((current) => [...new Map([...current, ...response.events].map((event) => [event.session_seq, event])).values()].sort((left, right) => left.session_seq - right.session_seq))
-        setTimelineCursor(response.next_after_seq)
-        setTimelineHasMore(response.has_more)
-        setOrchestration(snapshot)
-        setLoadError(null)
-      } catch (error) {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : "运行链路同步失败")
-      } finally {
-        inFlight = false
-      }
-    }, 2500)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [demoMode, selectedSessionId, selectedRun, selectedRunStatus, timelineCursor, timelineHasMore])
-
-  useEffect(() => {
-    if (!orchestration) return
+    if (!trace) return
     setExpanded((current) => {
       const next = new Set(current)
-      next.add(`run:${orchestration.run.run_id}`)
-      next.add(`snapshot:run:${orchestration.run.run_id}`)
-      for (const plan of orchestration.worker_plans) {
-        next.add(`snapshot:plan:${plan.plan_id}`)
-        for (const task of plan.tasks) next.add(`snapshot:task:${plan.plan_id}:${task.task_id}`)
-      }
+      next.add(`trace:${trace.spans.find((span) => span.span_type === "run")?.span_id || "root"}`)
       return next
     })
-  }, [orchestration])
-
-  const loadMoreEvents = async () => {
-    if (!selectedSessionId || !selectedRun || loading || !timelineHasMore) return
-    const identity = timelineIdentity
-    setLoading(true)
-    setLoadError(null)
-    try {
-      const response = await apiClient.getRunTimeline(selectedSessionId, selectedRun, timelineCursor)
-      if (identity !== timelineIdentityRef.current) return
-      setTimeline((current) => {
-        const bySeq = new Map(current.map((event) => [event.session_seq, event]))
-        for (const event of response.events) bySeq.set(event.session_seq, event)
-        return [...bySeq.values()].sort((left, right) => left.session_seq - right.session_seq)
-      })
-      setTimelineCursor(response.next_after_seq)
-      setTimelineHasMore(response.has_more)
-    } catch (error) {
-      if (identity === timelineIdentityRef.current) setLoadError(error instanceof Error ? error.message : "更多链路事件加载失败")
-    } finally {
-      if (identity === timelineIdentityRef.current) setLoading(false)
-    }
-  }
+  }, [trace])
 
   const runItems = demoMode ? demoRuns : runs.map((run) => {
     const created = run.created_at ? new Date(run.created_at) : null
-    const timing = getRunTiming(run, [], now)
     return {
       id: run.run_id,
       title: run.title || `运行 ${run.run_id.slice(0, 12)}`,
       status: run.status === "completed" ? "success" : run.status,
       time: created ? created.toLocaleString("zh-CN", { hour: "2-digit", minute: "2-digit", month: "2-digit", day: "2-digit" }) : "时间未知",
-      duration: formatDuration(timing.executionMs),
-      events: selectedRun === run.run_id ? timeline.length : 0,
+      duration: runDuration(run),
+      events: selectedRun === run.run_id ? trace?.spans.length ?? 0 : 0,
     }
   })
   const activeRun = runItems.find((run) => run.id === selectedRun) ?? runItems[0]
-  const mergedTimeline = new Map(
-    [...timeline, ...liveEvents.filter((event) => event.run_id === selectedRun)]
-      .map((event) => [`${event.run_id}:${event.session_seq}`, event] as const),
-  )
-  const timelineEvents = [...mergedTimeline.values()]
-    .sort((left, right) => left.session_seq - right.session_seq)
-  const runTiming = selectedRunSummary ? getRunTiming(selectedRunSummary, timelineEvents, now) : null
-  const hasRunActivity = timelineEvents.some((event) => event.payload.activity_id === `run:${selectedRun}`)
   const activities = demoMode
     ? demoEvents
-    : [
-        ...projectSnapshot(orchestration).filter((event) => event.id !== `snapshot:run:${selectedRun}` || !hasRunActivity),
-        ...projectTimeline(timelineEvents, selectedRunSummary, now),
-      ].map((event) => ({ ...event, parentId: event.parentId === `snapshot:run:${selectedRun}` && hasRunActivity ? `run:${selectedRun}` : event.parentId }))
+    : projectTrace(trace)
+  const executionDuration = demoMode
+    ? activeRun?.duration ?? "—"
+    : selectedRunSummary
+      ? runDuration(selectedRunSummary)
+      : "—"
   const selected = activities.find((event) => event.id === selectedId) ?? activities[0] ?? null
   const filteredEvents = useMemo(() => activities.filter((event) => {
     const matchesKind = filter === "all" || event.kind === filter
@@ -452,7 +358,7 @@ function RunChainView() {
             </div>
             <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
               {[
-                { label: "执行耗时", value: demoMode ? activeRun?.duration ?? "—" : formatDuration(runTiming?.executionMs ?? null), icon: Clock3, color: "text-sky-400" },
+                { label: "执行耗时", value: executionDuration, icon: Clock3, color: "text-sky-400" },
                 { label: "事件数", value: String(activities.length), icon: Activity, color: "text-violet-400" },
                 { label: "Token", value: demoMode ? "9,704" : "—", icon: Bot, color: "text-amber-400" },
                 { label: "重试 / 审批", value: `${activities.filter((event) => event.status === "retry").length} / ${activities.filter((event) => event.status === "approved").length}`, icon: ShieldCheck, color: "text-rose-400" },
@@ -464,8 +370,8 @@ function RunChainView() {
               ))}
             </div>
             {!demoMode && <div className="mt-3 space-y-1 text-[11px] leading-5 text-athena-muted">
-              <p>等待耗时 {formatDuration(runTiming?.queueMs ?? null)} · 端到端耗时 {formatDuration(runTiming?.totalMs ?? null)}（等待 + 执行）</p>
-              <p>执行耗时从首次开始到结束，包含执行期间的审批、挂起及调度等待。父活动已包含子活动，且活动可能并行，各项耗时不能直接相加。</p>
+              <p>此处只读取已结束 Run 的持久 Trace；活动 Run 不提供实时链路。</p>
+              <p>父 span 的耗时包含子 span，且子 span 可能并行，各项耗时不能直接相加。</p>
             </div>}
             {loadError && <p className="mt-2 text-xs text-athena-danger">{loadError}</p>}
           </div>
@@ -509,12 +415,6 @@ function RunChainView() {
                 </div>
               ) : <div className="divide-y divide-athena-border/40">{activities.filter((event) => !event.parentId).map((event) => renderEvent(event))}</div>}
               {filteredEvents.length === 0 && <div className="px-5 py-12 text-center text-sm text-athena-muted">没有匹配的事件</div>}
-              {!demoMode && timelineHasMore && <div className="border-t border-athena-border px-4 py-3 text-center">
-                <button type="button" onClick={() => void loadMoreEvents()} disabled={loading} className="rounded-md border border-athena-border px-3 py-1.5 text-xs text-athena-muted transition-colors hover:bg-athena-surface hover:text-athena-text disabled:cursor-wait disabled:opacity-50">
-                  {loading ? "正在加载…" : "加载更多事件"}
-                </button>
-                {loadError && <p className="mt-2 text-xs text-athena-danger">{loadError}</p>}
-              </div>}
             </section>
 
             <aside className="run-chain-details min-w-0 bg-athena-surface" aria-label="事件详情">
@@ -556,143 +456,6 @@ function DetailBlock({ title, value }: { title: string; value: string }) {
   )
 }
 
-function projectSnapshot(snapshot: RunOrchestrationSnapshot | null): RunEvent[] {
-  if (!snapshot) return []
-  const runId = snapshot.run.run_id
-  const runNodeId = `snapshot:run:${runId}`
-  const externalEffectStatus = snapshot.run.cancellation_external_effect_status
-  const externalEffectDetail = externalEffectStatus === "unknown"
-    ? "外部副作用结果未知；停止不能保证撤回已发送的操作"
-    : externalEffectStatus === "none"
-      ? "未观察到在途外部副作用"
-      : `外部副作用状态：${externalEffectStatus}`
-  const events: RunEvent[] = [{
-    id: runNodeId,
-    kind: "run",
-    name: "Run 状态快照",
-    summary: `持久状态：${snapshot.run.status}`,
-    status: snapshotStatus(snapshot.run.status),
-    duration: "—",
-    time: formatTimestamp(snapshot.run.updated_at || snapshot.run.created_at),
-    detail: `${externalEffectDetail}`,
-  }]
-  const taskNodes = new Map<string, string>()
-  const executionNodes = new Map<string, string>()
-
-  for (const plan of orderedWorkerPlans(snapshot)) {
-    const planNodeId = `snapshot:plan:${plan.plan_id}`
-    events.push({
-      id: planNodeId,
-      parentId: runNodeId,
-      kind: "plan",
-      name: `第 ${plan.sequence} 轮计划`,
-      summary: `${plan.status} · ${plan.terminal_task_count}/${plan.expected_task_count} 个任务结束`,
-      status: snapshotStatus(plan.status),
-      duration: "—",
-      time: formatTimestamp(plan.created_at),
-      detail: `${plan.goal}${plan.completed_at ? ` · 完成于 ${formatTimestamp(plan.completed_at)}` : ""}`,
-    })
-    for (const task of plan.tasks) {
-      const taskNodeId = `snapshot:task:${plan.plan_id}:${task.task_id}`
-      taskNodes.set(task.task_id, taskNodeId)
-      events.push({
-        id: taskNodeId,
-        parentId: planNodeId,
-        kind: "worker",
-        name: task.task_ref,
-        summary: `${workerTaskStatusLabel(task.status)} · 第 ${task.generation} 代`,
-        status: snapshotStatus(task.status),
-        duration: `${task.executions.length} 次尝试`,
-        time: formatTimestamp(task.executions.find((item) => item.generation === task.generation)?.started_at || plan.created_at),
-        detail: `${task.objective}${task.acceptance_criteria ? ` · 验收标准：${task.acceptance_criteria}` : ""}`,
-        output: task.output == null ? undefined : formatJson(task.output),
-        error: task.error == null ? undefined : formatJson(task.error),
-      })
-      for (const execution of task.executions) {
-        const executionNodeId = `snapshot:execution:${execution.execution_id}`
-        executionNodes.set(execution.execution_id, executionNodeId)
-        events.push(executionEvent(execution, taskNodeId, executionNodeId))
-      }
-    }
-  }
-
-  for (const approval of snapshot.approvals) {
-    events.push(...approvalEvents(approval, executionNodes, taskNodes, runNodeId))
-  }
-  return events
-}
-
-function executionEvent(
-  execution: WorkerExecutionSnapshot,
-  parentId: string,
-  id: string,
-): RunEvent {
-  const startedAt = execution.started_at
-  const completedAt = execution.completed_at
-  const elapsed = startedAt ? (completedAt ? Date.parse(completedAt) : Date.now()) - Date.parse(startedAt) : null
-  const error = execution.error == null ? undefined : formatJson(execution.error)
-  const capacityMessage = executionCapacityMessage(execution.status, execution.capacity_reserved)
-  return {
-    id,
-    parentId,
-    kind: "worker",
-    name: `第 ${execution.generation} 次执行`,
-    summary: `${executionStatusLabel(execution.status)}${capacityMessage ? ` · ${capacityMessage}` : ""}`,
-    status: snapshotStatus(execution.status),
-    duration: elapsed == null || !Number.isFinite(elapsed) ? "—" : formatDuration(elapsed),
-    time: formatTimestamp(startedAt || execution.deadline_at || ""),
-    detail: `${startedAt ? `开始于 ${formatTimestamp(startedAt)}` : "尚未开始"}${execution.deadline_at ? ` · 执行期限 ${formatTimestamp(execution.deadline_at)}` : ""}${completedAt ? ` · 结束于 ${formatTimestamp(completedAt)}` : ""}${capacityMessage ? ` · ${capacityMessage}` : ""}`,
-    error,
-  }
-}
-
-function approvalEvents(
-  approval: WorkerApprovalRequestSnapshot,
-  executionNodes: Map<string, string>,
-  taskNodes: Map<string, string>,
-  fallbackParent: string,
-): RunEvent[] {
-  return approval.items.map((item): RunEvent => ({
-    id: `snapshot:approval:${approval.approval_request_id}:${item.item_id}`,
-    parentId: executionNodes.get(approval.execution_id) || taskNodes.get(approval.task_id) || fallbackParent,
-    kind: "tool",
-    name: `审批 · ${item.tool_name}`,
-    summary: `${approvalStatusLabel(approval.status, item.status, item.decision)}${approval.approval_batch_id ? " · 批量审批" : ""} · ${item.risk_level}`,
-    status: approvalEventStatus(approval.status, item.status, item.decision),
-    duration: "—",
-    time: formatTimestamp(item.created_at),
-    detail: `${item.summary} · ${item.decision ? `决定：${item.decision} · ` : ""}${item.decided_at ? `决定于 ${formatTimestamp(item.decided_at)} · ` : ""}到期于 ${formatTimestamp(approval.expires_at)}`,
-    input: formatJson(item.arguments),
-  }))
-}
-
-function formatJson(value: unknown): string {
-  if (typeof value === "string") return value
-  return JSON.stringify(value, null, 2)
-}
-
-function workerTaskStatusLabel(value: string): string {
-  const labels: Record<string, string> = { queued: "排队中", claimed: "已分配", running: "执行中", waiting_approval: "等待审批", retry_wait: "等待重试", completed: "已完成", failed: "失败", invalid_output: "输出无效", cancelled: "已取消" }
-  return labels[value] || value
-}
-
-function executionStatusLabel(value: string): string {
-  const labels: Record<string, string> = { queued: "排队中", dispatching: "发送中", running: "执行中", waiting_approval: "等待审批", retry_wait: "等待重试", succeeded: "已完成", completed: "已完成", failed: "失败", timed_out: "已超时", cancelled: "已取消", superseded: "已替代" }
-  return labels[value] || value
-}
-
-function approvalStatusLabel(requestStatus: string, itemStatus: string, decision?: string | null): string {
-  if (requestStatus === "expired" || itemStatus === "expired") return "已到期"
-  if (itemStatus === "resolved" || itemStatus === "decided") return decision === "approved" || decision === "approve" ? "已批准" : "已拒绝"
-  return requestStatus === "pending" ? "待审批" : requestStatus
-}
-
-function approvalEventStatus(requestStatus: string, itemStatus: string, decision?: string | null): EventStatus {
-  if (requestStatus === "expired" || itemStatus === "expired") return "failed"
-  if (itemStatus === "resolved" || itemStatus === "decided") return decision === "approved" || decision === "approve" ? "approved" : "failed"
-  return requestStatus === "pending" ? "waiting" : "info"
-}
-
 function snapshotStatus(value: string): EventStatus {
   const status = value.toLowerCase()
   if (status.includes("fail") || status.includes("error")) return "failed"
@@ -705,77 +468,76 @@ function snapshotStatus(value: string): EventStatus {
   return "info"
 }
 
-function projectTimeline(rawEvents: RunTimelineEvent[], run?: SessionRunSummary, now = Date.now()): RunEvent[] {
-  const activities = new Map<string, RunEvent>()
-  for (const event of rawEvents) {
-    const payload = event.payload
-    const id = String(payload.activity_id || payload.call_id || payload.tool_call_id || `${event.event_type}:${event.session_seq}`)
-    const eventName = String(payload.name || payload.node || payload.tool_name || payload.activity_type || event.event_type)
-    const eventType = String(payload.activity_type || event.event_type)
-    const kind: EventKind = eventType.includes("llm") || event.event_type.startsWith("llm.")
-      ? "llm"
-      : eventType.includes("retriev") || event.event_type.startsWith("retrieval.")
-        ? "retrieval"
-        : eventType.includes("tool") || event.event_type.startsWith("tool.") || event.event_type.startsWith("approval.")
-          ? "tool"
-          : eventType.includes("plan") || event.event_type.startsWith("plan.")
-            ? "plan"
-            : eventType.includes("task") || event.event_type.startsWith("task.")
-              ? "worker"
-              : eventType.includes("response") || event.event_type.includes("message.completed")
-                ? "response"
-                : eventType === "run" || event.event_type.startsWith("run.")
-                  ? "run"
-                  : "system"
-    const status = timelineStatus(String(payload.status || event.event_type), event.event_type)
-    const existing = activities.get(id)
-    const startedAt = existing?.startedAt ?? (typeof payload.started_at === "string" ? payload.started_at
-      : event.event_type.endsWith(".started") || event.event_type === "message.delta" ? event.occurred_at : undefined)
-    const completedAt = typeof payload.completed_at === "string" ? payload.completed_at
-      : /\.(completed|failed|cancelled)$/.test(event.event_type) ? event.occurred_at : undefined
-    const errorValue = payload.error
-    const error = typeof errorValue === "object" && errorValue !== null
-      ? String((errorValue as { message?: unknown }).message || (errorValue as { code?: unknown }).code || "")
-      : typeof errorValue === "string" ? errorValue : ""
-    const retrievalSummary = event.event_type === "retrieval.completed"
-      ? `${String(payload.raw_hit_count ?? "未知")} 次命中 · ${String(payload.candidate_count ?? 0)} 个候选 · ${String(payload.bundle_count ?? 0)} 条进入资料窗口`
-      : event.event_type === "retrieval.selection.completed"
-        ? `本轮最终保留 ${String(payload.context_count ?? 0)} 条 · 记录${payload.trace_status === "complete" ? "完整" : "不完整"}`
-        : event.event_type.startsWith("retrieval.provider.")
-          ? `${String(payload.candidate_count ?? 0)} 个候选 · ${String(payload.result_count ?? 0)} 条模块输出${error ? ` · ${error}` : ""}`
-          : ""
-    const next: RunEvent = {
-      id,
-      parentId: String(payload.parent_activity_id || payload.parent_run_id || "") || undefined,
-      kind,
-      name: eventName,
-      summary: String(payload.summary || error || retrievalSummary || event.event_type),
-      status,
-      duration: kind === "run" && run ? formatDuration(getRunTiming(run, rawEvents, now).executionMs)
-        : getActivityDuration(startedAt, completedAt, payload.duration_ms),
-      startedAt,
-      // 活动合并后保留首次服务端事件时间；历史分页缺少 started 事件时使用服务端 started_at。
-      time: existing?.time ?? formatTimestamp(
-        typeof payload.started_at === "string" ? payload.started_at : event.occurred_at,
-      ),
-      detail: error || String(payload.summary || `事件 ${event.event_type} 已记录。`),
-      error: error || undefined,
-    }
-    activities.set(id, existing ? { ...existing, ...next, parentId: existing.parentId || next.parentId } : next)
-  }
-  // 输入按持久化 session_seq 排序，Map 顺序能保留活动起始顺序且不受本地日期边界影响。
-  return [...activities.values()]
+/** 将后端 span 按 parent_span_id 投影成页面活动；只读取白名单技术属性。 */
+function projectTrace(candidate: RunTraceResponse | null): RunEvent[] {
+  if (!candidate) return []
+  return candidate.spans
+    .map((span): RunEvent => {
+      const kind = traceKind(span)
+      const attributes = traceAttributes(span)
+      return {
+        id: span.span_id,
+        parentId: span.parent_span_id ?? undefined,
+        kind,
+        name: span.name,
+        summary: `${traceStatusLabel(span.status)}${attributes ? ` · ${attributes}` : ""}`,
+        status: spanStatus(span.status),
+        duration: span.duration_ms == null ? "—" : formatDuration(span.duration_ms),
+        time: formatTimestamp(span.started_at),
+        startedAt: span.started_at,
+        detail: `${span.span_type} · sequence ${span.sequence}${span.completed_at ? ` · 完成于 ${formatTimestamp(span.completed_at)}` : ""}`,
+        error: span.error ? Object.entries(span.error).map(([key, value]) => `${key}: ${value}`).join("\n") : undefined,
+      }
+    })
+    .sort((left, right) => {
+      const leftSpan = candidate.spans.find((span) => span.span_id === left.id)
+      const rightSpan = candidate.spans.find((span) => span.span_id === right.id)
+      return (leftSpan?.sequence ?? 0) - (rightSpan?.sequence ?? 0)
+    })
 }
 
-function timelineStatus(status: string, eventType: string): EventStatus {
-  if (status.includes("fail") || status.includes("error")) return "failed"
-  if (status.includes("expir")) return "failed"
-  if (status.includes("retry") || eventType.includes("retry")) return "retry"
-  if (status.includes("approv") || eventType === "approval.resolved") return "approved"
-  if (status.includes("waiting") || status.includes("pending")) return "waiting"
-  if (status.includes("running") || status.includes("started") || status.includes("queued")) return "running"
-  if (status.includes("cancel")) return "cancelled"
+function traceKind(span: RunTraceSpan): EventKind {
+  if (span.span_type === "run") return "run"
+  if (span.span_type === "llm") return "llm"
+  if (span.span_type === "retrieval") return "retrieval"
+  if (span.span_type === "tool") return "tool"
+  if (span.span_type === "plan") return "plan"
+  if (span.span_type === "worker_execution" || span.span_type === "worker_node") return "worker"
+  return "system"
+}
+
+function traceAttributes(span: RunTraceSpan): string {
+  return Object.entries(span.attributes)
+    .filter(([key]) => key !== "span_type")
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" · ")
+}
+
+function spanStatus(value: string): EventStatus {
+  if (value === "failed" || value === "error") return "failed"
+  if (value === "cancelled") return "cancelled"
+  if (value === "suspended" || value === "waiting") return "waiting"
+  if (value === "running" || value === "started") return "running"
   return "completed"
+}
+
+function traceStatusLabel(value: string): string {
+  const labels: Record<string, string> = {
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+    suspended: "已挂起",
+    running: "运行中",
+    started: "已开始",
+  }
+  return labels[value] || value
+}
+
+function runDuration(run: SessionRunSummary): string {
+  const started = Date.parse(run.started_at || run.created_at || "")
+  const completed = Date.parse(run.updated_at || "")
+  if (!Number.isFinite(started) || !Number.isFinite(completed)) return "—"
+  return formatDuration(Math.max(0, completed - started))
 }
 
 function formatTimestamp(value: string): string {

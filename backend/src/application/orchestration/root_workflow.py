@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from pydantic import ValidationError
 
 from shared.logging import get_logger
+from application.observability import PlanSpanAttributes, RetrievalSpanAttributes
 from application.orchestration.lease_context import lease_grant_from_context
 from domain.orchestration import (
     WorkerPlanSubmission,
@@ -55,6 +56,7 @@ from application.runs.context.contracts import (
 )
 from application.runs.context.planner import InvalidContextResource
 from application.runs.request_contracts import RootKnowledgeBase, RootRequestState
+from domain.runs import RootPlanCheckpointRecovery
 from domain.retrieval.trace_contracts import (
     RetrievalCandidateSelection,
     RetrievalCandidateTrace,
@@ -944,15 +946,37 @@ async def _retrieve_context_batch(
             ],
             None,
         )
-    bundle = await deps.context_acquisition.retrieve_context(
-        session_id=request.session_id,
-        run_id=request.run_id,
-        message_id=request.message_id,
-        invocation_id=uuid4().hex,
-        stage=stage,
-        plan=plan,
-        skipped_outcomes=skipped_outcomes,
-    )
+    span = None
+    if deps.observability is not None and request.run_id:
+        span = await deps.observability.start_span(
+            session_id=request.session_id,
+            run_id=request.run_id,
+            name=f"retrieval.{stage}",
+            attributes=RetrievalSpanAttributes(stage=stage),
+        )
+    try:
+        bundle = await deps.context_acquisition.retrieve_context(
+            session_id=request.session_id,
+            run_id=request.run_id,
+            message_id=request.message_id,
+            invocation_id=uuid4().hex,
+            stage=stage,
+            plan=plan,
+            skipped_outcomes=skipped_outcomes,
+        )
+    except Exception as error:
+        if deps.observability is not None and span is not None:
+            await deps.observability.finish_span(
+                span.span_id,
+                status="failed",
+                error={
+                    "code": "retrieval_failed",
+                    "message": type(error).__name__,
+                },
+            )
+        raise
+    if deps.observability is not None and span is not None:
+        await deps.observability.finish_span(span.span_id)
     return bundle, _context_query_outcomes(queries, bundle, stage), plan
 
 
@@ -1609,7 +1633,29 @@ class RootWorkflow(RootWorkflowPort):
             created_at=datetime.now(timezone.utc),
         )
         lease = lease_grant_from_context({"lease": state.get("execution_lease")})
-        receipt = await orchestration.submit_plan(submission, lease=lease)
+        span = None
+        if deps.observability is not None:
+            span = await deps.observability.start_span(
+                session_id=request_state.session_id,
+                run_id=run_id,
+                name="plan.submit",
+                attributes=PlanSpanAttributes(plan_id=plan_id),
+            )
+        try:
+            receipt = await orchestration.submit_plan(submission, lease=lease)
+        except Exception as error:
+            if deps.observability is not None and span is not None:
+                await deps.observability.finish_span(
+                    span.span_id,
+                    status="failed",
+                    error={
+                        "code": "plan_submit_failed",
+                        "message": type(error).__name__,
+                    },
+                )
+            raise
+        if deps.observability is not None and span is not None:
+            await deps.observability.finish_span(span.span_id)
         wait_generation = sequence
         return {
             "plan": {
@@ -1727,15 +1773,37 @@ class RootWorkflow(RootWorkflowPort):
         异常：身份不匹配或必要应用端口缺失时抛出 RuntimeError。
         """
         request = _request_state(state)
-        resume = RootResumeIdentity.model_validate(state.get("resume_value", {}))
         plan = RootPlanIdentity.model_validate(state.get("plan", {}))
-        if any(
-            (
-                resume.run_id != request.run_id,
-                resume.plan_id != plan.plan_id,
-                resume.plan_sequence != plan.sequence,
-                resume.root_wait_generation != plan.root_wait_generation,
+        resume_value = state.get("resume_value", {})
+        if not isinstance(resume_value, Mapping):
+            raise RuntimeError("root_plan_resume_identity_mismatch")
+        resume_type = resume_value.get("type")
+        if resume_type == "plan_completed":
+            resume = RootResumeIdentity.model_validate(resume_value)
+            identity_values = (
+                resume.run_id,
+                resume.plan_id,
+                resume.plan_sequence,
+                resume.root_wait_generation,
             )
+        elif resume_type == "plan_checkpoint_recovery":
+            try:
+                recovery = RootPlanCheckpointRecovery(**dict(resume_value))
+            except (TypeError, ValueError) as error:
+                raise RuntimeError("root_plan_resume_identity_mismatch") from error
+            identity_values = (
+                recovery.run_id,
+                recovery.plan_id,
+                recovery.plan_sequence,
+                recovery.root_wait_generation,
+            )
+        else:
+            raise RuntimeError("root_plan_resume_identity_mismatch")
+        if identity_values != (
+            request.run_id,
+            plan.plan_id,
+            plan.sequence,
+            plan.root_wait_generation,
         ):
             raise RuntimeError("root_plan_resume_identity_mismatch")
         result = await self.wait_for_plan_completion(state)

@@ -72,6 +72,7 @@ def _is_worker_service_route(path: str) -> bool:
     """
     prefixes = (
         "/api/worker-instances",
+        "/api/worker-api/v1",
         "/api/worker-resources",
         "/api/worker-executions",
         "/api/worker-approvals",

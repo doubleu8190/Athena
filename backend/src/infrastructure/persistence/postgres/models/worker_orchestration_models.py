@@ -240,6 +240,25 @@ class OrchestratorExecutionModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class WorkerDisplayResultModel(Base):
+    """保存一次 Worker execution 的用户可读结果。
+
+    独立建表使全新环境可通过 `create_all` 直接落地，不需要给既有
+    `task_executions` 表补列；机器结果仍保存在 execution 自身的 JSON 字段。
+    """
+
+    __tablename__ = "worker_display_results"
+
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("task_executions.execution_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    display_result: Mapped[str] = mapped_column(Text, nullable=False)
+    display_result_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
 class WorkerCommandReceiptModel(Base):
     """保留每条 Worker 命令的稳定接收回执与幂等摘要。"""
 

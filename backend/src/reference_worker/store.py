@@ -625,6 +625,8 @@ class WorkerStore:
                 "generation": generation,
                 "status": "completed",
                 "output": output,
+                # 参考 Worker 不发送进度，完成结果必须显式封闭空的进度前缀。
+                "last_progress_sequence": 0,
             }
             now = _utc_now()
             connection.execute(
@@ -733,6 +735,8 @@ class WorkerStore:
                 "generation": generation,
                 "status": "failed",
                 "error": error,
+                # 失败结果同样必须声明已确认的 Progress 前缀。
+                "last_progress_sequence": 0,
             }
             now = _utc_now()
             connection.execute(

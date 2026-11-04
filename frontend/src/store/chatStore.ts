@@ -24,9 +24,9 @@ import { closeTimelineEntry, upsertTimelineEntry } from "../utils/executionTimel
 interface ChatStore {
   sessionViewCache: Record<string, Partial<SessionViewState>>
   sessionHistoryLoaded: Record<string, boolean>
-  sessionEventCursors: Record<string, number>
+  sessionSyncTokens: Record<string, string>
   setSessionHistoryLoaded: (sessionId: string, loaded: boolean) => void
-  setSessionEventCursor: (sessionId: string, cursor: number) => void
+  setSessionSyncToken: (sessionId: string, token: string) => void
   clearAllSessionCaches: () => void
   // 连接状态
   connectionStatus: ConnectionStatus
@@ -142,24 +142,24 @@ export type SessionViewState = Pick<ChatStore,
 export const useChatStore = create<ChatStore>((set) => ({
   sessionViewCache: {},
   sessionHistoryLoaded: {},
-  sessionEventCursors: {},
+  sessionSyncTokens: {},
   setSessionHistoryLoaded: (sessionId, loaded) => set((state) => ({
     sessionHistoryLoaded: { ...state.sessionHistoryLoaded, [sessionId]: loaded },
   })),
-  setSessionEventCursor: (sessionId, cursor) => set((state) => {
-    // 快照水位只负责建立首次订阅基线；后续历史或分页响应不能越过已经开始的 SSE。
-    if (state.sessionEventCursors[sessionId] !== undefined) return {}
+  setSessionSyncToken: (sessionId, token) => set((state) => {
+    // 同步令牌只建立首次 SSE 基线；后续历史分页不能改变已经开始的连接。
+    if (state.sessionSyncTokens[sessionId] !== undefined) return {}
     return {
-      sessionEventCursors: {
-        ...state.sessionEventCursors,
-        [sessionId]: Math.max(0, cursor),
+      sessionSyncTokens: {
+        ...state.sessionSyncTokens,
+        [sessionId]: token,
       },
     }
   }),
   clearAllSessionCaches: () => set({
     sessionViewCache: {},
     sessionHistoryLoaded: {},
-    sessionEventCursors: {},
+    sessionSyncTokens: {},
     sessionRunStatuses: {},
     sessionRunStatusRevisions: {},
   }),
@@ -183,19 +183,19 @@ export const useChatStore = create<ChatStore>((set) => ({
     set((state) => {
       const sessionViewCache = { ...state.sessionViewCache }
       const sessionHistoryLoaded = { ...state.sessionHistoryLoaded }
-      const sessionEventCursors = { ...state.sessionEventCursors }
+      const sessionSyncTokens = { ...state.sessionSyncTokens }
       const sessionRunStatuses = { ...state.sessionRunStatuses }
       const sessionRunStatusRevisions = { ...state.sessionRunStatusRevisions }
       delete sessionViewCache[sessionId]
       delete sessionHistoryLoaded[sessionId]
-      delete sessionEventCursors[sessionId]
+      delete sessionSyncTokens[sessionId]
       delete sessionRunStatuses[sessionId]
       delete sessionRunStatusRevisions[sessionId]
       return {
         sessions: state.sessions.filter((s) => s.id !== sessionId),
         sessionViewCache,
         sessionHistoryLoaded,
-        sessionEventCursors,
+        sessionSyncTokens,
         sessionRunStatuses,
         sessionRunStatusRevisions,
       }

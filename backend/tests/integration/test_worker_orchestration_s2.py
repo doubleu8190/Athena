@@ -47,7 +47,9 @@ from infrastructure.persistence.postgres.models import (
     MemorySourceSuppressionModel,
     MessageModel,
     ProjectModel,
+    RunProgressModel,
     SessionModel,
+    TraceSpanModel,
 )
 from application.orchestration.worker_protocol_models import (
     WorkerRegistrationResponseModel,
@@ -87,6 +89,8 @@ _S2_TABLES = [
     OrchestratorWorkerCommandModel.__table__,
     WorkerCommandReceiptModel.__table__,
     ExecutionLeaseModel.__table__,
+    TraceSpanModel.__table__,
+    RunProgressModel.__table__,
 ]
 
 

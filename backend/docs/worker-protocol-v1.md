@@ -2,7 +2,7 @@
 
 日期：2026-10-30
 
-状态：S1 接口协议定稿；目标实现规范，当前后端和 Worker 尚未实现此协议。本文与 [worker-registry-round-plan-http-design.md](worker-registry-round-plan-http-design.md) 配套。本文中的接口路径、字段、状态码、错误目录和配置表对 S2–S8 有约束；协议 body 以 [worker-protocol-v1.schema.json](worker-protocol-v1.schema.json) 为准，示例以 [worker-protocol-v1.examples.json](worker-protocol-v1.examples.json) 为准。
+状态：S1 接口协议定稿；Athena 后端与聊天界面已实现本文的 Progress、结果展示和 Trace 分离约束，外部 Worker 需按本文接入完整 Progress 与最终结果。本文与 [worker-registry-round-plan-http-design.md](worker-registry-round-plan-http-design.md) 配套。本文中的接口路径、字段、状态码、错误目录和配置表对 S2–S8 有约束；协议 body 以 [worker-protocol-v1.schema.json](worker-protocol-v1.schema.json) 为准，示例以 [worker-protocol-v1.examples.json](worker-protocol-v1.examples.json) 为准。
 
 ## 1. 一致性规则
 
@@ -115,19 +115,27 @@ status=ready 表示健康且 accepting_tasks 可独立为 true/false；status=no
 
 同一服务 Bearer 主体可以拥有多个 worker_instance_key；健康判定归属 worker_instance_key，而不能只归属服务主体或 base_url。注册表中的期望 key 由 Athena 从认证主体下的实例记录取得，不能采用探测响应中的 key 反向选择目标实例。
 
-### 3.6 结果提交
+### 3.6 Worker Progress
+
+**请求：** POST /api/worker-api/v1/worker-executions/{execution_id}/progress
+
+Body 仅包含 `sequence` 与 `content`，不支持 streaming。`worker_id`、`run_id`、`task_id` 与 `session_id` 均由 Bearer 身份、路径和 Execution 的持久分配关系恢复。`sequence` 从 1 开始，由 Worker 在单个 execution 内递增；Athena 只信任接收时间。同一 `(execution_id, sequence)` 与相同 content 重放时返回原 ProgressReceipt，不同 content 返回 409 PROGRESS_SEQUENCE_CONFLICT。Execution 进入终态后返回 409 EXECUTION_ALREADY_TERMINAL。
+
+Worker 应在每次提交结果前确认所有 Progress 已收到 200 回执，并将已确认的最大序号写入 ResultSubmission 的 `last_progress_sequence`。Worker Progress 必须从 1 开始逐条连续提交，跳号或从中间插入会返回冲突；结果只接受完整前缀 `1..last_progress_sequence`，该字段为 0 时表示没有 Worker Progress。
+
+### 3.7 结果提交
 
 **请求：** POST /api/worker-executions/{execution_id}/result
 **Body：** ResultSubmission；路径 ID 是执行身份，generation 必须等于被认证主体拥有的该 Execution 代次。
 **Header：** Idempotency-Key = result_id。
 
-Worker 先把结果和待提交状态持久落盘/入库，再提交。completed 必须有 output；failed 必须有 WorkerError。ResultSubmission 不包含 cancelled 状态；远程停止通过 3.4 节 StopConfirmation 提交。body 不能声明另一个 worker_instance_id。
+Worker 先把结果和待提交状态持久落盘/入库，再提交。completed 必须有 output；failed 必须有 WorkerError。`output` 是机器可读结果，`display_result` 是可选、面向用户的一段完整文字；两者不能互相替代。`last_progress_sequence` 必须指向此前已成功接收的连续 Progress 前缀末端。ResultSubmission 不包含 cancelled 状态；远程停止通过 StopConfirmation 提交。body 不能声明另一个 worker_instance_id。
 
 有效成功结果需通过冻结 output_schema。输出无效时中心仍返回持久 200 ResultReceipt，disposition=recorded、reason=output_schema_invalid；任务记为失败并交 Root，不能再以相同 result_id 重试。执行失败按错误目录裁决：达到重试条件返回 disposition=retry_scheduled 和 next_execution_id；最终失败返回 recorded。取消、超时、旧代次的首次迟到结果返回 disposition=ignored 和对应 reason，不能更新 output、终态数或 Root 恢复作业。
 
 相同 result_id 和摘要返回原 ResultReceipt，不重复转换状态或创建重试；相同 result_id 不同摘要返回 409 RESULT_ID_CONFLICT。结果回执是可靠提交的唯一确认；Worker 在获得回执前持续重投同一结果。Worker 侧结果 outbox 不设有限丢弃次数，间隔封顶后继续持久重试，直到获得 200 回执或被明确的 4xx 协议错误隔离。
 
-### 3.7 大结果资源引用
+### 3.8 大结果资源引用
 
 ResourceReference body 有 resource_id、media_type、size_bytes、sha256 和可选 file_name。引用不包含本机路径，也不授予访问权。
 
@@ -162,10 +170,12 @@ HTTP 错误体由 Athena 生成，directive 是中心裁决。实现以 code 和
 | IDEMPOTENCY_KEY_REUSED | 409 | operator_action | 同 key 不同 body；停投并报告协议冲突。 |
 | COMMAND_ID_CONFLICT | 409 | operator_action | 不重试不同内容；保留原收件回执并报告。 |
 | RESULT_ID_CONFLICT | 409 | operator_action | 不替换已持久结果；告警 Worker 数据损坏/错误复用。 |
+| PROGRESS_SEQUENCE_CONFLICT | 409 | operator_action | 同一 execution 与 sequence 已对应不同内容，或新序号没有紧接已接收的连续前缀；停止跳号并告警。 |
 | RESOURCE_ID_CONFLICT | 409 | operator_action | 不覆盖同 ID 下的不同字节；由 Worker 分配新资源 ID 或修复内容摘要。 |
 | APPROVAL_ID_CONFLICT | 409 | operator_action | 不改写已有审批快照；隔离该请求。 |
 | STOP_CONFIRMATION_CONFLICT | 409 | operator_action | 停止确认不匹配已持久 CancelCommand 或相同幂等 ID 内容冲突；保留占用并排查 Worker 收件记录。 |
 | EXECUTION_NOT_FOUND | 404 | operator_action | 核对实例归属和持久状态；不创建新任务。 |
+| EXECUTION_ALREADY_TERMINAL | 409 | stop | 丢弃终态后的迟到 Progress，不再接受该 execution 的新过程消息。 |
 | EXECUTION_SUPERSEDED | 409 | stop | 丢弃本次旧代次命令；按已知中心状态收尾。 |
 | EXECUTION_DEADLINE_EXCEEDED | 409 | retry_execution | 不继续该代次；由中心超时策略判定新尝试额度。 |
 | TASK_CANCELLED | 409 | stop | 保存取消事实；停止继续该 Task 的工作与结果重试。 |

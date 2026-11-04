@@ -7,7 +7,6 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from application.orchestration import answer_generation as module
 from application.orchestration.answer_generation import (
     AnswerGenerationError, AnswerGenerationInput, AnswerGenerationService, AnswerStreamingOptions,
 )
@@ -27,10 +26,14 @@ class Events:
 
     async def publish(self, event: ApplicationEvent) -> ApplicationEvent:
         """参数 event 为待写事件；记录增量并返回原事件，不主动抛出异常。"""
-        if event.event_type == "message.delta":
+        if str(event.event_type) == "assistant.delta":
             self.deltas.append(str(event.payload["delta"]))
             self.first_delta.set()
         return event
+
+    async def publish_realtime(self, event: ApplicationEvent) -> ApplicationEvent:
+        """聊天正文增量只实时发送，不进入持久事件表。"""
+        return await self.publish(event)
 
     async def publish_with_lease(self, event: ApplicationEvent, *, lease) -> ApplicationEvent:
         return await self.publish(event)
@@ -74,10 +77,8 @@ async def test_first_delta_is_persisted_before_next_provider_chunk() -> None:
 
 
 @pytest.mark.asyncio
-async def test_busy_stream_flushes_by_elapsed_time_without_waiting_for_a_pause(monkeypatch) -> None:
-    """持续有片段到达时也按经过时间提交，无需真实睡眠或供应商停顿。"""
-    clock = [0.0]
-    monkeypatch.setattr(module, "monotonic", lambda: clock[0])
+async def test_busy_stream_publishes_each_provider_chunk_immediately() -> None:
+    """连续到达的每个模型文本片段都立即可见，不等待定时合并。"""
     events = Events()
     snapshots: list[list[str]] = []
 
@@ -87,16 +88,14 @@ async def test_busy_stream_flushes_by_elapsed_time_without_waiting_for_a_pause(m
             return len(text)
 
         async def stream(self, messages: list) -> AsyncIterator[LLMStreamEvent]:
-            """参数 messages 为输入；每次到达推进虚拟时间并观察已持久片段。"""
+            """参数 messages 为输入；每次到达前观察此前片段已经可见。"""
             for text in "abcde":
                 snapshots.append(list(events.deltas))
-                clock[0] += 0.04
                 yield LLMTextDelta(text)
             yield LLMStreamEnd("stop")
 
     result = await AnswerGenerationService(LLM(), events, prompt="回答").generate(inputs())
-    assert snapshots[1] == ["a"]
-    assert snapshots[4] == ["a", "bcd"]
+    assert snapshots == [[], ["a"], ["a", "b"], ["a", "b", "c"], ["a", "b", "c", "d"]]
     assert result.content == "abcde" == "".join(events.deltas)
     assert result.answer_stream.last_chunk_id == len(events.deltas)
 

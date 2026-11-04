@@ -67,6 +67,7 @@ from .worker_orchestration_models import (
     OrchestratorWorkerCommandModel,
     WorkerCommandReceiptModel,
     WorkerContractModel,
+    WorkerDisplayResultModel,
     WorkerInstanceModel,
     WorkerApprovalRequestModel,
     WorkerRegistrationReceiptModel,
@@ -77,6 +78,7 @@ from .tool_operation_models import WorkerToolOperationModel
 from .worker_execution_message_models import WorkerExecutionMessageModel
 from .worker_resource_models import WorkerResourceModel
 from .lease_models import ExecutionLeaseModel
+from .observability_models import RunProgressModel, TraceSpanModel
 
 __all__ = [
     "AttachmentModel",
@@ -121,6 +123,7 @@ __all__ = [
     "TaskExecutionResultModel",
     "WorkerJobModel",
     "WorkerContractModel",
+    "WorkerDisplayResultModel",
     "WorkerInstanceModel",
     "WorkerApprovalRequestModel",
     "WorkerRegistrationReceiptModel",
@@ -136,6 +139,8 @@ __all__ = [
     "WorkerExecutionMessageModel",
     "WorkerResourceModel",
     "ExecutionLeaseModel",
+    "RunProgressModel",
+    "TraceSpanModel",
     "EvalCaseAttemptModel",
     "EvalCaseModel",
     "EvalDatasetModel",

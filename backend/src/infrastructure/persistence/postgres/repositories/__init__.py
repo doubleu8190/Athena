@@ -48,6 +48,7 @@ from .orchestration_outbox_repository import (
 )
 from .evaluation_repository import PostgresEvaluationRepository
 from .lease_center import PostgresLeaseCenter
+from .observability_repository import PostgresObservabilityRepository
 
 __all__ = [
     "PostgresAttachmentRepository",
@@ -89,4 +90,5 @@ __all__ = [
     "PostgresOrchestrationOutboxRepository",
     "PostgresEvaluationRepository",
     "PostgresLeaseCenter",
+    "PostgresObservabilityRepository",
 ]

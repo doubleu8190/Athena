@@ -179,24 +179,54 @@ def test_approval_decision_endpoint_records_one_decision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sse_heartbeat_and_untagged_event_paths() -> None:
+async def test_sse_heartbeat_path(monkeypatch) -> None:
     from  interfaces.http.sse.events import build_events_router
+    from application.events.stream_service import encode_sync_token
     class Sessions:
         async def get(self, key): return Session.create(session_id=key, title="s", now=NOW)
     class Events:
         async def open_subscription(self, key): return asyncio.Queue(), 0
+        async def snapshot(self, key, **_kwargs):
+            return (
+                {
+                    "run_id": None,
+                    "run_status": None,
+                    "turns": [],
+                },
+                None,
+                None,
+                encode_sync_token(
+                    session_id="s",
+                    event_sequence=0,
+                    progress_ingest_sequence=0,
+                    run_sequence=0,
+                ),
+            )
+        async def list_progress_after(self, *args): return []
         async def replay(self, *args, limit=256): return []
         async def close(self, *args): self.closed = True
-    events = Events(); service = SimpleNamespace(open_subscription=events.open_subscription, replay=events.replay, close=events.close)
+    events = Events()
+    service = SimpleNamespace(
+        open_subscription=events.open_subscription,
+        snapshot=events.snapshot,
+        list_progress_after=events.list_progress_after,
+        replay=events.replay,
+        close=events.close,
+    )
     router = build_events_router(service)
     app = FastAPI(); app.include_router(router)
     disconnected = iter([False, True])
-    request = Request({"type": "http", "method": "GET", "path": "/sessions/s/events", "headers": [], "app": app})
+    request = Request({"type": "http", "method": "GET", "path": "/sessions/s/stream", "headers": [], "app": app})
     async def is_disconnected(): return next(disconnected)
     request.is_disconnected = is_disconnected  # type: ignore[method-assign]
-    response = await router.routes[0].endpoint("s", request, 0)
+    async def no_events(awaitable, *args, **kwargs):
+        awaitable.close()
+        raise TimeoutError
+    monkeypatch.setattr(asyncio, "wait_for", no_events)
+    response = await router.routes[0].endpoint("s", request, 0, None)
     chunks = [item async for item in response.body_iterator]
-    assert chunks == [": heartbeat\n\n"]
+    assert "event: session.snapshot" in chunks[0]
+    assert chunks[1] == ": heartbeat\n\n"
     assert events.closed
 
 

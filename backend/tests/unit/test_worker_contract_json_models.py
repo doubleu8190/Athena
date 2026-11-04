@@ -12,6 +12,8 @@ from application.orchestration.worker_protocol_models import (
     WorkerCancelCommandModel,
     WorkerCancelReceiptModel,
     WorkerErrorModel,
+    WorkerProgressReceiptModel,
+    WorkerProgressSubmissionModel,
     WorkerRegistrationResponseModel,
     WorkerResultReceiptModel,
     WorkerResultSubmissionModel,
@@ -80,6 +82,28 @@ def test_worker_capability_rejects_duplicate_schema_required_fields() -> None:
         )
 
 
+def test_worker_progress_rejects_whitespace_and_normalizes_content() -> None:
+    """Progress 展示正文不能只含空白，合法文本会移除首尾空白。"""
+    schema_validator = Draft202012Validator(
+        {
+            "$schema": _PROTOCOL_SCHEMA["$schema"],
+            "$defs": _PROTOCOL_SCHEMA["$defs"],
+            "$ref": "#/$defs/ProgressSubmission",
+        }
+    )
+    with pytest.raises(ValueError, match="worker_progress_content_empty"):
+        WorkerProgressSubmissionModel.model_validate(
+            {"sequence": 1, "content": " \n\t "}
+        )
+    assert not schema_validator.is_valid(
+        {"sequence": 1, "content": " \n\t "}
+    )
+    parsed = WorkerProgressSubmissionModel.model_validate(
+        {"sequence": 1, "content": "  正在读取资料  "}
+    )
+    assert parsed.content == "正在读取资料"
+
+
 @pytest.mark.parametrize(
     ("example_name", "model", "schema_name"),
     [
@@ -91,6 +115,8 @@ def test_worker_capability_rejects_duplicate_schema_required_fields() -> None:
         ("stop_confirmation_timeout_receipt", WorkerStopConfirmationReceiptModel, "StopConfirmationReceipt"),
         ("stop_confirmation_task_cancel", WorkerStopConfirmationModel, "StopConfirmation"),
         ("stop_confirmation_task_cancel_receipt", WorkerStopConfirmationReceiptModel, "StopConfirmationReceipt"),
+        ("progress_created", WorkerProgressSubmissionModel, "ProgressSubmission"),
+        ("progress_created_receipt", WorkerProgressReceiptModel, "ProgressReceipt"),
         ("result_success_duplicate_submission", WorkerResultSubmissionModel, "ResultSubmission"),
         ("result_failure", WorkerResultSubmissionModel, "ResultSubmission"),
         ("result_unknown_failure", WorkerResultSubmissionModel, "ResultSubmission"),

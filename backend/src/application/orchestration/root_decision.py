@@ -63,6 +63,7 @@ class PlanningFeedback(BaseModel):
     action: Literal["needs_information"]
     missing_information: tuple[str, ...] = Field(min_length=1)
     reason: str = Field(min_length=1)
+    progress: str | None = Field(default=None, max_length=2000)
 
     @field_validator("missing_information")
     @classmethod
@@ -138,6 +139,7 @@ class AnswerIntent(BaseModel):
     action: Literal["answer"]
     kind: Literal["final", "clarification"]
     instructions: str = Field(min_length=1, max_length=2000)
+    progress: str | None = Field(default=None, max_length=2000)
 
     @field_validator("instructions")
     @classmethod
@@ -168,6 +170,7 @@ class PlanIntent(BaseModel):
     action: Literal["plan"]
     goal: str = Field(min_length=1)
     instructions: str = Field(min_length=1, max_length=2000)
+    progress: str | None = Field(default=None, max_length=2000)
 
     @field_validator("goal", "instructions")
     @classmethod
@@ -251,6 +254,7 @@ class PlanDraft(BaseModel):
     action: Literal["plan"]
     goal: str = Field(min_length=1)
     tasks: tuple[PlanTaskDraft, ...] = Field(min_length=1)
+    progress: str | None = Field(default=None, max_length=2000)
 
     @field_validator("tasks")
     @classmethod
@@ -294,6 +298,7 @@ class RootDecisionStructuredOutput(BaseModel):
     kind: Literal["final", "clarification"] | None = None
     instructions: str | None = None
     goal: str | None = None
+    progress: str | None = None
 
 class RootPlanStructuredOutput(BaseModel):
     """完整计划或规划信息缺口的扁平结构化 schema。"""
@@ -305,6 +310,7 @@ class RootPlanStructuredOutput(BaseModel):
     tasks: tuple[PlanTaskDraft, ...] | None = None
     missing_information: tuple[str, ...] | None = None
     reason: str | None = None
+    progress: str | None = None
 
 
 RootDecision = Annotated[

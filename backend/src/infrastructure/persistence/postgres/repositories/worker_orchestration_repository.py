@@ -19,6 +19,11 @@ from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from application.observability import (
+    WorkerExecutionSpanAttributes,
+    run_span_id,
+    sanitize_trace_error,
+)
 from application.orchestration.worker_protocol_models import (
     WorkerCancelReceiptModel,
     WorkerCommandReceiptModel,
@@ -61,7 +66,10 @@ from ..models import (
     OrchestratorRootResumeJobModel,
     OrchestratorTaskModel,
     OrchestratorWorkerCommandModel,
+    RunProgressModel,
+    TraceSpanModel,
     WorkerContractModel,
+    WorkerDisplayResultModel,
     WorkerInstanceModel,
     WorkerRegistrationReceiptModel,
     WorkerResultReceiptModel,
@@ -73,6 +81,8 @@ from ..models import (
     SessionModel,
 )
 from .lease_center import PostgresLeaseCenter
+from .progress_locking import lock_progress_session
+from .trace_locking import lock_trace_span_scope
 
 
 def _worker_result_summary(output: Any) -> str:
@@ -88,12 +98,128 @@ def _worker_result_summary(output: Any) -> str:
     return json.dumps(output, ensure_ascii=False, indent=2)
 
 
+async def _add_worker_execution_span(
+    session: AsyncSession,
+    *,
+    run: AgentRunModel,
+    execution: OrchestratorExecutionModel,
+    task: OrchestratorTaskModel,
+    instance: WorkerInstanceModel,
+    started_at: datetime,
+) -> None:
+    """为一次外部 Worker execution 创建唯一 Trace span。
+
+    调用方必须先通过 `_lock_worker_write_scope` 取得 Run 级 Trace 锁，确保
+    当前事务在任何领域行锁之前完成该锁序。本函数不再重复申请 advisory lock。
+    """
+    span_id = f"worker:{execution.execution_id}"
+    # 锁后重查，避免同一命令的并发重投同时通过存在性检查后争用主键。
+    if await session.get(
+        TraceSpanModel, span_id, populate_existing=True
+    ) is not None:
+        return
+    sequence = int(
+        await session.scalar(
+            select(func.coalesce(func.max(TraceSpanModel.sequence), 0)).where(
+                TraceSpanModel.run_id == run.run_id
+            )
+        )
+        or 0
+    ) + 1
+    session.add(
+        TraceSpanModel(
+            span_id=span_id,
+            session_id=run.session_id,
+            run_id=run.run_id,
+            parent_span_id=run_span_id(run.run_id),
+            span_type="worker_execution",
+            name="worker.execute",
+            status="running",
+            started_at=started_at,
+            attributes_json=WorkerExecutionSpanAttributes(
+                execution_id=execution.execution_id,
+                task_id=task.task_id,
+                worker_id=instance.instance_id,
+            ).model_dump(mode="json"),
+            sequence=sequence,
+        )
+    )
+
+
+async def _finish_worker_execution_span(
+    session: AsyncSession,
+    *,
+    execution_id: str,
+    status: str,
+    completed_at: datetime,
+    error: dict[str, Any] | None = None,
+) -> None:
+    """结束 Worker execution 对应 span；重复终态转换保持幂等。"""
+    span = await session.get(TraceSpanModel, f"worker:{execution_id}")
+    if span is None or span.status != "running":
+        return
+    span.status = status
+    span.completed_at = completed_at
+    span.duration_ms = max(
+        0, int((completed_at - span.started_at).total_seconds() * 1000)
+    )
+    if error is not None:
+        span.error_json = sanitize_trace_error(
+            {
+                "code": str(error.get("code") or status),
+                "status": status,
+                "retryable": error.get("retryable"),
+            }
+        )
+
+
+async def _lock_worker_write_scope(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    session_id: str,
+    writes_trace: bool,
+) -> None:
+    """在锁定 Worker 领域行前取得统一的可观测性写锁。
+
+    参数：
+    - `session`（AsyncSession）：当前读写事务。
+    - `run_id`（str）：Trace 所属 Run。
+    - `session_id`（str）：Progress 所属会话。
+    - `writes_trace`（bool）：当前事务是否可能写 Trace。为 `True` 时必须先于
+      Progress 锁取得 Run 级 Trace advisory lock。
+
+    返回：无。
+
+    异常：数据库异常原样传播。
+
+    所有会锁 Run/Execution 的 Worker 领域写事务都先取得 Progress advisory
+    lock，即使当前分支最终不插入 Progress。这样会插入 Run 外键的 Progress
+    事务与会锁 Run/Execution 的终态、取消和派发事务使用相同前缀顺序，避免
+    `Progress → Execution → Run` 与 `Run → Execution → Progress FK`
+    形成反向锁序。
+    """
+    if writes_trace:
+        await lock_trace_span_scope(session, run_id)
+    await lock_progress_session(session, session_id)
+
+
 class WorkerPlanRejected(ValueError):
     """当前 Run 状态不允许提交新 Plan。"""
 
 
 class PostgresWorkerOrchestrationRepository:
-    """以单事务维护 Worker Plan、执行结果与 Root 唤醒事实。"""
+    """以单事务维护 Worker Plan、执行结果与 Root 唤醒事实。
+
+    command-only 写方法只读取或更新 `OrchestratorWorkerCommandModel`，不得在同一
+    事务访问 Run/Execution 等领域父记录，也不得写 Trace 或 Progress。未来若需要
+    扩展父级状态，必须先解析 Run/Session 身份并通过 `_lock_worker_write_scope`
+    取得统一 advisory 前缀，再获取任何领域行锁。
+
+    `_submit_plan` 是创建新命令的独立安全路径：它先锁 Session/Run 并校验状态，
+    只创建新的 Plan、Task、Execution 和 Command，不锁既有 Execution，也不写
+    Trace/Progress，因此不能误加 `_lock_worker_write_scope`。
+    """
 
     def __init__(
         self,
@@ -276,6 +402,9 @@ class PostgresWorkerOrchestrationRepository:
     ) -> WorkerDispatchLease | None:
         """用短事务领取一条待发送命令，网络请求不占用数据库锁。
 
+        这是 command-only 事务：只更新命令租约，不得访问 Run/Execution 或写
+        Trace/Progress；扩展到父级状态前必须走 `_lock_worker_write_scope`。
+
         参数：
         - `owner_id`（str）：当前 Dispatcher 进程实例身份。
         - `lease_seconds`（float）：数据库领取租约秒数，必须大于零。
@@ -356,9 +485,20 @@ class PostgresWorkerOrchestrationRepository:
             plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
             if plan_hint is None:
                 return None
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return None
+            # 以上读取不申请行锁。TraceSpan 和 RunProgress 的外键都会请求父行
+            # 共享锁，因此必须先取得所有 advisory lock，再锁领域行。
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=True,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
-                .where(AgentRunModel.run_id == plan_hint.run_id)
+                .where(AgentRunModel.run_id == run_hint.run_id)
                 .execution_options(populate_existing=True)
                 .with_for_update()
             )
@@ -493,11 +633,34 @@ class PostgresWorkerOrchestrationRepository:
             else:
                 first_assignment = False
                 execution.worker_name = execution.worker_name or instance.worker_name
+            await _add_worker_execution_span(
+                session,
+                run=run,
+                execution=execution,
+                task=task,
+                instance=instance,
+                started_at=now,
+            )
             command.instance_id = instance.instance_id
             command.lease_until = now + timedelta(seconds=lease_seconds)
             command.updated_at = now
             if first_assignment:
                 # 将第一次真实分配和开始事件放在同一事务，重投命令不会重复生成开始记录。
+                session.add(
+                    RunProgressModel(
+                        progress_id=self._id_factory(),
+                        session_id=run.session_id,
+                        run_id=run.run_id,
+                        execution_id=execution.execution_id,
+                        task_id=task.task_id,
+                        worker_id=instance.instance_id,
+                        source="orchestrator",
+                        scope_key=f"execution:{execution.execution_id}",
+                        sequence=0,
+                        content=f"任务“{task.objective}”开始执行。",
+                        created_at=now,
+                    )
+                )
                 session.add(
                     OrchestrationOutboxModel(
                         message_id=self._id_factory(),
@@ -574,6 +737,15 @@ class PostgresWorkerOrchestrationRepository:
             plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
             if plan_hint is None:
                 return None
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return None
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -680,6 +852,15 @@ class PostgresWorkerOrchestrationRepository:
             )
             if execution_hint is None or task_hint is None or plan_hint is None:
                 return None
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return None
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -845,7 +1026,17 @@ class PostgresWorkerOrchestrationRepository:
             )
             if task_hint is None or plan_hint is None:
                 return None
-            # 依次锁 Run、Plan、Task、Execution、Command，避免恢复与取消/结果事务交叉。
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return None
+            # 先取得 Progress advisory lock，再按 Run、Plan、Task、Execution、
+            # Command 锁领域行，避免与 Worker Progress 形成外键锁环。
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -1000,7 +1191,11 @@ class PostgresWorkerOrchestrationRepository:
     async def record_resume_receipt(
         self, lease: WorkerDispatchLease, receipt: WorkerResumeReceiptModel
     ) -> bool:
-        """保存 ResumeReceipt 并释放当前发送租约。"""
+        """保存 ResumeReceipt 并释放当前发送租约。
+
+        本方法会校验 Run/Plan/Task/Execution，因此不属于 command-only 事务，
+        必须在父领域行锁前调用 `_lock_worker_write_scope`。
+        """
         async with self._session_factory() as session, session.begin():
             now = await self._now(session)
             execution_hint = await session.scalar(
@@ -1018,6 +1213,18 @@ class PostgresWorkerOrchestrationRepository:
                 .where(OrchestratorPlanModel.plan_id == task_hint.plan_id)
                 .execution_options(populate_existing=True)
             )
+            run_hint = (
+                None
+                if plan_hint is None
+                else await session.get(AgentRunModel, plan_hint.run_id)
+            )
+            if run_hint is not None:
+                await _lock_worker_write_scope(
+                    session,
+                    run_id=run_hint.run_id,
+                    session_id=run_hint.session_id,
+                    writes_trace=False,
+                )
             run = None if plan_hint is None else await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -1102,6 +1309,9 @@ class PostgresWorkerOrchestrationRepository:
     ) -> bool:
         """记录取消命令的 HTTP 收件回执，保留 StopConfirmation 独立语义。
 
+        这是 command-only 事务：只更新命令回执，不得访问 Run/Execution 或写
+        Trace/Progress；扩展到父级状态前必须走 `_lock_worker_write_scope`。
+
         参数：
         - `lease`（WorkerDispatchLease）：发送取消命令时持有的 fencing 租约。
         - `receipt`（WorkerCancelReceiptModel）：Worker 返回的 202 收件回执。
@@ -1162,6 +1372,15 @@ class PostgresWorkerOrchestrationRepository:
             plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
             if plan_hint is None:
                 return False
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return False
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -1264,6 +1483,15 @@ class PostgresWorkerOrchestrationRepository:
             )
             if plan_hint is None:
                 return None
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return None
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -1400,6 +1628,9 @@ class PostgresWorkerOrchestrationRepository:
     ) -> tuple[dict[str, Any], str]:
         """首次发送前以同一 fencing token 冻结 TaskCommand 和 JCS 摘要。
 
+        这是 command-only 事务：只更新命令 body 与摘要，不得访问 Run/Execution
+        或写 Trace/Progress；扩展到父级状态前必须走 `_lock_worker_write_scope`。
+
         参数：
         - `lease`（WorkerDispatchLease）：当前命令领取权。
         - `command_body`（dict[str, Any]）：已按严格 TaskCommand DTO 序列化的最终 body。
@@ -1437,7 +1668,11 @@ class PostgresWorkerOrchestrationRepository:
     async def record_dispatch_receipt(
         self, lease: WorkerDispatchLease, receipt: WorkerCommandReceiptModel
     ) -> bool:
-        """仅由当前租约保存合法收件回执，且不覆盖已处理结果。"""
+        """仅由当前租约保存合法收件回执，且不覆盖已处理结果。
+
+        这是 command-only 事务：只更新命令回执，不得访问 Run/Execution 或写
+        Trace/Progress；扩展到父级状态前必须走 `_lock_worker_write_scope`。
+        """
         async with self._session_factory() as session, session.begin():
             now = await self._now(session)
             command = await session.scalar(
@@ -1495,6 +1730,15 @@ class PostgresWorkerOrchestrationRepository:
             )
             if plan_hint is None:
                 return False
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return False
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -1618,7 +1862,11 @@ class PostgresWorkerOrchestrationRepository:
             return True
 
     async def exhaust_dispatch_retries(self, lease: WorkerDispatchLease) -> bool:
-        """停止传输重投但保留可能已接收 Execution 的容量与 deadline。"""
+        """停止传输重投但保留可能已接收 Execution 的容量与 deadline。
+
+        这是 command-only 事务：只停止命令重投，不得访问 Run/Execution 或写
+        Trace/Progress；扩展到父级状态前必须走 `_lock_worker_write_scope`。
+        """
         async with self._session_factory() as session, session.begin():
             now = await self._now(session)
             command = await session.scalar(
@@ -1640,7 +1888,11 @@ class PostgresWorkerOrchestrationRepository:
             return True
 
     async def await_dispatch_result(self, lease: WorkerDispatchLease) -> bool:
-        """响应无法按目录判定时停止重投并保留 Execution 容量等待结果或 deadline。"""
+        """响应无法按目录判定时停止重投并保留 Execution 容量等待结果或 deadline。
+
+        这是 command-only 事务：只停止命令重投，不得访问 Run/Execution 或写
+        Trace/Progress；扩展到父级状态前必须走 `_lock_worker_write_scope`。
+        """
         async with self._session_factory() as session, session.begin():
             now = await self._now(session)
             command = await session.scalar(
@@ -1682,6 +1934,15 @@ class PostgresWorkerOrchestrationRepository:
             plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
             if plan_hint is None:
                 return False
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return False
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -1964,6 +2225,15 @@ class PostgresWorkerOrchestrationRepository:
             )
             if task_hint is None or plan_hint is None:
                 raise ValueError("worker_approval_execution_unknown")
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                raise ValueError("worker_approval_execution_unknown")
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=False,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -2218,6 +2488,10 @@ class PostgresWorkerOrchestrationRepository:
         self, submission: WorkerPlanSubmission, *, root_lease: LeaseGrant | None
     ) -> WorkerPlanReceipt:
         """校验并原子保存 Run 的一轮 Plan 及其无依赖任务。
+
+        本方法先锁 Session/Run 再创建新的 Plan、Task、Execution 和 Command；
+        不锁既有 Execution，也不写 Trace/Progress，因此无需统一 advisory 前缀。
+        未来若加入这三类访问，必须改为先走 `_lock_worker_write_scope` 的路径。
 
         参数：
         - `submission`（WorkerPlanSubmission）：完整的 Plan、幂等键和任务输入。
@@ -2773,6 +3047,15 @@ class PostgresWorkerOrchestrationRepository:
             plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
             if plan_hint is None:
                 return False
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                return False
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=True,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -2835,6 +3118,13 @@ class PostgresWorkerOrchestrationRepository:
                 execution.capacity_reserved = False
                 execution.capacity_released_at = now
                 execution.updated_at = now
+                await _finish_worker_execution_span(
+                    session,
+                    execution_id=execution.execution_id,
+                    status="failed",
+                    completed_at=now,
+                    error=execution.error_json,
+                )
                 task.status = WorkerTaskStatus.FAILED.value
                 task.error_json = execution.error_json
                 task.updated_at = now
@@ -2919,6 +3209,13 @@ class PostgresWorkerOrchestrationRepository:
                 "retryable": False,
             }
             execution.updated_at = now
+            await _finish_worker_execution_span(
+                session,
+                execution_id=execution.execution_id,
+                status="failed",
+                completed_at=execution.completed_at or now,
+                error=execution.error_json,
+            )
             task.status = WorkerTaskStatus.FAILED.value
             task.error_json = execution.error_json
             task.updated_at = now
@@ -3039,6 +3336,15 @@ class PostgresWorkerOrchestrationRepository:
             plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
             if plan_hint is None:
                 raise ValueError("worker_result_plan_identity_unknown")
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                raise ValueError("worker_result_run_identity_unknown")
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=True,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -3092,6 +3398,36 @@ class PostgresWorkerOrchestrationRepository:
                 )
 
             now = await self._now(session)
+            max_progress_sequence = int(
+                await session.scalar(
+                    select(func.max(RunProgressModel.sequence)).where(
+                        RunProgressModel.execution_id == submission.execution_id,
+                        RunProgressModel.source == "worker",
+                    )
+                )
+                or 0
+            )
+            if not submission.internal_timeout:
+                progress_sequences = list(
+                    (
+                        await session.scalars(
+                            select(RunProgressModel.sequence)
+                            .where(
+                                RunProgressModel.execution_id
+                                == submission.execution_id,
+                                RunProgressModel.source == "worker",
+                            )
+                            .order_by(RunProgressModel.sequence)
+                        )
+                    ).all()
+                )
+                # 结果只能封闭从 1 开始的完整前綴，不能仅比较最大值绕过中间跳号。
+                if (
+                    submission.last_progress_sequence != max_progress_sequence
+                    or progress_sequences
+                    != list(range(1, max_progress_sequence + 1))
+                ):
+                    raise ValueError("worker_progress_sequence_incomplete")
             if submission.internal_timeout and (
                 execution.status != "running"
                 or task.status != "running"
@@ -3275,6 +3611,21 @@ class PostgresWorkerOrchestrationRepository:
                 execution.result_json = output if output_valid else None
                 execution.error_json = error
                 execution.updated_at = now
+                if submission.display_result is not None:
+                    session.add(
+                        WorkerDisplayResultModel(
+                            execution_id=execution.execution_id,
+                            display_result=submission.display_result,
+                            display_result_at=now,
+                        )
+                    )
+                await _finish_worker_execution_span(
+                    session,
+                    execution_id=execution.execution_id,
+                    status=result_status,
+                    completed_at=now,
+                    error=error,
+                )
                 # 有效终态回执证明该 Execution 已停止；取消后的迟到结果走 ignored，不能释放旧槽位。
                 if execution.capacity_reserved and not submission.internal_timeout:
                     execution.capacity_reserved = False
@@ -3416,6 +3767,7 @@ class PostgresWorkerOrchestrationRepository:
                     "parallel_task_count": plan.expected_task_count,
                     "status": result_status,
                     "result_available_in_final": result_is_large,
+                    "display_result": submission.display_result,
                 }
                 if result_status == "completed" and not result_is_large:
                     # 单字段正文保持原文；复合结果以完整、可读的 JSON 传递。
@@ -3528,6 +3880,15 @@ class PostgresWorkerOrchestrationRepository:
             plan_hint = await session.get(OrchestratorPlanModel, task_hint.plan_id)
             if plan_hint is None or plan_hint.run_id != run_id:
                 raise ValueError("worker_task_run_identity_mismatch")
+            run_hint = await session.get(AgentRunModel, run_id)
+            if run_hint is None:
+                raise ValueError("worker_task_run_identity_mismatch")
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=True,
+            )
             run = await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == run_id)
@@ -3682,6 +4043,12 @@ class PostgresWorkerOrchestrationRepository:
                     execution.cancellation_epoch = cancellation_epoch
                     execution.capacity_reserved = False
                     execution.updated_at = now
+                    await _finish_worker_execution_span(
+                        session,
+                        execution_id=execution.execution_id,
+                        status="cancelled",
+                        completed_at=execution.completed_at or now,
+                    )
 
                 if execution.status != execution_status_before:
                     self._add_task_cancellation_event(
@@ -3742,14 +4109,6 @@ class PostgresWorkerOrchestrationRepository:
         ).model_dump(mode="json", exclude_none=True)
         request_hash = confirmation.request_hash or self._hash_json(body)
         async with self._session_factory() as session, session.begin():
-            stop_lock_key = (
-                "worker-stop-confirmation:"
-                f"{confirmation.instance_id}:{confirmation.stop_confirmation_id}"
-            )
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": stop_lock_key},
-            )
             command = await session.scalar(
                 select(OrchestratorWorkerCommandModel)
                 .where(
@@ -3777,6 +4136,23 @@ class PostgresWorkerOrchestrationRepository:
             )
             if plan_hint is None:
                 raise ValueError("worker_stop_execution_identity_unknown")
+            run_hint = await session.get(AgentRunModel, plan_hint.run_id)
+            if run_hint is None:
+                raise ValueError("worker_stop_execution_identity_unknown")
+            await _lock_worker_write_scope(
+                session,
+                run_id=run_hint.run_id,
+                session_id=run_hint.session_id,
+                writes_trace=True,
+            )
+            stop_lock_key = (
+                "worker-stop-confirmation:"
+                f"{confirmation.instance_id}:{confirmation.stop_confirmation_id}"
+            )
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": stop_lock_key},
+            )
             await session.scalar(
                 select(AgentRunModel)
                 .where(AgentRunModel.run_id == plan_hint.run_id)
@@ -3863,6 +4239,12 @@ class PostgresWorkerOrchestrationRepository:
                 execution.status = "cancelled"
                 execution.completed_at = execution.completed_at or now
                 execution.updated_at = now
+                await _finish_worker_execution_span(
+                    session,
+                    execution_id=execution.execution_id,
+                    status="cancelled",
+                    completed_at=execution.completed_at,
+                )
             if was_cancelling:
                 session.add(
                     OrchestrationOutboxModel(

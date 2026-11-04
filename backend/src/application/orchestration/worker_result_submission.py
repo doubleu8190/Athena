@@ -76,6 +76,8 @@ class WorkerResultSubmissionService:
             status=request.status,
             output=request.output,
             error=error,
+            last_progress_sequence=request.last_progress_sequence,
+            display_result=request.display_result,
             request_hash=request_hash,
         )
         receipt = await self._repository.record_result(submission=submission)

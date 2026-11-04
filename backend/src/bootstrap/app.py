@@ -242,7 +242,13 @@ def create_app(
     if run_service is not None:
         app.include_router(build_runs_router(run_service), prefix="/api")
     if run_query_service is not None:
-        app.include_router(build_run_query_router(run_query_service), prefix="/api")
+        app.include_router(
+            build_run_query_router(
+                run_query_service,
+                observability_service=graph.service("observability_service"),
+            ),
+            prefix="/api",
+        )
     if orchestration_query_service is not None:
         app.include_router(
             build_orchestration_router(orchestration_query_service), prefix="/api"

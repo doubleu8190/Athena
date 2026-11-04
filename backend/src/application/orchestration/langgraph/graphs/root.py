@@ -6,12 +6,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
-from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
 from langgraph.graph.state import CompiledStateGraph, RunnableConfig
 from langgraph.graph import END, START, StateGraph
+from langgraph.errors import GraphInterrupt
 from langgraph.types import Command, interrupt
 from pydantic import ValidationError
 
@@ -30,6 +30,12 @@ from domain.runs import RootPlanCheckpointRecovery, RootPlanCompletedResumeValue
 from domain.leases import LeaseGrant
 from shared.serialization import json_value
 from application.runs.request_contracts import RootRequestState
+from application.observability import (
+    RootNodeSpanAttributes,
+    bind_span,
+    reset_span,
+    run_span_id,
+)
 from shared import get_logger
 
 from .state import RootGraphState
@@ -37,93 +43,12 @@ from .state import RootGraphState
 logger = get_logger(__name__)
 
 
-async def _publish(
-    dependencies: RootWorkflowDependencies,
-    event_type: str,
-    state: Mapping[str, Any],
-    *,
-    node_name: str,
-    invocation_id: str,
-    started_at: datetime | None = None,
-    duration_ms: int | None = None,
-    error: str | None = None,
-    summary: str | None = None,
-) -> None:
-    """发布带节点身份、执行耗时和结果摘要的 Root 工作流事件。
-
-    参数：
-    - `dependencies`（RootWorkflowDependencies）：构建或执行当前流程所需的协作依赖；约束：无额外运行时限制。
-    - `event_type`（str）：要发布的事件类型名称；约束：无额外运行时限制。
-    - `state`（Mapping[str, Any]）：当前可恢复的工作流状态，包含本阶段所需数据；约束：无额外运行时限制。
-    - `node_name`（str）：当前图节点的稳定名称；约束：无额外运行时限制。
-    - `invocation_id`（str）：本次图或模型调用的关联标识；约束：无额外运行时限制。
-    - `started_at`（datetime | None）：操作开始时间，用于记录运行时间信息；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
-    - `duration_ms`（int | None）：本阶段测得的耗时毫秒数；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
-    - `error`（str | None）：操作失败时捕获的异常或错误说明；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
-    - `summary`（str | None）：面向用户或后续流程的简要结果说明；约束：允许为 None，按未提供值的分支处理；可省略，默认值为 `None`。
-
-    返回：
-    - None：操作完成后不提供返回数据。
-
-    异常：
-    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-    """
-    try:
-        request = RootRequestState.model_validate(state.get("request", {}))
-        from domain.events import ApplicationEvent, EventDurability
-
-        await dependencies.event_publisher.publish(
-            ApplicationEvent(
-                event_type=event_type,
-                durability=EventDurability.DURABLE,
-                session_id=request.session_id,
-                run_id=request.run_id or None,
-                message_id=request.message_id or None,
-                payload={
-                    "activity_id": f"node:{request.run_id}:{invocation_id}",
-                    "invocation_id": invocation_id,
-                    "activity_type": "node",
-                    "parent_activity_id": f"run:{request.run_id}",
-                    "node": node_name,
-                    "name": node_name,
-                    "status": {
-                        "node.started": "running",
-                        "node.failed": "failed",
-                    }.get(event_type, "completed"),
-                    **({"started_at": started_at.isoformat()} if started_at else {}),
-                    **(
-                        {
-                            "completed_at": datetime.now(timezone.utc).isoformat(),
-                            "duration_ms": duration_ms,
-                        }
-                        if duration_ms is not None
-                        else {}
-                    ),
-                    **(
-                        {
-                            "error": {
-                                "code": "node_failed",
-                                "message": error,
-                                "stage": node_name,
-                            }
-                        }
-                        if error
-                        else {}
-                    ),
-                    **({"summary": summary[:500]} if summary else {}),
-                },
-            ),
-        )
-    except Exception:
-        return
-
-
 def _node(
     name: str,
     handler: Callable[[RootGraphState], Awaitable[dict[str, Any]]],
     dependencies: RootWorkflowDependencies,
 ):
-    """包装 Root 工作流处理器，并统一记录节点开始、完成和失败事件。
+    """包装 Root 工作流处理器并记录节点 Trace span。
 
     参数：
     - `name`（str）：目标名称，用于标识相应配置、工具或对象；约束：无额外运行时限制。
@@ -148,30 +73,36 @@ def _node(
         异常：
         - 无预期业务异常；依赖调用产生的异常按当前实现传播。
         """
-        invocation_id = uuid4().hex
-        started_at = datetime.now(timezone.utc)
-        started_clock = perf_counter()
-        await _publish(
-            dependencies,
-            "node.started",
-            state,
-            node_name=name,
-            invocation_id=invocation_id,
-            started_at=started_at,
-        )
+        request = RootRequestState.model_validate(state.get("request", {}))
+        span = None
+        token = None
+        if dependencies.observability is not None and request.run_id:
+            span = await dependencies.observability.start_span(
+                session_id=request.session_id,
+                run_id=request.run_id,
+                name=name,
+                attributes=RootNodeSpanAttributes(node_name=name),
+                parent_span_id=run_span_id(request.run_id),
+            )
+            token = bind_span(span.span_id)
         try:
             value = await handler(state)
+        except GraphInterrupt:
+            if dependencies.observability is not None and span is not None:
+                await dependencies.observability.finish_span(
+                    span.span_id, status="suspended"
+                )
+            raise
         except Exception as exc:
-            await _publish(
-                dependencies,
-                "node.failed",
-                state,
-                node_name=name,
-                invocation_id=invocation_id,
-                started_at=started_at,
-                duration_ms=int((perf_counter() - started_clock) * 1000),
-                error=type(exc).__name__,
-            )
+            if dependencies.observability is not None and span is not None:
+                await dependencies.observability.finish_span(
+                    span.span_id,
+                    status="failed",
+                    error={
+                        "code": str(getattr(exc, "code", "node_failed")),
+                        "message": type(exc).__name__,
+                    },
+                )
             return {
                 "status": "failed",
                 "error": {
@@ -185,96 +116,15 @@ def _node(
                     ),
                 },
             }
-        await _publish(
-            dependencies,
-            "node.completed",
-            state,
-            node_name=name,
-            invocation_id=invocation_id,
-            started_at=started_at,
-            duration_ms=int((perf_counter() - started_clock) * 1000),
-            summary=_node_result_summary(name, value),
-        )
+        finally:
+            if token is not None:
+                reset_span(token)
+        if dependencies.observability is not None and span is not None:
+            await dependencies.observability.finish_span(span.span_id)
         return value or {}
 
     wrapped.__name__ = name
     return wrapped
-
-
-def _node_result_summary(node_name: str, value: Any) -> str | None:
-    """从节点返回值中提取适合展示的结果概述，不包含原文或模型推理。
-
-    参数：
-    - `node_name`（str）：当前图节点的稳定名称；约束：无额外运行时限制。
-    - `value`（Any）：待解析、校验或转换的输入值；约束：无额外运行时限制。
-
-    返回：
-    - str | None：适合写入事件的结果摘要；无可展示字段时返回 None。
-
-    异常：
-    - 无预期业务异常；依赖调用产生的异常按当前实现传播。
-    """
-    if not isinstance(value, Mapping):
-        return None
-
-    # 按节点挑选有限字段生成摘要，事件中不包含模型原文、用户正文或推理内容。
-    if node_name == "prepare_request":
-        request = value.get("request", {})
-        attachments = (
-            request.get("attachment_ids", []) if isinstance(request, Mapping) else []
-        )
-        knowledge_bases = value.get("knowledge_bases", [])
-        return (
-            f"请求上下文已准备；附件 {len(attachments) if isinstance(attachments, list) else 0} 个，"
-            f"可用知识库 {len(knowledge_bases) if isinstance(knowledge_bases, list) else 0} 个。"
-        )
-
-    if node_name == "prefetch_context":
-        bundle = value.get("context_bundle", {})
-        items = bundle.get("items", []) if isinstance(bundle, Mapping) else []
-        outcomes = value.get("context_queries", [])
-        count = len(items) if isinstance(items, list) else 0
-        outcome_count = len(outcomes) if isinstance(outcomes, list) else 0
-        return f"资料窗口包含 {count} 条资料；记录了 {outcome_count} 项查询结果。"
-
-    if node_name == "decide_root_action":
-        decision = value.get("root_decision", {})
-        action = decision.get("action") if isinstance(decision, Mapping) else None
-        action_labels = {
-            "answer": "直接回答",
-            "plan": "制定执行计划",
-        }
-        if action in action_labels:
-            return f"处理方式已确定：{action_labels[action]}。"
-        return "本阶段结束，流程将按当前状态继续。"
-
-    if node_name == "generate_plan":
-        draft = value.get("plan_draft")
-        if isinstance(draft, Mapping):
-            tasks = draft.get("tasks", [])
-            if isinstance(tasks, list):
-                return f"已生成计划草稿，包含 {len(tasks)} 项任务。"
-        feedback = value.get("planning_feedback")
-        if isinstance(feedback, Mapping):
-            missing = feedback.get("missing_information", [])
-            count = len(missing) if isinstance(missing, list) else 0
-            return f"计划需要补充信息，共 {count} 项。"
-        return None
-
-    if node_name == "materialize_execution_plan":
-        plan = value.get("plan", {})
-        tasks = plan.get("tasks", []) if isinstance(plan, Mapping) else []
-        count = len(tasks) if isinstance(tasks, list) else 0
-        return f"执行计划已提交，包含 {count} 项任务。"
-
-    if node_name == "generate_answer":
-        return "最终回答已生成，正文见下方消息。"
-
-    if node_name == "assemble_final_response":
-        status = value.get("status")
-        return "请求处理完成。" if status == "completed" else "请求处理未完成。"
-
-    return None
 
 
 def _route_after_request(state: RootGraphState) -> str:
@@ -478,8 +328,14 @@ def build_root_graph(
     graph = StateGraph(RootGraphState)
     for name, handler in handlers.items():
         graph.add_node(name, _node(name, handler, dependencies))
-    # 此节点负责 LangGraph 中断边界，不能由 _node 包装，否则会捕获中断并将其误报为应用错误。
-    graph.add_node("wait_for_plan_completion", _wait_for_plan_completion_node(workflow))
+    graph.add_node(
+        "wait_for_plan_completion",
+        _node(
+            "wait_for_plan_completion",
+            _wait_for_plan_completion_node(workflow),
+            dependencies,
+        ),
+    )
     graph.add_edge(START, "prepare_request")
     graph.add_conditional_edges(
         "prepare_request",

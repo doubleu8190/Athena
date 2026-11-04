@@ -20,6 +20,7 @@ import type {
   SessionRunSummary,
   RunListResponse,
   RunTimelineResponse,
+  RunTraceResponse,
   RunOrchestrationSnapshot,
   ProviderInfo,
   SettingsView,
@@ -233,9 +234,15 @@ class ApiClient {
     return this.request<SessionRunSummary[]>(`/api/sessions/${encodeURIComponent(sessionId)}/runs`)
   }
 
-  async listRuns(limit = 50, offset = 0, sessionId?: string): Promise<RunListResponse> {
+  async listRuns(
+    limit = 50,
+    offset = 0,
+    sessionId?: string,
+    terminalOnly = false,
+  ): Promise<RunListResponse> {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     if (sessionId) params.set("session_id", sessionId)
+    if (terminalOnly) params.set("terminal_only", "true")
     return this.request<RunListResponse>(`/api/runs?${params.toString()}`)
   }
 
@@ -243,6 +250,13 @@ class ApiClient {
     const params = new URLSearchParams({ after: String(after), limit: String(limit) })
     return this.request<RunTimelineResponse>(
       `/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(runId)}/timeline?${params.toString()}`,
+    )
+  }
+
+  /** 读取已完成 Run 的后端 Trace span 列表。 */
+  async getRunTrace(runId: string): Promise<RunTraceResponse> {
+    return this.request<RunTraceResponse>(
+      `/api/runs/${encodeURIComponent(runId)}/trace`,
     )
   }
 

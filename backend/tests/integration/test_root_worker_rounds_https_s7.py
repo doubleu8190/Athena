@@ -334,7 +334,12 @@ class _RecordingLLMProvider:
     [
         (
             PlanIntent(action="plan", goal="goal", instructions="plan"),
-            {"action": "str", "goal": "str", "instructions": "str"},
+                {
+                    "action": "str",
+                    "goal": "str",
+                    "instructions": "str",
+                    "progress": "NoneType",
+                },
         ),
         (
             {"action": "plan", "tasks": []},
@@ -848,9 +853,48 @@ async def _run_root_worker_rounds(
                         {"sequence": item.sequence, "status": item.status}
                         for item in plans
                     ],
-                    "tasks": [item.status for item in tasks],
-                    "executions": [item.status for item in executions],
-                    "commands": [item.status for item in commands],
+                    "tasks": [
+                        {
+                            "status": item.status,
+                            "active_execution_id": item.active_execution_id,
+                            "execution_generation": item.execution_generation,
+                            "cancellation_epoch": item.cancellation_epoch,
+                        }
+                        for item in tasks
+                    ],
+                    "executions": [
+                        {
+                            "status": item.status,
+                            "instance_id": item.instance_id,
+                            "generation": item.generation,
+                            "cancellation_epoch": item.cancellation_epoch,
+                            "capacity_reserved": item.capacity_reserved,
+                        }
+                        for item in executions
+                    ],
+                    "commands": [
+                        {
+                            "command_type": item.command_type,
+                            "status": item.status,
+                            "instance_id": item.instance_id,
+                            "attempt": item.attempt,
+                            "send_attempt_count": item.send_attempt_count,
+                            "delivery_uncertain_before_send": (
+                                item.delivery_uncertain_before_send
+                            ),
+                            "lease_owner_present": item.lease_owner is not None,
+                            "lease_until": (
+                                item.lease_until.isoformat()
+                                if item.lease_until is not None
+                                else None
+                            ),
+                            "available_at": item.available_at.isoformat(),
+                            "receipt_present": item.receipt_json is not None,
+                            "created_at": item.created_at.isoformat(),
+                            "updated_at": item.updated_at.isoformat(),
+                        }
+                        for item in commands
+                    ],
                     "result_receipts": [item.disposition for item in receipts],
                     "jobs": [
                         {
@@ -896,6 +940,38 @@ async def _run_root_worker_rounds(
             async def current_run_status() -> str | None:
                 async with sessions() as status_session:
                     current = await status_session.get(AgentRunModel, run_id)
+                    superseded_execute = await status_session.scalar(
+                        select(OrchestratorWorkerCommandModel.command_id)
+                        .join(
+                            OrchestratorExecutionModel,
+                            OrchestratorWorkerCommandModel.execution_id
+                            == OrchestratorExecutionModel.execution_id,
+                        )
+                        .join(
+                            OrchestratorTaskModel,
+                            OrchestratorExecutionModel.task_id
+                            == OrchestratorTaskModel.task_id,
+                        )
+                        .join(
+                            OrchestratorPlanModel,
+                            OrchestratorTaskModel.plan_id
+                            == OrchestratorPlanModel.plan_id,
+                        )
+                        .where(
+                            OrchestratorPlanModel.run_id == run_id,
+                            OrchestratorWorkerCommandModel.command_type == "execute",
+                            OrchestratorWorkerCommandModel.status == "superseded",
+                        )
+                        .limit(1)
+                    )
+                    if (
+                        current is not None
+                        and current.status == "running"
+                        and superseded_execute is not None
+                    ):
+                        # execute command 不可能在父级仍有效时永久 supersede；
+                        # 立即进入统一安全快照，避免等待真实 LLM 预算耗尽。
+                        return "failed"
                     return current.status if current is not None else None
 
             async def wait_for_run_condition(
@@ -963,38 +1039,6 @@ async def _run_root_worker_rounds(
                 timeout=root_phase_timeout,
                 label="second_plan_created",
             )
-            await root_resume_dispatcher.stop()
-            background.remove(root_resume_dispatcher)
-
-            async def second_plan_waiting_for_resume() -> bool:
-                async with sessions() as session:
-                    plan = await session.scalar(
-                        select(OrchestratorPlanModel).where(
-                            OrchestratorPlanModel.run_id == run_id,
-                            OrchestratorPlanModel.sequence == 2,
-                        )
-                    )
-                    job = await session.scalar(
-                        select(OrchestratorRootResumeJobModel).where(
-                            OrchestratorRootResumeJobModel.run_id == run_id,
-                            OrchestratorRootResumeJobModel.plan_id
-                            == (plan.plan_id if plan is not None else ""),
-                        )
-                    )
-                    return (
-                        plan is not None
-                        and plan.status == "completed"
-                        and job is not None
-                        and job.status == "pending"
-                    )
-
-            await wait_for_run_condition(
-                second_plan_waiting_for_resume,
-                timeout=root_phase_timeout,
-                label="second_plan_waiting_for_resume",
-            )
-            await root_resume_dispatcher.start()
-            background.append(root_resume_dispatcher)
 
             async def run_completed() -> bool:
                 async with sessions() as session:

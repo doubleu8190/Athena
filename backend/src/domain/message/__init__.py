@@ -1,0 +1,47 @@
+"""消息领域公共接口。"""
+
+from domain.message.model import (
+    ConversationMessage,
+    ConversationMessageDraft,
+    ConversationMessagePage,
+    ConversationRole,
+    ExecutionMessage,
+    ExecutionMessageDraft,
+    ExecutionRole,
+    FileRefPart,
+    InvalidMessageError,
+    InvalidMessageReferenceError,
+    MessageConflictError,
+    MessageMetadata,
+    MessagePart,
+    MessageStatus,
+    SessionNotFoundError,
+    TextPart,
+    ToolCallPart,
+    ToolResultPart,
+    ToolResultStatus,
+)
+from domain.message.ports import MessageRepository
+
+__all__ = [
+    "ConversationMessage",
+    "ConversationMessageDraft",
+    "ConversationMessagePage",
+    "ConversationRole",
+    "ExecutionMessage",
+    "ExecutionMessageDraft",
+    "ExecutionRole",
+    "FileRefPart",
+    "InvalidMessageError",
+    "InvalidMessageReferenceError",
+    "MessageConflictError",
+    "MessageMetadata",
+    "MessagePart",
+    "MessageRepository",
+    "MessageStatus",
+    "SessionNotFoundError",
+    "TextPart",
+    "ToolCallPart",
+    "ToolResultPart",
+    "ToolResultStatus",
+]

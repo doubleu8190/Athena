@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.auth import AuthCookieConfig, build_auth_router
+from api.security import AdminAuth
 from app.auth.rate_limit import FixedWindowRateLimiter
 from app.auth.service import (
     DEFAULT_SESSION_SECONDS,
@@ -23,6 +24,7 @@ from domain.auth import (
     EmailAlreadyRegisteredError,
     PasswordHasher,
     User,
+    UserRole,
     UserStatus,
 )
 
@@ -83,6 +85,34 @@ class InMemoryAuthRepository(AuthRepository):
         if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
             return None
         return AuthContext(user=user, session_id=auth_session.id)
+
+    async def get_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> User | None:
+        session = next((item for item in self.sessions.values() if item.id == session_id), None)
+        user = self.users.get(user_id)
+        if session is None or session.user_id != user_id or session.revoked_time is not None:
+            return None
+        if session.expires_at <= now or user is None:
+            return None
+        if user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
+            return None
+        return user
+
+    async def promote_active_user_by_email(
+        self,
+        email: str,
+        updated_at: datetime,
+    ) -> User | None:
+        user = await self.get_user_by_email(email)
+        if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
+            return None
+        promoted = replace(user, role=UserRole.ADMIN, updated_at=updated_at)
+        self.users[user.id] = promoted
+        return promoted
 
     async def revoke_session(
         self,
@@ -205,7 +235,11 @@ def test_register_sets_http_only_cookie_and_me_returns_user() -> None:
     assert response.status_code == 201
     assert response.json()["email"] == "user@example.com"
     assert response.json()["display_name"] == "Athena"
+    assert response.json()["role"] == "user"
     assert "password" not in response.json()
+    assert "password_hash" not in response.json()
+    assert "status" not in response.json()
+    assert "deleted_time" not in response.json()
     assert "httponly" in cookie
     assert "samesite=lax" in cookie
     assert "path=/" in cookie
@@ -213,6 +247,48 @@ def test_register_sets_http_only_cookie_and_me_returns_user() -> None:
     assert response.headers["cache-control"] == "no-store"
     assert me.status_code == 200
     assert me.json()["id"] == response.json()["id"]
+    assert me.json()["role"] == "user"
+
+
+def test_admin_dependency_returns_401_403_and_allows_current_admin() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    current_user = User(
+        id="usr_admin_check",
+        email="admin-check@example.com",
+        password_hash="not-exposed",
+        display_name=None,
+        status=UserStatus.ACTIVE,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    context = AuthContext(user=current_user, session_id="ses_admin_check")
+    auth_state = {"context": context}
+
+    class AuthenticatorStub:
+        async def authenticate(self, token: str) -> AuthContext | None:
+            return auth_state["context"] if token == "valid" else None
+
+    app = FastAPI()
+    app.state.authenticator = AuthenticatorStub()
+    app.state.auth_cookie_name = "athena_session"
+
+    @app.get("/admin-check")
+    async def admin_check(_: AdminAuth) -> dict[str, bool]:
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        unauthenticated = client.get("/admin-check")
+        client.cookies.set("athena_session", "valid")
+        non_admin = client.get("/admin-check")
+        auth_state["context"] = replace(
+            context,
+            user=replace(context.user, role=UserRole.ADMIN),
+        )
+        admin = client.get("/admin-check")
+
+    assert unauthenticated.status_code == 401
+    assert non_admin.status_code == 403
+    assert admin.status_code == 200
 
 
 def test_cookie_can_be_secure_and_remember_me_extends_max_age() -> None:
@@ -236,6 +312,8 @@ def test_cookie_can_be_secure_and_remember_me_extends_max_age() -> None:
 
     assert "secure" in register.headers["set-cookie"].lower()
     assert f"max-age={REMEMBER_SESSION_SECONDS}" in login.headers["set-cookie"].lower()
+    assert register.json()["role"] == "user"
+    assert login.json()["role"] == "user"
 
 
 def test_login_errors_and_logout_are_stable() -> None:

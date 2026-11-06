@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request, status
 
-from domain.auth import AuthContext, Authenticator
+from domain.auth import AuthContext, Authenticator, UserRole
 
 NOT_AUTHENTICATED = "not_authenticated"
 ORIGIN_NOT_ALLOWED = "origin_not_allowed"
@@ -89,11 +89,30 @@ async def get_current_auth(request: Request) -> AuthContext:
 CurrentAuth = Annotated[AuthContext, Depends(get_current_auth)]
 
 
+async def require_admin(current_auth: CurrentAuth) -> AuthContext:
+    """基于本次数据库认证结果预检查管理员角色。
+
+    管理操作服务仍须调用 AuthService.revalidate_admin，避免把依赖层检查当作
+    事务内最终授权。此依赖不读取任何管理资源。
+    """
+    if current_auth.user.role is not UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="admin_required",
+        )
+    return current_auth
+
+
+AdminAuth = Annotated[AuthContext, Depends(require_admin)]
+
+
 __all__ = [
     "CurrentAuth",
+    "AdminAuth",
     "DEFAULT_COOKIE_NAME",
     "NOT_AUTHENTICATED",
     "ORIGIN_NOT_ALLOWED",
     "get_current_auth",
+    "require_admin",
     "verify_request_origin",
 ]

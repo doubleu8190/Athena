@@ -17,6 +17,7 @@ from app.auth.model.result import IssuedAuthResult
 from app.auth.rate_limit import FixedWindowRateLimiter, RateLimiter
 from common.ids import new_id, now_utc
 from domain.auth import (
+    AdminPromotionError,
     AuthContext,
     AuthRepository,
     AuthSession,
@@ -29,6 +30,7 @@ from domain.auth import (
     PasswordHasher,
     RateLimitExceededError,
     User,
+    UserRole,
     UserStatus,
 )
 
@@ -182,6 +184,7 @@ class AuthService:
             ),
             display_name=normalized_display_name,
             status=UserStatus.ACTIVE,
+            role=UserRole.USER,
             created_at=current,
             updated_at=current,
         )
@@ -272,6 +275,39 @@ class AuthService:
             _hash_token(token),
             _utc_value(self._clock()),
         )
+
+    async def revalidate_admin(self, context: AuthContext) -> User | None:
+        """按会话 ID 从数据库复核当前有效用户及管理员角色。
+
+        参数：context 是认证依赖提供的用户与会话标识。
+        返回：当前仍有效且为管理员的用户；否则返回 None。
+        异常：仓储故障会原样传播。
+        """
+        user = await self._repository.get_current_session_user(
+            context.user.id,
+            context.session_id,
+            _utc_value(self._clock()),
+        )
+        return user if user is not None and user.role is UserRole.ADMIN else None
+
+    async def promote_admin_by_email(self, email: str) -> User:
+        """将已有 active 且未删除账号提升为管理员。
+
+        参数：email 是待提升账号的邮箱地址。
+        返回：角色更新后的用户。
+        异常：邮箱无效或账号不存在、停用、已删除时抛 AdminPromotionError。
+        """
+        try:
+            normalized_email = _normalize_email(email)
+        except InvalidEmailError as error:
+            raise AdminPromotionError("admin_promotion_unavailable") from error
+        user = await self._repository.promote_active_user_by_email(
+            normalized_email,
+            _utc_value(self._clock()),
+        )
+        if user is None:
+            raise AdminPromotionError("admin_promotion_unavailable")
+        return user
 
     async def logout(self, token: str) -> None:
         """撤销当前 token；未知或已失效 token 保持幂等。"""

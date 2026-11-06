@@ -1,7 +1,8 @@
 """认证领域模型与异常。"""
 
-from domain.auth.model.entity import AuthContext, AuthSession, User, UserStatus
+from domain.auth.model.entity import AuthContext, AuthSession, User, UserRole, UserStatus
 from domain.auth.model.errors import (
+    AdminPromotionError,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
@@ -13,6 +14,7 @@ from domain.auth.model.errors import (
 )
 
 __all__ = [
+    "AdminPromotionError",
     "AuthContext",
     "AuthSession",
     "EmailAlreadyRegisteredError",
@@ -24,5 +26,6 @@ __all__ = [
     "InvalidSessionError",
     "RateLimitExceededError",
     "User",
+    "UserRole",
     "UserStatus",
 ]

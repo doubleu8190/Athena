@@ -13,6 +13,7 @@ def user_to_result(user: User) -> UserResult:
         email=user.email,
         display_name=user.display_name,
         created_at=user.created_at,
+        role=user.role,
     )
 
 

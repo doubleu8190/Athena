@@ -45,6 +45,21 @@ class AuthRepository(Protocol):
     ) -> AuthContext | None:
         """读取未撤销、未过期且用户可用的登录上下文。"""
 
+    async def get_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> User | None:
+        """独立只读预检查；不为后续写事务提供并发授权保证。"""
+
+    async def promote_active_user_by_email(
+        self,
+        email: str,
+        updated_at: datetime,
+    ) -> User | None:
+        """锁定账号行，将现存 active 且未删除账号设为管理员。"""
+
     async def revoke_session(
         self,
         token_hash: str,
@@ -71,4 +86,15 @@ class Authenticator(Protocol):
         """验证原始 token 并返回登录上下文。"""
 
 
-__all__ = ["AuthRepository", "Authenticator", "PasswordHasher"]
+class AuthTransactionGuard(Protocol):
+    """绑定到调用方事务、为最终管理操作复核身份的窄能力。"""
+
+    async def lock_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> User | None:
+        """在调用方事务中按 user 后 session 的顺序锁行并检查当前有效身份。"""
+
+
+__all__ = ["AuthRepository", "AuthTransactionGuard", "Authenticator", "PasswordHasher"]

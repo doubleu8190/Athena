@@ -11,7 +11,9 @@ from secrets import token_hex
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -22,6 +24,7 @@ from domain.auth import (
     AuthSession,
     EmailAlreadyRegisteredError,
     User,
+    UserRole,
     UserStatus,
 )
 
@@ -62,11 +65,12 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
             migration_config.attributes["connect_args"] = {
                 "server_settings": {"search_path": schema}
             }
+            expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
             await asyncio.to_thread(command.upgrade, migration_config, "head")
 
             async with test_engine.connect() as connection:
                 revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert revision == "20261105_0005"
+            assert revision == expected_head
 
             session_factory = async_sessionmaker(
                 test_engine,
@@ -100,7 +104,13 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                 created_at=timestamp,
             )
             await repository.create_user_with_session(user, first)
+            assert user.role is UserRole.USER
             await repository.create_session(second)
+            promoted = await repository.promote_active_user_by_email(user.email, timestamp)
+            assert promoted is not None and promoted.role is UserRole.ADMIN
+            assert (
+                await repository.get_current_session_user(user.id, first.id, timestamp)
+            ) == promoted
 
             with pytest.raises(EmailAlreadyRegisteredError):
                 await repository.create_user_with_session(
@@ -199,6 +209,23 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                 sum(isinstance(item, EmailAlreadyRegisteredError) for item in concurrent_results)
                 == 1
             )
+
+            await asyncio.to_thread(command.downgrade, migration_config, "20261105_0005")
+            await asyncio.to_thread(command.upgrade, migration_config, "head")
+            async with test_engine.connect() as connection:
+                assert (
+                    await connection.scalar(
+                        text("SELECT role FROM users WHERE id = :user_id"),
+                        {"user_id": user.id},
+                    )
+                    == UserRole.USER.value
+                )
+            with pytest.raises(IntegrityError):
+                async with test_engine.begin() as connection:
+                    await connection.execute(
+                        text("UPDATE users SET role = 'owner' WHERE id = :user_id"),
+                        {"user_id": user.id},
+                    )
         finally:
             await test_engine.dispose()
             async with admin_engine.begin() as connection:

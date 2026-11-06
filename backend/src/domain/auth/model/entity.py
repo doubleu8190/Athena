@@ -14,6 +14,13 @@ class UserStatus(StrEnum):
     DISABLED = "disabled"
 
 
+class UserRole(StrEnum):
+    """用户可拥有的基础权限角色。"""
+
+    ADMIN = "admin"
+    USER = "user"
+
+
 @dataclass(frozen=True, slots=True)
 class User:
     """平台用户及其密码凭据。"""
@@ -25,6 +32,7 @@ class User:
     status: UserStatus
     created_at: datetime
     updated_at: datetime
+    role: UserRole = UserRole.USER
     deleted_time: datetime | None = None
 
 
@@ -48,4 +56,4 @@ class AuthContext:
     session_id: str
 
 
-__all__ = ["AuthContext", "AuthSession", "User", "UserStatus"]
+__all__ = ["AuthContext", "AuthSession", "User", "UserRole", "UserStatus"]

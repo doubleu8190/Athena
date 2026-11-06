@@ -16,6 +16,7 @@ from domain.auth import (
     AuthSession,
     EmailAlreadyRegisteredError,
     User,
+    UserRole,
     UserStatus,
 )
 
@@ -43,6 +44,7 @@ class SqlAlchemyAuthRepository(AuthRepository):
                             password_hash=user.password_hash,
                             display_name=user.display_name,
                             status=user.status.value,
+                            role=user.role.value,
                             created_at=user.created_at,
                             updated_at=user.updated_at,
                             deleted_time=user.deleted_time,
@@ -117,6 +119,53 @@ class SqlAlchemyAuthRepository(AuthRepository):
             user=user_to_domain(user_row),
             session_id=auth_session_to_domain(auth_row).id,
         )
+
+    async def get_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> User | None:
+        """从数据库重新验证会话并返回用户当前角色。"""
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(UserModel)
+                .join(AuthSessionModel, AuthSessionModel.user_id == UserModel.id)
+                .where(
+                    UserModel.id == user_id,
+                    UserModel.status == UserStatus.ACTIVE.value,
+                    UserModel.deleted_time.is_(None),
+                    AuthSessionModel.id == session_id,
+                    AuthSessionModel.revoked_time.is_(None),
+                    AuthSessionModel.expires_at > now,
+                )
+            )
+        return None if row is None else user_to_domain(row)
+
+    async def promote_active_user_by_email(
+        self,
+        email: str,
+        updated_at: datetime,
+    ) -> User | None:
+        """锁定用户行并幂等提升仍可用的账号。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(UserModel)
+                    .where(
+                        UserModel.email == email,
+                        UserModel.status == UserStatus.ACTIVE.value,
+                        UserModel.deleted_time.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if row is None:
+                    return None
+                if row.role != UserRole.ADMIN.value:
+                    row.role = UserRole.ADMIN.value
+                    row.updated_at = updated_at
+                    await session.flush()
+                return user_to_domain(row)
 
     async def revoke_session(
         self,

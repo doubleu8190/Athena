@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from domain.auth import UserRole
+
 
 @dataclass(frozen=True, slots=True)
 class UserResult:
@@ -14,6 +16,7 @@ class UserResult:
     email: str
     display_name: str | None
     created_at: datetime
+    role: UserRole
 
 
 @dataclass(frozen=True, slots=True)

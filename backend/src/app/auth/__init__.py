@@ -9,6 +9,7 @@ from app.auth.service import (
     AuthService,
 )
 from domain.auth import (
+    AdminPromotionError,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
@@ -20,6 +21,7 @@ from domain.auth import (
 )
 
 __all__ = [
+    "AdminPromotionError",
     "AuthService",
     "DEFAULT_SESSION_SECONDS",
     "EmailAlreadyRegisteredError",

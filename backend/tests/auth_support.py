@@ -18,6 +18,7 @@ from domain.auth import (
     EmailAlreadyRegisteredError,
     PasswordHasher,
     User,
+    UserRole,
     UserStatus,
 )
 
@@ -80,6 +81,38 @@ class InMemoryAuthRepository(AuthRepository):
         if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
             return None
         return AuthContext(user=user, session_id=auth_session.id)
+
+    async def get_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> User | None:
+        session = next((item for item in self.sessions.values() if item.id == session_id), None)
+        user = self.users.get(user_id)
+        if (
+            session is None
+            or session.user_id != user_id
+            or session.revoked_time is not None
+            or session.expires_at <= now
+            or user is None
+            or user.status is not UserStatus.ACTIVE
+            or user.deleted_time is not None
+        ):
+            return None
+        return user
+
+    async def promote_active_user_by_email(
+        self,
+        email: str,
+        updated_at: datetime,
+    ) -> User | None:
+        user = await self.get_user_by_email(email)
+        if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
+            return None
+        promoted = replace(user, role=UserRole.ADMIN, updated_at=updated_at)
+        self.users[user.id] = promoted
+        return promoted
 
     async def revoke_session(
         self,

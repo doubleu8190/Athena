@@ -8,16 +8,21 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from adapter.auth.model import AuthSessionModel, UserModel
-from adapter.auth.repository import SqlAlchemyAuthRepository
+from adapter.auth.repository import (
+    SqlAlchemyAuthRepository,
+    SqlAlchemyAuthTransactionGuard,
+)
 from adapter.models import Base
 from domain.auth import (
     AuthSession,
     EmailAlreadyRegisteredError,
     User,
+    UserRole,
     UserStatus,
 )
 
@@ -201,6 +206,182 @@ def test_password_change_revokes_other_sessions_and_keeps_current() -> None:
             assert await repository.get_active_session("1" * 64, changed_at) is None
             assert await repository.get_active_session("2" * 64, changed_at) is not None
             assert await repository.get_active_session("3" * 64, changed_at) is None
+        finally:
+            await engine.dispose()
+
+    _run(scenario())
+
+
+def test_repository_revalidates_current_role_and_session_state() -> None:
+    async def scenario() -> None:
+        engine, session_factory, repository = await _make_repository()
+        try:
+            now = datetime(2026, 1, 2, tzinfo=UTC)
+            user = _user("usr_role", "role@example.com")
+            auth_session = _session("ses_role", user.id, "e" * 64)
+            await repository.create_user_with_session(user, auth_session)
+
+            async with session_factory() as db_session:
+                async with db_session.begin():
+                    row = await db_session.get(UserModel, user.id)
+                    assert row is not None
+                    row.role = UserRole.ADMIN.value
+
+            context = await repository.get_active_session(auth_session.token_hash, now)
+            assert context is not None
+            assert context.user.role is UserRole.ADMIN
+            assert (
+                await repository.get_current_session_user(user.id, auth_session.id, now)
+            ) == context.user
+
+            assert await repository.revoke_session(auth_session.token_hash, now)
+            assert await repository.get_current_session_user(user.id, auth_session.id, now) is None
+        finally:
+            await engine.dispose()
+
+    _run(scenario())
+
+
+def test_repository_promotes_only_active_non_deleted_users_idempotently() -> None:
+    async def scenario() -> None:
+        engine, _, repository = await _make_repository()
+        try:
+            timestamp = datetime(2026, 1, 2, tzinfo=UTC)
+            active = _user("usr_active_promote", "promote@example.com")
+            disabled = _user(
+                "usr_disabled_promote",
+                "disabled-promote@example.com",
+                status=UserStatus.DISABLED,
+            )
+            deleted = _user("usr_deleted_promote", "deleted-promote@example.com", deleted=True)
+            for user in (active, disabled, deleted):
+                await repository.create_user_with_session(
+                    user,
+                    _session(f"ses_{user.id}", user.id, (user.id * 64)[:64]),
+                )
+
+            promoted = await repository.promote_active_user_by_email(active.email, timestamp)
+            assert promoted is not None and promoted.role is UserRole.ADMIN
+            assert (
+                await repository.promote_active_user_by_email(
+                    active.email,
+                    timestamp + timedelta(days=1),
+                )
+                == promoted
+            )
+            assert await repository.promote_active_user_by_email(disabled.email, timestamp) is None
+            assert await repository.promote_active_user_by_email(deleted.email, timestamp) is None
+            assert (
+                await repository.promote_active_user_by_email("missing@example.com", timestamp)
+                is None
+            )
+        finally:
+            await engine.dispose()
+
+    _run(scenario())
+
+
+def test_transaction_guard_checks_locked_user_and_session_state() -> None:
+    async def scenario() -> None:
+        engine, session_factory, repository = await _make_repository()
+        try:
+            now = datetime(2026, 1, 2, tzinfo=UTC)
+            cases = (
+                ("admin", UserStatus.ACTIVE, False, False),
+                ("disabled", UserStatus.DISABLED, False, False),
+                ("deleted", UserStatus.ACTIVE, True, False),
+                ("revoked", UserStatus.ACTIVE, False, True),
+                ("expired", UserStatus.ACTIVE, False, False),
+                ("expires_after_lock", UserStatus.ACTIVE, False, False),
+            )
+            for suffix, status, deleted, revoked in cases:
+                user = _user(
+                    f"usr_guard_{suffix}",
+                    f"guard-{suffix}@example.com",
+                    status=status,
+                    deleted=deleted,
+                )
+                auth_session = _session(
+                    f"ses_guard_{suffix}",
+                    user.id,
+                    (suffix.encode().hex() * 64)[:64],
+                    expires_at=(
+                        now - timedelta(seconds=1)
+                        if suffix == "expired"
+                        else now + timedelta(seconds=1)
+                        if suffix == "expires_after_lock"
+                        else None
+                    ),
+                )
+                if revoked:
+                    auth_session = AuthSession(
+                        id=auth_session.id,
+                        user_id=auth_session.user_id,
+                        token_hash=auth_session.token_hash,
+                        expires_at=auth_session.expires_at,
+                        revoked_time=now - timedelta(seconds=1),
+                        created_at=auth_session.created_at,
+                    )
+                await repository.create_user_with_session(user, auth_session)
+                if suffix == "admin":
+                    async with session_factory() as db_session:
+                        async with db_session.begin():
+                            row = await db_session.get(UserModel, user.id)
+                            assert row is not None
+                            row.role = UserRole.ADMIN.value
+                statements: list[str] = []
+
+                def record_statement(
+                    _connection: Any,
+                    _cursor: Any,
+                    statement: str,
+                    _parameters: Any,
+                    _context: Any,
+                    _many: bool,
+                    statement_log: list[str] = statements,
+                ) -> None:
+                    statement_log.append(statement.lower())
+
+                event.listen(
+                    engine.sync_engine,
+                    "before_cursor_execute",
+                    record_statement,
+                )
+
+                def lock_time_clock(statement_log: list[str] = statements) -> datetime:
+                    assert statement_log and "auth_sessions" in statement_log[-1]
+                    return now + timedelta(seconds=2)
+
+                async with session_factory() as db_session:
+                    async with db_session.begin():
+                        guard = SqlAlchemyAuthTransactionGuard(
+                            db_session,
+                            clock=(
+                                lock_time_clock if suffix == "expires_after_lock" else lambda: now
+                            ),
+                        )
+                        actual = await guard.lock_current_session_user(
+                            user.id,
+                            auth_session.id,
+                        )
+                        if suffix == "admin":
+                            assert actual is not None and actual.role is UserRole.ADMIN
+                        else:
+                            assert actual is None
+                        assert (
+                            await guard.lock_current_session_user(
+                                "different-user",
+                                auth_session.id,
+                            )
+                            is None
+                        )
+                        assert (
+                            await guard.lock_current_session_user(
+                                user.id,
+                                "different-session",
+                            )
+                            is None
+                        )
         finally:
             await engine.dispose()
 

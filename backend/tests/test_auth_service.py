@@ -18,6 +18,7 @@ from app.auth.service import (
     AuthService,
 )
 from domain.auth import (
+    AdminPromotionError,
     AuthContext,
     AuthRepository,
     AuthSession,
@@ -30,6 +31,7 @@ from domain.auth import (
     PasswordHasher,
     RateLimitExceededError,
     User,
+    UserRole,
     UserStatus,
 )
 from infrastructure.security.password import Argon2PasswordHasher
@@ -99,6 +101,34 @@ class InMemoryAuthRepository(AuthRepository):
         if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
             return None
         return AuthContext(user=user, session_id=auth_session.id)
+
+    async def get_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> User | None:
+        session = next((item for item in self.sessions.values() if item.id == session_id), None)
+        user = self.users.get(user_id)
+        if session is None or session.user_id != user_id or session.revoked_time is not None:
+            return None
+        if session.expires_at <= now or user is None:
+            return None
+        if user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
+            return None
+        return user
+
+    async def promote_active_user_by_email(
+        self,
+        email: str,
+        updated_at: datetime,
+    ) -> User | None:
+        user = await self.get_user_by_email(email)
+        if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
+            return None
+        promoted = replace(user, role=UserRole.ADMIN, updated_at=updated_at)
+        self.users[user.id] = promoted
+        return promoted
 
     async def revoke_session(
         self,
@@ -424,3 +454,49 @@ def test_argon2_hasher_produces_salted_hashes() -> None:
     assert hasher.verify_password("long-enough-password", first) is True
     assert hasher.verify_password("wrong-password-value", first) is False
     assert hasher.verify_password("long-enough-password", hasher.dummy_hash) is False
+
+
+def test_admin_promotion_is_idempotent_and_requires_active_existing_account() -> None:
+    async def scenario() -> None:
+        service, repository, _, _ = _service()
+        registered = await service.register("admin@example.com", "long-enough-password")
+        promoted = await service.promote_admin_by_email("ADMIN@example.com")
+        assert promoted.role is UserRole.ADMIN
+        assert await service.promote_admin_by_email("admin@example.com") == promoted
+        assert registered.user.role is UserRole.USER
+
+        repository.users["usr_2"] = replace(
+            repository.users["usr_1"],
+            id="usr_2",
+            email="disabled@example.com",
+            status=UserStatus.DISABLED,
+        )
+        repository.users["usr_3"] = replace(
+            repository.users["usr_1"],
+            id="usr_3",
+            email="deleted@example.com",
+            deleted_time=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for email in ("missing@example.com", "disabled@example.com", "deleted@example.com"):
+            with pytest.raises(AdminPromotionError):
+                await service.promote_admin_by_email(email)
+
+    _run(scenario())
+
+
+def test_admin_revalidation_reads_current_role_and_rejects_revoked_session() -> None:
+    async def scenario() -> None:
+        service, repository, _, _ = _service()
+        registered = await service.register("user@example.com", "long-enough-password")
+        context = await service.authenticate(registered.token)
+        assert context is not None
+        assert await service.revalidate_admin(context) is None
+
+        repository.users[context.user.id] = replace(context.user, role=UserRole.ADMIN)
+        current = await service.revalidate_admin(context)
+        assert current is not None and current.role is UserRole.ADMIN
+
+        await service.logout(registered.token)
+        assert await service.revalidate_admin(context) is None
+
+    _run(scenario())

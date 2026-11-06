@@ -26,6 +26,7 @@ class UserModel(Base):
             "status IN ('active', 'disabled')",
             name="ck_users_status",
         ),
+        CheckConstraint("role IN ('admin', 'user')", name="ck_users_role"),
         CheckConstraint(
             "email = lower(email)",
             name="ck_users_email_normalized",
@@ -38,6 +39,7 @@ class UserModel(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, server_default="user")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     deleted_time: Mapped[datetime | None] = mapped_column(

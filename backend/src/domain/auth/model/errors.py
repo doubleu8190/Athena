@@ -29,12 +29,17 @@ class InvalidSessionError(LookupError):
     """登录会话不存在、已撤销、已过期或用户不可用。"""
 
 
+class AdminPromotionError(ValueError):
+    """目标账号不存在或当前不可提升为管理员。"""
+
+
 class RateLimitExceededError(ValueError):
     """认证请求超过允许频率。"""
 
 
 __all__ = [
     "EmailAlreadyRegisteredError",
+    "AdminPromotionError",
     "InvalidCredentialsError",
     "InvalidCurrentPasswordError",
     "InvalidDisplayNameError",

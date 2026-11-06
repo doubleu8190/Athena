@@ -6,6 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from domain.auth import UserRole
+
 
 class RegisterRequest(BaseModel):
     """开放注册请求。"""
@@ -43,6 +45,7 @@ class UserResponse(BaseModel):
     email: str
     display_name: str | None
     created_at: datetime
+    role: UserRole
 
 
 __all__ = [

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
 from typing import Any
@@ -22,7 +22,11 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
-from adapter.auth.model import UserModel
+from adapter.auth.model import AuthSessionModel, UserModel
+from adapter.auth.repository import (
+    SqlAlchemyAuthRepository,
+    SqlAlchemyAuthTransactionGuard,
+)
 from adapter.message.model import ConversationMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.project.model import ProjectModel
@@ -32,6 +36,7 @@ from adapter.session.repository import SqlAlchemySessionRepository
 from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.session.service import SessionService
+from common.ids import now_utc
 from domain.message import (
     ConversationMessage,
     ConversationMessageDraft,
@@ -173,6 +178,30 @@ async def _seed_user(
                     created_at=timestamp,
                     updated_at=timestamp,
                     deleted_time=None,
+                )
+            )
+
+
+async def _seed_auth_session(
+    session_factory: async_sessionmaker[AsyncSession],
+    session_id: str,
+    user_id: str,
+    token_hash: str,
+    *,
+    expires_at: datetime | None = None,
+) -> None:
+    """创建仍有效的认证会话供管理员复核并发测试使用。"""
+    timestamp = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                AuthSessionModel(
+                    id=session_id,
+                    user_id=user_id,
+                    token_hash=token_hash,
+                    expires_at=expires_at or datetime(2027, 1, 1, tzinfo=UTC),
+                    revoked_time=None,
+                    created_at=timestamp,
                 )
             )
 
@@ -828,5 +857,217 @@ def test_session_delete_and_message_append_serialize_on_session_row(
                 )
             )
             await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_admin_guard_serializes_with_session_revocation_and_role_changes(
+    migrated_schema: str,
+) -> None:
+    """最终管理员复核与撤销、角色修改按 user/session 行锁线性化。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    async def scenario() -> None:
+        suffix = token_hex(6)
+        holder_name = f"athena_guard_holder_{suffix}"
+        worker_name = f"athena_guard_worker_{suffix}"
+        monitor_engine = _engine(database_url, migrated_schema, f"athena_guard_monitor_{suffix}")
+        holder_engine = _engine(database_url, migrated_schema, holder_name)
+        worker_engine = _engine(database_url, migrated_schema, worker_name)
+        holder_factory = async_sessionmaker(holder_engine, expire_on_commit=False)
+        worker_factory = async_sessionmaker(worker_engine, expire_on_commit=False)
+        auth_repository = SqlAlchemyAuthRepository(worker_factory)
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        revoke_guard_user = f"user_guard_revoke_{suffix}"
+        revoke_guard_session = f"ses_guard_revoke_{suffix}"
+        revoke_first_user = f"user_revoke_first_{suffix}"
+        revoke_first_session = f"ses_revoke_first_{suffix}"
+        role_guard_user = f"user_guard_role_{suffix}"
+        role_guard_session = f"ses_guard_role_{suffix}"
+        role_first_user = f"user_role_first_{suffix}"
+        role_first_session = f"ses_role_first_{suffix}"
+        guard_acquired = asyncio.Event()
+        release_guard = asyncio.Event()
+        holder_task: asyncio.Task[Any] | None = None
+        operation_task: asyncio.Task[Any] | None = None
+        expiry_task: asyncio.Task[Any] | None = None
+        observed: dict[str, Any] = {}
+
+        async def hold_guard(user_id: str, session_id: str, label: str) -> None:
+            async with holder_factory() as database_session:
+                async with database_session.begin():
+                    user = await SqlAlchemyAuthTransactionGuard(
+                        database_session
+                    ).lock_current_session_user(user_id, session_id)
+                    observed[label] = user
+                    guard_acquired.set()
+                    if user is not None:
+                        await database_session.execute(
+                            text("UPDATE users SET updated_at = :updated_at WHERE id = :user_id"),
+                            {
+                                "updated_at": datetime(2026, 1, 2, 0, 1, tzinfo=UTC),
+                                "user_id": user_id,
+                            },
+                        )
+                    await release_guard.wait()
+
+        try:
+            for user_id in (
+                revoke_guard_user,
+                revoke_first_user,
+                role_guard_user,
+                role_first_user,
+            ):
+                await _seed_user(holder_factory, user_id)
+            for user_id, session_id in (
+                (revoke_guard_user, revoke_guard_session),
+                (revoke_first_user, revoke_first_session),
+                (role_guard_user, role_guard_session),
+                (role_first_user, role_first_session),
+            ):
+                token_hash = (session_id.encode().hex() * 64)[:64]
+                await _seed_auth_session(holder_factory, session_id, user_id, token_hash)
+            async with holder_factory() as database_session:
+                async with database_session.begin():
+                    await database_session.execute(
+                        text("UPDATE users SET role = 'admin' WHERE id IN (:first, :second)"),
+                        {"first": role_guard_user, "second": role_first_user},
+                    )
+
+            # 复核先持有 user、session 锁；撤销必须等待复核事务提交。
+            holder_task = asyncio.create_task(
+                hold_guard(revoke_guard_user, revoke_guard_session, "revoke_guard")
+            )
+            await asyncio.wait_for(guard_acquired.wait(), timeout=TASK_TIMEOUT)
+            operation_task = asyncio.create_task(
+                auth_repository.revoke_session(
+                    (revoke_guard_session.encode().hex() * 64)[:64],
+                    now,
+                )
+            )
+            await _wait_for_blocked_task(
+                operation_task,
+                monitor_engine,
+                worker_name,
+                "UPDATE auth_sessions",
+            )
+            release_guard.set()
+            await asyncio.wait_for(holder_task, timeout=TASK_TIMEOUT)
+            assert observed["revoke_guard"].role.value == "user"
+            assert await asyncio.wait_for(operation_task, timeout=TASK_TIMEOUT) is True
+
+            # 撤销先提交时，后续事务 guard 不得返回用户。
+            assert await auth_repository.revoke_session(
+                (revoke_first_session.encode().hex() * 64)[:64],
+                now,
+            )
+            async with holder_factory() as database_session:
+                async with database_session.begin():
+                    assert (
+                        await SqlAlchemyAuthTransactionGuard(
+                            database_session
+                        ).lock_current_session_user(revoke_first_user, revoke_first_session)
+                        is None
+                    )
+
+            # 复核先锁用户时，角色降级等待；最终写事务先提交，降级随后生效。
+            guard_acquired.clear()
+            release_guard.clear()
+            holder_task = asyncio.create_task(
+                hold_guard(role_guard_user, role_guard_session, "role_guard")
+            )
+            await asyncio.wait_for(guard_acquired.wait(), timeout=TASK_TIMEOUT)
+
+            async def demote_role(user_id: str) -> None:
+                async with worker_factory() as database_session:
+                    async with database_session.begin():
+                        await database_session.execute(
+                            text("UPDATE users SET role = 'user' WHERE id = :user_id"),
+                            {"user_id": user_id},
+                        )
+
+            operation_task = asyncio.create_task(demote_role(role_guard_user))
+            await _wait_for_blocked_task(
+                operation_task,
+                monitor_engine,
+                worker_name,
+                "UPDATE users",
+            )
+            release_guard.set()
+            await asyncio.wait_for(holder_task, timeout=TASK_TIMEOUT)
+            assert observed["role_guard"].role.value == "admin"
+            await asyncio.wait_for(operation_task, timeout=TASK_TIMEOUT)
+
+            # 角色变更先提交时，guard 读取已变更的普通用户角色。
+            await demote_role(role_first_user)
+            async with holder_factory() as database_session:
+                async with database_session.begin():
+                    demoted = await SqlAlchemyAuthTransactionGuard(
+                        database_session
+                    ).lock_current_session_user(role_first_user, role_first_session)
+                    assert demoted is not None and demoted.role.value == "user"
+
+            # 会话在 guard 等待 user 行锁期间过期，锁后 clock 必须使最终复核拒绝。
+            expiring_user = f"user_expiring_guard_{suffix}"
+            expiring_session = f"ses_expiring_guard_{suffix}"
+            await _seed_user(holder_factory, expiring_user)
+            await _seed_auth_session(
+                holder_factory,
+                expiring_session,
+                expiring_user,
+                (expiring_session.encode().hex() * 64)[:64],
+            )
+            expiry_result: dict[str, Any] = {}
+
+            async def guard_after_wait() -> None:
+                async with worker_factory() as database_session:
+                    async with database_session.begin():
+                        expiry_result["user"] = await SqlAlchemyAuthTransactionGuard(
+                            database_session,
+                            clock=now_utc,
+                        ).lock_current_session_user(expiring_user, expiring_session)
+
+            async with holder_factory() as blocking_session:
+                async with blocking_session.begin():
+                    await blocking_session.execute(
+                        text("UPDATE users SET updated_at = :updated_at WHERE id = :user_id"),
+                        {"updated_at": now, "user_id": expiring_user},
+                    )
+                    expiry_task = asyncio.create_task(guard_after_wait())
+                    await _wait_for_blocked_task(
+                        expiry_task,
+                        monitor_engine,
+                        worker_name,
+                        "FROM users",
+                    )
+                    # 先确认 guard 已等待 user，再设定到期时刻；准备阶段不消耗有效窗口。
+                    expiration = now_utc() + timedelta(seconds=2)
+                    await blocking_session.execute(
+                        text(
+                            "UPDATE auth_sessions SET expires_at = :expires_at "
+                            "WHERE id = :session_id AND user_id = :user_id"
+                        ),
+                        {
+                            "expires_at": expiration,
+                            "session_id": expiring_session,
+                            "user_id": expiring_user,
+                        },
+                    )
+                    assert now_utc() < expiration
+                    remaining = (expiration - now_utc()).total_seconds()
+                    await asyncio.sleep(max(0.0, remaining) + 0.1)
+                    assert now_utc() > expiration
+            await asyncio.wait_for(expiry_task, timeout=TASK_TIMEOUT)
+            assert expiry_result["user"] is None
+        finally:
+            release_guard.set()
+            await _cancel_tasks(
+                *(task for task in (holder_task, operation_task, expiry_task) if task is not None)
+            )
+            await holder_engine.dispose()
+            await worker_engine.dispose()
+            await monitor_engine.dispose()
 
     asyncio.run(scenario())

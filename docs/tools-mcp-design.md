@@ -1,6 +1,8 @@
 # 全局 MCP 与 Tool 管理设计
 
-**状态：** 本次范围与架构已确认，本文细化实现要求，代码仍未实施。
+**状态：** Phase 0–4 已实现并通过独立 Review 与 Root 验收。本文记录已实现行为及后续未实现范围。
+
+**实施状态：** 角色、受控 transport、加密目录、发现、ToolManager、管理 MCP 与公共工具目录 HTTP API、严格 DTO、固定错误映射及数据库默认组装均已实现并验收。`tools/call`、Redis、定时刷新和健康探测仍未实现。
 
 ## 1. 目标与范围
 
@@ -18,11 +20,11 @@
 
 ## 2. 当前基础与认证变化
 
-当前仓库已有 Cookie 登录，`CurrentAuth` 包含由数据库查询得到的 `User`；`User`/ORM 尚无角色。开放注册 DTO 使用 `extra="forbid"`。部署前需要将下面的角色规则和字段迁移纳入认证模块。
+当前仓库使用 Cookie 登录，`CurrentAuth` 包含由数据库读取的 `User` 与角色。开放注册 DTO 使用 `extra="forbid"`；新用户角色为 `user`，管理员通过本地运维命令提升。
 
 - `users.role` 取值 `admin`／`user`，新用户默认 `user`；迁移把已有用户显式设为 `user`。
 - 普通注册请求不接收 role，拒绝额外字段，不能由用户自助提权。
-- 首个及后续管理员由部署方用受控本地运维命令，将已有且 active 的真实账号设为 admin。不给新账号默认密码，不在应用启动时自动选管理员，不新增 HTTP 提权或通用角色管理后台。本轮不执行该运维命令。
+- 首个及后续管理员由部署方用受控本地运维命令，将已有且 active 的真实账号设为 admin。不给新账号默认密码，不在应用启动时自动选管理员，不新增 HTTP 提权或通用角色管理后台。CLI 已在 Phase 1 实现，是否执行由部署方决定。
 - `User`、`UserModel`、认证 converter/service 与 `AuthContext` 传递 role；当前用户自己的安全响应可包含 role。
 - 每个请求按数据库当前角色授权，不能只信 Cookie 中缓存的角色。已禁用或删除用户不能通过 `CurrentAuth`。
 
@@ -184,7 +186,7 @@ tools_discovered_at
 
 沿用当前设计的 `id`、`server_id`、`remote_name`、`model_name`、`description`、`input_schema_json`、`created_at`。`(server_id, remote_name)` 和 `model_name` 唯一，server 外键级联删除。Tool 不重复记录 owner。
 
-迁移只对 `users` 增加角色并新增两张 MCP 表、约束和索引；当前仓库尚无 MCP 表，不涉及迁移既有 MCP owner 字段。部署回滚需备份配置，恢复秘密需同时持有应用主密钥。
+Phase 1/2 迁移已加入用户角色及两张 MCP 表、约束和索引；不涉及 MCP owner 字段。部署回滚需备份配置，恢复秘密需同时持有应用主密钥。
 
 ## 10. HTTP API
 
@@ -228,7 +230,7 @@ tools_discovered_at
 - HTTP 目标的 DNS/IP 防护、TLS 校验和同源／跨源重定向阻断生效；协议、响应、页数和总时限受限。
 - 普通工具目录读取只查数据库，不连接 MCP；首版无 Redis、定时刷新、健康探测或用户策略。
 
-本设计覆盖已确认的全局配置和双 transport 范围，尚需锁定具体 MCP SDK release 并验证。文档不等于代码已实施；按仓库流程审阅确认后再交 Implementer 编码。
+MCP SDK 已锁定并通过 Phase 0–3 的 transport、发现与目录验证；Phase 4 API 和应用组装已通过独立 Review 与 Root 验收。本文描述目标与约束，具体完成状态以代码和验收结果为准。
 
 ## 13. 协议参考
 

@@ -5,10 +5,10 @@
 已确认的产品范围：直接回答、搜索阅读与分析、文件生成、MCP、Skill、
 自定义业务 Subagent、知识库和记忆系统。
 
-当前已实现邮箱密码认证、项目目录 CRUD、Session 目录 CRUD，以及消息存储和
-只读会话历史。认证使用服务端可撤销登录会话和 HttpOnly Cookie，项目、Session
-和消息 API 都从已验证的请求级登录上下文确定当前用户。Run 编排、消息发送
-接口、流式输出和其余产品能力尚未实现。
+当前已实现邮箱密码认证、项目与 Session 目录、消息存储和只读历史，以及全局
+MCP Server 管理和安全工具目录 API。认证使用服务端可撤销登录会话和 HttpOnly
+Cookie；管理操作在应用服务及最终写事务中复核当前角色和会话。Run 编排、消息
+发送接口、工具调用、流式输出和其余产品能力尚未实现。
 
 项目管理支持：
 
@@ -242,6 +242,50 @@ Session 不存在、已删除或不属于当前登录用户时统一返回 `404`
 Session 创建后可继续使用该接口读取 conversation messages；当前仍没有消息
 发送 HTTP 接口。
 
+## MCP 管理与工具目录 API
+
+管理员接口要求当前数据库角色为 `admin`；普通用户访问管理路径统一返回
+`403 admin_required`，未登录返回 `401 not_authenticated`。首次管理员由部署方
+为已有 active 账号执行受控本地命令：
+
+```sh
+cd backend
+../.venv/bin/python -m cli.promote_admin --email admin@example.com
+```
+
+该命令不会创建账号或设置默认密码。注册接口不能提交 role。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/v1/admin/mcp/servers` | 发现并注册 HTTP 或 stdio MCP Server |
+| `GET` | `/api/v1/admin/mcp/servers` | 分页查看全局 Server |
+| `GET` | `/api/v1/admin/mcp/servers/{server_id}` | 查看连接配置和秘密名称/是否已设置 |
+| `PUT` | `/api/v1/admin/mcp/servers/{server_id}` | 带 `expected_config_version` 完整替换配置 |
+| `DELETE` | `/api/v1/admin/mcp/servers/{server_id}` | 删除 Server 与工具目录 |
+| `GET` | `/api/v1/admin/mcp/servers/{server_id}/tools` | 查看指定 Server 的工具来源 |
+| `GET` | `/api/v1/admin/tools` | 分页查看全局工具及来源 |
+| `GET` | `/api/v1/admin/tools/{tool_id}` | 查看单个工具来源 |
+| `GET` | `/api/v1/tools` | 任一有效用户读取安全工具目录 |
+| `GET` | `/api/v1/tools/{tool_id}` | 任一有效用户读取单个安全工具 |
+
+列表支持 `page`（默认 `1`）和 `page_size`（默认 `20`，最大 `100`）。写请求
+拒绝混合 transport 字段及额外字段；Server 修改是完整替换。公共工具响应只含
+`tool_id`、`model_name`、`description` 和 `input_schema`。管理响应也不会返回
+秘密值、密文、nonce 或密钥。
+公共工具列表只接受 `page`、`page_size` 且不接受重复参数；工具详情不接受 query
+参数。已认证请求携带其他或重复 query 时返回固定 `422 mcp_query_invalid`。
+
+数据库默认组装 MCP 服务时必须配置 `ATHENA_MCP_SECRET_KEY`（base64 编码的
+32-byte 随机密钥）；`ATHENA_MCP_SECRET_KEY_VERSION` 默认为 `1`。不得将密钥提交
+到仓库或日志。`ATHENA_MCP_ALLOWED_PRIVATE_HOSTS` 是逗号分隔的精确主机白名单，
+默认空集并拒绝私网连接。`ATHENA_MCP_STDIO_BASE_ENV_NAMES` 列出可从宿主环境
+复制到 stdio 子进程的变量名，默认空集；每个 Server 的环境秘密单独配置，进程
+不会继承完整宿主环境。HTTP 只允许 HTTPS、固定 DNS 解析地址并阻断重定向；发现
+受总时限、响应大小、页数和工具数限制。
+
+当前未实现 `tools/call`、Run/LLM 集成、Redis、健康探测和定时刷新；普通工具
+目录查询只读取最近一次成功发现并持久化的结果。
+
 ## 开发检查
 
 ```sh
@@ -272,9 +316,12 @@ backend/src/domain/auth/       用户、认证会话、异常和认证端口
 backend/src/app/project/       项目应用用例、结果模型和转换
 backend/src/app/session/       Session CRUD 用例、结果模型和转换
 backend/src/app/message/       消息写入、历史查询、结果模型和转换
+backend/src/app/tool/          MCP 管理与工具目录用例
 backend/src/domain/project/    项目领域包：model 放实体/异常，ports 放仓储端口
 backend/src/domain/message/    消息实体、类型化内容块、异常和仓储端口
 backend/src/domain/session/    Session 实体、异常和仓储端口
+backend/src/domain/mcp/        MCP 配置、发现端口和目录持久化端口
+backend/src/domain/tool/       工具定义、安全投影和目录读取端口
 backend/src/adapter/base.py                共享 SQLAlchemy DeclarativeBase
 backend/src/adapter/models.py              聚合导入 auth/project/message/session ORM
 backend/src/adapter/auth/                  用户与登录会话 model、repository、converter
@@ -287,8 +334,9 @@ backend/src/adapter/message/repository/    消息事务、查询和持久化编�
 backend/src/adapter/session/model/         Session ORM 模型
 backend/src/adapter/session/converter/     Session ORM 到领域对象转换
 backend/src/adapter/session/repository/    Session CRUD、行锁与原子项目绑定
+backend/src/adapter/mcp/                   MCP Server 与工具原子持久化
 backend/src/common/            共享 ID 等基础工具
-backend/src/infrastructure/    数据库连接、Argon2id 密码哈希等共享基础设施
+backend/src/infrastructure/    数据库、密码与 MCP transport/秘密加密基础设施
 backend/src/main.py            应用组装入口
 backend/tests/                 后端测试
 backend/migrations/            Alembic 迁移

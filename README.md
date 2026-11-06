@@ -303,6 +303,26 @@ SDK 自动重试关闭，流式中断不会重放。真实模型兼容性尚未�
 地址和凭据后，需分别验证普通、流式、tools、结构化及显式上下文续接。
 客户端请求未压缩响应，并拒绝服务端返回的压缩响应，以确保响应字节上限在 SDK 解码前生效。
 
+## 记忆核心
+
+记忆服务随应用在内部组装，当前提供 add、recall 及必要的管理用例，不暴露 HTTP
+接口或自动提取流程。设置 `ATHENA_MEMORY_ENABLED=true` 后才加载本地
+`BAAI/bge-m3`、`BAAI/bge-reranker-v2-m3` 和 BGE tokenizer；默认设备为 CPU。
+模型必须预先放在本地缓存中，启动不会下载权重。也可通过
+`create_app(memory_service=...)` 注入已组装服务。模型 revision 默认固定，
+可分别通过 `ATHENA_MEMORY_EMBEDDING_REVISION`、
+`ATHENA_MEMORY_RERANKER_REVISION` 和 `ATHENA_MEMORY_TOKENIZER_REVISION` 显式覆盖。
+可通过
+`ATHENA_MEMORY_EMBEDDING_MODEL`、`ATHENA_MEMORY_EMBEDDING_DEVICE`、
+`ATHENA_MEMORY_RERANKER_MODEL`、`ATHENA_MEMORY_RERANKER_DEVICE` 和
+`ATHENA_MEMORY_TOKENIZER` 覆盖模型及设备。检索可调
+`ATHENA_MEMORY_VECTOR_MIN_SCORE`（默认 `0.70`）、
+`ATHENA_MEMORY_RERANK_MIN_SCORE`（默认 `0.30`）和
+`ATHENA_MEMORY_TIMEOUT_SECONDS`（默认 `60`）；只有明确校准后才配置
+`ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE`，重排失败时不默认接纳关键词候选。
+重排阈值 `0.30` 来自少量中文正负样例的初始测量，部署前应在目标记忆语料上复核。
+迁移需要 PostgreSQL `vector` 和 `zhparser` 扩展。
+
 ## 开发检查
 
 ```sh

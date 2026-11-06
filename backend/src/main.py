@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -16,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.llm import OpenAIResponsesAdapter
 from adapter.mcp.repository import SqlAlchemyMcpRepository
+from adapter.memory.repository import MemoryRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.session import SqlAlchemySessionRepository
@@ -29,6 +32,7 @@ from api.sessions import build_session_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
 from app.llm import LlmService, parse_profiles
+from app.memory.service import MemoryService
 from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.session.service import SessionService
@@ -40,10 +44,28 @@ from infrastructure.database import (
     Database,
 )
 from infrastructure.mcp.discovery import McpDiscoveryClient
+from infrastructure.memory import LocalEmbedding, LocalReranker, LocalTokenCounter
 from infrastructure.security.mcp_secrets import McpSecretCipher
 from infrastructure.security.password import Argon2PasswordHasher
 
 logger = logging.getLogger(__name__)
+
+
+def memory_profile_id(model: str, revision: str) -> str:
+    """根据模型权重与向量预处理规则生成不可混用的档案标识。"""
+    profile = json.dumps(
+        {
+            "model": model,
+            "revision": revision,
+            "dimensions": 1024,
+            "normalize_embeddings": False,
+            "preprocessing": "sentence-transformers-default-v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"bge-{hashlib.sha256(profile.encode()).hexdigest()[:32]}"
+
 
 _DATABASE_BACKED_ROUTE_PREFIXES = (
     "/api/v1/auth",
@@ -86,6 +108,7 @@ def create_app(
     *,
     tool_manager: ToolManager | None = None,
     llm_service: LlmService | None = None,
+    memory_service: MemoryService | None = None,
     auth_cookie_secure: bool | None = None,
     public_origin: str | None = None,
 ) -> FastAPI:
@@ -107,6 +130,14 @@ def create_app(
     mcp_use_case = tool_manager
     llm_use_case = llm_service
     llm_adapter: OpenAIResponsesAdapter | None = None
+    memory_embedding: LocalEmbedding | None = None
+    memory_reranker: LocalReranker | None = None
+    memory_counter: LocalTokenCounter | None = None
+    memory_use_case = memory_service
+    memory_enabled = _env_flag("ATHENA_MEMORY_ENABLED", default=False)
+    memory_owned = memory_service is None and memory_enabled
+    if memory_owned and not database_url:
+        raise RuntimeError("memory_database_required")
     if llm_use_case is None:
         llm_profiles = parse_profiles()
         if llm_profiles:
@@ -131,6 +162,7 @@ def create_app(
         or message_use_case is None
         or session_use_case is None
         or mcp_use_case is None
+        or memory_owned
     ):
         database = Database(
             database_url,
@@ -166,6 +198,46 @@ def create_app(
                 mcp_discovery,
                 auth_repository,
             )
+    if memory_owned and database is not None:
+        embedding_model = os.getenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
+        embedding_revision = os.getenv(
+            "ATHENA_MEMORY_EMBEDDING_REVISION",
+            "5617a9f61b028005a4858fdac845db406aefb181",
+        )
+        reranker_model = os.getenv("ATHENA_MEMORY_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+        reranker_revision = os.getenv(
+            "ATHENA_MEMORY_RERANKER_REVISION",
+            "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+        )
+        tokenizer_model = os.getenv("ATHENA_MEMORY_TOKENIZER", embedding_model)
+        tokenizer_revision = os.getenv("ATHENA_MEMORY_TOKENIZER_REVISION", embedding_revision)
+        memory_embedding = LocalEmbedding(
+            embedding_model,
+            embedding_revision,
+            os.getenv("ATHENA_MEMORY_EMBEDDING_DEVICE", "cpu"),
+        )
+        memory_reranker = LocalReranker(
+            reranker_model,
+            reranker_revision,
+            os.getenv("ATHENA_MEMORY_RERANKER_DEVICE", "cpu"),
+        )
+        memory_counter = LocalTokenCounter(tokenizer_model, tokenizer_revision)
+        memory_profile = memory_profile_id(embedding_model, embedding_revision)
+        memory_use_case = MemoryService(
+            MemoryRepository(database.session_factory),
+            memory_embedding,
+            memory_reranker,
+            memory_counter,
+            profile_id=memory_profile,
+            vector_min_score=float(os.getenv("ATHENA_MEMORY_VECTOR_MIN_SCORE", "0.70")),
+            timeout_seconds=float(os.getenv("ATHENA_MEMORY_TIMEOUT_SECONDS", "60")),
+            rerank_min_score=float(os.getenv("ATHENA_MEMORY_RERANK_MIN_SCORE", "0.30")),
+            keyword_fallback_min_score=(
+                float(os.environ["ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE"])
+                if "ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE" in os.environ
+                else None
+            ),
+        )
 
     if auth_cookie_secure is None:
         auth_cookie_secure = _env_flag("ATHENA_COOKIE_SECURE", default=False)
@@ -179,6 +251,11 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         """在应用退出时释放数据库连接池。"""
         try:
+            if memory_owned and memory_embedding is not None and memory_reranker is not None:
+                await memory_embedding.start()
+                await memory_reranker.start()
+                if memory_counter is not None:
+                    await memory_counter.start()
             yield
         finally:
             if llm_adapter is not None:
@@ -186,6 +263,13 @@ def create_app(
                     await llm_adapter.aclose()
                 except Exception:
                     logger.error("llm_shutdown_failed code=llm_cleanup_failed")
+            if memory_owned:
+                if memory_embedding is not None:
+                    await memory_embedding.aclose()
+                if memory_reranker is not None:
+                    await memory_reranker.aclose()
+                if memory_counter is not None:
+                    memory_counter.close()
             if database is not None:
                 try:
                     await database.dispose()
@@ -200,6 +284,7 @@ def create_app(
     app.state.public_origin = configured_public_origin or None
     app.state.tool_manager = mcp_use_case
     app.state.llm_service = llm_use_case
+    app.state.memory_service = memory_use_case
     app.include_router(health_router)
     if project_use_case is not None:
         app.include_router(build_project_router(project_use_case))

@@ -7,6 +7,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 import main
+from app.memory.service import MemoryService
 from app.tool import ToolManager
 from main import create_app
 
@@ -31,6 +32,18 @@ def test_llm_is_optional_without_profiles() -> None:
     with TestClient(app) as client:
         response = client.get("/health")
     assert response.status_code == 200
+
+
+def test_memory_is_disabled_by_default_and_can_be_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ATHENA_MEMORY_ENABLED", raising=False)
+    disabled_app = create_app()
+    assert disabled_app.state.memory_service is None
+
+    service = cast(MemoryService, object())
+    injected_app = create_app(memory_service=service)
+    assert injected_app.state.memory_service is service
 
 
 def test_injected_llm_service_ignores_invalid_environment_and_keeps_ownership(

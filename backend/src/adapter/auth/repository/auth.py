@@ -14,6 +14,7 @@ from domain.auth import (
     AuthContext,
     AuthRepository,
     AuthSession,
+    CurrentSessionReader,
     EmailAlreadyRegisteredError,
     User,
     UserRole,
@@ -21,7 +22,7 @@ from domain.auth import (
 )
 
 
-class SqlAlchemyAuthRepository(AuthRepository):
+class SqlAlchemyAuthRepository(AuthRepository, CurrentSessionReader):
     """在同一数据库事务中维护用户和登录会话。"""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:

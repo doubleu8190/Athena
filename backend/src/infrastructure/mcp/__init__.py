@@ -1,5 +1,6 @@
 """受控 MCP transport 基础设施。"""
 
+from infrastructure.mcp.discovery import McpDiscoveryClient
 from infrastructure.mcp.http import (
     McpAccessDeniedError,
     McpEndpointError,
@@ -19,6 +20,7 @@ from infrastructure.mcp.stdio import (
 
 __all__ = [
     "McpAccessDeniedError",
+    "McpDiscoveryClient",
     "McpEndpointError",
     "McpRedirectRejectedError",
     "McpResponseTooLargeError",

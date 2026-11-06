@@ -22,7 +22,19 @@ class PasswordHasher(Protocol):
         """校验明文密码与哈希是否匹配。"""
 
 
-class AuthRepository(Protocol):
+class CurrentSessionReader(Protocol):
+    """按可信用户与 session ID 重新读取有效身份及当前角色。"""
+
+    async def get_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> User | None:
+        """独立只读预检查；不为后续写事务提供并发授权保证。"""
+
+
+class AuthRepository(CurrentSessionReader, Protocol):
     """用户与登录会话的一致性持久化端口。"""
 
     async def create_user_with_session(
@@ -44,14 +56,6 @@ class AuthRepository(Protocol):
         now: datetime,
     ) -> AuthContext | None:
         """读取未撤销、未过期且用户可用的登录上下文。"""
-
-    async def get_current_session_user(
-        self,
-        user_id: str,
-        session_id: str,
-        now: datetime,
-    ) -> User | None:
-        """独立只读预检查；不为后续写事务提供并发授权保证。"""
 
     async def promote_active_user_by_email(
         self,
@@ -97,4 +101,10 @@ class AuthTransactionGuard(Protocol):
         """在调用方事务中按 user 后 session 的顺序锁行并检查当前有效身份。"""
 
 
-__all__ = ["AuthRepository", "AuthTransactionGuard", "Authenticator", "PasswordHasher"]
+__all__ = [
+    "AuthRepository",
+    "AuthTransactionGuard",
+    "Authenticator",
+    "CurrentSessionReader",
+    "PasswordHasher",
+]

@@ -20,6 +20,7 @@ from domain.auth.ports import (
     Authenticator,
     AuthRepository,
     AuthTransactionGuard,
+    CurrentSessionReader,
     PasswordHasher,
 )
 
@@ -28,6 +29,7 @@ __all__ = [
     "AuthContext",
     "AuthRepository",
     "AuthTransactionGuard",
+    "CurrentSessionReader",
     "AuthSession",
     "Authenticator",
     "EmailAlreadyRegisteredError",

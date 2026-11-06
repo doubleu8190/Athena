@@ -11,7 +11,12 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
-from adapter.mcp.converter.mcp import server_to_domain, tool_to_admin, tool_to_public
+from adapter.mcp.converter.mcp import (
+    server_to_domain,
+    tool_to_admin,
+    tool_to_domain,
+    tool_to_public,
+)
 from adapter.mcp.model import McpServerModel, McpToolModel
 from common.ids import now_utc
 from domain.auth import AuthContext, UserRole
@@ -266,18 +271,50 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader):
         rows, total = await self._tool_page(offset, limit)
         return ToolPage(items=tuple(tool_to_admin(row) for row in rows), total=total)
 
-    async def _tool_page(self, offset: int, limit: int) -> tuple[list[McpToolModel], int]:
+    async def list_internal(self, *, offset: int, limit: int) -> ToolPage[ToolDefinition]:
+        """读取供受信编排使用的完整工具定义分页。"""
+        rows, total = await self._tool_page(offset, limit)
+        return ToolPage(items=tuple(tool_to_domain(row) for row in rows), total=total)
+
+    async def list_server_admin(
+        self, server_id: str, *, offset: int, limit: int
+    ) -> ToolPage[AdminToolDefinition]:
+        """读取指定 Server 的管理员工具分页。"""
+        rows, total = await self._tool_page(offset, limit, server_id=server_id)
+        return ToolPage(items=tuple(tool_to_admin(row) for row in rows), total=total)
+
+    async def get_public_tool(self, tool_id: str) -> PublicToolDefinition | None:
+        """按工具 ID 返回不含来源的安全投影。"""
+        async with self._session_factory() as session:
+            row = await session.get(McpToolModel, tool_id)
+        return None if row is None else tool_to_public(row)
+
+    async def get_admin_tool(self, tool_id: str) -> AdminToolDefinition | None:
+        """按工具 ID 返回不含配置和秘密的管理员投影。"""
+        async with self._session_factory() as session:
+            row = await session.get(McpToolModel, tool_id)
+        return None if row is None else tool_to_admin(row)
+
+    async def _tool_page(
+        self,
+        offset: int,
+        limit: int,
+        *,
+        server_id: str | None = None,
+    ) -> tuple[list[McpToolModel], int]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("mcp_page_invalid")
         async with self._session_factory() as session:
-            total = int(await session.scalar(select(func.count()).select_from(McpToolModel)) or 0)
+            count_query = select(func.count()).select_from(McpToolModel)
+            rows_query = select(McpToolModel)
+            if server_id is not None:
+                count_query = count_query.where(McpToolModel.server_id == server_id)
+                rows_query = rows_query.where(McpToolModel.server_id == server_id)
+            total = int(await session.scalar(count_query) or 0)
             rows = list(
                 (
                     await session.scalars(
-                        select(McpToolModel)
-                        .order_by(McpToolModel.model_name)
-                        .offset(offset)
-                        .limit(limit)
+                        rows_query.order_by(McpToolModel.model_name).offset(offset).limit(limit)
                     )
                 ).all()
             )

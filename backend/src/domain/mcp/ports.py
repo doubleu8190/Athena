@@ -6,7 +6,14 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from domain.auth import AuthContext
-from domain.mcp.model import McpServer, McpServerPage, McpServerRuntimeConfig, McpServerWrite
+from domain.mcp.model import (
+    DiscoveredMcpTool,
+    McpConnectionInput,
+    McpServer,
+    McpServerPage,
+    McpServerRuntimeConfig,
+    McpServerWrite,
+)
 from domain.tool import ToolDefinition
 
 
@@ -44,4 +51,11 @@ class McpServerRepository(Protocol):
         """分页读取 Server 安全投影。"""
 
 
-__all__ = ["McpServerRepository"]
+class McpDiscovery(Protocol):
+    """通过受控传输读取远端工具目录。"""
+
+    async def discover(self, connection: McpConnectionInput) -> tuple[DiscoveredMcpTool, ...]:
+        """建立短时连接并完整读取工具分页，结束前确认资源已清理。"""
+
+
+__all__ = ["McpDiscovery", "McpServerRepository"]

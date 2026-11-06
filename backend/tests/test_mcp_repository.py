@@ -150,6 +150,14 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             public_tools = await repository.list_public(offset=0, limit=10)
             assert not hasattr(public_tools.items[0], "server_id")
             assert not hasattr(public_tools.items[0], "remote_name")
+            internal_tools = await repository.list_internal(offset=0, limit=10)
+            assert {tool.remote_name for tool in internal_tools.items} == {"alpha", "gamma"}
+            server_tools = await repository.list_server_admin("mcp_1", offset=0, limit=10)
+            assert server_tools.total == 2
+            assert (await repository.get_public_tool(before_alpha.tool_id)) == next(
+                tool for tool in public_tools.items if tool.tool_id == before_alpha.tool_id
+            )
+            assert (await repository.get_admin_tool(before_alpha.tool_id)) == before_alpha
 
             async with session_factory() as session:
                 async with session.begin():

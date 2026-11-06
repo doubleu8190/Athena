@@ -28,6 +28,27 @@ class McpSecretPurpose(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class McpConnectionInput:
+    """一次发现操作使用的连接配置与已解封秘密，不含数据库身份。"""
+
+    config: McpServerConfig
+    secrets: Mapping[str, str] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """复制并冻结秘密，避免后续操作共享可变凭据。"""
+        object.__setattr__(self, "secrets", MappingProxyType(dict(self.secrets)))
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredMcpTool:
+    """远端 MCP 返回的工具定义，尚未分配本地身份。"""
+
+    remote_name: str
+    description: str
+    input_schema: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class McpSecretMetadata:
     """可安全展示的秘密键名及是否保存了值。"""
 

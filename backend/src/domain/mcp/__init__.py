@@ -2,10 +2,19 @@
 
 from domain.mcp.model import (
     MAX_MCP_SECRET_BYTES,
+    DiscoveredMcpTool,
+    McpAdminRequiredError,
     McpAuthorizationChangedError,
     McpCatalogPersistenceError,
     McpConfigurationError,
     McpConfigVersionConflictError,
+    McpConnectionInput,
+    McpDiscoveryCapabilityError,
+    McpDiscoveryError,
+    McpDiscoveryProtocolError,
+    McpDiscoveryResultError,
+    McpDiscoveryTimeoutError,
+    McpInvalidSessionError,
     McpSecretError,
     McpSecretMetadata,
     McpSecretPurpose,
@@ -22,13 +31,23 @@ from domain.mcp.model import (
     StreamableHttpConfig,
     parse_server_config,
 )
-from domain.mcp.ports import McpServerRepository
+from domain.mcp.ports import McpDiscovery, McpServerRepository
 
 __all__ = [
     "MAX_MCP_SECRET_BYTES",
     "McpAuthorizationChangedError",
+    "McpAdminRequiredError",
     "McpCatalogPersistenceError",
     "McpConfigVersionConflictError",
+    "McpConnectionInput",
+    "McpDiscovery",
+    "McpDiscoveryCapabilityError",
+    "McpDiscoveryError",
+    "McpDiscoveryProtocolError",
+    "McpDiscoveryResultError",
+    "McpDiscoveryTimeoutError",
+    "McpInvalidSessionError",
+    "DiscoveredMcpTool",
     "McpConfigurationError",
     "McpSecretError",
     "McpSecretMetadata",

@@ -8,6 +8,8 @@ from domain.mcp.model.config import (
 )
 from domain.mcp.model.entity import (
     MAX_MCP_SECRET_BYTES,
+    DiscoveredMcpTool,
+    McpConnectionInput,
     McpSecretMetadata,
     McpSecretPurpose,
     McpServer,
@@ -16,10 +18,17 @@ from domain.mcp.model.entity import (
     McpTransport,
 )
 from domain.mcp.model.errors import (
+    McpAdminRequiredError,
     McpAuthorizationChangedError,
     McpCatalogPersistenceError,
     McpConfigurationError,
     McpConfigVersionConflictError,
+    McpDiscoveryCapabilityError,
+    McpDiscoveryError,
+    McpDiscoveryProtocolError,
+    McpDiscoveryResultError,
+    McpDiscoveryTimeoutError,
+    McpInvalidSessionError,
     McpSecretError,
     McpServerNameConflictError,
     McpServerNotFoundError,
@@ -29,9 +38,18 @@ from domain.mcp.model.result import McpServerPage
 
 __all__ = [
     "MAX_MCP_SECRET_BYTES",
+    "DiscoveredMcpTool",
+    "McpConnectionInput",
+    "McpAdminRequiredError",
     "McpAuthorizationChangedError",
     "McpCatalogPersistenceError",
     "McpConfigVersionConflictError",
+    "McpDiscoveryCapabilityError",
+    "McpDiscoveryError",
+    "McpDiscoveryProtocolError",
+    "McpDiscoveryResultError",
+    "McpDiscoveryTimeoutError",
+    "McpInvalidSessionError",
     "McpConfigurationError",
     "McpSecretError",
     "McpSecretMetadata",

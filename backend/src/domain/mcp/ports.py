@@ -1,0 +1,47 @@
+"""MCP Server 目录持久化端口。"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Protocol
+
+from domain.auth import AuthContext
+from domain.mcp.model import McpServer, McpServerPage, McpServerRuntimeConfig, McpServerWrite
+from domain.tool import ToolDefinition
+
+
+class McpServerRepository(Protocol):
+    """管理 MCP Server 和其发现工具快照的原子持久化端口。"""
+
+    async def create_with_tools(
+        self,
+        actor: AuthContext,
+        server: McpServerWrite,
+        tools: Sequence[ToolDefinition],
+    ) -> McpServer:
+        """同一事务复核管理员后创建 Server 及全部工具。"""
+
+    async def replace_with_tools(
+        self,
+        actor: AuthContext,
+        server_id: str,
+        expected_config_version: int,
+        replacement: McpServerWrite,
+        tools: Sequence[ToolDefinition],
+    ) -> McpServer:
+        """比较配置版本后原子替换 Server 配置和工具快照。"""
+
+    async def delete(self, actor: AuthContext, server_id: str) -> None:
+        """同一事务复核管理员后物理删除 Server 及其工具。"""
+
+    async def get(self, server_id: str) -> McpServer | None:
+        """读取不含秘密明文的 Server 投影。"""
+
+    async def get_runtime_config(self, server_id: str) -> McpServerRuntimeConfig | None:
+        """仅供 transport 的内部调用解封凭据，不用于用户可见输出。"""
+
+    async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
+        """分页读取 Server 安全投影。"""
+
+
+__all__ = ["McpServerRepository"]

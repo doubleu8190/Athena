@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
+from adapter.llm import OpenAIResponsesAdapter
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
@@ -27,6 +28,7 @@ from api.security import DEFAULT_COOKIE_NAME
 from api.sessions import build_session_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
+from app.llm import LlmService, parse_profiles
 from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.session.service import SessionService
@@ -83,6 +85,7 @@ def create_app(
     auth_service: AuthService | None = None,
     *,
     tool_manager: ToolManager | None = None,
+    llm_service: LlmService | None = None,
     auth_cookie_secure: bool | None = None,
     public_origin: str | None = None,
 ) -> FastAPI:
@@ -102,6 +105,13 @@ def create_app(
     auth_use_case = auth_service
     database_url = os.getenv("ATHENA_DATABASE_URL")
     mcp_use_case = tool_manager
+    llm_use_case = llm_service
+    llm_adapter: OpenAIResponsesAdapter | None = None
+    if llm_use_case is None:
+        llm_profiles = parse_profiles()
+        if llm_profiles:
+            llm_adapter = OpenAIResponsesAdapter(llm_profiles)
+            llm_use_case = LlmService(llm_adapter, llm_profiles)
     secret_cipher: McpSecretCipher | None = None
     mcp_discovery: McpDiscoveryClient | None = None
     if database_url and mcp_use_case is None:
@@ -171,8 +181,16 @@ def create_app(
         try:
             yield
         finally:
+            if llm_adapter is not None:
+                try:
+                    await llm_adapter.aclose()
+                except Exception:
+                    logger.error("llm_shutdown_failed code=llm_cleanup_failed")
             if database is not None:
-                await database.dispose()
+                try:
+                    await database.dispose()
+                except Exception:
+                    logger.error("database_shutdown_failed")
 
     app = FastAPI(title="Athena", version="0.1.0", lifespan=lifespan)
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
@@ -181,6 +199,7 @@ def create_app(
     app.state.auth_cookie_name = DEFAULT_COOKIE_NAME
     app.state.public_origin = configured_public_origin or None
     app.state.tool_manager = mcp_use_case
+    app.state.llm_service = llm_use_case
     app.include_router(health_router)
     if project_use_case is not None:
         app.include_router(build_project_router(project_use_case))

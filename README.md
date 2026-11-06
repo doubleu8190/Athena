@@ -286,6 +286,23 @@ cd backend
 当前未实现 `tools/call`、Run/LLM 集成、Redis、健康探测和定时刷新；普通工具
 目录查询只读取最近一次成功发现并持久化的结果。
 
+## LLM 调用模块
+
+内部 `app.state.llm_service` 可执行一次 Responses API 非流式、流式或严格结构化
+调用。首版不提供 HTTP 路由、工具执行或 Run 循环。部署方可用
+`ATHENA_LLM_PROFILES` JSON 对象配置 Profile；各项含 `model`、`api_key_env` 和
+`capabilities`，可选 `base_url`、超时、并发、输入/响应大小、输出 token 及工具上限。
+凭据只从 `api_key_env` 指向的环境变量读取。默认上限为请求 60 秒、流 120 秒、
+每 Profile 并发 4、输入 256 KiB、响应 1 MiB、输出 8192 tokens、32 个工具、
+单个工具参数 64 KiB。请求只能收紧这些部署限制。Profile 能力包括 `tools`、
+`stream`、`structured` 和 `temperature`；未声明的能力会在调用前拒绝。
+
+未设置 `ATHENA_LLM_PROFILES` 时 LLM 不启用，应用和 `/health` 仍可正常启动。
+注入的 LLM 服务由调用方管理；应用自行构建的 SDK 客户端在 lifespan 退出时关闭。
+SDK 自动重试关闭，流式中断不会重放。真实模型兼容性尚未联调；配置真实模型、
+地址和凭据后，需分别验证普通、流式、tools、结构化及显式上下文续接。
+客户端请求未压缩响应，并拒绝服务端返回的压缩响应，以确保响应字节上限在 SDK 解码前生效。
+
 ## 开发检查
 
 ```sh

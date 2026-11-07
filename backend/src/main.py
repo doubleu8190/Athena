@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import ipaddress
-import json
 import logging
 import os
 import re
-from collections.abc import AsyncIterator
+import shutil
+import tempfile
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -16,6 +17,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
+from adapter.knowledge.repository import KnowledgeRepository
 from adapter.llm import OpenAIResponsesAdapter
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.memory.repository import MemoryRepository
@@ -24,47 +26,179 @@ from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.session import SqlAlchemySessionRepository
 from api.auth import AuthCookieConfig, build_auth_router
 from api.health import router as health_router
+from api.knowledge import build_knowledge_router
 from api.mcp import build_mcp_router
 from api.messages import build_message_router
+from api.project_knowledge import build_project_knowledge_router
 from api.projects import build_project_router
 from api.security import DEFAULT_COOKIE_NAME
 from api.sessions import build_session_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
+from app.knowledge.service import KnowledgeService
 from app.llm import LlmService, parse_profiles
 from app.memory.service import MemoryService
 from app.message.service import MessageService
+from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
 from app.session.service import SessionService
 from app.tool import ToolManager
+from common.ids import new_id
+from domain.knowledge.ports import KnowledgeRepositoryPort
 from domain.mcp import McpSecretError
 from infrastructure.database import (
     DEFAULT_DATABASE_MAX_OVERFLOW,
     DEFAULT_DATABASE_POOL_SIZE,
     Database,
 )
+from infrastructure.embedding import LocalEmbedding
+from infrastructure.embedding.profile import embedding_profile_id
+from infrastructure.knowledge import (
+    JiebaChineseTokenizer,
+    LocalKnowledgeTokenCounter,
+    LocalOriginalStore,
+)
 from infrastructure.mcp.discovery import McpDiscoveryClient
-from infrastructure.memory import LocalEmbedding, LocalReranker, LocalTokenCounter
+from infrastructure.memory import LocalReranker, LocalTokenCounter
 from infrastructure.security.mcp_secrets import McpSecretCipher
 from infrastructure.security.password import Argon2PasswordHasher
 
 logger = logging.getLogger(__name__)
 
 
+class _KnowledgeUploadLimitMiddleware:
+    """Bound multipart requests before Starlette parses/spools their fields."""
+
+    _maximum = 22 * 1024 * 1024  # 20 MiB file plus bounded multipart metadata.
+
+    def __init__(
+        self,
+        app: object,
+        repository: KnowledgeRepositoryPort | None = None,
+        storage_path: str | None = None,
+    ) -> None:
+        self.app = app
+        self._repository = repository
+        self._storage_path = storage_path
+        self._local_slots = asyncio.Semaphore(4)
+
+    async def __call__(self, scope: dict[str, object], receive: object, send: object) -> None:
+        path = str(scope.get("path", ""))
+        method = str(scope.get("method", ""))
+        upload_path = path.startswith("/api/v1/knowledge-bases/") and (
+            path.endswith("/documents/upload") or path.endswith("/versions/upload")
+        )
+        if method != "POST" or not upload_path:
+            await self.app(scope, receive, send)  # type: ignore[operator]
+            return
+        receive_fn = receive
+        send_fn = send
+        assert callable(receive_fn) and callable(send_fn)
+        minimum_free_bytes = _env_int(
+            "ATHENA_KNOWLEDGE_UPLOAD_MIN_FREE_BYTES",
+            default=384 * 1024 * 1024,
+            minimum=1,
+        )
+        try:
+            temp_free = shutil.disk_usage(tempfile.gettempdir()).free
+            storage_free = (
+                shutil.disk_usage(self._storage_path).free
+                if self._storage_path is not None
+                else temp_free
+            )
+            if min(temp_free, storage_free) < minimum_free_bytes:
+                await _send_json(send_fn, 503, "knowledge_upload_storage_low")
+                return
+        except OSError:
+            await _send_json(send_fn, 503, "knowledge_upload_storage_unavailable")
+            return
+        slot_token = new_id("kuslot")
+        acquired = False
+        if self._repository is None:
+            await self._local_slots.acquire()
+            acquired = True
+        else:
+            try:
+                acquired = await self._repository.acquire_upload_slot(slot_token, lease_seconds=900)
+            except Exception:
+                await _send_json(send_fn, 503, "knowledge_upload_admission_unavailable")
+                return
+        if not acquired:
+            await _send_json(send_fn, 429, "knowledge_upload_capacity_exceeded")
+            return
+        response_started = False
+
+        async def tracked_send(message: dict[str, object]) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send_fn(message)
+
+        try:
+            async with asyncio.timeout(600):
+                with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b") as body:
+                    size = 0
+                    while True:
+                        message = await receive_fn()
+                        if message["type"] == "http.disconnect":
+                            return
+                        chunk = message.get("body", b"")
+                        size += len(chunk)
+                        if size > self._maximum:
+                            await _send_json(tracked_send, 413, "document_file_too_large")
+                            return
+                        body.write(chunk)
+                        if not message.get("more_body", False):
+                            break
+                    body.seek(0)
+                    first = True
+
+                    async def replay() -> dict[str, object]:
+                        nonlocal first
+                        if first:
+                            first = False
+                            return {
+                                "type": "http.request",
+                                "body": body.read(64 * 1024),
+                                "more_body": True,
+                            }
+                        chunk = body.read(64 * 1024)
+                        return {"type": "http.request", "body": chunk, "more_body": bool(chunk)}
+
+                    await self.app(scope, replay, tracked_send)  # type: ignore[operator]
+        except TimeoutError:
+            if not response_started:
+                await _send_json(tracked_send, 504, "knowledge_upload_timeout")
+        finally:
+            if self._repository is None:
+                self._local_slots.release()
+            else:
+                try:
+                    await asyncio.shield(self._repository.release_upload_slot(slot_token))
+                except Exception:
+                    logger.error("knowledge_upload_slot_release_failed")
+
+
+async def _send_json(send: object, status: int, detail: str) -> None:
+    """发送上传准入或大小限制错误响应。"""
+    assert callable(send)
+    payload = ('{"detail":"' + detail + '"}').encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(payload)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": payload})
+
+
 def memory_profile_id(model: str, revision: str) -> str:
     """根据模型权重与向量预处理规则生成不可混用的档案标识。"""
-    profile = json.dumps(
-        {
-            "model": model,
-            "revision": revision,
-            "dimensions": 1024,
-            "normalize_embeddings": False,
-            "preprocessing": "sentence-transformers-default-v1",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return f"bge-{hashlib.sha256(profile.encode()).hexdigest()[:32]}"
+    return embedding_profile_id(model, revision)
 
 
 _DATABASE_BACKED_ROUTE_PREFIXES = (
@@ -73,6 +207,7 @@ _DATABASE_BACKED_ROUTE_PREFIXES = (
     "/api/v1/sessions",
     "/api/v1/admin",
     "/api/v1/tools",
+    "/api/v1/knowledge-bases",
 )
 
 
@@ -134,7 +269,13 @@ def create_app(
     memory_reranker: LocalReranker | None = None
     memory_counter: LocalTokenCounter | None = None
     memory_use_case = memory_service
+    knowledge_embedding: LocalEmbedding | None = None
+    knowledge_counter = None
     memory_enabled = _env_flag("ATHENA_MEMORY_ENABLED", default=False)
+    knowledge_enabled = _env_flag("ATHENA_KNOWLEDGE_ENABLED", default=False)
+    knowledge_use_case: KnowledgeService | None = None
+    knowledge_repository: KnowledgeRepository | None = None
+    knowledge_originals: LocalOriginalStore | None = None
     memory_owned = memory_service is None and memory_enabled
     if memory_owned and not database_url:
         raise RuntimeError("memory_database_required")
@@ -163,6 +304,7 @@ def create_app(
         or session_use_case is None
         or mcp_use_case is None
         or memory_owned
+        or (knowledge_enabled and knowledge_use_case is None)
     ):
         database = Database(
             database_url,
@@ -197,6 +339,29 @@ def create_app(
                 mcp_repository,
                 mcp_discovery,
                 auth_repository,
+            )
+        if knowledge_enabled:
+            storage_root = os.getenv("ATHENA_KNOWLEDGE_STORAGE_ROOT", "./var/knowledge")
+            knowledge_originals = LocalOriginalStore(storage_root)
+            model_name = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
+            model_revision = os.getenv(
+                "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
+                "5617a9f61b028005a4858fdac845db406aefb181",
+            )
+            knowledge_embedding = LocalEmbedding(
+                model_name,
+                model_revision,
+                os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu"),
+            )
+            knowledge_counter = LocalKnowledgeTokenCounter(model_name, model_revision)
+            knowledge_repository = KnowledgeRepository(database.session_factory)
+            knowledge_use_case = KnowledgeService(
+                knowledge_repository,
+                JiebaChineseTokenizer(),
+                knowledge_embedding,
+                knowledge_originals,
+                knowledge_counter,
+                profile_id=memory_profile_id(model_name, model_revision),
             )
     if memory_owned and database is not None:
         embedding_model = os.getenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -248,9 +413,13 @@ def create_app(
     )
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         """在应用退出时释放数据库连接池。"""
         try:
+            if knowledge_counter is not None:
+                await knowledge_counter.start()
+            if knowledge_embedding is not None:
+                await knowledge_embedding.start()
             if memory_owned and memory_embedding is not None and memory_reranker is not None:
                 await memory_embedding.start()
                 await memory_reranker.start()
@@ -270,6 +439,10 @@ def create_app(
                     await memory_reranker.aclose()
                 if memory_counter is not None:
                     memory_counter.close()
+            if knowledge_embedding is not None:
+                await knowledge_embedding.aclose()
+            if knowledge_counter is not None:
+                knowledge_counter.close()
             if database is not None:
                 try:
                     await database.dispose()
@@ -277,6 +450,15 @@ def create_app(
                     logger.error("database_shutdown_failed")
 
     app = FastAPI(title="Athena", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        _KnowledgeUploadLimitMiddleware,
+        repository=knowledge_repository,
+        storage_path=(
+            os.getenv("ATHENA_KNOWLEDGE_STORAGE_ROOT", "./var/knowledge")
+            if knowledge_repository is not None
+            else None
+        ),
+    )
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
     app.add_exception_handler(OSError, _handle_os_error)
     app.state.authenticator = auth_use_case
@@ -285,6 +467,7 @@ def create_app(
     app.state.tool_manager = mcp_use_case
     app.state.llm_service = llm_use_case
     app.state.memory_service = memory_use_case
+    app.state.knowledge_service = knowledge_use_case
     app.include_router(health_router)
     if project_use_case is not None:
         app.include_router(build_project_router(project_use_case))
@@ -305,6 +488,18 @@ def create_app(
     if mcp_use_case is not None:
         app.include_router(build_mcp_router(mcp_use_case))
         app.include_router(build_tools_router(mcp_use_case))
+    if knowledge_use_case is not None:
+        app.state.knowledge_original_store = knowledge_originals
+        app.include_router(build_knowledge_router(knowledge_use_case))
+        if project_use_case is not None and database is not None:
+            app.include_router(
+                build_project_knowledge_router(
+                    ProjectKnowledgeService(
+                        project_use_case, KnowledgeRepository(database.session_factory)
+                    ),
+                    project_use_case,
+                )
+            )
     return app
 
 

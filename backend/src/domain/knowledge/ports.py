@@ -1,0 +1,341 @@
+"""知识库对外端口。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Protocol
+
+from domain.knowledge.model import (
+    Document,
+    DocumentVersion,
+    KnowledgeBase,
+    SearchHit,
+    SearchResult,
+    SourceReference,
+    TextBlock,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedDocument:
+    """文档提取的文本与诊断。"""
+
+    blocks: tuple[TextBlock, ...]
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class FileUploadReservation:
+    """Fenced file-upload quota reservation or a finalized idempotency replay."""
+
+    reservation_token: str | None
+    storage_key: str | None
+    source_id: str | None
+    document_id: str
+    version_id: str
+    job_id: str | None
+    replay_document: Document | None = None
+    fencing_token: int = 0
+
+
+class DocumentParser(Protocol):
+    """按已确认格式提取文档文本，必要时执行 OCR。"""
+
+    async def parse(self, filename: str, content: bytes) -> ParsedDocument: ...
+
+
+class EmbeddingPort(Protocol):
+    """将文本编码为固定维度向量。"""
+
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class ChineseTokenizer(Protocol):
+    """对中文全文检索输入进行确定性分词。"""
+
+    def tokenize(self, text: str) -> tuple[str, ...]: ...
+
+
+class TokenCounterPort(Protocol):
+    """返回所选 embedding tokenizer 对输入文本的 token 数。"""
+
+    def count(self, text: str) -> int: ...
+
+
+class OriginalStore(Protocol):
+    """知识库原件的受控存储。"""
+
+    async def put(self, key: str, content: bytes) -> None: ...
+
+    async def get(self, key: str) -> bytes: ...
+
+    async def delete(self, key: str) -> None: ...
+
+    async def sweep_orphans(
+        self, referenced_keys: set[str], *, older_than_seconds: int = 86400
+    ) -> int: ...
+
+
+class KnowledgeRepositoryPort(Protocol):
+    """知识库应用服务使用的持久化边界。"""
+
+    async def create_base(self, item: KnowledgeBase) -> KnowledgeBase: ...
+
+    async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None: ...
+
+    async def is_storage_key_referenced(self, storage_key: str) -> bool: ...
+
+    async def reserve_file_upload(
+        self,
+        *,
+        owner_id: str,
+        operation: str,
+        request_key: str,
+        request_hash: str,
+        base_id: str,
+        document_id: str,
+        size_bytes: int,
+        reservation_token: str,
+        storage_key: str,
+        source_id: str,
+        version_id: str,
+        job_id: str,
+        at: datetime,
+        expires_after_seconds: int = 86400,
+    ) -> FileUploadReservation: ...
+
+    async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool: ...
+
+    async def release_upload_slot(self, token: str) -> None: ...
+
+    async def claim_expired_upload_reservations(
+        self, *, limit: int = 20, lease_seconds: int = 300
+    ) -> tuple[FileUploadReservation, ...]: ...
+
+    async def finish_expired_upload_reservation(
+        self, reservation_token: str, fencing_token: int
+    ) -> bool: ...
+
+    async def can_delete_expired_upload_reservation(
+        self, reservation_token: str, fencing_token: int
+    ) -> bool: ...
+
+    async def list_bases(
+        self, owner_id: str, *, offset: int, limit: int
+    ) -> list[KnowledgeBase]: ...
+
+    async def rename_base(
+        self, owner_id: str, base_id: str, name: str, description: str | None, at: datetime
+    ) -> KnowledgeBase | None: ...
+
+    async def soft_delete_base(self, owner_id: str, base_id: str, at: datetime) -> bool: ...
+
+    async def create_text_document(
+        self,
+        *,
+        owner_id: str,
+        base_id: str,
+        title: str,
+        text: str,
+        request_key: str,
+        request_hash: str,
+        content_hash: str,
+        document_id: str,
+        version_id: str,
+        job_id: str,
+        profile_id: str,
+        at: datetime,
+    ) -> tuple[Document, str]: ...
+
+    async def create_file_document(
+        self,
+        *,
+        owner_id: str,
+        base_id: str,
+        title: str,
+        filename: str,
+        media_type: str,
+        storage_key: str,
+        size_bytes: int,
+        sha256: str,
+        request_key: str,
+        request_hash: str,
+        document_id: str,
+        version_id: str,
+        source_id: str,
+        reservation_token: str,
+        job_id: str,
+        profile_id: str,
+        at: datetime,
+    ) -> tuple[Document, str]: ...
+
+    async def replace_text_document(
+        self,
+        *,
+        owner_id: str,
+        base_id: str,
+        document_id: str,
+        text: str,
+        request_key: str,
+        request_hash: str,
+        content_hash: str,
+        version_id: str,
+        job_id: str,
+        profile_id: str,
+        at: datetime,
+    ) -> tuple[Document, str]: ...
+
+    async def replace_file_document(
+        self,
+        *,
+        owner_id: str,
+        base_id: str,
+        document_id: str,
+        title: str,
+        filename: str,
+        media_type: str,
+        storage_key: str,
+        size_bytes: int,
+        sha256: str,
+        request_key: str,
+        request_hash: str,
+        version_id: str,
+        source_id: str,
+        reservation_token: str,
+        job_id: str,
+        profile_id: str,
+        at: datetime,
+    ) -> tuple[Document, str]: ...
+
+    async def list_documents(
+        self, owner_id: str, base_id: str, *, offset: int, limit: int
+    ) -> list[Document]: ...
+
+    async def rename_document(
+        self, owner_id: str, base_id: str, document_id: str, title: str, at: datetime
+    ) -> Document | None: ...
+
+    async def delete_document(
+        self, owner_id: str, base_id: str, document_id: str
+    ) -> list[str] | None: ...
+
+    async def list_versions(
+        self, owner_id: str, base_id: str, document_id: str
+    ) -> list[DocumentVersion] | None: ...
+
+    async def retry_version(
+        self,
+        owner_id: str,
+        base_id: str,
+        document_id: str,
+        version_id: str,
+        job_id: str,
+        at: datetime,
+    ) -> DocumentVersion | None: ...
+
+    async def get_source(
+        self, owner_id: str, base_id: str, document_id: str, version_id: str
+    ) -> SourceReference | None: ...
+
+    async def get_chunk(self, owner_id: str, base_id: str, chunk_id: str) -> SearchHit | None: ...
+
+    async def get_document(
+        self, owner_id: str, base_id: str, document_id: str
+    ) -> Document | None: ...
+
+    async def search(
+        self,
+        owner_id: str,
+        base_ids: list[str],
+        query: str,
+        tokens: tuple[str, ...],
+        limit: int,
+        vector: list[float] | None = None,
+    ) -> SearchResult: ...
+
+    async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None: ...
+
+    async def search_keyword(
+        self, owner_id: str, base_ids: list[str], tokens: tuple[str, ...], limit: int
+    ) -> tuple[SearchHit, ...]: ...
+
+    async def search_semantic(
+        self,
+        owner_id: str,
+        base_ids: list[str],
+        vector: list[float],
+        limit: int,
+        profile_id: str | None = None,
+    ) -> tuple[SearchHit, ...]: ...
+
+    async def has_incompatible_profile(
+        self, owner_id: str, base_ids: list[str], profile_id: str
+    ) -> bool: ...
+
+    async def filter_active_hits(
+        self, owner_id: str, hits: tuple[SearchHit, ...]
+    ) -> tuple[SearchHit, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimedKnowledgeJob:
+    """持有一次租约和 fencing token 的待处理工作。"""
+
+    job_id: str
+    owner_id: str
+    version_id: str
+    document_id: str
+    title: str
+    source_text: str | None
+    source_key: str | None
+    source_filename: str | None
+    fencing_token: int
+    kind: str = "ingestion"
+    source_keys: tuple[str, ...] = ()
+    target_id: str = ""
+    profile_id: str | None = None
+
+
+class KnowledgeJobRepository(Protocol):
+    """后台消费者使用的短事务任务边界。"""
+
+    async def claim_job(
+        self, *, lease_seconds: int, owner_concurrency: int = 2
+    ) -> ClaimedKnowledgeJob | None: ...
+
+    async def heartbeat_job(
+        self, job_id: str, fencing_token: int, *, lease_seconds: int
+    ) -> bool: ...
+
+    async def publish_job(
+        self,
+        job: ClaimedKnowledgeJob,
+        *,
+        chunks: list[tuple[str, dict[str, object], int, str, list[float]]],
+        warnings: list[str],
+    ) -> bool: ...
+
+    async def fail_job(
+        self, job: ClaimedKnowledgeJob, *, error_code: str, retryable: bool
+    ) -> None: ...
+
+    async def finish_cleanup_job(self, job: ClaimedKnowledgeJob) -> bool: ...
+
+    async def list_referenced_storage_keys(self) -> set[str]: ...
+
+    async def claim_expired_upload_reservations(
+        self, *, limit: int = 20, lease_seconds: int = 300
+    ) -> tuple[FileUploadReservation, ...]: ...
+
+    async def finish_expired_upload_reservation(
+        self, reservation_token: str, fencing_token: int
+    ) -> bool: ...
+
+    async def can_delete_expired_upload_reservation(
+        self, reservation_token: str, fencing_token: int
+    ) -> bool: ...
+
+    async def release_upload_slot(self, token: str) -> None: ...
+
+    async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool: ...

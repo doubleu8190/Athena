@@ -2,6 +2,18 @@
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.base import Base
+from adapter.knowledge.model import (
+    KnowledgeBaseModel,
+    KnowledgeChunkModel,
+    KnowledgeDocumentModel,
+    KnowledgeJobModel,
+    KnowledgeRequestModel,
+    KnowledgeSourceModel,
+    KnowledgeUploadReservationModel,
+    KnowledgeUploadSlotModel,
+    KnowledgeVersionModel,
+    ProjectKnowledgeBaseModel,
+)
 from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.memory.model import MemoryModel, MemorySettingModel, MemorySourceModel
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
@@ -18,6 +30,16 @@ __all__ = [
     "MemoryModel",
     "MemorySettingModel",
     "MemorySourceModel",
+    "KnowledgeBaseModel",
+    "KnowledgeChunkModel",
+    "KnowledgeDocumentModel",
+    "KnowledgeJobModel",
+    "KnowledgeRequestModel",
+    "KnowledgeSourceModel",
+    "KnowledgeUploadReservationModel",
+    "KnowledgeUploadSlotModel",
+    "KnowledgeVersionModel",
+    "ProjectKnowledgeBaseModel",
     "ProjectModel",
     "SessionModel",
     "UserModel",

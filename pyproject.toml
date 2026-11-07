@@ -17,6 +17,7 @@ dependencies = [
     "httpx2==2.16.0",
     "jsonschema>=4.26,<5",
     "mcp==2.3.0",
+    "python-multipart>=0.0.20,<1",
     "openai==3.46.0",
     "pgvector>=0.4,<1",
     "pydantic>=2.14,<3",
@@ -35,6 +36,17 @@ dev = [
     "pytest>=8,<10",
     "ruff>=0.9,<1",
 ]
+knowledge = [
+    "jieba==0.42.1",
+    "psutil>=6,<8",
+    "paddlepaddle==3.2.2; python_version < '3.14'",
+    "paddleocr==3.7.0; python_version < '3.14'",
+    "pypdfium2==5.15.0",
+    "python-docx==1.2.0",
+    "openpyxl==3.1.5",
+    "python-pptx==1.0.2",
+    "Pillow==13.0.0",
+]
 
 [tool.hatch.build]
 dev-mode-dirs = ["backend/src"]
@@ -48,6 +60,7 @@ testpaths = ["backend/tests"]
 markers = [
     "integration: requires ATHENA_TEST_DATABASE_URL and PostgreSQL",
     "llm_live: uses a configured real LLM service and is skipped by default",
+    "real_ocr: uses the local PaddleOCR model runtime",
 ]
 
 [tool.ruff]

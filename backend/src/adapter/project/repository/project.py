@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.knowledge.model import ProjectKnowledgeBaseModel
 from adapter.project.converter.project import project_to_domain
 from adapter.project.model.project import ProjectModel
 from adapter.session.model import SessionModel
@@ -144,6 +145,12 @@ class SqlAlchemyProjectRepository(ProjectRepository):
                 )
                 if active_session_id is not None:
                     raise ProjectHasSessionsError("project_has_sessions")
+                await session.execute(
+                    delete(ProjectKnowledgeBaseModel).where(
+                        ProjectKnowledgeBaseModel.project_id == project_id,
+                        ProjectKnowledgeBaseModel.owner_id == owner_id,
+                    )
+                )
                 row.deleted_time = deleted_at
                 row.updated_at = deleted_at
                 await session.flush()

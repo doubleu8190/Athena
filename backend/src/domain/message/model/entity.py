@@ -61,6 +61,7 @@ class ConversationMessageDraft:
     created_at: datetime
     completed_at: datetime | None
     metadata: MessageMetadata
+    context_turn_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,7 @@ class ConversationMessage:
     created_at: datetime
     completed_at: datetime | None
     metadata: MessageMetadata
+    context_turn_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

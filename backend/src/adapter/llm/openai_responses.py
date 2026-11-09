@@ -6,13 +6,12 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, NoReturn, cast
 
 import httpx2
 import openai
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from openai import AsyncOpenAI
 from openai.types.responses import Response
 
@@ -30,7 +29,6 @@ from domain.llm.model import (
     LlmRole,
     LlmStreamEvent,
     LlmText,
-    LlmToolArgumentsError,
     LlmToolCall,
     LlmUsage,
     ResponseCompleted,
@@ -62,9 +60,16 @@ def _caused_by_response_limit(error: BaseException) -> bool:
 class _BoundedResponseStream(httpx2.AsyncByteStream):
     """Enforce raw body, chunk, and SSE event limits while reading transport bytes."""
 
-    def __init__(self, stream: httpx2.AsyncByteStream, limit: int, is_sse: bool) -> None:
+    def __init__(
+        self,
+        stream: httpx2.AsyncByteStream,
+        limit: int,
+        is_sse: bool,
+        event_limit: int | None = None,
+    ) -> None:
         self._stream = stream
         self._limit = limit
+        self._event_limit = event_limit or limit
         self._is_sse = is_sse
         self._total = 0
         self._event_bytes = 0
@@ -74,7 +79,7 @@ class _BoundedResponseStream(httpx2.AsyncByteStream):
     def _scan_sse(self, chunk: bytes) -> None:
         for byte in chunk:
             self._event_bytes += 1
-            if self._event_bytes > self._limit:
+            if self._event_bytes > self._event_limit:
                 raise ResponseLimitError("llm_stream_event_too_large")
             if self._pending_cr:
                 self._pending_cr = False
@@ -109,9 +114,16 @@ class _BoundedResponseStream(httpx2.AsyncByteStream):
 class _BoundedResponseTransport(httpx2.AsyncBaseTransport):
     """Wrap HTTP transport responses with per-client byte limits."""
 
-    def __init__(self, inner: httpx2.AsyncBaseTransport, limit: int) -> None:
+    def __init__(
+        self,
+        inner: httpx2.AsyncBaseTransport,
+        limit: int,
+        *,
+        event_limit: int | None = None,
+    ) -> None:
         self._inner = inner
         self._limit = limit
+        self._event_limit = event_limit
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         response = await self._inner.handle_async_request(request)
@@ -135,7 +147,10 @@ class _BoundedResponseTransport(httpx2.AsyncBaseTransport):
                 raise ResponseLimitError("llm_response_length_invalid") from None
         is_sse = "text/event-stream" in response.headers.get("content-type", "").lower()
         response.stream = _BoundedResponseStream(
-            cast(httpx2.AsyncByteStream, response.stream), self._limit, is_sse
+            cast(httpx2.AsyncByteStream, response.stream),
+            self._limit,
+            is_sse,
+            self._event_limit,
         )
         return response
 
@@ -187,6 +202,7 @@ class OpenAIResponsesAdapter(LlmProvider):
                         input=self._input(request.messages),
                         tools=self._tools(request),
                         tool_choice=self._tool_choice(request),
+                        parallel_tool_calls=False,
                         max_output_tokens=request.max_output_tokens
                         or selected_profile.max_output_tokens,
                         include=["reasoning.encrypted_content"],
@@ -208,7 +224,7 @@ class OpenAIResponsesAdapter(LlmProvider):
     @asynccontextmanager
     async def _stream(
         self, profile_name: str, request: LlmRequest
-    ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+    ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
         """在异步上下文全程持有并发配额及上游连接。"""
         profile = self._profile(profile_name)
         semaphore = self._semaphores[profile_name]
@@ -226,6 +242,7 @@ class OpenAIResponsesAdapter(LlmProvider):
                         input=self._input(request.messages),
                         tools=self._tools(request),
                         tool_choice=self._tool_choice(request),
+                        parallel_tool_calls=False,
                         max_output_tokens=request.max_output_tokens or profile.max_output_tokens,
                         include=["reasoning.encrypted_content"],
                         store=False,
@@ -347,6 +364,21 @@ class OpenAIResponsesAdapter(LlmProvider):
         items: list[dict[str, Any]] = []
         for message in messages:
             items.extend(_plain(item) for item in message.continuation_items)
+            if message.role is LlmRole.ASSISTANT and message.tool_calls:
+                if message.content:
+                    items.append({"role": "assistant", "content": message.content})
+                items.extend(
+                    {
+                        "type": "function_call",
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": json.dumps(
+                            _plain(call.arguments), ensure_ascii=False, separators=(",", ":")
+                        ),
+                    }
+                    for call in message.tool_calls
+                )
+                continue
             if message.continuation_items and not message.content:
                 continue
             if message.role is LlmRole.TOOL:
@@ -402,7 +434,6 @@ class OpenAIResponsesAdapter(LlmProvider):
             raise LlmProtocolError() from None
         if output_bytes > profile.max_response_bytes:
             raise LlmProtocolError("llm_response_too_large")
-        schemas = {tool.name: tool.input_schema for tool in request.tools}
         call_ids: set[str] = set()
         try:
             for item in result.output:
@@ -410,12 +441,7 @@ class OpenAIResponsesAdapter(LlmProvider):
                     self._validate_reasoning(item)
                     continue
                 if item.type == "function_call":
-                    if (
-                        not item.call_id
-                        or item.call_id in call_ids
-                        or not item.name
-                        or item.name not in schemas
-                    ):
+                    if not item.call_id or item.call_id in call_ids or not item.name:
                         raise LlmProtocolError()
                     call_ids.add(item.call_id)
                     if len(item.arguments.encode("utf-8")) > profile.max_tool_argument_bytes:
@@ -425,10 +451,12 @@ class OpenAIResponsesAdapter(LlmProvider):
                         >= profile.max_tools
                     ):
                         raise LlmProtocolError("llm_tool_count_exceeded")
-                    arguments = json.loads(item.arguments)
+                    try:
+                        arguments = json.loads(item.arguments)
+                    except (TypeError, ValueError):
+                        raise LlmProtocolError("llm_tool_arguments_invalid") from None
                     if not isinstance(arguments, dict):
-                        raise LlmProtocolError()
-                    Draft202012Validator(_plain(schemas[item.name])).validate(arguments)
+                        raise LlmProtocolError("llm_tool_arguments_invalid")
                     output.append(LlmToolCall(item.call_id, item.name, arguments))
                 elif item.type == "message":
                     if item.role != "assistant":
@@ -447,7 +475,7 @@ class OpenAIResponsesAdapter(LlmProvider):
         except LlmProtocolError:
             raise
         except Exception:
-            raise LlmToolArgumentsError() from None
+            raise LlmProtocolError("llm_response_invalid") from None
         raw_usage = result.usage
         usage = (
             None
@@ -644,16 +672,12 @@ class OpenAIResponsesAdapter(LlmProvider):
                     state = item_state(event.output_index, event.item_id, "function_call")
                     if state["arguments_done"] or state["arguments"] != event.arguments:
                         raise LlmProtocolError("llm_tool_arguments_done_mismatch")
-                    schemas = {tool.name: tool.input_schema for tool in request.tools}
-                    if state["name"] not in schemas:
-                        raise LlmProtocolError("llm_tool_name_unbound")
                     try:
                         arguments = json.loads(event.arguments)
                         if not isinstance(arguments, dict):
                             raise ValueError
-                        Draft202012Validator(_plain(schemas[state["name"]])).validate(arguments)
-                    except Exception:
-                        raise LlmToolArgumentsError() from None
+                    except (TypeError, ValueError):
+                        raise LlmProtocolError("llm_tool_arguments_invalid") from None
                     state["arguments_done"] = True
                     state["arguments_value"] = arguments
                 elif kind in {

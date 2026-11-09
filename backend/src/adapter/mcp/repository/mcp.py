@@ -24,6 +24,9 @@ from domain.mcp import (
     McpAuthorizationChangedError,
     McpCatalogPersistenceError,
     McpConfigVersionConflictError,
+    McpConnectionInput,
+    McpRuntimeToolDefinition,
+    McpRuntimeToolTarget,
     McpSecretPurpose,
     McpServer,
     McpServerNameConflictError,
@@ -33,6 +36,7 @@ from domain.mcp import (
     McpServerRuntimeConfig,
     McpServerWrite,
     McpToolConflictError,
+    McpToolRuntimeReader,
     McpTransport,
 )
 from domain.tool import (
@@ -45,7 +49,7 @@ from domain.tool import (
 from infrastructure.security.mcp_secrets import McpSecretCipher, SealedMcpSecrets
 
 
-class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader):
+class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRuntimeReader):
     """在权限复核与资源更新间保持单一事务和统一锁顺序。"""
 
     def __init__(
@@ -227,6 +231,69 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader):
         secrets = self._decrypt_secrets(row)
         server = server_to_domain(row, tuple(sorted(secrets)))
         return McpServerRuntimeConfig(server=server, secrets=secrets)
+
+    async def list_runtime_tools(self, *, limit: int) -> tuple[McpRuntimeToolDefinition, ...]:
+        """Read catalog rows and their Server config version in one DB snapshot."""
+        if not 1 <= limit <= 201:
+            raise ValueError("mcp_runtime_tool_limit_invalid")
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(McpToolModel, McpServerModel)
+                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                    .order_by(McpToolModel.server_id, McpToolModel.model_name)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(
+            McpRuntimeToolDefinition(
+                tool_id=tool.id,
+                server_id=server.id,
+                remote_name=tool.remote_name,
+                model_name=tool.model_name,
+                description=tool.description,
+                input_schema=dict(tool.input_schema_json),
+                config_version=server.config_version,
+            )
+            for tool, server in rows
+        )
+
+    async def get_call_target(
+        self,
+        tool_id: str,
+        server_id: str,
+        remote_name: str,
+        expected_config_version: int,
+    ) -> McpRuntimeToolTarget | None:
+        """Read one tool and current config/version without crossing a network wait."""
+        if expected_config_version < 1:
+            return None
+        async with self._session_factory() as session:
+            pair = (
+                await session.execute(
+                    select(McpToolModel, McpServerModel)
+                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                    .where(
+                        McpToolModel.id == tool_id,
+                        McpToolModel.server_id == server_id,
+                        McpToolModel.remote_name == remote_name,
+                    )
+                )
+            ).one_or_none()
+        if pair is None:
+            return None
+        tool, server = pair
+        if server.config_version != expected_config_version:
+            return None
+        secrets = self._decrypt_secrets(server)
+        server_domain = server_to_domain(server, tuple(sorted(secrets)))
+        return McpRuntimeToolTarget(
+            tool_id=tool.id,
+            server_id=server.id,
+            remote_name=tool.remote_name,
+            config_version=server.config_version,
+            connection=McpConnectionInput(server_domain.config, secrets),
+        )
 
     async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
         """按更新时间倒序读取 Server 安全投影分页。

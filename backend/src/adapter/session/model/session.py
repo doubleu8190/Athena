@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     String,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -24,6 +25,7 @@ class SessionModel(Base):
 
     __tablename__ = "sessions"
     __table_args__ = (
+        UniqueConstraint("id", "owner_id", name="uq_sessions_id_owner"),
         CheckConstraint(
             "last_message_sequence >= 0",
             name="ck_sessions_last_message_sequence",

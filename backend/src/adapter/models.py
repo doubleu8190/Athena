@@ -14,10 +14,24 @@ from adapter.knowledge.model import (
     KnowledgeVersionModel,
     ProjectKnowledgeBaseModel,
 )
+from adapter.llm.model import (
+    CompressionPolicyVersionModel,
+    CurrentCompressionPolicyModel,
+    DefaultModelProfileModel,
+    ModelProfileVersionModel,
+)
 from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.memory.model import MemoryModel, MemorySettingModel, MemorySourceModel
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.project.model import ProjectModel
+from adapter.run.model import (
+    RunEventModel,
+    RunInputRequestModel,
+    RunModel,
+    RunRequestModel,
+    RunToolCallModel,
+    SessionContextSummaryModel,
+)
 from adapter.session.model import SessionModel
 
 __all__ = [
@@ -25,6 +39,10 @@ __all__ = [
     "Base",
     "ConversationMessageModel",
     "ExecutionMessageModel",
+    "DefaultModelProfileModel",
+    "CompressionPolicyVersionModel",
+    "CurrentCompressionPolicyModel",
+    "ModelProfileVersionModel",
     "McpServerModel",
     "McpToolModel",
     "MemoryModel",
@@ -41,6 +59,12 @@ __all__ = [
     "KnowledgeVersionModel",
     "ProjectKnowledgeBaseModel",
     "ProjectModel",
+    "RunEventModel",
+    "RunInputRequestModel",
+    "RunModel",
+    "RunRequestModel",
+    "RunToolCallModel",
+    "SessionContextSummaryModel",
     "SessionModel",
     "UserModel",
 ]

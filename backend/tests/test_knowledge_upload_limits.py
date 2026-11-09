@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import cast
+
+import pytest
 
 from domain.knowledge.ports import KnowledgeRepositoryPort
 from main import _KnowledgeUploadLimitMiddleware
@@ -97,6 +100,103 @@ def test_upload_slot_is_released_with_its_token_after_downstream() -> None:
         token, lease_seconds = slots.acquired[0]
         assert lease_seconds == 900
         assert slots.released == [token]
+
+    asyncio.run(scenario())
+
+
+def test_upload_admission_checks_only_the_temp_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked_paths: list[str] = []
+    temp_directory = "/tmp/athena-upload-test"
+
+    def disk_usage(path: str) -> SimpleNamespace:
+        checked_paths.append(path)
+        return SimpleNamespace(free=1024**3)
+
+    monkeypatch.setattr("main.shutil.disk_usage", disk_usage)
+    monkeypatch.setattr("main.tempfile.gettempdir", lambda: temp_directory)
+
+    class Slots:
+        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
+            del token, lease_seconds
+            return True
+
+        async def release_upload_slot(self, token: str) -> None:
+            del token
+
+    async def scenario() -> None:
+        async def application(scope: object, receive: object, send: object) -> None:
+            del scope, receive, send
+
+        middleware = _KnowledgeUploadLimitMiddleware(
+            application, cast(KnowledgeRepositoryPort, Slots())
+        )
+
+        async def receive() -> dict[str, object]:
+            return {"type": "http.request", "body": b"ok", "more_body": False}
+
+        async def send(message: dict[str, object]) -> None:
+            del message
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/knowledge-bases/kb_1/documents/upload",
+            },
+            receive,
+            send,
+        )
+
+    asyncio.run(scenario())
+    assert checked_paths == [temp_directory]
+
+
+def test_upload_rejects_low_temp_space_before_acquiring_a_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "main.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=0),
+    )
+
+    class Slots:
+        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
+            raise AssertionError("low temp space must be rejected before slot acquisition")
+
+        async def release_upload_slot(self, token: str) -> None:
+            raise AssertionError("unacquired slot must not be released")
+
+    async def scenario() -> None:
+        app_calls = 0
+
+        async def application(scope: object, receive: object, send: object) -> None:
+            nonlocal app_calls
+            app_calls += 1
+
+        middleware = _KnowledgeUploadLimitMiddleware(
+            application, cast(KnowledgeRepositoryPort, Slots())
+        )
+        responses: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            raise AssertionError("request body must not be read when temp space is low")
+
+        async def send(message: dict[str, object]) -> None:
+            responses.append(message)
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/knowledge-bases/kb_1/documents/upload",
+            },
+            receive,
+            send,
+        )
+        assert app_calls == 0
+        assert responses[0]["status"] == 503
 
     asyncio.run(scenario())
 

@@ -27,11 +27,13 @@ from adapter.knowledge.model import (
 from adapter.project.model import ProjectModel
 from common.ids import new_id
 from domain.knowledge.model import (
+    MAX_PROJECT_KNOWLEDGE_BASES,
     ChunkLocator,
     Document,
     DocumentState,
     DocumentVersion,
     KnowledgeBase,
+    ProjectKnowledgeLimitReachedError,
     SearchHit,
     SearchResult,
     SourceReference,
@@ -95,25 +97,11 @@ class KnowledgeRepository:
 
     async def is_storage_key_referenced(self, storage_key: str) -> bool:
         async with self._sessions() as session:
-            return (
-                await session.scalar(
-                    select(KnowledgeSourceModel.id)
-                    .where(
-                        KnowledgeSourceModel.storage_key == storage_key,
-                    )
-                    .limit(1)
-                )
-                is not None
+            source_reference = exists().where(KnowledgeSourceModel.storage_key == storage_key)
+            reservation_reference = exists().where(
+                KnowledgeUploadReservationModel.storage_key == storage_key
             )
-
-    async def list_referenced_storage_keys(self) -> set[str]:
-        async with self._sessions() as session:
-            referenced_keys = await session.scalars(
-                select(KnowledgeSourceModel.storage_key).union_all(
-                    select(KnowledgeUploadReservationModel.storage_key)
-                )
-            )
-            return set(referenced_keys)
+            return bool(await session.scalar(select(source_reference | reservation_reference)))
 
     async def reserve_file_upload(
         self,
@@ -1014,6 +1002,24 @@ class KnowledgeRepository:
                 raise LookupError("knowledge_base_not_found")
             existing = await session.get(ProjectKnowledgeBaseModel, (project_id, base_id))
             if existing is None:
+                active_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ProjectKnowledgeBaseModel)
+                        .join(
+                            KnowledgeBaseModel,
+                            KnowledgeBaseModel.id == ProjectKnowledgeBaseModel.knowledge_base_id,
+                        )
+                        .where(
+                            ProjectKnowledgeBaseModel.project_id == project_id,
+                            ProjectKnowledgeBaseModel.owner_id == owner_id,
+                            KnowledgeBaseModel.deleted_time.is_(None),
+                        )
+                    )
+                    or 0
+                )
+                if active_count >= MAX_PROJECT_KNOWLEDGE_BASES:
+                    raise ProjectKnowledgeLimitReachedError("project_knowledge_limit_reached")
                 session.add(
                     ProjectKnowledgeBaseModel(
                         project_id=project_id,
@@ -2000,6 +2006,7 @@ class KnowledgeRepository:
                 (_locator(chunk.locator),),
                 (),
                 0.0,
+                knowledge_base_id=base_id,
             )
 
     async def search(
@@ -2043,8 +2050,8 @@ class KnowledgeRepository:
                 .limit(min(limit, 40))
             )
             return tuple(
-                _search_hit(chunk, title, "keyword", position)
-                for position, (chunk, title) in enumerate(rows, start=1)
+                _search_hit(chunk, title, base_id, "keyword", position)
+                for position, (chunk, title, base_id) in enumerate(rows, start=1)
             )
 
     async def search_semantic(
@@ -2065,8 +2072,8 @@ class KnowledgeRepository:
         async with self._sessions() as session:
             rows = await session.execute(query)
             return tuple(
-                _search_hit(chunk, title, "semantic", position)
-                for position, (chunk, title) in enumerate(rows, start=1)
+                _search_hit(chunk, title, base_id, "semantic", position)
+                for position, (chunk, title, base_id) in enumerate(rows, start=1)
             )
 
     async def has_incompatible_profile(
@@ -2202,9 +2209,15 @@ def _tsquery_token(token: str) -> str:
     return "'" + token.replace("'", "''") + "'"
 
 
-def _visible_chunks_query(owner_id: str, base_ids: list[str]) -> Select[KnowledgeChunkModel, str]:
+def _visible_chunks_query(
+    owner_id: str, base_ids: list[str]
+) -> Select[KnowledgeChunkModel, str, str]:
     return (
-        select(KnowledgeChunkModel, KnowledgeDocumentModel.title)
+        select(
+            KnowledgeChunkModel,
+            KnowledgeDocumentModel.title,
+            KnowledgeDocumentModel.knowledge_base_id,
+        )
         .join(KnowledgeVersionModel, KnowledgeVersionModel.id == KnowledgeChunkModel.version_id)
         .join(KnowledgeDocumentModel, KnowledgeDocumentModel.id == KnowledgeChunkModel.document_id)
         .join(KnowledgeBaseModel, KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id)
@@ -2219,7 +2232,13 @@ def _visible_chunks_query(owner_id: str, base_ids: list[str]) -> Select[Knowledg
     )
 
 
-def _search_hit(chunk: KnowledgeChunkModel, title: str, channel: str, position: int) -> SearchHit:
+def _search_hit(
+    chunk: KnowledgeChunkModel,
+    title: str,
+    base_id: str,
+    channel: str,
+    position: int,
+) -> SearchHit:
     return SearchHit(
         chunk_id=chunk.id,
         document_id=chunk.document_id,
@@ -2231,6 +2250,7 @@ def _search_hit(chunk: KnowledgeChunkModel, title: str, channel: str, position: 
         rank=float(position),
         chunk_ordinal=chunk.ordinal,
         chunk_ids=(chunk.id,),
+        knowledge_base_id=base_id,
     )
 
 

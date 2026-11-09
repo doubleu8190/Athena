@@ -14,52 +14,53 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
 from sqlalchemy.exc import SQLAlchemyError
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.knowledge.repository import KnowledgeRepository
+from adapter.knowledge.storage import MinioStorageConfig
 from adapter.llm import OpenAIResponsesAdapter
+from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
-from adapter.memory.repository import MemoryRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
+from adapter.run.redis_transport import RedisRunTransport
+from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
 from api.auth import AuthCookieConfig, build_auth_router
 from api.health import router as health_router
 from api.knowledge import build_knowledge_router
+from api.llm import build_llm_admin_router
 from api.mcp import build_mcp_router
 from api.messages import build_message_router
 from api.project_knowledge import build_project_knowledge_router
 from api.projects import build_project_router
+from api.runs import build_run_router
 from api.security import DEFAULT_COOKIE_NAME
 from api.sessions import build_session_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
 from app.knowledge.service import KnowledgeService
-from app.llm import LlmService, parse_profiles
+from app.llm import LlmService, ModelProfileService, parse_profiles
 from app.memory.service import MemoryService
 from app.message.service import MessageService
-from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
+from app.run.service import RunService
+from app.run.stream import RunStreamService
 from app.session.service import SessionService
 from app.tool import ToolManager
+from app.tool.dependencies import QueryServiceBundle, build_query_services
 from common.ids import new_id
-from domain.knowledge.ports import KnowledgeRepositoryPort
+from domain.knowledge.ports import KnowledgeRepositoryPort, OriginalStore
 from domain.mcp import McpSecretError
 from infrastructure.database import (
     DEFAULT_DATABASE_MAX_OVERFLOW,
     DEFAULT_DATABASE_POOL_SIZE,
     Database,
 )
-from infrastructure.embedding import LocalEmbedding
 from infrastructure.embedding.profile import embedding_profile_id
-from infrastructure.knowledge import (
-    JiebaChineseTokenizer,
-    LocalKnowledgeTokenCounter,
-    LocalOriginalStore,
-)
 from infrastructure.mcp.discovery import McpDiscoveryClient
-from infrastructure.memory import LocalReranker, LocalTokenCounter
 from infrastructure.security.mcp_secrets import McpSecretCipher
 from infrastructure.security.password import Argon2PasswordHasher
 
@@ -75,11 +76,9 @@ class _KnowledgeUploadLimitMiddleware:
         self,
         app: object,
         repository: KnowledgeRepositoryPort | None = None,
-        storage_path: str | None = None,
     ) -> None:
         self.app = app
         self._repository = repository
-        self._storage_path = storage_path
         self._local_slots = asyncio.Semaphore(4)
 
     async def __call__(self, scope: dict[str, object], receive: object, send: object) -> None:
@@ -101,12 +100,7 @@ class _KnowledgeUploadLimitMiddleware:
         )
         try:
             temp_free = shutil.disk_usage(tempfile.gettempdir()).free
-            storage_free = (
-                shutil.disk_usage(self._storage_path).free
-                if self._storage_path is not None
-                else temp_free
-            )
-            if min(temp_free, storage_free) < minimum_free_bytes:
+            if temp_free < minimum_free_bytes:
                 await _send_json(send_fn, 503, "knowledge_upload_storage_low")
                 return
         except OSError:
@@ -239,11 +233,14 @@ def create_app(
     project_service: ProjectService | None = None,
     message_service: MessageService | None = None,
     session_service: SessionService | None = None,
+    run_service: RunService | None = None,
     auth_service: AuthService | None = None,
     *,
     tool_manager: ToolManager | None = None,
     llm_service: LlmService | None = None,
+    model_profile_service: ModelProfileService | None = None,
     memory_service: MemoryService | None = None,
+    knowledge_service: KnowledgeService | None = None,
     auth_cookie_secure: bool | None = None,
     public_origin: str | None = None,
 ) -> FastAPI:
@@ -260,25 +257,34 @@ def create_app(
     project_use_case = project_service
     message_use_case = message_service
     session_use_case = session_service
+    run_use_case = run_service
     auth_use_case = auth_service
     database_url = os.getenv("ATHENA_DATABASE_URL")
     mcp_use_case = tool_manager
     llm_use_case = llm_service
     llm_adapter: OpenAIResponsesAdapter | None = None
-    memory_embedding: LocalEmbedding | None = None
-    memory_reranker: LocalReranker | None = None
-    memory_counter: LocalTokenCounter | None = None
+    model_profile_use_case = model_profile_service
     memory_use_case = memory_service
-    knowledge_embedding: LocalEmbedding | None = None
-    knowledge_counter = None
-    memory_enabled = _env_flag("ATHENA_MEMORY_ENABLED", default=False)
-    knowledge_enabled = _env_flag("ATHENA_KNOWLEDGE_ENABLED", default=False)
-    knowledge_use_case: KnowledgeService | None = None
+    memory_enabled = memory_service is not None or _env_flag("ATHENA_MEMORY_ENABLED", default=False)
+    knowledge_enabled = knowledge_service is not None or _env_flag(
+        "ATHENA_KNOWLEDGE_ENABLED", default=False
+    )
+    knowledge_use_case: KnowledgeService | None = knowledge_service
     knowledge_repository: KnowledgeRepository | None = None
-    knowledge_originals: LocalOriginalStore | None = None
+    knowledge_originals: OriginalStore | None = None
+    query_services: QueryServiceBundle | None = None
     memory_owned = memory_service is None and memory_enabled
+    knowledge_owned = knowledge_service is None and knowledge_enabled
+    run_stream_service: RunStreamService | None = None
+    run_transport: RedisRunTransport | None = None
     if memory_owned and not database_url:
         raise RuntimeError("memory_database_required")
+    if knowledge_owned and not database_url:
+        raise RuntimeError("knowledge_database_required")
+    if knowledge_owned:
+        # Fail before constructing any database, Redis, or model resources.
+        # The same environment is parsed again by build_query_services.
+        MinioStorageConfig.from_environment()
     if llm_use_case is None:
         llm_profiles = parse_profiles()
         if llm_profiles:
@@ -302,9 +308,12 @@ def create_app(
         or project_use_case is None
         or message_use_case is None
         or session_use_case is None
+        or run_use_case is None
         or mcp_use_case is None
         or memory_owned
-        or (knowledge_enabled and knowledge_use_case is None)
+        # Project bindings and query services share the API database session
+        # factory even when a pre-built KnowledgeService is injected.
+        or knowledge_enabled
     ):
         database = Database(
             database_url,
@@ -320,6 +329,11 @@ def create_app(
             ),
         )
         project_repository = SqlAlchemyProjectRepository(database.session_factory)
+        model_profile_repository = SqlAlchemyModelProfileRepository(database.session_factory)
+        if model_profile_use_case is None:
+            model_profile_use_case = ModelProfileService(
+                model_profile_repository, SqlAlchemyAuthRepository(database.session_factory)
+            )
         session_repository = SqlAlchemySessionRepository(database.session_factory)
         auth_repository = SqlAlchemyAuthRepository(database.session_factory)
         if auth_use_case is None:
@@ -329,7 +343,24 @@ def create_app(
         if project_use_case is None:
             project_use_case = ProjectService(project_repository)
         if message_use_case is None:
-            message_use_case = MessageService(SqlAlchemyMessageRepository(database.session_factory))
+            message_repository = SqlAlchemyMessageRepository(database.session_factory)
+            message_use_case = MessageService(message_repository)
+        else:
+            message_repository = SqlAlchemyMessageRepository(database.session_factory)
+        run_repository = SqlAlchemyRunRepository(database.session_factory, message_repository)
+        if run_use_case is None:
+            run_use_case = RunService(run_repository)
+        if auth_use_case is not None:
+            redis_url = os.getenv("ATHENA_REDIS_URL", "").strip()
+            if redis_url:
+                run_transport = RedisRunTransport(
+                    Redis.from_url(redis_url, decode_responses=False, socket_connect_timeout=1)
+                )
+            run_stream_service = RunStreamService(
+                run_repository,
+                auth_use_case,
+                run_transport,
+            )
         if mcp_use_case is None:
             if secret_cipher is None or mcp_discovery is None:
                 raise McpSecretError("mcp_secret_key_missing")
@@ -340,69 +371,16 @@ def create_app(
                 mcp_discovery,
                 auth_repository,
             )
-        if knowledge_enabled:
-            storage_root = os.getenv("ATHENA_KNOWLEDGE_STORAGE_ROOT", "./var/knowledge")
-            knowledge_originals = LocalOriginalStore(storage_root)
-            model_name = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
-            model_revision = os.getenv(
-                "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
-                "5617a9f61b028005a4858fdac845db406aefb181",
-            )
-            knowledge_embedding = LocalEmbedding(
-                model_name,
-                model_revision,
-                os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu"),
-            )
-            knowledge_counter = LocalKnowledgeTokenCounter(model_name, model_revision)
-            knowledge_repository = KnowledgeRepository(database.session_factory)
-            knowledge_use_case = KnowledgeService(
-                knowledge_repository,
-                JiebaChineseTokenizer(),
-                knowledge_embedding,
-                knowledge_originals,
-                knowledge_counter,
-                profile_id=memory_profile_id(model_name, model_revision),
-            )
-    if memory_owned and database is not None:
-        embedding_model = os.getenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
-        embedding_revision = os.getenv(
-            "ATHENA_MEMORY_EMBEDDING_REVISION",
-            "5617a9f61b028005a4858fdac845db406aefb181",
+        query_services = build_query_services(
+            database.session_factory,
+            projects=project_use_case,
+            memory_service=memory_use_case,
+            knowledge_service=knowledge_use_case,
         )
-        reranker_model = os.getenv("ATHENA_MEMORY_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-        reranker_revision = os.getenv(
-            "ATHENA_MEMORY_RERANKER_REVISION",
-            "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
-        )
-        tokenizer_model = os.getenv("ATHENA_MEMORY_TOKENIZER", embedding_model)
-        tokenizer_revision = os.getenv("ATHENA_MEMORY_TOKENIZER_REVISION", embedding_revision)
-        memory_embedding = LocalEmbedding(
-            embedding_model,
-            embedding_revision,
-            os.getenv("ATHENA_MEMORY_EMBEDDING_DEVICE", "cpu"),
-        )
-        memory_reranker = LocalReranker(
-            reranker_model,
-            reranker_revision,
-            os.getenv("ATHENA_MEMORY_RERANKER_DEVICE", "cpu"),
-        )
-        memory_counter = LocalTokenCounter(tokenizer_model, tokenizer_revision)
-        memory_profile = memory_profile_id(embedding_model, embedding_revision)
-        memory_use_case = MemoryService(
-            MemoryRepository(database.session_factory),
-            memory_embedding,
-            memory_reranker,
-            memory_counter,
-            profile_id=memory_profile,
-            vector_min_score=float(os.getenv("ATHENA_MEMORY_VECTOR_MIN_SCORE", "0.70")),
-            timeout_seconds=float(os.getenv("ATHENA_MEMORY_TIMEOUT_SECONDS", "60")),
-            rerank_min_score=float(os.getenv("ATHENA_MEMORY_RERANK_MIN_SCORE", "0.30")),
-            keyword_fallback_min_score=(
-                float(os.environ["ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE"])
-                if "ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE" in os.environ
-                else None
-            ),
-        )
+        memory_use_case = query_services.memory
+        knowledge_use_case = query_services.knowledge
+        knowledge_repository = query_services.knowledge_repository
+        knowledge_originals = query_services.knowledge_original_store
 
     if auth_cookie_secure is None:
         auth_cookie_secure = _env_flag("ATHENA_COOKIE_SECURE", default=False)
@@ -416,33 +394,31 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         """在应用退出时释放数据库连接池。"""
         try:
-            if knowledge_counter is not None:
-                await knowledge_counter.start()
-            if knowledge_embedding is not None:
-                await knowledge_embedding.start()
-            if memory_owned and memory_embedding is not None and memory_reranker is not None:
-                await memory_embedding.start()
-                await memory_reranker.start()
-                if memory_counter is not None:
-                    await memory_counter.start()
+            if query_services is not None:
+                await query_services.start()
             yield
         finally:
+            if run_transport is not None:
+                try:
+                    await run_transport.aclose()
+                except Exception as error:
+                    logger.error(
+                        "run_redis_shutdown_failed exception_type=%s",
+                        type(error).__name__,
+                    )
             if llm_adapter is not None:
                 try:
                     await llm_adapter.aclose()
                 except Exception:
                     logger.error("llm_shutdown_failed code=llm_cleanup_failed")
-            if memory_owned:
-                if memory_embedding is not None:
-                    await memory_embedding.aclose()
-                if memory_reranker is not None:
-                    await memory_reranker.aclose()
-                if memory_counter is not None:
-                    memory_counter.close()
-            if knowledge_embedding is not None:
-                await knowledge_embedding.aclose()
-            if knowledge_counter is not None:
-                knowledge_counter.close()
+            if query_services is not None:
+                try:
+                    await query_services.aclose()
+                except Exception as error:
+                    logger.error(
+                        "query_service_shutdown_failed exception_type=%s",
+                        type(error).__name__,
+                    )
             if database is not None:
                 try:
                     await database.dispose()
@@ -453,11 +429,6 @@ def create_app(
     app.add_middleware(
         _KnowledgeUploadLimitMiddleware,
         repository=knowledge_repository,
-        storage_path=(
-            os.getenv("ATHENA_KNOWLEDGE_STORAGE_ROOT", "./var/knowledge")
-            if knowledge_repository is not None
-            else None
-        ),
     )
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
     app.add_exception_handler(OSError, _handle_os_error)
@@ -466,13 +437,19 @@ def create_app(
     app.state.public_origin = configured_public_origin or None
     app.state.tool_manager = mcp_use_case
     app.state.llm_service = llm_use_case
+    app.state.model_profile_service = model_profile_use_case
+    app.state.run_service = run_use_case
     app.state.memory_service = memory_use_case
     app.state.knowledge_service = knowledge_use_case
     app.include_router(health_router)
+    if model_profile_use_case is not None:
+        app.include_router(build_llm_admin_router(model_profile_use_case))
     if project_use_case is not None:
         app.include_router(build_project_router(project_use_case))
     if session_use_case is not None:
         app.include_router(build_session_router(session_use_case))
+    if run_use_case is not None:
+        app.include_router(build_run_router(run_use_case, run_stream_service))
     if message_use_case is not None:
         app.include_router(build_message_router(message_use_case))
     if auth_use_case is not None:
@@ -491,12 +468,14 @@ def create_app(
     if knowledge_use_case is not None:
         app.state.knowledge_original_store = knowledge_originals
         app.include_router(build_knowledge_router(knowledge_use_case))
-        if project_use_case is not None and database is not None:
+        if (
+            project_use_case is not None
+            and query_services is not None
+            and query_services.project_knowledge is not None
+        ):
             app.include_router(
                 build_project_knowledge_router(
-                    ProjectKnowledgeService(
-                        project_use_case, KnowledgeRepository(database.session_factory)
-                    ),
+                    query_services.project_knowledge,
                     project_use_case,
                 )
             )

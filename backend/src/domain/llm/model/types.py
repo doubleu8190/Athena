@@ -26,6 +26,7 @@ class LlmMessage:
     tool_call_id: str | None = None
     name: str | None = None
     continuation_items: tuple[Mapping[str, Any], ...] = ()
+    tool_calls: tuple[LlmToolCall, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

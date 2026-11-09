@@ -76,6 +76,7 @@ def test_memory_migration_add_and_hybrid_candidate_queries() -> None:
             config.attributes["connect_args"] = {
                 "server_settings": {"search_path": f"{schema},public"}
             }
+            config.attributes["version_table_schema"] = schema
             await asyncio.to_thread(command.upgrade, config, "head")
             await asyncio.to_thread(command.upgrade, config, "head")
             repository = MemoryRepository(async_sessionmaker(engine, expire_on_commit=False))

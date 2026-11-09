@@ -16,6 +16,7 @@ from adapter.message.converter.message import (
 )
 from adapter.message.model.conversation import ConversationMessageModel
 from adapter.message.model.execution import ExecutionMessageModel
+from adapter.run.model.run import RunModel
 from adapter.session.model import SessionModel
 from domain.message import (
     ConversationMessage,
@@ -92,29 +93,49 @@ class SqlAlchemyMessageRepository:
                     draft.session_id,
                     draft.owner_id,
                 )
-                existing = await self._find_conversation(session, draft)
-                if existing is not None:
-                    return self._accept_existing_conversation(existing, draft)
-                await self._validate_conversation_reference(session, draft)
-                sequence = self._next_sequence(locked_session, draft.created_at)
-                row = ConversationMessageModel(
-                    id=draft.id,
-                    session_id=draft.session_id,
-                    role=draft.role.value,
-                    status=draft.status.value,
-                    sequence=sequence,
-                    parts=serialize_parts(draft.parts),
-                    reply_to_message_id=draft.reply_to_message_id,
-                    run_id=draft.run_id,
-                    client_message_id=draft.client_message_id,
-                    created_at=draft.created_at,
-                    completed_at=draft.completed_at,
-                    metadata_json=serialize_metadata(draft.metadata),
+                await self._ensure_legacy_run_reference(session, draft.run_id)
+                result = await self.append_conversation_in_session(
+                    session, draft, locked_session=locked_session
                 )
-                session.add(row)
-                await session.flush()
-                result = conversation_to_domain(row)
         return result
+
+    async def append_conversation_in_session(
+        self,
+        session: AsyncSession,
+        draft: ConversationMessageDraft,
+        *,
+        locked_session: SessionModel,
+        managed_run_id: str | None = None,
+    ) -> ConversationMessage:
+        """在调用方事务和已锁 Session 内写消息，不提交事务。"""
+        if draft.session_id != locked_session.id or draft.owner_id != locked_session.owner_id:
+            raise SessionNotFoundError("session_not_found")
+        if managed_run_id is not None and managed_run_id != draft.run_id:
+            raise InvalidMessageReferenceError("managed_run_reference_invalid")
+        existing = await self._find_conversation(session, draft)
+        if existing is not None:
+            return self._accept_existing_conversation(existing, draft)
+        await self._validate_conversation_reference(session, draft)
+        sequence = self._next_sequence(locked_session, draft.created_at)
+        row = ConversationMessageModel(
+            id=draft.id,
+            session_id=draft.session_id,
+            role=draft.role.value,
+            status=draft.status.value,
+            sequence=sequence,
+            parts=serialize_parts(draft.parts),
+            reply_to_message_id=draft.reply_to_message_id,
+            run_id=draft.run_id,
+            managed_run_id=managed_run_id,
+            context_turn_id=draft.context_turn_id,
+            client_message_id=draft.client_message_id,
+            created_at=draft.created_at,
+            completed_at=draft.completed_at,
+            metadata_json=serialize_metadata(draft.metadata),
+        )
+        session.add(row)
+        await session.flush()
+        return conversation_to_domain(row)
 
     async def append_execution(
         self,
@@ -128,32 +149,60 @@ class SqlAlchemyMessageRepository:
                     draft.session_id,
                     draft.owner_id,
                 )
-                existing = await self._find_execution_tool_result(session, draft)
-                if existing is not None:
-                    return self._accept_existing_execution(existing, draft)
-                await self._validate_source_message(session, draft)
-                if draft.role is ExecutionRole.TOOL:
-                    await self._validate_tool_result_reference(session, draft)
-                elif draft.role is ExecutionRole.ASSISTANT:
-                    await self._validate_tool_call_uniqueness(session, draft)
-                sequence = self._next_sequence(locked_session, draft.created_at)
-                row = ExecutionMessageModel(
-                    id=draft.id,
-                    session_id=draft.session_id,
-                    run_id=draft.run_id,
-                    thread_id=draft.thread_id,
-                    sequence=sequence,
-                    role=draft.role.value,
-                    parts=serialize_parts(draft.parts),
-                    tool_call_id=draft.tool_call_id,
-                    source_message_id=draft.source_message_id,
-                    created_at=draft.created_at,
-                    metadata_json=serialize_metadata(draft.metadata),
+                await self._ensure_legacy_run_reference(session, draft.run_id)
+                result = await self.append_execution_in_session(
+                    session, draft, locked_session=locked_session
                 )
-                session.add(row)
-                await session.flush()
-                result = execution_to_domain(row)
         return result
+
+    @staticmethod
+    async def _ensure_legacy_run_reference(session: AsyncSession, run_id: str | None) -> None:
+        """阻止旧公开入口为受管 Run 写入缺少 fencing 的消息。"""
+        if (
+            run_id is not None
+            and await session.scalar(select(RunModel.id).where(RunModel.id == run_id)) is not None
+        ):
+            raise InvalidMessageReferenceError("managed_run_write_requires_run_command")
+
+    async def append_execution_in_session(
+        self,
+        session: AsyncSession,
+        draft: ExecutionMessageDraft,
+        *,
+        locked_session: SessionModel,
+        managed_run_id: str | None = None,
+    ) -> ExecutionMessage:
+        """在调用方事务和已锁 Session 内写执行消息，不提交事务。"""
+        if draft.session_id != locked_session.id or draft.owner_id != locked_session.owner_id:
+            raise SessionNotFoundError("session_not_found")
+        if managed_run_id is not None and managed_run_id != draft.run_id:
+            raise InvalidMessageReferenceError("managed_run_reference_invalid")
+        existing = await self._find_execution_tool_result(session, draft)
+        if existing is not None:
+            return self._accept_existing_execution(existing, draft)
+        await self._validate_source_message(session, draft)
+        if draft.role is ExecutionRole.TOOL:
+            await self._validate_tool_result_reference(session, draft)
+        elif draft.role is ExecutionRole.ASSISTANT:
+            await self._validate_tool_call_uniqueness(session, draft)
+        sequence = self._next_sequence(locked_session, draft.created_at)
+        row = ExecutionMessageModel(
+            id=draft.id,
+            session_id=draft.session_id,
+            run_id=draft.run_id,
+            managed_run_id=managed_run_id,
+            thread_id=draft.thread_id,
+            sequence=sequence,
+            role=draft.role.value,
+            parts=serialize_parts(draft.parts),
+            tool_call_id=draft.tool_call_id,
+            source_message_id=draft.source_message_id,
+            created_at=draft.created_at,
+            metadata_json=serialize_metadata(draft.metadata),
+        )
+        session.add(row)
+        await session.flush()
+        return execution_to_domain(row)
 
     async def list_conversation_for_owner(
         self,
@@ -205,22 +254,12 @@ class SqlAlchemyMessageRepository:
         session: AsyncSession,
         draft: ConversationMessageDraft,
     ) -> ConversationMessage | None:
-        """在写事务内按客户端幂等键或 run 唯一键读取已有消息。"""
+        """在写事务内按客户端幂等键读取已有消息。"""
         if draft.client_message_id is not None:
             row = await session.scalar(
                 select(ConversationMessageModel).where(
                     ConversationMessageModel.session_id == draft.session_id,
                     ConversationMessageModel.client_message_id == draft.client_message_id,
-                )
-            )
-            if row is not None:
-                return conversation_to_domain(row)
-        if draft.run_id is not None:
-            row = await session.scalar(
-                select(ConversationMessageModel).where(
-                    ConversationMessageModel.session_id == draft.session_id,
-                    ConversationMessageModel.run_id == draft.run_id,
-                    ConversationMessageModel.role == draft.role.value,
                 )
             )
             if row is not None:

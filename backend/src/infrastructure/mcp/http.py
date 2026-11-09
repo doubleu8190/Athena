@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import cast
@@ -308,7 +308,7 @@ async def pinned_streamable_http_transport(
     maximum_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     resolver: Resolver | None = None,
     inner_transport: httpx2.AsyncBaseTransport | None = None,
-) -> AsyncIterator[TransportStreams]:
+) -> AsyncGenerator[TransportStreams, None]:
     """创建自动关闭资源且设置响应、SSE 上限的 SDK Streamable HTTP transport。"""
     async with build_pinned_http_client(
         endpoint,

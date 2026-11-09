@@ -14,9 +14,12 @@ from pathlib import PurePath
 
 from common.ids import new_id, now_utc
 from domain.knowledge.model import (
+    MAX_ORIGINAL_BYTES,
     Document,
     DocumentVersion,
     KnowledgeBase,
+    OriginalStorageNotFoundError,
+    OriginalStorageUnavailableError,
     SearchHit,
     SearchResult,
 )
@@ -30,7 +33,7 @@ from domain.knowledge.ports import (
 
 MAX_PAGE_SIZE = 100
 MAX_TEXT_LENGTH = 1_000_000
-MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_FILE_BYTES = MAX_ORIGINAL_BYTES
 DEFAULT_CONTEXT_BUDGET = 4000
 _MEDIA_TYPES = {
     ".txt": "text/plain",
@@ -200,7 +203,7 @@ class KnowledgeService:
     ) -> tuple[Document, str]:
         """保存受限格式原件并原子登记文档、版本和后台任务。"""
         if self._originals is None:
-            raise RuntimeError("knowledge_storage_unavailable")
+            raise OriginalStorageUnavailableError()
         owner = _required(owner_id, "owner_id_required")
         await self.get_base(owner, base_id)
         normalized_title = _clean_text(title, maximum=255, code="document_title_invalid")
@@ -325,7 +328,7 @@ class KnowledgeService:
     ) -> tuple[Document, str]:
         """将文件原件登记为待处理替换版本。"""
         if self._originals is None:
-            raise RuntimeError("knowledge_storage_unavailable")
+            raise OriginalStorageUnavailableError()
         owner = _required(owner_id, "owner_id_required")
         document = await self.get_document(owner, base_id, document_id)
         safe_filename = unicodedata.normalize(
@@ -437,15 +440,11 @@ class KnowledgeService:
         return document
 
     async def delete_document(self, owner_id: str, base_id: str, document_id: str) -> None:
-        """软删除文档，清除版本派生数据并回收未共享原件。"""
-        if self._originals is None:
-            raise RuntimeError("knowledge_storage_unavailable")
+        """软删除文档并登记后台原件回收，不依赖同步存储可用性。"""
         await self.get_base(owner_id, base_id)
-        keys = await self._repository.delete_document(owner_id, base_id, document_id)
-        if keys is None:
+        deleted = await self._repository.delete_document(owner_id, base_id, document_id)
+        if deleted is None:
             raise KnowledgeNotFoundError("document_not_found")
-        for key in keys:
-            await self._originals.delete(key)
 
     async def list_versions(
         self, owner_id: str, base_id: str, document_id: str
@@ -479,17 +478,25 @@ class KnowledgeService:
         self, owner_id: str, base_id: str, document_id: str, version_id: str
     ) -> tuple[str, str, bytes]:
         """授权读取指定历史版本原件或手动文本副本。"""
-        if self._originals is None:
-            raise RuntimeError("knowledge_storage_unavailable")
         reference = await self._repository.get_source(owner_id, base_id, document_id, version_id)
         if reference is None:
             raise KnowledgeNotFoundError("source_not_found")
         content = (
             reference.text.encode("utf-8")
             if reference.text is not None
-            else await self._originals.get(reference.storage_key or "")
+            else await self._read_file_source(reference.storage_key)
         )
         return reference.filename, reference.media_type, content
+
+    async def _read_file_source(self, storage_key: str | None) -> bytes:
+        if storage_key is None:
+            raise KnowledgeNotFoundError("source_not_found")
+        if self._originals is None:
+            raise OriginalStorageUnavailableError()
+        try:
+            return await self._originals.get(storage_key)
+        except OriginalStorageNotFoundError as error:
+            raise KnowledgeNotFoundError("source_not_found") from error
 
     async def chunk(self, owner_id: str, base_id: str, chunk_id: str) -> SearchHit:
         """读取指定知识库内的历史版本片段。"""

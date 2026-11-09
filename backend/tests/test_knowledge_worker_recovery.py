@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import cast
 
 import anyio
@@ -93,10 +94,12 @@ def test_same_worker_recovers_from_claim_and_fail_job_database_errors() -> None:
             async def delete(self, key: str) -> None:
                 raise AssertionError
 
-            async def sweep_orphans(
-                self, referenced_keys: set[str], *, older_than_seconds: int = 86400
-            ) -> int:
-                return 0
+            async def iter_orphan_candidates(
+                self, *, older_than_seconds: int = 86400
+            ) -> AsyncIterator[str]:
+                del older_than_seconds
+                if False:
+                    yield ""
 
         class Embedding:
             async def embed(self, texts: list[str]) -> list[list[float]]:

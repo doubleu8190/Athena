@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -72,9 +73,7 @@ class OriginalStore(Protocol):
 
     async def delete(self, key: str) -> None: ...
 
-    async def sweep_orphans(
-        self, referenced_keys: set[str], *, older_than_seconds: int = 86400
-    ) -> int: ...
+    def iter_orphan_candidates(self, *, older_than_seconds: int = 86400) -> AsyncIterator[str]: ...
 
 
 class KnowledgeRepositoryPort(Protocol):
@@ -322,7 +321,7 @@ class KnowledgeJobRepository(Protocol):
 
     async def finish_cleanup_job(self, job: ClaimedKnowledgeJob) -> bool: ...
 
-    async def list_referenced_storage_keys(self) -> set[str]: ...
+    async def is_storage_key_referenced(self, storage_key: str) -> bool: ...
 
     async def claim_expired_upload_reservations(
         self, *, limit: int = 20, lease_seconds: int = 300

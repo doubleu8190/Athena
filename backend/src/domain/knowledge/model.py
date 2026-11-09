@@ -6,6 +6,56 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+MAX_PROJECT_KNOWLEDGE_BASES = 20
+MAX_ORIGINAL_BYTES = 20 * 1024 * 1024
+
+
+class OriginalStorageError(RuntimeError):
+    """Safe failure raised by the original-object storage adapter."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class OriginalStorageUnavailableError(OriginalStorageError):
+    """The object store is temporarily unreachable or overloaded."""
+
+    def __init__(self) -> None:
+        super().__init__("knowledge_storage_unavailable")
+
+
+class OriginalStorageNotFoundError(OriginalStorageError):
+    """The requested original object does not exist."""
+
+    def __init__(self) -> None:
+        super().__init__("knowledge_storage_object_not_found")
+
+
+class OriginalStorageAccessDeniedError(OriginalStorageError):
+    """The deployment credentials cannot perform the requested operation."""
+
+    def __init__(self) -> None:
+        super().__init__("knowledge_storage_access_denied")
+
+
+class OriginalStorageIntegrityError(OriginalStorageError):
+    """Stored bytes violate the content-addressed original contract."""
+
+    def __init__(self, code: str = "knowledge_storage_integrity_error") -> None:
+        super().__init__(code)
+
+
+class OriginalStorageConfigurationError(OriginalStorageError):
+    """MinIO configuration is missing, invalid, or points at an absent bucket."""
+
+    def __init__(self, code: str = "knowledge_storage_config_invalid") -> None:
+        super().__init__(code)
+
+
+class ProjectKnowledgeLimitReachedError(ValueError):
+    """A project already has the maximum number of active knowledge bases."""
+
 
 class DocumentState(StrEnum):
     """文档版本处理状态。"""
@@ -107,6 +157,7 @@ class SearchHit:
     rank: float
     chunk_ordinal: int = 0
     chunk_ids: tuple[str, ...] = ()
+    knowledge_base_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

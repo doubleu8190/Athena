@@ -8,9 +8,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.project.model import ProjectModel
+from adapter.run.model import RunModel
 from adapter.session.converter.session import session_to_domain
 from adapter.session.model.session import SessionModel
 from domain.project import ProjectNotFoundError
+from domain.run import RunStatus, SessionHasActiveRunError
 from domain.session import (
     Session,
     SessionPage,
@@ -196,6 +198,21 @@ class SqlAlchemySessionRepository(SessionRepository):
                 if row is None:
                     return False
                 if row.deleted_time is None:
+                    active_run_id = await database_session.scalar(
+                        select(RunModel.id).where(
+                            RunModel.session_id == session_id,
+                            RunModel.status.in_(
+                                [
+                                    RunStatus.QUEUED.value,
+                                    RunStatus.RUNNING.value,
+                                    RunStatus.WAITING_FOR_INPUT.value,
+                                    RunStatus.CANCELLING.value,
+                                ]
+                            ),
+                        )
+                    )
+                    if active_run_id is not None:
+                        raise SessionHasActiveRunError("session_has_active_run")
                     row.deleted_time = deleted_at
                     row.updated_at = _monotonic_updated_at(row.updated_at, deleted_at)
                     await database_session.flush()

@@ -51,7 +51,7 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
         test_engine = create_async_engine(
             database_url,
             poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": schema}},
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
         )
         try:
             async with admin_engine.begin() as connection:
@@ -63,8 +63,9 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                 database_url.replace("%", "%%"),
             )
             migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": schema}
+                "server_settings": {"search_path": f"{schema},public"}
             }
+            migration_config.attributes["version_table_schema"] = schema
             expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
             await asyncio.to_thread(command.upgrade, migration_config, "head")
 

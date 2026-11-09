@@ -12,11 +12,12 @@ from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
 from adapter.knowledge.repository import KnowledgeRepository
+from adapter.knowledge.storage import MinioOriginalStore
 from app.knowledge.worker import KnowledgeWorker
 from infrastructure.database import Database
 from infrastructure.embedding import LocalEmbedding
 from infrastructure.embedding.profile import embedding_profile_id
-from infrastructure.knowledge import JiebaChineseTokenizer, LocalOriginalStore
+from infrastructure.knowledge import JiebaChineseTokenizer
 from infrastructure.knowledge.parsers import LocalDocumentParser
 from infrastructure.knowledge.token_counter import LocalKnowledgeTokenCounter
 
@@ -74,44 +75,92 @@ async def _run_consumers(worker: KnowledgeWorker, concurrency: int) -> None:
 
 
 async def run_worker() -> None:
-    """组装共享 PostgreSQL/磁盘资源并运行有界消费协程。"""
-    database_url = os.getenv("ATHENA_DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("knowledge_database_required")
-    if os.getenv("ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"):
-        os.environ["PADDLE_PDX_CACHE_HOME"] = os.environ["ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"]
-    database = Database(database_url)
-    model = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
-    revision = os.getenv(
-        "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
-        "5617a9f61b028005a4858fdac845db406aefb181",
-    )
-    embedding = LocalEmbedding(
-        model, revision, os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu")
-    )
-    counter = LocalKnowledgeTokenCounter(model, revision)
-    await embedding.start()
-    await counter.start()
-    worker = KnowledgeWorker(
-        KnowledgeRepository(database.session_factory),
-        LocalDocumentParser(ocr_languages="ch"),
-        LocalOriginalStore(os.getenv("ATHENA_KNOWLEDGE_STORAGE_ROOT", "./var/knowledge")),
-        embedding,
-        JiebaChineseTokenizer(),
-        counter,
-        parse_memory_mb=int(os.getenv("ATHENA_KNOWLEDGE_PARSE_MEMORY_MB", "4096")),
-        profile_id=embedding_profile_id(model, revision),
-        owner_concurrency=int(os.getenv("ATHENA_KNOWLEDGE_OWNER_CONCURRENCY", "2")),
-    )
-    concurrency = int(os.getenv("ATHENA_KNOWLEDGE_WORKER_CONCURRENCY", "2"))
-    if concurrency < 1 or concurrency > 16:
-        raise ValueError("knowledge_worker_concurrency_invalid")
+    """组装共享 PostgreSQL、MinIO 和模型资源并运行有界消费协程。"""
+    database: Database | None = None
+    embedding: LocalEmbedding | None = None
+    counter: LocalKnowledgeTokenCounter | None = None
+    originals: MinioOriginalStore | None = None
+    failure: BaseException | None = None
     try:
+        database_url = os.getenv("ATHENA_DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("knowledge_database_required")
+        if os.getenv("ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"):
+            os.environ["PADDLE_PDX_CACHE_HOME"] = os.environ["ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"]
+        database = Database(database_url)
+        originals = MinioOriginalStore.from_environment()
+        await originals.start()
+        model = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
+        revision = os.getenv(
+            "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
+            "5617a9f61b028005a4858fdac845db406aefb181",
+        )
+        embedding = LocalEmbedding(
+            model, revision, os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu")
+        )
+        counter = LocalKnowledgeTokenCounter(model, revision)
+        await embedding.start()
+        await counter.start()
+        worker = KnowledgeWorker(
+            KnowledgeRepository(database.session_factory),
+            LocalDocumentParser(ocr_languages="ch"),
+            originals,
+            embedding,
+            JiebaChineseTokenizer(),
+            counter,
+            parse_memory_mb=int(os.getenv("ATHENA_KNOWLEDGE_PARSE_MEMORY_MB", "4096")),
+            profile_id=embedding_profile_id(model, revision),
+            owner_concurrency=int(os.getenv("ATHENA_KNOWLEDGE_OWNER_CONCURRENCY", "2")),
+        )
+        concurrency = int(os.getenv("ATHENA_KNOWLEDGE_WORKER_CONCURRENCY", "2"))
+        if concurrency < 1 or concurrency > 16:
+            raise ValueError("knowledge_worker_concurrency_invalid")
         await _run_consumers(worker, concurrency)
+    except BaseException as error:
+        failure = error
     finally:
-        counter.close()
-        await embedding.aclose()
-        await database.dispose()
+        if counter is not None:
+            try:
+                counter.close()
+            except BaseException as error:
+                logger.error(
+                    "knowledge_worker_counter_cleanup_failed exception_type=%s",
+                    type(error).__name__,
+                )
+                if failure is None:
+                    failure = error
+        if embedding is not None:
+            try:
+                await embedding.aclose()
+            except BaseException as error:
+                logger.error(
+                    "knowledge_worker_embedding_cleanup_failed exception_type=%s",
+                    type(error).__name__,
+                )
+                if failure is None:
+                    failure = error
+        if originals is not None:
+            try:
+                await originals.aclose()
+            except BaseException as error:
+                logger.error(
+                    "knowledge_worker_storage_cleanup_failed exception_type=%s",
+                    type(error).__name__,
+                )
+                if failure is None:
+                    failure = error
+        if database is not None:
+            try:
+                await database.dispose()
+            except BaseException as error:
+                logger.error(
+                    "knowledge_worker_database_cleanup_failed exception_type=%s",
+                    type(error).__name__,
+                )
+                if failure is None:
+                    failure = error
+    if failure is not None:
+        raise failure
 
 
 def main() -> None:

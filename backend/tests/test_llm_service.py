@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from dataclasses import replace
 from typing import Any
 
+import httpx2
 import pytest
+from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict
 
+from adapter.llm.openai_chat_completions import OpenAIChatCompletionsAdapter
 from adapter.llm.openai_responses import OpenAIResponsesAdapter
 from app.llm.config import LlmProfile, parse_profiles
 from app.llm.service import LlmService
@@ -21,6 +26,7 @@ from domain.llm.model import (
     LlmStructuredValidationError,
     LlmText,
     LlmTool,
+    LlmToolCall,
     StructuredLlmRequest,
 )
 
@@ -100,6 +106,126 @@ def test_tool_schema_is_copied_and_frozen_at_call_boundary() -> None:
     assert copied.tools[0].input_schema["properties"]["value"]["type"] == "string"
     with pytest.raises(TypeError):
         copied.tools[0].input_schema["properties"]["new"] = {}
+
+
+def test_public_service_snapshots_typed_tool_calls_and_results() -> None:
+    """公开 stream 保留 assistant 调用及 tool 结果，并冻结参数快照。"""
+    provider = ProviderStub()
+    service = LlmService(provider, {"assistant": make_profile()})
+    arguments: dict[str, Any] = {"nested": {"answer": "A"}}
+    request = LlmRequest(
+        "assistant",
+        (
+            LlmMessage(
+                LlmRole.ASSISTANT,
+                tool_calls=(LlmToolCall("call_1", "request_user_input", arguments),),
+            ),
+            LlmMessage(LlmRole.TOOL, '{"confirmed":true}', tool_call_id="call_1"),
+        ),
+    )
+    service.stream(request)
+    assert provider.request is not None
+    serialized = OpenAIChatCompletionsAdapter._messages(provider.request.messages)
+    assert serialized[0]["tool_calls"][0]["id"] == "call_1"
+    assert serialized[0]["tool_calls"][0]["function"]["arguments"] == ('{"nested":{"answer":"A"}}')
+    assert serialized[1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": '{"confirmed":true}',
+    }
+    arguments["nested"]["answer"] = "mutated"
+    assert provider.request.messages[0].tool_calls[0].arguments["nested"]["answer"] == "A"
+    with pytest.raises(TypeError):
+        provider.request.messages[0].tool_calls[0].arguments["nested"]["new"] = "blocked"
+
+
+def test_tool_call_arguments_count_towards_input_byte_limit() -> None:
+    """工具调用参数计入 LlmService 的输入字节预算。"""
+    profile = replace(make_profile(), max_input_bytes=180)
+    service = LlmService(ProviderStub(), {"assistant": profile})
+    request = LlmRequest(
+        "assistant",
+        (
+            LlmMessage(
+                LlmRole.ASSISTANT,
+                tool_calls=(LlmToolCall("call_1", "lookup", {"payload": "x" * 512}),),
+            ),
+            LlmMessage(LlmRole.TOOL, "done", tool_call_id="call_1"),
+        ),
+    )
+    with pytest.raises(LlmRequestError, match="llm_input_too_large"):
+        service.stream(request)
+
+
+def test_public_service_sends_nested_tool_call_arguments_to_responses() -> None:
+    """公开 LlmService 经真实 Responses SDK 发送冻结的嵌套工具参数。"""
+
+    async def run() -> None:
+        calls: list[dict[str, Any]] = []
+
+        async def handle(request: httpx2.Request) -> httpx2.Response:
+            calls.append(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json={
+                    "id": "resp_1",
+                    "object": "response",
+                    "created_at": 1,
+                    "status": "completed",
+                    "model": "model",
+                    "output": [],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "usage": None,
+                },
+                request=request,
+            )
+
+        profile = make_profile()
+        adapter = OpenAIResponsesAdapter({"assistant": profile})
+        sdk_http = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+        sdk = AsyncOpenAI(
+            api_key=profile.api_key,
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            http_client=sdk_http,
+        )
+        adapter._clients[
+            (
+                "https://api.openai.com/v1",
+                hashlib.sha256(profile.api_key.encode()).hexdigest(),
+                profile.max_response_bytes,
+            )
+        ] = sdk
+        service = LlmService(adapter, {"assistant": profile})
+        arguments: dict[str, Any] = {
+            "filter": {"status": "open"},
+            "items": [{"id": 1}, {"id": 2}],
+        }
+        request = LlmRequest(
+            "assistant",
+            (
+                LlmMessage(
+                    LlmRole.ASSISTANT,
+                    tool_calls=(LlmToolCall("call_1", "lookup", arguments),),
+                ),
+                LlmMessage(LlmRole.TOOL, "found", tool_call_id="call_1"),
+            ),
+        )
+        await service.complete(request)
+        assert calls[0]["input"] == [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": '{"filter":{"status":"open"},"items":[{"id":1},{"id":2}]}',
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "found"},
+        ]
+        await adapter.aclose()
+
+    asyncio.run(run())
 
 
 def test_external_schema_reference_is_rejected_without_resolution() -> None:

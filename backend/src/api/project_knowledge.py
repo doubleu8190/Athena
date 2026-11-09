@@ -8,7 +8,7 @@ from api.dto.knowledge import KnowledgeBaseResponse
 from api.security import CurrentAuth, verify_request_origin
 from app.project.knowledge import KnowledgeNotFoundError, ProjectKnowledgeService
 from app.project.service import ProjectService
-from domain.knowledge.model import KnowledgeBase
+from domain.knowledge.model import KnowledgeBase, ProjectKnowledgeLimitReachedError
 from domain.project import ProjectNotFoundError
 
 
@@ -38,6 +38,11 @@ def build_project_knowledge_router(
             raise HTTPException(status_code=404, detail="project_not_found") from error
         except KnowledgeNotFoundError as error:
             raise HTTPException(status_code=404, detail="knowledge_base_not_found") from error
+        except ProjectKnowledgeLimitReachedError as error:
+            raise HTTPException(
+                status_code=409,
+                detail="project_knowledge_limit_reached",
+            ) from error
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.delete("/{base_id}", status_code=status.HTTP_204_NO_CONTENT)

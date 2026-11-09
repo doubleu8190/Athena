@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import AsyncIterator
 from types import ModuleType
 
 import anyio
@@ -12,13 +13,21 @@ import pytest
 from app.knowledge.worker import (
     KnowledgeWorker,
     _error_code,
+    _is_retryable_error,
     _make_chunks,
     _parse_child_entry,
     _parse_in_child,
     _process_rss_mb,
     _terminate_and_reap,
 )
-from domain.knowledge.model import ChunkLocator, TextBlock
+from domain.knowledge.model import (
+    ChunkLocator,
+    OriginalStorageAccessDeniedError,
+    OriginalStorageIntegrityError,
+    OriginalStorageNotFoundError,
+    OriginalStorageUnavailableError,
+    TextBlock,
+)
 from domain.knowledge.ports import ClaimedKnowledgeJob, FileUploadReservation, ParsedDocument
 
 
@@ -42,6 +51,7 @@ class _Repository:
         self.published = False
         self.failed = False
         self.retryable = False
+        self.finished_cleanup = False
 
     async def claim_job(
         self, *, lease_seconds: int, owner_concurrency: int = 2
@@ -78,10 +88,12 @@ class _Repository:
         self.retryable = retryable
 
     async def finish_cleanup_job(self, job: ClaimedKnowledgeJob) -> bool:
+        self.finished_cleanup = True
         return True
 
-    async def list_referenced_storage_keys(self) -> set[str]:
-        return set()
+    async def is_storage_key_referenced(self, storage_key: str) -> bool:
+        del storage_key
+        return False
 
     async def claim_expired_upload_reservations(
         self, *, limit: int = 20, lease_seconds: int = 300
@@ -120,10 +132,12 @@ class _UnusedStore:
     async def delete(self, key: str) -> None:
         raise AssertionError
 
-    async def sweep_orphans(
-        self, referenced_keys: set[str], *, older_than_seconds: int = 86400
-    ) -> int:
-        return 0
+    async def iter_orphan_candidates(
+        self, *, older_than_seconds: int = 86400
+    ) -> AsyncIterator[str]:
+        del older_than_seconds
+        if False:
+            yield ""
 
 
 def test_chunker_caps_token_count_and_preserves_locator() -> None:
@@ -261,6 +275,66 @@ def test_worker_rejects_a_different_embedding_profile() -> None:
     assert not repository.retryable
 
 
+async def _run_cleanup(error: Exception) -> _Repository:
+    class CleanupRepository(_Repository):
+        async def claim_job(
+            self, *, lease_seconds: int, owner_concurrency: int = 2
+        ) -> ClaimedKnowledgeJob:
+            assert lease_seconds == 120
+            assert owner_concurrency == 2
+            return ClaimedKnowledgeJob(
+                "job_cleanup",
+                "owner_1",
+                "version_1",
+                "document_1",
+                "title",
+                None,
+                None,
+                None,
+                1,
+                kind="cleanup",
+                source_keys=("a" * 64 + "/ksrc_1/" + "b" * 2 + "/" + "b" * 64,),
+                target_id="doc:document_1",
+            )
+
+    class DeleteStore(_UnusedStore):
+        async def delete(self, key: str) -> None:
+            del key
+            raise error
+
+    repository = CleanupRepository()
+    worker = KnowledgeWorker(
+        repository,
+        _UnusedParser(),
+        DeleteStore(),
+        _Embedding(),
+        _Tokenizer(),
+        _Counter(),
+        isolate_parsing=False,
+    )
+    await worker.run_once()
+    return repository
+
+
+def test_cleanup_treats_missing_object_as_success() -> None:
+    repository = anyio.run(
+        _run_cleanup,
+        OriginalStorageNotFoundError(),
+    )
+    assert repository.finished_cleanup
+    assert not repository.failed
+
+
+def test_cleanup_keeps_transient_storage_failure_retryable() -> None:
+    repository = anyio.run(
+        _run_cleanup,
+        OriginalStorageUnavailableError(),
+    )
+    assert not repository.finished_cleanup
+    assert repository.failed
+    assert repository.retryable
+
+
 async def _run_invalid_vector() -> _Repository:
     class InvalidEmbedding(_Embedding):
         async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -314,3 +388,20 @@ def test_parser_ipc_marks_runtime_engine_errors_retryable(monkeypatch: pytest.Mo
     assert _error_code(RuntimeError("knowledge_ocr_engine_unavailable")) == (
         "knowledge_ocr_engine_unavailable"
     )
+
+
+def test_storage_error_codes_and_retry_policies_are_distinct() -> None:
+    unavailable = OriginalStorageUnavailableError()
+    missing = OriginalStorageNotFoundError()
+    denied = OriginalStorageAccessDeniedError()
+    integrity = OriginalStorageIntegrityError()
+
+    assert _error_code(unavailable) == "knowledge_storage_unavailable"
+    assert _error_code(missing) == "knowledge_storage_object_not_found"
+    assert _is_retryable_error(unavailable, "ingestion")
+    assert _is_retryable_error(unavailable, "cleanup")
+    assert not _is_retryable_error(missing, "ingestion")
+    assert not _is_retryable_error(missing, "cleanup")
+    assert not _is_retryable_error(denied, "ingestion")
+    assert _is_retryable_error(denied, "cleanup")
+    assert not _is_retryable_error(integrity, "cleanup")

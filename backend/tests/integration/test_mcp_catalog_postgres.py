@@ -66,7 +66,7 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
         test_engine = create_async_engine(
             database_url,
             poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": schema}},
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
         )
         try:
             async with admin_engine.begin() as connection:
@@ -74,8 +74,9 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
             migration_config = Config(str(ALEMBIC_INI))
             migration_config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
             migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": schema}
+                "server_settings": {"search_path": f"{schema},public"}
             }
+            migration_config.attributes["version_table_schema"] = schema
             expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
             await asyncio.to_thread(command.upgrade, migration_config, "head")
             async with test_engine.connect() as connection:

@@ -464,7 +464,7 @@ def test_user_message_is_idempotent_and_conflicting_reuse_is_rejected() -> None:
     _run(scenario())
 
 
-def test_assistant_message_is_unique_per_run() -> None:
+def test_same_role_messages_can_share_run_and_client_idempotency_remains() -> None:
     async def scenario() -> None:
         engine, session_factory, repository = await _make_repository()
         try:
@@ -477,33 +477,56 @@ def test_assistant_message_is_unique_per_run() -> None:
                     run_id="run_1",
                 )
             )
-            replay = await repository.append_conversation(
+            second = await repository.append_conversation(
                 _conversation(
                     "msg_assistant_2",
                     role=ConversationRole.ASSISTANT,
-                    text="最终回答",
+                    text="补充回答",
                     run_id="run_1",
                 )
             )
-            assert replay == first
+            assert first.sequence == 1
+            assert second.sequence == 2
+            assert second.id != first.id
+
+            keyed = await repository.append_conversation(
+                _conversation(
+                    "msg_assistant_keyed",
+                    role=ConversationRole.ASSISTANT,
+                    text="幂等消息",
+                    run_id="run_1",
+                    client_message_id="client-key",
+                )
+            )
+            replay = await repository.append_conversation(
+                _conversation(
+                    "msg_assistant_keyed_retry",
+                    role=ConversationRole.ASSISTANT,
+                    text="幂等消息",
+                    run_id="run_1",
+                    client_message_id="client-key",
+                )
+            )
+            assert replay == keyed
 
             with pytest.raises(MessageConflictError):
                 await repository.append_conversation(
                     _conversation(
                         "msg_assistant_3",
                         role=ConversationRole.ASSISTANT,
-                        text="另一个回答",
+                        text="冲突内容",
                         run_id="run_1",
+                        client_message_id="client-key",
                     )
                 )
-            assert await _session_sequence(session_factory, "session_1") == 1
+            assert await _session_sequence(session_factory, "session_1") == 3
             assert (
                 await _message_count(
                     session_factory,
                     ConversationMessageModel,
                     session_id="session_1",
                 )
-                == 1
+                == 3
             )
         finally:
             await engine.dispose()

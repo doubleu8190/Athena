@@ -122,8 +122,9 @@ def migrated_schema() -> Iterator[str]:
                 database_url.replace("%", "%%"),
             )
             migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": schema}
+                "server_settings": {"search_path": f"{schema},public"}
             }
+            migration_config.attributes["version_table_schema"] = schema
             await asyncio.to_thread(command.upgrade, migration_config, "head")
         except BaseException:
             async with admin_engine.begin() as connection:
@@ -154,7 +155,7 @@ def _engine(database_url: str, schema: str, application_name: str) -> AsyncEngin
         poolclass=NullPool,
         connect_args={
             "server_settings": {
-                "search_path": schema,
+                "search_path": f"{schema},public",
                 "application_name": application_name,
             }
         },

@@ -11,6 +11,7 @@ from secrets import token_hex
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -55,7 +56,7 @@ def test_message_migration_and_repository_round_trip() -> None:
         test_engine = create_async_engine(
             database_url,
             poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": schema}},
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
         )
         try:
             async with admin_engine.begin() as connection:
@@ -67,14 +68,16 @@ def test_message_migration_and_repository_round_trip() -> None:
                 database_url.replace("%", "%%"),
             )
             migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": schema}
+                "server_settings": {"search_path": f"{schema},public"}
             }
+            migration_config.attributes["version_table_schema"] = schema
             await asyncio.to_thread(command.upgrade, migration_config, "head")
+            expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
 
             session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
             async with test_engine.connect() as connection:
                 revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-            assert revision == "20261105_0005"
+            assert revision == expected_head
 
             timestamp = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
             async with session_factory() as session:

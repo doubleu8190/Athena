@@ -16,7 +16,8 @@ from adapter.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 迁移配置不应禁用应用模块已经创建的 logger。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
@@ -48,6 +49,7 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        version_table_schema=config.attributes.get("version_table_schema"),
     )
     with context.begin_transaction():
         context.run_migrations()

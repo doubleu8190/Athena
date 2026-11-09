@@ -9,11 +9,14 @@ from domain.auth import AuthContext
 from domain.mcp.model import (
     DiscoveredMcpTool,
     McpConnectionInput,
+    McpRuntimeToolDefinition,
+    McpRuntimeToolTarget,
     McpServer,
     McpServerPage,
     McpServerRuntimeConfig,
     McpServerWrite,
 )
+from domain.mcp.model.execution import McpCallResult
 from domain.tool import ToolDefinition
 
 
@@ -58,4 +61,38 @@ class McpDiscovery(Protocol):
         """建立短时连接并完整读取工具分页，结束前确认资源已清理。"""
 
 
-__all__ = ["McpDiscovery", "McpServerRepository"]
+class McpToolRuntimeReader(Protocol):
+    """Read one current routing target without exposing it to API callers."""
+
+    async def list_runtime_tools(self, *, limit: int) -> tuple[McpRuntimeToolDefinition, ...]:
+        """Read at most ``limit`` catalog rows with one config version per Server."""
+
+    async def get_call_target(
+        self,
+        tool_id: str,
+        server_id: str,
+        remote_name: str,
+        expected_config_version: int,
+    ) -> McpRuntimeToolTarget | None:
+        """Return the target only when its DB config version still matches."""
+
+
+class McpToolExecutor(Protocol):
+    """Execute exactly one tools/call over a fresh connection."""
+
+    async def call(
+        self,
+        target: McpRuntimeToolTarget,
+        arguments: dict[str, object],
+        *,
+        deadline_seconds: float,
+    ) -> McpCallResult:
+        """Connect, list for header state, call once, and always close resources."""
+
+
+__all__ = [
+    "McpDiscovery",
+    "McpServerRepository",
+    "McpToolExecutor",
+    "McpToolRuntimeReader",
+]

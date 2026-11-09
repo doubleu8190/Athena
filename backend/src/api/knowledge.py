@@ -44,7 +44,12 @@ from app.knowledge.service import (
     KnowledgeSearchUnavailableError,
     KnowledgeService,
 )
-from domain.knowledge.model import ChunkLocator, Document, KnowledgeBase
+from domain.knowledge.model import (
+    ChunkLocator,
+    Document,
+    KnowledgeBase,
+    OriginalStorageError,
+)
 
 
 def build_knowledge_router(service: KnowledgeService) -> APIRouter:
@@ -173,6 +178,8 @@ def build_knowledge_router(service: KnowledgeService) -> APIRouter:
             raise _not_found(error) from error
         except LookupError as error:
             raise _not_found(error) from error
+        except OriginalStorageError as error:
+            raise _storage_unavailable() from error
         except ValueError as error:
             if str(error) == "idempotency_conflict":
                 raise HTTPException(status_code=409, detail="idempotency_conflict") from error
@@ -213,6 +220,8 @@ def build_knowledge_router(service: KnowledgeService) -> APIRouter:
             raise _not_found(error) from error
         except LookupError as error:
             raise _not_found(error) from error
+        except OriginalStorageError as error:
+            raise _storage_unavailable() from error
         except KnowledgeInputError as error:
             if str(error) in {"document_update_in_progress", "idempotency_conflict"}:
                 raise HTTPException(status_code=409, detail=str(error)) from error
@@ -415,6 +424,8 @@ def build_knowledge_router(service: KnowledgeService) -> APIRouter:
             )
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except OriginalStorageError as error:
+            raise _storage_unavailable() from error
         return Response(
             content=content,
             media_type=media_type,
@@ -535,3 +546,7 @@ def _upload_error(error: ValueError) -> HTTPException:
 
 def _not_found(error: Exception) -> HTTPException:
     return HTTPException(status_code=404, detail=str(error))
+
+
+def _storage_unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail="knowledge_storage_unavailable")

@@ -52,6 +52,7 @@ config.attributes['connect_args'] = {
         'lock_timeout': '5000',
     },
 }
+config.attributes['version_table_schema'] = os.environ['KNOWLEDGE_TEST_SCHEMA']
 command.upgrade(config, 'head')
 """
     result = subprocess.run(
@@ -138,10 +139,7 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
                     text("SELECT state FROM knowledge_jobs WHERE id='profile_job'")
                 )
                 profile_version_state = await session.scalar(
-                    text(
-                        "SELECT state FROM knowledge_document_versions "
-                        "WHERE id='profile_ver'"
-                    )
+                    text("SELECT state FROM knowledge_document_versions WHERE id='profile_ver'")
                 )
                 profile_chunks = await session.scalar(
                     text("SELECT count(*) FROM knowledge_chunks WHERE version_id='profile_ver'")
@@ -262,9 +260,7 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
                             ],
                             warnings=[],
                         )
-                    await repository.fail_job(
-                        expiring, error_code="late_failure", retryable=False
-                    )
+                    await repository.fail_job(expiring, error_code="late_failure", retryable=False)
                     return None
 
                 async with factory() as lock_session, lock_session.begin():
@@ -292,8 +288,7 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
                     )
                     version_state = await session.scalar(
                         text(
-                            "SELECT state FROM knowledge_document_versions "
-                            "WHERE id = :version_id"
+                            "SELECT state FROM knowledge_document_versions WHERE id = :version_id"
                         ),
                         {"version_id": version_id},
                     )
@@ -482,9 +477,7 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
             assert sibling_cleanup.target_id == "doc:sibling_doc"
             assert await repository.finish_cleanup_job(sibling_cleanup)
             async with factory() as session:
-                sibling_after_cleanup = await session.get(
-                    KnowledgeDocumentModel, "sibling_doc"
-                )
+                sibling_after_cleanup = await session.get(KnowledgeDocumentModel, "sibling_doc")
                 assert sibling_after_cleanup is not None
                 assert sibling_after_cleanup.deleted_time is not None
                 remaining_sibling_versions = await session.scalar(

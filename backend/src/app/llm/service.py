@@ -23,6 +23,7 @@ from domain.llm.model import (
     LlmStructuredOutputError,
     LlmStructuredValidationError,
     LlmText,
+    LlmToolCall,
     StructuredLlmRequest,
     StructuredLlmResponse,
 )
@@ -273,6 +274,14 @@ class LlmService:
                                 "content": message.content,
                                 "tool_call_id": message.tool_call_id,
                                 "name": message.name,
+                                "tool_calls": [
+                                    {
+                                        "call_id": call.call_id,
+                                        "name": call.name,
+                                        "arguments": _thaw(call.arguments),
+                                    }
+                                    for call in message.tool_calls
+                                ],
                                 "continuation_items": [
                                     _thaw(item) for item in message.continuation_items
                                 ],
@@ -316,6 +325,14 @@ class LlmService:
                     content=message.content,
                     tool_call_id=message.tool_call_id,
                     name=message.name,
+                    tool_calls=tuple(
+                        LlmToolCall(
+                            call_id=call.call_id,
+                            name=call.name,
+                            arguments=_freeze(copy.deepcopy(dict(call.arguments))),
+                        )
+                        for call in message.tool_calls
+                    ),
                     continuation_items=tuple(
                         _freeze(_validate_continuation_item(item))
                         for item in message.continuation_items

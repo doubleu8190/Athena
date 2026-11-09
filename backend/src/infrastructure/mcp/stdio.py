@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from types import TracebackType
@@ -108,7 +108,7 @@ class McpStdioTransport:
         return cast(bool, await self._context.__aexit__(exception_type, exception, traceback))
 
     @asynccontextmanager
-    async def _run(self) -> AsyncIterator[TransportStreams]:
+    async def _run(self) -> AsyncGenerator[TransportStreams, None]:
         process = await anyio.open_process(
             [self._command, *self._args],
             stdin=-1,

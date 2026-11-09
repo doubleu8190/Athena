@@ -3,20 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import multiprocessing
 import sys
 import time
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from dataclasses import asdict
 from queue import Empty
 from typing import Protocol, cast
 
-from domain.knowledge.model import ChunkLocator, TextBlock
+from domain.knowledge.model import (
+    ChunkLocator,
+    OriginalStorageAccessDeniedError,
+    OriginalStorageConfigurationError,
+    OriginalStorageError,
+    OriginalStorageNotFoundError,
+    OriginalStorageUnavailableError,
+    TextBlock,
+)
 from domain.knowledge.ports import (
     ChineseTokenizer,
     ClaimedKnowledgeJob,
     DocumentParser,
     EmbeddingPort,
+    FileUploadReservation,
     KnowledgeJobRepository,
     OriginalStore,
     ParsedDocument,
@@ -27,6 +39,8 @@ CHUNK_TOKEN_LIMIT = 512
 CHUNK_TOKEN_OVERLAP = 64
 LEASE_SECONDS = 120
 HEARTBEAT_SECONDS = 20
+
+logger = logging.getLogger(__name__)
 
 
 class _ChildResultQueue(Protocol):
@@ -98,7 +112,10 @@ class KnowledgeWorker:
         try:
             if job.kind == "cleanup":
                 for key in job.source_keys:
-                    await self._originals.delete(key)
+                    try:
+                        await self._originals.delete(key)
+                    except OriginalStorageNotFoundError:
+                        continue
                 if lost_lease.is_set():
                     return True
                 await self._repository.finish_cleanup_job(job)
@@ -137,7 +154,7 @@ class KnowledgeWorker:
             await self._repository.fail_job(
                 job,
                 error_code=code,
-                retryable=not isinstance(error, (ValueError, TypeError)),
+                retryable=_is_retryable_error(error, job.kind),
             )
         finally:
             heartbeat.cancel()
@@ -151,26 +168,62 @@ class KnowledgeWorker:
                 limit=20, lease_seconds=300
             )
             for reservation in expired:
-                if reservation.reservation_token is None or reservation.storage_key is None:
-                    continue
                 try:
-                    can_delete = await self._repository.can_delete_expired_upload_reservation(
-                        reservation.reservation_token, reservation.fencing_token
+                    await self._cleanup_expired_reservation(reservation)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    code = (
+                        error.code
+                        if isinstance(error, OriginalStorageError)
+                        else "knowledge_upload_cleanup_failed"
                     )
-                    if not can_delete:
-                        continue
-                    await self._originals.delete(reservation.storage_key)
-                except OSError:
-                    # 保留 cleaning reservation 和 quota，待清理租约过期后重试。
+                    logger.warning(
+                        "knowledge_upload_cleanup_failed code=%s exception_type=%s reservation=%s",
+                        code,
+                        type(error).__name__,
+                        reservation.reservation_token,
+                    )
                     continue
-                await self._repository.finish_expired_upload_reservation(
-                    reservation.reservation_token, reservation.fencing_token
-                )
-            referenced = await self._repository.list_referenced_storage_keys()
-            await self._originals.sweep_orphans(referenced, older_than_seconds=86400)
-        except Exception:
+            candidates = self._originals.iter_orphan_candidates(older_than_seconds=86400)
+            async with aclosing(cast(AsyncGenerator[str, None], candidates)) as orphan_candidates:
+                async for key in orphan_candidates:
+                    if await self._repository.is_storage_key_referenced(key):
+                        continue
+                    try:
+                        await self._originals.delete(key)
+                    except OriginalStorageNotFoundError:
+                        continue
+                    except OriginalStorageError as error:
+                        logger.warning(
+                            "knowledge_orphan_delete_failed code=%s",
+                            error.code,
+                        )
+                        continue
+        except Exception as error:
             # 回收失败不影响 ingestion；reservation 和 quota 保持可恢复状态。
+            logger.warning(
+                "knowledge_maintenance_failed exception_type=%s",
+                type(error).__name__,
+            )
             return
+
+    async def _cleanup_expired_reservation(self, reservation: FileUploadReservation) -> None:
+        """Try one expired reservation without blocking the rest of the batch."""
+        if reservation.reservation_token is None or reservation.storage_key is None:
+            return
+        can_delete = await self._repository.can_delete_expired_upload_reservation(
+            reservation.reservation_token, reservation.fencing_token
+        )
+        if not can_delete:
+            return
+        try:
+            await self._originals.delete(reservation.storage_key)
+        except OriginalStorageNotFoundError:
+            pass
+        await self._repository.finish_expired_upload_reservation(
+            reservation.reservation_token, reservation.fencing_token
+        )
 
     async def _read_blocks(self, job: ClaimedKnowledgeJob) -> tuple[list[TextBlock], list[str]]:
         if job.source_text is not None:
@@ -248,6 +301,8 @@ def _largest_suffix_start(text: str, counter: TokenCounterPort, limit: int) -> i
 
 def _error_code(error: Exception) -> str:
     """把异常映射为不含正文、物理路径或驱动细节的短错误码。"""
+    if isinstance(error, OriginalStorageError):
+        return error.code
     if isinstance(error, TimeoutError):
         return "knowledge_parse_timeout"
     if isinstance(error, (ValueError, TypeError)):
@@ -267,6 +322,20 @@ def _error_code(error: Exception) -> str:
     if isinstance(error, OSError):
         return "knowledge_storage_unavailable"
     return "knowledge_processing_failed"
+
+
+def _is_retryable_error(error: Exception, job_kind: str) -> bool:
+    """Apply distinct ingestion and cleanup retry policies."""
+    if isinstance(error, OriginalStorageUnavailableError):
+        return True
+    if isinstance(
+        error,
+        (OriginalStorageAccessDeniedError, OriginalStorageConfigurationError),
+    ):
+        return job_kind == "cleanup"
+    if isinstance(error, OriginalStorageError):
+        return False
+    return not isinstance(error, (ValueError, TypeError))
 
 
 def _process_rss_mb(process_id: int) -> int | None:

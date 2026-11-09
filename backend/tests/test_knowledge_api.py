@@ -18,6 +18,7 @@ from domain.knowledge.model import (
     DocumentState,
     DocumentVersion,
     KnowledgeBase,
+    OriginalStorageUnavailableError,
     SearchResult,
 )
 
@@ -85,6 +86,8 @@ class ApiService:
             raise KnowledgeInputError("document_file_empty")
         if title == "quota-bytes":
             raise KnowledgeInputError("knowledge_storage_quota_exceeded")
+        if title == "storage-down":
+            raise OriginalStorageUnavailableError()
         now = datetime(2026, 1, 1, tzinfo=UTC)
         return Document(
             "doc_upload", owner_id, base_id, title, None, None, now, now
@@ -121,6 +124,8 @@ class ApiService:
             raise KnowledgeInputError("document_file_empty")
         if key == "quota-bytes":
             raise KnowledgeInputError("knowledge_storage_quota_exceeded")
+        if key == "storage-down":
+            raise OriginalStorageUnavailableError()
         now = datetime(2026, 1, 1, tzinfo=UTC)
         return Document(
             document_id, owner_id, base_id, "replacement", None, None, now, now
@@ -177,6 +182,17 @@ class ApiService:
     async def delete_document(self, owner_id: str, base_id: str, document_id: str) -> None:
         del document_id
         await self.get_base(owner_id, base_id)
+
+    async def source(
+        self, owner_id: str, base_id: str, document_id: str, version_id: str
+    ) -> tuple[str, str, bytes]:
+        del document_id
+        await self.get_base(owner_id, base_id)
+        if version_id == "missing":
+            raise KnowledgeNotFoundError("source_not_found")
+        if version_id == "storage-down":
+            raise OriginalStorageUnavailableError()
+        return "notes.txt", "text/plain", b"source"
 
     async def search(
         self, owner_id: str, base_ids: list[str], query: str, *, limit: int
@@ -377,3 +393,33 @@ def test_write_route_rejects_cross_origin_request() -> None:
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "origin_not_allowed"
+
+
+def test_storage_failures_map_to_safe_service_unavailable() -> None:
+    client = TestClient(_app())
+    create = client.post(
+        "/api/v1/knowledge-bases/kb_a/documents/upload",
+        headers={"Idempotency-Key": "storage-create"},
+        data={"title": "storage-down"},
+        files={"file": ("notes.txt", b"source", "text/plain")},
+    )
+    replace = client.post(
+        "/api/v1/knowledge-bases/kb_a/documents/doc_a/versions/upload",
+        headers={"Idempotency-Key": "storage-down"},
+        files={"file": ("notes.txt", b"source", "text/plain")},
+    )
+    download = client.get(
+        "/api/v1/knowledge-bases/kb_a/documents/doc_a/versions/storage-down/source"
+    )
+
+    for response in (create, replace, download):
+        assert response.status_code == 503
+        assert response.json()["detail"] == "knowledge_storage_unavailable"
+
+
+def test_missing_source_maps_to_not_found_not_storage_unavailable() -> None:
+    response = TestClient(_app()).get(
+        "/api/v1/knowledge-bases/kb_a/documents/doc_a/versions/missing/source"
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "source_not_found"

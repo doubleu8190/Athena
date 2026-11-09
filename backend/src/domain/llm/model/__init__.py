@@ -1,5 +1,6 @@
 """LLM 领域模型公开接口。"""
 
+from domain.llm.model.compression_policy import CompressionPolicyInput, CompressionPolicyVersion
 from domain.llm.model.errors import (
     LlmCapabilityError,
     LlmConfigurationError,
@@ -13,6 +14,13 @@ from domain.llm.model.errors import (
     LlmStructuredOutputError,
     LlmStructuredValidationError,
     LlmToolArgumentsError,
+)
+from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, RuntimeModelProfile
+from domain.llm.model.profile_errors import (
+    ModelProfileAuthorizationError,
+    ModelProfileConflictError,
+    ModelProfileError,
+    ModelProfileNotFoundError,
 )
 from domain.llm.model.types import (
     LlmMessage,
@@ -64,4 +72,13 @@ __all__ = [
     "ToolArgumentsDelta",
     "ToolCallCompleted",
     "ToolCallStarted",
+    "ModelProfileInput",
+    "CompressionPolicyInput",
+    "CompressionPolicyVersion",
+    "ModelProfileVersion",
+    "RuntimeModelProfile",
+    "ModelProfileAuthorizationError",
+    "ModelProfileConflictError",
+    "ModelProfileError",
+    "ModelProfileNotFoundError",
 ]

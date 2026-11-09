@@ -180,6 +180,7 @@ def conversation_to_domain(row: ConversationMessageModel) -> ConversationMessage
         parts=deserialize_parts(row.parts),
         reply_to_message_id=row.reply_to_message_id,
         run_id=row.run_id,
+        context_turn_id=row.context_turn_id,
         client_message_id=row.client_message_id,
         created_at=_as_utc(row.created_at),
         completed_at=_as_utc(row.completed_at) if row.completed_at is not None else None,

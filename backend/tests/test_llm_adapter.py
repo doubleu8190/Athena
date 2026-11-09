@@ -28,6 +28,7 @@ from domain.llm.model import (
     LlmRequest,
     LlmRole,
     LlmTool,
+    LlmToolCall,
     ResponseCompleted,
     TextDelta,
     ToolCallCompleted,
@@ -89,6 +90,26 @@ def test_input_preserves_function_call_and_tool_result_order() -> None:
     assert OpenAIResponsesAdapter._input(messages) == [
         {"type": "function_call", "call_id": "c1"},
         {"type": "function_call_output", "call_id": "c1", "output": "result"},
+    ]
+
+
+def test_typed_tool_calls_and_results_remain_responses_compatible() -> None:
+    """新增 typed assistant tool_calls 仍映射为 Responses call/output 顺序。"""
+    messages = (
+        LlmMessage(
+            LlmRole.ASSISTANT,
+            tool_calls=(LlmToolCall("call_1", "lookup", {"key": "value"}),),
+        ),
+        LlmMessage(LlmRole.TOOL, "result", tool_call_id="call_1"),
+    )
+    assert OpenAIResponsesAdapter._input(messages) == [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup",
+            "arguments": '{"key":"value"}',
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "result"},
     ]
 
 
@@ -159,6 +180,168 @@ def test_openai_sdk_mock_transport_sends_one_stateless_responses_request() -> No
         await adapter.aclose()
 
     asyncio.run(run())
+
+
+def test_responses_sdk_wire_final_request_uses_no_tools_and_disables_retries() -> None:
+    """最终回答轮的真实 Responses 请求显式关闭工具，SDK 不隐式重试。"""
+
+    async def run() -> None:
+        requests: list[dict[str, Any]] = []
+
+        async def handle(request: httpx2.Request) -> httpx2.Response:
+            requests.append(json.loads(request.content))
+            response_payload = {
+                "id": "resp_final",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "model",
+                "output": [],
+                "parallel_tool_calls": False,
+                "tool_choice": "none",
+                "tools": [],
+                "usage": None,
+            }
+            event = {
+                "type": "response.completed",
+                "sequence_number": 0,
+                "response": response_payload,
+            }
+            return httpx2.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(f"event: response.completed\ndata: {json.dumps(event)}\n\n").encode(),
+                request=request,
+            )
+
+        cfg = profile("assistant", "secret")
+        adapter = OpenAIResponsesAdapter({"assistant": cfg})
+        sdk_http = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+        sdk = AsyncOpenAI(
+            api_key="secret",
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            http_client=sdk_http,
+        )
+        adapter._clients[
+            (
+                "https://api.openai.com/v1",
+                hashlib.sha256(b"secret").hexdigest(),
+                cfg.max_response_bytes,
+            )
+        ] = sdk
+        request = LlmRequest(
+            "assistant",
+            (LlmMessage(LlmRole.USER, "answer now"),),
+            tool_choice="none",
+        )
+
+        async with adapter.stream("assistant", request) as stream:
+            _ = [event async for event in stream]
+
+        assert sdk.max_retries == 0
+        assert len(requests) == 1
+        assert requests[0]["tools"] == []
+        assert requests[0]["tool_choice"] == "none"
+        assert requests[0]["parallel_tool_calls"] is False
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
+def test_responses_adapter_defers_unknown_tool_and_schema_validation() -> None:
+    """Responses 同样将未知工具和 Schema 不匹配交给执行层。"""
+    tool = LlmTool(
+        "known_tool",
+        "",
+        {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    )
+    result = Response.model_validate(
+        {
+            "id": "resp_unknown_tool",
+            "object": "response",
+            "created_at": 1,
+            "status": "completed",
+            "model": "model",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_unknown",
+                    "call_id": "call_unknown",
+                    "name": "model_guessed_tool",
+                    "arguments": '{"unexpected":true}',
+                    "status": "completed",
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": None,
+        }
+    )
+    adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
+    response = adapter._response(
+        result,
+        LlmRequest(
+            "assistant",
+            (LlmMessage(LlmRole.USER, "call"),),
+            tools=(tool,),
+        ),
+        profile("assistant", "secret"),
+    )
+    call = next(item for item in response.output if isinstance(item, LlmToolCall))
+    assert call.name == "model_guessed_tool"
+    assert call.arguments == {"unexpected": True}
+
+
+@pytest.mark.parametrize(
+    ("call_id", "arguments"),
+    [
+        ("", '{"query":"ok"}'),
+        ("call_invalid_json", '{"query":'),
+        ("call_non_object", '["query"]'),
+    ],
+)
+def test_responses_adapter_keeps_protocol_failures_for_missing_id_or_invalid_arguments(
+    call_id: str,
+    arguments: str,
+) -> None:
+    """Responses 缺失 ID、非法 JSON 和非对象参数仍是协议失败。"""
+    result = Response.model_validate(
+        {
+            "id": "resp_invalid_call",
+            "object": "response",
+            "created_at": 1,
+            "status": "completed",
+            "model": "model",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_invalid",
+                    "call_id": call_id,
+                    "name": "known_tool",
+                    "arguments": arguments,
+                    "status": "completed",
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": None,
+        }
+    )
+    adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
+    with pytest.raises(LlmProtocolError):
+        adapter._response(
+            result,
+            LlmRequest("assistant", (LlmMessage(LlmRole.USER, "call"),)),
+            profile("assistant", "secret"),
+        )
 
 
 @pytest.mark.parametrize("streaming", [False, True])

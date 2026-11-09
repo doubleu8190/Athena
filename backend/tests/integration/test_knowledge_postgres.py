@@ -7,8 +7,7 @@ import hashlib
 import os
 import subprocess
 import sys
-import tempfile
-import time
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
@@ -16,6 +15,7 @@ from threading import Thread
 from typing import Any, cast
 
 import pytest
+from knowledge_fakes import MemoryOriginalStore
 from sqlalchemy import event, insert, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -26,7 +26,6 @@ from adapter.knowledge.repository import KnowledgeRepository
 from app.knowledge.service import KnowledgeService
 from domain.knowledge.model import Document, KnowledgeBase
 from domain.knowledge.ports import ClaimedKnowledgeJob, KnowledgeRepositoryPort
-from infrastructure.knowledge.storage import LocalOriginalStore
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -59,9 +58,7 @@ class _CommitThenRaiseRepository:
         raise ConnectionError("simulated response loss after commit")
 
 
-async def _claim_job_target(
-    repository: KnowledgeRepository, target_id: str
-) -> ClaimedKnowledgeJob:
+async def _claim_job_target(repository: KnowledgeRepository, target_id: str) -> ClaimedKnowledgeJob:
     """Claim a target task while completing other known ingestion jobs in queue order."""
     for _ in range(20):
         job = await repository.claim_job(lease_seconds=120)
@@ -99,6 +96,7 @@ config.attributes['connect_args'] = {
         'lock_timeout': '5000',
     },
 }
+config.attributes['version_table_schema'] = os.environ['KNOWLEDGE_TEST_SCHEMA']
 command.upgrade(config, 'head')
 """
     result = subprocess.run(
@@ -190,6 +188,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             assert interleaved_reservation.reservation_token is not None
             assert interleaved_reservation.source_id is not None
             assert interleaved_reservation.job_id is not None
+            assert await repository.is_storage_key_referenced(interleaved_reservation.storage_key)
             interleaved_done = False
             interleaved_errors: list[BaseException] = []
 
@@ -266,7 +265,9 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 finalize_before_referenced_query,
             )
             try:
-                interleaved_references = await repository.list_referenced_storage_keys()
+                still_referenced = await repository.is_storage_key_referenced(
+                    interleaved_reservation.storage_key
+                )
             finally:
                 event.remove(
                     engine.sync_engine,
@@ -275,10 +276,9 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 )
             assert interleaved_done
             assert not interleaved_errors, f"interleaved finalize failed: {interleaved_errors!r}"
-            assert interleaved_reservation.storage_key in interleaved_references
+            assert still_referenced
 
-            with tempfile.TemporaryDirectory(prefix="knowledge-upload-race-") as storage_root:
-                originals = LocalOriginalStore(storage_root)
+            with nullcontext(MemoryOriginalStore()) as originals:
                 upload_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
                     _UploadTokenizer(),
@@ -304,14 +304,14 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     ),
                 )
                 assert upload_results[0] == upload_results[1]
-                assert len([path for path in Path(storage_root).rglob("*") if path.is_file()]) == 1
+                assert len(originals.keys()) == 1
                 winning_document, winning_version = upload_results[0]
                 winning_source = await repository.get_source(
                     "upload_owner", "upload_kb", winning_document.id, winning_version
                 )
                 assert winning_source is not None
                 assert winning_source.storage_key is not None
-                assert await originals.get(winning_source.storage_key) == upload_content
+                assert originals.content(winning_source.storage_key) == upload_content
 
                 canonical_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
@@ -324,9 +324,12 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 canonical_text = await canonical_service.create_text_document(
                     "kb_owner_a", "kb_a", "canonical title", "canonical body", "canonical-key"
                 )
-                assert await canonical_service.create_text_document(
-                    "kb_owner_a", "kb_a", "canonical title", "canonical body", "canonical-key"
-                ) == canonical_text
+                assert (
+                    await canonical_service.create_text_document(
+                        "kb_owner_a", "kb_a", "canonical title", "canonical body", "canonical-key"
+                    )
+                    == canonical_text
+                )
                 with pytest.raises(ValueError, match="idempotency_conflict"):
                     await canonical_service.create_text_document(
                         "kb_owner_a",
@@ -344,9 +347,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                         "canonical-key",
                     )
                 with pytest.raises(ValueError, match="idempotency_conflict"):
-                    files_before_source_kind_conflict = len(
-                        [path for path in Path(storage_root).rglob("*") if path.is_file()]
-                    )
+                    files_before_source_kind_conflict = len(originals.keys())
                     await canonical_service.create_file_document(
                         "kb_owner_a",
                         "kb_a",
@@ -355,12 +356,8 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                         b"canonical body",
                         "canonical-key",
                     )
-                assert len(
-                    [path for path in Path(storage_root).rglob("*") if path.is_file()]
-                ) == files_before_source_kind_conflict
-                files_before_first_canonical_file = len(
-                    [path for path in Path(storage_root).rglob("*") if path.is_file()]
-                )
+                assert len(originals.keys()) == files_before_source_kind_conflict
+                files_before_first_canonical_file = len(originals.keys())
                 canonical_file = await canonical_service.create_file_document(
                     "kb_owner_a",
                     "kb_a",
@@ -369,21 +366,20 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     b"same file content",
                     "canonical-file-key",
                 )
-                files_after_first_canonical_file = len(
-                    [path for path in Path(storage_root).rglob("*") if path.is_file()]
-                )
+                files_after_first_canonical_file = len(originals.keys())
                 assert files_after_first_canonical_file == files_before_first_canonical_file + 1
-                assert await canonical_service.create_file_document(
-                    "kb_owner_a",
-                    "kb_a",
-                    "file title",
-                    "canonical.txt",
-                    b"same file content",
-                    "canonical-file-key",
-                ) == canonical_file
-                assert len(
-                    [path for path in Path(storage_root).rglob("*") if path.is_file()]
-                ) == files_after_first_canonical_file
+                assert (
+                    await canonical_service.create_file_document(
+                        "kb_owner_a",
+                        "kb_a",
+                        "file title",
+                        "canonical.txt",
+                        b"same file content",
+                        "canonical-file-key",
+                    )
+                    == canonical_file
+                )
+                assert len(originals.keys()) == files_after_first_canonical_file
                 with pytest.raises(ValueError, match="idempotency_conflict"):
                     await canonical_service.create_file_document(
                         "kb_owner_a",
@@ -393,9 +389,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                         b"same file content",
                         "canonical-file-key",
                     )
-                assert len(
-                    [path for path in Path(storage_root).rglob("*") if path.is_file()]
-                ) == files_after_first_canonical_file
+                assert len(originals.keys()) == files_after_first_canonical_file
                 ambiguous_commit = _CommitThenRaiseRepository(repository)
                 uncertain_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, ambiguous_commit),
@@ -412,7 +406,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                         "ambiguous-commit-key",
                     )
                 assert ambiguous_commit.storage_key is not None
-                assert await originals.get(ambiguous_commit.storage_key) == (
+                assert originals.content(ambiguous_commit.storage_key) == (
                     b"committed before response lost"
                 )
                 async with session_factory() as session:
@@ -451,9 +445,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     ),
                     return_exceptions=True,
                 )
-                assert sum(
-                    not isinstance(result, Exception) for result in file_request_race
-                ) == 1
+                assert sum(not isinstance(result, Exception) for result in file_request_race) == 1
                 file_conflicts = [
                     result for result in file_request_race if isinstance(result, ValueError)
                 ]
@@ -472,16 +464,22 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 orphan_hash = hashlib.sha256(orphan_content).hexdigest()
                 owner_hash = hashlib.sha256(b"upload_owner").hexdigest()
                 orphan_key = f"{owner_hash}/orphan/{orphan_hash[:2]}/{orphan_hash}"
-                await originals.put(orphan_key, orphan_content)
-                stale_time = time.time() - 90_000
-                os.utime(Path(storage_root) / orphan_key, (stale_time, stale_time))
-                assert winning_source.storage_key is not None
-                swept = await originals.sweep_orphans(
-                    {winning_source.storage_key}, older_than_seconds=86_400
+                originals.seed(
+                    orphan_key,
+                    orphan_content,
+                    modified_at=now - timedelta(days=2),
                 )
-                assert swept == 1
-                assert await originals.get(winning_source.storage_key) == upload_content
-                assert not (Path(storage_root) / orphan_key).exists()
+                assert winning_source.storage_key is not None
+                candidates = [
+                    key async for key in originals.iter_orphan_candidates(older_than_seconds=86_400)
+                ]
+                assert orphan_key in candidates
+                for candidate in candidates:
+                    if await repository.is_storage_key_referenced(candidate):
+                        continue
+                    await originals.delete(candidate)
+                assert originals.content(winning_source.storage_key) == upload_content
+                assert not originals.contains(orphan_key)
 
             async def concurrent_create(suffix: str) -> tuple[Document, str]:
                 return await repository.create_text_document(
@@ -784,8 +782,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 warnings=[],
             )
 
-            with tempfile.TemporaryDirectory(prefix="knowledge-replace-replay-") as storage_root:
-                replacement_store = LocalOriginalStore(storage_root)
+            with nullcontext(MemoryOriginalStore()) as replacement_store:
                 file_replace_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
                     _UploadTokenizer(),
@@ -800,7 +797,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     replacement_payload,
                     "rename-file-replay",
                 )
-                files_after_first_replace = len(list(Path(storage_root).rglob("*")))
+                files_after_first_replace = len(replacement_store.keys())
                 await file_replace_service.rename_document(
                     "kb_owner_a", "kb_a", doc_a.id, "renamed file document"
                 )
@@ -816,7 +813,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     file_replace[0].id,
                     file_replace[1],
                 )
-                assert len(list(Path(storage_root).rglob("*"))) == files_after_first_replace
+                assert len(replacement_store.keys()) == files_after_first_replace
                 file_replace_job = await _claim_job_target(repository, file_replace[1])
                 assert await repository.publish_job(
                     file_replace_job,
@@ -854,9 +851,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     ),
                     {"job_id": document_cleanup.job_id},
                 )
-            document_cleanup_retry = await _claim_job_target(
-                repository, f"doc:{doc_a.id}"
-            )
+            document_cleanup_retry = await _claim_job_target(repository, f"doc:{doc_a.id}")
             assert document_cleanup_retry.target_id == f"doc:{doc_a.id}"
             assert document_cleanup_retry.fencing_token == document_cleanup.fencing_token + 1
             assert not await repository.finish_cleanup_job(document_cleanup)
@@ -1026,8 +1021,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 ],
                 warnings=[],
             )
-            with tempfile.TemporaryDirectory(prefix="knowledge-quota-reject-") as storage_root:
-                quota_store = LocalOriginalStore(storage_root)
+            with nullcontext(MemoryOriginalStore()) as quota_store:
                 quota_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
                     _UploadTokenizer(),
@@ -1051,7 +1045,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                         b"small replacement",
                         "quota-replace-reject",
                     )
-                assert list(Path(storage_root).rglob("*")) == []
+                assert quota_store.put_calls == []
         finally:
             await engine.dispose()
             async with admin.begin() as connection:

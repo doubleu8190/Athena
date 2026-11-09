@@ -1,5 +1,7 @@
 """LLM 调用使用的安全领域异常。"""
 
+import math
+
 
 class LlmError(Exception):
     """不携带上游正文或凭据的 LLM 异常。"""
@@ -31,9 +33,25 @@ class LlmRequestError(LlmError):
 
 
 class LlmProviderError(LlmError):
-    """上游 SDK 调用失败。"""
+    """上游 SDK 调用失败，并可携带安全的重试等待提示。"""
 
     code = "llm_provider_error"
+
+    def __init__(
+        self,
+        code: str | None = None,
+        *,
+        retry_after_seconds: float | None = None,
+        retry_safe: bool = False,
+    ) -> None:
+        """保存固定错误码及可选重试等待秒数。"""
+        if retry_after_seconds is not None and (
+            not math.isfinite(retry_after_seconds) or retry_after_seconds < 0
+        ):
+            raise ValueError("llm_retry_after_invalid")
+        self.retry_after_seconds = retry_after_seconds
+        self.retry_safe = retry_safe
+        super().__init__(code)
 
 
 class LlmProtocolError(LlmError):

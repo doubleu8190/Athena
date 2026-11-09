@@ -6,15 +6,14 @@ import asyncio
 import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from knowledge_fakes import MemoryOriginalStore
 
 from app.knowledge.service import KnowledgeService
 from domain.knowledge.model import Document, KnowledgeBase
 from domain.knowledge.ports import FileUploadReservation, KnowledgeRepositoryPort
-from infrastructure.knowledge.storage import LocalOriginalStore
 
 
 class _UploadRepository:
@@ -199,15 +198,17 @@ class _Tokenizer:
         return tuple(text.split())
 
 
-class _FailAfterStoreOriginalStore(LocalOriginalStore):
+class _FailAfterStoreOriginalStore(MemoryOriginalStore):
     async def put(self, key: str, content: bytes) -> None:
         await super().put(key, content)
-        raise OSError("simulated_storage_write_error")
+        from domain.knowledge.model import OriginalStorageUnavailableError
+
+        raise OriginalStorageUnavailableError()
 
 
-class _RacingOriginalStore(LocalOriginalStore):
-    def __init__(self, root: Path) -> None:
-        super().__init__(root)
+class _RacingOriginalStore(MemoryOriginalStore):
+    def __init__(self) -> None:
+        super().__init__()
         self._both_writing = asyncio.Event()
         self._write_count = 0
 
@@ -223,7 +224,7 @@ class _RacingOriginalStore(LocalOriginalStore):
 
 
 def _make(
-    tmp_path: Path, originals: LocalOriginalStore | None = None
+    originals: MemoryOriginalStore | None = None,
 ) -> tuple[KnowledgeService, _UploadRepository]:
     repository = _UploadRepository()
     now = datetime(2026, 11, 7, tzinfo=UTC)
@@ -231,16 +232,16 @@ def _make(
     service = KnowledgeService(
         cast(KnowledgeRepositoryPort, repository),
         _Tokenizer(),
-        originals=originals or LocalOriginalStore(tmp_path / "originals"),
+        originals=originals or MemoryOriginalStore(),
         id_factory=lambda kind: f"{kind}_{next(identities)}",
         clock=lambda: now,
     )
     return service, repository
 
 
-def test_owner_scoped_uploads_same_bytes_to_distinct_storage_keys(tmp_path: Path) -> None:
+def test_owner_scoped_uploads_same_bytes_to_distinct_storage_keys() -> None:
     async def scenario() -> None:
-        service, repository = _make(tmp_path)
+        service, repository = _make()
         alice_base = await service.create_base("alice", "private", None)
         bob_base = await service.create_base("bob", "private", None)
         alice, _ = await service.create_file_document(
@@ -257,16 +258,16 @@ def test_owner_scoped_uploads_same_bytes_to_distinct_storage_keys(tmp_path: Path
             hashlib.sha256(b"bob").hexdigest(),
         }
         assert len({key for key in repository.referenced}) == 2
-        originals = cast(LocalOriginalStore, service._originals)
+        originals = cast(MemoryOriginalStore, service._originals)
         assert originals is not None
-        assert all(await asyncio.gather(*(originals.get(key) for key in repository.storage_keys)))
+        assert originals.keys() == set(repository.storage_keys)
 
     asyncio.run(scenario())
 
 
-def test_upload_idempotency_replay_keeps_one_source_key(tmp_path: Path) -> None:
+def test_upload_idempotency_replay_keeps_one_source_key() -> None:
     async def scenario() -> None:
-        service, repository = _make(tmp_path)
+        service, repository = _make()
         base = await service.create_base("alice", "private", None)
         first, version_a = await service.create_file_document(
             "alice", base.id, "notes", "notes.txt", b"same bytes", "request-1"
@@ -280,7 +281,8 @@ def test_upload_idempotency_replay_keeps_one_source_key(tmp_path: Path) -> None:
         assert repository.content_hashes == [hashlib.sha256(b"same bytes").hexdigest()]
         assert len(repository.referenced) == 1
         assert len(repository.storage_keys) == 1
-        assert len([path for path in (tmp_path / "originals").rglob("*") if path.is_file()]) == 1
+        originals = cast(MemoryOriginalStore, service._originals)
+        assert originals.keys() == set(repository.storage_keys)
         with pytest.raises(ValueError, match="idempotency_conflict"):
             await service.create_file_document(
                 "alice", base.id, "notes", "notes.txt", b"different", "request-1"
@@ -294,9 +296,9 @@ def test_upload_idempotency_replay_keeps_one_source_key(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_quota_rejection_happens_before_original_write(tmp_path: Path) -> None:
+def test_quota_rejection_happens_before_original_write() -> None:
     async def scenario() -> None:
-        service, repository = _make(tmp_path)
+        service, repository = _make()
         base = await service.create_base("alice", "private", None)
         repository.quota_limit_bytes = 2
 
@@ -306,17 +308,16 @@ def test_quota_rejection_happens_before_original_write(tmp_path: Path) -> None:
             )
 
         assert repository.reservations == {}
-        assert (
-            list((tmp_path / "originals").rglob("*") if (tmp_path / "originals").exists() else [])
-            == []
-        )
+        originals = cast(MemoryOriginalStore, service._originals)
+        assert originals.keys() == set()
+        assert originals.put_calls == []
 
     asyncio.run(scenario())
 
 
-def test_finalize_failure_keeps_reservation_original_and_quota(tmp_path: Path) -> None:
+def test_finalize_failure_keeps_reservation_original_and_quota() -> None:
     async def scenario() -> None:
-        service, repository = _make(tmp_path)
+        service, repository = _make()
         base = await service.create_base("alice", "private", None)
         repository.fail_next = True
         with pytest.raises(RuntimeError, match="simulated_database_failure"):
@@ -324,14 +325,12 @@ def test_finalize_failure_keeps_reservation_original_and_quota(tmp_path: Path) -
                 "alice", base.id, "notes", "notes.txt", b"orphan", "request-1"
             )
         digest = hashlib.sha256(b"orphan").hexdigest()
-        orphan = next((tmp_path / "originals").rglob(digest))
-        assert orphan.read_bytes() == b"orphan"
+        originals = cast(MemoryOriginalStore, service._originals)
+        orphan = next(key for key in originals.keys() if key.endswith(digest))
+        assert originals.content(orphan) == b"orphan"
         assert len(repository.reservations) == 1
         assert sum(repository._reserved_sizes.values()) == len(b"orphan")
-        originals = cast(LocalOriginalStore, service._originals)
-        assert originals is not None
-        assert await originals.sweep_orphans(repository.retained_storage_keys()) == 0
-        assert orphan.exists()
+        assert orphan in originals.keys()
 
         token = next(iter(repository._reserved_sizes))
         repository._expired_reservations.add(token)
@@ -350,19 +349,21 @@ def test_finalize_failure_keeps_reservation_original_and_quota(tmp_path: Path) -
             await repository.finish_expired_upload_reservation(token, reservation.fencing_token)
             is True
         )
-        assert not orphan.exists()
+        assert not originals.contains(orphan)
         assert token not in repository._reserved_sizes
 
     asyncio.run(scenario())
 
 
-def test_store_error_keeps_reservation_and_bytes_until_fenced_cleanup(tmp_path: Path) -> None:
+def test_store_error_keeps_reservation_and_bytes_until_fenced_cleanup() -> None:
     async def scenario() -> None:
-        storage = _FailAfterStoreOriginalStore(tmp_path / "originals")
-        service, repository = _make(tmp_path, storage)
+        storage = _FailAfterStoreOriginalStore()
+        service, repository = _make(storage)
         base = await service.create_base("alice", "private", None)
 
-        with pytest.raises(OSError, match="simulated_storage_write_error"):
+        from domain.knowledge.model import OriginalStorageUnavailableError
+
+        with pytest.raises(OriginalStorageUnavailableError):
             await service.create_file_document(
                 "alice", base.id, "notes", "notes.txt", b"expected", "request-1"
             )
@@ -371,18 +372,16 @@ def test_store_error_keeps_reservation_and_bytes_until_fenced_cleanup(tmp_path: 
         assert sum(repository._reserved_sizes.values()) == len(b"expected")
         reservation = next(iter(repository.reservations.values()))
         assert reservation.storage_key is not None
-        assert await storage.get(reservation.storage_key) == b"expected"
+        assert storage.content(reservation.storage_key) == b"expected"
         assert reservation.storage_key in repository.retained_storage_keys()
 
     asyncio.run(scenario())
 
 
-def test_same_reservation_concurrent_put_failure_does_not_delete_successful_write(
-    tmp_path: Path,
-) -> None:
+def test_same_reservation_concurrent_put_failure_does_not_delete_successful_write() -> None:
     async def scenario() -> None:
-        storage = _RacingOriginalStore(tmp_path / "originals")
-        service, repository = _make(tmp_path, storage)
+        storage = _RacingOriginalStore()
+        service, repository = _make(storage)
         base = await service.create_base("alice", "private", None)
 
         results = await asyncio.gather(
@@ -399,16 +398,16 @@ def test_same_reservation_concurrent_put_failure_does_not_delete_successful_writ
         assert sum(not isinstance(result, Exception) for result in results) == 1
         assert len(repository.storage_keys) == 1
         key = repository.storage_keys[0]
-        assert await storage.get(key) == b"same bytes"
+        assert storage.content(key) == b"same bytes"
         assert repository.reservations == {}
         assert repository.committed_sizes[key] == len(b"same bytes")
 
     asyncio.run(scenario())
 
 
-def test_uncertain_commit_keeps_referenced_original(tmp_path: Path) -> None:
+def test_uncertain_commit_keeps_referenced_original() -> None:
     async def scenario() -> None:
-        service, repository = _make(tmp_path)
+        service, repository = _make()
         base = await service.create_base("alice", "private", None)
         repository.fail_after_commit = True
         with pytest.raises(RuntimeError, match="simulated_commit_result_unknown"):
@@ -418,20 +417,20 @@ def test_uncertain_commit_keeps_referenced_original(tmp_path: Path) -> None:
 
         assert len(repository.storage_keys) == 1
         key = repository.storage_keys[0]
-        originals = cast(LocalOriginalStore, service._originals)
+        originals = cast(MemoryOriginalStore, service._originals)
         assert originals is not None
-        assert await originals.get(key) == b"committed"
+        assert originals.content(key) == b"committed"
         assert key in repository.referenced
         assert repository.reservations == {}
         assert sum(repository.committed_sizes.values()) == len(b"committed")
-        assert await originals.sweep_orphans(repository.referenced) == 0
+        assert key in originals.keys()
 
     asyncio.run(scenario())
 
 
-def test_file_replacement_uses_same_owner_scope_and_persists_bytes(tmp_path: Path) -> None:
+def test_file_replacement_uses_same_owner_scope_and_persists_bytes() -> None:
     async def scenario() -> None:
-        service, repository = _make(tmp_path)
+        service, repository = _make()
         base = await service.create_base("alice", "private", None)
         await service.create_file_document(
             "alice", base.id, "notes", "notes.txt", b"old", "request-1"
@@ -455,9 +454,9 @@ def test_file_replacement_uses_same_owner_scope_and_persists_bytes(tmp_path: Pat
     asyncio.run(scenario())
 
 
-def test_replace_request_replays_after_document_rename(tmp_path: Path) -> None:
+def test_replace_request_replays_after_document_rename() -> None:
     async def scenario() -> None:
-        service, repository = _make(tmp_path)
+        service, repository = _make()
         base = await service.create_base("alice", "private", None)
         original, _ = await service.create_file_document(
             "alice", base.id, "notes", "notes.txt", b"original", "create-request"

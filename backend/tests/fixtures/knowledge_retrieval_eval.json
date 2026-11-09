@@ -16,8 +16,8 @@
     {"id":"excel-formula","text":"读取 Excel 时公式不执行。若单元格具有缓存结果就提取缓存值；没有缓存结果则保留公式字符串并给出提示。"},
     {"id":"powerpoint-slide","text":"PPTX 文本框和表格按幻灯片读取，引用来源包含 slide number 和 shape number。"},
     {"id":"powerpoint-group","text":"PowerPoint 组合形状可以嵌套。解析器递归遍历组合内图片并用层级 shape path 保存定位。"},
-    {"id":"storage-owner","text":"上传原件存储键以 owner_id 的 SHA-256 作为目录前缀。同内容的两个用户拥有不同物理存储键。"},
-    {"id":"storage-cleanup","text":"数据库登记失败后，若原件没有被其他记录引用，上传服务会删除刚写入的本地磁盘对象。"},
+    {"id":"storage-owner","text":"上传原件写入私有 MinIO 桶，对象键以 owner_id 的 SHA-256 作为前缀。同内容的两个用户拥有不同对象键。"},
+    {"id":"storage-cleanup","text":"数据库登记失败后，对象先保留在 MinIO。超过 24 小时且没有来源或上传预留引用时，worker 才删除孤儿对象。"},
     {"id":"search-rrf","text":"知识检索将关键词名次和 pgvector 语义名次通过 Reciprocal Rank Fusion 合并，不直接相加两路原始分数。"}
   ],
   "queries": [
@@ -55,7 +55,7 @@
     {"query":"PowerPoint 组形状内的图片会递归识别吗？","expected_doc_id":"powerpoint-group","kind":"office"},
     {"query":"嵌套组合中图片 locator 怎样记录层级路径？","expected_doc_id":"powerpoint-group","kind":"office"},
     {"query":"owner_id 的哈希为什么放在原件存储路径最前面？","expected_doc_id":"storage-owner","kind":"identifier"},
-    {"query":"不同用户上传同一个文件会共享本地磁盘对象吗？","expected_doc_id":"storage-owner","kind":"paraphrase"},
+    {"query":"不同用户上传同一个文件会在 MinIO 中共用对象吗？","expected_doc_id":"storage-owner","kind":"paraphrase"},
     {"query":"上传元数据提交失败后如何处理孤儿文件？","expected_doc_id":"storage-cleanup","kind":"paraphrase"},
     {"query":"原件没有数据库引用时什么时候删除？","expected_doc_id":"storage-cleanup","kind":"paraphrase"},
     {"query":"关键词与向量排序通过什么方法融合？","expected_doc_id":"search-rrf","kind":"paraphrase"},

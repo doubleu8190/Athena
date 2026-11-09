@@ -5,10 +5,12 @@
 已确认的产品范围：直接回答、搜索阅读与分析、文件生成、MCP、Skill、
 自定义业务 Subagent、知识库和记忆系统。
 
-当前已实现邮箱密码认证、项目与 Session 目录、消息存储和只读历史，以及全局
-MCP Server 管理和安全工具目录 API。认证使用服务端可撤销登录会话和 HttpOnly
-Cookie；管理操作在应用服务及最终写事务中复核当前角色和会话。Run 编排、消息
-发送接口、工具调用、流式输出和其余产品能力尚未实现。
+当前已实现邮箱密码认证、项目与 Session 目录、消息存储和只读历史、全局
+MCP Server 管理、安全工具目录 API，以及首期 Run 后端闭环。认证使用服务端
+可撤销登录会话和 HttpOnly Cookie；管理操作在应用服务及最终写事务中复核当前
+角色和会话。Run 支持提交、澄清恢复、取消、失败重试、独立 Worker 执行和 SSE
+临时增量；已接入管理员 MCP 工具与只读的 `memory_search`、`knowledge_search`，
+前端页面尚未实现。
 
 项目管理支持：
 
@@ -63,8 +65,8 @@ Cookie；管理操作在应用服务及最终写事务中复核当前角色和�
   异常和取消都会由 PostgreSQL 自动释放行锁，因此约束跨进程生效。
 - 该方案以数据库已有行为锁对象；当前不支持锁定没有数据库行的资源。若未来
   出现此类需求，应针对实际资源单独设计，不预建通用锁抽象。
-- 本轮只提供 Session CRUD，不提供消息发送 HTTP 接口；消息写入仍只由内部
-  `MessageService` 提供给未来的 Run 流程。
+- Session CRUD 与 Run HTTP 接口分开；正式消息写入由内部 `MessageService` 提供，
+  由 Run 命令在共享数据库事务内调用。
 
 消息支持：
 
@@ -79,8 +81,8 @@ Cookie；管理操作在应用服务及最终写事务中复核当前角色和�
 - 适配器按领域分包：消息 ORM、纯转换和仓储分别位于
   `adapter/message/{model,converter,repository}`，仓储只负责事务、查询和
   持久化编排。
-- 消息写入只由内部应用服务提供，未来由 Run 提交流程调用；当前没有消息写
-  HTTP 接口。
+- 消息写入只由内部应用服务提供，并由 Run 命令在共享事务中调用；不提供独立的
+  通用消息写入 HTTP 接口。
 - 内部消息追加必须携带已认证的 `owner_id`，并在同一事务的 Session 行锁内
   匹配 Session owner；
   跨用户或不可见 Session 统一按 `session_not_found` 拒绝。
@@ -283,13 +285,15 @@ cd backend
 不会继承完整宿主环境。HTTP 只允许 HTTPS、固定 DNS 解析地址并阻断重定向；发现
 受总时限、响应大小、页数和工具数限制。
 
-当前未实现 `tools/call`、Run/LLM 集成、Redis、健康探测和定时刷新；普通工具
-目录查询只读取最近一次成功发现并持久化的结果。
+模型业务调用不通过公开的通用 `tools/call` 路由，而是由 Run 按冻结目录执行；
+每次调用独立建立并关闭 HTTP/stdio MCP 连接，SDK 自动重试关闭。MCP 健康探测和
+定时刷新尚未实现；普通工具目录查询只读取最近一次成功发现并持久化的结果。
+Run、LLM 配置及 Redis/SSE 的实现边界见下文。
 
 ## LLM 调用模块
 
 内部 `app.state.llm_service` 可执行一次 Responses API 非流式、流式或严格结构化
-调用。首版不提供 HTTP 路由、工具执行或 Run 循环。部署方可用
+调用；Run Worker 使用独立的 Chat Completions 适配器执行工具循环。部署方可用
 `ATHENA_LLM_PROFILES` JSON 对象配置 Profile；各项含 `model`、`api_key_env` 和
 `capabilities`，可选 `base_url`、超时、并发、输入/响应大小、输出 token 及工具上限。
 凭据只从 `api_key_env` 指向的环境变量读取。默认上限为请求 60 秒、流 120 秒、
@@ -323,6 +327,54 @@ SDK 自动重试关闭，流式中断不会重放。真实模型兼容性尚未�
 重排阈值 `0.30` 来自少量中文正负样例的初始测量，部署前应在目标记忆语料上复核。
 迁移需要 PostgreSQL `vector` 和 `zhparser` 扩展。
 
+## 知识库与 MinIO
+
+知识库原件只写入部署级私有 MinIO 桶，PostgreSQL 继续保存目录、版本、解析文本、
+分块、索引和任务状态；手动文本仍保存在数据库。本地只用于上传暂存、解析临时文件、
+OCR 与模型缓存。启用知识库时安装额外依赖：
+
+```sh
+.venv/bin/python -m pip install -e '.[dev,knowledge]'
+```
+
+Python 3.14 当前没有兼容的 PaddleOCR/PaddlePaddle 组合，可在该环境运行非 OCR
+单元测试，但不要在 Python 3.14 启动知识库 worker。MinIO SDK 固定在
+`minio==7.2.20`；关闭知识库时不读取 MinIO 配置，也不导入 SDK 客户端。
+
+桶必须由部署方预建并保持私有，应用不会创建桶或修改策略。服务凭据需要桶检查、
+对象列举、读取、上传和删除权限。API、`knowledge_worker` 与启用知识查询的
+`run_worker` 必须使用相同数据库、模型 revision 和目标桶：
+
+```text
+ATHENA_KNOWLEDGE_ENABLED=true
+ATHENA_KNOWLEDGE_MINIO_ENDPOINT=host[:port]
+ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY=<由 secret manager 注入>
+ATHENA_KNOWLEDGE_MINIO_SECRET_KEY=<由 secret manager 注入>
+ATHENA_KNOWLEDGE_MINIO_BUCKET=<预建私有桶>
+ATHENA_KNOWLEDGE_MINIO_SECURE=true
+```
+
+TLS 默认开启，布尔值必须明确；证书校验使用系统信任库，部署私有 CA 时可通过
+`SSL_CERT_FILE` 指定 CA 文件，关闭 TLS 只限受控 HTTP 环境。适配器默认连接超时
+5 秒、读取超时 30 秒、最多 2 次重试，只重试幂等方法；每进程最多 4 个并发同步
+存储操作。对象键、字节大小和 SHA-256 会在写入前和读取后校验，已有对象会读取
+实际内容复核，下载响应始终关闭并释放连接。应用不管理未完成分段上传，部署方应在
+专用桶配置其生命周期回收；完成对象超过 24 小时且无来源或预留引用时才由 worker
+清理。MinIO 暂不可用不影响文档的逻辑删除，后台任务会按策略退避重试。
+
+测试数据切换脚本默认 dry-run，只有显式 `--execute` 才在单个事务中清理知识文档
+数据并保留知识库、项目关联及其他领域数据：
+
+```sh
+.venv/bin/python backend/scripts/reset_knowledge_documents.py
+.venv/bin/python backend/scripts/reset_knowledge_documents.py --execute
+```
+
+真实 MinIO 测试使用独立的 `ATHENA_TEST_MINIO_*` 桶配置；未提供环境时测试明确
+跳过。写入过新对象后不能退回旧本地原件目录，故障时应暂停写入并修复 MinIO 配置。
+更完整的启动、权限、切换与回滚边界见
+[知识库运行环境](docs/knowledge-base-operations.md)。
+
 ## 开发检查
 
 ```sh
@@ -342,6 +394,101 @@ export ATHENA_TEST_DATABASE_URL='postgresql+asyncpg://user:password@127.0.0.1:54
 集成测试会创建唯一的临时 schema，通过真实 Alembic 入口执行迁移，完成仓储
 验证和 Session/Project 行锁并发交错测试，最后删除该 schema；不会改动
 `public` schema 中的数据。
+
+## Run 执行
+
+Run 是 Session 中一次任务的持久化执行。迁移至当前 Alembic head 后，API 负责
+提交任务、澄清回答、取消、重试及 SSE；独立 Worker 领取 PostgreSQL 队列并调用
+Chat Completions。`run-v1` 保持原澄清流程，新 Run 与 retry 使用 `run-v2`，
+每轮最多接受一个业务工具并串行执行 MCP、`memory_search` 或 `knowledge_search`，
+随后把成对调用/结果交回模型，直到最终回答。Sub Agent 尚未接入。增量文本只用于
+实时展示，断线后重新读取数据库快照和正式消息，不回放历史 token。
+
+每 Run 最多 40 次实际 LLM 请求，正常生成、压缩和无输出临时错误的应用层重试
+共用额度；计数在 provider 调用前原子增加，失败不退还。工具本身不计次，单次
+默认 30 秒并受执行段剩余时间限制。参数非法、未知工具或暂不可用仍保存调用/结果
+对；参数超过 64 KiB、非法 JSON 或缺失调用 ID 按协议失败处理。工具结果在 UTF-8
+字节和 JSON 结构边界内受限，超长时明确标记截断。
+
+### 模型配置
+
+只有管理员可以创建配置版本和设置默认版本。密钥不进入 API 请求或数据库，
+配置只保存受控的环境变量名，且变量名必须以 `ATHENA_LLM_CREDENTIAL_` 开头。
+在 API 和 Worker 进程的 secret manager 中注入该变量，再使用管理员 Cookie：
+
+```sh
+export ATHENA_LLM_CREDENTIAL_DEFAULT='从 secret manager 注入的密钥'
+```
+
+管理员接口为 `/api/v1/admin/llm/model-profiles`。创建版本示例：
+
+```json
+{
+  "name": "primary",
+  "base_url": "https://api.example.com/v1",
+  "model": "provider-model-name",
+  "credential_env": "ATHENA_LLM_CREDENTIAL_DEFAULT",
+  "context_window_tokens": 128000,
+  "tokenizer_encoding": "o200k_base",
+  "max_output_tokens": 4096,
+  "request_timeout_seconds": 60,
+  "execution_timeout_seconds": 300,
+  "max_concurrency": 4,
+  "temperature": null
+}
+```
+
+仅支持 `cl100k_base` 和 `o200k_base` 计数。Worker 启动时会在独立有界线程预热
+两种编码，最多等待 45 秒；部署时应预置可写 tokenizer cache，或允许首次启动下载
+资源。预热失败或超时会拒绝启动 Worker。运行中上下文转换和 token 计数使用最多
+4 个 daemon 工作线程，容量满时异步排队且等待计入 Run deadline。超时不会强杀正在
+运行的线程；其工作槽位在实际退出后释放，超时 Run 不会继续调用模型。原 `run-v1`
+提示模板保持不变，新提交和 retry 固定使用 `run-v2`；
+上下文预算会计入系统提示、消息协议、工具调用 schema 和预留输出 token，超限
+时明确失败，不静默截断。创建后通过 `PUT /api/v1/admin/llm/model-profiles/default`
+设置 `{ "profile_id": "<返回的版本 ID>" }`。禁用版本会阻止后续调用；密钥轮换后
+重启 API 与 Worker 进程，使环境变量更新生效。被引用的旧版本保留供历史 Run
+审计，不能删除或改写。
+
+### Worker 与实时传输
+
+API 和 Worker 使用同一 `ATHENA_DATABASE_URL`。单独启动 Worker：
+
+```sh
+.venv/bin/python -m run_worker
+```
+
+`ATHENA_REDIS_URL` 可选。Redis 暂时不可用时 Run 仍会持久化和完成，SSE 通过
+数据库周期对账交付正式消息，并可能发送 `stream_interrupted`。反向代理必须关闭
+SSE 响应缓冲，并设置高于连接预期时长的读取超时；应用默认每 15 秒发送心跳。
+Worker 参数可通过 `.env.example` 中的 `ATHENA_RUN_*` 项调整：默认并发 4、租约
+30 秒、每 5 秒续租、执行总时限 300 秒、取消/队列轮询 1 秒、租约回收 5 秒；
+LLM 请求上限默认 40，工具超时 30 秒，参数与规范化结果上限均为 65536 字节，
+资源清理最多额外 10 秒。数据库截止时间依赖各服务主机时钟同步。
+
+工具调用可通过
+`GET /api/v1/sessions/{session_id}/runs/{run_id}/tool-calls` 和
+`GET .../tool-calls/{call_id}` 查询。列表按 `after_ordinal` 与 `limit` 分页，
+摘要不含参数和结果；详情只返回有界的参数、规范化 outcome、状态、耗时和截断标记，
+不返回 MCP server/remote 名称、URL、凭据或 SDK 异常。所有查询复核 owner 和会话
+可见性，不存在与不可见统一返回 `404`。
+
+`POST .../retry` 始终创建从头执行的新 Run，可能重复此前成功的写操作；响应中的
+`retry_warning` 会明确说明。来源 Run 存在 unknown 工具结果时，请求必须带
+`{"request_id": "...", "confirm_unknown": true}`；未确认返回
+`409 tool_retry_confirmation_required`。确认只针对整个 unknown 事实，不支持部分
+调用确认或结果复用；旧 unknown 记录保持不变。
+
+升级数据库使用 `.venv/bin/alembic -c backend/alembic.ini upgrade head`。含旧数据的
+部署应先备份并按迁移说明核对 owner 归属；缺少有效所有者的历史数据会被拒绝迁移，
+不能用占位 owner 绕过。Run/LLM 迁移的 downgrade 会删除模型版本、Run、事件、请求
+及相关 managed 关联列，属于破坏性操作。迁移脚本在部分历史数据冲突时会拒绝降级；
+即使执行通过也会丢失这些数据。生产环境不要直接 downgrade；需要回滚时从已验证的
+备份恢复，并先在隔离环境演练。
+
+联合集成测试使用真实 PostgreSQL、Redis、公开 Cookie 认证与 Worker，但模型提供方
+为确定性 fake streaming provider。真实供应商联调需要在部署环境配置有效密钥后另行
+执行；当前测试结果不代表供应商兼容性验证。
 
 ## 目录
 

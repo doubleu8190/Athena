@@ -34,6 +34,14 @@ from domain.mcp.model.errors import (
     McpServerNotFoundError,
     McpToolConflictError,
 )
+from domain.mcp.model.execution import (
+    McpCallResult,
+    McpCallStatus,
+    McpRuntimeToolDefinition,
+    McpRuntimeToolTarget,
+    mcp_content_projection,
+    mcp_message_from_result,
+)
 from domain.mcp.model.result import McpServerPage
 
 __all__ = [
@@ -43,6 +51,8 @@ __all__ = [
     "McpAdminRequiredError",
     "McpAuthorizationChangedError",
     "McpCatalogPersistenceError",
+    "McpCallResult",
+    "McpCallStatus",
     "McpConfigVersionConflictError",
     "McpDiscoveryCapabilityError",
     "McpDiscoveryError",
@@ -56,6 +66,8 @@ __all__ = [
     "McpSecretPurpose",
     "McpServer",
     "McpServerRuntimeConfig",
+    "McpRuntimeToolTarget",
+    "McpRuntimeToolDefinition",
     "McpServerConfig",
     "McpServerNameConflictError",
     "McpServerNotFoundError",
@@ -66,4 +78,6 @@ __all__ = [
     "StdioConfig",
     "StreamableHttpConfig",
     "parse_server_config",
+    "mcp_content_projection",
+    "mcp_message_from_result",
 ]

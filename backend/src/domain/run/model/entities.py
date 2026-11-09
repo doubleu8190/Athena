@@ -10,7 +10,11 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from domain.message import ConversationMessage, ConversationMessageDraft, ExecutionMessageDraft
-from domain.tool import RuntimeToolSnapshot, ToolCallStatus
+from domain.tool import (
+    RuntimeToolSnapshot,
+    ToolApprovalDecision,
+    ToolCallStatus,
+)
 
 
 class RunStatus(StrEnum):
@@ -19,6 +23,7 @@ class RunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING_FOR_INPUT = "waiting_for_input"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -39,6 +44,7 @@ class RunRequestOperation(StrEnum):
     SUBMIT = "submit"
     ANSWER = "answer"
     RETRY = "retry"
+    DECIDE_TOOL_APPROVAL = "decide_tool_approval"
 
 
 class RunAttemptUsage(BaseModel):
@@ -127,6 +133,25 @@ class RunResumedPayload(_RunEventPayload):
     answer_message_id: str
 
 
+class RunWaitingForApprovalPayload(_RunEventPayload):
+    type: Literal["waiting_for_approval"] = "waiting_for_approval"
+    batch_message_id: str
+    pending_call_ids: tuple[str, ...]
+
+
+class RunToolApprovalDecidedPayload(_RunEventPayload):
+    type: Literal["tool_approval_decided"] = "tool_approval_decided"
+    call_id: str
+    ordinal: int = Field(ge=1)
+    decision: ToolApprovalDecision
+    status: ToolCallStatus
+
+
+class RunApprovalResumedPayload(_RunEventPayload):
+    type: Literal["approval_resumed"] = "approval_resumed"
+    batch_message_id: str
+
+
 class RunCancelRequestedPayload(_RunEventPayload):
     type: Literal["cancel_requested"] = "cancel_requested"
 
@@ -178,6 +203,7 @@ class RunToolCallFinishedPayload(_RunEventPayload):
     ordinal: int = Field(ge=1)
     status: ToolCallStatus
     round: int = Field(default=0, ge=0)
+    safe_error_code: str | None = None
 
 
 type RunEventPayload = Annotated[
@@ -185,6 +211,9 @@ type RunEventPayload = Annotated[
     | RunStartedPayload
     | RunWaitingPayload
     | RunResumedPayload
+    | RunWaitingForApprovalPayload
+    | RunToolApprovalDecidedPayload
+    | RunApprovalResumedPayload
     | RunCancelRequestedPayload
     | RunCompletedPayload
     | RunFailedPayload

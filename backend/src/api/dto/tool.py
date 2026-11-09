@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class PublicToolResponse(BaseModel):
@@ -21,6 +21,15 @@ class AdminToolResponse(PublicToolResponse):
 
     server_id: str
     remote_name: str
+    requires_approval: bool
+
+
+class ToolApprovalPolicyRequest(BaseModel):
+    """Only the approval flag is mutable through this endpoint."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    requires_approval: bool
 
 
 class PublicToolListResponse(BaseModel):
@@ -46,4 +55,5 @@ __all__ = [
     "AdminToolResponse",
     "PublicToolListResponse",
     "PublicToolResponse",
+    "ToolApprovalPolicyRequest",
 ]

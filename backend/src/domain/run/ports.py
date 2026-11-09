@@ -27,14 +27,22 @@ from domain.run.model import (
     SubmitRunResult,
 )
 from domain.tool import (
+    AdmitToolCallCommand,
+    BeginToolCallBatchCommand,
+    BeginToolCallBatchResult,
     BeginToolCallCommand,
     BeginToolCallResult,
+    ConvergeToolBatchCommand,
+    DecideToolApprovalCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
+    PendingToolApproval,
     ReserveLlmRequestCommand,
     RuntimeToolSnapshot,
+    RunToolBatch,
     RunToolCallDetails,
     RunToolCallPage,
+    RunToolCallRecord,
     ToolRetryContext,
 )
 
@@ -76,6 +84,30 @@ class RunRepository(Protocol):
 
     async def begin_tool_call(self, command: BeginToolCallCommand) -> BeginToolCallResult:
         """原子保存调用协议、记录和开始事件，仅首次提交允许执行。"""
+
+    async def begin_tool_call_batch(
+        self, command: BeginToolCallBatchCommand
+    ) -> BeginToolCallBatchResult:
+        """原子保存助手调用消息、全部调用记录和审批等待点。"""
+
+    async def get_resumable_tool_batch(self, run_id: str) -> RunToolBatch | None:
+        """在任何新模型请求前读取已批准但尚未执行的批次。"""
+
+    async def admit_tool_call(
+        self, command: AdmitToolCallCommand
+    ) -> RunToolCallRecord | None:
+        """以当前 Worker 和代次原子取得单调用外部执行准入。"""
+
+    async def converge_tool_batch(self, command: ConvergeToolBatchCommand) -> Run | None:
+        """停止派发、取消未执行调用并原子失败整个 Run。"""
+
+    async def decide_tool_approval(self, command: DecideToolApprovalCommand) -> Run | None:
+        """逐调用批准/拒绝，最后一个决定原子重新排队 Run。"""
+
+    async def list_pending_approvals(
+        self, session_id: str, owner_id: str, run_id: str
+    ) -> tuple[PendingToolApproval, ...] | None:
+        """读取 owner 可见 Run 的安全待审批调用投影。"""
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
         """有效执行权内幂等保存唯一结果和结束事件。"""

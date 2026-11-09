@@ -206,6 +206,30 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
         except SQLAlchemyError:
             raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
 
+    async def set_requires_approval(
+        self, actor: AuthContext, tool_id: str, requires_approval: bool
+    ) -> AdminToolDefinition:
+        """Update one MCP tool policy while preserving ids, versions, and secrets."""
+        if not tool_id or len(tool_id) > 64 or type(requires_approval) is not bool:
+            raise ValueError("mcp_tool_policy_invalid")
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_admin(session, actor)
+                    row = await session.scalar(
+                        select(McpToolModel)
+                        .where(McpToolModel.id == tool_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if row is None:
+                        raise McpServerNotFoundError("mcp_tool_not_found")
+                    row.requires_approval = requires_approval
+                    await session.flush()
+                    return tool_to_admin(row)
+        except SQLAlchemyError:
+            raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
+
     async def get(self, server_id: str) -> McpServer | None:
         """读取单个 Server 的安全投影。
 
@@ -254,6 +278,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
                 description=tool.description,
                 input_schema=dict(tool.input_schema_json),
                 config_version=server.config_version,
+                requires_approval=tool.requires_approval,
             )
             for tool, server in rows
         )
@@ -471,6 +496,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
                     model_name=(existing.model_name if existing else tool.model_name),
                     description=tool.description,
                     input_schema_json=dict(tool.input_schema),
+                    requires_approval=tool.requires_approval,
                     created_at=existing.created_at if existing else created_at,
                 )
             )
@@ -495,6 +521,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
                         model_name=tool.model_name,
                         description=tool.description,
                         input_schema_json=dict(tool.input_schema),
+                        requires_approval=tool.requires_approval,
                         created_at=updated_at,
                     )
                 )

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import anyio
 import pytest
@@ -178,6 +179,9 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
     manager.list_server_tools = AsyncMock(return_value=ToolPage((tool,), 1))  # type: ignore[attr-defined]
     manager.list_admin_tools = AsyncMock(return_value=ToolPage((tool,), 1))  # type: ignore[attr-defined]
     manager.get_admin_tool = AsyncMock(return_value=tool)  # type: ignore[attr-defined]
+    manager.update_tool_approval_policy = AsyncMock(  # type: ignore[attr-defined]
+        return_value=replace(tool, requires_approval=True)
+    )
     auth_service = make_auth_service()
     repository = cast(InMemoryAuthRepository, auth_service._repository)
     app = create_app(auth_service=auth_service, tool_manager=cast(ToolManager, manager))
@@ -222,6 +226,19 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
         server_tools = client.get("/api/v1/admin/mcp/servers/mcp_test/tools")
         admin_tools = client.get("/api/v1/admin/tools")
         admin_tool = client.get(f"/api/v1/admin/tools/{tool.tool_id}")
+        denied_policy = client.patch(
+            f"/api/v1/admin/tools/{tool.tool_id}",
+            headers={"Origin": "https://evil.example.com"},
+            json={"requires_approval": True},
+        )
+        invalid_policy = client.patch(
+            f"/api/v1/admin/tools/{tool.tool_id}",
+            json={"requires_approval": True, "server_id": "must-not-change"},
+        )
+        updated_policy = client.patch(
+            f"/api/v1/admin/tools/{tool.tool_id}",
+            json={"requires_approval": True},
+        )
         deleted = client.delete("/api/v1/admin/mcp/servers/mcp_test")
         public_tools = client.get("/api/v1/tools")
 
@@ -238,9 +255,37 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
     assert server_tools.json()["items"][0]["remote_name"] == "remote_tool"
     assert admin_tools.json()["total"] == 1
     assert admin_tool.json()["server_id"] == "mcp_test"
+    assert denied_policy.status_code == 403
+    assert invalid_policy.status_code == 422
+    assert updated_policy.status_code == 200
+    assert updated_policy.json()["requires_approval"] is True
+    manager.update_tool_approval_policy.assert_awaited_once_with(  # type: ignore[attr-defined]
+        ANY, tool.tool_id, True
+    )
     assert deleted.status_code == 204
     assert public_tools.status_code == 200
     assert "server_id" not in public_tools.text and "remote_name" not in public_tools.text
+
+
+def test_regular_user_cannot_update_tool_approval_policy() -> None:
+    """普通用户即使提交合法 DTO 也不能修改管理员工具策略。"""
+
+    app = create_app(
+        auth_service=make_auth_service(),
+        tool_manager=cast(ToolManager, _PublicOnlyManager()),
+    )
+    with TestClient(app) as client:
+        registered = client.post(
+            "/api/v1/auth/register",
+            json={"email": "regular-policy@example.com", "password": TEST_PASSWORD},
+        )
+        assert registered.status_code == 201
+        denied = client.patch(
+            "/api/v1/admin/tools/tool_0123456789abcdef0123456789abcdef",
+            json={"requires_approval": True},
+        )
+    assert denied.status_code == 403
+    assert denied.json() == {"detail": "admin_required"}
 
 
 def test_mcp_routes_require_login_and_admin_precheck() -> None:

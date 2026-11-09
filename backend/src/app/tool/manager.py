@@ -165,6 +165,15 @@ class ToolManager:
             raise McpServerNotFoundError("mcp_tool_not_found")
         return tool
 
+    async def update_tool_approval_policy(
+        self, actor: AuthContext, tool_id: str, requires_approval: bool
+    ) -> AdminToolDefinition:
+        """仅允许管理员更新已注册 MCP 工具的审批策略。"""
+        await self._authorize(actor, admin=True)
+        if not tool_id or len(tool_id) > 64 or type(requires_approval) is not bool:
+            raise ValueError("mcp_tool_policy_invalid")
+        return await self._servers.set_requires_approval(actor, tool_id, requires_approval)
+
     async def list_tools(
         self, actor: AuthContext, *, offset: int = 0, limit: int = 20
     ) -> ToolPage[ToolDefinition]:

@@ -118,6 +118,11 @@ def _validate_input(value: ModelProfileInput) -> None:
         or value.tokenizer_encoding not in {"cl100k_base", "o200k_base"}
         or type(value.supports_stream) is not bool
         or type(value.supports_tools) is not bool
+        or type(value.supports_parallel_tool_calls) is not bool
+        or (
+            value.supports_parallel_tool_calls
+            and not value.supports_tools
+        )
         or not 1 <= value.max_output_tokens <= value.context_window_tokens
         or not 1 <= value.request_timeout_seconds <= 3600
         or not 1 <= value.execution_timeout_seconds <= 3600

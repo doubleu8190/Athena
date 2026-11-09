@@ -60,18 +60,23 @@ from domain.run.model import (
     Run,
     RunEvent,
     RunLease,
-    RunStatus,
     RunUsage,
 )
 from domain.run.ports import RunRepository
 from domain.tool import (
+    AdmitToolCallCommand,
     AuthorizedRunContext,
-    BeginToolCallCommand,
+    BeginToolCallBatchCommand,
+    BeginToolCallBatchItem,
+    ConvergeToolBatchCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
+    RunToolBatch,
+    RunToolBatchCall,
     RunToolRuntime,
+    ToolCallStatus,
     ToolExecutionContext,
     ToolExecutionResult,
     ToolKind,
@@ -138,6 +143,16 @@ class _ExecutionState:
     event_cursor: int
     round: int = 0
     publish_disabled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchCallResult:
+    """One settled call and whether it requires stopping new dispatch."""
+
+    record_id: str
+    ordinal: int
+    stop_error_code: str | None = None
+    lease_lost: bool = False
 
 
 class RunExecutor:
@@ -286,11 +301,17 @@ class RunExecutor:
         return fixed
 
     async def _run_loop(self, state: _ExecutionState) -> None:
-        """Build one request at a time, execute at most one tool, and loop."""
+        """Resume settled batches before asking the model for any new calls."""
         run = state.run
         while True:
             if not await self._repository.is_live_execution(run.id, run.execution_epoch):
                 raise LlmError("run_execution_lease_lost")
+            resumed = await self._repository.get_resumable_tool_batch(run.id)
+            if resumed is not None:
+                state.round = max(state.round, resumed.round)
+                if not await self._execute_persisted_batch(state, resumed):
+                    return
+                continue
             runtime = await self._profiles.get_runtime(run.model_config_version_id)
             if runtime is None:
                 raise LlmError("model_profile_unavailable")
@@ -325,16 +346,27 @@ class RunExecutor:
             if calls:
                 if final_only:
                     raise LlmError("llm_tool_call_in_final_answer")
-                if len(calls) != 1:
+                if len(calls) > 1 and not runtime.version.supports_parallel_tool_calls:
                     raise LlmError("llm_parallel_tool_calls_unsupported")
-                call = calls[0]
-                arguments = dict(call.arguments)
-                if utf8_size(arguments) > self._config.tool_argument_bytes:
+                if not 1 <= len(calls) <= self._config.tool_batch_limit:
+                    raise LlmError("llm_tool_batch_too_large")
+                call_ids = [call.call_id for call in calls]
+                if len(set(call_ids)) != len(call_ids):
+                    raise LlmError("llm_tool_call_id_duplicate")
+                if any(
+                    utf8_size(dict(call.arguments)) > self._config.tool_argument_bytes
+                    for call in calls
+                ):
                     raise LlmError("llm_tool_arguments_too_large")
-                if call.name == "request_user_input":
-                    await self._save_clarification(state, call, text, response)
+                request_inputs = [
+                    call for call in calls if call.name == "request_user_input"
+                ]
+                if request_inputs:
+                    if len(calls) != 1:
+                        raise LlmError("llm_tool_call_mix_unsupported")
+                    await self._save_clarification(state, calls[0], text, response)
                     return
-                if not await self._execute_business_call(state, call, text, response):
+                if not await self._submit_and_execute_batch(state, calls, text, response):
                     return
                 continue
             if not text.strip():
@@ -560,22 +592,80 @@ class RunExecutor:
         calls = tuple(part for part in response.output if isinstance(part, LlmToolCall))
         return text, calls
 
-    async def _execute_business_call(
+    def _definition_for_call(
         self,
         state: _ExecutionState,
+        model_name: str,
+    ) -> RuntimeToolDefinition | None:
+        if state.run.prompt_template_version == "run-v1":
+            return None
+        return state.snapshot.by_model_name(model_name)
+
+    def _validate_business_call(
+        self,
+        definition: RuntimeToolDefinition | None,
         call: LlmToolCall,
+    ) -> ToolOutcome | None:
+        """Validate locally before deciding whether a call needs approval."""
+        if self._tool_runtime is None:
+            return ToolOutcome(
+                status=ToolOutcomeStatus.ERROR,
+                code="tool_unavailable",
+                message="当前 Run 未启用业务工具执行。",
+            )
+        validator = getattr(self._tool_runtime, "validate_call", None)
+        if validator is None:
+            if definition is None:
+                return ToolOutcome(
+                    status=ToolOutcomeStatus.ERROR,
+                    code="tool_unknown",
+                    message="模型请求了冻结目录中不存在的工具。",
+                )
+            return None
+        return cast(
+            ToolOutcome | None,
+            validator(definition, call.name, dict(call.arguments)),
+        )
+
+    def _tool_result_draft(
+        self,
+        state: _ExecutionState,
+        *,
+        tool_call_id: str,
+        outcome: ToolOutcome,
+        created_at: datetime,
+        thread_id: str | None = None,
+    ) -> ExecutionMessageDraft:
+        return ExecutionMessageDraft(
+            id=self._id_factory("exec"),
+            session_id=state.run.session_id,
+            owner_id=state.run.owner_id,
+            run_id=state.run.id,
+            thread_id=thread_id or state.run.id,
+            role=ExecutionRole.TOOL,
+            parts=(
+                ToolResultPart(
+                    tool_call_id=tool_call_id,
+                    status=protocol_status_for_outcome(outcome),
+                    output=outcome.canonical_output(),
+                ),
+            ),
+            tool_call_id=tool_call_id,
+            source_message_id=None,
+            created_at=created_at,
+            metadata=MessageMetadata(),
+        )
+
+    async def _submit_and_execute_batch(
+        self,
+        state: _ExecutionState,
+        calls: tuple[LlmToolCall, ...],
         explanation: str,
         response: LlmResponse,
     ) -> bool:
-        """Persist one call before dispatch, then save exactly one matching result."""
+        """Persist all calls together, then execute only if no approval barrier exists."""
         run = state.run
-        definition = (
-            None
-            if state.run.prompt_template_version == "run-v1"
-            else state.snapshot.by_model_name(call.name)
-        )
         call_message_id = self._id_factory("exec")
-        record_id = self._id_factory("toolcall")
         created_at = self._now()
         call_message = ExecutionMessageDraft(
             id=call_message_id,
@@ -586,75 +676,308 @@ class RunExecutor:
             role=ExecutionRole.ASSISTANT,
             parts=(
                 *((TextPart(explanation),) if explanation.strip() else ()),
-                ToolCallPart(call.call_id, call.name, dict(call.arguments)),
+                *(
+                    ToolCallPart(call.call_id, call.name, dict(call.arguments))
+                    for call in calls
+                ),
             ),
             tool_call_id=None,
             source_message_id=None,
             created_at=created_at,
             metadata=MessageMetadata(provider="chat_completions", model=response.model),
         )
-        begun = await self._repository.begin_tool_call(
-            BeginToolCallCommand(
+        items: list[BeginToolCallBatchItem] = []
+        for call in calls:
+            definition = self._definition_for_call(state, call.name)
+            outcome = self._validate_business_call(definition, call)
+            items.append(
+                BeginToolCallBatchItem(
+                    record_id=self._id_factory("toolcall"),
+                    tool_call_id=call.call_id,
+                    model_name=call.name,
+                    tool_id=None if definition is None else definition.tool_id,
+                    tool_kind=(
+                        None if definition is None else ToolKind(definition.source.kind)
+                    ),
+                    requires_approval=bool(
+                        outcome is None
+                        and definition is not None
+                        and definition.requires_approval
+                    ),
+                    immediate_outcome=outcome,
+                    result_message=(
+                        None
+                        if outcome is None
+                        else self._tool_result_draft(
+                            state,
+                            tool_call_id=call.call_id,
+                            outcome=bounded_outcome(
+                                outcome,
+                                maximum_bytes=self._config.tool_result_bytes,
+                            ),
+                            created_at=created_at,
+                        )
+                    ),
+                )
+            )
+        committed = await self._repository.begin_tool_call_batch(
+            BeginToolCallBatchCommand(
                 run_id=run.id,
                 worker_id=run.worker_id or "",
                 execution_epoch=run.execution_epoch,
-                record_id=record_id,
-                tool_call_id=call.call_id,
-                model_name=call.name,
-                tool_id=None if definition is None else definition.tool_id,
-                tool_kind=None if definition is None else ToolKind(definition.source.kind),
                 call_message=call_message,
-                started_at=created_at,
+                calls=tuple(items),
+                requested_at=created_at,
                 round=state.round,
             )
         )
-        if not begun.execute:
-            raise LlmError("run_tool_call_already_started")
         await self._publish_pending_events(state)
-        result = await self._execute_tool(state, definition, call)
-        outcome = bounded_outcome(result.outcome, maximum_bytes=self._config.tool_result_bytes)
-        finished_at = self._now()
-        result_message = ExecutionMessageDraft(
-            id=self._id_factory("exec"),
-            session_id=run.session_id,
-            owner_id=run.owner_id,
-            run_id=run.id,
-            thread_id=call_message.thread_id,
-            role=ExecutionRole.TOOL,
-            parts=(
-                ToolResultPart(
-                    tool_call_id=call.call_id,
-                    status=protocol_status_for_outcome(outcome),
-                    output=outcome.canonical_output(),
-                ),
-            ),
-            tool_call_id=call.call_id,
-            source_message_id=None,
-            created_at=finished_at,
-            metadata=MessageMetadata(),
+        if committed.waiting_for_approval:
+            return False
+        return await self._execute_persisted_batch(state, committed.batch)
+
+    async def _execute_persisted_batch(
+        self,
+        state: _ExecutionState,
+        batch: RunToolBatch,
+    ) -> bool:
+        """Execute approved calls with stable admission order and bounded concurrency."""
+        if any(
+            call.record.status is ToolCallStatus.UNKNOWN for call in batch.calls
+        ):
+            converged = await self._repository.converge_tool_batch(
+                ConvergeToolBatchCommand(
+                    run_id=state.run.id,
+                    worker_id=state.run.worker_id or "",
+                    execution_epoch=state.run.execution_epoch,
+                    call_message_id=batch.call_message_id,
+                    safe_error_code="tool_outcome_unknown",
+                    failed_at=self._now(),
+                )
+            )
+            if converged is None:
+                raise LlmError("run_execution_lease_lost")
+            await self._publish_pending_events(state)
+            return False
+        approved = [
+            call
+            for call in batch.calls
+            if call.record.status is ToolCallStatus.APPROVED
+        ]
+        if not approved:
+            return True
+        stop_dispatch = asyncio.Event()
+        active: dict[asyncio.Task[_BatchCallResult], RunToolBatchCall] = {}
+        next_index = 0
+        stop_error_code: str | None = None
+        lease_lost = False
+
+        async def collect(done: set[asyncio.Task[_BatchCallResult]]) -> None:
+            nonlocal stop_error_code, lease_lost
+            for task in done:
+                result = await task
+                active.pop(task)
+                if result.lease_lost:
+                    lease_lost = True
+                    stop_dispatch.set()
+                if result.stop_error_code is not None:
+                    stop_error_code = stop_error_code or result.stop_error_code
+                    stop_dispatch.set()
+
+        try:
+            while next_index < len(approved) or active:
+                while (
+                    next_index < len(approved)
+                    and len(active) < self._config.tool_concurrency
+                    and not stop_dispatch.is_set()
+                ):
+                    call = approved[next_index]
+                    admitted = await self._repository.admit_tool_call(
+                        AdmitToolCallCommand(
+                            run_id=state.run.id,
+                            worker_id=state.run.worker_id or "",
+                            execution_epoch=state.run.execution_epoch,
+                            record_id=call.record.id,
+                            admitted_at=self._now(),
+                        )
+                    )
+                    if admitted is None:
+                        lease_lost = True
+                        stop_dispatch.set()
+                        break
+                    if stop_dispatch.is_set():
+                        if not await self._finish_cancelled_admitted_call(
+                            state,
+                            call,
+                            batch.thread_id,
+                        ):
+                            lease_lost = True
+                        break
+                    started = asyncio.Event()
+                    task = asyncio.create_task(
+                        self._execute_admitted_call(
+                            state,
+                            call,
+                            batch.thread_id,
+                            stop_dispatch,
+                            started,
+                        )
+                    )
+                    active[task] = call
+                    next_index += 1
+                    await started.wait()
+                if not active:
+                    break
+                done, _ = await asyncio.wait(
+                    active,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                await collect(done)
+        except asyncio.CancelledError:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+            raise
+        except Exception:
+            for task in active:
+                task.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+            raise
+        finally:
+            if active:
+                await asyncio.gather(*active, return_exceptions=True)
+
+        if lease_lost:
+            raise LlmError("run_execution_lease_lost")
+        if stop_error_code is not None:
+            converged = await self._repository.converge_tool_batch(
+                ConvergeToolBatchCommand(
+                    run_id=state.run.id,
+                    worker_id=state.run.worker_id or "",
+                    execution_epoch=state.run.execution_epoch,
+                    call_message_id=batch.call_message_id,
+                    safe_error_code=stop_error_code,
+                    failed_at=self._now(),
+                )
+            )
+            if converged is None:
+                raise LlmError("run_execution_lease_lost")
+            await self._publish_pending_events(state)
+            return False
+        await self._publish_pending_events(state)
+        return True
+
+    async def _finish_cancelled_admitted_call(
+        self,
+        state: _ExecutionState,
+        call: RunToolBatchCall,
+        thread_id: str,
+    ) -> bool:
+        """Close an admitted call that never reached an external request."""
+        outcome = ToolOutcome(
+            status=ToolOutcomeStatus.CANCELLED,
+            code="tool_not_executed",
+            message="该工具调用未执行。",
         )
+        finished_at = self._now()
         finished = await self._repository.finish_tool_call(
             FinishToolCallCommand(
-                run_id=run.id,
-                worker_id=run.worker_id or "",
-                execution_epoch=run.execution_epoch,
-                record_id=begun.item.id,
-                result_message=result_message,
+                run_id=state.run.id,
+                worker_id=state.run.worker_id or "",
+                execution_epoch=state.run.execution_epoch,
+                record_id=call.record.id,
+                result_message=self._tool_result_draft(
+                    state,
+                    tool_call_id=call.record.tool_call_id,
+                    outcome=outcome,
+                    created_at=finished_at,
+                    thread_id=thread_id,
+                ),
+                outcome=outcome,
+                finished_at=finished_at,
+                defer_terminal_convergence=True,
+            )
+        )
+        return finished is not None
+
+    async def _execute_admitted_call(
+        self,
+        state: _ExecutionState,
+        call: RunToolBatchCall,
+        thread_id: str,
+        stop_dispatch: asyncio.Event,
+        started: asyncio.Event,
+    ) -> _BatchCallResult:
+        """Run one already-admitted call and persist exactly one matching result."""
+        if stop_dispatch.is_set():
+            started.set()
+            if not await self._finish_cancelled_admitted_call(
+                state,
+                call,
+                thread_id,
+            ):
+                return _BatchCallResult(
+                    call.record.id,
+                    call.record.ordinal,
+                    lease_lost=True,
+                )
+            return _BatchCallResult(call.record.id, call.record.ordinal)
+        started.set()
+        definition = self._definition_for_call(state, call.record.model_name)
+        result = await self._execute_tool(
+            state,
+            definition,
+            LlmToolCall(
+                call.record.tool_call_id,
+                call.record.model_name,
+                call.arguments,
+            ),
+        )
+        outcome = bounded_outcome(
+            result.outcome,
+            maximum_bytes=self._config.tool_result_bytes,
+        )
+        finished_at = self._now()
+        finished = await self._repository.finish_tool_call(
+            FinishToolCallCommand(
+                run_id=state.run.id,
+                worker_id=state.run.worker_id or "",
+                execution_epoch=state.run.execution_epoch,
+                record_id=call.record.id,
+                result_message=self._tool_result_draft(
+                    state,
+                    tool_call_id=call.record.tool_call_id,
+                    outcome=outcome,
+                    created_at=finished_at,
+                    thread_id=thread_id,
+                ),
                 outcome=outcome,
                 finished_at=finished_at,
                 terminate_error_code=result.terminate_run_error_code,
+                defer_terminal_convergence=True,
             )
         )
         if finished is None:
-            raise LlmError("run_execution_lease_lost")
-        await self._publish_pending_events(state)
-        if outcome.status is ToolOutcomeStatus.UNKNOWN:
-            return False
-        if result.terminate_run_error_code is not None:
-            return False
-        if finished.status is not RunStatus.RUNNING:
-            return False
-        return True
+            stop_dispatch.set()
+            return _BatchCallResult(call.record.id, call.record.ordinal, lease_lost=True)
+        if (
+            outcome.status is ToolOutcomeStatus.UNKNOWN
+            or result.terminate_run_error_code is not None
+        ):
+            stop_dispatch.set()
+        return _BatchCallResult(
+            record_id=call.record.id,
+            ordinal=call.record.ordinal,
+            stop_error_code=(
+                result.terminate_run_error_code
+                if result.terminate_run_error_code is not None
+                else (
+                    "tool_outcome_unknown"
+                    if outcome.status is ToolOutcomeStatus.UNKNOWN
+                    else None
+                )
+            ),
+        )
 
     async def _execute_tool(
         self,

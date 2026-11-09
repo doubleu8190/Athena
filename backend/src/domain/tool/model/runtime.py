@@ -51,6 +51,7 @@ class RuntimeToolDefinition(BaseModel):
     description: str = Field(max_length=8192)
     input_schema: dict[str, Any]
     source: RuntimeToolSource
+    requires_approval: bool = False
 
     @field_validator("description")
     @classmethod

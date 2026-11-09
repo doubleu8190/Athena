@@ -15,6 +15,7 @@ from domain.run.model import (
     AnswerRunCommand,
     InputRequestStatus,
     Run,
+    RunApprovalResumedPayload,
     RunCancelledPayload,
     RunCancelRequestedPayload,
     RunEvent,
@@ -37,9 +38,12 @@ from domain.run.model.errors import (
 )
 from domain.run.ports import RunRepository
 from domain.tool import (
+    DecideToolApprovalCommand,
+    PendingToolApproval,
     RunToolCallDetails,
     RunToolCallPage,
     RunToolCallRecord,
+    ToolApprovalDecision,
     ToolCallStatus,
     ToolKind,
     ToolOutcome,
@@ -62,6 +66,8 @@ class InMemoryRunRepository:
         self.calls: dict[tuple[str, str], RunInputCall] = {}
         self.last_answer_auth_session_id: str | None = None
         self.tool_calls: list[RunToolCallDetails] = []
+        self.pending_approvals: dict[str, list[PendingToolApproval]] = {}
+        self.decided_approval_calls: dict[str, ToolApprovalDecision] = {}
         self.sequence = 0
         self.next_id = 0
 
@@ -112,6 +118,7 @@ class InMemoryRunRepository:
                 RunStatus.QUEUED,
                 RunStatus.RUNNING,
                 RunStatus.WAITING_FOR_INPUT,
+                RunStatus.WAITING_FOR_APPROVAL,
                 RunStatus.CANCELLING,
             }
             for run in self.runs.values()
@@ -252,6 +259,62 @@ class InMemoryRunRepository:
             None,
         )
 
+    async def list_pending_approvals(
+        self, session_id: str, owner_id: str, run_id: str
+    ) -> tuple[PendingToolApproval, ...] | None:
+        if await self.get(session_id, owner_id, run_id) is None:
+            return None
+        return tuple(self.pending_approvals.get(run_id, ()))
+
+    async def decide_tool_approval(self, command: DecideToolApprovalCommand) -> Run | None:
+        key = (
+            command.owner_id,
+            command.session_id,
+            RunRequestOperation.DECIDE_TOOL_APPROVAL,
+            command.request_id,
+        )
+        replay = self.requests.get(key)
+        if replay is not None:
+            if replay[0] != command.fingerprint:
+                raise RunConflictError("run_request_id_conflict")
+            result = replay[1]
+            assert isinstance(result, RunRequestResult)
+            return self.runs.get(
+                (command.owner_id, command.session_id, result.run_id or "")
+            )
+        run = await self.get(command.session_id, command.owner_id, command.run_id)
+        if run is None:
+            return None
+        pending = self.pending_approvals.get(run.id, [])
+        matched = next((item for item in pending if item.call_id == command.record_id), None)
+        if matched is None:
+            previous = self.decided_approval_calls.get(command.record_id)
+            if previous is None:
+                raise RunNotFoundError("run_tool_call_not_found")
+            if previous is not command.decision:
+                raise RunConflictError("run_tool_approval_already_decided")
+            return run
+        if run.status is not RunStatus.WAITING_FOR_APPROVAL:
+            raise RunStateError("run_tool_approval_not_pending")
+        remaining = [item for item in pending if item.call_id != command.record_id]
+        self.pending_approvals[run.id] = remaining
+        self.decided_approval_calls[command.record_id] = command.decision
+        updated = replace(
+            run,
+            auth_session_id=command.auth_session_id or run.auth_session_id,
+        )
+        if not remaining:
+            updated = replace(updated, status=RunStatus.QUEUED, queued_at=command.decided_at)
+            updated = self._append_event(
+                updated,
+                "approval_resumed",
+                RunApprovalResumedPayload(batch_message_id=matched.batch_message_id),
+            )
+        else:
+            self.runs[(command.owner_id, command.session_id, run.id)] = updated
+        self.requests[key] = (command.fingerprint, RunRequestResult(run_id=run.id))
+        return updated
+
     async def list_runs(
         self,
         session_id: str,
@@ -293,7 +356,11 @@ class InMemoryRunRepository:
         run = await self.get(session_id, owner_id, run_id)
         if run is None:
             return None
-        if run.status in {RunStatus.QUEUED, RunStatus.WAITING_FOR_INPUT}:
+        if run.status in {
+            RunStatus.QUEUED,
+            RunStatus.WAITING_FOR_INPUT,
+            RunStatus.WAITING_FOR_APPROVAL,
+        }:
             return self._append_event(
                 replace(run, status=RunStatus.CANCELLED),
                 "cancelled",
@@ -682,6 +749,124 @@ def test_unknown_retry_confirmation_tool_call_projection_and_warning() -> None:
         assert repository.runs[key].status is RunStatus.FAILED
 
 
+def test_tool_approval_api_is_owner_scoped_origin_checked_and_idempotent() -> None:
+    """审批端点逐调用投影、同源校验、幂等和部分决定语义保持隔离。"""
+
+    repository = InMemoryRunRepository()
+    from app.run.service import RunService
+
+    app = create_app(
+        auth_service=make_auth_service(),
+        run_service=RunService(cast(RunRepository, repository)),
+        public_origin="https://app.example.com",
+    )
+    auth_client = AuthTestClient(app, email="approval-owner@example.com")
+    with auth_client as client:
+        owner_id = auth_client.user_id or ""
+        session_id = "session-approval"
+        repository.sessions.add((owner_id, session_id))
+        submitted = client.post(
+            f"/api/v1/sessions/{session_id}/runs",
+            json={"request_id": "approval-source", "text": "需要审批的任务"},
+        )
+        assert submitted.status_code == 201
+        run_id = submitted.json()["id"]
+        now = datetime.now(UTC)
+        repository.pending_approvals[run_id] = [
+            PendingToolApproval(
+                call_id="record-call-1",
+                batch_message_id="exec-batch-1",
+                ordinal=1,
+                model_name="mcp_lookup",
+                tool_kind=ToolKind.MCP,
+                requested_at=now,
+            ),
+            PendingToolApproval(
+                call_id="record-call-2",
+                batch_message_id="exec-batch-1",
+                ordinal=2,
+                model_name="mcp_write",
+                tool_kind=ToolKind.MCP,
+                requested_at=now,
+            ),
+        ]
+        run_key = (owner_id, session_id, run_id)
+        repository.runs[run_key] = replace(
+            repository.runs[run_key], status=RunStatus.WAITING_FOR_APPROVAL
+        )
+
+        details = client.get(f"/api/v1/sessions/{session_id}/runs/{run_id}")
+        assert details.status_code == 200
+        assert [
+            item["call_id"] for item in details.json()["pending_approvals"]
+        ] == ["record-call-1", "record-call-2"]
+        assert "arguments" not in details.text
+
+        evil_origin = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",
+            headers={"Origin": "https://evil.example.com"},
+            json={"request_id": "approve-evil", "decision": "approve"},
+        )
+        missing_call = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/missing/approval",
+            json={"request_id": "approve-missing", "decision": "approve"},
+        )
+        extra_field = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",
+            json={"request_id": "approve-extra", "decision": "approve", "arguments": {}},
+        )
+        assert evil_origin.status_code == 403
+        assert missing_call.status_code == 404
+        assert extra_field.status_code == 422
+
+        first = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",
+            headers={"Origin": "https://app.example.com"},
+            json={"request_id": "approve-1", "decision": "approve"},
+        )
+        replay = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",
+            headers={"Origin": "https://app.example.com"},
+            json={"request_id": "approve-1", "decision": "approve"},
+        )
+        contradictory_replay = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",
+            headers={"Origin": "https://app.example.com"},
+            json={"request_id": "approve-1", "decision": "reject"},
+        )
+        assert first.status_code == replay.status_code == 200
+        assert first.json()["status"] == "waiting_for_approval"
+        assert [
+            item["call_id"] for item in first.json()["pending_approvals"]
+        ] == ["record-call-2"]
+        assert contradictory_replay.status_code == 409
+
+        last = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-2/approval",
+            headers={"Origin": "https://app.example.com"},
+            json={"request_id": "reject-2", "decision": "reject"},
+        )
+        assert last.status_code == 200
+        assert last.json()["status"] == "queued"
+        assert last.json()["pending_approvals"] == []
+        late = client.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-2/approval",
+            headers={"Origin": "https://app.example.com"},
+            json={"request_id": "late-opposite", "decision": "approve"},
+        )
+        assert late.status_code == 409
+
+    with AuthTestClient(app, email="approval-intruder@example.com") as intruder:
+        hidden = intruder.get(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}"
+        )
+        denied = intruder.post(
+            f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",
+            json={"request_id": "intruder", "decision": "approve"},
+        )
+        assert hidden.status_code == denied.status_code == 404
+
+
 class InMemorySessionDeleteRepository:
     """将 Run 状态映射成 Session 删除保护的 API 测试端口。"""
 
@@ -699,6 +884,7 @@ class InMemorySessionDeleteRepository:
                 RunStatus.QUEUED,
                 RunStatus.RUNNING,
                 RunStatus.WAITING_FOR_INPUT,
+                RunStatus.WAITING_FOR_APPROVAL,
                 RunStatus.CANCELLING,
             }
             for run in self._runs.runs.values()

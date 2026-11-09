@@ -25,13 +25,14 @@ from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVers
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.project.model import ProjectModel
-from adapter.run.model import RunEventModel, RunModel, RunToolCallModel
+from adapter.run.model import RunEventModel, RunModel, RunRequestModel, RunToolCallModel
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
 from domain.knowledge import ProjectKnowledgeLimitReachedError
 from domain.message import (
     ConversationMessageDraft,
     ConversationRole,
+    ExecutionMessage,
     ExecutionMessageDraft,
     ExecutionRole,
     MessageMetadata,
@@ -45,20 +46,31 @@ from domain.run.model import (
     FinishRunCommand,
     Run,
     RunLease,
+    RunRequestOperation,
+    RunRequestResult,
     RunStatus,
     RunUsage,
     SubmitRunCommand,
 )
-from domain.run.model.errors import RunStateError, ToolRetryConfirmationRequiredError
+from domain.run.model.errors import (
+    RunConflictError,
+    RunStateError,
+    ToolRetryConfirmationRequiredError,
+)
 from domain.tool import (
+    AdmitToolCallCommand,
+    BeginToolCallBatchCommand,
+    BeginToolCallBatchItem,
     BeginToolCallCommand,
     BuiltinToolSource,
+    DecideToolApprovalCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
     ReserveLlmRequestCommand,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
     RunToolCallRecord,
+    ToolApprovalDecision,
     ToolCallStatus,
     ToolKind,
     ToolOutcome,
@@ -931,5 +943,496 @@ def test_project_knowledge_limit_is_atomic_and_repeat_bind_is_idempotent() -> No
                 sum(isinstance(result, ProjectKnowledgeLimitReachedError) for result in race) == 1
             )
             assert len(await repository.list_project_bases(owner_id, project_two)) == 20
+
+    asyncio.run(scenario())
+
+
+def _approval_snapshot(*, both_risky: bool = False) -> RuntimeToolSnapshot:
+    return RuntimeToolSnapshot(
+        tools=(
+            RuntimeToolDefinition(
+                tool_id="builtin_safe_tool",
+                model_name="safe_tool",
+                description="safe tool",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                source=BuiltinToolSource(version=1),
+                requires_approval=both_risky,
+            ),
+            RuntimeToolDefinition(
+                tool_id="builtin_risky_tool",
+                model_name="risky_tool",
+                description="risky tool",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                source=BuiltinToolSource(version=1),
+                requires_approval=True,
+            ),
+        )
+    )
+
+
+def _batch_command(
+    lease: RunLease,
+    *,
+    suffix: str,
+    calls: tuple[tuple[str, str], ...],
+) -> BeginToolCallBatchCommand:
+    now = datetime.now(UTC)
+    run = lease.run
+    return BeginToolCallBatchCommand(
+        run_id=run.id,
+        worker_id=run.worker_id or "",
+        execution_epoch=run.execution_epoch,
+        call_message=ExecutionMessageDraft(
+            id=f"exec_batch_{suffix}",
+            session_id=run.session_id,
+            owner_id=run.owner_id,
+            run_id=run.id,
+            thread_id=run.id,
+            role=ExecutionRole.ASSISTANT,
+            parts=tuple(
+                ToolCallPart(call_id, name, {"query": f"{suffix}-{ordinal}"})
+                for ordinal, (call_id, name) in enumerate(calls, start=1)
+            ),
+            tool_call_id=None,
+            source_message_id=None,
+            created_at=now,
+            metadata=MessageMetadata(provider="chat_completions", model="tool-integration-model"),
+        ),
+        calls=tuple(
+            BeginToolCallBatchItem(
+                record_id=f"record_{suffix}_{ordinal}",
+                tool_call_id=call_id,
+                model_name=name,
+                tool_id=(
+                    "builtin_risky_tool" if name == "risky_tool" else "builtin_safe_tool"
+                ),
+                tool_kind=ToolKind.BUILTIN,
+                requires_approval=name == "risky_tool",
+            )
+            for ordinal, (call_id, name) in enumerate(calls, start=1)
+        ),
+        requested_at=now,
+        round=1,
+    )
+
+
+def _batch_finish(
+    lease: RunLease,
+    record: RunToolCallRecord,
+    *,
+    suffix: str,
+    output: str,
+) -> FinishToolCallCommand:
+    now = datetime.now(UTC)
+    outcome = ToolOutcome(
+        status=ToolOutcomeStatus.OK,
+        code="tool_completed",
+        message="completed",
+        data={"value": output},
+    )
+    return FinishToolCallCommand(
+        run_id=lease.run.id,
+        worker_id=lease.run.worker_id or "",
+        execution_epoch=lease.run.execution_epoch,
+        record_id=record.id,
+        result_message=ExecutionMessageDraft(
+            id=f"exec_result_{record.id}",
+            session_id=lease.run.session_id,
+            owner_id=lease.run.owner_id,
+            run_id=lease.run.id,
+            thread_id=lease.run.id,
+            role=ExecutionRole.TOOL,
+            parts=(
+                ToolResultPart(
+                    tool_call_id=record.tool_call_id,
+                    status=protocol_status_for_outcome(outcome),
+                    output=outcome.canonical_output(),
+                ),
+            ),
+            tool_call_id=record.tool_call_id,
+            source_message_id=None,
+            created_at=now,
+            metadata=MessageMetadata(),
+        ),
+        outcome=outcome,
+        finished_at=now,
+        defer_terminal_convergence=True,
+    )
+
+
+def test_tool_approval_batch_barrier_resume_and_context_order_are_atomic() -> None:
+    """一个待审批调用建立整批屏障；最后决定只排队一次，恢复后结果稳定排序。"""
+
+    async def scenario() -> None:
+        async with _database() as (factory, _engine, _admin, _schema):
+            owner_id, _ = await _seed_owner_and_profile(factory, suffix="approval")
+            repository = SqlAlchemyRunRepository(
+                factory, SqlAlchemyMessageRepository(factory)
+            )
+            lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="approval",
+            )
+            await repository.initialize_tools(
+                InitializeRunToolsCommand(
+                    lease.run.id,
+                    lease.run.worker_id or "",
+                    lease.run.execution_epoch,
+                    _approval_snapshot(),
+                )
+            )
+            begun = await repository.begin_tool_call_batch(
+                _batch_command(
+                    lease,
+                    suffix="approval",
+                    calls=(("call_safe", "safe_tool"), ("call_risky", "risky_tool")),
+                )
+            )
+            assert begun.waiting_for_approval is True
+            waiting = await repository.get(
+                lease.run.session_id, owner_id, lease.run.id
+            )
+            assert waiting is not None and waiting.status is RunStatus.WAITING_FOR_APPROVAL
+            assert [call.record.status for call in begun.batch.calls] == [
+                ToolCallStatus.APPROVED,
+                ToolCallStatus.PENDING_APPROVAL,
+            ]
+            pending = await repository.list_pending_approvals(
+                lease.run.session_id, owner_id, lease.run.id
+            )
+            assert pending is not None and len(pending) == 1
+            assert pending[0].call_id == begun.batch.calls[1].record.id
+
+            first = DecideToolApprovalCommand(
+                session_id=lease.run.session_id,
+                owner_id=owner_id,
+                run_id=lease.run.id,
+                record_id=pending[0].call_id,
+                request_id="approve-risky",
+                fingerprint="1" * 64,
+                decision=ToolApprovalDecision.APPROVE,
+                decided_at=datetime.now(UTC),
+                auth_session_id="fresh-auth",
+            )
+            partially_decided = await repository.decide_tool_approval(first)
+            assert partially_decided is not None
+            assert partially_decided.status is RunStatus.QUEUED
+            assert partially_decided.auth_session_id == "fresh-auth"
+            replay_request_id = "approve-risky-replay"
+            replay = await repository.decide_tool_approval(
+                replace(
+                    first,
+                    request_id=replay_request_id,
+                    fingerprint="2" * 64,
+                    decided_at=datetime.now(UTC),
+                )
+            )
+            assert replay is not None and replay.status is RunStatus.QUEUED
+            async with factory() as session:
+                replay_request = await session.scalar(
+                    select(RunRequestModel).where(
+                        RunRequestModel.owner_id == owner_id,
+                        RunRequestModel.session_id == lease.run.session_id,
+                        RunRequestModel.operation
+                        == RunRequestOperation.DECIDE_TOOL_APPROVAL.value,
+                        RunRequestModel.request_id == replay_request_id,
+                    )
+                )
+            assert replay_request is not None
+            assert replay_request.fingerprint == "2" * 64
+            assert (
+                RunRequestResult.model_validate(replay_request.result).run_id
+                == lease.run.id
+            )
+            with pytest.raises(
+                RunConflictError, match="run_request_id_conflict"
+            ):
+                await repository.decide_tool_approval(
+                    replace(
+                        first,
+                        request_id=replay_request_id,
+                        fingerprint="3" * 64,
+                        decision=ToolApprovalDecision.REJECT,
+                        decided_at=datetime.now(UTC),
+                    )
+                )
+
+            resumable = await repository.get_resumable_tool_batch(lease.run.id)
+            assert resumable is not None
+            assert [call.record.tool_call_id for call in resumable.calls] == [
+                "call_safe",
+                "call_risky",
+            ]
+            assert [call.arguments for call in resumable.calls] == [
+                {"query": "approval-1"},
+                {"query": "approval-2"},
+            ]
+
+            leases = await repository.claim(
+                "worker_resume",
+                lease_seconds=30,
+                execution_seconds=60,
+                limit=1,
+            )
+            assert len(leases) == 1
+            resumed = leases[0]
+            assert resumed.run.execution_epoch > lease.run.execution_epoch
+            assert resumed.run.session_id == lease.run.session_id
+            stale = await repository.admit_tool_call(
+                AdmitToolCallCommand(
+                    run_id=lease.run.id,
+                    worker_id=lease.run.worker_id or "",
+                    execution_epoch=lease.run.execution_epoch,
+                    record_id=resumable.calls[0].record.id,
+                    admitted_at=datetime.now(UTC),
+                )
+            )
+            assert stale is None
+            admitted = await asyncio.gather(
+                *(
+                    repository.admit_tool_call(
+                        AdmitToolCallCommand(
+                            run_id=resumed.run.id,
+                            worker_id=resumed.run.worker_id or "",
+                            execution_epoch=resumed.run.execution_epoch,
+                            record_id=call.record.id,
+                            admitted_at=datetime.now(UTC),
+                        )
+                    )
+                    for call in resumable.calls
+                )
+            )
+            assert all(record is not None for record in admitted)
+            assert [record.ordinal for record in admitted if record is not None] == [1, 2]
+            first_record, second_record = admitted
+            assert first_record is not None and second_record is not None
+
+            await repository.finish_tool_call(
+                _batch_finish(
+                    resumed,
+                    second_record,
+                    suffix="approval",
+                    output="second",
+                )
+            )
+            await repository.finish_tool_call(
+                _batch_finish(
+                    resumed,
+                    first_record,
+                    suffix="approval",
+                    output="first",
+                )
+            )
+            context = await repository.list_context_messages(
+                lease.run.session_id, owner_id, lease.run.id
+            )
+            assert context is not None
+            execution = [
+                message
+                for message in context
+                if isinstance(message, ExecutionMessage)
+            ]
+            assert isinstance(execution[0], ExecutionMessage)
+            assert [
+                part.tool_call_id
+                for part in execution[0].parts
+                if isinstance(part, ToolCallPart)
+            ] == ["call_safe", "call_risky"]
+            result_ids = [
+                next(
+                    part.tool_call_id
+                    for part in message.parts
+                    if isinstance(part, ToolResultPart)
+                )
+                for message in execution[1:]
+            ]
+            assert result_ids == ["call_safe", "call_risky"]
+
+            finished = await repository.finish(
+                FinishRunCommand(
+                    resumed.run.id,
+                    resumed.run.worker_id or "",
+                    resumed.run.execution_epoch,
+                    _reply(resumed.run, suffix="approval"),
+                    RunUsage(),
+                    datetime.now(UTC),
+                )
+            )
+            assert finished is not None and finished.status is RunStatus.COMPLETED
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_last_approval_decision_queues_once_and_cancel_closes_pending() -> None:
+    """并发最后决定遵循行锁；拒绝后等待取消，迟到决定不能恢复。"""
+
+    async def scenario() -> None:
+        async with _database() as (factory, _engine, _admin, _schema):
+            owner_id, _ = await _seed_owner_and_profile(factory, suffix="approval-race")
+            repository = SqlAlchemyRunRepository(
+                factory, SqlAlchemyMessageRepository(factory)
+            )
+            lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="approval-race",
+            )
+            begun = await repository.begin_tool_call_batch(
+                _batch_command(
+                    lease,
+                    suffix="approval-race",
+                    calls=(("call_r1", "risky_tool"), ("call_r2", "risky_tool")),
+                )
+            )
+            assert begun.waiting_for_approval
+            pending = await repository.list_pending_approvals(
+                lease.run.session_id, owner_id, lease.run.id
+            )
+            assert pending is not None and len(pending) == 2
+            decisions = await asyncio.gather(
+                repository.decide_tool_approval(
+                    DecideToolApprovalCommand(
+                        session_id=lease.run.session_id,
+                        owner_id=owner_id,
+                        run_id=lease.run.id,
+                        record_id=pending[0].call_id,
+                        request_id="race-a",
+                        fingerprint="a" * 64,
+                        decision=ToolApprovalDecision.APPROVE,
+                        decided_at=datetime.now(UTC),
+                        auth_session_id="fresh-auth",
+                    )
+                ),
+                repository.decide_tool_approval(
+                    DecideToolApprovalCommand(
+                        session_id=lease.run.session_id,
+                        owner_id=owner_id,
+                        run_id=lease.run.id,
+                        record_id=pending[1].call_id,
+                        request_id="race-b",
+                        fingerprint="b" * 64,
+                        decision=ToolApprovalDecision.REJECT,
+                        decided_at=datetime.now(UTC),
+                        auth_session_id="fresh-auth",
+                    )
+                ),
+            )
+            assert all(item is not None for item in decisions)
+            assert sorted(
+                item.status.value for item in decisions if item is not None
+            ) == ["queued", "waiting_for_approval"]
+            final = await repository.get(lease.run.session_id, owner_id, lease.run.id)
+            assert final is not None and final.status is RunStatus.QUEUED
+            async with factory() as session:
+                resumed_events = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(RunEventModel)
+                        .where(
+                            RunEventModel.run_id == lease.run.id,
+                            RunEventModel.type == "approval_resumed",
+                        )
+                    )
+                    or 0
+                )
+            assert resumed_events == 1
+            async with factory() as session:
+                rejected = await session.scalar(
+                    select(RunToolCallModel).where(
+                        RunToolCallModel.id == pending[1].call_id
+                    )
+                )
+            assert rejected is not None
+            assert rejected.status == "failed"
+            assert rejected.safe_error_code == "tool_approval_denied"
+            assert rejected.result_message_id is not None
+            context = await repository.list_context_messages(
+                lease.run.session_id, owner_id, lease.run.id
+            )
+            assert context is not None
+            denied_results = [
+                ToolOutcome.model_validate_json(part.output)
+                for message in context
+                if isinstance(message, ExecutionMessage)
+                for part in message.parts
+                if isinstance(part, ToolResultPart) and part.output is not None
+            ]
+            assert any(
+                outcome.code == "tool_approval_denied" for outcome in denied_results
+            )
+            decided = decisions[0]
+            assert decided is not None
+            async with factory() as session:
+                row = await session.scalar(
+                    select(RunToolCallModel).where(
+                        RunToolCallModel.id == pending[0].call_id
+                    )
+                )
+            assert row is not None and row.approval_decision is not None
+            opposite = (
+                ToolApprovalDecision.REJECT
+                if row.approval_decision == ToolApprovalDecision.APPROVE.value
+                else ToolApprovalDecision.APPROVE
+            )
+            with pytest.raises(RunConflictError):
+                await repository.decide_tool_approval(
+                    DecideToolApprovalCommand(
+                        session_id=lease.run.session_id,
+                        owner_id=owner_id,
+                        run_id=lease.run.id,
+                        record_id=pending[0].call_id,
+                        request_id="opposite",
+                        fingerprint="c" * 64,
+                        decision=opposite,
+                        decided_at=datetime.now(UTC),
+                    )
+                )
+
+            cancel_lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="approval-cancel",
+            )
+            await repository.begin_tool_call_batch(
+                _batch_command(
+                    cancel_lease,
+                    suffix="approval-cancel",
+                    calls=(("call_cancel_r", "risky_tool"),),
+                )
+            )
+            cancelled = await repository.cancel(
+                cancel_lease.run.session_id,
+                owner_id,
+                cancel_lease.run.id,
+                datetime.now(UTC),
+            )
+            assert cancelled is not None and cancelled.status is RunStatus.CANCELLED
+            with pytest.raises(RunStateError):
+                await repository.decide_tool_approval(
+                    DecideToolApprovalCommand(
+                        session_id=cancel_lease.run.session_id,
+                        owner_id=owner_id,
+                        run_id=cancel_lease.run.id,
+                        record_id="record_approval-cancel_1",
+                        request_id="late-cancel",
+                        fingerprint="d" * 64,
+                        decision=ToolApprovalDecision.APPROVE,
+                        decided_at=datetime.now(UTC),
+                    )
+                )
 
     asyncio.run(scenario())

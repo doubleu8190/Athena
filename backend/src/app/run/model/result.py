@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from domain.run.model import Run, RunInputRequest
+from domain.tool import PendingToolApproval
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +14,7 @@ class RunDetailsResult:
 
     run: Run
     pending_input: RunInputRequest | None
+    pending_approvals: tuple[PendingToolApproval, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

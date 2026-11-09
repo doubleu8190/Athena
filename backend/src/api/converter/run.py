@@ -8,6 +8,7 @@ from api.dto.run import (
     RunEventResponse,
     RunInputRequestResponse,
     RunListResponse,
+    RunPendingToolApprovalResponse,
     RunResponse,
     RunToolCallDetailResponse,
     RunToolCallListResponse,
@@ -17,7 +18,12 @@ from api.dto.run import (
 )
 from app.run.model.result import RunDetailsResult, RunListResult
 from domain.run.model import Run, RunEvent, RunInputRequest, RunStatus, RunUsage
-from domain.tool import RunToolCallDetails, RunToolCallPage, RunToolCallRecord
+from domain.tool import (
+    PendingToolApproval,
+    RunToolCallDetails,
+    RunToolCallPage,
+    RunToolCallRecord,
+)
 
 RETRY_WARNING = "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。"
 
@@ -62,6 +68,7 @@ def run_to_response(
     run: Run,
     *,
     pending_input: RunInputRequest | None = None,
+    pending_approvals: tuple[PendingToolApproval, ...] = (),
     replayed: bool = False,
 ) -> RunResponse:
     """只公开 Run 业务状态，不包含供应商地址或凭据引用。"""
@@ -85,6 +92,17 @@ def run_to_response(
         safe_error_code=run.safe_error_code,
         usage=_usage_to_response(run.usage),
         pending_input=None if pending_input is None else _input_to_response(pending_input),
+        pending_approvals=[
+            RunPendingToolApprovalResponse(
+                call_id=item.call_id,
+                batch_message_id=item.batch_message_id,
+                ordinal=item.ordinal,
+                model_name=item.model_name,
+                tool_kind=None if item.tool_kind is None else item.tool_kind.value,
+                requested_at=item.requested_at,
+            )
+            for item in pending_approvals
+        ],
         replayed=replayed,
         retry_warning=(
             RETRY_WARNING
@@ -95,7 +113,11 @@ def run_to_response(
 
 
 def run_details_to_response(details: RunDetailsResult) -> RunResponse:
-    return run_to_response(details.run, pending_input=details.pending_input)
+    return run_to_response(
+        details.run,
+        pending_input=details.pending_input,
+        pending_approvals=details.pending_approvals,
+    )
 
 
 def run_list_to_response(result: RunListResult) -> RunListResponse:
@@ -127,7 +149,7 @@ def tool_call_summary_to_response(record: RunToolCallRecord) -> RunToolCallSumma
     """Project a call without arguments, output, or internal routing data."""
     duration_ms = (
         None
-        if record.finished_at is None
+        if record.finished_at is None or record.started_at is None
         else max(0, int((record.finished_at - record.started_at).total_seconds() * 1000))
     )
     return RunToolCallSummaryResponse(

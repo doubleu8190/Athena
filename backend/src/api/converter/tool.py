@@ -30,6 +30,7 @@ def admin_tool_to_response(tool: AdminToolDefinition) -> AdminToolResponse:
         input_schema=dict(tool.input_schema),
         server_id=tool.server_id,
         remote_name=tool.remote_name,
+        requires_approval=tool.requires_approval,
     )
 
 

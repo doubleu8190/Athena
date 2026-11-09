@@ -9,6 +9,7 @@ import logging
 import math
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
@@ -53,6 +54,14 @@ MAX_TOTAL_RAW_BYTES = 4 * 1024 * 1024
 MAX_TEXT_BYTES = 1024 * 1024
 MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
 MAX_TOOL_CALLS = 8
+
+
+@dataclass(slots=True)
+class _ToolCallAccumulator:
+    call_id: str = ""
+    name: str = ""
+    arguments: str = ""
+    argument_bytes: int = 0
 
 
 def _retry_after_seconds(value: str | None, now: datetime | None = None) -> float | None:
@@ -240,7 +249,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                             messages=self._messages(request.messages),
                             tools=self._tools(request),
                             tool_choice=self._tool_choice(request),
-                            parallel_tool_calls=False,
+                            parallel_tool_calls=config.supports_parallel_tool_calls,
                             max_tokens=request.max_output_tokens or config.max_output_tokens,
                             stream=True,
                             stream_options={"include_usage": True},
@@ -408,13 +417,12 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
     ) -> AsyncIterator[LlmStreamEvent]:
         """重组分片调用，等待结束 chunk 后才发出完整结果。"""
         text_parts: list[str] = []
-        calls: dict[int, dict[str, str]] = {}
+        calls: dict[int, _ToolCallAccumulator] = {}
         finish_reason: str | None = None
         usage: LlmUsage | None = None
         response_id: str | None = None
         total_raw_bytes = 0
         text_bytes = 0
-        argument_bytes = 0
         chunk_count = 0
         iterator = aiter(stream)
         while True:
@@ -477,33 +485,33 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                     if state is None:
                         if len(calls) >= MAX_TOOL_CALLS:
                             raise LlmProtocolError("llm_stream_too_large")
-                        state = {"id": "", "name": "", "arguments": ""}
+                        state = _ToolCallAccumulator()
                         calls[index] = state
                     function = fragment.function
                     call_id = getattr(fragment, "id", None)
                     name = getattr(function, "name", None)
                     if call_id:
-                        if state["id"] and state["id"] != call_id:
+                        if state.call_id and state.call_id != call_id:
                             raise LlmProtocolError("llm_tool_call_identity_invalid")
-                        state["id"] = call_id
+                        state.call_id = call_id
                     if name:
-                        if state["name"] and state["name"] != name:
+                        if state.name and state.name != name:
                             raise LlmProtocolError("llm_tool_call_identity_invalid")
-                        state["name"] = name
+                        state.name = name
                     if call_id or name:
                         yield ToolCallStarted(
-                            output_index=index, call_id=state["id"], name=state["name"]
+                            output_index=index, call_id=state.call_id, name=state.name
                         )
                     arguments = getattr(function, "arguments", None)
                     if arguments:
                         if not isinstance(arguments, str):
                             raise LlmProtocolError("llm_tool_arguments_invalid")
-                        argument_bytes += len(arguments.encode("utf-8"))
-                        if argument_bytes > MAX_TOOL_ARGUMENT_BYTES:
+                        state.argument_bytes += len(arguments.encode("utf-8"))
+                        if state.argument_bytes > MAX_TOOL_ARGUMENT_BYTES:
                             raise LlmProtocolError("llm_tool_arguments_too_large")
-                        state["arguments"] += arguments
+                        state.arguments += arguments
                         yield ToolArgumentsDelta(
-                            output_index=index, call_id=state["id"], delta=arguments
+                            output_index=index, call_id=state.call_id, delta=arguments
                         )
         if finish_reason not in {"stop", "tool_calls"}:
             raise LlmIncompleteError("llm_incomplete")
@@ -512,18 +520,18 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             output.append(LlmText("".join(text_parts)))
         if calls and finish_reason != "tool_calls":
             raise LlmProtocolError()
-        call_ids = [state["id"] for state in calls.values()]
+        call_ids = [state.call_id for state in calls.values()]
         if len(set(call_ids)) != len(call_ids):
             raise LlmProtocolError("llm_tool_call_identity_invalid")
         for index in sorted(calls):
             state = calls[index]
             try:
-                arguments = json.loads(state["arguments"])
+                arguments = json.loads(state.arguments)
             except (TypeError, ValueError):
                 raise LlmProtocolError("llm_tool_arguments_invalid") from None
-            if not state["id"] or not state["name"] or not isinstance(arguments, dict):
+            if not state.call_id or not state.name or not isinstance(arguments, dict):
                 raise LlmProtocolError("llm_tool_arguments_invalid")
-            call = LlmToolCall(state["id"], state["name"], arguments)
+            call = LlmToolCall(state.call_id, state.name, arguments)
             output.append(call)
             yield ToolCallCompleted(output_index=index, tool_call=call)
         result = LlmResponse(

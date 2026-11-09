@@ -83,6 +83,7 @@ class FakeServers:
             tuple[Any, str, int, McpServerWrite, tuple[ToolDefinition, ...]]
         ] = []
         self.delete_calls: list[str] = []
+        self.policy_calls: list[tuple[str, bool]] = []
         self.server: McpServer | None = None
         self.raise_conflict = False
 
@@ -123,6 +124,21 @@ class FakeServers:
         self.read_count += 1
         return McpServerPage(
             (self.server,) if self.server is not None else (), int(self.server is not None)
+        )
+
+    async def set_requires_approval(
+        self, actor: AuthContext, tool_id: str, requires_approval: bool
+    ) -> AdminToolDefinition:
+        del actor
+        self.policy_calls.append((tool_id, requires_approval))
+        return AdminToolDefinition(
+            tool_id,
+            "mcp__00000000000040008000000000000000",
+            "d",
+            {},
+            "mcp_a",
+            "remote",
+            requires_approval,
         )
 
 
@@ -304,3 +320,19 @@ def test_another_admin_can_manage_global_catalog() -> None:
     assert _run(manager.get_mcp_server(second_admin, "mcp_global")).id == "mcp_global"
     assert _run(manager.list_admin_tools(second_admin)).items[0] == tools.admin
     assert all(call[0] in {actor.user.id, second_admin.user.id} for call in auth.calls)
+
+
+def test_only_admin_can_update_approval_policy_with_a_real_bool() -> None:
+    user_actor = AuthContext(_user(UserRole.USER), "ses_user")
+    manager, _, servers, _, _ = _manager(role=UserRole.USER)
+    with pytest.raises(McpAdminRequiredError):
+        _run(manager.update_tool_approval_policy(user_actor, "tool_x", True))
+    assert servers.policy_calls == []
+
+    admin_actor = AuthContext(_user(), "ses_admin")
+    manager, _, servers, _, _ = _manager()
+    with pytest.raises(ValueError, match="mcp_tool_policy_invalid"):
+        _run(manager.update_tool_approval_policy(admin_actor, "tool_x", 1))  # type: ignore[arg-type]
+    result = _run(manager.update_tool_approval_policy(admin_actor, "tool_x", True))
+    assert result.requires_approval is True
+    assert servers.policy_calls == [("tool_x", True)]

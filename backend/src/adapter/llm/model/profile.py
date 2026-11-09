@@ -23,6 +23,10 @@ class ModelProfileVersionModel(Base):
         ),
         CheckConstraint("supports_stream IN (true, false)", name="ck_llm_profile_supports_stream"),
         CheckConstraint("supports_tools IN (true, false)", name="ck_llm_profile_supports_tools"),
+        CheckConstraint(
+            "supports_parallel_tool_calls IN (true, false)",
+            name="ck_llm_profile_supports_parallel_tool_calls",
+        ),
         CheckConstraint("max_output_tokens > 0", name="ck_llm_profile_output_tokens"),
         CheckConstraint("request_timeout_seconds > 0", name="ck_llm_profile_request_timeout"),
         CheckConstraint("execution_timeout_seconds > 0", name="ck_llm_profile_execution_timeout"),
@@ -39,6 +43,9 @@ class ModelProfileVersionModel(Base):
     tokenizer_encoding: Mapped[str] = mapped_column(String(32), nullable=False)
     supports_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     supports_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    supports_parallel_tool_calls: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     max_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     request_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     execution_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)

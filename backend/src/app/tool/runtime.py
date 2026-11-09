@@ -68,6 +68,7 @@ REQUEST_USER_INPUT_DEFINITION = RuntimeToolDefinition(
         "additionalProperties": False,
     },
     source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
 )
 
 MEMORY_SEARCH_DEFINITION = RuntimeToolDefinition(
@@ -87,6 +88,7 @@ MEMORY_SEARCH_DEFINITION = RuntimeToolDefinition(
         "additionalProperties": False,
     },
     source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
 )
 
 KNOWLEDGE_SEARCH_DEFINITION = RuntimeToolDefinition(
@@ -106,6 +108,7 @@ KNOWLEDGE_SEARCH_DEFINITION = RuntimeToolDefinition(
         "additionalProperties": False,
     },
     source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
 )
 
 
@@ -203,9 +206,33 @@ class RunToolRuntimeService(RunToolRuntime):
                         remote_name=item.remote_name,
                         config_version=item.config_version,
                     ),
+                    requires_approval=item.requires_approval,
                 )
             )
         return RuntimeToolSnapshot(tools=tuple(definitions))
+
+    def validate_call(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolOutcome | None:
+        """Validate frozen identity and local JSON Schema without network access."""
+        if arguments and utf8_size(arguments) > MAX_TOOL_ARGUMENT_BYTES:
+            return _error("tool_arguments_too_large", "工具参数超过上限。")
+        if definition is None or definition.model_name != model_name:
+            return _error("tool_unknown", "模型请求了冻结目录中不存在的工具。")
+        validation_error = _validate_arguments(definition.input_schema, arguments)
+        if validation_error is not None:
+            return _error("tool_arguments_invalid", validation_error)
+        query = arguments.get("query")
+        if (
+            definition.model_name in {"memory_search", "knowledge_search"}
+            and isinstance(query, str)
+            and not query.strip()
+        ):
+            return _error("tool_arguments_invalid", "查询内容不能为空。")
+        return None
 
     async def execute(
         self,
@@ -218,20 +245,10 @@ class RunToolRuntimeService(RunToolRuntime):
         run_remaining_seconds: float,
     ) -> ToolExecutionResult:
         """Validate locally, dispatch once, then re-authorize before delivery."""
-        if arguments and utf8_size(arguments) > MAX_TOOL_ARGUMENT_BYTES:
-            return ToolExecutionResult(_error("tool_arguments_too_large", "工具参数超过上限。"))
-        if definition is None or definition.model_name != model_name:
-            return ToolExecutionResult(_error("tool_unknown", "模型请求了冻结目录中不存在的工具。"))
-        validation_error = _validate_arguments(definition.input_schema, arguments)
+        validation_error = self.validate_call(definition, model_name, arguments)
         if validation_error is not None:
-            return ToolExecutionResult(_error("tool_arguments_invalid", validation_error))
-        query = arguments.get("query")
-        if (
-            definition.model_name in {"memory_search", "knowledge_search"}
-            and isinstance(query, str)
-            and not query.strip()
-        ):
-            return ToolExecutionResult(_error("tool_arguments_invalid", "查询内容不能为空。"))
+            return ToolExecutionResult(validation_error)
+        assert definition is not None
         if definition.source.kind == "mcp":
             return await self._execute_mcp(
                 definition,

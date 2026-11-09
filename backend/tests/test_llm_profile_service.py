@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -52,6 +53,7 @@ class _ProfileRepository:
             temperature=value.temperature,
             enabled=True,
             created_at=timestamp,
+            supports_parallel_tool_calls=value.supports_parallel_tool_calls,
         )
 
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
@@ -135,6 +137,25 @@ def test_model_profile_create_revalidates_current_admin() -> None:
     with pytest.raises(ModelProfileAuthorizationError):
         asyncio.run(service.create(actor(), profile_input()))
     assert repository.created == []
+
+
+def test_parallel_tool_capability_requires_tools_and_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _ProfileRepository()
+    service = ModelProfileService(repository, _AuthReader(actor().user))
+    monkeypatch.setenv("ATHENA_LLM_CREDENTIAL_TEST", "test-secret")
+
+    invalid = replace(
+        profile_input(),
+        supports_parallel_tool_calls=True,
+        supports_tools=False,
+    )
+    with pytest.raises(ModelProfileError):
+        asyncio.run(service.create(actor(), invalid))
+    valid = replace(profile_input(), supports_parallel_tool_calls=True)
+    created = asyncio.run(service.create(actor(), valid))
+    assert created.supports_parallel_tool_calls is True
 
 
 def test_model_profile_admin_api_requires_auth_and_never_returns_secret(

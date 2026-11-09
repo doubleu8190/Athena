@@ -32,7 +32,13 @@ from domain.run.model import (
 from domain.run.model.errors import RunNotFoundError, RunStateError
 from domain.run.ports import RunRepository
 from domain.session import SessionNotFoundError
-from domain.tool import MAX_TOOL_CALL_ID_LENGTH, RunToolCallDetails, RunToolCallPage
+from domain.tool import (
+    MAX_TOOL_CALL_ID_LENGTH,
+    DecideToolApprovalCommand,
+    RunToolCallDetails,
+    RunToolCallPage,
+    ToolApprovalDecision,
+)
 
 MAX_RUN_TEXT_LENGTH = 32_000
 MAX_RUN_REQUEST_ID_LENGTH = 128
@@ -291,7 +297,54 @@ class RunService:
         if run is None:
             raise RunNotFoundError("run_not_found")
         pending = await self._repository.get_pending_input(session_id, owner_id, run_id)
-        return RunDetailsResult(run, pending)
+        pending_approvals = await self._repository.list_pending_approvals(
+            session_id, owner_id, run_id
+        )
+        if pending_approvals is None:
+            raise RunNotFoundError("run_not_found")
+        return RunDetailsResult(run, pending, pending_approvals)
+
+    async def decide_tool_approval(
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        call_id: str,
+        request_id: str,
+        decision: ToolApprovalDecision,
+        *,
+        auth_session_id: str | None = None,
+    ) -> Run:
+        """Apply one owner-scoped tool approval decision with an idempotency key."""
+        request_id = _validate_request_id(request_id)
+        if not call_id or len(call_id) > MAX_TOOL_CALL_ID_LENGTH:
+            raise InvalidRunInputError("run_tool_call_id_invalid")
+        if not run_id or len(run_id) > 128:
+            raise InvalidRunInputError("run_id_invalid")
+        result = await self._repository.decide_tool_approval(
+            DecideToolApprovalCommand(
+                session_id=session_id,
+                owner_id=owner_id,
+                run_id=run_id,
+                record_id=call_id,
+                request_id=request_id,
+                fingerprint=_fingerprint(
+                    operation="decide_tool_approval",
+                    fields={
+                        "session_id": session_id,
+                        "run_id": run_id,
+                        "call_id": call_id,
+                        "decision": decision.value,
+                    },
+                ),
+                decision=decision,
+                decided_at=_utc_value(self._clock()),
+                auth_session_id=auth_session_id,
+            )
+        )
+        if result is None:
+            raise RunNotFoundError("run_not_found")
+        return result
 
     async def list(
         self, session_id: str, owner_id: str, *, cursor: str | None, limit: int

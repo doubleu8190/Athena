@@ -20,6 +20,7 @@ class ModelProfileCreateRequest(BaseModel):
     tokenizer_encoding: str = Field(default="o200k_base", pattern="^(cl100k_base|o200k_base)$")
     supports_stream: bool = True
     supports_tools: bool = True
+    supports_parallel_tool_calls: bool = False
     max_output_tokens: int = Field(ge=1, le=1_000_000)
     request_timeout_seconds: int = Field(default=120, ge=1, le=3600)
     execution_timeout_seconds: int = Field(default=300, ge=1, le=3600)
@@ -40,6 +41,7 @@ class ModelProfileResponse(BaseModel):
     tokenizer_encoding: str
     supports_stream: bool
     supports_tools: bool
+    supports_parallel_tool_calls: bool
     max_output_tokens: int
     request_timeout_seconds: int
     execution_timeout_seconds: int

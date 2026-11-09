@@ -17,7 +17,7 @@ from domain.mcp.model import (
     McpServerWrite,
 )
 from domain.mcp.model.execution import McpCallResult
-from domain.tool import ToolDefinition
+from domain.tool import AdminToolDefinition, ToolDefinition
 
 
 class McpServerRepository(Protocol):
@@ -52,6 +52,11 @@ class McpServerRepository(Protocol):
 
     async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
         """分页读取 Server 安全投影。"""
+
+    async def set_requires_approval(
+        self, actor: AuthContext, tool_id: str, requires_approval: bool
+    ) -> AdminToolDefinition:
+        """复核管理员后更新已注册工具的审批策略。"""
 
 
 class McpDiscovery(Protocol):

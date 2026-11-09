@@ -215,6 +215,31 @@ def test_stream_subscribes_before_snapshot_and_reconciles_epoch_from_database() 
     assert repository.subscribed
 
 
+def test_stream_stops_after_snapshot_while_waiting_for_tool_approval() -> None:
+    repository = _FakeRepository(status=RunStatus.WAITING_FOR_APPROVAL, epoch=2)
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository)),
+    )
+
+    async def collect() -> RunSnapshotEvent:
+        iterator = service.events(
+            "session_stream_test", "user_stream_test", "run_stream_test", "token"
+        )
+        first = await anext(iterator)
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+        await iterator.aclose()
+        assert isinstance(first, RunSnapshotEvent)
+        return first
+
+    first = asyncio.run(collect())
+    assert isinstance(first, RunSnapshotEvent)
+    assert first.payload.status is RunStatus.WAITING_FOR_APPROVAL
+    assert repository.subscribed
+
+
 def test_stream_gap_interrupts_and_suppresses_incomplete_delta_suffix() -> None:
     repository = _FakeRepository(
         status=RunStatus.RUNNING,

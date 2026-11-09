@@ -538,6 +538,209 @@ def test_tool_argument_and_call_count_limits() -> None:
         asyncio.run(calls())
 
 
+def test_tool_argument_limit_is_per_call_for_interleaved_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多个调用交错分片时，各自低于上限且总和超限仍应成功。"""
+    import adapter.llm.openai_chat_completions as chat_adapter
+
+    monkeypatch.setattr(chat_adapter, "MAX_TOOL_ARGUMENT_BYTES", 10)
+    adapter = OpenAIChatCompletionsAdapter()
+    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "call both"),))
+
+    def fragment(
+        index: int,
+        call_id: str | None,
+        name: str | None,
+        arguments: str,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            index=index,
+            id=call_id,
+            function=SimpleNamespace(name=name, arguments=arguments),
+        )
+
+    async def collect() -> list[object]:
+        return [
+            event
+            async for event in adapter._events(
+                async_chunks(
+                    [
+                        chunk(tool_calls=[fragment(0, "call_0", "tool", '{"a":')]),
+                        chunk(tool_calls=[fragment(1, "call_1", "tool", '{"b":')]),
+                        chunk(tool_calls=[fragment(0, None, None, "1}")]),
+                        chunk(tool_calls=[fragment(1, None, None, "2}")]),
+                        chunk(finish_reason="tool_calls"),
+                    ]
+                ),
+                runtime_profile(),
+                request,
+            )
+        ]
+
+    events = asyncio.run(collect())
+    completed = [
+        event.tool_call
+        for event in events
+        if isinstance(event, ToolCallCompleted)
+    ]
+    assert [call.call_id for call in completed] == ["call_0", "call_1"]
+    assert [call.arguments for call in completed] == [{"a": 1}, {"b": 2}]
+    assert sum(len(json.dumps(call.arguments)) for call in completed) > 10
+
+
+def test_tool_argument_limit_accumulates_across_fragments_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一调用跨分片累计超限时返回参数过大错误。"""
+    import adapter.llm.openai_chat_completions as chat_adapter
+
+    monkeypatch.setattr(chat_adapter, "MAX_TOOL_ARGUMENT_BYTES", 10)
+    adapter = OpenAIChatCompletionsAdapter()
+    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "call tool"),))
+    first = SimpleNamespace(
+        index=0,
+        id="call_0",
+        function=SimpleNamespace(name="tool", arguments='{"a":"'),
+    )
+    second = SimpleNamespace(
+        index=0,
+        id=None,
+        function=SimpleNamespace(name=None, arguments='abcdef"}'),
+    )
+
+    async def consume() -> None:
+        async for _ in adapter._events(
+            async_chunks(
+                [
+                    chunk(tool_calls=[first]),
+                    chunk(tool_calls=[second]),
+                    chunk(finish_reason="tool_calls"),
+                ]
+            ),
+            runtime_profile(),
+            request,
+        ):
+            pass
+
+    with pytest.raises(LlmProtocolError, match="llm_tool_arguments_too_large"):
+        asyncio.run(consume())
+
+
+def test_stream_assembles_multiple_parallel_tool_calls_by_index() -> None:
+    adapter = OpenAIChatCompletionsAdapter()
+    request = LlmRequest(
+        "unused",
+        (LlmMessage(LlmRole.USER, "call both"),),
+        tools=(LlmTool("tool", "Tool", {"type": "object"}),),
+    )
+    calls: list[object] = [
+        SimpleNamespace(
+            index=0,
+            id="call_0",
+            function=SimpleNamespace(name="tool", arguments='{"query":"a"}'),
+        ),
+        SimpleNamespace(
+            index=1,
+            id="call_1",
+            function=SimpleNamespace(name="tool", arguments='{"query":"b"}'),
+        ),
+    ]
+
+    async def collect() -> list[object]:
+        return [
+            event
+            async for event in adapter._events(
+                async_chunks(
+                    [
+                        chunk(tool_calls=calls),
+                        chunk(finish_reason="tool_calls"),
+                    ]
+                ),
+                runtime_profile(),
+                request,
+            )
+        ]
+
+    events = asyncio.run(collect())
+    completed = [
+        event.tool_call
+        for event in events
+        if isinstance(event, ToolCallCompleted)
+    ]
+    assert [call.call_id for call in completed] == ["call_0", "call_1"]
+    assert [call.arguments for call in completed] == [
+        {"query": "a"},
+        {"query": "b"},
+    ]
+    assert isinstance(events[-1], ResponseCompleted)
+
+
+def test_parallel_tool_call_capability_is_forwarded_to_chat_completions() -> None:
+    async def run() -> None:
+        requests: list[dict[str, Any]] = []
+
+        async def handle(request: httpx2.Request) -> httpx2.Response:
+            requests.append(cast(dict[str, Any], json.loads(request.content)))
+            body = (
+                'data: {"id":"chatcmpl_parallel","object":"chat.completion.chunk",'
+                '"created":1,"model":"test-model","choices":[{"index":0,'
+                '"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n'
+                'data: {"id":"chatcmpl_parallel","object":"chat.completion.chunk",'
+                '"created":1,"model":"test-model","choices":[],"usage":'
+                '{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n'
+                "data: [DONE]\n\n"
+            )
+            return httpx2.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body.encode(),
+                request=request,
+            )
+
+        base = runtime_profile()
+        runtime = replace(
+            base,
+            version=replace(base.version, supports_parallel_tool_calls=True),
+        )
+        adapter = OpenAIChatCompletionsAdapter()
+        sdk = AsyncOpenAI(
+            api_key=runtime.api_key,
+            base_url=runtime.version.base_url,
+            max_retries=0,
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)),
+        )
+        adapter._clients[
+            (
+                runtime.version.base_url,
+                hashlib.sha256(runtime.api_key.encode()).hexdigest(),
+            )
+        ] = sdk
+        request = LlmRequest(
+            "unused",
+            (LlmMessage(LlmRole.USER, "call tools"),),
+            tools=(
+                LlmTool(
+                    "tool",
+                    "Tool",
+                    {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                ),
+            ),
+        )
+
+        async with adapter.stream(runtime, request) as events:
+            _ = [event async for event in events]
+
+        assert requests[0]["parallel_tool_calls"] is True
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
 def test_sdk_wire_final_request_uses_no_tools_and_disables_retries() -> None:
     """最终回答轮在真实 SDK 请求中显式关闭工具，且客户端不隐式重试。"""
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 
 from api.converter.tool import (
     admin_tool_page_to_response,
@@ -17,9 +17,10 @@ from api.dto.tool import (
     AdminToolResponse,
     PublicToolListResponse,
     PublicToolResponse,
+    ToolApprovalPolicyRequest,
 )
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
-from api.security import AdminAuth, CurrentAuth
+from api.security import AdminAuth, CurrentAuth, verify_request_origin
 from app.tool import ToolManager
 
 
@@ -105,6 +106,27 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         try:
             result = await manager.get_admin_tool(actor, tool_id)
+        except Exception as error:
+            raise mcp_error_to_http(error) from error
+        return admin_tool_to_response(result)
+
+    @router.patch(
+        "/api/v1/admin/tools/{tool_id}",
+        response_model=AdminToolResponse,
+        dependencies=[Depends(verify_request_origin)],
+    )
+    async def update_admin_tool_policy(
+        actor: AdminAuth,
+        tool_id: Annotated[str, Path(min_length=1, max_length=64)],
+        request: ToolApprovalPolicyRequest,
+        response: Response,
+    ) -> AdminToolResponse:
+        """Update only the administrator-owned approval policy."""
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            result = await manager.update_tool_approval_policy(
+                actor, tool_id, request.requires_approval
+            )
         except Exception as error:
             raise mcp_error_to_http(error) from error
         return admin_tool_to_response(result)

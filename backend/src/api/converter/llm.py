@@ -18,6 +18,7 @@ def model_profile_to_response(value: ModelProfileVersion) -> ModelProfileRespons
         tokenizer_encoding=value.tokenizer_encoding,
         supports_stream=value.supports_stream,
         supports_tools=value.supports_tools,
+        supports_parallel_tool_calls=value.supports_parallel_tool_calls,
         max_output_tokens=value.max_output_tokens,
         request_timeout_seconds=value.request_timeout_seconds,
         execution_timeout_seconds=value.execution_timeout_seconds,

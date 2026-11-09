@@ -223,6 +223,9 @@ def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
             async def list_retry_context(self, *_args: object) -> tuple[object, ...]:
                 return ()
 
+            async def get_resumable_tool_batch(self, *_args: object) -> None:
+                return None
+
             async def list_context_messages(self, *args: object) -> tuple[object, ...]:
                 return ()
 
@@ -311,6 +314,9 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
 
             async def list_retry_context(self, *_args: object) -> tuple[object, ...]:
                 return ()
+
+            async def get_resumable_tool_batch(self, *_args: object) -> None:
+                return None
 
             async def list_context_messages(self, *args: object) -> tuple[object, ...]:
                 return ()

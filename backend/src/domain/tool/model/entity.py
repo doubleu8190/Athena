@@ -23,6 +23,7 @@ class ToolDefinition:
     model_name: str
     description: str
     input_schema: Mapping[str, Any]
+    requires_approval: bool = False
 
     def __post_init__(self) -> None:
         """校验工具标识、描述和 JSON Schema 对象形状。"""
@@ -85,6 +86,7 @@ class AdminToolDefinition(PublicToolDefinition):
 
     server_id: str
     remote_name: str
+    requires_approval: bool = False
 
 
 __all__ = [

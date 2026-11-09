@@ -19,6 +19,7 @@ def profile_to_domain(row: ModelProfileVersionModel) -> ModelProfileVersion:
         tokenizer_encoding=cast(Literal["cl100k_base", "o200k_base"], row.tokenizer_encoding),
         supports_stream=row.supports_stream,
         supports_tools=row.supports_tools,
+        supports_parallel_tool_calls=row.supports_parallel_tool_calls,
         max_output_tokens=row.max_output_tokens,
         request_timeout_seconds=row.request_timeout_seconds,
         execution_timeout_seconds=row.execution_timeout_seconds,

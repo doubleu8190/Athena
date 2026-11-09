@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
@@ -33,7 +34,8 @@ class RunToolCallModel(Base):
         CheckConstraint("ordinal > 0", name="ck_run_tool_calls_ordinal"),
         CheckConstraint("execution_epoch > 0", name="ck_run_tool_calls_epoch"),
         CheckConstraint(
-            "status IN ('executing', 'completed', 'failed', 'cancelled', 'unknown')",
+            "status IN ('pending_approval', 'approved', 'executing', "
+            "'completed', 'failed', 'cancelled', 'unknown')",
             name="ck_run_tool_calls_status",
         ),
         CheckConstraint(
@@ -42,7 +44,6 @@ class RunToolCallModel(Base):
         ),
         UniqueConstraint("run_id", "tool_call_id", name="uq_run_tool_calls_protocol_id"),
         UniqueConstraint("run_id", "ordinal", name="uq_run_tool_calls_ordinal"),
-        UniqueConstraint("call_message_id", name="uq_run_tool_calls_call_message"),
         UniqueConstraint("result_message_id", name="uq_run_tool_calls_result_message"),
         ForeignKeyConstraint(
             ["run_id", "session_id"],
@@ -62,6 +63,11 @@ class RunToolCallModel(Base):
             name="fk_run_tool_calls_result_message_session",
             ondelete="RESTRICT",
         ),
+        CheckConstraint(
+            "approval_decision IS NULL OR approval_decision IN ('approve', 'reject')",
+            name="ck_run_tool_calls_approval_decision",
+        ),
+        Index("ix_run_tool_calls_call_message", "call_message_id"),
         Index("ix_run_tool_calls_run_ordinal", "run_id", "ordinal"),
         Index("ix_run_tool_calls_run_status", "run_id", "status"),
     )
@@ -78,7 +84,15 @@ class RunToolCallModel(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     call_message_id: Mapped[str] = mapped_column(String(64), nullable=False)
     result_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requires_approval: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_decision: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    approval_decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     outcome: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)

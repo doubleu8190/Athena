@@ -40,6 +40,7 @@ class McpRuntimeToolDefinition:
     description: str
     input_schema: dict[str, Any]
     config_version: int
+    requires_approval: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,6 +25,7 @@ from api.dto.run import (
     RunResponse,
     RunRetryRequest,
     RunSubmitRequest,
+    RunToolApprovalRequest,
     RunToolCallDetailResponse,
     RunToolCallListResponse,
 )
@@ -39,7 +40,7 @@ from domain.run.model.errors import (
     ToolRetryConfirmationRequiredError,
 )
 from domain.session import SessionNotFoundError
-from domain.tool import MAX_TOOL_CALL_ID_LENGTH
+from domain.tool import MAX_TOOL_CALL_ID_LENGTH, ToolApprovalDecision
 
 
 class _RunEventSourceResponse(StreamingResponse):
@@ -275,6 +276,37 @@ def build_run_router(
             )
         except (RunNotFoundError, SessionNotFoundError) as error:
             raise _not_found(error) from error
+        except InvalidRunInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @router.post(
+        "/{run_id}/tool-calls/{call_id}/approval",
+        response_model=RunResponse,
+    )
+    async def decide_tool_approval(
+        request: RunToolApprovalRequest,
+        session_id: Annotated[str, Path(min_length=1, max_length=64)],
+        run_id: Annotated[str, Path(min_length=1, max_length=64)],
+        call_id: Annotated[str, Path(min_length=1, max_length=MAX_TOOL_CALL_ID_LENGTH)],
+        current_auth: CurrentAuth,
+    ) -> RunResponse:
+        """Approve or reject one persisted call without resubmitting arguments."""
+        try:
+            await service.decide_tool_approval(
+                session_id,
+                current_auth.user.id,
+                run_id,
+                call_id,
+                request.request_id,
+                ToolApprovalDecision(request.decision),
+                auth_session_id=current_auth.session_id,
+            )
+            details = await service.get(session_id, current_auth.user.id, run_id)
+            return run_details_to_response(details)
+        except (RunNotFoundError, SessionNotFoundError) as error:
+            raise _not_found(error) from error
+        except (RunConflictError, RunStateError) as error:
+            raise _conflict(error) from error
         except InvalidRunInputError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 

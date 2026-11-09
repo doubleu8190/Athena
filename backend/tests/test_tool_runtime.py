@@ -187,7 +187,9 @@ def _mcp_definition() -> RuntimeToolDefinition:
     )
 
 
-def _mcp_snapshot_definition() -> McpRuntimeToolDefinition:
+def _mcp_snapshot_definition(
+    *, requires_approval: bool = False
+) -> McpRuntimeToolDefinition:
     return McpRuntimeToolDefinition(
         tool_id="tool_lookup",
         server_id="mcp_1",
@@ -201,6 +203,7 @@ def _mcp_snapshot_definition() -> McpRuntimeToolDefinition:
             "additionalProperties": False,
         },
         config_version=2,
+        requires_approval=requires_approval,
     )
 
 
@@ -269,7 +272,7 @@ def test_snapshot_freezes_v1_and_hides_unavailable_v2_builtins() -> None:
         memory = _Memory(RecallResult("ok"))
         knowledge = _Knowledge(SearchResult((), ()))
         projects = _ProjectKnowledge([_base(1)])
-        catalog = _McpCatalog((_mcp_snapshot_definition(),))
+        catalog = _McpCatalog((_mcp_snapshot_definition(requires_approval=True),))
         visible, _ = _runtime(
             memory=memory,
             memory_enabled=True,
@@ -284,7 +287,30 @@ def test_snapshot_freezes_v1_and_hides_unavailable_v2_builtins() -> None:
             "knowledge_search",
             "lookup",
         )
+        assert v2.tools[-1].requires_approval is True
         assert projects.list_calls == [("owner_1", "project_1")]
+
+    asyncio.run(scenario())
+
+
+def test_validate_call_rejects_invalid_schema_before_any_provider_call() -> None:
+    async def scenario() -> None:
+        executor = _McpExecutor(McpCallResult(McpCallStatus.OK, "ok"))
+        runtime, _ = _runtime(mcp_executor=executor)
+        definition = _mcp_definition()
+
+        assert runtime.validate_call(definition, "lookup", {"query": "value"}) is None
+        invalid = runtime.validate_call(definition, "lookup", {"query": 1})
+        oversized = runtime.validate_call(
+            definition,
+            "lookup",
+            {"query": "x" * (65 * 1024)},
+        )
+        unknown = runtime.validate_call(None, "missing", {})
+        assert invalid is not None and invalid.code == "tool_arguments_invalid"
+        assert oversized is not None and oversized.code == "tool_arguments_too_large"
+        assert unknown is not None and unknown.code == "tool_unknown"
+        assert executor.calls == []
 
     asyncio.run(scenario())
 

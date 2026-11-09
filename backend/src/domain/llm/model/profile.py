@@ -28,6 +28,7 @@ class ModelProfileVersion:
     temperature: float | None
     enabled: bool
     created_at: datetime
+    supports_parallel_tool_calls: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,7 @@ class ModelProfileInput:
     execution_timeout_seconds: int = 300
     max_concurrency: int = 4
     temperature: float | None = None
+    supports_parallel_tool_calls: bool = False
 
 
 __all__ = ["ModelProfileInput", "ModelProfileVersion", "RuntimeModelProfile"]

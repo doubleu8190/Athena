@@ -133,6 +133,7 @@ class RunStreamService:
                 event_cursor = event.sequence
             if snapshot.run.status.value in {
                 "waiting_for_input",
+                "waiting_for_approval",
                 "completed",
                 "failed",
                 "cancelled",
@@ -306,6 +307,7 @@ class RunStreamService:
                     last_reconcile = now
                     if snapshot.run.status.value in {
                         "waiting_for_input",
+                        "waiting_for_approval",
                         "completed",
                         "failed",
                         "cancelled",

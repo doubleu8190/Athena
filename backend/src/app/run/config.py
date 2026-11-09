@@ -37,6 +37,8 @@ class RunWorkerConfig:
     tool_argument_bytes: int = 64 * 1024
     tool_result_bytes: int = 64 * 1024
     tool_cleanup_seconds: float = 10.0
+    tool_batch_limit: int = 8
+    tool_concurrency: int = 4
 
     def __post_init__(self) -> None:
         if (
@@ -60,6 +62,9 @@ class RunWorkerConfig:
             or not 0 < self.tool_cleanup_seconds <= 10
             or not 512 <= self.tool_result_bytes <= 64 * 1024
             or not 1024 <= self.tool_argument_bytes <= 64 * 1024
+            or not 1 <= self.tool_batch_limit <= 8
+            or not 1 <= self.tool_concurrency <= 8
+            or self.tool_concurrency > self.tool_batch_limit
         ):
             raise ValueError("run_worker_config_invalid")
 
@@ -81,6 +86,8 @@ def worker_config_from_environment() -> RunWorkerConfig:
         tool_argument_bytes=_positive_int("ATHENA_RUN_TOOL_ARGUMENT_BYTES", 64 * 1024, 64 * 1024),
         tool_result_bytes=_positive_int("ATHENA_RUN_TOOL_RESULT_BYTES", 64 * 1024, 64 * 1024),
         tool_cleanup_seconds=_positive_float("ATHENA_RUN_TOOL_CLEANUP_SECONDS", 10.0, 10.0),
+        tool_batch_limit=_positive_int("ATHENA_RUN_TOOL_BATCH_LIMIT", 8, 8),
+        tool_concurrency=_positive_int("ATHENA_RUN_TOOL_CONCURRENCY", 4, 8),
     )
 
 

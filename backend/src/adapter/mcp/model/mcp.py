@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -82,6 +83,7 @@ class McpToolModel(Base):
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(String(8192), nullable=False)
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(_JSON_DOCUMENT, nullable=False)
+    requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

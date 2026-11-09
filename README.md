@@ -267,13 +267,16 @@ cd backend
 | `GET` | `/api/v1/admin/mcp/servers/{server_id}/tools` | 查看指定 Server 的工具来源 |
 | `GET` | `/api/v1/admin/tools` | 分页查看全局工具及来源 |
 | `GET` | `/api/v1/admin/tools/{tool_id}` | 查看单个工具来源 |
+| `PATCH` | `/api/v1/admin/tools/{tool_id}` | 修改已注册 MCP 工具的运行期审批策略 |
 | `GET` | `/api/v1/tools` | 任一有效用户读取安全工具目录 |
 | `GET` | `/api/v1/tools/{tool_id}` | 任一有效用户读取单个安全工具 |
 
 列表支持 `page`（默认 `1`）和 `page_size`（默认 `20`，最大 `100`）。写请求
 拒绝混合 transport 字段及额外字段；Server 修改是完整替换。公共工具响应只含
 `tool_id`、`model_name`、`description` 和 `input_schema`。管理响应也不会返回
-秘密值、密文、nonce 或密钥。
+秘密值、密文、nonce 或密钥，并额外返回 `requires_approval`。策略接口请求体只
+允许 `{"requires_approval": true|false}`，默认关闭；重新发现工具时按
+`remote_name` 保留已有策略，运行中的 Run 继续使用创建时的工具快照。
 公共工具列表只接受 `page`、`page_size` 且不接受重复参数；工具详情不接受 query
 参数。已认证请求携带其他或重复 query 时返回固定 `422 mcp_query_invalid`。
 
@@ -300,6 +303,9 @@ Run、LLM 配置及 Redis/SSE 的实现边界见下文。
 每 Profile 并发 4、输入 256 KiB、响应 1 MiB、输出 8192 tokens、32 个工具、
 单个工具参数 64 KiB。请求只能收紧这些部署限制。Profile 能力包括 `tools`、
 `stream`、`structured` 和 `temperature`；未声明的能力会在调用前拒绝。
+模型版本另有 `supports_parallel_tool_calls`（默认 `false`）：关闭时仍向供应商
+发送 `parallel_tool_calls=false` 且只接受单个工具调用，开启后接受每批 1–8 个
+调用。该能力必须同时声明 `tools`。
 
 未设置 `ATHENA_LLM_PROFILES` 时 LLM 不启用，应用和 `/health` 仍可正常启动。
 注入的 LLM 服务由调用方管理；应用自行构建的 SDK 客户端在 lifespan 退出时关闭。
@@ -400,9 +406,12 @@ export ATHENA_TEST_DATABASE_URL='postgresql+asyncpg://user:password@127.0.0.1:54
 Run 是 Session 中一次任务的持久化执行。迁移至当前 Alembic head 后，API 负责
 提交任务、澄清回答、取消、重试及 SSE；独立 Worker 领取 PostgreSQL 队列并调用
 Chat Completions。`run-v1` 保持原澄清流程，新 Run 与 retry 使用 `run-v2`，
-每轮最多接受一个业务工具并串行执行 MCP、`memory_search` 或 `knowledge_search`，
-随后把成对调用/结果交回模型，直到最终回答。Sub Agent 尚未接入。增量文本只用于
-实时展示，断线后重新读取数据库快照和正式消息，不回放历史 token。
+每轮可接受 1–8 个业务工具调用并形成同一批次；同一 Run 最多 4 个调用实际并发，
+结果按调用序号稳定交回模型。批次中任一调用需要管理员配置的运行期审批时，整批
+暂停且免审批调用也不会提前执行；用户逐个批准或拒绝，最后一个决定原子地把 Run
+重新排队，Worker 从持久化批次恢复而不重放模型请求。明确失败不扩散，unknown
+停止派发新调用、等待已开始调用收敛后失败 Run。Sub Agent 尚未接入。增量文本只
+用于实时展示，断线后重新读取数据库快照和正式消息，不回放历史 token。
 
 每 Run 最多 40 次实际 LLM 请求，正常生成、压缩和无输出临时错误的应用层重试
 共用额度；计数在 provider 调用前原子增加，失败不退还。工具本身不计次，单次
@@ -434,7 +443,8 @@ export ATHENA_LLM_CREDENTIAL_DEFAULT='从 secret manager 注入的密钥'
   "request_timeout_seconds": 60,
   "execution_timeout_seconds": 300,
   "max_concurrency": 4,
-  "temperature": null
+  "temperature": null,
+  "supports_parallel_tool_calls": false
 }
 ```
 
@@ -464,7 +474,8 @@ SSE 响应缓冲，并设置高于连接预期时长的读取超时；应用默�
 Worker 参数可通过 `.env.example` 中的 `ATHENA_RUN_*` 项调整：默认并发 4、租约
 30 秒、每 5 秒续租、执行总时限 300 秒、取消/队列轮询 1 秒、租约回收 5 秒；
 LLM 请求上限默认 40，工具超时 30 秒，参数与规范化结果上限均为 65536 字节，
-资源清理最多额外 10 秒。数据库截止时间依赖各服务主机时钟同步。
+资源清理最多额外 10 秒；单批工具上限 8、实际并发默认 4（1–8，且不超过批次
+上限）。数据库截止时间依赖各服务主机时钟同步。
 
 工具调用可通过
 `GET /api/v1/sessions/{session_id}/runs/{run_id}/tool-calls` 和
@@ -472,6 +483,18 @@ LLM 请求上限默认 40，工具超时 30 秒，参数与规范化结果上限
 摘要不含参数和结果；详情只返回有界的参数、规范化 outcome、状态、耗时和截断标记，
 不返回 MCP server/remote 名称、URL、凭据或 SDK 异常。所有查询复核 owner 和会话
 可见性，不存在与不可见统一返回 `404`。
+
+等待审批的 Run 详情包含安全的 `pending_approvals` 投影（调用 ID、批次消息 ID、
+序号、模型工具名、类型和请求时间），完整参数仍通过调用详情读取。逐调用审批：
+
+```text
+POST /api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/{call_id}/approval
+{"request_id": "client-idempotency-key", "decision": "approve"}
+```
+
+`decision` 只允许 `approve` 或 `reject`；同键同内容幂等，同键不同内容或相反决定
+返回 `409`。审批不使用 Conversation 消息或 `run_input_requests`，等待期不自动
+过期，但用户可以取消 Run。
 
 `POST .../retry` 始终创建从头执行的新 Run，可能重复此前成功的写操作；响应中的
 `retry_warning` 会明确说明。来源 Run 存在 unknown 工具结果时，请求必须带

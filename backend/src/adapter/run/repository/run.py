@@ -60,6 +60,7 @@ from domain.run.model import (
     RecordRunUsageCommand,
     RequestRunInputCommand,
     Run,
+    RunApprovalResumedPayload,
     RunAttemptUsage,
     RunCancelledPayload,
     RunCancelRequestedPayload,
@@ -81,9 +82,11 @@ from domain.run.model import (
     RunStatus,
     RunStreamMessage,
     RunStreamSnapshot,
+    RunToolApprovalDecidedPayload,
     RunToolCallFinishedPayload,
     RunToolCallStartedPayload,
     RunUsage,
+    RunWaitingForApprovalPayload,
     RunWaitingPayload,
     SaveContextSummaryCommand,
     SubmitRunCommand,
@@ -95,16 +98,28 @@ from domain.run.model.errors import (
     RunStateError,
     ToolRetryConfirmationRequiredError,
 )
+from domain.run.ports import RunRepository
 from domain.tool import (
+    AdmitToolCallCommand,
+    BeginToolCallBatchCommand,
+    BeginToolCallBatchResult,
     BeginToolCallCommand,
     BeginToolCallResult,
+    ConvergeToolBatchCommand,
+    DecideToolApprovalCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
+    PendingToolApproval,
     ReserveLlmRequestCommand,
     RuntimeToolSnapshot,
+    RunToolBatch,
+    RunToolBatchCall,
     RunToolCallDetails,
     RunToolCallPage,
+    RunToolCallRecord,
+    ToolApprovalDecision,
     ToolCallStatus,
+    ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
     ToolRetryContext,
@@ -117,12 +132,14 @@ _ACTIVE_STATUSES = (
     RunStatus.QUEUED.value,
     RunStatus.RUNNING.value,
     RunStatus.WAITING_FOR_INPUT.value,
+    RunStatus.WAITING_FOR_APPROVAL.value,
     RunStatus.CANCELLING.value,
 )
 _STREAM_SNAPSHOT_MESSAGES = 8
 _STREAM_SNAPSHOT_EVENTS = 100
 _STREAM_SNAPSHOT_BYTES = MAX_RUN_SSE_SNAPSHOT_BYTES
 _STREAM_SNAPSHOT_PREFIX_RESERVE = 128
+_MAX_TOOL_BATCH_SIZE = 8
 
 
 def _purpose_total(attempts: tuple[RunAttemptUsage, ...], purpose: str) -> int | None:
@@ -135,7 +152,7 @@ def _purpose_total(attempts: tuple[RunAttemptUsage, ...], purpose: str) -> int |
     return None if not values else sum(values)
 
 
-class SqlAlchemyRunRepository:
+class SqlAlchemyRunRepository(RunRepository):
     """按 Session → Run → 输入请求顺序锁定并写入事件化状态。"""
 
     def __init__(
@@ -686,6 +703,553 @@ class SqlAlchemyRunRepository:
                 )
                 return BeginToolCallResult(tool_call_to_domain(record), True)
 
+    async def begin_tool_call_batch(
+        self, command: BeginToolCallBatchCommand
+    ) -> BeginToolCallBatchResult:
+        """Persist one assistant tool batch, approval barrier, and local failures atomically."""
+        if not 1 <= len(command.calls) <= _MAX_TOOL_BATCH_SIZE:
+            raise ValueError("run_tool_batch_size_invalid")
+        record_ids = [item.record_id for item in command.calls]
+        protocol_ids = [item.tool_call_id for item in command.calls]
+        if len(set(record_ids)) != len(record_ids) or len(set(protocol_ids)) != len(protocol_ids):
+            raise ValueError("run_tool_batch_duplicate")
+        if any(not item.tool_call_id or len(item.tool_call_id) > 256 for item in command.calls):
+            raise ValueError("run_tool_call_identity_invalid")
+        call_parts = [
+            part
+            for part in command.call_message.parts
+            if isinstance(part, ToolCallPart)
+        ]
+        if (
+            command.call_message.role is not ExecutionRole.ASSISTANT
+            or any(isinstance(part, ToolResultPart) for part in command.call_message.parts)
+            or [part.tool_call_id for part in call_parts] != protocol_ids
+            or [part.name for part in call_parts] != [item.model_name for item in command.calls]
+        ):
+            raise RunStateError("run_tool_call_message_invalid")
+        for item in command.calls:
+            if (item.immediate_outcome is None) != (item.result_message is None):
+                raise RunStateError("run_tool_result_message_invalid")
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await self._lock_worker_run(
+                    session, command.run_id, command.worker_id, command.execution_epoch
+                )
+                locked_session = await session.get(SessionModel, row.session_id)
+                if locked_session is None or locked_session.deleted_time is not None:
+                    raise SessionNotFoundError("session_not_found")
+                db_now = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    row.status != RunStatus.RUNNING.value
+                    or row.cancel_requested_at is not None
+                    or not self._lease_is_valid(
+                        row, command.worker_id, command.execution_epoch, db_now
+                    )
+                    or not self._work_deadline_is_valid(row, db_now)
+                ):
+                    raise RunStateError("run_execution_lease_lost")
+                if (
+                    command.call_message.session_id != row.session_id
+                    or command.call_message.owner_id != row.owner_id
+                    or command.call_message.run_id != row.id
+                ):
+                    raise RunStateError("run_tool_call_message_invalid")
+
+                existing_message = await session.get(
+                    ExecutionMessageModel, command.call_message.id
+                )
+                if existing_message is not None:
+                    existing_records = list(
+                        (
+                            await session.scalars(
+                                select(RunToolCallModel)
+                                .where(
+                                    RunToolCallModel.run_id == row.id,
+                                    RunToolCallModel.call_message_id == command.call_message.id,
+                                )
+                                .order_by(RunToolCallModel.ordinal)
+                            )
+                        ).all()
+                    )
+                    if (
+                        [record.tool_call_id for record in existing_records] != protocol_ids
+                        or [
+                            record.model_name for record in existing_records
+                        ] != [item.model_name for item in command.calls]
+                        or [
+                            part
+                            for part in execution_to_domain(existing_message).parts
+                            if isinstance(part, ToolCallPart)
+                        ]
+                        != call_parts
+                    ):
+                        raise RunConflictError("run_tool_batch_conflict")
+                    return BeginToolCallBatchResult(
+                        await self._batch_from_records(session, row.id, existing_records),
+                        row.status == RunStatus.WAITING_FOR_APPROVAL.value,
+                        True,
+                    )
+
+                ordinal = int(
+                    (
+                        await session.scalar(
+                            select(func.max(RunToolCallModel.ordinal)).where(
+                                RunToolCallModel.run_id == row.id
+                            )
+                        )
+                    )
+                    or 0
+                )
+                await self._messages.append_execution_in_session(
+                    session,
+                    command.call_message,
+                    locked_session=locked_session,
+                    managed_run_id=row.id,
+                )
+                records: list[RunToolCallModel] = []
+                pending_record_ids: list[str] = []
+                for item in command.calls:
+                    ordinal += 1
+                    outcome = (
+                        None
+                        if item.immediate_outcome is None
+                        else bounded_outcome(item.immediate_outcome)
+                    )
+                    status = (
+                        ToolCallStatus.PENDING_APPROVAL
+                        if item.requires_approval and outcome is None
+                        else ToolCallStatus.APPROVED
+                    )
+                    if outcome is not None:
+                        status = persisted_status_for_outcome(outcome)
+                    record = RunToolCallModel(
+                        id=item.record_id,
+                        run_id=row.id,
+                        session_id=row.session_id,
+                        tool_call_id=item.tool_call_id,
+                        ordinal=ordinal,
+                        tool_id=item.tool_id,
+                        tool_kind=(
+                            None if item.tool_kind is None else item.tool_kind.value
+                        ),
+                        model_name=item.model_name,
+                        execution_epoch=command.execution_epoch,
+                        status=status.value,
+                        call_message_id=command.call_message.id,
+                        result_message_id=None,
+                        requires_approval=item.requires_approval,
+                        requested_at=command.requested_at,
+                        approval_decision=None,
+                        approval_decided_at=None,
+                        started_at=None,
+                        finished_at=None if outcome is None else command.requested_at,
+                        safe_error_code=(
+                            None
+                            if outcome is None or outcome.status is ToolOutcomeStatus.OK
+                            else outcome.code
+                        ),
+                        outcome=None if outcome is None else outcome.model_dump(mode="json"),
+                        round=command.round,
+                    )
+                    session.add(record)
+                    await session.flush()
+                    if outcome is not None:
+                        if item.result_message is None:
+                            raise RunStateError("run_tool_result_message_invalid")
+                        self._validate_tool_result_message(
+                            record, item.result_message, row, outcome
+                        )
+                        await self._messages.append_execution_in_session(
+                            session,
+                            item.result_message,
+                            locked_session=locked_session,
+                            managed_run_id=row.id,
+                        )
+                        record.result_message_id = item.result_message.id
+                        await self._append_event(
+                            session,
+                            row,
+                            RunToolCallFinishedPayload(
+                                call_id=record.id,
+                                ordinal=record.ordinal,
+                                status=status,
+                                round=record.round,
+                                safe_error_code=record.safe_error_code,
+                            ),
+                            command.requested_at,
+                        )
+                    elif status is ToolCallStatus.PENDING_APPROVAL:
+                        pending_record_ids.append(record.id)
+                    records.append(record)
+
+                if pending_record_ids:
+                    row.status = RunStatus.WAITING_FOR_APPROVAL.value
+                    row.updated_at = command.requested_at
+                    self._clear_lease(row)
+                    await self._append_event(
+                        session,
+                        row,
+                        RunWaitingForApprovalPayload(
+                            batch_message_id=command.call_message.id,
+                            pending_call_ids=tuple(pending_record_ids),
+                        ),
+                        command.requested_at,
+                    )
+                batch = await self._batch_from_records(session, row.id, records)
+                result = BeginToolCallBatchResult(
+                    batch,
+                    bool(pending_record_ids),
+                    False,
+                )
+        return result
+
+    async def get_resumable_tool_batch(self, run_id: str) -> RunToolBatch | None:
+        """Return the earliest approved batch before any new model request."""
+        async with self._session_factory() as session:
+            first = await session.scalar(
+                select(RunToolCallModel)
+                .where(
+                    RunToolCallModel.run_id == run_id,
+                    RunToolCallModel.status == ToolCallStatus.APPROVED.value,
+                )
+                .order_by(RunToolCallModel.ordinal)
+                .limit(1)
+            )
+            if first is None:
+                return None
+            records = list(
+                (
+                    await session.scalars(
+                        select(RunToolCallModel)
+                        .where(
+                            RunToolCallModel.run_id == run_id,
+                            RunToolCallModel.call_message_id == first.call_message_id,
+                        )
+                        .order_by(RunToolCallModel.ordinal)
+                    )
+                ).all()
+            )
+            if any(
+                record.status == ToolCallStatus.PENDING_APPROVAL.value
+                for record in records
+            ):
+                return None
+            return await self._batch_from_records(session, run_id, records)
+
+    async def admit_tool_call(
+        self, command: AdmitToolCallCommand
+    ) -> RunToolCallRecord | None:
+        """Atomically claim one approved call under the current execution lease."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                session_id = await session.scalar(
+                    select(RunModel.session_id).where(RunModel.id == command.run_id)
+                )
+                if session_id is None:
+                    raise RunNotFoundError("run_not_found")
+                await self._lock_session_by_id(session, session_id)
+                row = await self._lock_run(session, session_id, command.run_id)
+                if (
+                    row.worker_id != command.worker_id
+                    or row.execution_epoch != command.execution_epoch
+                ):
+                    return None
+                record = await session.scalar(
+                    select(RunToolCallModel)
+                    .where(
+                        RunToolCallModel.id == command.record_id,
+                        RunToolCallModel.run_id == row.id,
+                        RunToolCallModel.session_id == row.session_id,
+                    )
+                    .with_for_update()
+                )
+                if record is None:
+                    raise RunNotFoundError("run_tool_call_not_found")
+                db_now = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    row.status != RunStatus.RUNNING.value
+                    or row.cancel_requested_at is not None
+                    or not self._lease_is_valid(
+                        row, command.worker_id, command.execution_epoch, db_now
+                    )
+                    or not self._work_deadline_is_valid(row, db_now)
+                    or record.status != ToolCallStatus.APPROVED.value
+                ):
+                    return None
+                record.status = ToolCallStatus.EXECUTING.value
+                record.execution_epoch = command.execution_epoch
+                record.started_at = command.admitted_at
+                row.updated_at = command.admitted_at
+                await self._append_event(
+                    session,
+                    row,
+                    RunToolCallStartedPayload(
+                        call_id=record.id,
+                        ordinal=record.ordinal,
+                        round=record.round,
+                    ),
+                    command.admitted_at,
+                )
+                result = tool_call_to_domain(record)
+        return result
+
+    async def converge_tool_batch(self, command: ConvergeToolBatchCommand) -> Run | None:
+        """Cancel undispatched calls and fail the Run after started calls settle."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await self._lock_worker_run(
+                    session, command.run_id, command.worker_id, command.execution_epoch
+                )
+                db_now = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    row.status != RunStatus.RUNNING.value
+                    or row.cancel_requested_at is not None
+                    or not self._lease_is_valid(
+                        row, command.worker_id, command.execution_epoch, db_now
+                    )
+                ):
+                    return None
+                locked_session = await session.get(SessionModel, row.session_id)
+                if locked_session is None or locked_session.deleted_time is not None:
+                    raise SessionNotFoundError("session_not_found")
+                unsettled = list(
+                    (
+                        await session.scalars(
+                            select(RunToolCallModel)
+                            .where(
+                                RunToolCallModel.run_id == row.id,
+                                RunToolCallModel.call_message_id == command.call_message_id,
+                                RunToolCallModel.status.in_(
+                                    (
+                                        ToolCallStatus.PENDING_APPROVAL.value,
+                                        ToolCallStatus.APPROVED.value,
+                                        ToolCallStatus.EXECUTING.value,
+                                    )
+                                ),
+                            )
+                            .order_by(RunToolCallModel.ordinal)
+                            .with_for_update()
+                        )
+                    ).all()
+                )
+                await self._settle_unfinished_tool_calls(
+                    session,
+                    locked_session,
+                    row,
+                    command.failed_at,
+                    records=unsettled,
+                )
+                await self._fail_run_in_transaction(
+                    session,
+                    locked_session,
+                    row,
+                    command.safe_error_code,
+                    command.failed_at,
+                )
+                result = run_to_domain(row)
+        return result
+
+    async def decide_tool_approval(
+        self, command: DecideToolApprovalCommand
+    ) -> Run | None:
+        """Apply one idempotent approval decision and queue only after the last pending."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked_session = await self._lock_session(
+                    session, command.session_id, command.owner_id
+                )
+                row = await self._lock_run(session, command.session_id, command.run_id)
+                replay = await self._find_request(
+                    session,
+                    command.owner_id,
+                    command.session_id,
+                    RunRequestOperation.DECIDE_TOOL_APPROVAL,
+                    command.request_id,
+                )
+                if replay is not None:
+                    self._check_fingerprint(replay, command.fingerprint)
+                    replay_run_id = RunRequestResult.model_validate(replay.result).run_id
+                    replay_row = await session.scalar(
+                        select(RunModel).where(
+                            RunModel.id == replay_run_id,
+                            RunModel.session_id == command.session_id,
+                        )
+                    )
+                    if replay_row is None:
+                        raise RunNotFoundError("run_not_found")
+                    return run_to_domain(replay_row)
+
+                record = await session.scalar(
+                    select(RunToolCallModel)
+                    .where(
+                        RunToolCallModel.id == command.record_id,
+                        RunToolCallModel.run_id == row.id,
+                        RunToolCallModel.session_id == row.session_id,
+                    )
+                    .with_for_update()
+                )
+                if record is None:
+                    raise RunNotFoundError("run_tool_call_not_found")
+                if record.approval_decision is not None:
+                    if record.approval_decision == command.decision.value:
+                        await self._store_request(
+                            session,
+                            command.owner_id,
+                            command.session_id,
+                            RunRequestOperation.DECIDE_TOOL_APPROVAL,
+                            command.request_id,
+                            command.fingerprint,
+                            RunRequestResult(run_id=row.id),
+                            command.decided_at,
+                        )
+                        return run_to_domain(row)
+                    raise RunConflictError("run_tool_approval_already_decided")
+                if (
+                    row.status != RunStatus.WAITING_FOR_APPROVAL.value
+                    or record.status != ToolCallStatus.PENDING_APPROVAL.value
+                ):
+                    raise RunStateError("run_tool_approval_not_pending")
+
+                record.approval_decision = command.decision.value
+                record.approval_decided_at = command.decided_at
+                if command.decision is ToolApprovalDecision.APPROVE:
+                    record.status = ToolCallStatus.APPROVED.value
+                else:
+                    call_message = await session.get(
+                        ExecutionMessageModel, record.call_message_id
+                    )
+                    if call_message is None:
+                        raise RuntimeError("run_tool_call_message_missing")
+                    denied = ToolOutcome(
+                        status=ToolOutcomeStatus.ERROR,
+                        code="tool_approval_denied",
+                        message="用户拒绝了该工具调用，未执行外部操作。",
+                    )
+                    result_message_id = new_id("exec")
+                    result_message = ExecutionMessageDraft(
+                        id=result_message_id,
+                        session_id=row.session_id,
+                        owner_id=row.owner_id,
+                        run_id=row.id,
+                        thread_id=call_message.thread_id,
+                        role=ExecutionRole.TOOL,
+                        parts=(
+                            ToolResultPart(
+                                tool_call_id=record.tool_call_id,
+                                status=ToolResultStatus.ERROR,
+                                output=denied.canonical_output(),
+                            ),
+                        ),
+                        tool_call_id=record.tool_call_id,
+                        source_message_id=None,
+                        created_at=command.decided_at,
+                        metadata=MessageMetadata(),
+                    )
+                    await self._messages.append_execution_in_session(
+                        session,
+                        result_message,
+                        locked_session=locked_session,
+                        managed_run_id=row.id,
+                    )
+                    record.status = ToolCallStatus.FAILED.value
+                    record.result_message_id = result_message_id
+                    record.finished_at = command.decided_at
+                    record.safe_error_code = denied.code
+                    record.outcome = denied.model_dump(mode="json")
+
+                await self._append_event(
+                    session,
+                    row,
+                    RunToolApprovalDecidedPayload(
+                        call_id=record.id,
+                        ordinal=record.ordinal,
+                        decision=command.decision,
+                        status=ToolCallStatus(record.status),
+                    ),
+                    command.decided_at,
+                )
+                row.updated_at = command.decided_at
+                if command.auth_session_id is not None:
+                    row.auth_session_id = command.auth_session_id
+                await session.flush()
+                remaining = await session.scalar(
+                    select(func.count(RunToolCallModel.id)).where(
+                        RunToolCallModel.run_id == row.id,
+                        RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
+                    )
+                )
+                if not remaining:
+                    row.status = RunStatus.QUEUED.value
+                    row.queued_at = command.decided_at
+                    row.updated_at = command.decided_at
+                    self._clear_lease(row)
+                    await self._append_event(
+                        session,
+                        row,
+                        RunApprovalResumedPayload(
+                            batch_message_id=record.call_message_id
+                        ),
+                        command.decided_at,
+                    )
+                await self._store_request(
+                    session,
+                    command.owner_id,
+                    command.session_id,
+                    RunRequestOperation.DECIDE_TOOL_APPROVAL,
+                    command.request_id,
+                    command.fingerprint,
+                    RunRequestResult(run_id=row.id),
+                    command.decided_at,
+                )
+                result = run_to_domain(row)
+        return result
+
+    async def list_pending_approvals(
+        self, session_id: str, owner_id: str, run_id: str
+    ) -> tuple[PendingToolApproval, ...] | None:
+        """Read the safe pending-call projection for an owner-visible Run."""
+        async with self._session_factory() as session:
+            visible = await session.scalar(
+                select(RunModel.id)
+                .join(SessionModel, SessionModel.id == RunModel.session_id)
+                .where(
+                    RunModel.id == run_id,
+                    RunModel.session_id == session_id,
+                    RunModel.owner_id == owner_id,
+                    SessionModel.owner_id == owner_id,
+                    SessionModel.deleted_time.is_(None),
+                )
+            )
+            if visible is None:
+                return None
+            rows = (
+                await session.scalars(
+                    select(RunToolCallModel)
+                    .where(
+                        RunToolCallModel.run_id == run_id,
+                        RunToolCallModel.session_id == session_id,
+                        RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
+                    )
+                    .order_by(RunToolCallModel.ordinal)
+                )
+            ).all()
+        pending: list[PendingToolApproval] = []
+        for row in rows:
+            if row.requested_at is None:
+                raise RuntimeError("run_tool_call_requested_at_missing")
+            pending.append(
+                PendingToolApproval(
+                    call_id=row.id,
+                    batch_message_id=row.call_message_id,
+                    ordinal=row.ordinal,
+                    model_name=row.model_name,
+                    tool_kind=None if row.tool_kind is None else ToolKind(row.tool_kind),
+                    requested_at=row.requested_at,
+                )
+            )
+        return tuple(pending)
+
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
         """Persist one result and atomically converge/fail when required."""
         async with self._session_factory() as session:
@@ -749,6 +1313,7 @@ class SqlAlchemyRunRepository:
                         ordinal=record.ordinal,
                         status=ToolCallStatus(record.status),
                         round=record.round,
+                        safe_error_code=record.safe_error_code,
                     ),
                     command.finished_at,
                 )
@@ -757,7 +1322,7 @@ class SqlAlchemyRunRepository:
                     if outcome.status is ToolOutcomeStatus.UNKNOWN
                     else command.terminate_error_code
                 )
-                if fail_code is not None:
+                if fail_code is not None and not command.defer_terminal_convergence:
                     await self._fail_run_in_transaction(
                         session,
                         locked_session,
@@ -1025,7 +1590,7 @@ class SqlAlchemyRunRepository:
                     raise RunStateError("run_execution_lease_lost")
                 if row.status != RunStatus.RUNNING.value:
                     raise RunStateError("run_execution_not_active")
-                if await self._has_executing_tool_calls(session, row.id):
+                if await self._has_unsettled_tool_calls(session, row.id):
                     raise RunStateError("run_tool_call_unsettled")
                 if (
                     command.question_message.session_id != row.session_id
@@ -1091,6 +1656,45 @@ class SqlAlchemyRunRepository:
         return result
 
     @staticmethod
+    async def _batch_from_records(
+        session: AsyncSession,
+        run_id: str,
+        records: list[RunToolCallModel],
+    ) -> RunToolBatch:
+        """Build a typed batch from one persisted assistant message."""
+        if not records:
+            raise ValueError("run_tool_batch_empty")
+        call_message_id = records[0].call_message_id
+        if any(record.call_message_id != call_message_id for record in records):
+            raise ValueError("run_tool_batch_message_invalid")
+        message = await session.get(ExecutionMessageModel, call_message_id)
+        if message is None:
+            raise RuntimeError("run_tool_call_message_missing")
+        call_message = execution_to_domain(message)
+        arguments = {
+            part.tool_call_id: dict(part.arguments)
+            for part in call_message.parts
+            if isinstance(part, ToolCallPart)
+        }
+        ordered = sorted(records, key=lambda item: item.ordinal)
+        if any(record.run_id != run_id for record in ordered) or any(
+            record.tool_call_id not in arguments for record in ordered
+        ):
+            raise ValueError("run_tool_batch_call_invalid")
+        return RunToolBatch(
+            call_message_id=call_message_id,
+            thread_id=call_message.thread_id,
+            round=ordered[0].round,
+            calls=tuple(
+                RunToolBatchCall(
+                    record=tool_call_to_domain(record),
+                    arguments=arguments[record.tool_call_id],
+                )
+                for record in ordered
+            ),
+        )
+
+    @staticmethod
     async def _validate_input_interaction(
         session: AsyncSession,
         run_id: str,
@@ -1152,8 +1756,8 @@ class SqlAlchemyRunRepository:
                     return None
                 if row.status != RunStatus.RUNNING.value:
                     return None
-                if await self._has_executing_tool_calls(session, row.id):
-                    await self._settle_executing_tool_calls(
+                if await self._has_unsettled_tool_calls(session, row.id):
+                    await self._settle_unfinished_tool_calls(
                         session,
                         locked_session,
                         row,
@@ -1217,7 +1821,7 @@ class SqlAlchemyRunRepository:
                 locked_session = await session.get(SessionModel, row.session_id)
                 if locked_session is None or locked_session.deleted_time is not None:
                     raise SessionNotFoundError("session_not_found")
-                await self._settle_executing_tool_calls(
+                await self._settle_unfinished_tool_calls(
                     session,
                     locked_session,
                     row,
@@ -1253,7 +1857,7 @@ class SqlAlchemyRunRepository:
                 locked_session = await session.get(SessionModel, row.session_id)
                 if locked_session is None or locked_session.deleted_time is not None:
                     raise SessionNotFoundError("session_not_found")
-                await self._settle_executing_tool_calls(
+                await self._settle_unfinished_tool_calls(
                     session,
                     locked_session,
                     row,
@@ -1323,7 +1927,7 @@ class SqlAlchemyRunRepository:
                     ):
                         continue
                     was_cancelling = row.status == RunStatus.CANCELLING.value
-                    await self._settle_executing_tool_calls(
+                    await self._settle_unfinished_tool_calls(
                         session,
                         locked_session,
                         row,
@@ -1365,8 +1969,12 @@ class SqlAlchemyRunRepository:
                 )
                 if row is None:
                     return None
-                if row.status in {RunStatus.QUEUED.value, RunStatus.WAITING_FOR_INPUT.value}:
-                    await self._settle_executing_tool_calls(
+                if row.status in {
+                    RunStatus.QUEUED.value,
+                    RunStatus.WAITING_FOR_INPUT.value,
+                    RunStatus.WAITING_FOR_APPROVAL.value,
+                }:
+                    await self._settle_unfinished_tool_calls(
                         session,
                         locked_session,
                         row,
@@ -1601,6 +2209,13 @@ class SqlAlchemyRunRepository:
                     .order_by(ExecutionMessageModel.sequence)
                 )
             ).all()
+            tool_call_rows = (
+                await session.scalars(
+                    select(RunToolCallModel)
+                    .where(RunToolCallModel.run_id == run_id)
+                    .order_by(RunToolCallModel.ordinal)
+                )
+            ).all()
             run_trigger_by_id = dict(
                 (
                     await session.execute(
@@ -1623,7 +2238,65 @@ class SqlAlchemyRunRepository:
             ),
             *(execution_to_domain(row) for row in execution_rows),
         ]
-        return tuple(sorted(messages, key=lambda item: item.sequence))
+        result_ids_by_call_message = {
+            message_id: tuple(
+                row.result_message_id
+                for row in tool_call_rows
+                if row.call_message_id == message_id and row.result_message_id is not None
+            )
+            for message_id in {row.call_message_id for row in tool_call_rows}
+        }
+        result_by_protocol_id = {
+            result.tool_call_id: message
+            for message in messages
+            if isinstance(message, ExecutionMessage)
+            and message.role is ExecutionRole.TOOL
+            for result in message.parts
+            if isinstance(result, ToolResultPart)
+        }
+        ordered: list[ConversationMessage | ExecutionMessage] = []
+        consumed_results: set[str] = set()
+        for message in sorted(messages, key=lambda item: item.sequence):
+            if (
+                isinstance(message, ExecutionMessage)
+                and message.role is ExecutionRole.TOOL
+                and message.id in consumed_results
+            ):
+                continue
+            ordered.append(message)
+            if (
+                not isinstance(message, ExecutionMessage)
+                or message.role is not ExecutionRole.ASSISTANT
+            ):
+                continue
+            call_parts = [
+                part for part in message.parts if isinstance(part, ToolCallPart)
+            ]
+            if not call_parts:
+                continue
+            persisted_results = result_ids_by_call_message.get(message.id, ())
+            if persisted_results:
+                result_ids = persisted_results
+            else:
+                result_ids = tuple(
+                    result.id
+                    for call in call_parts
+                    if (result := result_by_protocol_id.get(call.tool_call_id)) is not None
+                )
+            for result_id in result_ids:
+                result_message = next(
+                    (
+                        item
+                        for item in messages
+                        if isinstance(item, ExecutionMessage) and item.id == result_id
+                    ),
+                    None,
+                )
+                if result_message is None or result_message.id in consumed_results:
+                    continue
+                ordered.append(result_message)
+                consumed_results.add(result_message.id)
+        return tuple(ordered)
 
     async def list_context_summaries(
         self, session_id: str, owner_id: str, run_id: str
@@ -2102,49 +2775,83 @@ class SqlAlchemyRunRepository:
             raise RunStateError("run_tool_result_message_invalid")
 
     @staticmethod
-    async def _has_executing_tool_calls(session: AsyncSession, run_id: str) -> bool:
+    async def _has_unsettled_tool_calls(session: AsyncSession, run_id: str) -> bool:
         return bool(
             await session.scalar(
                 select(RunToolCallModel.id)
                 .where(
                     RunToolCallModel.run_id == run_id,
-                    RunToolCallModel.status == ToolCallStatus.EXECUTING.value,
+                    RunToolCallModel.status.in_(
+                        (
+                            ToolCallStatus.PENDING_APPROVAL.value,
+                            ToolCallStatus.APPROVED.value,
+                            ToolCallStatus.EXECUTING.value,
+                        )
+                    ),
                 )
                 .limit(1)
             )
         )
 
-    async def _settle_executing_tool_calls(
+    async def _settle_unfinished_tool_calls(
         self,
         session: AsyncSession,
         locked_session: SessionModel,
         run: RunModel,
         settled_at: datetime,
+        *,
+        records: list[RunToolCallModel] | None = None,
     ) -> None:
-        """Add unknown results for every unfinished call in the same transaction."""
-        records = list(
-            (
-                await session.scalars(
-                    select(RunToolCallModel)
-                    .where(
-                        RunToolCallModel.run_id == run.id,
-                        RunToolCallModel.status == ToolCallStatus.EXECUTING.value,
+        """Cancel undispatched and mark already-started calls unknown."""
+        if records is None:
+            records = list(
+                (
+                    await session.scalars(
+                        select(RunToolCallModel)
+                        .where(
+                            RunToolCallModel.run_id == run.id,
+                            RunToolCallModel.status.in_(
+                                (
+                                    ToolCallStatus.PENDING_APPROVAL.value,
+                                    ToolCallStatus.APPROVED.value,
+                                    ToolCallStatus.EXECUTING.value,
+                                )
+                            ),
+                        )
+                        .order_by(RunToolCallModel.ordinal)
+                        .with_for_update()
                     )
-                    .order_by(RunToolCallModel.ordinal)
-                    .with_for_update()
-                )
-            ).all()
-        )
+                ).all()
+            )
         for record in records:
+            if record.status not in {
+                ToolCallStatus.PENDING_APPROVAL.value,
+                ToolCallStatus.APPROVED.value,
+                ToolCallStatus.EXECUTING.value,
+            }:
+                continue
             call_message = await session.get(ExecutionMessageModel, record.call_message_id)
             if call_message is None:
                 raise RuntimeError("run_tool_call_message_missing")
-            if record.result_message_id is None:
-                outcome = ToolOutcome(
-                    status=ToolOutcomeStatus.UNKNOWN,
-                    code="tool_outcome_unknown",
-                    message="工具执行结果无法确认。",
+            if record.status == ToolCallStatus.EXECUTING.value:
+                outcome = (
+                    ToolOutcome.model_validate(record.outcome)
+                    if record.outcome is not None
+                    else ToolOutcome(
+                        status=ToolOutcomeStatus.UNKNOWN,
+                        code="tool_outcome_unknown",
+                        message="工具执行结果无法确认。",
+                    )
                 )
+                persisted_status = persisted_status_for_outcome(outcome)
+            else:
+                outcome = ToolOutcome(
+                    status=ToolOutcomeStatus.CANCELLED,
+                    code="tool_not_executed",
+                    message="该工具调用未执行。",
+                )
+                persisted_status = ToolCallStatus.CANCELLED
+            if record.result_message_id is None:
                 result_message_id = new_id("exec")
                 result_draft = ExecutionMessageDraft(
                     id=result_message_id,
@@ -2173,17 +2880,20 @@ class SqlAlchemyRunRepository:
                 )
                 record.result_message_id = result_message_id
                 record.outcome = outcome.model_dump(mode="json")
-            record.status = ToolCallStatus.UNKNOWN.value
+            record.status = persisted_status.value
             record.finished_at = settled_at
-            record.safe_error_code = "tool_outcome_unknown"
+            record.safe_error_code = (
+                outcome.code if outcome.status is not ToolOutcomeStatus.OK else None
+            )
             await self._append_event(
                 session,
                 run,
                 RunToolCallFinishedPayload(
                     call_id=record.id,
                     ordinal=record.ordinal,
-                    status=ToolCallStatus.UNKNOWN,
+                    status=persisted_status,
                     round=record.round,
+                    safe_error_code=record.safe_error_code,
                 ),
                 settled_at,
             )
@@ -2197,7 +2907,7 @@ class SqlAlchemyRunRepository:
         failed_at: datetime,
     ) -> None:
         """Converge unfinished calls before committing the failed terminal state."""
-        await self._settle_executing_tool_calls(
+        await self._settle_unfinished_tool_calls(
             session,
             locked_session,
             run,

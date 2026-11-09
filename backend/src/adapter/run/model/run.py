@@ -32,8 +32,8 @@ class RunModel(Base):
     __tablename__ = "runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'running', 'waiting_for_input', 'cancelling', "
-            "'completed', 'failed', 'cancelled')",
+            "status IN ('queued', 'running', 'waiting_for_input', "
+            "'waiting_for_approval', 'cancelling', 'completed', 'failed', 'cancelled')",
             name="ck_runs_status",
         ),
         CheckConstraint("context_cutoff_sequence >= 0", name="ck_runs_context_cutoff"),
@@ -81,9 +81,13 @@ class RunModel(Base):
             "session_id",
             unique=True,
             postgresql_where=text(
-                "status IN ('queued', 'running', 'waiting_for_input', 'cancelling')"
+                "status IN ('queued', 'running', 'waiting_for_input', "
+                "'waiting_for_approval', 'cancelling')"
             ),
-            sqlite_where=text("status IN ('queued', 'running', 'waiting_for_input', 'cancelling')"),
+            sqlite_where=text(
+                "status IN ('queued', 'running', 'waiting_for_input', "
+                "'waiting_for_approval', 'cancelling')"
+            ),
         ),
         Index("ix_runs_claim", "status", "queued_at", "id"),
         Index("ix_runs_lease", "status", "lease_expires_at"),

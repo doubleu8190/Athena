@@ -147,6 +147,13 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             assert not hasattr(before_alpha, "config")
             assert not hasattr(before_alpha, "secrets")
             assert before_alpha.model_name.startswith("mcp__")
+            assert before_alpha.requires_approval is False
+            updated_alpha = await repository.set_requires_approval(
+                actor, before_alpha.tool_id, True
+            )
+            assert updated_alpha.requires_approval is True
+            with pytest.raises(McpServerNotFoundError):
+                await repository.set_requires_approval(actor, "tool_missing", True)
             public_tools = await repository.list_public(offset=0, limit=10)
             assert not hasattr(public_tools.items[0], "server_id")
             assert not hasattr(public_tools.items[0], "remote_name")
@@ -157,7 +164,7 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             assert (await repository.get_public_tool(before_alpha.tool_id)) == next(
                 tool for tool in public_tools.items if tool.tool_id == before_alpha.tool_id
             )
-            assert (await repository.get_admin_tool(before_alpha.tool_id)) == before_alpha
+            assert (await repository.get_admin_tool(before_alpha.tool_id)) == updated_alpha
 
             async with session_factory() as session:
                 async with session.begin():
@@ -200,8 +207,10 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
                 before_alpha.model_name,
             )
             assert after_alpha.description == "Changed"
+            assert after_alpha.requires_approval is True
             assert after_beta.tool_id.startswith("tool_")
             assert after_beta.model_name == f"mcp__{after_beta.tool_id.removeprefix('tool_')}"
+            assert after_beta.requires_approval is False
             assert all(tool.remote_name != "gamma" for tool in after_tools.items)
 
             with pytest.raises(McpConfigVersionConflictError, match="mcp_config_version_conflict"):

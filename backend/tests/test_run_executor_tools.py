@@ -50,6 +50,8 @@ from domain.run.ports import RunRepository
 from domain.session.model import Session
 from domain.tool import (
     AuthorizedRunContext,
+    BeginToolCallBatchCommand,
+    BeginToolCallBatchResult,
     BeginToolCallCommand,
     BeginToolCallResult,
     BuiltinToolSource,
@@ -57,10 +59,14 @@ from domain.tool import (
     McpToolSource,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
+    RunToolBatch,
+    RunToolBatchCall,
     RunToolCallRecord,
     RunToolRuntime,
+    ToolApprovalDecision,
     ToolCallStatus,
     ToolExecutionResult,
+    ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
 )
@@ -69,7 +75,7 @@ from infrastructure.mcp.execution import McpToolCallClient
 NOW = datetime.now(UTC)
 
 
-def _runtime_profile() -> RuntimeModelProfile:
+def _runtime_profile(*, supports_parallel_tool_calls: bool = False) -> RuntimeModelProfile:
     return RuntimeModelProfile(
         version=ModelProfileVersion(
             id="profile-tools",
@@ -89,6 +95,7 @@ def _runtime_profile() -> RuntimeModelProfile:
             temperature=None,
             enabled=True,
             created_at=NOW,
+            supports_parallel_tool_calls=supports_parallel_tool_calls,
         ),
         api_key="test-secret",
     )
@@ -106,6 +113,22 @@ def _definition() -> RuntimeToolDefinition:
             "additionalProperties": False,
         },
         source=BuiltinToolSource(version=1),
+    )
+
+
+def _named_definition(model_name: str, *, requires_approval: bool = False) -> RuntimeToolDefinition:
+    return RuntimeToolDefinition(
+        tool_id=f"builtin_{model_name}",
+        model_name=model_name,
+        description=f"{model_name} tool",
+        input_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        source=BuiltinToolSource(version=1),
+        requires_approval=requires_approval,
     )
 
 
@@ -204,9 +227,13 @@ class _Repository:
     def __init__(self, run: Run) -> None:
         self.run = run
         self.begin_tool_calls = 0
+        self.records: dict[str, RunToolCallRecord] = {}
+        self.batches: dict[str, RunToolBatch] = {}
         self.finish_tool_calls = 0
+        self.finish_order: list[int] = []
         self.normal_finishes = 0
         self.failures: list[str] = []
+        self.converge_calls: list[Any] = []
 
     async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
         return True
@@ -247,13 +274,178 @@ class _Repository:
         )
         return BeginToolCallResult(record, True)
 
+    async def begin_tool_call_batch(
+        self, command: BeginToolCallBatchCommand
+    ) -> BeginToolCallBatchResult:
+        self.begin_tool_calls += 1
+        self.last_batch_command = command
+        call_parts = [
+            part for part in command.call_message.parts if isinstance(part, ToolCallPart)
+        ]
+        records: list[RunToolCallRecord] = []
+        pending = False
+        for ordinal, (item, _part) in enumerate(
+            zip(command.calls, call_parts, strict=False), start=1
+        ):
+            outcome = item.immediate_outcome
+            status = (
+                ToolCallStatus.PENDING_APPROVAL
+                if item.requires_approval and outcome is None
+                else ToolCallStatus.APPROVED
+            )
+            result_id = None
+            if outcome is not None:
+                from domain.tool import persisted_status_for_outcome
+
+                status = persisted_status_for_outcome(outcome)
+                result_id = item.result_message.id if item.result_message is not None else None
+                self.finish_tool_calls += 1
+                if item.result_message is not None:
+                    self.last_finish_command = FinishToolCallCommand(
+                        run_id=command.run_id,
+                        worker_id=command.worker_id,
+                        execution_epoch=command.execution_epoch,
+                        record_id=item.record_id,
+                        result_message=item.result_message,
+                        outcome=outcome,
+                        finished_at=command.requested_at,
+                    )
+            pending = pending or status is ToolCallStatus.PENDING_APPROVAL
+            record = RunToolCallRecord(
+                id=item.record_id,
+                run_id=command.run_id,
+                session_id=command.call_message.session_id,
+                tool_call_id=item.tool_call_id,
+                ordinal=ordinal,
+                tool_id=item.tool_id,
+                tool_kind=item.tool_kind,
+                model_name=item.model_name,
+                execution_epoch=command.execution_epoch,
+                status=status,
+                call_message_id=command.call_message.id,
+                result_message_id=result_id,
+                started_at=None,
+                finished_at=None,
+                safe_error_code=None if outcome is None else outcome.code,
+                outcome=outcome,
+                requires_approval=item.requires_approval,
+                requested_at=command.requested_at,
+            )
+            self.records[record.id] = record
+            records.append(record)
+            self.last_begin_command = type(
+                "BeginView",
+                (),
+                {
+                    "call_message": command.call_message,
+                    "tool_id": item.tool_id,
+                    "tool_kind": item.tool_kind,
+                    "tool_call_id": item.tool_call_id,
+                },
+            )()
+        if pending:
+            self.run = replace(self.run, status=RunStatus.WAITING_FOR_APPROVAL)
+        batch = RunToolBatch(
+            call_message_id=command.call_message.id,
+            thread_id=command.call_message.thread_id,
+            round=command.round,
+            calls=tuple(
+                RunToolBatchCall(
+                    record=record,
+                    arguments=dict(
+                        next(
+                            part.arguments
+                            for part in call_parts
+                            if part.tool_call_id == record.tool_call_id
+                        )
+                    ),
+                )
+                for record in records
+            ),
+        )
+        self.batches[batch.call_message_id] = batch
+        return BeginToolCallBatchResult(batch, pending)
+
+    async def get_resumable_tool_batch(self, run_id: str) -> RunToolBatch | None:
+        del run_id
+        for message_id, batch in self.batches.items():
+            refreshed = replace(
+                batch,
+                calls=tuple(
+                    replace(call, record=self.records[call.record.id])
+                    for call in batch.calls
+                ),
+            )
+            self.batches[message_id] = refreshed
+            if any(call.record.status is ToolCallStatus.APPROVED for call in refreshed.calls):
+                return refreshed
+        return None
+
+    async def admit_tool_call(self, command: Any) -> RunToolCallRecord:
+        record = self.records[command.record_id]
+        updated = replace(
+            record,
+            status=ToolCallStatus.EXECUTING,
+            execution_epoch=command.execution_epoch,
+            started_at=command.admitted_at,
+        )
+        self.records[record.id] = updated
+        self.batches = {
+            message_id: replace(
+                batch,
+                calls=tuple(
+                    replace(call, record=updated)
+                    if call.record.id == updated.id
+                    else call
+                    for call in batch.calls
+                ),
+            )
+            for message_id, batch in self.batches.items()
+        }
+        return updated
+
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run:
         self.finish_tool_calls += 1
         self.last_finish_command = command
+        record = self.records[command.record_id]
+        self.finish_order.append(record.ordinal)
+        updated = replace(
+            record,
+            status=(
+                ToolCallStatus.UNKNOWN
+                if command.outcome.status is ToolOutcomeStatus.UNKNOWN
+                else (
+                    ToolCallStatus.COMPLETED
+                    if command.outcome.status is ToolOutcomeStatus.OK
+                    else ToolCallStatus.FAILED
+                )
+            ),
+            result_message_id=command.result_message.id,
+            finished_at=command.finished_at,
+            outcome=command.outcome,
+            safe_error_code=(
+                None
+                if command.outcome.status is ToolOutcomeStatus.OK
+                else command.outcome.code
+            ),
+        )
+        self.records[record.id] = updated
+        self.batches = {
+            message_id: replace(
+                batch,
+                calls=tuple(
+                    replace(call, record=updated)
+                    if call.record.id == updated.id
+                    else call
+                    for call in batch.calls
+                ),
+            )
+            for message_id, batch in self.batches.items()
+        }
         if (
             command.outcome.status is ToolOutcomeStatus.UNKNOWN
             or command.terminate_error_code is not None
-        ):
+        ) and not command.defer_terminal_convergence:
             self.run = replace(
                 self.run,
                 status=RunStatus.FAILED,
@@ -263,6 +455,15 @@ class _Repository:
                     else command.terminate_error_code
                 ),
             )
+        return self.run
+
+    async def converge_tool_batch(self, command: Any) -> Run:
+        self.converge_calls.append(command)
+        self.run = replace(
+            self.run,
+            status=RunStatus.FAILED,
+            safe_error_code=command.safe_error_code,
+        )
         return self.run
 
     async def finish(self, command: object) -> Run:
@@ -277,8 +478,13 @@ class _Repository:
 
 
 class _Profiles:
+    def __init__(self, *, supports_parallel_tool_calls: bool = False) -> None:
+        self._supports_parallel_tool_calls = supports_parallel_tool_calls
+
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
-        return _runtime_profile()
+        return _runtime_profile(
+            supports_parallel_tool_calls=self._supports_parallel_tool_calls
+        )
 
 
 class _DeliveryAuth:
@@ -463,6 +669,109 @@ def _response(*, call: LlmToolCall | None = None, text: str = "") -> LlmResponse
         request_id=None,
         usage=LlmUsage(1, 1, 2),
     )
+
+
+def _multi_response(*calls: LlmToolCall, text: str = "") -> LlmResponse:
+    output: tuple[LlmText | LlmToolCall, ...] = ((LlmText(text),) if text else ()) + calls
+    return LlmResponse(
+        output=output,
+        status="completed",
+        incomplete_reason=None,
+        model="tools-model",
+        response_id="resp-tools",
+        request_id=None,
+        usage=LlmUsage(1, 1, 2),
+    )
+
+
+class _ConcurrencyToolRuntime(_ToolRuntime):
+    def __init__(self, *, delay_seconds: float = 0.02) -> None:
+        super().__init__(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok")),
+            delay_seconds=delay_seconds,
+        )
+        self.active = 0
+        self.max_active = 0
+        self.started_queries: list[str] = []
+
+    async def execute(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+        context: object,
+        *,
+        deadline_seconds: float,
+        run_remaining_seconds: float,
+    ) -> ToolExecutionResult:
+        del definition, model_name, context, deadline_seconds, run_remaining_seconds
+        self.started_queries.append(str(arguments["query"]))
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(self.delay_seconds)
+            self.calls += 1
+            return self.result
+        finally:
+            self.active -= 1
+
+
+class _UnknownThenSlowToolRuntime(_ToolRuntime):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
+        )
+        self.executed_queries: list[str] = []
+
+    async def execute(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+        context: object,
+        *,
+        deadline_seconds: float,
+        run_remaining_seconds: float,
+    ) -> ToolExecutionResult:
+        del definition, model_name, context, deadline_seconds, run_remaining_seconds
+        self.calls += 1
+        self.executed_queries.append(str(arguments["query"]))
+        if arguments["query"] == "1":
+            return ToolExecutionResult(
+                ToolOutcome(
+                    status=ToolOutcomeStatus.UNKNOWN,
+                    code="tool_timeout",
+                    message="unknown",
+                )
+            )
+        await asyncio.sleep(0.05)
+        return ToolExecutionResult(
+            ToolOutcome(status=ToolOutcomeStatus.OK, code="ok")
+        )
+
+
+class _ValidatingToolRuntime(_ToolRuntime):
+    def __init__(self) -> None:
+        super().__init__(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="must_not_run"))
+        )
+        self.validate_calls = 0
+
+    def validate_call(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolOutcome | None:
+        del definition, arguments
+        self.validate_calls += 1
+        if model_name == "risky_tool":
+            return ToolOutcome(
+                status=ToolOutcomeStatus.ERROR,
+                code="tool_arguments_invalid",
+                message="schema mismatch",
+            )
+        return None
 
 
 def test_unknown_tool_result_stops_model_and_tool_loop() -> None:
@@ -972,5 +1281,345 @@ def test_oversized_tool_arguments_fail_without_creating_a_placeholder_call() -> 
         assert repository.finish_tool_calls == 0
         assert repository.failures == ["llm_tool_arguments_too_large"]
         assert repository.run.status is RunStatus.FAILED
+
+    asyncio.run(scenario())
+
+
+def test_approval_barrier_holds_safe_calls_and_resume_does_not_replay_model() -> None:
+    async def scenario() -> None:
+        safe = _named_definition("test_tool")
+        risky = _named_definition("risky_tool", requires_approval=True)
+        lease = _lease()
+        lease = replace(
+            lease,
+            run=replace(
+                lease.run,
+                tool_snapshot=RuntimeToolSnapshot(tools=(safe, risky)),
+            ),
+        )
+        repository = _Repository(lease.run)
+        tool_runtime = _ToolRuntime(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
+        )
+        provider = _ScriptedProvider(
+            [
+                _multi_response(
+                    LlmToolCall("call-safe", "test_tool", {"query": "safe"}),
+                    LlmToolCall("call-risky", "risky_tool", {"query": "risky"}),
+                ),
+                _multi_response(text="finished"),
+            ]
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(),
+        )
+
+        await executor.execute(lease)
+
+        assert len(provider.requests) == 1
+        assert tool_runtime.calls == 0
+        assert repository.begin_tool_calls == 1
+        assert repository.finish_tool_calls == 0
+        assert repository.run.status is RunStatus.WAITING_FOR_APPROVAL
+        risky_record = next(
+            record
+            for record in repository.records.values()
+            if record.tool_call_id == "call-risky"
+        )
+        safe_record = next(
+            record
+            for record in repository.records.values()
+            if record.tool_call_id == "call-safe"
+        )
+        assert risky_record.status is ToolCallStatus.PENDING_APPROVAL
+        assert safe_record.status is ToolCallStatus.APPROVED
+
+        repository.records[risky_record.id] = replace(
+            risky_record,
+            status=ToolCallStatus.APPROVED,
+            approval_decision=ToolApprovalDecision.APPROVE,
+            approval_decided_at=NOW,
+        )
+        repository.run = replace(
+            repository.run,
+            status=RunStatus.RUNNING,
+            execution_epoch=2,
+            worker_id="worker-resume",
+            lease_expires_at=NOW + timedelta(minutes=2),
+            execution_deadline_at=NOW + timedelta(minutes=1),
+        )
+        resumed_lease = RunLease(
+            repository.run,
+            NOW + timedelta(minutes=2),
+            NOW + timedelta(minutes=1),
+        )
+
+        await executor.execute(resumed_lease)
+
+        assert len(provider.requests) == 2
+        assert tool_runtime.calls == 2
+        assert repository.finish_tool_calls == 2
+        assert repository.finish_order == [1, 2]
+        assert repository.normal_finishes == 1
+        assert repository.run.status is RunStatus.COMPLETED
+
+    asyncio.run(scenario())
+
+
+def test_parallel_batch_respects_concurrency_limit_and_stable_dispatch_order() -> None:
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        tool_runtime = _ConcurrencyToolRuntime()
+        calls = tuple(
+            LlmToolCall(f"call-{index}", "test_tool", {"query": str(index)})
+            for index in range(1, 7)
+        )
+        provider = _ScriptedProvider(
+            [_multi_response(*calls), _multi_response(text="finished")]
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(tool_batch_limit=8, tool_concurrency=3),
+        )
+
+        await executor.execute(lease)
+
+        assert len(provider.requests) == 2
+        assert tool_runtime.started_queries == [str(index) for index in range(1, 7)]
+        assert tool_runtime.max_active == 3
+        assert repository.finish_tool_calls == 6
+        assert sorted(repository.finish_order) == [1, 2, 3, 4, 5, 6]
+        assert repository.run.status is RunStatus.COMPLETED
+
+    asyncio.run(scenario())
+
+
+def test_unknown_after_start_stops_new_dispatch_and_converges_batch() -> None:
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        tool_runtime = _UnknownThenSlowToolRuntime()
+        calls = tuple(
+            LlmToolCall(f"call-{index}", "test_tool", {"query": str(index)})
+            for index in range(1, 5)
+        )
+        provider = _ScriptedProvider([_multi_response(*calls)])
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(tool_batch_limit=8, tool_concurrency=2),
+        )
+
+        await executor.execute(lease)
+
+        assert len(provider.requests) == 1
+        assert 1 <= tool_runtime.calls <= 2
+        assert "3" not in tool_runtime.executed_queries
+        assert "4" not in tool_runtime.executed_queries
+        assert repository.converge_calls
+        assert repository.converge_calls[0].safe_error_code == "tool_outcome_unknown"
+        assert repository.run.status is RunStatus.FAILED
+        assert repository.run.safe_error_code == "tool_outcome_unknown"
+        assert not repository.normal_finishes
+
+    asyncio.run(scenario())
+
+
+def test_persisted_batch_with_unknown_never_starts_a_new_model_request() -> None:
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        unknown = RunToolCallRecord(
+            id="record-unknown",
+            run_id=lease.run.id,
+            session_id=lease.run.session_id,
+            tool_call_id="call-unknown",
+            ordinal=1,
+            tool_id="builtin_test_tool",
+            tool_kind=ToolKind.BUILTIN,
+            model_name="test_tool",
+            execution_epoch=1,
+            status=ToolCallStatus.UNKNOWN,
+            call_message_id="exec-persisted-batch",
+            result_message_id="exec-unknown-result",
+            started_at=NOW,
+            finished_at=NOW,
+            safe_error_code="tool_timeout",
+            outcome=ToolOutcome(
+                status=ToolOutcomeStatus.UNKNOWN,
+                code="tool_timeout",
+                message="unknown",
+            ),
+        )
+        approved = replace(
+            unknown,
+            id="record-approved",
+            tool_call_id="call-approved",
+            ordinal=2,
+            status=ToolCallStatus.APPROVED,
+            result_message_id=None,
+            started_at=None,
+            finished_at=None,
+            safe_error_code=None,
+            outcome=None,
+        )
+        repository.records[unknown.id] = unknown
+        repository.records[approved.id] = approved
+        repository.batches["exec-persisted-batch"] = RunToolBatch(
+            call_message_id="exec-persisted-batch",
+            thread_id=lease.run.id,
+            round=1,
+            calls=(
+                RunToolBatchCall(unknown, {"query": "unknown"}),
+                RunToolBatchCall(approved, {"query": "approved"}),
+            ),
+        )
+        tool_runtime = _ToolRuntime(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="must_not_run"))
+        )
+        provider = _ScriptedProvider([])
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(),
+        )
+
+        await executor.execute(lease)
+
+        assert provider.requests == []
+        assert tool_runtime.calls == 0
+        assert repository.converge_calls
+        assert repository.converge_calls[0].safe_error_code == "tool_outcome_unknown"
+        assert repository.run.status is RunStatus.FAILED
+
+    asyncio.run(scenario())
+
+
+def test_parallel_capability_disabled_and_mixed_input_fail_before_batch() -> None:
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        tool_runtime = _ToolRuntime(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
+        )
+        calls = (
+            LlmToolCall("call-1", "test_tool", {"query": "one"}),
+            LlmToolCall("call-2", "test_tool", {"query": "two"}),
+        )
+        disabled = _ScriptedProvider([_multi_response(*calls)])
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, disabled),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(),
+        )
+        await executor.execute(lease)
+        assert repository.failures == ["llm_parallel_tool_calls_unsupported"]
+        assert repository.begin_tool_calls == 0
+        assert tool_runtime.calls == 0
+
+        mixed_repository = _Repository(lease.run)
+        mixed = _ScriptedProvider(
+            [
+                _multi_response(
+                    LlmToolCall("call-1", "request_user_input", {"question": "Which?"}),
+                    LlmToolCall("call-2", "test_tool", {"query": "two"}),
+                )
+            ]
+        )
+        mixed_executor = RunExecutor(
+            cast(RunRepository, mixed_repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, mixed),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(),
+        )
+        await mixed_executor.execute(lease)
+        assert mixed_repository.failures == ["llm_tool_call_mix_unsupported"]
+        assert mixed_repository.begin_tool_calls == 0
+        assert tool_runtime.calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_tool_batch_limit_rejects_nine_calls_without_dispatch() -> None:
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        tool_runtime = _ToolRuntime(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
+        )
+        calls = tuple(
+            LlmToolCall(f"call-{index}", "test_tool", {"query": str(index)})
+            for index in range(1, 10)
+        )
+        provider = _ScriptedProvider([_multi_response(*calls)])
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(),
+        )
+
+        await executor.execute(lease)
+
+        assert repository.failures == ["llm_tool_batch_too_large"]
+        assert repository.begin_tool_calls == 0
+        assert tool_runtime.calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_invalid_arguments_for_approval_tool_do_not_create_waiting_state() -> None:
+    async def scenario() -> None:
+        risky = _named_definition("risky_tool", requires_approval=True)
+        lease = _lease()
+        lease = replace(
+            lease,
+            run=replace(
+                lease.run,
+                tool_snapshot=RuntimeToolSnapshot(tools=(risky,)),
+            ),
+        )
+        repository = _Repository(lease.run)
+        tool_runtime = _ValidatingToolRuntime()
+        provider = _ScriptedProvider(
+            [
+                _multi_response(LlmToolCall("call-risky", "risky_tool", {"query": "bad"})),
+                _multi_response(text="handled"),
+            ]
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(),
+        )
+
+        await executor.execute(lease)
+
+        assert tool_runtime.validate_calls == 1
+        assert tool_runtime.calls == 0
+        assert repository.finish_tool_calls == 1
+        assert repository.run.status is RunStatus.COMPLETED
+        assert all(
+            record.status is ToolCallStatus.FAILED
+            for record in repository.records.values()
+        )
 
     asyncio.run(scenario())

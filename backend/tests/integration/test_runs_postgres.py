@@ -1772,3 +1772,211 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
             await admin_engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None:
+    """0014 的历史 Run、工具调用、MCP 与模型配置行可无损升级到审批版本。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    async def scenario() -> None:
+        schema = f"athena_v2_approval_migration_{token_hex(8)}"
+        admin_engine = create_async_engine(database_url, poolclass=NullPool)
+        test_engine = create_async_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
+        )
+        try:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            config = Config(str(ALEMBIC_INI))
+            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+            config.attributes["connect_args"] = {
+                "server_settings": {"search_path": f"{schema},public"}
+            }
+            config.attributes["version_table_schema"] = schema
+            await asyncio.to_thread(command.upgrade, config, "20261113_0014")
+            now = datetime.now(UTC)
+            async with test_engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id,email,password_hash,status,created_at,updated_at) "
+                        "VALUES ('usr_approval_migration','migration@example.com','x',"
+                        "'active',:now,:now)"
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO sessions "
+                        "(id,owner_id,title,project_id,last_message_sequence,created_at,"
+                        "updated_at) VALUES ('ses_approval_migration','usr_approval_migration',"
+                        "NULL,NULL,1,:now,:now)"
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO conversation_messages "
+                        "(id,session_id,role,status,sequence,parts,run_id,client_message_id,"
+                        "created_at,metadata) VALUES "
+                        "('msg_approval_migration','ses_approval_migration','user',"
+                        "'completed',1,CAST(:parts AS jsonb),NULL,NULL,:now,"
+                        "CAST('{}' AS jsonb))"
+                    ),
+                    {
+                        "parts": json.dumps([{"type": "text", "text": "legacy"}]),
+                        "now": now,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO execution_messages "
+                        "(id,session_id,run_id,thread_id,sequence,role,parts,tool_call_id,"
+                        "source_message_id,created_at,metadata) VALUES "
+                        "('exec_approval_migration','ses_approval_migration',"
+                        "'run_approval_migration','thread_legacy',1,'assistant',"
+                        "CAST(:parts AS jsonb),NULL,NULL,:now,CAST('{}' AS jsonb))"
+                    ),
+                    {
+                        "parts": json.dumps(
+                            [
+                                {
+                                    "type": "tool_call",
+                                    "tool_call_id": "call_legacy",
+                                    "name": "legacy_tool",
+                                    "arguments": {"query": "legacy"},
+                                }
+                            ]
+                        ),
+                        "now": now,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO llm_model_profile_versions "
+                        "(id,name,protocol,base_url,model,credential_env,"
+                        "context_window_tokens,tokenizer_encoding,max_output_tokens,"
+                        "request_timeout_seconds,execution_timeout_seconds,max_concurrency,"
+                        "temperature,enabled,created_at) VALUES "
+                        "('llmprof_approval_migration','Legacy','chat_completions',"
+                        "'https://llm.example/v1','legacy','ATHENA_LLM_CREDENTIAL_LEGACY',"
+                        "8192,'o200k_base',512,30,60,1,NULL,true,:now)"
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO runs "
+                        "(id,session_id,owner_id,status,trigger_message_id,"
+                        "context_cutoff_sequence,model_config_version_id,"
+                        "prompt_template_version,execution_epoch,queued_at,created_at,"
+                        "updated_at) VALUES "
+                        "('run_approval_migration','ses_approval_migration',"
+                        "'usr_approval_migration','completed','msg_approval_migration',1,"
+                        "'llmprof_approval_migration','run-v2',1,:now,:now,:now)"
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO run_tool_calls "
+                        "(id,run_id,session_id,tool_call_id,ordinal,tool_id,tool_kind,"
+                        "model_name,execution_epoch,status,call_message_id,started_at,"
+                        "finished_at,safe_error_code,outcome,round) VALUES "
+                        "('toolcall_legacy','run_approval_migration',"
+                        "'ses_approval_migration','call_legacy',1,'builtin_legacy',"
+                        "'builtin','legacy_tool',1,'completed','exec_approval_migration',"
+                        ":started,:now,NULL,CAST(:outcome AS jsonb),0)"
+                    ),
+                    {
+                        "started": now - timedelta(seconds=1),
+                        "now": now,
+                        "outcome": json.dumps(
+                            {
+                                "status": "ok",
+                                "code": "tool_completed",
+                                "message": "done",
+                            }
+                        ),
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO mcp_servers "
+                        "(id,name,transport,config_json,config_version,created_at,updated_at) "
+                        "VALUES ('mcp_legacy','Legacy','stdio',CAST(:config AS jsonb),1,"
+                        ":now,:now)"
+                    ),
+                    {
+                        "config": json.dumps(
+                            {
+                                "transport": "stdio",
+                                "command": "/bin/true",
+                                "args": [],
+                            }
+                        ),
+                        "now": now,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO mcp_tools "
+                        "(id,server_id,remote_name,model_name,description,"
+                        "input_schema_json,created_at) VALUES "
+                        "('tool_legacy','mcp_legacy','remote_legacy','mcp__legacy',"
+                        "'legacy',CAST(:schema AS jsonb),:now)"
+                    ),
+                    {"schema": json.dumps({"type": "object"}), "now": now},
+                )
+            await asyncio.to_thread(command.upgrade, config, "head")
+            async with test_engine.connect() as connection:
+                tool_row = (
+                    await connection.execute(
+                        text(
+                            "SELECT status, requires_approval, requested_at = started_at "
+                            "AS requested_backfilled FROM run_tool_calls "
+                            "WHERE id = 'toolcall_legacy'"
+                        )
+                    )
+                ).one()
+                mcp_row = (
+                    await connection.execute(
+                        text(
+                            "SELECT requires_approval FROM mcp_tools "
+                            "WHERE id = 'tool_legacy'"
+                        )
+                    )
+                ).one()
+                profile_row = (
+                    await connection.execute(
+                        text(
+                            "SELECT supports_parallel_tool_calls "
+                            "FROM llm_model_profile_versions "
+                            "WHERE id = 'llmprof_approval_migration'"
+                        )
+                    )
+                ).one()
+                run_row = (
+                    await connection.execute(
+                        text(
+                            "SELECT status FROM runs WHERE id = 'run_approval_migration'"
+                        )
+                    )
+                ).one()
+            assert tool_row.status == "completed"
+            assert tool_row.requires_approval is False
+            assert tool_row.requested_backfilled is True
+            assert mcp_row.requires_approval is False
+            assert profile_row.supports_parallel_tool_calls is False
+            assert run_row.status == "completed"
+        finally:
+            await test_engine.dispose()
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            await admin_engine.dispose()
+
+    asyncio.run(scenario())

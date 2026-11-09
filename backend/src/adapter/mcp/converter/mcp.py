@@ -42,6 +42,7 @@ def tool_to_domain(row: McpToolModel) -> ToolDefinition:
         model_name=row.model_name,
         description=row.description,
         input_schema=row.input_schema_json,
+        requires_approval=row.requires_approval,
     )
 
 
@@ -64,6 +65,7 @@ def tool_to_admin(row: McpToolModel) -> AdminToolDefinition:
         input_schema=row.input_schema_json,
         server_id=row.server_id,
         remote_name=row.remote_name,
+        requires_approval=row.requires_approval,
     )
 
 

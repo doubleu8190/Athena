@@ -11,6 +11,7 @@ from adapter.run.model import RunEventModel, RunInputRequestModel, RunModel, Run
 from domain.run.model import (
     InputRequestStatus,
     Run,
+    RunApprovalResumedPayload,
     RunCancelledPayload,
     RunCancelRequestedPayload,
     RunCompletedPayload,
@@ -25,14 +26,17 @@ from domain.run.model import (
     RunResumedPayload,
     RunStartedPayload,
     RunStatus,
+    RunToolApprovalDecidedPayload,
     RunToolCallFinishedPayload,
     RunToolCallStartedPayload,
     RunUsage,
+    RunWaitingForApprovalPayload,
     RunWaitingPayload,
 )
 from domain.tool import (
     RuntimeToolSnapshot,
     RunToolCallRecord,
+    ToolApprovalDecision,
     ToolCallStatus,
     ToolKind,
     ToolOutcome,
@@ -42,7 +46,10 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[BaseModel]] = {
     "queued": RunQueuedPayload,
     "started": RunStartedPayload,
     "waiting_for_input": RunWaitingPayload,
+    "waiting_for_approval": RunWaitingForApprovalPayload,
     "resumed": RunResumedPayload,
+    "approval_resumed": RunApprovalResumedPayload,
+    "tool_approval_decided": RunToolApprovalDecidedPayload,
     "cancel_requested": RunCancelRequestedPayload,
     "completed": RunCompletedPayload,
     "failed": RunFailedPayload,
@@ -150,10 +157,20 @@ def tool_call_to_domain(row: RunToolCallModel) -> RunToolCallRecord:
         status=ToolCallStatus(row.status),
         call_message_id=row.call_message_id,
         result_message_id=row.result_message_id,
-        started_at=_as_utc(row.started_at),
+        started_at=None if row.started_at is None else _as_utc(row.started_at),
         finished_at=None if row.finished_at is None else _as_utc(row.finished_at),
         safe_error_code=row.safe_error_code,
         outcome=None if row.outcome is None else ToolOutcome.model_validate(row.outcome),
+        requires_approval=row.requires_approval,
+        requested_at=None if row.requested_at is None else _as_utc(row.requested_at),
+        approval_decided_at=(
+            None if row.approval_decided_at is None else _as_utc(row.approval_decided_at)
+        ),
+        approval_decision=(
+            None
+            if row.approval_decision is None
+            else ToolApprovalDecision(row.approval_decision)
+        ),
     )
 
 

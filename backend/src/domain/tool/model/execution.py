@@ -31,11 +31,20 @@ class ToolKind(StrEnum):
 class ToolCallStatus(StrEnum):
     """Persisted lifecycle of a model-issued tool call."""
 
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
     EXECUTING = "executing"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
     UNKNOWN = "unknown"
+
+
+class ToolApprovalDecision(StrEnum):
+    """A user's one-time decision for a persisted tool call."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
 
 
 class ToolOutcomeStatus(StrEnum):
@@ -116,10 +125,14 @@ class RunToolCallRecord:
     status: ToolCallStatus
     call_message_id: str
     result_message_id: str | None
-    started_at: datetime
+    started_at: datetime | None
     finished_at: datetime | None
     safe_error_code: str | None
     outcome: ToolOutcome | None
+    requires_approval: bool = False
+    requested_at: datetime | None = None
+    approval_decided_at: datetime | None = None
+    approval_decision: ToolApprovalDecision | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +187,7 @@ class BeginToolCallCommand:
     call_message: ExecutionMessageDraft
     started_at: datetime
     round: int = 0
+    requires_approval: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +210,111 @@ class FinishToolCallCommand:
     outcome: ToolOutcome
     finished_at: datetime
     terminate_error_code: str | None = None
+    defer_terminal_convergence: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BeginToolCallBatchItem:
+    """One call in an atomic assistant tool-message batch."""
+
+    record_id: str
+    tool_call_id: str
+    model_name: str
+    tool_id: str | None
+    tool_kind: ToolKind | None
+    requires_approval: bool
+    immediate_outcome: ToolOutcome | None = None
+    result_message: ExecutionMessageDraft | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BeginToolCallBatchCommand:
+    """Persist one assistant response and all its call records atomically."""
+
+    run_id: str
+    worker_id: str
+    execution_epoch: int
+    call_message: ExecutionMessageDraft
+    calls: tuple[BeginToolCallBatchItem, ...]
+    requested_at: datetime
+    round: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RunToolBatchCall:
+    """A persisted call paired with its frozen assistant arguments."""
+
+    record: RunToolCallRecord
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RunToolBatch:
+    """One persisted assistant tool batch in stable ordinal order."""
+
+    call_message_id: str
+    thread_id: str
+    round: int
+    calls: tuple[RunToolBatchCall, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BeginToolCallBatchResult:
+    """The committed batch and whether the Run entered approval waiting."""
+
+    batch: RunToolBatch
+    waiting_for_approval: bool
+    replayed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AdmitToolCallCommand:
+    """Atomically move one approved call into real execution."""
+
+    run_id: str
+    worker_id: str
+    execution_epoch: int
+    record_id: str
+    admitted_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ConvergeToolBatchCommand:
+    """Cancel undispatched calls and fail a Run after batch settlement."""
+
+    run_id: str
+    worker_id: str
+    execution_epoch: int
+    call_message_id: str
+    safe_error_code: str
+    failed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DecideToolApprovalCommand:
+    """User decision command with its Run-request idempotency ledger key."""
+
+    session_id: str
+    owner_id: str
+    run_id: str
+    record_id: str
+    request_id: str
+    fingerprint: str
+    decision: ToolApprovalDecision
+    decided_at: datetime
+    auth_session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingToolApproval:
+    """Safe Run-detail projection for one call awaiting a decision."""
+
+    call_id: str
+    batch_message_id: str
+    ordinal: int
+    model_name: str
+    tool_kind: ToolKind | None
+    requested_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +364,14 @@ class RunToolRuntime(Protocol):
         run_remaining_seconds: float,
     ) -> ToolExecutionResult:
         """Validate and execute one call within distinct tool and Run deadlines."""
+
+    def validate_call(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolOutcome | None:
+        """Return a safe local error before approval is requested."""
 
 
 def persisted_status_for_outcome(outcome: ToolOutcome) -> ToolCallStatus:
@@ -302,8 +429,14 @@ def bounded_outcome(
 
 __all__ = [
     "AuthorizedRunContext",
+    "AdmitToolCallCommand",
     "BeginToolCallCommand",
+    "BeginToolCallBatchCommand",
+    "BeginToolCallBatchItem",
+    "BeginToolCallBatchResult",
     "BeginToolCallResult",
+    "ConvergeToolBatchCommand",
+    "DecideToolApprovalCommand",
     "FinishToolCallCommand",
     "InitializeRunToolsCommand",
     "MAX_LLM_REQUESTS_PER_RUN",
@@ -311,10 +444,14 @@ __all__ = [
     "MAX_TOOL_CALL_ID_LENGTH",
     "MAX_TOOL_RESULT_BYTES",
     "ReserveLlmRequestCommand",
+    "PendingToolApproval",
     "RunToolCallDetails",
     "RunToolCallPage",
     "RunToolCallRecord",
+    "RunToolBatch",
+    "RunToolBatchCall",
     "RunToolRuntime",
+    "ToolApprovalDecision",
     "ToolCallStatus",
     "ToolExecutionResult",
     "ToolExecutionContext",

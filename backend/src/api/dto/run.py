@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +27,22 @@ class RunRetryRequest(BaseModel):
 
     request_id: str = Field(min_length=1, max_length=128)
     confirm_unknown: bool = False
+
+
+class RunToolApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    decision: Literal["approve", "reject"]
+
+
+class RunPendingToolApprovalResponse(BaseModel):
+    call_id: str
+    batch_message_id: str
+    ordinal: int
+    model_name: str
+    tool_kind: str | None
+    requested_at: datetime
 
 
 class RunAttemptUsageResponse(BaseModel):
@@ -79,6 +96,7 @@ class RunResponse(BaseModel):
     safe_error_code: str | None
     usage: RunUsageResponse
     pending_input: RunInputRequestResponse | None = None
+    pending_approvals: list[RunPendingToolApprovalResponse] = Field(default_factory=list)
     replayed: bool = False
     retry_warning: str | None = None
 
@@ -119,7 +137,7 @@ class RunToolCallSummaryResponse(BaseModel):
     tool_kind: str | None
     model_name: str
     status: str
-    started_at: datetime
+    started_at: datetime | None
     finished_at: datetime | None
     duration_ms: int | None
     safe_error_code: str | None
@@ -143,12 +161,14 @@ __all__ = [
     "RunEventResponse",
     "RunInputRequestResponse",
     "RunListResponse",
+    "RunPendingToolApprovalResponse",
     "RunResponse",
     "RunRetryRequest",
     "RunSubmitRequest",
     "RunToolCallDetailResponse",
     "RunToolCallListResponse",
     "RunToolCallSummaryResponse",
+    "RunToolApprovalRequest",
     "RunToolOutcomeResponse",
     "RunUsageResponse",
 ]

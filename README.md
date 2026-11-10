@@ -10,7 +10,10 @@ MCP Server 管理、安全工具目录 API，以及首期 Run 后端闭环。认
 可撤销登录会话和 HttpOnly Cookie；管理操作在应用服务及最终写事务中复核当前
 角色和会话。Run 支持提交、澄清恢复、取消、失败重试、独立 Worker 执行和 SSE
 临时增量；已接入管理员 MCP 工具与只读的 `memory_search`、`knowledge_search`，
-前端页面尚未实现。
+生产前端阶段 1–5 已完成实现与独立评审验收：真实认证与项目/Session 目录、
+对话侧栏项目树、新对话草稿、项目中心四 Tab、会话消息、Run/SSE、停止、
+补充输入、工具审批、失败重试和执行轨迹，以及知识库目录/文档/版本/来源/检索、
+项目知识库关联和模型/MCP/工具管理控制台均已接入。
 
 项目管理支持：
 
@@ -170,6 +173,36 @@ UPDATE projects SET owner_id = '<实际-owner-id>' WHERE id = '<project-id>';
 SELECT count(*) FROM projects WHERE owner_id IS NULL;
 ```
 
+## 前端开发
+
+生产前端位于 `frontend/`，阶段 1–5 已完成实现与独立评审验收。它已接入真实
+项目与 Session 目录、项目树展开、新对话项目管理、
+项目中心四 Tab、Session 分页/改名/删除、`/chat/:sessionId` 的消息历史、
+Run 提交、SSE 运行态、停止、补充输入、工具审批、失败重试和执行轨迹，以及
+知识库、项目知识库关联和管理控制台。新草稿只在首次发送时创建 Session；
+知识库和管理页面不再显示占位空态，也不展示原型中的示例数据。
+
+```sh
+cd frontend
+npm install
+npm run dev
+```
+
+Vite 默认运行在 `http://localhost:5173`，并将 `/api` 代理到
+`http://127.0.0.1:8000`。开发时请通过 Vite 地址访问，以保持 Cookie 与
+写请求同源校验；生产同源托管方案尚未确定。
+
+类型检查、测试和构建：
+
+```sh
+cd frontend
+npm run typecheck
+npm run test
+npm run build
+```
+
+认证、路由、数据缓存和阶段边界见 [`frontend/README.md`](frontend/README.md)。
+
 ## 认证 API
 
 | 方法 | 路径 | 说明 |
@@ -241,8 +274,9 @@ PATCH 使用显式字段判断更新意图，因此 `{"title": null}` 会清空�
 向前翻页。接口只返回 conversation messages，不返回 execution messages；
 Session 不存在、已删除或不属于当前登录用户时统一返回 `404`。
 
-Session 创建后可继续使用该接口读取 conversation messages；当前仍没有消息
-发送 HTTP 接口。
+Session 创建后可继续使用该接口读取 conversation messages；用户消息通过
+`POST /api/v1/sessions/{session_id}/runs` 随 Run 提交写入，当前仍没有独立的
+通用消息写入 HTTP 接口。
 
 ## MCP 管理与工具目录 API
 
@@ -285,8 +319,9 @@ cd backend
 到仓库或日志。`ATHENA_MCP_ALLOWED_PRIVATE_HOSTS` 是逗号分隔的精确主机白名单，
 默认空集并拒绝私网连接。`ATHENA_MCP_STDIO_BASE_ENV_NAMES` 列出可从宿主环境
 复制到 stdio 子进程的变量名，默认空集；每个 Server 的环境秘密单独配置，进程
-不会继承完整宿主环境。HTTP 只允许 HTTPS、固定 DNS 解析地址并阻断重定向；发现
-受总时限、响应大小、页数和工具数限制。
+不会继承完整宿主环境。API 与 Run Worker（含工具执行）使用同一套严格解析：
+空项、非法主机或非法环境变量名都会导致进程启动失败。HTTP 只允许 HTTPS、固定
+DNS 解析地址并阻断重定向；发现受总时限、响应大小、页数和工具数限制。
 
 模型业务调用不通过公开的通用 `tools/call` 路由，而是由 Run 按冻结目录执行；
 每次调用独立建立并关闭 HTTP/stdio MCP 连接，SDK 自动重试关闭。MCP 健康探测和
@@ -405,7 +440,7 @@ export ATHENA_TEST_DATABASE_URL='postgresql+asyncpg://user:password@127.0.0.1:54
 
 Run 是 Session 中一次任务的持久化执行。迁移至当前 Alembic head 后，API 负责
 提交任务、澄清回答、取消、重试及 SSE；独立 Worker 领取 PostgreSQL 队列并调用
-Chat Completions。`run-v1` 保持原澄清流程，新 Run 与 retry 使用 `run-v2`，
+Chat Completions。新 Run 与 retry 固定使用 `run-v2`，
 每轮可接受 1–8 个业务工具调用并形成同一批次；同一 Run 最多 4 个调用实际并发，
 结果按调用序号稳定交回模型。批次中任一调用需要管理员配置的运行期审批时，整批
 暂停且免审批调用也不会提前执行；用户逐个批准或拒绝，最后一个决定原子地把 Run
@@ -452,8 +487,9 @@ export ATHENA_LLM_CREDENTIAL_DEFAULT='从 secret manager 注入的密钥'
 两种编码，最多等待 45 秒；部署时应预置可写 tokenizer cache，或允许首次启动下载
 资源。预热失败或超时会拒绝启动 Worker。运行中上下文转换和 token 计数使用最多
 4 个 daemon 工作线程，容量满时异步排队且等待计入 Run deadline。超时不会强杀正在
-运行的线程；其工作槽位在实际退出后释放，超时 Run 不会继续调用模型。原 `run-v1`
-提示模板保持不变，新提交和 retry 固定使用 `run-v2`；
+运行的线程；其工作槽位在实际退出后释放，超时 Run 不会继续调用模型。当前只支持
+`run-v2`；历史 `run-v1` Run 执行时会以 `run_prompt_template_unsupported` 安全
+失败；新提交和 retry 固定使用 `run-v2`；
 上下文预算会计入系统提示、消息协议、工具调用 schema 和预留输出 token，超限
 时明确失败，不静默截断。创建后通过 `PUT /api/v1/admin/llm/model-profiles/default`
 设置 `{ "profile_id": "<返回的版本 ID>" }`。禁用版本会阻止后续调用；密钥轮换后

@@ -24,7 +24,7 @@ MinIO/PostgreSQL 联调已完成；实际数据清理/切换和生产部署尚�
 | `backend/src/adapter/knowledge/repository.py` | 文档删除已登记 cleanup 并返回空列表；引用快照含来源/预留，单键检查仅含来源 | 复用删除任务；补齐单键检查的上传预留引用。 |
 | `backend/src/app/knowledge/worker.py` | 已有 cleanup、预留回收、每 100 次 run_once 扫描、解析重试 | 保留调度，按存储异常分类；孤儿按候选逐项复核引用。 |
 | `backend/src/main.py` | 上传准入同时检查暂存目录与本地原件目录空间 | 移除原件路径参数和磁盘检查，保留暂存空间、请求体限制和上传槽位。 |
-| `backend/src/app/tool/dependencies.py` | API/Run Worker 查询服务共享组装，类型指向本地实现 | 改为端口类型，统一配置和资源生命周期。 |
+| `backend/src/bootstrap/tool.py` | API/Run Worker 共享查询服务组装，类型指向本地实现 | 改为端口类型，统一配置和资源生命周期。 |
 | `backend/src/knowledge_worker.py` | 独立组装本地存储和模型 | 与 API/Run Worker 使用相同 MinIO 配置构建。 |
 
 ## 3. 阶段一：配置、SDK 与存储契约
@@ -96,7 +96,7 @@ get 有界读取，至少沿用当前文件最大尺寸，并校验实际 SHA-25
 
 ## 5. 阶段三：进程接线与移除本地实现
 
-- `app/tool/dependencies.py`：bundle 的原件字段改为 OriginalStore 端口，组装新实现，并加入 start/aclose 生命周期。适配 API 和 Run Worker 共用路径。
+- `backend/src/bootstrap/tool.py`：共享查询服务组装；bundle 的原件字段改为 OriginalStore 端口，组装新实现，并加入 start/aclose 生命周期。适配 API 和 Run Worker 共用路径。
 - `main.py`：移除本地实现导入及类型注解，确保启用/关闭和启动失败时的资源收尾。
 - `knowledge_worker.py`：改为同一配置构建；存储、模型、数据库部分初始化失败时也要收尾，不只覆盖消费者运行后的 finally。
 - `infrastructure/knowledge/__init__.py`：移除 LocalOriginalStore 导出；删除旧 storage.py。不保留生产本地后端。

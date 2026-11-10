@@ -30,7 +30,7 @@
 | `backend/src/adapter/knowledge/repository.py` | 当前 `delete_document` 已在事务中软删除并登记 cleanup 任务，返回空键列表；所以实际文档删除通常已走后台。引用集合包含来源记录和上传预留；任务已有租约、fencing token、失败退避。 |
 | `backend/src/app/knowledge/worker.py` | 已支持 cleanup、过期上传预留清理、孤儿扫描；文件解析通过 `get` 读取受限原件字节。过期预留清理局部只捕获 `OSError`，需适配存储异常。 |
 | `backend/src/api/knowledge.py` | API 暂存并校验上传文件后读入内存，下载返回原件字节；这次保留现有大小限制和 API 形状，不扩展为大文件流式改造。 |
-| `backend/src/app/tool/dependencies.py`、`backend/src/main.py`、`backend/src/knowledge_worker.py` | 组装及类型注解依赖 `LocalOriginalStore`；共享查询依赖还服务 Run Worker，须一并覆盖。 |
+| `backend/src/bootstrap/tool.py`、`backend/src/main.py`、`backend/src/knowledge_worker.py` | 组装及类型注解依赖 `LocalOriginalStore`；共享查询依赖还服务 Run Worker，须一并覆盖。 |
 | `backend/src/adapter/knowledge/model.py` | 来源已有 `storage_key/sha256/size_bytes`，不需要为 MinIO 增加桶名或 URL 字段。 |
 
 ## 3. 实施建议：存储与配置

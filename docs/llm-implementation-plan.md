@@ -1,6 +1,6 @@
 # LLM 模块实施方案
 
-状态：待用户确认；本文是对 `llm-design.md` 的项目落地提案，不代表代码已经实现。设计文档中已确认的供应商与协议选择继续有效，整体方案及本文具体选择需确认后实施。
+状态：原始 Responses API 提案。当前生产 Run 路径使用管理员后台配置的 Chat Completions Profile；Responses 服务仅作为调用方显式注入的低层组件保留，应用不会从环境或 Run Profile 自动构建它。
 
 ## 1. 当前项目与目标
 
@@ -19,7 +19,7 @@
 | `backend/src/domain/llm/model/`、`ports.py` | 与 SDK 无关的请求、消息、工具、结果、续接项、事件、错误和调用端口；适配器显式继承端口 |
 | `backend/src/app/llm/` | Profile 选择、能力及请求校验、工具快照、结构化结果校验和对外服务 |
 | `backend/src/adapter/llm/` | Responses 请求与响应转换、异步 SDK、流事件重组、上游异常安全映射；必要的协议模型及 converter 放在该目录 |
-| `backend/src/main.py` | 可选组装服务，注入 `app.state.llm_service`，在 lifespan 关闭自建客户端；保持无 LLM 配置时现有应用和健康检查可用 |
+| `backend/src/main.py` | 保留 `app.state.llm_service` 显式注入位；生产 Run 配置由管理员模型 Profile 和 Run Worker Chat Completions 适配器使用 |
 | `pyproject.toml` | 固定经过接口验证的 OpenAI SDK 版本；直接声明业务使用的 Pydantic 版本范围；保留现有 `jsonschema` |
 | `.env.example`、`README.md` | 配置样例、启动和联调说明，不包含实际凭据 |
 | `backend/tests/test_llm_*.py` | 领域及服务、协议转换、流和生命周期测试；真实服务测试单独标记并默认不运行 |
@@ -36,10 +36,10 @@
 
 ## 4. 配置与生命周期提案
 
-- 增加可选 `ATHENA_LLM_PROFILES`，值为部署方管理的 JSON 对象，键是 Profile 名称，值包含 `base_url`（可省略使用 SDK 默认地址）、`api_key_env`（环境变量名而非密钥）、`model`、能力声明、超时、并发及内容大小上限。模型不硬编码；空配置表示不启用 LLM。解析应拒绝未知字段、重复 Profile、非法值和缺失凭据，错误不回显配置或密钥。具体样例在实施时写入 `.env.example` / README。
+- LLM Profile 和 API Key 由管理员后台管理；API Key 以 AES-GCM 密文持久化，部署密钥仅用于加密和解密，不提供供应商配置。缺少密钥的旧模型会停用；默认模型及当前压缩策略指针清除，历史版本和 Run 快照保留，管理员需重新配置模型与压缩策略。升级后旧 Run 仍固定原压缩策略；若其模型不可用，Run 会回退到完整上下文继续执行，超出模型上下文窗口时才会失败。管理员停用当前策略模型时，策略配置和新 Run 快照保持不变，Run 会回退到完整上下文继续执行，超出模型上下文窗口时才会失败。
 - 能力明确列出 tools、stream、structured 和支持的生成参数。请求要求未声明能力则调用前失败；可选参数仅在受支持时发送。请求可设置更严格的超时/大小限制，不得突破部署上限；明确区分请求的输出 token 上限和本地字节、工具数量上限。
 - 按实际连接配置及凭据身份复用客户端；不同凭据不共用。并发配额按 Profile 独立限制，等待、调用和流消费均在受控时限内；流持有配额至关闭。明确错误与取消路径都释放配额，不在日志或对象展示中泄露秘密。
-- `create_app` 支持注入已有 LLM 服务，注入对象由调用方管理；自行创建的客户端由应用管理。组装失败时关闭已创建资源；lifespan 正常或异常退出关闭客户端与数据库，某项关闭失败不阻止其他资源释放。LLM 服务即使没有数据库也可独立组装。
+- `create_app` 保留显式注入的低层 Responses 服务，注入对象由调用方管理；生产管理员配置驱动 Run Chat Completions。应用不会从部署变量自动构建 Responses 服务。
 - 限制及默认值在代码和文档中统一定义并验证；数值属于实施提案，需在编码前定稿，不依赖请求方自行限流。SDK 的 `max_retries=0`，应用层也不重试。
 
 ## 5. 协议、流与错误

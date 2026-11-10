@@ -204,9 +204,9 @@ export function AdminModelsPage() {
                       </dd>
                     </div>
                     <div>
-                      <dt>凭据环境变量</dt>
+                      <dt>API Key 状态</dt>
                       <dd className="admin-code-value">
-                        {profile.credential_env}
+                        {profile.has_api_key ? "已配置 API Key" : "需要重新配置 API Key"}
                       </dd>
                     </div>
                     <div>
@@ -315,7 +315,9 @@ export function AdminModelsPage() {
                 className="button-primary"
                 disabled={
                   !profiles.isSuccess ||
-                  !profiles.data.items.some((profile) => profile.enabled)
+                  !profiles.data.items.some(
+                    (profile) => profile.enabled && profile.has_api_key,
+                  )
                 }
                 onClick={() => setCompressionOpen(true)}
                 type="button"
@@ -325,9 +327,11 @@ export function AdminModelsPage() {
             }
             description={
               profiles.isSuccess &&
-              !profiles.data.items.some((profile) => profile.enabled)
-                ? "当前没有已启用的模型版本，需先启用版本后才能保存策略。"
-                : "后端尚未配置上下文压缩。保存时会创建新的不可变策略版本。"
+              !profiles.data.items.some(
+                (profile) => profile.enabled && profile.has_api_key,
+              )
+                ? "当前没有同时启用且已配置 API Key 的模型版本，需先重新配置模型密钥。"
+                : "上下文压缩尚未配置或其模型密钥暂不可用。升级后需重新选择模型并保存策略；已有 Run 仍保留原策略快照。"
             }
             icon="history"
             kicker="Not configured"
@@ -350,6 +354,18 @@ export function AdminModelsPage() {
                 策略版本 {policy.data.id} · 模板{" "}
                 {policy.data.prompt_template_version ?? "未返回"}
               </p>
+              {(() => {
+                const compressionProfile = profiles.data?.items.find(
+                  (profile) =>
+                    profile.id === policy.data.compression_model_profile_id,
+                );
+                return compressionProfile &&
+                  (!compressionProfile.enabled || !compressionProfile.has_api_key) ? (
+                    <p className="admin-warning" role="status">
+                      当前策略仍会固定到新 Run；该模型未启用或缺少 API Key 时，Run 会回退到完整上下文，超出模型上下文窗口时才会失败。
+                    </p>
+                  ) : null;
+              })()}
             </div>
             <dl className="admin-policy-ratios">
               <div>
@@ -375,7 +391,9 @@ export function AdminModelsPage() {
                 className="button-quiet"
                 disabled={
                   !profiles.isSuccess ||
-                  !profiles.data.items.some((profile) => profile.enabled)
+                  !profiles.data.items.some(
+                    (profile) => profile.enabled && profile.has_api_key,
+                  )
                 }
                 onClick={() => setCompressionOpen(true)}
                 type="button"

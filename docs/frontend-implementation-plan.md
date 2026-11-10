@@ -267,12 +267,11 @@ frontend/
 状态：已完成实现与独立评审验收。
 
 - `/admin/models` 使用真实模型版本和压缩策略接口。模型版本只允许创建不可变
-  版本、启停和设默认，不提供编辑或删除；页面仅展示后端安全投影，凭据只显示
-  `credential_env`。默认入口仅对 `enabled && supports_stream &&
+  版本、启停和设默认，不提供编辑或删除；页面仅展示后端安全投影，只显示 API Key
+  配置状态。默认入口仅对 `enabled && supports_stream &&
   supports_tools` 的版本开放；停用当前默认版本需要二次确认，并明确后端不会
   自动切换、新 Run 可能失败。
-- 模型创建表单校验 HTTPS `base_url`、上下文/输出关系、并行工具调用依赖、
-  `credential_env` 前缀和环境变量名，并映射 403/409/422。压缩策略要求
+- 模型创建表单校验 HTTPS `base_url`、API Key、上下文/输出关系和并行工具调用依赖，并映射 403/409/422。压缩策略要求
   `0 < 比例 < 1`、`recent_ratio + summary_ratio < 1`，压缩模型必须已启用；
   没有后端关闭开关，未配置时显示真实空态。
 - `/admin/mcp` 使用真实分页和 `total`，展示 transport、配置、

@@ -1,8 +1,9 @@
 export const MODEL_PROFILE_NAME_MAX_LENGTH = 120;
 export const MODEL_BASE_URL_MAX_LENGTH = 2_048;
 export const MODEL_NAME_MAX_LENGTH = 200;
-export const CREDENTIAL_ENV_MAX_LENGTH = 128;
-export const TOKEN_LIMIT_MAX = 1_000_000;
+export const API_KEY_MAX_LENGTH = 16_384;
+export const CONTEXT_WINDOW_TOKEN_LIMIT_MAX = 1_048_576;
+export const OUTPUT_TOKEN_LIMIT_MAX = 1_000_000;
 export const TIMEOUT_SECONDS_MAX = 3_600;
 export const MAX_CONCURRENCY = 128;
 export const MCP_SERVER_NAME_MAX_LENGTH = 120;
@@ -22,7 +23,7 @@ export interface ModelProfile {
   protocol: string;
   base_url: string;
   model: string;
-  credential_env: string;
+  has_api_key: boolean;
   context_window_tokens: number;
   tokenizer_encoding: TokenizerEncoding;
   supports_stream: boolean;
@@ -46,7 +47,7 @@ export interface ModelProfileCreateInput {
   name: string;
   base_url: string;
   model: string;
-  credential_env: string;
+  api_key: string;
   context_window_tokens: number;
   tokenizer_encoding: TokenizerEncoding;
   supports_stream: boolean;
@@ -160,7 +161,7 @@ export interface ModelProfileFormValues {
   name: string;
   base_url: string;
   model: string;
-  credential_env: string;
+  api_key: string;
   context_window_tokens: string;
   tokenizer_encoding: TokenizerEncoding;
   supports_stream: boolean;
@@ -294,7 +295,7 @@ export function validateModelProfileForm(
   const name = values.name.trim();
   const baseUrl = values.base_url.trim();
   const model = values.model.trim();
-  const credentialEnv = values.credential_env.trim();
+  const apiKey = values.api_key.trim();
   const contextTokens = parseInteger(values.context_window_tokens);
   const maxOutputTokens = parseInteger(values.max_output_tokens);
   const requestTimeout = parseInteger(
@@ -326,27 +327,24 @@ export function validateModelProfileForm(
   ) {
     errors.model = "模型标识需为 1–200 个字符。";
   }
-  if (
-    !credentialEnv ||
-    credentialEnv.length > CREDENTIAL_ENV_MAX_LENGTH ||
-    !ENV_NAME_PATTERN.test(credentialEnv) ||
-    !credentialEnv.startsWith("ATHENA_LLM_CREDENTIAL_")
-  ) {
-    errors.credential_env =
-      "必须是以 ATHENA_LLM_CREDENTIAL_ 开头的合法环境变量名。";
+  const apiKeyPayloadBytes = new TextEncoder().encode(
+    JSON.stringify({ api_key: apiKey }),
+  ).length;
+  if (!apiKey || apiKey.includes("\0") || apiKeyPayloadBytes > API_KEY_MAX_LENGTH) {
+    errors.api_key = "API Key 不能为空、不能包含 NUL 字符，且加密内容不能超过 16 KiB。";
   }
   if (
     contextTokens === null ||
     contextTokens < 1 ||
-    contextTokens > TOKEN_LIMIT_MAX
+    contextTokens > CONTEXT_WINDOW_TOKEN_LIMIT_MAX
   ) {
     errors.context_window_tokens =
-      "上下文窗口需为 1–1,000,000 的整数。";
+      "上下文窗口需为 1–1,048,576 的整数。";
   }
   if (
     maxOutputTokens === null ||
     maxOutputTokens < 1 ||
-    maxOutputTokens > TOKEN_LIMIT_MAX ||
+    maxOutputTokens > OUTPUT_TOKEN_LIMIT_MAX ||
     (contextTokens !== null && maxOutputTokens > contextTokens)
   ) {
     errors.max_output_tokens =
@@ -396,7 +394,7 @@ export function validateModelProfileForm(
       name,
       base_url: baseUrl,
       model,
-      credential_env: credentialEnv,
+      api_key: apiKey,
       context_window_tokens: contextTokens as number,
       tokenizer_encoding: values.tokenizer_encoding,
       supports_stream: values.supports_stream,
@@ -615,7 +613,7 @@ export function defaultModelProfileForm(): ModelProfileFormValues {
     name: "",
     base_url: "",
     model: "",
-    credential_env: "ATHENA_LLM_CREDENTIAL_",
+    api_key: "",
     context_window_tokens: "128000",
     tokenizer_encoding: "o200k_base",
     supports_stream: true,
@@ -689,6 +687,7 @@ export function mcpServerForm(server?: McpServer): McpServerFormValues {
 export function modelCanBeDefault(profile: ModelProfile): boolean {
   return (
     profile.enabled &&
+    profile.has_api_key &&
     profile.supports_stream &&
     profile.supports_tools
   );

@@ -53,7 +53,7 @@ def runtime_profile() -> RuntimeModelProfile:
             protocol="chat_completions",
             base_url="https://llm.example/v1",
             model="test-model",
-            credential_env="ATHENA_LLM_CREDENTIAL_TEST",
+            has_api_key=True,
             context_window_tokens=8192,
             tokenizer_encoding="o200k_base",
             supports_stream=True,

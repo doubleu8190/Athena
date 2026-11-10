@@ -16,6 +16,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
+from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
 from redis.asyncio import Redis
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -146,8 +147,6 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
             factory = async_sessionmaker(engine, expire_on_commit=False)
             now = datetime.now(UTC)
             token = "run-e2e-session-token"
-            credential_env = "ATHENA_LLM_CREDENTIAL_E2E_TEST"
-            monkeypatch.setenv(credential_env, "test-only-fake-provider-credential")
             async with factory() as session, session.begin():
                 session.add(
                     UserModel(
@@ -192,7 +191,7 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                         protocol="chat_completions",
                         base_url="https://llm.example.test/v1",
                         model="fake-stream-model",
-                        credential_env=credential_env,
+                        **encrypted_llm_key_fields("llmprof_run_e2e"),
                         context_window_tokens=2048,
                         tokenizer_encoding="o200k_base",
                         supports_stream=True,
@@ -215,7 +214,7 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                         protocol="chat_completions",
                         base_url="https://llm.example.test/v1",
                         model="fake-summary-model",
-                        credential_env=credential_env,
+                        **encrypted_llm_key_fields("llmprof_compression_e2e"),
                         context_window_tokens=8192,
                         tokenizer_encoding="o200k_base",
                         supports_stream=False,
@@ -305,7 +304,7 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
             auth_service = AuthService(SqlAlchemyAuthRepository(factory), Argon2PasswordHasher())
             message_repository = SqlAlchemyMessageRepository(factory)
             run_repository = SqlAlchemyRunRepository(factory, message_repository)
-            profile_repository = SqlAlchemyModelProfileRepository(factory)
+            profile_repository = SqlAlchemyModelProfileRepository(factory, TEST_LLM_CIPHER)
             api_transport = RedisRunTransport(Redis.from_url(redis_url, decode_responses=False))
             worker_transport = RedisRunTransport(Redis.from_url(redis_url, decode_responses=False))
             original_publish = worker_transport.publish_persisted

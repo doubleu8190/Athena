@@ -17,7 +17,7 @@ from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
 from app.auth.service import AuthService
 from app.knowledge.service import KnowledgeService
-from app.llm import LlmService, ModelProfileService, parse_profiles
+from app.llm import LlmService, ModelProfileService
 from app.memory.service import MemoryService
 from app.message.service import MessageService
 from app.project.service import ProjectService
@@ -149,11 +149,7 @@ def build_api_dependencies(
         # 在创建任何数据库、Redis 或模型资源前失败，避免遗留半组装资源。
         # 同一份环境会由 build_query_services 再次解析。
         validate_knowledge_storage_configuration()
-    if llm_use_case is None:
-        llm_profiles = parse_profiles()
-        if llm_profiles:
-            llm_adapter = OpenAIResponsesAdapter(llm_profiles)
-            llm_use_case = LlmService(llm_adapter, llm_profiles)
+    # LLM 配置由管理员持久化；部署环境只提供加密主密钥，不提供模型凭据。
     secret_cipher: McpSecretCipher | None = None
     mcp_discovery: McpDiscoveryClient | None = None
     if database_url and mcp_use_case is None:
@@ -167,6 +163,12 @@ def build_api_dependencies(
             stdio_base_environment=base_environment,
             stdio_allowed_environment_names=stdio_names,
         )
+    if database_url and model_profile_use_case is None and secret_cipher is None:
+        # LLM 加密密钥未配置时仍允许非 MCP 功能启动；模型调用会安全地保持不可用。
+        try:
+            secret_cipher = McpSecretCipher.from_environment()
+        except McpSecretError:
+            secret_cipher = None
     if database_url and (
         auth_use_case is None
         or project_use_case is None
@@ -180,7 +182,9 @@ def build_api_dependencies(
     ):
         database = build_database(database_url)
         project_repository = SqlAlchemyProjectRepository(database.session_factory)
-        model_profile_repository = SqlAlchemyModelProfileRepository(database.session_factory)
+        model_profile_repository = SqlAlchemyModelProfileRepository(
+            database.session_factory, secret_cipher
+        )
         if model_profile_use_case is None:
             model_profile_use_case = ModelProfileService(
                 model_profile_repository, SqlAlchemyAuthRepository(database.session_factory)

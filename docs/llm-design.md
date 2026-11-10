@@ -1,5 +1,7 @@
 # LLM 调用模块设计
 
+> 当前生产 Run 路径采用管理员后台管理的 Chat Completions 模型配置。本文的 Responses API 设计只适用于显式注入的低层 `LlmService`；应用不会从环境变量或 Run Profile 自动创建 Responses 服务。
+
 状态：原 Responses 模块方案保持有效；Run 另使用已确认的 Chat Completions Adapter 和持久化模型版本。
 
 ## 1. 已确认选择与首版范围
@@ -239,8 +241,8 @@ SDK 版本在实施时锁定，并以该版本验证所需接口与资源关闭�
 
 ## Run 配置说明
 
-Run 模型版本通过管理员接口持久化；首期显式选择 Chat Completions 协议、流式与工具能力声明、`cl100k_base` 或 `o200k_base` tokenizer 映射；凭据仅引用以 `ATHENA_LLM_CREDENTIAL_` 开头且已注入的环境变量名。
-Responses 的 `ATHENA_LLM_PROFILES` 部署配置仍服务现有 LLM 调用，不转换为 Run 配置。
+Run 模型版本通过管理员接口持久化；首期显式选择 Chat Completions 协议、流式与工具能力声明、`cl100k_base` 或 `o200k_base` tokenizer 映射；API Key 使用部署主密钥加密保存。
+LLM Profile 和 API Key 统一由管理员后台配置；API Key 以密文持久化，部署环境只提供加密主密钥。
 
 ## 13. 官方参考
 

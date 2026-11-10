@@ -1,9 +1,11 @@
 """验证应用组装后的 HTTP 存活检查。"""
 
+import asyncio
 from typing import Any, cast
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
 import bootstrap.api as bootstrap_api
@@ -39,6 +41,24 @@ def test_llm_is_optional_without_profiles() -> None:
     with TestClient(app) as client:
         response = client.get("/health")
     assert response.status_code == 200
+
+
+def test_request_validation_errors_do_not_echo_sensitive_input() -> None:
+    """请求校验错误响应不回显管理员提交的 API Key。"""
+    request = Request({"type": "http", "method": "POST", "path": "/"})
+    error = RequestValidationError(
+        [
+            {
+                "type": "string_type",
+                "loc": ("body", "api_key"),
+                "msg": "Input should be a valid string",
+                "input": "sensitive-key-value",
+            }
+        ]
+    )
+    response = asyncio.run(main._handle_request_validation_error(request, error))
+    assert response.status_code == 422
+    assert b"sensitive-key-value" not in response.body
 
 
 def test_memory_is_disabled_by_default_and_can_be_injected(
@@ -119,6 +139,7 @@ def test_knowledge_minio_configuration_fails_before_creating_query_resources(
         raise AssertionError("query services must not be built")
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
     for name in (
         "ATHENA_KNOWLEDGE_MINIO_ENDPOINT",
@@ -173,6 +194,7 @@ def test_query_service_start_failure_closes_started_resources_and_database(
         _closables=(resource,),
     )
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr(bootstrap_api, "build_query_services", lambda *_args, **_kwargs: bundle)
 
@@ -218,6 +240,7 @@ def test_injected_knowledge_service_mounts_project_routes_without_stealing_owner
 
     knowledge = InjectedKnowledge()
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     monkeypatch.setenv("ATHENA_KNOWLEDGE_MINIO_ENDPOINT", "localhost:not-a-port")
     monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY", raising=False)
     monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_SECRET_KEY", raising=False)
@@ -260,21 +283,15 @@ def test_injected_llm_service_ignores_invalid_environment_and_keeps_ownership(
     assert not service.closed
 
 
-def test_self_built_llm_adapter_closes_on_app_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """应用自建的 LLM adapter 在 lifespan 退出时关闭。"""
-    closed: list[bool] = []
-
-    async def close(self: Any) -> None:
-        closed.append(True)
-
+def test_llm_environment_profiles_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM Profile 环境变量不会自动启用或覆盖管理员配置。"""
     monkeypatch.setenv(
         "ATHENA_LLM_PROFILES", '{"test":{"api_key_env":"TEST_KEY","model":"m","capabilities":{}}}'
     )
     monkeypatch.setenv("TEST_KEY", "fake-key")
-    monkeypatch.setattr("bootstrap.api.OpenAIResponsesAdapter.aclose", close)
     with TestClient(create_app()) as client:
         assert client.get("/health").status_code == 200
-    assert closed == [True]
+    assert client.app.state.llm_service is None
 
 
 def test_llm_close_failure_does_not_prevent_database_disposal(
@@ -296,6 +313,7 @@ def test_llm_close_failure_does_not_prevent_database_disposal(
         raise RuntimeError("safe fake")
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     monkeypatch.setenv(
         "ATHENA_LLM_PROFILES", '{"test":{"api_key_env":"TEST_KEY","model":"m","capabilities":{}}}'
     )

@@ -21,7 +21,7 @@ export function makeModelProfile(
     base_url: "https://llm.example/v1",
     context_window_tokens: 128_000,
     created_at: "2026-11-08T08:00:00Z",
-    credential_env: "ATHENA_LLM_CREDENTIAL_PRIMARY",
+    has_api_key: true,
     enabled: true,
     execution_timeout_seconds: 300,
     max_concurrency: 4,

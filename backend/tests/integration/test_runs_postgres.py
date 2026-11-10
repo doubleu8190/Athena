@@ -16,6 +16,7 @@ from typing import cast
 import pytest
 from alembic import command
 from alembic.config import Config
+from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -111,9 +112,7 @@ def _draft(
     )
 
 
-def test_run_migration_preserves_legacy_ids_and_atomic_commands(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
     """真实迁移保留历史 run_id，事务命令、幂等及事件在 PostgreSQL 正确工作。"""
     database_url = DATABASE_URL
     if database_url is None:
@@ -200,7 +199,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                         protocol="chat_completions",
                         base_url="https://llm.example/v1",
                         model="test-model",
-                        credential_env="ATHENA_LLM_CREDENTIAL_RUN_TEST",
+                        **encrypted_llm_key_fields("llmprof_run_test"),
                         context_window_tokens=8192,
                         tokenizer_encoding="o200k_base",
                         supports_stream=True,
@@ -1238,8 +1237,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
 
                     yield events()
 
-            repository_profiles = SqlAlchemyModelProfileRepository(factory)
-            monkeypatch.setenv("ATHENA_LLM_CREDENTIAL_RUN_TEST", "test-secret")
+            repository_profiles = SqlAlchemyModelProfileRepository(factory, TEST_LLM_CIPHER)
             executor = RunExecutor(repository, repository_profiles, FakeProvider())
             await executor.execute(executor_lease)
             completed = await repository.get(
@@ -1501,7 +1499,6 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
 
             async def record_retry_delay(seconds: float) -> None:
                 retry_delays.append(seconds)
-                monkeypatch.setenv("ATHENA_LLM_CREDENTIAL_RUN_TEST", "rotated-secret")
 
             await RunExecutor(
                 repository,
@@ -1512,7 +1509,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
             retried = await repository.get("ses_executor_retry", "usr_run_test", retry_run_id)
             assert retried is not None and retried.status is RunStatus.FAILED
             assert retry_provider.calls == 2
-            assert retry_provider.api_keys == ["test-secret", "rotated-secret"]
+            assert retry_provider.api_keys == ["test-secret", "test-secret"]
             assert retry_delays == [0.4]
             assert [item.attempt for item in retried.usage.attempts] == [1, 2]
 
@@ -1870,14 +1867,39 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                 )
                 await connection.execute(
                     text(
+                        "INSERT INTO llm_compression_policy_versions "
+                        "(id,compression_model_profile_id,trigger_ratio,recent_ratio,"
+                        "summary_ratio,prompt_template_version,created_at) VALUES "
+                        "('cmpol_approval_migration','llmprof_approval_migration',"
+                        "0.8,0.2,0.1,'context-summary-v1',:now)"
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO llm_default_model_profile (singleton_id,profile_id) "
+                        "VALUES (1,'llmprof_approval_migration')"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO llm_current_compression_policy "
+                        "(singleton_id,policy_version_id) VALUES "
+                        "(1,'cmpol_approval_migration')"
+                    )
+                )
+                await connection.execute(
+                    text(
                         "INSERT INTO runs "
                         "(id,session_id,owner_id,status,trigger_message_id,"
                         "context_cutoff_sequence,model_config_version_id,"
+                        "compression_policy_version_id,"
                         "prompt_template_version,execution_epoch,queued_at,created_at,"
                         "updated_at) VALUES "
                         "('run_approval_migration','ses_approval_migration',"
                         "'usr_approval_migration','completed','msg_approval_migration',1,"
-                        "'llmprof_approval_migration','run-v2',1,:now,:now,:now)"
+                        "'llmprof_approval_migration','cmpol_approval_migration',"
+                        "'run-v2',1,:now,:now,:now)"
                     ),
                     {"now": now},
                 )
@@ -1960,6 +1982,34 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                         )
                     )
                 ).one()
+                profile_state = (
+                    await connection.execute(
+                        text(
+                            "SELECT enabled, api_key_ciphertext IS NULL AS no_key "
+                            "FROM llm_model_profile_versions "
+                            "WHERE id = 'llmprof_approval_migration'"
+                        )
+                    )
+                ).one()
+                pointer_state = (
+                    await connection.execute(
+                        text(
+                            "SELECT (SELECT count(*) FROM llm_default_model_profile) "
+                            "AS defaults, (SELECT count(*) FROM llm_current_compression_policy) "
+                            "AS current_policies, (SELECT count(*) "
+                            "FROM llm_compression_policy_versions "
+                            "WHERE id = 'cmpol_approval_migration') AS history"
+                        )
+                    )
+                ).one()
+                run_snapshot = (
+                    await connection.execute(
+                        text(
+                            "SELECT model_config_version_id,compression_policy_version_id "
+                            "FROM runs WHERE id = 'run_approval_migration'"
+                        )
+                    )
+                ).one()
                 run_row = (
                     await connection.execute(
                         text(
@@ -1972,7 +2022,33 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
             assert tool_row.requested_backfilled is True
             assert mcp_row.requires_approval is False
             assert profile_row.supports_parallel_tool_calls is False
+            assert profile_state.enabled is False
+            assert profile_state.no_key is True
+            assert pointer_state.defaults == 0
+            assert pointer_state.current_policies == 0
+            assert pointer_state.history == 1
+            assert run_snapshot.model_config_version_id == "llmprof_approval_migration"
+            assert run_snapshot.compression_policy_version_id == "cmpol_approval_migration"
             assert run_row.status == "completed"
+            factory = async_sessionmaker(test_engine, expire_on_commit=False)
+            messages = SqlAlchemyMessageRepository(factory)
+            repository = SqlAlchemyRunRepository(factory, messages)
+            async with factory() as session, session.begin():
+                legacy_profile = await session.get(
+                    ModelProfileVersionModel, "llmprof_approval_migration"
+                )
+                assert legacy_profile is not None
+                legacy_profile.enabled = True
+                session.add(
+                    DefaultModelProfileModel(
+                        singleton_id=1,
+                        profile_id="llmprof_approval_migration",
+                    )
+                )
+                await session.flush()
+                with pytest.raises(RunStateError, match="llm_default_profile_unavailable"):
+                    await repository._lock_default_profile(session)
+                assert await repository._current_compression_policy_id(session) is None
         finally:
             await test_engine.dispose()
             async with admin_engine.begin() as connection:

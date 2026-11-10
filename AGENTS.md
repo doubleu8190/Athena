@@ -3,7 +3,7 @@
 ## 模型与角色
 
 Root: 当前选择模型
-Implementer: luna-implementer
+Implementer: implementer
 Reviewer: terra-reviewer
 
 ## 固定工作流
@@ -63,3 +63,4 @@ Root → Implementer → Reviewer → Root
 - Reviewer 负责独立审查。
 - 角色之间不得随意替代。
 - 改变既定架构需用户重新确认。
+- 关键步骤必须写简体中文注释，说明业务意图、状态变更或事务边界；注释只服务理解，不替代清晰代码。

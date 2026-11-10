@@ -38,9 +38,7 @@ test("模型创建表单提交真实字段并更新列表", async ({ page }) => 
   await dialog.getByLabel("版本名称").fill("端到端模型");
   await dialog.getByLabel("模型标识").fill("atlas-e2e");
   await dialog.getByLabel("HTTPS Base URL").fill("https://llm.example/v1");
-  await dialog
-    .getByLabel("凭据环境变量")
-    .fill("ATHENA_LLM_CREDENTIAL_E2E");
+  await dialog.getByLabel("API Key").fill("test-secret-key");
 
   const requestPromise = page.waitForRequest(
     (request) =>
@@ -54,7 +52,7 @@ test("模型创建表单提交真实字段并更新列表", async ({ page }) => 
   const request = await requestPromise;
   expect(request.postDataJSON()).toMatchObject({
     base_url: "https://llm.example/v1",
-    credential_env: "ATHENA_LLM_CREDENTIAL_E2E",
+    api_key: "test-secret-key",
     model: "atlas-e2e",
     name: "端到端模型",
   });

@@ -14,7 +14,7 @@ interface ModelFixture {
   base_url: string;
   context_window_tokens: number;
   created_at: string;
-  credential_env: string;
+  has_api_key: boolean;
   enabled: boolean;
   execution_timeout_seconds: number;
   id: string;
@@ -72,6 +72,7 @@ function makeModel(body: Record<string, unknown>): ModelFixture {
   return {
     ...(body as Omit<ModelFixture, "created_at" | "enabled" | "id" | "protocol">),
     created_at: NOW,
+    has_api_key: true,
     enabled: true,
     id: "model-e2e",
     protocol: "chat_completions",

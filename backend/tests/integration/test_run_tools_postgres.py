@@ -14,6 +14,7 @@ from secrets import token_hex
 import pytest
 from alembic import command
 from alembic.config import Config
+from integration.llm_fixtures import encrypted_llm_key_fields
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -151,7 +152,7 @@ async def _seed_owner_and_profile(
                 protocol="chat_completions",
                 base_url="https://llm.example.test/v1",
                 model="tool-integration-model",
-                credential_env="ATHENA_LLM_CREDENTIAL_TOOL_TEST",
+                **encrypted_llm_key_fields(profile_id),
                 context_window_tokens=8192,
                 tokenizer_encoding="o200k_base",
                 supports_stream=True,

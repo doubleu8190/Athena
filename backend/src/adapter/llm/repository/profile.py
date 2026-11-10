@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import re
 from collections.abc import Callable
 from datetime import datetime
 
@@ -27,24 +25,27 @@ from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, Run
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
     ModelProfileConflictError,
+    ModelProfileError,
     ModelProfileNotFoundError,
 )
 from domain.llm.profile_ports import ModelProfileRepository
-
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from domain.mcp import McpSecretError, McpSecretPurpose
+from infrastructure.security.mcp_secrets import McpSecretCipher
 
 
 class SqlAlchemyModelProfileRepository(ModelProfileRepository):
-    """模型版本写入时复核管理员，并在调用时解析环境凭据。"""
+    """模型版本写入时复核管理员，并在调用时解封数据库凭据。"""
 
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
+        secret_cipher: McpSecretCipher | None,
         *,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
         """保存数据库会话工厂和可替换时钟。"""
         self._session_factory = session_factory
+        self._secret_cipher = secret_cipher
         self._clock = clock
 
     async def create(self, actor: AuthContext, value: ModelProfileInput) -> ModelProfileVersion:
@@ -52,13 +53,17 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
+                if self._secret_cipher is None:
+                    raise ModelProfileError("llm_secret_key_missing")
                 row = ModelProfileVersionModel(
                     id=new_id("llmprof"),
                     name=value.name,
                     protocol="chat_completions",
                     base_url=value.base_url,
                     model=value.model,
-                    credential_env=value.credential_env,
+                    api_key_ciphertext=None,
+                    api_key_nonce=None,
+                    api_key_key_version=None,
                     context_window_tokens=value.context_window_tokens,
                     tokenizer_encoding=value.tokenizer_encoding,
                     supports_stream=value.supports_stream,
@@ -72,6 +77,15 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                     enabled=True,
                     created_at=self._clock(),
                 )
+                try:
+                    sealed = self._secret_cipher.seal(
+                        row.id, McpSecretPurpose.LLM_API_KEY, {"api_key": value.api_key}
+                    )
+                except McpSecretError:
+                    raise ModelProfileError("llm_model_credential_invalid") from None
+                row.api_key_ciphertext = sealed.ciphertext
+                row.api_key_nonce = sealed.nonce
+                row.api_key_key_version = sealed.key_version
                 session.add(row)
                 try:
                     await session.flush()
@@ -127,6 +141,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                     or not row.enabled
                     or not row.supports_stream
                     or not row.supports_tools
+                    or self._runtime(row) is None
                 ):
                     raise ModelProfileNotFoundError()
                 statement = pg_insert(DefaultModelProfileModel).values(
@@ -141,7 +156,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                 return profile_to_domain(row)
 
     async def get_default_runtime(self) -> RuntimeModelProfile | None:
-        """读取当前启用默认版本，并在调用时解析最新环境凭据。"""
+        """读取当前启用默认版本，并在调用时解封数据库凭据。"""
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(ModelProfileVersionModel)
@@ -203,7 +218,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                     )
                     .with_for_update()
                 )
-                if profile is None or not os.getenv(profile.credential_env):
+                if profile is None or self._runtime(profile) is None:
                     raise ModelProfileNotFoundError()
                 now = self._clock()
                 row = CompressionPolicyVersionModel(
@@ -235,7 +250,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                 )
 
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile | None:
-        """读取指定启用版本并解析当前环境凭据。"""
+        """读取指定启用版本并解封数据库凭据。"""
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(ModelProfileVersionModel).where(
@@ -248,7 +263,24 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
     def _runtime(self, row: ModelProfileVersionModel | None) -> RuntimeModelProfile | None:
         if row is None or not row.enabled:
             return None
-        api_key = os.getenv(row.credential_env)
+        if (
+            self._secret_cipher is None
+            or row.api_key_ciphertext is None
+            or row.api_key_nonce is None
+            or row.api_key_key_version is None
+        ):
+            return None
+        try:
+            secrets = self._secret_cipher.open(
+                row.id,
+                McpSecretPurpose.LLM_API_KEY,
+                row.api_key_ciphertext,
+                row.api_key_nonce,
+                row.api_key_key_version,
+            )
+        except McpSecretError:
+            return None
+        api_key = secrets.get("api_key")
         if not api_key:
             return None
         return RuntimeModelProfile(version=profile_to_domain(row), api_key=api_key)

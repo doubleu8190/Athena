@@ -69,6 +69,11 @@ describe("管理模型页", () => {
       id: "model-eligible",
       name: "候选模型",
     });
+    const missingKey = makeModelProfile({
+      has_api_key: false,
+      id: "model-missing-key",
+      name: "待重配模型",
+    });
     let defaultCalls = 0;
     const fetchMock = baseFetch((url, init) => {
       if (
@@ -77,7 +82,7 @@ describe("管理模型页", () => {
       ) {
         return jsonResponse({
           default_profile_id: PRIMARY.id,
-          items: [PRIMARY, eligible],
+          items: [PRIMARY, eligible, missingKey],
         });
       }
       if (
@@ -117,6 +122,13 @@ describe("管理模型页", () => {
     renderApp("/admin/models");
 
     await screen.findByText(eligible.name);
+    const missingKeyCard = screen
+      .getAllByRole("heading", { name: missingKey.name })
+      .map((heading) => heading.closest("li"))
+      .find((element) => element !== null) as HTMLElement;
+    expect(
+      within(missingKeyCard).getByRole("button", { name: "设为默认" }),
+    ).toBeDisabled();
     const eligibleCard = screen
       .getAllByRole("heading", { name: eligible.name })
       .map((heading) => heading.closest("li"))
@@ -202,7 +214,7 @@ describe("管理模型页", () => {
     expect(await screen.findByText("后端返回 3 个版本")).toBeInTheDocument();
     expect(screen.getAllByText(PRIMARY.base_url)).toHaveLength(3);
     expect(
-      screen.getAllByText(PRIMARY.credential_env),
+      screen.getAllByText("已配置 API Key"),
     ).toHaveLength(3);
     expect(screen.getByText("当前默认")).toBeInTheDocument();
     expect(
@@ -350,9 +362,7 @@ describe("管理模型页", () => {
       within(dialog).getByLabelText(/^HTTPS Base URL/),
       "http://llm.example/v1",
     );
-    const credential = within(dialog).getByLabelText(/^凭据环境变量/);
-    await user.clear(credential);
-    await user.type(credential, "OTHER_CREDENTIAL");
+    const apiKey = within(dialog).getByLabelText(/^API Key/);
     await user.click(
       within(dialog).getByRole("checkbox", { name: "支持工具调用" }),
     );
@@ -372,7 +382,7 @@ describe("管理模型页", () => {
     ).toBeInTheDocument();
     expect(
       within(dialog).getByText(
-        "必须是以 ATHENA_LLM_CREDENTIAL_ 开头的合法环境变量名。",
+        "API Key 不能为空、不能包含 NUL 字符，且加密内容不能超过 16 KiB。",
       ),
     ).toBeInTheDocument();
     expect(
@@ -387,11 +397,7 @@ describe("管理模型页", () => {
     const baseUrl = within(dialog).getByLabelText(/^HTTPS Base URL/);
     await user.clear(baseUrl);
     await user.type(baseUrl, "https://llm.example/v1");
-    await user.clear(credential);
-    await user.type(
-      credential,
-      "ATHENA_LLM_CREDENTIAL_REVIEW",
-    );
+    await user.type(apiKey, "test-key");
     await user.click(
       within(dialog).getByRole("checkbox", { name: "支持工具调用" }),
     );
@@ -433,7 +439,7 @@ describe("管理模型页", () => {
     expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({
       base_url: "https://llm.example/v1",
       context_window_tokens: 128000,
-      credential_env: "ATHENA_LLM_CREDENTIAL_REVIEW",
+      api_key: "test-key",
       model: "atlas-review",
       name: "审核模型",
       supports_parallel_tool_calls: false,

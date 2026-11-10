@@ -448,23 +448,18 @@ Run、LLM 配置及 Redis/SSE 的实现边界见下文。
 
 ## LLM 调用模块
 
-内部 `app.state.llm_service` 可执行一次 Responses API 非流式、流式或严格结构化
-调用；Run Worker 使用独立的 Chat Completions 适配器执行工具循环。部署方可用
-`ATHENA_LLM_PROFILES` JSON 对象配置 Profile；各项含 `model`、`api_key_env` 和
-`capabilities`，可选 `base_url`、超时、并发、输入/响应大小、输出 token 及工具上限。
-凭据只从 `api_key_env` 指向的环境变量读取。默认上限为请求 60 秒、流 120 秒、
-每 Profile 并发 4、输入 256 KiB、响应 1 MiB、输出 8192 tokens、32 个工具、
-单个工具参数 64 KiB。请求只能收紧这些部署限制。Profile 能力包括 `tools`、
-`stream`、`structured` 和 `temperature`；未声明的能力会在调用前拒绝。
-模型版本另有 `supports_parallel_tool_calls`（默认 `false`）：关闭时仍向供应商
-发送 `parallel_tool_calls=false` 且只接受单个工具调用，开启后接受每批 1–8 个
-调用。该能力必须同时声明 `tools`。
+生产 Run 路径使用 Chat Completions；管理员在后台配置模型版本和 API Key，密钥以
+部署主密钥加密保存，接口只返回配置状态。旧环境变量中的 Profile 和供应商密钥不再
+参与生产配置。升级时旧密钥不会迁移：相关模型版本会停用，默认模型与当前压缩策略
+指针会清除。管理员需重新录入 API Key、选择默认模型并重新保存压缩策略。历史
+Run 仍保留原模型和压缩策略快照；若后续仍需调用没有密钥的历史模型，该 Run 会失败。
+压缩策略指针仍会供新 Run 固定；若策略模型停用或密钥不可用，Run 会回退到完整
+上下文继续执行，超出模型上下文窗口时才会失败。请重新启用有效模型并保存新策略版本。
 
-未设置 `ATHENA_LLM_PROFILES` 时 LLM 不启用，应用和 `/health` 仍可正常启动。
-注入的 LLM 服务由调用方管理；应用自行构建的 SDK 客户端在 lifespan 退出时关闭。
-SDK 自动重试关闭，流式中断不会重放。真实模型兼容性尚未联调；配置真实模型、
-地址和凭据后，需分别验证普通、流式、tools、结构化及显式上下文续接。
-客户端请求未压缩响应，并拒绝服务端返回的压缩响应，以确保响应字节上限在 SDK 解码前生效。
+`app.state.llm_service` 是可显式注入的低层 Responses 服务扩展点。应用不会从环境变量
+或管理员 Run Profile 自动构建它，也没有当前生产路由调用它；注入对象由调用方管理。
+管理后台配置驱动 Run Worker 的 Chat Completions 适配器。模型版本的
+`supports_parallel_tool_calls` 默认为 `false`；开启时必须同时支持工具调用。
 
 ## 记忆核心
 
@@ -521,14 +516,6 @@ TLS 默认开启，布尔值必须明确；证书校验使用系统信任库，�
 专用桶配置其生命周期回收；完成对象超过 24 小时且无来源或预留引用时才由 worker
 清理。MinIO 暂不可用不影响文档的逻辑删除，后台任务会按策略退避重试。
 
-测试数据切换脚本默认 dry-run，只有显式 `--execute` 才在单个事务中清理知识文档
-数据并保留知识库、项目关联及其他领域数据：
-
-```sh
-.venv/bin/python backend/scripts/reset_knowledge_documents.py
-.venv/bin/python backend/scripts/reset_knowledge_documents.py --execute
-```
-
 真实 MinIO 测试使用独立的 `ATHENA_TEST_MINIO_*` 桶配置；未提供环境时测试明确
 跳过。写入过新对象后不能退回旧本地原件目录，故障时应暂停写入并修复 MinIO 配置。
 更完整的启动、权限、切换与回滚边界见
@@ -574,13 +561,9 @@ Chat Completions。新 Run 与 retry 固定使用 `run-v2`，
 
 ### 模型配置
 
-只有管理员可以创建配置版本和设置默认版本。密钥不进入 API 请求或数据库，
-配置只保存受控的环境变量名，且变量名必须以 `ATHENA_LLM_CREDENTIAL_` 开头。
-在 API 和 Worker 进程的 secret manager 中注入该变量，再使用管理员 Cookie：
-
-```sh
-export ATHENA_LLM_CREDENTIAL_DEFAULT='从 secret manager 注入的密钥'
-```
+只有管理员可以创建配置版本和设置默认版本。管理员通过后台提交 API Key，服务端
+以 AES-GCM 密文保存在数据库中，API 只返回是否已配置。API 与 Worker 部署需要
+提供用于密钥封装的 `ATHENA_MCP_SECRET_KEY` 主密钥；它不是模型配置或供应商凭据。
 
 管理员接口为 `/api/v1/admin/llm/model-profiles`。创建版本示例：
 
@@ -589,7 +572,7 @@ export ATHENA_LLM_CREDENTIAL_DEFAULT='从 secret manager 注入的密钥'
   "name": "primary",
   "base_url": "https://api.example.com/v1",
   "model": "provider-model-name",
-  "credential_env": "ATHENA_LLM_CREDENTIAL_DEFAULT",
+  "api_key": "由管理员安全提交的模型密钥",
   "context_window_tokens": 128000,
   "tokenizer_encoding": "o200k_base",
   "max_output_tokens": 4096,

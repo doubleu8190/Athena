@@ -17,13 +17,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import AuthSessionModel, UserModel
+from adapter.llm.model.profile import ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
+from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.run.repository import SqlAlchemyRunRepository
 from domain.auth import AuthContext, User, UserRole, UserStatus
+from domain.llm.model.compression_policy import CompressionPolicyInput
 from domain.llm.model.profile import ModelProfileInput
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
     ModelProfileNotFoundError,
 )
+from domain.mcp import McpSecretError, McpSecretPurpose
+from infrastructure.security.mcp_secrets import McpSecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
@@ -105,16 +111,16 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                 ),
                 session_id="auth_llm_admin",
             )
-            repository = SqlAlchemyModelProfileRepository(factory)
+            secret_cipher = McpSecretCipher(bytes(range(32)))
+            repository = SqlAlchemyModelProfileRepository(factory, secret_cipher)
             value = ModelProfileInput(
                 name="Integration model",
                 base_url="https://llm.example/v1",
                 model="test-model",
-                credential_env="ATHENA_LLM_CREDENTIAL_INTEGRATION",
+                api_key="first-secret",
                 context_window_tokens=8192,
                 max_output_tokens=512,
             )
-            monkeypatch.setenv(value.credential_env, "first-secret")
             created = await repository.create(actor, value)
             assert created.enabled is True
             assert "first-secret" not in repr(created)
@@ -122,6 +128,24 @@ def test_model_profile_migration_admin_and_runtime_credentials(
             assert await repository.get_default_id(actor) == created.id
             runtime = await repository.get_default_runtime()
             assert runtime is not None and runtime.api_key == "first-secret"
+            policy = await repository.set_compression_policy(
+                actor,
+                CompressionPolicyInput(
+                    compression_model_profile_id=created.id,
+                    trigger_ratio=0.8,
+                    recent_ratio=0.2,
+                    summary_ratio=0.1,
+                ),
+            )
+            await repository.set_enabled(actor, created.id, False)
+            assert await repository.get_current_compression_policy() == policy
+            run_repository = SqlAlchemyRunRepository(
+                factory, SqlAlchemyMessageRepository(factory)
+            )
+            async with factory() as session:
+                assert await run_repository._current_compression_policy_id(session) == policy.id
+            await repository.set_enabled(actor, created.id, True)
+            assert await repository.get_current_compression_policy() == policy
             unsupported = await repository.create(
                 actor, replace(value, name="Unsupported model", supports_tools=False)
             )
@@ -130,9 +154,41 @@ def test_model_profile_migration_admin_and_runtime_credentials(
             unsupported_runtime = await repository.get_runtime(unsupported.id)
             assert unsupported_runtime is not None
             assert unsupported_runtime.version.supports_tools is False
-            monkeypatch.setenv(value.credential_env, "rotated-secret")
+            no_key = await repository.create(
+                actor, replace(value, name="Needs reconfiguration")
+            )
+            async with factory() as session, session.begin():
+                profile = await session.get(ModelProfileVersionModel, no_key.id)
+                assert profile is not None
+                profile.api_key_ciphertext = None
+                profile.api_key_nonce = None
+                profile.api_key_key_version = None
+            with pytest.raises(ModelProfileNotFoundError):
+                await repository.set_default(actor, no_key.id)
+            assert await repository.get_default_id(actor) == created.id
             runtime = await repository.get_runtime(created.id)
-            assert runtime is not None and runtime.api_key == "rotated-secret"
+            assert runtime is not None and runtime.api_key == "first-secret"
+            llm_sealed = secret_cipher.seal(
+                created.id,
+                McpSecretPurpose.LLM_API_KEY,
+                {"api_key": "first-secret"},
+            )
+            with pytest.raises(McpSecretError):
+                secret_cipher.open(
+                    created.id,
+                    McpSecretPurpose.HTTP_HEADERS,
+                    llm_sealed.ciphertext,
+                    llm_sealed.nonce,
+                    llm_sealed.key_version,
+                )
+            other_key_repository = SqlAlchemyModelProfileRepository(
+                factory, McpSecretCipher(bytes(reversed(range(32))))
+            )
+            assert await other_key_repository.get_runtime(created.id) is None
+            other_version_repository = SqlAlchemyModelProfileRepository(
+                factory, McpSecretCipher(bytes(range(32)), key_version=2)
+            )
+            assert await other_version_repository.get_runtime(created.id) is None
             await repository.set_enabled(actor, created.id, False)
             assert await repository.get_runtime(created.id) is None
             async with factory() as session:

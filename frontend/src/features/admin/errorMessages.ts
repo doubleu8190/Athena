@@ -4,13 +4,15 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
   admin_required: "管理员权限已失效，正在重新核验账号。",
   not_authenticated: "登录状态已失效，请重新登录。",
   llm_model_profile_invalid:
-    "模型配置不符合后端约束，请检查地址、凭据引用和容量参数。",
+    "模型配置不符合后端约束，请检查地址、API Key 和容量参数。",
   llm_model_profile_conflict:
     "该模型配置与已有版本冲突，请检查名称或唯一配置字段。",
   llm_model_profile_not_found:
     "该模型版本不存在、已停用，或不再满足默认模型条件。",
   llm_model_credential_unavailable:
-    "credential_env 指向的服务端环境变量尚未配置，无法创建版本。",
+    "模型 API Key 未配置，无法创建版本。",
+  llm_model_credential_invalid:
+    "API Key 无效或超过 16 KiB 安全限制，请检查后重试。",
   llm_compression_policy_invalid:
     "上下文压缩策略不符合后端约束，请检查比例与模型状态。",
   mcp_request_invalid:

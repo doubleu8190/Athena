@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -200,6 +201,20 @@ async def _handle_os_error(request: Request, error: Exception) -> JSONResponse:
     return await _handle_database_unavailable(request, error)
 
 
+async def _handle_request_validation_error(
+    request: Request, error: Exception
+) -> JSONResponse:
+    """去除请求值，避免校验响应回显管理员提交的 API Key。"""
+    del request
+    if not isinstance(error, RequestValidationError):
+        return JSONResponse(status_code=422, content={"detail": "request_invalid"})
+    safe_errors = [
+        {key: value for key, value in item.items() if key != "input"}
+        for item in error.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
+
+
 def create_app(
     project_service: ProjectService | None = None,
     message_service: MessageService | None = None,
@@ -260,6 +275,7 @@ def create_app(
     )
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
     app.add_exception_handler(OSError, _handle_os_error)
+    app.add_exception_handler(RequestValidationError, _handle_request_validation_error)
     app.state.authenticator = deps.auth_service
     app.state.auth_cookie_name = DEFAULT_COOKIE_NAME
     app.state.public_origin = configured_public_origin or None

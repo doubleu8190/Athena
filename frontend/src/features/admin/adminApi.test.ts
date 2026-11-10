@@ -52,7 +52,7 @@ describe("管理 API 契约", () => {
     const input: ModelProfileCreateInput = {
       base_url: profile.base_url,
       context_window_tokens: profile.context_window_tokens,
-      credential_env: profile.credential_env,
+      api_key: "test-key",
       execution_timeout_seconds: profile.execution_timeout_seconds,
       max_concurrency: profile.max_concurrency,
       max_output_tokens: profile.max_output_tokens,

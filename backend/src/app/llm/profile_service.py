@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import os
-import re
+import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import cast
@@ -12,11 +11,15 @@ from urllib.parse import urlsplit
 from common.ids import now_utc
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
 from domain.llm.model.compression_policy import CompressionPolicyInput, CompressionPolicyVersion
-from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion
+from domain.llm.model.profile import (
+    MAX_CONTEXT_WINDOW_TOKENS,
+    MAX_OUTPUT_TOKENS,
+    ModelProfileInput,
+    ModelProfileVersion,
+)
 from domain.llm.model.profile_errors import ModelProfileAuthorizationError, ModelProfileError
 from domain.llm.profile_ports import CompressionPolicyRepository, ModelProfileRepository
-
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from domain.mcp import MAX_MCP_SECRET_BYTES
 
 
 class ModelProfileService:
@@ -38,8 +41,7 @@ class ModelProfileService:
         """验证配置并创建不可变版本。"""
         await self._authorize(actor)
         _validate_input(value)
-        if not os.getenv(value.credential_env):
-            raise ModelProfileError("llm_model_credential_unavailable")
+        _validate_api_key(value.api_key)
         return await self._repository.create(actor, value)
 
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
@@ -112,9 +114,7 @@ def _validate_input(value: ModelProfileInput) -> None:
         or not value.model.strip()
         or len(value.model) > 200
         or not valid_url
-        or not _ENV_NAME.fullmatch(value.credential_env)
-        or not value.credential_env.startswith("ATHENA_LLM_CREDENTIAL_")
-        or not 1 <= value.context_window_tokens <= 1_000_000
+        or not 1 <= value.context_window_tokens <= MAX_CONTEXT_WINDOW_TOKENS
         or value.tokenizer_encoding not in {"cl100k_base", "o200k_base"}
         or type(value.supports_stream) is not bool
         or type(value.supports_tools) is not bool
@@ -123,13 +123,32 @@ def _validate_input(value: ModelProfileInput) -> None:
             value.supports_parallel_tool_calls
             and not value.supports_tools
         )
-        or not 1 <= value.max_output_tokens <= value.context_window_tokens
+        or not 1 <= value.max_output_tokens <= min(
+            value.context_window_tokens, MAX_OUTPUT_TOKENS
+        )
         or not 1 <= value.request_timeout_seconds <= 3600
         or not 1 <= value.execution_timeout_seconds <= 3600
         or not 1 <= value.max_concurrency <= 128
         or (value.temperature is not None and not 0 <= value.temperature <= 2)
     ):
         raise ModelProfileError()
+
+
+def _validate_api_key(value: str) -> None:
+    """验证 API Key 可放入加密信封，避免过大或非法输入触发存储错误。"""
+    if not value.strip() or "\x00" in value:
+        raise ModelProfileError("llm_model_credential_invalid")
+    try:
+        serialized = json.dumps(
+            {"api_key": value},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except UnicodeError:
+        raise ModelProfileError("llm_model_credential_invalid") from None
+    if len(serialized) > MAX_MCP_SECRET_BYTES:
+        raise ModelProfileError("llm_model_credential_invalid")
 
 
 __all__ = ["ModelProfileService"]

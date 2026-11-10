@@ -3004,6 +3004,12 @@ class SqlAlchemyRunRepository(RunRepository):
             raise RunStateError("llm_default_profile_unavailable")
         if not profile.enabled or not profile.supports_stream or not profile.supports_tools:
             raise RunStateError("llm_default_profile_unavailable")
+        if (
+            profile.api_key_ciphertext is None
+            or profile.api_key_nonce is None
+            or profile.api_key_key_version is None
+        ):
+            raise RunStateError("llm_default_profile_unavailable")
         return profile.id
 
     @staticmethod

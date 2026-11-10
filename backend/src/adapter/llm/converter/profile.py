@@ -14,7 +14,7 @@ def profile_to_domain(row: ModelProfileVersionModel) -> ModelProfileVersion:
         protocol="chat_completions",
         base_url=row.base_url,
         model=row.model,
-        credential_env=row.credential_env,
+        has_api_key=bool(row.api_key_ciphertext),
         context_window_tokens=row.context_window_tokens,
         tokenizer_encoding=cast(Literal["cl100k_base", "o200k_base"], row.tokenizer_encoding),
         supports_stream=row.supports_stream,

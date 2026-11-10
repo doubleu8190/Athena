@@ -17,6 +17,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
+from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -312,8 +313,6 @@ def _response(
 
 async def _seed(
     factory: async_sessionmaker[AsyncSession],
-    *,
-    credential_env: str,
 ) -> tuple[str, str, str, str]:
     now = datetime.now(UTC)
     owner_id = "usr_tool_e2e"
@@ -375,7 +374,7 @@ async def _seed(
                 protocol="chat_completions",
                 base_url="https://llm.example.test/v1",
                 model="tool-integration-model",
-                credential_env=credential_env,
+                **encrypted_llm_key_fields("llmprof_tool_e2e", "test-only-credential"),
                 context_window_tokens=8192,
                 tokenizer_encoding="o200k_base",
                 supports_stream=True,
@@ -413,17 +412,12 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
 
     async def scenario(monkeypatch: pytest.MonkeyPatch) -> None:
         async with _database() as (factory, _engine, _admin, _schema):
-            credential_env = "ATHENA_LLM_CREDENTIAL_TOOL_E2E"
-            monkeypatch.setenv(credential_env, "test-only-credential")
-            owner_id, session_id, project_id, token = await _seed(
-                factory,
-                credential_env=credential_env,
-            )
+            owner_id, session_id, project_id, token = await _seed(factory)
             auth_repository = SqlAlchemyAuthRepository(factory)
             session_repository = SqlAlchemySessionRepository(factory)
             message_repository = SqlAlchemyMessageRepository(factory)
             run_repository = SqlAlchemyRunRepository(factory, message_repository)
-            profile_repository = SqlAlchemyModelProfileRepository(factory)
+            profile_repository = SqlAlchemyModelProfileRepository(factory, TEST_LLM_CIPHER)
             auth_service = AuthService(auth_repository, Argon2PasswordHasher())
             run_service = RunService(run_repository)
             app = FastAPI()

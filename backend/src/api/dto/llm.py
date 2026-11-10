@@ -6,6 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from domain.llm.model.profile import MAX_CONTEXT_WINDOW_TOKENS, MAX_OUTPUT_TOKENS
+
 
 class ModelProfileCreateRequest(BaseModel):
     """创建 Chat Completions 配置版本。"""
@@ -15,13 +17,13 @@ class ModelProfileCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     base_url: str = Field(min_length=8, max_length=2048)
     model: str = Field(min_length=1, max_length=200)
-    credential_env: str = Field(min_length=1, max_length=128)
-    context_window_tokens: int = Field(ge=1, le=1_000_000)
+    api_key: str = Field(min_length=1, max_length=16384, repr=False)
+    context_window_tokens: int = Field(ge=1, le=MAX_CONTEXT_WINDOW_TOKENS)
     tokenizer_encoding: str = Field(default="o200k_base", pattern="^(cl100k_base|o200k_base)$")
     supports_stream: bool = True
     supports_tools: bool = True
     supports_parallel_tool_calls: bool = False
-    max_output_tokens: int = Field(ge=1, le=1_000_000)
+    max_output_tokens: int = Field(ge=1, le=MAX_OUTPUT_TOKENS)
     request_timeout_seconds: int = Field(default=120, ge=1, le=3600)
     execution_timeout_seconds: int = Field(default=300, ge=1, le=3600)
     max_concurrency: int = Field(default=4, ge=1, le=128)
@@ -36,7 +38,7 @@ class ModelProfileResponse(BaseModel):
     protocol: str
     base_url: str
     model: str
-    credential_env: str
+    has_api_key: bool
     context_window_tokens: int
     tokenizer_encoding: str
     supports_stream: bool

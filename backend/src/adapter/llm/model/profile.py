@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from adapter.base import Base
@@ -38,7 +47,9 @@ class ModelProfileVersionModel(Base):
     protocol: Mapped[str] = mapped_column(String(32), nullable=False)
     base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     model: Mapped[str] = mapped_column(String(200), nullable=False)
-    credential_env: Mapped[str] = mapped_column(String(128), nullable=False)
+    api_key_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    api_key_nonce: Mapped[bytes | None] = mapped_column(LargeBinary(12), nullable=True)
+    api_key_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     context_window_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     tokenizer_encoding: Mapped[str] = mapped_column(String(32), nullable=False)
     supports_stream: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

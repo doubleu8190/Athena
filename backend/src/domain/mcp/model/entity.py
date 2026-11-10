@@ -25,6 +25,7 @@ class McpSecretPurpose(StrEnum):
 
     HTTP_HEADERS = "http_headers"
     STDIO_ENVIRONMENT = "stdio_environment"
+    LLM_API_KEY = "llm_api_key"
 
 
 @dataclass(frozen=True, slots=True)

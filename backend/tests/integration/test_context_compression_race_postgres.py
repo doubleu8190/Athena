@@ -12,6 +12,7 @@ from secrets import token_hex
 import pytest
 from alembic import command
 from alembic.config import Config
+from integration.llm_fixtures import encrypted_llm_key_fields
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -160,7 +161,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                             protocol="chat_completions",
                             base_url="https://llm.example.test/v1",
                             model="summary-model",
-                            credential_env="ATHENA_TEST_KEY",
+                            **encrypted_llm_key_fields("llmprof_compression_pg"),
                             context_window_tokens=2048,
                             tokenizer_encoding="o200k_base",
                             supports_stream=False,
@@ -179,7 +180,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                             protocol="chat_completions",
                             base_url="https://llm.example.test/v1",
                             model="main-model",
-                            credential_env="ATHENA_TEST_KEY",
+                            **encrypted_llm_key_fields("llmprof_main_pg"),
                             context_window_tokens=2048,
                             tokenizer_encoding="o200k_base",
                             supports_stream=True,

@@ -65,7 +65,7 @@ def build_run_worker_dependencies(
     secret_cipher = McpSecretCipher.from_environment()
     database = build_database(configured_url)
     bundle.database = database
-    profiles = SqlAlchemyModelProfileRepository(database.session_factory)
+    profiles = SqlAlchemyModelProfileRepository(database.session_factory, secret_cipher)
     projects_repository = SqlAlchemyProjectRepository(database.session_factory)
     messages = SqlAlchemyMessageRepository(database.session_factory)
     repository = SqlAlchemyRunRepository(database.session_factory, messages)

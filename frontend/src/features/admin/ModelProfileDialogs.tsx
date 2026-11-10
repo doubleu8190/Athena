@@ -10,7 +10,9 @@ import {
 } from "./hooks";
 import {
   compressionPolicyForm,
+  CONTEXT_WINDOW_TOKEN_LIMIT_MAX,
   defaultModelProfileForm,
+  OUTPUT_TOKEN_LIMIT_MAX,
   TOKENIZER_ENCODINGS,
   validateCompressionPolicyForm,
   validateModelProfileForm,
@@ -217,32 +219,32 @@ export function ModelProfileCreateDialog({
 
           <label
             className="workspace-field"
-            htmlFor={fieldId("credential_env")}
+            htmlFor={fieldId("api_key")}
           >
-            <span>凭据环境变量</span>
+            <span>API Key</span>
             <input
               aria-describedby={
-                errors.credential_env
-                  ? fieldId("credential_env-error")
-                  : fieldId("credential_env-help")
+                errors.api_key
+                  ? fieldId("api_key-error")
+                  : fieldId("api_key-help")
               }
-              aria-invalid={Boolean(errors.credential_env)}
+              aria-invalid={Boolean(errors.api_key)}
               autoComplete="off"
-              id={fieldId("credential_env")}
+              id={fieldId("api_key")}
               onChange={(event) =>
-                update("credential_env", event.target.value)
+                update("api_key", event.target.value)
               }
               spellCheck={false}
-              value={values.credential_env}
+              type="password"
+              value={values.api_key}
             />
-            <small id={fieldId("credential_env-help")}>
-              只保存变量名，不保存或回显凭据值。前缀必须为
-              ATHENA_LLM_CREDENTIAL_。
+            <small id={fieldId("api_key-help")}>
+              API Key 会加密保存，创建后不会再次显示。
             </small>
           </label>
           <FieldError
-            error={errors.credential_env}
-            id={fieldId("credential_env-error")}
+            error={errors.api_key}
+            id={fieldId("api_key-error")}
           />
 
           <div className="admin-form-grid">
@@ -255,7 +257,7 @@ export function ModelProfileCreateDialog({
                 aria-invalid={Boolean(errors.context_window_tokens)}
                 id={fieldId("context")}
                 inputMode="numeric"
-                max={1_000_000}
+                max={CONTEXT_WINDOW_TOKEN_LIMIT_MAX}
                 min={1}
                 onChange={(event) =>
                   update(
@@ -276,7 +278,7 @@ export function ModelProfileCreateDialog({
                 aria-invalid={Boolean(errors.max_output_tokens)}
                 id={fieldId("max-output")}
                 inputMode="numeric"
-                max={1_000_000}
+                max={OUTPUT_TOKEN_LIMIT_MAX}
                 min={1}
                 onChange={(event) =>
                   update("max_output_tokens", event.target.value)
@@ -563,7 +565,9 @@ export function CompressionPolicyDialog({
   profiles,
 }: CompressionPolicyDialogProps) {
   const formId = useId();
-  const enabledProfiles = profiles.filter((profile) => profile.enabled);
+  const enabledProfiles = profiles.filter(
+    (profile) => profile.enabled && profile.has_api_key,
+  );
   const [values, setValues] = useState<CompressionPolicyFormValues>(
     () => compressionPolicyForm(policy),
   );

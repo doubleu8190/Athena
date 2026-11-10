@@ -13,7 +13,7 @@ def model_profile_to_response(value: ModelProfileVersion) -> ModelProfileRespons
         protocol=value.protocol,
         base_url=value.base_url,
         model=value.model,
-        credential_env=value.credential_env,
+        has_api_key=value.has_api_key,
         context_window_tokens=value.context_window_tokens,
         tokenizer_encoding=value.tokenizer_encoding,
         supports_stream=value.supports_stream,

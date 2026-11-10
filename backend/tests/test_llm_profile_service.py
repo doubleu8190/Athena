@@ -41,7 +41,7 @@ class _ProfileRepository:
             protocol="chat_completions",
             base_url=value.base_url,
             model=value.model,
-            credential_env=value.credential_env,
+            has_api_key=bool(value.api_key),
             context_window_tokens=value.context_window_tokens,
             tokenizer_encoding=value.tokenizer_encoding,
             supports_stream=value.supports_stream,
@@ -95,22 +95,33 @@ def actor(role: UserRole = UserRole.ADMIN) -> AuthContext:
     )
 
 
-def profile_input(credential_env: str = "ATHENA_LLM_CREDENTIAL_TEST") -> ModelProfileInput:
+def profile_input(api_key: str = "test-secret") -> ModelProfileInput:
     """创建合法配置字段。"""
     return ModelProfileInput(
         name="Test model",
         base_url="https://llm.example/v1",
         model="test-model",
-        credential_env=credential_env,
+        api_key=api_key,
         context_window_tokens=8192,
         max_output_tokens=512,
     )
 
 
-def test_model_profile_create_requires_credential_namespace_and_value(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("api_key", "valid"),
+    [
+        ("a" * 16370, True),
+        ("a" * 16371, False),
+        ("你" * 5456, True),
+        ("你" * 5457, False),
+        ("contains\x00nul", False),
+        ("  ", False),
+    ],
+)
+def test_model_profile_create_validates_encrypted_api_key_payload(
+    api_key: str, valid: bool
 ) -> None:
-    """只允许专属环境变量引用，且引用必须已经注入。"""
+    """管理员必须提交非空 API Key，密钥不会进入安全投影。"""
     timestamp = datetime.now(UTC)
     user = actor().user
     repository = _ProfileRepository()
@@ -119,15 +130,13 @@ def test_model_profile_create_requires_credential_namespace_and_value(
         _AuthReader(user),
         clock=lambda: timestamp,
     )
-    monkeypatch.setenv("ATHENA_LLM_CREDENTIAL_TEST", "test-secret")
-    asyncio.run(service.create(actor(), profile_input()))
-    assert len(repository.created) == 1
-
-    with pytest.raises(ModelProfileError):
-        asyncio.run(service.create(actor(), profile_input("DATABASE_URL")))
-    with pytest.raises(ModelProfileError):
-        asyncio.run(service.create(actor(), profile_input("ATHENA_LLM_CREDENTIAL_MISSING")))
-    assert len(repository.created) == 1
+    if valid:
+        asyncio.run(service.create(actor(), profile_input(api_key)))
+        assert repository.created[-1].api_key == api_key
+    else:
+        with pytest.raises(ModelProfileError) as error:
+            asyncio.run(service.create(actor(), profile_input(api_key)))
+        assert error.value.code == "llm_model_credential_invalid"
 
 
 def test_model_profile_create_revalidates_current_admin() -> None:
@@ -139,12 +148,68 @@ def test_model_profile_create_revalidates_current_admin() -> None:
     assert repository.created == []
 
 
-def test_parallel_tool_capability_requires_tools_and_round_trips(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("context_window_tokens", "valid"),
+    [(1_048_576, True), (1_048_577, False)],
+)
+def test_model_profile_context_window_limit(
+    context_window_tokens: int, valid: bool
 ) -> None:
+    """上下文窗口接受 1,048,576 tokens，并拒绝超过上限的值。"""
     repository = _ProfileRepository()
     service = ModelProfileService(repository, _AuthReader(actor().user))
-    monkeypatch.setenv("ATHENA_LLM_CREDENTIAL_TEST", "test-secret")
+    value = replace(
+        profile_input(),
+        context_window_tokens=context_window_tokens,
+        max_output_tokens=1_000_000,
+    )
+    if valid:
+        asyncio.run(service.create(actor(), value))
+        assert repository.created[-1].context_window_tokens == 1_048_576
+    else:
+        with pytest.raises(ModelProfileError):
+            asyncio.run(service.create(actor(), value))
+
+
+def test_model_profile_output_limit_stays_independent_from_context_limit() -> None:
+    """扩大上下文上限不扩大独立的最大输出 token 上限。"""
+    repository = _ProfileRepository()
+    service = ModelProfileService(repository, _AuthReader(actor().user))
+    with pytest.raises(ModelProfileError):
+        asyncio.run(
+            service.create(
+                actor(),
+                replace(
+                    profile_input(),
+                    context_window_tokens=1_048_576,
+                    max_output_tokens=1_000_001,
+                ),
+            )
+        )
+
+
+def test_model_profile_api_dto_context_boundary() -> None:
+    """API DTO 接受新的上下文上限，同时拒绝上限加一。"""
+    from pydantic import ValidationError
+
+    from api.dto.llm import ModelProfileCreateRequest
+
+    body = {
+        "name": "Large context",
+        "base_url": "https://llm.example/v1",
+        "model": "large-context",
+        "api_key": "test-key",
+        "context_window_tokens": 1_048_576,
+        "max_output_tokens": 1_000_000,
+    }
+    assert ModelProfileCreateRequest(**body).context_window_tokens == 1_048_576
+    with pytest.raises(ValidationError):
+        ModelProfileCreateRequest(**{**body, "context_window_tokens": 1_048_577})
+
+
+def test_parallel_tool_capability_requires_tools_and_round_trips() -> None:
+    repository = _ProfileRepository()
+    service = ModelProfileService(repository, _AuthReader(actor().user))
 
     invalid = replace(
         profile_input(),
@@ -171,7 +236,6 @@ def test_model_profile_admin_api_requires_auth_and_never_returns_secret(
         async def authenticate(self, token: str) -> AuthContext | None:
             return actor() if token == "valid-admin" else None
 
-    monkeypatch.setenv("ATHENA_LLM_CREDENTIAL_TEST", "sensitive-value")
     repository = _ProfileRepository()
     service = ModelProfileService(repository, _AuthReader(actor().user))
     app = FastAPI()
@@ -181,7 +245,7 @@ def test_model_profile_admin_api_requires_auth_and_never_returns_secret(
         "name": "Test model",
         "base_url": "https://llm.example/v1",
         "model": "test-model",
-        "credential_env": "ATHENA_LLM_CREDENTIAL_TEST",
+        "api_key": "sensitive-value",
         "context_window_tokens": 8192,
         "max_output_tokens": 512,
     }
@@ -191,7 +255,7 @@ def test_model_profile_admin_api_requires_auth_and_never_returns_secret(
         response = client.post("/api/v1/admin/llm/model-profiles", json=body)
     assert response.status_code == 201
     assert "sensitive-value" not in response.text
-    assert "credential_env" in response.json()
+    assert response.json()["has_api_key"] is True
 
 
 def test_compression_policy_admin_api_and_user_denial() -> None:

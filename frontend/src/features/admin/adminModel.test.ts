@@ -16,7 +16,7 @@ describe("管理表单纯校验", () => {
     values.name = "审核模型";
     values.model = "atlas-review";
     values.base_url = "http://llm.example/v1";
-    values.credential_env = "ATHENA_LLM_CREDENTIAL_REVIEW";
+    values.api_key = "test-key";
     values.context_window_tokens = "100";
     values.max_output_tokens = "200";
     values.supports_parallel_tool_calls = true;
@@ -40,6 +40,30 @@ describe("管理表单纯校验", () => {
       supports_parallel_tool_calls: true,
       supports_tools: true,
     });
+  });
+
+  it("上下文窗口上限为 1,048,576，最大输出仍使用独立上限", () => {
+    const values = defaultModelProfileForm();
+    values.name = "大上下文模型";
+    values.model = "large-context";
+    values.base_url = "https://llm.example/v1";
+    values.api_key = "test-key";
+    values.context_window_tokens = "1048576";
+    values.max_output_tokens = "1000000";
+    expect(validateModelProfileForm(values).input?.context_window_tokens).toBe(
+      1_048_576,
+    );
+
+    values.context_window_tokens = "1048577";
+    expect(
+      validateModelProfileForm(values).errors.context_window_tokens,
+    ).toContain("1–1,048,576");
+
+    values.context_window_tokens = "1048576";
+    values.max_output_tokens = "1000001";
+    expect(
+      validateModelProfileForm(values).errors.max_output_tokens,
+    ).toBeDefined();
   });
 
   it("压缩策略只接受已启用模型和合法比例", () => {

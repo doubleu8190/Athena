@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+# 上下文窗口与单次输出有各自的上限，扩大上下文容量不改变输出保护边界。
+MAX_CONTEXT_WINDOW_TOKENS = 1_048_576
+MAX_OUTPUT_TOKENS = 1_000_000
+
 
 @dataclass(frozen=True, slots=True)
 class ModelProfileVersion:
@@ -16,7 +20,7 @@ class ModelProfileVersion:
     protocol: Literal["chat_completions"]
     base_url: str
     model: str
-    credential_env: str
+    has_api_key: bool
     context_window_tokens: int
     tokenizer_encoding: Literal["cl100k_base", "o200k_base"]
     supports_stream: bool
@@ -46,7 +50,7 @@ class ModelProfileInput:
     name: str
     base_url: str
     model: str
-    credential_env: str
+    api_key: str = field(repr=False)
     context_window_tokens: int
     max_output_tokens: int
     tokenizer_encoding: Literal["cl100k_base", "o200k_base"] = "o200k_base"
@@ -59,4 +63,10 @@ class ModelProfileInput:
     supports_parallel_tool_calls: bool = False
 
 
-__all__ = ["ModelProfileInput", "ModelProfileVersion", "RuntimeModelProfile"]
+__all__ = [
+    "MAX_CONTEXT_WINDOW_TOKENS",
+    "MAX_OUTPUT_TOKENS",
+    "ModelProfileInput",
+    "ModelProfileVersion",
+    "RuntimeModelProfile",
+]

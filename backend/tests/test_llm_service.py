@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from adapter.llm.openai_chat_completions import OpenAIChatCompletionsAdapter
 from adapter.llm.openai_responses import OpenAIResponsesAdapter
-from app.llm.config import LlmProfile, parse_profiles
+from app.llm.config import LlmProfile
 from app.llm.service import LlmService
 from domain.llm.model import (
     LlmMessage,
@@ -66,31 +66,9 @@ def make_profile(
     return LlmProfile("assistant", "key", "model", None, capabilities)
 
 
-def test_parse_profiles_rejects_duplicate_and_missing_credentials() -> None:
-    """重复 JSON 字段和缺失 API Key 都只暴露固定错误码。"""
-    with pytest.raises(Exception, match="llm_configuration_invalid"):
-        parse_profiles('{"x":{"model":"m","model":"n"}}', {})
-    config = json.dumps({"x": {"model": "m", "api_key_env": "OPENAI_API_KEY", "capabilities": {}}})
-    with pytest.raises(Exception, match="llm_configuration_invalid"):
-        parse_profiles(config, {})
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("max_concurrency", 0.5),
-        ("max_concurrency", True),
-        ("max_response_bytes", 0),
-        ("max_tools", -1),
-        ("max_output_tokens", 1.2),
-        ("request_timeout_seconds", float("nan")),
-        ("stream_timeout_seconds", float("inf")),
-    ],
-)
-def test_parse_profiles_rejects_invalid_numeric_limits(field: str, value: Any) -> None:
-    config = {"x": {"model": "m", "api_key_env": "KEY", "capabilities": {}, field: value}}
-    with pytest.raises(Exception, match="llm_configuration_invalid"):
-        parse_profiles(json.dumps(config), {"KEY": "fake"})
+def test_runtime_profile_repr_hides_api_key() -> None:
+    """LLM 配置对象的日志展示不包含供应商密钥。"""
+    assert "key" not in repr(make_profile())
 
 
 def test_tool_schema_is_copied_and_frozen_at_call_boundary() -> None:

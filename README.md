@@ -124,8 +124,42 @@ MCP Server 管理、安全工具目录 API，以及首期 Run 后端闭环。认
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
+npm --prefix frontend install
+cp .env.example .env
+```
+
+编辑 `.env`，至少设置可访问的 `ATHENA_DATABASE_URL` 和随机生成的
+`ATHENA_MCP_SECRET_KEY`。本地开发可用以下命令生成密钥，再将结果粘贴到 `.env`：
+
+```sh
+python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
+```
+
+随后运行启动脚本：
+
+```sh
+scripts/dev.sh --migrate
+```
+
+脚本默认从项目根目录 `.env` 读取配置，也可用 `--env-file` 显式指定其他配置文件。
+脚本同时启动 API、Run Worker 和 Vite；设置
+`ATHENA_KNOWLEDGE_ENABLED=true` 时还会启动 Knowledge Worker。前端地址为
+`http://localhost:5173`，API 地址为 `http://127.0.0.1:8000`。按 `Ctrl+C` 会停止
+全部启动的进程。迁移只在传入 `--migrate` 时执行；脚本不会安装依赖，也不会启动
+PostgreSQL、Redis 或 MinIO。
+脚本不启用 Uvicorn 自动重载，以便检测应用启动失败；修改后端代码后需重启脚本。
+`ATHENA_KNOWLEDGE_ENABLED` 按后端规则忽略大小写并去除首尾空白，接受
+`true/false`、`1/0`、`yes/no` 和 `on/off`。
+
+Vite API 代理保留浏览器发送的 `Host` 和 `Origin`。后端同源校验允许请求自身的
+origin，因此从 `http://localhost:5173` 访问时，`.env.example` 中面向直连 API 的
+`ATHENA_PUBLIC_ORIGIN=http://127.0.0.1:8000` 不会阻断前端写请求。
+
+也可以继续分别启动服务。后端命令如下：
+
+```sh
 .venv/bin/alembic -c backend/alembic.ini upgrade head
-.venv/bin/python -m uvicorn main:create_app --factory --reload
+.venv/bin/python -m uvicorn main:create_app --factory
 ```
 
 运行迁移和应用前需要设置 PostgreSQL 连接：
@@ -172,6 +206,90 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_id VARCHAR(128);
 UPDATE projects SET owner_id = '<实际-owner-id>' WHERE id = '<project-id>';
 SELECT count(*) FROM projects WHERE owner_id IS NULL;
 ```
+
+### 本地 Docker 测试依赖
+
+项目根目录的 [compose.test.yml](compose.test.yml) 提供一套独立的 PostgreSQL、Redis
+和 MinIO 测试依赖。PostgreSQL 同时创建 `athena` 开发库和 `athena_test` 测试库，
+并预装迁移需要的 `vector` 与 `zhparser` 扩展；MinIO 初始化两个默认私有桶，分别供
+开发和测试使用。Compose 项目名和持久数据目录与其他项目隔离，端口只绑定本机：
+PostgreSQL `5432`、Redis `6379`、MinIO S3 `9000`、MinIO Console `9001`。
+PostgreSQL 基于固定摘要的 PostgreSQL 18.6/pgvector 0.8.7 镜像，并从固定上游
+`zhparser` commit 和带 SHA-256 校验的 SCWS 1.2.3 源码构建扩展；Redis 固定为 7.4.7，
+MinIO 固定为 `RELEASE.2025-10-15T17-29-55Z` 镜像摘要。
+
+首次使用时，如果本地配置文件还不存在，复制非敏感设置模板；再运行 secret 初始化工具。
+已有环境默认必须提供完整旧凭据，工具核对 PostgreSQL URL、MinIO app/test 与 root 凭据，
+全部一致后才迁入 `secrets/` 并从本地配置删除敏感键。若缺少旧凭据或来源冲突，工具会
+停止且不写入或清理文件。仅全新环境可显式使用 `--fresh` 生成随机凭据；不要对已有数据
+目录或遗留命名卷使用该选项。已有 secret 不会被覆盖。
+
+```sh
+if [ ! -f docker/test.env ]; then cp docker/test.env.example docker/test.env; fi
+scripts/bootstrap-test-secrets.py --fresh  # 仅全新且没有旧数据时
+# 有旧配置/凭据的已有环境运行：scripts/bootstrap-test-secrets.py
+```
+
+已有 `docker/test.env` 的环境应先运行不带 `--fresh` 的 bootstrap，再 source helper。
+bootstrap 会删除旧版固定 MinIO endpoint；helper 会按当前 `MINIO_API_PORT` 生成 endpoint，
+避免随后 `dev.sh --env-file docker/test.env` 再覆盖成旧端口。
+
+PostgreSQL 和 MinIO 启动时从 Compose secrets 读取用户及密码。MinIO 镜像自身不支持
+`_FILE` 变量，由精简入口包装器从只读 secret 读取 root 凭据；桶初始化容器也只读取
+同一 secret。宿主 API 配置通过 shell helper 在当前终端生成：
+
+```sh
+source scripts/load-test-env.sh
+```
+
+helper 从 `secrets/` 读取 PostgreSQL 与 MinIO 凭据，URL 编码 PostgreSQL 连接地址，
+并设置 `ATHENA_TEST_DATABASE_URL`、`ATHENA_REDIS_URL`、MinIO endpoint、桶名及 MCP 加密密钥；
+endpoint 和开发/测试桶名分别从 `MINIO_API_PORT`、`MINIO_DEV_BUCKET` 与
+`MINIO_TEST_BUCKET` 派生。旧配置中的应用桶名若与 Compose 桶名不一致，bootstrap 会停止
+并保留配置，先统一本地桶名再重试。
+本地知识库和测试访问使用同一个 MinIO root 用户，因此共用其实际 root secret。
+Redis 保持无密码配置。凭据不会写入模板、README 或根目录 `.env.example`。
+Compose 数据现在直接绑定到忽略跟踪的 `data/postgres`、`data/redis` 和 `data/minio`；
+原有三个命名卷的数据已复制过去并保留为回滚副本。
+
+构建并启动服务，等待 PostgreSQL、Redis 与 MinIO 健康后再运行一次性桶初始化：
+
+```sh
+docker compose --env-file docker/test.env -f compose.test.yml up -d --build --wait postgres redis minio
+docker compose --env-file docker/test.env -f compose.test.yml run --rm minio-init
+docker compose --env-file docker/test.env -f compose.test.yml ps
+```
+
+`minio-init` 成功退出表示两个桶已创建；若初始化失败，Compose 命令会返回非零状态。
+迁移前先导入本地 helper，再运行 Alembic。该连接明确指向新建的
+开发数据库 `127.0.0.1:5432/athena`，不会迁移项目中其他数据库：
+
+```sh
+source scripts/load-test-env.sh && \
+  .venv/bin/alembic -c backend/alembic.ini upgrade head
+```
+
+要用这套测试依赖启动 API、Worker 和 Vite，显式选择 Compose 的非敏感配置文件；helper
+提供的数据库 URL、MinIO 凭据和 MCP 密钥会从当前 shell 传入启动脚本。`--migrate` 可选，
+仅在需要升级 `athena` 开发库时添加：
+
+```sh
+source scripts/load-test-env.sh && scripts/dev.sh --env-file docker/test.env
+source scripts/load-test-env.sh && scripts/dev.sh --env-file docker/test.env --migrate
+```
+
+显式传入 `--env-file` 可避免根目录 `.env` 覆盖测试数据库配置；不传该选项时，启动脚本
+仍沿用根目录 `.env` 的默认开发流程。
+
+运行后端集成测试时保持同一终端环境，其中 `ATHENA_TEST_DATABASE_URL` 指向独立的
+`athena_test` 数据库，`ATHENA_REDIS_URL` 指向本 Compose 的 Redis。Compose 的
+`--env-file` 只提供端口、数据库名和桶名等非敏感配置，不会自动导出给宿主机上的
+Alembic 或 pytest。
+知识库功能默认关闭，启动时不会触发嵌入模型下载。
+
+测试后可执行 `docker compose --env-file docker/test.env -f compose.test.yml down` 停止并
+移除本套容器；`data/postgres`、`data/redis` 和 `data/minio` 中的 bind mount 数据会保留，
+供下次启动复用。
 
 ## 前端开发
 

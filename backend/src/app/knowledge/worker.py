@@ -27,13 +27,13 @@ from domain.knowledge.ports import (
     ChineseTokenizer,
     ClaimedKnowledgeJob,
     DocumentParser,
-    EmbeddingPort,
+    DocumentParserFactory,
     FileUploadReservation,
     KnowledgeJobRepository,
     OriginalStore,
     ParsedDocument,
-    TokenCounterPort,
 )
+from domain.llm.ports import EmbeddingPort, TokenCounterPort
 
 CHUNK_TOKEN_LIMIT = 512
 CHUNK_TOKEN_OVERLAP = 64
@@ -74,6 +74,7 @@ class KnowledgeWorker:
         counter: TokenCounterPort,
         *,
         isolate_parsing: bool = True,
+        parser_factory: DocumentParserFactory | None = None,
         parse_timeout_seconds: int = 600,
         parse_memory_mb: int = 4096,
         profile_id: str | None = None,
@@ -87,6 +88,10 @@ class KnowledgeWorker:
         self._tokenizer = tokenizer
         self._counter = counter
         self._isolate_parsing = isolate_parsing
+        # 隔离解析必须注入工厂：父进程只持有可序列化工厂，不直接依赖 infrastructure。
+        if isolate_parsing and parser_factory is None:
+            raise ValueError("knowledge_parser_factory_required")
+        self._parser_factory = parser_factory
         self._parse_timeout_seconds = parse_timeout_seconds
         if parse_memory_mb < 512 or parse_memory_mb > 16384:
             raise ValueError("knowledge_parse_memory_limit_invalid")
@@ -231,16 +236,19 @@ class KnowledgeWorker:
         if job.source_key is None or job.source_filename is None:
             raise ValueError("document_source_missing")
         content = await self._originals.get(job.source_key)
-        parsed = (
-            await _parse_in_child(
+        if self._isolate_parsing:
+            # 构造函数已保证隔离模式存在工厂；局部变量与断言仅用于让类型收窄。
+            parser_factory = self._parser_factory
+            assert parser_factory is not None
+            parsed = await _parse_in_child(
                 job.source_filename,
                 content,
+                parser_factory,
                 self._parse_timeout_seconds,
                 self._parse_memory_mb,
             )
-            if self._isolate_parsing
-            else await self._parser.parse(job.source_filename, content)
-        )
+        else:
+            parsed = await self._parser.parse(job.source_filename, content)
         return list(parsed.blocks), list(parsed.warnings)
 
     async def _heartbeat(self, job: ClaimedKnowledgeJob, lost_lease: asyncio.Event) -> None:
@@ -349,17 +357,27 @@ def _process_rss_mb(process_id: int) -> int | None:
 
 
 async def _parse_in_child(
-    filename: str, content: bytes, timeout_seconds: int, memory_limit_mb: int = 4096
+    filename: str,
+    content: bytes,
+    factory: DocumentParserFactory,
+    timeout_seconds: int,
+    memory_limit_mb: int = 4096,
 ) -> ParsedDocument:
     """在独立进程运行 OCR/解析，取消或超时后终止并回收进程。"""
     context = multiprocessing.get_context("spawn")
     result_queue = context.Queue(maxsize=1)
+    # 工厂实例随 spawn 参数在父进程序列化；子进程反序列化参数时
+    # （进入目标函数前）即导入解析器模块，create() 时才实例化解析器。
     process = context.Process(
         target=_parse_child_entry,
-        args=(filename, content, result_queue, memory_limit_mb),
+        args=(filename, content, factory, result_queue, memory_limit_mb),
     )
-    process.start()
+    # 进程可能启动失败（例如工厂无法序列化）：只在真正启动后终止回收，
+    # 但结果队列无论启动成败都要在 finally 中关闭，避免句柄泄漏。
+    started = False
     try:
+        process.start()
+        started = True
         deadline = time.monotonic() + timeout_seconds
         received: tuple[bool, ParsedDocument | str] | None = None
         while received is None:
@@ -405,10 +423,12 @@ async def _parse_in_child(
             raise RuntimeError("knowledge_parser_result_invalid")
         return result
     except asyncio.CancelledError:
-        await _terminate_and_reap(process)
+        if started:
+            await _terminate_and_reap(process)
         raise
     except BaseException:
-        await _terminate_and_reap(process)
+        if started:
+            await _terminate_and_reap(process)
         raise
     finally:
         result_queue.close()
@@ -439,6 +459,7 @@ async def _terminate_and_reap(process: _ChildProcess) -> None:
 def _parse_child_entry(
     filename: str,
     content: bytes,
+    factory: DocumentParserFactory,
     result_queue: _ChildResultQueue,
     memory_limit_mb: int,
 ) -> None:
@@ -457,9 +478,10 @@ def _parse_child_entry(
             except (OSError, ValueError) as error:
                 raise RuntimeError("resource_limits_unsupported") from error
 
-        from infrastructure.knowledge.parsers import LocalDocumentParser
-
-        parsed = asyncio.run(LocalDocumentParser(ocr_languages="ch").parse(filename, content))
+        # 工厂参数在子进程反序列化时（进入本函数前）导入 infrastructure 实现；
+        # create() 在本函数内实例化解析器。父进程无需加载 OCR runtime，
+        # 应用层也不直连 infrastructure。
+        parsed = asyncio.run(factory.create().parse(filename, content))
         result_queue.put((True, parsed))
     except Exception as error:
         # Do not serialize exception text: it can contain source content or

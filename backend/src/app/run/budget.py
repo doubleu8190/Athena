@@ -42,14 +42,17 @@ class RunLlmBudget:
     @property
     def can_compress(self) -> bool:
         """Keep one request available for the mandatory final-answer attempt."""
+        # 始终为最后一次“无工具最终回答”保留一个预算槽位。
         return self.used < self._maximum - 1
 
     @property
     def final_only(self) -> bool:
+        # 只剩最后一个槽位时，下一轮必须直接产出最终回答。
         return self.used >= self._maximum - 1
 
     async def reserve(self) -> int:
         """Consume one slot and return its 1-based request number."""
+        # 先做本地检查，再由仓储原子递增数据库计数器，保证跨进程不超发。
         if self.remaining <= 0:
             raise LlmError("run_llm_request_limit_exceeded")
         sequence = await self._repository.reserve_llm_request(
@@ -62,6 +65,7 @@ class RunLlmBudget:
         )
         if sequence is None:
             raise LlmError("run_execution_lease_lost")
+        # 数据库返回的序号必须单调且不超上限，否则说明计数状态不一致。
         if sequence <= self.used or sequence > self._maximum:
             raise LlmError("run_llm_request_counter_invalid")
         self.used = sequence

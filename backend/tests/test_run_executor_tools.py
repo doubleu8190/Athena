@@ -16,6 +16,7 @@ from mcp import types
 
 from app.run.config import RunWorkerConfig
 from app.run.executor import RunExecutor
+from app.tool.ports import RunToolRuntime
 from app.tool.runtime import RunToolRuntimeService
 from domain.auth.model import User, UserRole, UserStatus
 from domain.llm.model import (
@@ -62,7 +63,6 @@ from domain.tool import (
     RunToolBatch,
     RunToolBatchCall,
     RunToolCallRecord,
-    RunToolRuntime,
     ToolApprovalDecision,
     ToolCallStatus,
     ToolExecutionResult,
@@ -279,9 +279,7 @@ class _Repository:
     ) -> BeginToolCallBatchResult:
         self.begin_tool_calls += 1
         self.last_batch_command = command
-        call_parts = [
-            part for part in command.call_message.parts if isinstance(part, ToolCallPart)
-        ]
+        call_parts = [part for part in command.call_message.parts if isinstance(part, ToolCallPart)]
         records: list[RunToolCallRecord] = []
         pending = False
         for ordinal, (item, _part) in enumerate(
@@ -372,8 +370,7 @@ class _Repository:
             refreshed = replace(
                 batch,
                 calls=tuple(
-                    replace(call, record=self.records[call.record.id])
-                    for call in batch.calls
+                    replace(call, record=self.records[call.record.id]) for call in batch.calls
                 ),
             )
             self.batches[message_id] = refreshed
@@ -394,9 +391,7 @@ class _Repository:
             message_id: replace(
                 batch,
                 calls=tuple(
-                    replace(call, record=updated)
-                    if call.record.id == updated.id
-                    else call
+                    replace(call, record=updated) if call.record.id == updated.id else call
                     for call in batch.calls
                 ),
             )
@@ -424,9 +419,7 @@ class _Repository:
             finished_at=command.finished_at,
             outcome=command.outcome,
             safe_error_code=(
-                None
-                if command.outcome.status is ToolOutcomeStatus.OK
-                else command.outcome.code
+                None if command.outcome.status is ToolOutcomeStatus.OK else command.outcome.code
             ),
         )
         self.records[record.id] = updated
@@ -434,9 +427,7 @@ class _Repository:
             message_id: replace(
                 batch,
                 calls=tuple(
-                    replace(call, record=updated)
-                    if call.record.id == updated.id
-                    else call
+                    replace(call, record=updated) if call.record.id == updated.id else call
                     for call in batch.calls
                 ),
             )
@@ -482,9 +473,7 @@ class _Profiles:
         self._supports_parallel_tool_calls = supports_parallel_tool_calls
 
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
-        return _runtime_profile(
-            supports_parallel_tool_calls=self._supports_parallel_tool_calls
-        )
+        return _runtime_profile(supports_parallel_tool_calls=self._supports_parallel_tool_calls)
 
 
 class _DeliveryAuth:
@@ -718,9 +707,7 @@ class _ConcurrencyToolRuntime(_ToolRuntime):
 
 class _UnknownThenSlowToolRuntime(_ToolRuntime):
     def __init__(self) -> None:
-        super().__init__(
-            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
-        )
+        super().__init__(ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok")))
         self.executed_queries: list[str] = []
 
     async def execute(
@@ -745,9 +732,7 @@ class _UnknownThenSlowToolRuntime(_ToolRuntime):
                 )
             )
         await asyncio.sleep(0.05)
-        return ToolExecutionResult(
-            ToolOutcome(status=ToolOutcomeStatus.OK, code="ok")
-        )
+        return ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
 
 
 class _ValidatingToolRuntime(_ToolRuntime):
@@ -1173,11 +1158,12 @@ def test_unknown_tool_name_persists_call_and_error_result_before_continuing() ->
     asyncio.run(scenario())
 
 
-def test_run_v1_cannot_execute_business_definition_from_an_unexpected_snapshot() -> None:
-    """旧提示版本的 Run 即使快照异常，也不能执行任何业务工具。"""
+def test_unsupported_prompt_version_fails_before_provider_or_tool_calls() -> None:
+    """不支持的模板版本必须在调用模型或工具前安全失败。"""
 
     async def scenario() -> None:
         lease = _lease()
+        # 模拟历史 v1 Run：执行前不改数据，由执行器识别版本并安全失败。
         lease = replace(
             lease,
             run=replace(lease.run, prompt_template_version="run-v1"),
@@ -1202,19 +1188,13 @@ def test_run_v1_cannot_execute_business_definition_from_an_unexpected_snapshot()
 
         await executor.execute(lease)
 
+        # 版本校验发生在准备阶段，模型与工具都不应被调用。
+        assert provider.requests == []
         assert tool_runtime.calls == 0
-        assert repository.begin_tool_calls == repository.finish_tool_calls == 1
-        assert repository.last_begin_command is not None
-        assert repository.last_begin_command.tool_id is None
-        assert repository.last_finish_command is not None
-        result_part = next(
-            part
-            for part in repository.last_finish_command.result_message.parts
-            if isinstance(part, ToolResultPart)
-        )
-        assert result_part.output is not None
-        assert ToolOutcome.model_validate_json(result_part.output).code == "tool_unknown"
-        assert repository.run.status is RunStatus.COMPLETED
+        assert repository.failures == ["run_prompt_template_unsupported"]
+        assert repository.run.status is RunStatus.FAILED
+        assert repository.begin_tool_calls == 0
+        assert repository.finish_tool_calls == 0
 
     asyncio.run(scenario())
 
@@ -1326,14 +1306,10 @@ def test_approval_barrier_holds_safe_calls_and_resume_does_not_replay_model() ->
         assert repository.finish_tool_calls == 0
         assert repository.run.status is RunStatus.WAITING_FOR_APPROVAL
         risky_record = next(
-            record
-            for record in repository.records.values()
-            if record.tool_call_id == "call-risky"
+            record for record in repository.records.values() if record.tool_call_id == "call-risky"
         )
         safe_record = next(
-            record
-            for record in repository.records.values()
-            if record.tool_call_id == "call-safe"
+            record for record in repository.records.values() if record.tool_call_id == "call-safe"
         )
         assert risky_record.status is ToolCallStatus.PENDING_APPROVAL
         assert safe_record.status is ToolCallStatus.APPROVED
@@ -1379,9 +1355,7 @@ def test_parallel_batch_respects_concurrency_limit_and_stable_dispatch_order() -
             LlmToolCall(f"call-{index}", "test_tool", {"query": str(index)})
             for index in range(1, 7)
         )
-        provider = _ScriptedProvider(
-            [_multi_response(*calls), _multi_response(text="finished")]
-        )
+        provider = _ScriptedProvider([_multi_response(*calls), _multi_response(text="finished")])
         executor = RunExecutor(
             cast(RunRepository, repository),
             cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
@@ -1617,9 +1591,6 @@ def test_invalid_arguments_for_approval_tool_do_not_create_waiting_state() -> No
         assert tool_runtime.calls == 0
         assert repository.finish_tool_calls == 1
         assert repository.run.status is RunStatus.COMPLETED
-        assert all(
-            record.status is ToolCallStatus.FAILED
-            for record in repository.records.values()
-        )
+        assert all(record.status is ToolCallStatus.FAILED for record in repository.records.values())
 
     asyncio.run(scenario())

@@ -79,6 +79,7 @@ known-first-party = [
     "adapter",
     "api",
     "app",
+    "bootstrap",
     "common",
     "domain",
     "infrastructure",

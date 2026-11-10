@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import AsyncIterator
-from types import ModuleType
 
 import anyio
 import pytest
@@ -29,6 +28,7 @@ from domain.knowledge.model import (
     TextBlock,
 )
 from domain.knowledge.ports import ClaimedKnowledgeJob, FileUploadReservation, ParsedDocument
+from infrastructure.knowledge.parsers import LocalDocumentParserFactory
 
 
 class _Counter:
@@ -140,6 +140,50 @@ class _UnusedStore:
             yield ""
 
 
+class _BytesStore(_UnusedStore):
+    """文件源返回固定文本内容，供隔离解析子进程读取。"""
+
+    async def get(self, key: str) -> bytes:
+        assert key == "source_key"
+        return b"valid text content for isolated parsing"
+
+
+class _FileRepository(_Repository):
+    """认领文件来源任务并记录发布的 chunks，供隔离解析全链路断言。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunks: list[tuple[str, dict[str, object], int, str, list[float]]] = []
+
+    async def claim_job(
+        self, *, lease_seconds: int, owner_concurrency: int = 2
+    ) -> ClaimedKnowledgeJob | None:
+        assert lease_seconds == 120
+        assert owner_concurrency == 2
+        return ClaimedKnowledgeJob(
+            "job_file",
+            "owner_1",
+            "version_1",
+            "document_1",
+            "title",
+            None,
+            "source_key",
+            "sample.txt",
+            1,
+        )
+
+    async def publish_job(
+        self,
+        job: ClaimedKnowledgeJob,
+        *,
+        chunks: list[tuple[str, dict[str, object], int, str, list[float]]],
+        warnings: list[str],
+    ) -> bool:
+        self.chunks = chunks
+        self.published = job.fencing_token == 1 and bool(chunks) and warnings == []
+        return self.published
+
+
 def test_chunker_caps_token_count_and_preserves_locator() -> None:
     locator = ChunkLocator(kind="text", start_line=1, end_line=2)
     chunks = _make_chunks([TextBlock("a" * 1200, locator)], _Counter())
@@ -170,6 +214,34 @@ def test_text_job_is_published_with_embeddings() -> None:
     assert anyio.run(_run_text_job)
 
 
+async def _run_isolated_file_job() -> _FileRepository:
+    repository = _FileRepository()
+    worker = KnowledgeWorker(
+        repository,
+        _UnusedParser(),
+        _BytesStore(),
+        _Embedding(),
+        _Tokenizer(),
+        _Counter(),
+        # 保持默认 isolate_parsing=True，让真实 spawn 子进程完成解析。
+        parser_factory=LocalDocumentParserFactory(),
+    )
+    assert await worker.run_once()
+    return repository
+
+
+@pytest.mark.skipif(os.name == "nt", reason="spawn CLI import differs on Windows")
+def test_isolated_parsing_publishes_file_content_from_child_process() -> None:
+    repository = anyio.run(_run_isolated_file_job)
+    assert repository.published
+    assert not repository.failed
+    assert repository.chunks
+    assert any(
+        "valid text content for isolated parsing" in content
+        for content, _, _, _, _ in repository.chunks
+    )
+
+
 async def _run_no_job() -> bool:
     class EmptyRepository(_Repository):
         async def claim_job(
@@ -178,7 +250,13 @@ async def _run_no_job() -> bool:
             return None
 
     worker = KnowledgeWorker(
-        EmptyRepository(), _UnusedParser(), _UnusedStore(), _Embedding(), _Tokenizer(), _Counter()
+        EmptyRepository(),
+        _UnusedParser(),
+        _UnusedStore(),
+        _Embedding(),
+        _Tokenizer(),
+        _Counter(),
+        isolate_parsing=False,
     )
     return await worker.run_once()
 
@@ -190,7 +268,10 @@ def test_no_job_returns_without_processing() -> None:
 async def _parse_repeatedly() -> None:
     for index in range(3):
         parsed = await _parse_in_child(
-            f"sample-{index}.txt", b"valid text content for parser process lifecycle", 30
+            f"sample-{index}.txt",
+            b"valid text content for parser process lifecycle",
+            LocalDocumentParserFactory(),
+            30,
         )
         assert parsed.blocks
         assert "valid text content" in parsed.blocks[0].text
@@ -262,6 +343,7 @@ async def _run_profile_mismatch() -> _Repository:
         _Embedding(),
         _Tokenizer(),
         _Counter(),
+        isolate_parsing=False,
         profile_id="worker-profile",
     )
     await worker.run_once()
@@ -370,24 +452,94 @@ def test_parser_ipc_marks_runtime_engine_errors_retryable(monkeypatch: pytest.Mo
         def put(self, value: tuple[bool, ParsedDocument | str]) -> None:
             self.value = value
 
-    parser_module = ModuleType("infrastructure.knowledge.parsers")
-
     class RuntimeFailureParser:
-        def __init__(self, **_: object) -> None:
-            pass
-
         async def parse(self, filename: str, content: bytes) -> ParsedDocument:
             raise RuntimeError("knowledge_ocr_engine_unavailable")
 
-    parser_module.LocalDocumentParser = RuntimeFailureParser  # type: ignore[attr-defined]
+    class RuntimeFailureFactory:
+        def create(self) -> RuntimeFailureParser:
+            return RuntimeFailureParser()
+
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setitem(sys.modules, "infrastructure.knowledge.parsers", parser_module)
     queue = ResultQueue()
-    _parse_child_entry("scan.png", b"image", queue, 4096)
+    _parse_child_entry("scan.png", b"image", RuntimeFailureFactory(), queue, 4096)
     assert queue.value == (False, "transient:knowledge_ocr_engine_unavailable")
     assert _error_code(RuntimeError("knowledge_ocr_engine_unavailable")) == (
         "knowledge_ocr_engine_unavailable"
     )
+
+
+def test_parse_in_child_closes_queue_when_process_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动失败不得 join 未启动进程，但结果队列仍须关闭并回收线程。"""
+    import multiprocessing
+
+    class FakeQueue:
+        closed = False
+        joined = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def join_thread(self) -> None:
+            self.joined = True
+
+    class FailingProcess:
+        def start(self) -> None:
+            raise RuntimeError("factory_pickle_failed")
+
+    class FakeContext:
+        queue = FakeQueue()
+
+        def Queue(self, maxsize: int = 0) -> FakeQueue:
+            del maxsize
+            return self.queue
+
+        def Process(self, target: object, args: tuple[object, ...]) -> FailingProcess:
+            del target, args
+            return FailingProcess()
+
+    context = FakeContext()
+
+    def fake_get_context(method: str) -> FakeContext:
+        del method
+        return context
+
+    monkeypatch.setattr(multiprocessing, "get_context", fake_get_context)
+
+    reap_calls: list[object] = []
+
+    async def spy_terminate_and_reap(process: object) -> None:
+        reap_calls.append(process)
+
+    # 必须替换模块全局：_parse_in_child 在运行时按 app.knowledge.worker 全局名查找。
+    monkeypatch.setattr("app.knowledge.worker._terminate_and_reap", spy_terminate_and_reap)
+
+    with pytest.raises(RuntimeError, match="factory_pickle_failed"):
+        anyio.run(
+            _parse_in_child,
+            "sample.txt",
+            b"content",
+            LocalDocumentParserFactory(),
+            30,
+        )
+    assert reap_calls == []  # 未启动的进程不得被 terminate/join
+    assert context.queue.closed
+    assert context.queue.joined
+
+
+def test_isolated_parsing_requires_a_parser_factory() -> None:
+    """隔离模式必须注入工厂，应用层不能自行导入 infrastructure 解析器。"""
+    with pytest.raises(ValueError, match="knowledge_parser_factory_required"):
+        KnowledgeWorker(
+            _Repository(),
+            _UnusedParser(),
+            _UnusedStore(),
+            _Embedding(),
+            _Tokenizer(),
+            _Counter(),
+        )
 
 
 def test_storage_error_codes_and_retry_policies_are_distinct() -> None:

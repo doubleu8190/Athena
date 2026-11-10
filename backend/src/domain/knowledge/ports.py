@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 from domain.knowledge.model import (
@@ -46,22 +47,24 @@ class DocumentParser(Protocol):
     async def parse(self, filename: str, content: bytes) -> ParsedDocument: ...
 
 
-class EmbeddingPort(Protocol):
-    """将文本编码为固定维度向量。"""
+class DocumentParserFactory(Protocol):
+    """在解析进程内创建文档解析器；实现必须可跨进程序列化。"""
 
-    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+    def create(self) -> DocumentParser: ...
+
+
+class DocumentFileValidator(Protocol):
+    """在持久化前校验上传文件的大小、签名与格式。"""
+
+    def validate_file(
+        self, filename: str, path: Path, *, max_bytes: int = 20 * 1024 * 1024
+    ) -> None: ...
 
 
 class ChineseTokenizer(Protocol):
     """对中文全文检索输入进行确定性分词。"""
 
     def tokenize(self, text: str) -> tuple[str, ...]: ...
-
-
-class TokenCounterPort(Protocol):
-    """返回所选 embedding tokenizer 对输入文本的 token 数。"""
-
-    def count(self, text: str) -> int: ...
 
 
 class OriginalStore(Protocol):

@@ -1373,6 +1373,7 @@ def test_concurrent_last_approval_decision_queues_once_and_cancel_closes_pending
             assert any(
                 outcome.code == "tool_approval_denied" for outcome in denied_results
             )
+            # 已决定的调用不能被后续相反决策覆盖。
             decided = decisions[0]
             assert decided is not None
             async with factory() as session:

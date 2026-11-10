@@ -226,11 +226,13 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
     ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
         """持有并发名额直到流结束、失败或调用方退出。"""
         config = runtime.version
+        # 先确认绑定版本支持流式与工具，再申请该版本的并发名额。
         self._validate_capabilities(runtime, request)
         semaphore = self._semaphores.setdefault(
             config.id, asyncio.Semaphore(config.max_concurrency)
         )
         stream: Any = None
+        # 请求超时不得超过模型配置的硬上限。
         timeout = min(
             request.timeout_seconds or config.request_timeout_seconds,
             config.request_timeout_seconds,
@@ -244,6 +246,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                     acquired = True
                     create = cast(Any, self._client(runtime).chat.completions.create)
                     try:
+                        # 只发起一次流式请求（SDK 重试已禁用），重试策略由执行器负责。
                         stream = await create(
                             model=config.model,
                             messages=self._messages(request.messages),
@@ -265,6 +268,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                         raise
                     except Exception as error:
                         self._raise_provider_error(error)
+                    # 事件转换器负责分片重组、体积上限与协议校验。
                     yield self._events(stream, runtime, request)
             except asyncio.CancelledError:
                 raise
@@ -273,6 +277,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                     raise
                 raise LlmProviderError("llm_timeout") from None
         finally:
+            # 无论正常结束、报错还是调用方提前退出，都关闭上游流并释放并发名额。
             try:
                 if stream is not None:
                     try:
@@ -416,6 +421,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
         self, stream: Any, runtime: RuntimeModelProfile, request: LlmRequest
     ) -> AsyncIterator[LlmStreamEvent]:
         """重组分片调用，等待结束 chunk 后才发出完整结果。"""
+        # 分片文本与工具调用参数先累积，只有完整结束后才产出最终 LlmResponse。
         text_parts: list[str] = []
         calls: dict[int, _ToolCallAccumulator] = {}
         finish_reason: str | None = None
@@ -436,6 +442,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                 raise
             except Exception as error:
                 self._raise_provider_error(error)
+            # 对分片数量、单片体积与累计体积设上限，防止异常流耗尽资源。
             chunk_count += 1
             if chunk_count > MAX_STREAM_CHUNKS:
                 raise LlmProtocolError("llm_stream_too_large")
@@ -453,6 +460,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             if total_raw_bytes > MAX_TOTAL_RAW_BYTES:
                 raise LlmProtocolError("llm_stream_too_large")
             response_id = getattr(chunk, "id", None) or response_id
+            # 用量通常在最后一个 chunk 返回，允许覆盖为空的前值。
             if getattr(chunk, "usage", None) is not None:
                 item = chunk.usage
                 usage = LlmUsage(
@@ -474,11 +482,13 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                 if content:
                     if not isinstance(content, str):
                         raise LlmProtocolError()
+                    # 文本累计体积受上限约束，防止超长响应进入持久化。
                     text_bytes += len(content.encode("utf-8"))
                     if text_bytes > MAX_TEXT_BYTES:
                         raise LlmProtocolError("llm_response_too_large")
                     text_parts.append(content)
                     yield TextDelta(output_index=0, content_index=0, text=content)
+                # 工具调用按 index 累积：id/name 只出现一次，arguments 分片拼接。
                 for fragment in getattr(delta, "tool_calls", None) or ():
                     index = fragment.index
                     state = calls.get(index)
@@ -513,6 +523,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                         yield ToolArgumentsDelta(
                             output_index=index, call_id=state.call_id, delta=arguments
                         )
+        # 只接受正常停止或工具调用结束；长度截断等其他原因都视为不完整。
         if finish_reason not in {"stop", "tool_calls"}:
             raise LlmIncompleteError("llm_incomplete")
         output: list[LlmText | LlmToolCall] = []
@@ -520,6 +531,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             output.append(LlmText("".join(text_parts)))
         if calls and finish_reason != "tool_calls":
             raise LlmProtocolError()
+        # 最终校验：调用 id 唯一、参数是合法 JSON 对象，才生成完整的 LlmToolCall。
         call_ids = [state.call_id for state in calls.values()]
         if len(set(call_ids)) != len(call_ids):
             raise LlmProtocolError("llm_tool_call_identity_invalid")
@@ -534,6 +546,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             call = LlmToolCall(state.call_id, state.name, arguments)
             output.append(call)
             yield ToolCallCompleted(output_index=index, tool_call=call)
+        # 只有完整重组成功后才发出 ResponseCompleted，执行器据此确认调用成功。
         result = LlmResponse(
             output=tuple(output),
             status="completed",

@@ -11,15 +11,12 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
-from adapter.knowledge.repository import KnowledgeRepository
-from adapter.knowledge.storage import MinioOriginalStore
 from app.knowledge.worker import KnowledgeWorker
-from infrastructure.database import Database
-from infrastructure.embedding import LocalEmbedding
-from infrastructure.embedding.profile import embedding_profile_id
-from infrastructure.knowledge import JiebaChineseTokenizer
-from infrastructure.knowledge.parsers import LocalDocumentParser
-from infrastructure.knowledge.token_counter import LocalKnowledgeTokenCounter
+from bootstrap.knowledge_worker import (
+    KnowledgeWorkerBundle,
+    build_knowledge_worker,
+    build_knowledge_worker_resources,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,53 +72,31 @@ async def _run_consumers(worker: KnowledgeWorker, concurrency: int) -> None:
 
 
 async def run_worker() -> None:
-    """组装共享 PostgreSQL、MinIO 和模型资源并运行有界消费协程。"""
-    database: Database | None = None
-    embedding: LocalEmbedding | None = None
-    counter: LocalKnowledgeTokenCounter | None = None
-    originals: MinioOriginalStore | None = None
+    """装配共享 PostgreSQL、MinIO 和模型资源并运行有界消费协程。"""
+    # 资源由 bundle 持有；两阶段构造保证启动顺序不变，失败时只清理已创建部分。
+    bundle = KnowledgeWorkerBundle()
     failure: BaseException | None = None
     try:
-        database_url = os.getenv("ATHENA_DATABASE_URL")
-        if not database_url:
-            raise RuntimeError("knowledge_database_required")
-        if os.getenv("ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"):
-            os.environ["PADDLE_PDX_CACHE_HOME"] = os.environ["ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"]
-        database = Database(database_url)
-        originals = MinioOriginalStore.from_environment()
+        build_knowledge_worker_resources(bundle)
+        originals = bundle.originals
+        models = bundle.models
+        assert originals is not None and models is not None
         await originals.start()
-        model = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
-        revision = os.getenv(
-            "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
-            "5617a9f61b028005a4858fdac845db406aefb181",
-        )
-        embedding = LocalEmbedding(
-            model, revision, os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu")
-        )
-        counter = LocalKnowledgeTokenCounter(model, revision)
-        await embedding.start()
-        await counter.start()
-        worker = KnowledgeWorker(
-            KnowledgeRepository(database.session_factory),
-            LocalDocumentParser(ocr_languages="ch"),
-            originals,
-            embedding,
-            JiebaChineseTokenizer(),
-            counter,
-            parse_memory_mb=int(os.getenv("ATHENA_KNOWLEDGE_PARSE_MEMORY_MB", "4096")),
-            profile_id=embedding_profile_id(model, revision),
-            owner_concurrency=int(os.getenv("ATHENA_KNOWLEDGE_OWNER_CONCURRENCY", "2")),
-        )
-        concurrency = int(os.getenv("ATHENA_KNOWLEDGE_WORKER_CONCURRENCY", "2"))
-        if concurrency < 1 or concurrency > 16:
-            raise ValueError("knowledge_worker_concurrency_invalid")
+        await models.embedding.start()
+        await models.counter.start()
+        concurrency = build_knowledge_worker(bundle)
+        worker = bundle.worker
+        assert worker is not None
         await _run_consumers(worker, concurrency)
     except BaseException as error:
         failure = error
     finally:
-        if counter is not None:
+        # 逆序释放模型、存储与数据库；单个清理失败不阻断后续步骤，
+        # 只保留首个异常，函数结束前统一抛出。
+        models = bundle.models
+        if models is not None:
             try:
-                counter.close()
+                models.counter.close()
             except BaseException as error:
                 logger.error(
                     "knowledge_worker_counter_cleanup_failed exception_type=%s",
@@ -129,9 +104,9 @@ async def run_worker() -> None:
                 )
                 if failure is None:
                     failure = error
-        if embedding is not None:
+        if models is not None:
             try:
-                await embedding.aclose()
+                await models.embedding.aclose()
             except BaseException as error:
                 logger.error(
                     "knowledge_worker_embedding_cleanup_failed exception_type=%s",
@@ -139,9 +114,9 @@ async def run_worker() -> None:
                 )
                 if failure is None:
                     failure = error
-        if originals is not None:
+        if bundle.originals is not None:
             try:
-                await originals.aclose()
+                await bundle.originals.aclose()
             except BaseException as error:
                 logger.error(
                     "knowledge_worker_storage_cleanup_failed exception_type=%s",
@@ -149,9 +124,9 @@ async def run_worker() -> None:
                 )
                 if failure is None:
                     failure = error
-        if database is not None:
+        if bundle.database is not None:
             try:
-                await database.dispose()
+                await bundle.database.dispose()
             except BaseException as error:
                 logger.error(
                     "knowledge_worker_database_cleanup_failed exception_type=%s",

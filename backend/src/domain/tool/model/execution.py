@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -13,7 +13,7 @@ from common.json import dumps
 from domain.message import ExecutionMessageDraft, ToolResultStatus
 
 if TYPE_CHECKING:
-    from domain.tool.model.runtime import RuntimeToolDefinition, RuntimeToolSnapshot
+    from domain.tool.model.runtime import RuntimeToolSnapshot
 
 MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
 MAX_TOOL_RESULT_BYTES = 64 * 1024
@@ -334,46 +334,6 @@ class ToolRetryContext:
     safe_error_code: str
 
 
-class RunToolRuntime(Protocol):
-    """Application boundary for authorization, catalog, and single calls."""
-
-    async def authorize(
-        self,
-        owner_id: str,
-        chat_session_id: str,
-        run_id: str,
-        auth_session_id: str | None,
-    ) -> AuthorizedRunContext | None:
-        """Re-read authentication and visible chat state before tools or delivery."""
-
-    async def build_snapshot(
-        self,
-        prompt_template_version: str,
-        context: AuthorizedRunContext,
-    ) -> RuntimeToolSnapshot:
-        """Build a bounded catalog without relying on a default page size."""
-
-    async def execute(
-        self,
-        definition: RuntimeToolDefinition | None,
-        model_name: str,
-        arguments: dict[str, Any],
-        context: ToolExecutionContext,
-        *,
-        deadline_seconds: float,
-        run_remaining_seconds: float,
-    ) -> ToolExecutionResult:
-        """Validate and execute one call within distinct tool and Run deadlines."""
-
-    def validate_call(
-        self,
-        definition: RuntimeToolDefinition | None,
-        model_name: str,
-        arguments: dict[str, Any],
-    ) -> ToolOutcome | None:
-        """Return a safe local error before approval is requested."""
-
-
 def persisted_status_for_outcome(outcome: ToolOutcome) -> ToolCallStatus:
     """Map a business outcome to its persisted lifecycle state."""
     if outcome.status is ToolOutcomeStatus.OK:
@@ -450,7 +410,6 @@ __all__ = [
     "RunToolCallRecord",
     "RunToolBatch",
     "RunToolBatchCall",
-    "RunToolRuntime",
     "ToolApprovalDecision",
     "ToolCallStatus",
     "ToolExecutionResult",

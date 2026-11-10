@@ -1,4 +1,8 @@
-"""Shared composition helpers for API and Run Worker tool dependencies."""
+"""API 与 Run Worker 共享的组合根：在此组装 adapter/infrastructure 资源与查询用例。
+
+应用层只消费领域端口；具体仓储、模型资源与外部客户端的选择全部收敛在本模块，
+保证两个进程使用同一套环境变量和依赖装配规则。
+"""
 
 from __future__ import annotations
 
@@ -10,48 +14,23 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.knowledge.repository import KnowledgeRepository
-from adapter.knowledge.storage import MinioOriginalStore
 from app.knowledge.service import KnowledgeService
 from app.memory.service import MemoryService
-from app.project.knowledge import ProjectKnowledgeService
+from app.project.knowledge import ProjectKnowledgeRepository, ProjectKnowledgeService
 from app.project.service import ProjectService
 from app.tool.runtime import RunToolRuntimeService
+from bootstrap.config import env_csv_set, env_flag
+from bootstrap.knowledge import build_knowledge_models, build_knowledge_original_store
 from domain.auth import CurrentSessionReader
-from domain.knowledge.ports import OriginalStore
+from domain.knowledge.ports import KnowledgeRepositoryPort, OriginalStore
 from domain.mcp import McpToolExecutor, McpToolRuntimeReader
 from domain.session import SessionRepository
 from infrastructure.embedding import LocalEmbedding
 from infrastructure.embedding.profile import embedding_profile_id
-from infrastructure.knowledge import (
-    JiebaChineseTokenizer,
-    LocalKnowledgeTokenCounter,
-)
 from infrastructure.mcp.execution import McpToolCallClient
 from infrastructure.memory import LocalReranker, LocalTokenCounter
 
 logger = logging.getLogger(__name__)
-
-
-def _env_flag(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"{name}_invalid")
-
-
-def _env_csv_set(name: str) -> frozenset[str]:
-    raw = os.getenv(name, "")
-    if not raw.strip():
-        return frozenset()
-    parts = [part.strip() for part in raw.split(",")]
-    if any(not part for part in parts):
-        raise ValueError(f"{name}_invalid")
-    return frozenset(parts)
 
 
 def _profile_id(model: str, revision: str) -> str:
@@ -65,7 +44,8 @@ class QueryServiceBundle:
     memory: MemoryService | None
     knowledge: KnowledgeService | None
     project_knowledge: ProjectKnowledgeService | None
-    knowledge_repository: KnowledgeRepository | None
+    # 对外只暴露领域端口，应用层不需要知道具体仓储实现。
+    knowledge_repository: KnowledgeRepositoryPort | None
     knowledge_original_store: OriginalStore | None
     memory_enabled: bool
     knowledge_enabled: bool
@@ -108,15 +88,18 @@ def build_query_services(
     knowledge_service: KnowledgeService | None = None,
 ) -> QueryServiceBundle:
     """Build memory/knowledge query services from the same environment in both processes."""
-    memory_enabled = memory_service is not None or _env_flag("ATHENA_MEMORY_ENABLED", default=False)
-    knowledge_enabled = knowledge_service is not None or _env_flag(
+    memory_enabled = memory_service is not None or env_flag("ATHENA_MEMORY_ENABLED", default=False)
+    knowledge_enabled = knowledge_service is not None or env_flag(
         "ATHENA_KNOWLEDGE_ENABLED", default=False
     )
     startables: list[Any] = []
     closables: list[Any] = []
     memory = memory_service
     knowledge = knowledge_service
-    knowledge_repository: KnowledgeRepository | None = None
+    # 组合根是唯一允许构造具体适配器的地方；bundle 只暴露领域端口。
+    knowledge_repository: KnowledgeRepositoryPort | None = None
+    # 项目知识关联需要额外的仓储能力，构造期单独持有具体实现，不进入公开契约。
+    project_knowledge_repository: ProjectKnowledgeRepository | None = None
     knowledge_originals: OriginalStore | None = None
     if memory_enabled and memory is None:
         embedding_model = os.getenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -160,36 +143,32 @@ def build_query_services(
         startables.extend((embedding, reranker, counter))
         closables.extend((embedding, reranker, counter))
     if knowledge_enabled and knowledge is None:
-        minio_originals = MinioOriginalStore.from_environment()
+        # 先校验并构造原件存储，再加载模型资源，保持原有启动顺序。
+        minio_originals = build_knowledge_original_store()
         knowledge_originals = minio_originals
-        model_name = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
-        model_revision = os.getenv(
-            "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
-            "5617a9f61b028005a4858fdac845db406aefb181",
-        )
-        embedding = LocalEmbedding(
-            model_name,
-            model_revision,
-            os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu"),
-        )
-        knowledge_counter = LocalKnowledgeTokenCounter(model_name, model_revision)
-        knowledge_repository = KnowledgeRepository(sessions)
+        models = build_knowledge_models()
+        concrete_repository = KnowledgeRepository(sessions)
+        knowledge_repository = concrete_repository
+        project_knowledge_repository = concrete_repository
         knowledge = KnowledgeService(
-            knowledge_repository,
-            JiebaChineseTokenizer(),
-            embedding,
+            concrete_repository,
+            models.tokenizer,
+            models.embedding,
             knowledge_originals,
-            knowledge_counter,
-            profile_id=_profile_id(model_name, model_revision),
+            models.counter,
+            profile_id=models.profile_id,
         )
-        startables.extend((minio_originals, knowledge_counter, embedding))
-        closables.extend((minio_originals, embedding, knowledge_counter))
+        # 启动顺序沿用存储 → 计数 → 向量模型，关闭时按相反依赖顺序释放。
+        startables.extend((minio_originals, models.counter, models.embedding))
+        closables.extend((minio_originals, models.embedding, models.counter))
     elif knowledge is not None and knowledge_repository is None:
-        knowledge_repository = KnowledgeRepository(sessions)
+        concrete_repository = KnowledgeRepository(sessions)
+        knowledge_repository = concrete_repository
+        project_knowledge_repository = concrete_repository
     project_knowledge = (
         None
-        if not knowledge_enabled or knowledge is None or knowledge_repository is None
-        else ProjectKnowledgeService(projects, knowledge_repository)
+        if not knowledge_enabled or knowledge is None or project_knowledge_repository is None
+        else ProjectKnowledgeService(projects, project_knowledge_repository)
     )
     return QueryServiceBundle(
         memory=memory,
@@ -215,8 +194,8 @@ def build_mcp_executor(
     cleanup_timeout_seconds: float = 10.0,
 ) -> McpToolCallClient:
     """Create the single-call MCP executor with the deployment transport limits."""
-    allowed_private_hosts = _env_csv_set("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS")
-    stdio_names = _env_csv_set("ATHENA_MCP_STDIO_BASE_ENV_NAMES")
+    allowed_private_hosts = env_csv_set("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS")
+    stdio_names = env_csv_set("ATHENA_MCP_STDIO_BASE_ENV_NAMES")
     base_environment = {name: os.environ[name] for name in stdio_names if name in os.environ}
     return McpToolCallClient(
         allowed_private_hosts=allowed_private_hosts,

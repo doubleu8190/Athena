@@ -1,0 +1,80 @@
+"""Knowledge Worker 进程的组合根：集中装配数据库、MinIO、模型与 Worker。"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+from adapter.knowledge.repository import KnowledgeRepository
+from adapter.knowledge.storage import MinioOriginalStore
+from app.knowledge.worker import KnowledgeWorker
+from bootstrap.database import build_database
+from bootstrap.knowledge import (
+    KnowledgeModelResources,
+    build_knowledge_models,
+    build_knowledge_original_store,
+)
+from infrastructure.database import Database
+from infrastructure.knowledge.parsers import LocalDocumentParser, LocalDocumentParserFactory
+
+# 隔离解析工厂与非隔离解析器共用同一 OCR 语言配置，避免两处配置漂移。
+OCR_LANGUAGES = "ch"
+
+
+@dataclass(slots=True)
+class KnowledgeWorkerBundle:
+    """Knowledge Worker 构造过程中已创建、需要由入口清理的资源。"""
+
+    database: Database | None = None
+    originals: MinioOriginalStore | None = None
+    models: KnowledgeModelResources | None = None
+    worker: KnowledgeWorker | None = None
+
+
+def build_knowledge_worker_resources(bundle: KnowledgeWorkerBundle) -> None:
+    """第一阶段：装配数据库、原件存储与模型资源。
+
+    存储配置与模型资源都在 Worker 构造前完成，失败时入口只清理 bundle 中
+    已填充的字段，保持与原先入口一致的失败清理语义。
+    """
+    database_url = os.getenv("ATHENA_DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("knowledge_database_required")
+    if os.getenv("ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"):
+        os.environ["PADDLE_PDX_CACHE_HOME"] = os.environ["ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"]
+    bundle.database = build_database(database_url)
+    bundle.originals = build_knowledge_original_store()
+    bundle.models = build_knowledge_models()
+
+
+def build_knowledge_worker(bundle: KnowledgeWorkerBundle) -> int:
+    """第二阶段：用已启动的资源构造 Worker 并返回消费协程数。"""
+    database = bundle.database
+    originals = bundle.originals
+    models = bundle.models
+    assert database is not None and originals is not None and models is not None
+    bundle.worker = KnowledgeWorker(
+        KnowledgeRepository(database.session_factory),
+        LocalDocumentParser(ocr_languages=OCR_LANGUAGES),
+        originals,
+        models.embedding,
+        models.tokenizer,
+        models.counter,
+        # 隔离解析在子进程用工厂创建解析器；位置参数 parser 供非隔离模式使用。
+        parser_factory=LocalDocumentParserFactory(ocr_languages=OCR_LANGUAGES),
+        parse_memory_mb=int(os.getenv("ATHENA_KNOWLEDGE_PARSE_MEMORY_MB", "4096")),
+        profile_id=models.profile_id,
+        owner_concurrency=int(os.getenv("ATHENA_KNOWLEDGE_OWNER_CONCURRENCY", "2")),
+    )
+    concurrency = int(os.getenv("ATHENA_KNOWLEDGE_WORKER_CONCURRENCY", "2"))
+    if concurrency < 1 or concurrency > 16:
+        raise ValueError("knowledge_worker_concurrency_invalid")
+    return concurrency
+
+
+__all__ = [
+    "OCR_LANGUAGES",
+    "KnowledgeWorkerBundle",
+    "build_knowledge_worker",
+    "build_knowledge_worker_resources",
+]

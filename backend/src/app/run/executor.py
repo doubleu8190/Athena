@@ -16,6 +16,7 @@ from app.run.budget import RunLlmBudget
 from app.run.compression import ContextCompressor
 from app.run.config import RunWorkerConfig
 from app.run.context import RunContextError, build_llm_request
+from app.tool.ports import RunToolRuntime
 from app.tool.runtime import (
     MCP_DELIVERY_AUTH_TIMEOUT_SECONDS,
     MCP_TOOL_WATCHDOG_GRACE_SECONDS,
@@ -75,7 +76,6 @@ from domain.tool import (
     RuntimeToolSnapshot,
     RunToolBatch,
     RunToolBatchCall,
-    RunToolRuntime,
     ToolCallStatus,
     ToolExecutionContext,
     ToolExecutionResult,
@@ -191,24 +191,32 @@ class RunExecutor:
     async def execute(self, lease: RunLease) -> None:
         """执行一次领取；终态、等待与资源清理由原子仓储命令完成。"""
         run = lease.run
+        # 把数据库的墙上时钟截止时间换算成事件循环的单调时钟，统一用于超时判断。
         loop_deadline = asyncio.get_running_loop().time() + max(
             0.0, (lease.execution_deadline_at - self._now()).total_seconds()
         )
         try:
+            # 领取时截止时间已过：不再执行，直接走超时失败路径。
             if loop_deadline <= asyncio.get_running_loop().time():
                 raise TimeoutError("run_execution_deadline")
+            # 模型循环与全部工具执行共享同一个总截止时间。
             async with asyncio.timeout_at(loop_deadline):
                 state = await self._prepare(lease, loop_deadline)
                 await self._run_loop(state)
         except asyncio.CancelledError:
+            # 取消必须原样传播，由 Worker 监督循环取消子任务并清理上游资源。
             raise
         except RunContextError as error:
+            # 上下文类错误携带稳定错误码，直接作为安全失败原因落库。
             await self._fail(run, str(error))
         except LlmError as error:
+            # 模型/工具运行时的领域错误同样只暴露固定安全错误码。
             await self._fail(run, error.code)
         except TimeoutError:
+            # 总截止时间耗尽。
             await self._fail(run, "execution_timeout")
         except Exception as error:
+            # 未预期异常记录类型后收敛为固定错误码，避免泄露堆栈与内部信息。
             logger.error(
                 "run_execution_failed run_id=%s exception_type=%s",
                 run.id,
@@ -219,18 +227,24 @@ class RunExecutor:
     async def _prepare(self, lease: RunLease, loop_deadline: float) -> _ExecutionState:
         """Re-authorize, freeze the catalog, and create the Run request budget."""
         run = lease.run
-        if run.prompt_template_version not in {"run-v1", "run-v2"}:
+        # 仅执行当前支持的模板版本；历史 v1 Run 安全失败，不再兼容。
+        if run.prompt_template_version != "run-v2":
             raise LlmError("run_prompt_template_unsupported")
         authorized: AuthorizedRunContext | None = None
         if self._tool_runtime is not None:
+            # 启用业务工具时必须绑定有效登录会话，否则无法做 owner/项目级鉴权。
             if not run.auth_session_id:
                 raise LlmError("run_auth_session_required")
             authorized = await self._authorize(run)
             if authorized is None:
                 raise LlmError("run_auth_session_invalid")
+        # 工具目录在首次执行时冻结并持久化；同一 Run 的后续轮次、
+        # 澄清回答或审批恢复后重新执行时都复用同一快照。
         snapshot = run.tool_snapshot
         if snapshot is None:
             snapshot = await self._freeze_snapshot(run, authorized)
+        # 工具执行上下文固定 owner/session/project/epoch 与总截止时间，
+        # 供工具运行时在每次外部调用前后做权限与超时约束。
         context = ToolExecutionContext(
             owner_id=run.owner_id,
             chat_session_id=run.session_id,
@@ -240,6 +254,7 @@ class RunExecutor:
             auth_session_id=run.auth_session_id or "",
             deadline_at=lease.execution_deadline_at,
         )
+        # 预算从数据库已用次数继续，跨进程重试也不会超发模型请求。
         budget = RunLlmBudget(
             self._repository,
             context,
@@ -247,9 +262,11 @@ class RunExecutor:
             maximum=self._config.llm_request_limit,
             worker_id=run.worker_id or "",
         )
+        # 用户主动重试时带上的安全摘要，只作为历史资料注入，不是当前执行结果。
         retry_context = await self._repository.list_retry_context(
             run.session_id, run.owner_id, run.id
         )
+        # event_cursor 记录已推送事件位置，执行期间只增量发布新事件。
         return _ExecutionState(
             lease=lease,
             run=run,
@@ -266,11 +283,13 @@ class RunExecutor:
     ) -> RuntimeToolSnapshot:
         """Build and atomically persist the first catalog without a partial write."""
         try:
+            # 没有工具运行时的 Run 只暴露澄清工具。
             if self._tool_runtime is None:
                 snapshot = RuntimeToolSnapshot(tools=(REQUEST_USER_INPUT_DEFINITION,))
             else:
                 if authorized is None:
                     raise LlmError("run_auth_session_invalid")
+                # 由运行时构建 v2 工具目录；非 run-v2 已在 _prepare 阶段拒绝，不再兼容 v1。
                 snapshot = await self._tool_runtime.build_snapshot(
                     run.prompt_template_version,
                     authorized,
@@ -288,6 +307,7 @@ class RunExecutor:
             if str(error) == "tool_snapshot_too_large":
                 raise LlmError("tool_catalog_too_large") from error
             raise LlmError("tool_snapshot_invalid") from error
+        # 原子写入冻结快照；返回 None 表示租约已丢失或已被其他执行抢先初始化。
         fixed = await self._repository.initialize_tools(
             InitializeRunToolsCommand(
                 run_id=run.id,
@@ -304,17 +324,21 @@ class RunExecutor:
         """Resume settled batches before asking the model for any new calls."""
         run = state.run
         while True:
+            # 每轮先确认 Run 仍由当前执行轮次持有，失租立即停止，避免重复副作用。
             if not await self._repository.is_live_execution(run.id, run.execution_epoch):
                 raise LlmError("run_execution_lease_lost")
+            # 审批恢复或进程重启后，先执行已批准并持久化的工具批次，再请求模型。
             resumed = await self._repository.get_resumable_tool_batch(run.id)
             if resumed is not None:
                 state.round = max(state.round, resumed.round)
                 if not await self._execute_persisted_batch(state, resumed):
                     return
                 continue
+            # 每轮重新读取 Run 绑定的模型配置版本，配置可能已被禁用或修改。
             runtime = await self._profiles.get_runtime(run.model_config_version_id)
             if runtime is None:
                 raise LlmError("model_profile_unavailable")
+            # 预算只剩最后一个槽位时进入 final-only：本轮必须产出最终回答。
             final_only = state.budget.final_only
             messages, tools, max_output_tokens = await self._prepare_request(
                 state,
@@ -325,6 +349,7 @@ class RunExecutor:
                 final_only = True
                 tools = ()
             state.round += 1
+            # 组装本轮模型请求；有工具时才允许 auto tool choice。
             request = LlmRequest(
                 model_profile=runtime.version.id,
                 messages=messages,
@@ -341,15 +366,18 @@ class RunExecutor:
                     allow_retry=not final_only,
                 )
             except _UseFinalAnswerSlot:
+                # 最后一个预算槽位留给无工具的最终回答，回到循环重新构建请求。
                 continue
             text, calls = self._response_parts(response)
             if calls:
+                # final-only 轮次出现工具调用属于协议违约；并行能力与批次大小也必须匹配配置。
                 if final_only:
                     raise LlmError("llm_tool_call_in_final_answer")
                 if len(calls) > 1 and not runtime.version.supports_parallel_tool_calls:
                     raise LlmError("llm_parallel_tool_calls_unsupported")
                 if not 1 <= len(calls) <= self._config.tool_batch_limit:
                     raise LlmError("llm_tool_batch_too_large")
+                # 调用 id 必须唯一，参数体积受配置上限约束，避免异常数据进入持久化。
                 call_ids = [call.call_id for call in calls]
                 if len(set(call_ids)) != len(call_ids):
                     raise LlmError("llm_tool_call_id_duplicate")
@@ -358,17 +386,18 @@ class RunExecutor:
                     for call in calls
                 ):
                     raise LlmError("llm_tool_arguments_too_large")
-                request_inputs = [
-                    call for call in calls if call.name == "request_user_input"
-                ]
+                # 澄清工具必须单独出现：转存问题并进入等待用户输入，结束本次执行。
+                request_inputs = [call for call in calls if call.name == "request_user_input"]
                 if request_inputs:
                     if len(calls) != 1:
                         raise LlmError("llm_tool_call_mix_unsupported")
                     await self._save_clarification(state, calls[0], text, response)
                     return
+                # 其余工具调用先原子落库（可能进入审批屏障），再执行已批准部分。
                 if not await self._submit_and_execute_batch(state, calls, text, response):
                     return
                 continue
+            # 无工具调用的纯文本即最终回答；空输出视为模型失败。
             if not text.strip():
                 raise LlmError("llm_empty_output")
             await self._save_final(state, text, response)
@@ -383,16 +412,20 @@ class RunExecutor:
     ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int]:
         """Rebuild context each round and keep the final slot tool-free."""
         run = state.run
+        # 每轮重新读取 cutoff 内的正式消息与本 Run 的执行消息，确保工具结果生效。
         messages = await self._repository.list_context_messages(
             run.session_id, run.owner_id, run.id
         )
         if messages is None:
             raise LlmError("run_context_unavailable")
+        # final-only 轮次不暴露任何工具，强制模型直接给出回答。
         tools = () if final_only else self._available_tools(state)
+        # 剩余执行时间就是本轮上下文构建与压缩的硬上限。
         remaining = self._remaining_seconds(state)
         if remaining <= 0:
             raise TimeoutError("run_execution_deadline")
         policy_id = run.compression_policy_version_id
+        # 无压缩策略、final-only 或预算不足时，直接构建完整请求。
         if policy_id is None or final_only or not state.budget.can_compress:
             return await build_llm_request(
                 run,
@@ -408,6 +441,7 @@ class RunExecutor:
         if policy is None:
             raise LlmError("run_compression_policy_unavailable")
         try:
+            # 按 Run 固定的压缩策略压缩较早历史；成功时返回摘要 + 保留消息的请求。
             built, selected, output, _ = await self._compressor.prepare(
                 state.lease,
                 messages,
@@ -419,6 +453,7 @@ class RunExecutor:
                 budget=state.budget,
             )
         except RunContextError as error:
+            # 失租不能回退，必须终止；其余压缩失败回退到完整上下文再尝试一次。
             if error.args and error.args[0] == "run_execution_lease_lost":
                 raise
             built, selected, output = await build_llm_request(
@@ -429,6 +464,7 @@ class RunExecutor:
                 tools=tools,
                 retry_context=state.retry_context,
             )
+        # 压缩过程本身会消耗预算，若因此进入 final-only，同样清空工具。
         if state.budget.final_only:
             selected = ()
         return built, selected, output
@@ -437,7 +473,8 @@ class RunExecutor:
         """Expose only definitions in the frozen snapshot for this prompt version."""
         snapshot = state.snapshot
         definitions: tuple[RuntimeToolDefinition, ...]
-        if self._tool_runtime is None or state.run.prompt_template_version == "run-v1":
+        # 无工具运行时只暴露澄清工具；启用工具运行时暴露冻结快照中的全部工具。
+        if self._tool_runtime is None:
             request_input = next(
                 (item for item in snapshot.tools if item.model_name == "request_user_input"),
                 REQUEST_USER_INPUT_DEFINITION,
@@ -463,15 +500,19 @@ class RunExecutor:
     ) -> LlmResponse:
         """Reserve every provider attempt and retry only output-free transient errors."""
         run = state.run
+        # 同一次执行内的所有尝试共享 operation_id，便于用量审计关联。
         operation_id = new_id("llmop")
         for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
+            # 每次尝试前重新确认租约与模型配置，执行期间配置可能被禁用。
             if not await self._repository.is_live_execution(run.id, run.execution_epoch):
                 raise LlmError("run_execution_lease_lost")
             attempt_runtime = await self._profiles.get_runtime(run.model_config_version_id)
             if attempt_runtime is None:
                 raise LlmError("model_profile_unavailable")
+            # 先原子预占预算；失败不退还，防止异常重试无限消耗供应商额度。
             await state.budget.reserve()
             response: LlmResponse | None = None
+            # 是否已向客户端产生可见输出；一旦有输出就不能安全重试。
             emitted_output = False
             provider_error: LlmProviderError | None = None
             fatal_error: Exception | None = None
@@ -481,6 +522,7 @@ class RunExecutor:
             try:
                 async with self._provider.stream(attempt_runtime, request) as events:
                     async for event in events:
+                        # 文本增量尽力实时推送；推送失败只影响实时性，不中断模型调用。
                         if isinstance(event, TextDelta):
                             emitted_output = True
                             try:
@@ -492,10 +534,12 @@ class RunExecutor:
                                 )
                             except Exception:
                                 logger.warning("run_progress_publish_failed run_id=%s", run.id)
+                        # 工具调用分片同样视为已产生输出，禁止后续重试。
                         elif isinstance(
                             event, (ToolCallStarted, ToolArgumentsDelta, ToolCallCompleted)
                         ):
                             emitted_output = True
+                        # 只有完整的 ResponseCompleted 才代表本次调用成功。
                         elif isinstance(event, ResponseCompleted):
                             response = event.response
                             usage = response.usage
@@ -509,6 +553,7 @@ class RunExecutor:
             except Exception as error:
                 fatal_error = error
             finally:
+                # 无论成功、失败还是取消，都记录本次尝试的用量与耗时。
                 elapsed = max(0, int((time.monotonic() - started) * 1000))
                 try:
                     usage_recorded = await self._repository.record_usage(
@@ -558,11 +603,10 @@ class RunExecutor:
                     and attempt < MAX_MODEL_ATTEMPTS
                     and state.budget.remaining == 1
                 ):
-                    # The failed normal request consumed the penultimate slot.
-                    # Re-enter the loop so the last provider call is the
-                    # mandatory tool-free final answer rather than another
-                    # tool-enabled retry.
+                    # 本次失败消耗了倒数第二个预算槽位：
+                    # 回到主循环，让最后一个槽位用于强制的无工具最终回答。
                     raise _UseFinalAnswerSlot() from provider_error
+                # 只有“未产生输出 + 允许重试 + 可恢复错误 + 预算仍够”才重试。
                 if (
                     emitted_output
                     or not allow_retry
@@ -571,6 +615,7 @@ class RunExecutor:
                     or state.budget.remaining <= 0
                 ):
                     raise provider_error
+                # 退避取服务端 Retry-After 与指数退避的较大值；超过剩余时间直接超时。
                 delay = max(
                     provider_error.retry_after_seconds or 0.0,
                     0.25 * (2 ** (attempt - 1)),
@@ -586,8 +631,10 @@ class RunExecutor:
 
     @staticmethod
     def _response_parts(response: LlmResponse) -> tuple[str, tuple[LlmToolCall, ...]]:
+        # 仅接受完整结束的响应；截断或未完成统一按 llm_incomplete 处理。
         if response.status != "completed" or response.incomplete_reason is not None:
             raise LlmError("llm_incomplete")
+        # 拆分文本与工具调用：两者可同时存在，由主循环决定后续分支。
         text = "".join(part.text for part in response.output if isinstance(part, LlmText))
         calls = tuple(part for part in response.output if isinstance(part, LlmToolCall))
         return text, calls
@@ -597,8 +644,7 @@ class RunExecutor:
         state: _ExecutionState,
         model_name: str,
     ) -> RuntimeToolDefinition | None:
-        if state.run.prompt_template_version == "run-v1":
-            return None
+        # 只允许冻结快照中存在的工具，其余一律视为未知工具。
         return state.snapshot.by_model_name(model_name)
 
     def _validate_business_call(
@@ -607,12 +653,14 @@ class RunExecutor:
         call: LlmToolCall,
     ) -> ToolOutcome | None:
         """Validate locally before deciding whether a call needs approval."""
+        # 未启用工具运行时：模型仍可能调用工具，直接返回可展示的失败结果。
         if self._tool_runtime is None:
             return ToolOutcome(
                 status=ToolOutcomeStatus.ERROR,
                 code="tool_unavailable",
                 message="当前 Run 未启用业务工具执行。",
             )
+        # 运行时校验器负责参数级本地校验，不发起任何网络调用。
         validator = getattr(self._tool_runtime, "validate_call", None)
         if validator is None:
             if definition is None:
@@ -665,6 +713,7 @@ class RunExecutor:
     ) -> bool:
         """Persist all calls together, then execute only if no approval barrier exists."""
         run = state.run
+        # 助手消息承载解释文本与全部工具调用，作为一个批次原子持久化。
         call_message_id = self._id_factory("exec")
         created_at = self._now()
         call_message = ExecutionMessageDraft(
@@ -676,10 +725,7 @@ class RunExecutor:
             role=ExecutionRole.ASSISTANT,
             parts=(
                 *((TextPart(explanation),) if explanation.strip() else ()),
-                *(
-                    ToolCallPart(call.call_id, call.name, dict(call.arguments))
-                    for call in calls
-                ),
+                *(ToolCallPart(call.call_id, call.name, dict(call.arguments)) for call in calls),
             ),
             tool_call_id=None,
             source_message_id=None,
@@ -687,6 +733,7 @@ class RunExecutor:
             metadata=MessageMetadata(provider="chat_completions", model=response.model),
         )
         items: list[BeginToolCallBatchItem] = []
+        # 逐条先做本地校验：校验失败生成即时错误结果，不进入审批或外部执行。
         for call in calls:
             definition = self._definition_for_call(state, call.name)
             outcome = self._validate_business_call(definition, call)
@@ -696,13 +743,10 @@ class RunExecutor:
                     tool_call_id=call.call_id,
                     model_name=call.name,
                     tool_id=None if definition is None else definition.tool_id,
-                    tool_kind=(
-                        None if definition is None else ToolKind(definition.source.kind)
-                    ),
+                    tool_kind=(None if definition is None else ToolKind(definition.source.kind)),
+                    # 只有校验通过且定义要求审批的调用才进入审批屏障。
                     requires_approval=bool(
-                        outcome is None
-                        and definition is not None
-                        and definition.requires_approval
+                        outcome is None and definition is not None and definition.requires_approval
                     ),
                     immediate_outcome=outcome,
                     result_message=(
@@ -720,6 +764,8 @@ class RunExecutor:
                     ),
                 )
             )
+        # 仓储在同一事务内写入消息、调用记录、即时结果与事件，
+        # 并根据是否存在待审批调用决定 Run 是否进入等待状态。
         committed = await self._repository.begin_tool_call_batch(
             BeginToolCallBatchCommand(
                 run_id=run.id,
@@ -732,8 +778,10 @@ class RunExecutor:
             )
         )
         await self._publish_pending_events(state)
+        # 进入审批屏障时结束本次执行，等待用户决策后 Run 会被重新入队。
         if committed.waiting_for_approval:
             return False
+        # 无审批屏障时立即执行已批准的调用。
         return await self._execute_persisted_batch(state, committed.batch)
 
     async def _execute_persisted_batch(
@@ -742,9 +790,8 @@ class RunExecutor:
         batch: RunToolBatch,
     ) -> bool:
         """Execute approved calls with stable admission order and bounded concurrency."""
-        if any(
-            call.record.status is ToolCallStatus.UNKNOWN for call in batch.calls
-        ):
+        # 存在结果未知的调用时必须先收敛整个批次，避免重复执行产生外部副作用。
+        if any(call.record.status is ToolCallStatus.UNKNOWN for call in batch.calls):
             converged = await self._repository.converge_tool_batch(
                 ConvergeToolBatchCommand(
                     run_id=state.run.id,
@@ -759,13 +806,11 @@ class RunExecutor:
                 raise LlmError("run_execution_lease_lost")
             await self._publish_pending_events(state)
             return False
-        approved = [
-            call
-            for call in batch.calls
-            if call.record.status is ToolCallStatus.APPROVED
-        ]
+        # 只调度 APPROVED 的调用；待审批或已终态的调用不再执行。
+        approved = [call for call in batch.calls if call.record.status is ToolCallStatus.APPROVED]
         if not approved:
             return True
+        # stop_dispatch 在失租或出现终止性错误时阻止继续派发新调用。
         stop_dispatch = asyncio.Event()
         active: dict[asyncio.Task[_BatchCallResult], RunToolBatchCall] = {}
         next_index = 0
@@ -792,6 +837,8 @@ class RunExecutor:
                     and not stop_dispatch.is_set()
                 ):
                     call = approved[next_index]
+                    # 先原子 admit（APPROVED → EXECUTING）再创建任务，
+                    # 保证多 Worker/重试下同一调用不会被重复执行。
                     admitted = await self._repository.admit_tool_call(
                         AdmitToolCallCommand(
                             run_id=state.run.id,
@@ -802,10 +849,12 @@ class RunExecutor:
                         )
                     )
                     if admitted is None:
+                        # 失租或状态已变：停止派发，交由上层上报。
                         lease_lost = True
                         stop_dispatch.set()
                         break
                     if stop_dispatch.is_set():
+                        # 停止信号在 admit 期间到达：补写“未执行”的取消结果。
                         if not await self._finish_cancelled_admitted_call(
                             state,
                             call,
@@ -813,6 +862,7 @@ class RunExecutor:
                         ):
                             lease_lost = True
                         break
+                    # 启动执行任务并等待其真正开始，确保并发上限与 admit 顺序可控。
                     started = asyncio.Event()
                     task = asyncio.create_task(
                         self._execute_admitted_call(
@@ -832,8 +882,10 @@ class RunExecutor:
                     active,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                # 收集已完成结果；出现失租/终止错误时停止派发后续调用。
                 await collect(done)
         except asyncio.CancelledError:
+            # 取消或异常时先取消并等待所有活跃工具任务，避免遗留外部调用。
             for task in active:
                 task.cancel()
             await asyncio.gather(*active, return_exceptions=True)
@@ -847,8 +899,10 @@ class RunExecutor:
             if active:
                 await asyncio.gather(*active, return_exceptions=True)
 
+        # 失租优先上报，由 Worker 监督循环决定是否收敛状态。
         if lease_lost:
             raise LlmError("run_execution_lease_lost")
+        # 终止性错误：收敛批次并结束本轮，不再请求模型。
         if stop_error_code is not None:
             converged = await self._repository.converge_tool_batch(
                 ConvergeToolBatchCommand(
@@ -864,6 +918,7 @@ class RunExecutor:
                 raise LlmError("run_execution_lease_lost")
             await self._publish_pending_events(state)
             return False
+        # 批次正常结束：发布事件后返回 True，主循环继续请求模型。
         await self._publish_pending_events(state)
         return True
 
@@ -874,6 +929,7 @@ class RunExecutor:
         thread_id: str,
     ) -> bool:
         """Close an admitted call that never reached an external request."""
+        # 已 admit 但尚未发起外部请求的调用补写“取消”终态，保证不会悬挂。
         outcome = ToolOutcome(
             status=ToolOutcomeStatus.CANCELLED,
             code="tool_not_executed",
@@ -909,6 +965,7 @@ class RunExecutor:
         started: asyncio.Event,
     ) -> _BatchCallResult:
         """Run one already-admitted call and persist exactly one matching result."""
+        # 任务开始前已被叫停：不发起外部调用，直接补写取消结果。
         if stop_dispatch.is_set():
             started.set()
             if not await self._finish_cancelled_admitted_call(
@@ -923,6 +980,7 @@ class RunExecutor:
                 )
             return _BatchCallResult(call.record.id, call.record.ordinal)
         started.set()
+        # 定位冻结快照中的定义并执行单个工具；结果先按字节上限裁剪。
         definition = self._definition_for_call(state, call.record.model_name)
         result = await self._execute_tool(
             state,
@@ -938,6 +996,7 @@ class RunExecutor:
             maximum_bytes=self._config.tool_result_bytes,
         )
         finished_at = self._now()
+        # 原子写入结果消息、事件与记录终态；返回 None 表示租约已丢失。
         finished = await self._repository.finish_tool_call(
             FinishToolCallCommand(
                 run_id=state.run.id,
@@ -960,6 +1019,7 @@ class RunExecutor:
         if finished is None:
             stop_dispatch.set()
             return _BatchCallResult(call.record.id, call.record.ordinal, lease_lost=True)
+        # 结果未知或工具要求终止 Run 时，通知调度器停止派发后续调用。
         if (
             outcome.status is ToolOutcomeStatus.UNKNOWN
             or result.terminate_run_error_code is not None
@@ -972,9 +1032,7 @@ class RunExecutor:
                 result.terminate_run_error_code
                 if result.terminate_run_error_code is not None
                 else (
-                    "tool_outcome_unknown"
-                    if outcome.status is ToolOutcomeStatus.UNKNOWN
-                    else None
+                    "tool_outcome_unknown" if outcome.status is ToolOutcomeStatus.UNKNOWN else None
                 )
             ),
         )
@@ -986,6 +1044,7 @@ class RunExecutor:
         call: LlmToolCall,
     ) -> ToolExecutionResult:
         """Execute exactly one business tool with a bounded deadline and no retry."""
+        # 定义缺失或未启用工具运行时：返回安全错误，不发起外部调用。
         if definition is None:
             return ToolExecutionResult(
                 ToolOutcome(
@@ -1002,9 +1061,11 @@ class RunExecutor:
                     message="当前 Run 未启用业务工具执行。",
                 )
             )
+        # 工具超时取配置上限与 Run 剩余执行时间的较小值。
         run_remaining_seconds = self._remaining_seconds(state)
         deadline_seconds = min(self._config.tool_timeout_seconds, run_remaining_seconds)
         if deadline_seconds <= 0:
+            # 执行前时间已耗尽：外部操作是否发生不可知，按 UNKNOWN 处理。
             return ToolExecutionResult(
                 ToolOutcome(
                     status=ToolOutcomeStatus.UNKNOWN,
@@ -1043,6 +1104,7 @@ class RunExecutor:
         except asyncio.CancelledError:
             raise
         except TimeoutError:
+            # 超时后结果不可确认（外部操作可能已生效），标记 UNKNOWN 交给上层收敛。
             return ToolExecutionResult(
                 ToolOutcome(
                     status=ToolOutcomeStatus.UNKNOWN,
@@ -1051,6 +1113,7 @@ class RunExecutor:
                 )
             )
         except Exception as error:
+            # 非预期异常同样按 UNKNOWN 收敛，不向模型暴露内部异常细节。
             logger.warning(
                 "run_tool_execution_failed run_id=%s exception_type=%s",
                 state.run.id,
@@ -1073,8 +1136,10 @@ class RunExecutor:
     ) -> None:
         """Persist the single request_user_input interaction and enter waiting."""
         run = state.run
+        # 落库前重新鉴权，防止模型调用期间登录会话失效。
         if self._tool_runtime is not None and await self._authorize(run) is None:
             raise LlmError("run_auth_session_invalid")
+        # 严格校验参数形状：只允许一个非空 question 字段。
         if set(call.arguments) != {"question"}:
             raise LlmError("llm_tool_arguments_invalid")
         question = call.arguments.get("question")
@@ -1113,6 +1178,7 @@ class RunExecutor:
             created_at=created_at,
             metadata=MessageMetadata(provider="chat_completions", model=response.model),
         )
+        # 原子写入用户可见的问题消息、内部执行消息与输入请求，并进入等待状态。
         request = await self._repository.request_input(
             RequestRunInputCommand(
                 run_id=run.id,
@@ -1137,6 +1203,7 @@ class RunExecutor:
     ) -> None:
         """Re-check delivery permission and atomically save the final answer."""
         run = state.run
+        # 最终回答落库前重新鉴权，防止权限在生成期间被撤销。
         if self._tool_runtime is not None and await self._authorize(run) is None:
             raise LlmError("run_auth_session_invalid")
         finished_at = self._now()
@@ -1155,6 +1222,7 @@ class RunExecutor:
             metadata=MessageMetadata(provider="chat_completions", model=response.model),
             context_turn_id=run.trigger_message_id,
         )
+        # 原子完成 Run 并写入回复消息；返回 None 表示失租，不能覆盖他人结果。
         finished = await self._repository.finish(
             FinishRunCommand(
                 run_id=run.id,
@@ -1181,9 +1249,11 @@ class RunExecutor:
 
     async def _publish_pending_events(self, state: _ExecutionState) -> None:
         """Best-effort publish committed events; SSE reconciles from PostgreSQL."""
+        # 无实时传输时直接跳过；客户端 SSE 会从 PostgreSQL 对账补齐。
         if state.publish_disabled or isinstance(self._publisher, NullRunProgressPublisher):
             return
         try:
+            # 从 event_cursor 起增量推送已提交事件，游标随成功/失败推进。
             while True:
                 current = await self._repository.get(
                     state.run.session_id, state.run.owner_id, state.run.id
@@ -1205,6 +1275,7 @@ class RunExecutor:
                             state.run.id, state.run.execution_epoch, event
                         )
                     except Exception as error:
+                        # 单条推送失败只影响实时性，不阻断执行；游标仍推进到该事件。
                         logger.warning(
                             "run_event_publish_failed run_id=%s exception_type=%s",
                             state.run.id,
@@ -1212,6 +1283,7 @@ class RunExecutor:
                         )
                     state.event_cursor = event.sequence
         except Exception as error:
+            # 查询事件失败：本次执行内禁用发布，避免重复告警与无谓开销。
             state.publish_disabled = True
             logger.warning(
                 "run_event_lookup_failed run_id=%s exception_type=%s",
@@ -1221,6 +1293,7 @@ class RunExecutor:
 
     async def _fail(self, run: Run, safe_error_code: str) -> None:
         """用当前租约记录固定安全错误码。"""
+        # 没有 worker 归属就无法安全写入失败态，直接返回。
         if run.worker_id is None:
             return
         try:
@@ -1234,6 +1307,7 @@ class RunExecutor:
                 )
             )
         except Exception as error:
+            # 失败收敛自身出错时只记录日志，不能覆盖原始失败原因。
             logger.error(
                 "run_failure_settle_failed run_id=%s exception_type=%s",
                 run.id,

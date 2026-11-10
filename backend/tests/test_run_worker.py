@@ -39,7 +39,7 @@ def _lease(status: RunStatus = RunStatus.RUNNING) -> RunLease:
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile_worker_test",
-        prompt_template_version="run-v1",
+        prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
         worker_id="worker-cleanup-0",
@@ -461,7 +461,7 @@ def test_worker_entry_propagates_fatal_task_error_and_closes_resources() -> None
         class FakeDatabase:
             session_factory = object()
 
-            def __init__(self, database_url: str) -> None:
+            def __init__(self, database_url: str, **_kwargs: Any) -> None:
                 pass
 
             async def dispose(self) -> None:
@@ -483,14 +483,14 @@ def test_worker_entry_propagates_fatal_task_error_and_closes_resources() -> None
 
         with (
             patch("run_worker.prepare_run_tokenizers", _async_noop),
-            patch("run_worker.McpSecretCipher.from_environment", return_value=object()),
-            patch("run_worker.Database", FakeDatabase),
-            patch("run_worker.SqlAlchemyModelProfileRepository", lambda _: object()),
-            patch("run_worker.SqlAlchemyMessageRepository", lambda _: object()),
-            patch("run_worker.SqlAlchemyRunRepository", lambda *_: object()),
-            patch("run_worker.OpenAIChatCompletionsAdapter", FakeProvider),
-            patch("run_worker.RunExecutor", lambda *_args, **_kwargs: object()),
-            patch("run_worker.RunWorker", FakeWorker),
+            patch("bootstrap.run_worker.McpSecretCipher.from_environment", return_value=object()),
+            patch("bootstrap.database.Database", FakeDatabase),
+            patch("bootstrap.run_worker.SqlAlchemyModelProfileRepository", lambda _: object()),
+            patch("bootstrap.run_worker.SqlAlchemyMessageRepository", lambda _: object()),
+            patch("bootstrap.run_worker.SqlAlchemyRunRepository", lambda *_: object()),
+            patch("bootstrap.run_worker.OpenAIChatCompletionsAdapter", FakeProvider),
+            patch("bootstrap.run_worker.RunExecutor", lambda *_args, **_kwargs: object()),
+            patch("bootstrap.run_worker.RunWorker", FakeWorker),
         ):
             with pytest.raises(RuntimeError, match="worker_fatal"):
                 await run_worker_process(database_url="postgresql://unused")

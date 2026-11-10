@@ -50,9 +50,12 @@ from domain.knowledge.model import (
     KnowledgeBase,
     OriginalStorageError,
 )
+from domain.knowledge.ports import DocumentFileValidator
 
 
-def build_knowledge_router(service: KnowledgeService) -> APIRouter:
+def build_knowledge_router(
+    service: KnowledgeService, validator: DocumentFileValidator
+) -> APIRouter:
     """将知识库用例绑定到版本化 API。"""
     router = APIRouter(
         prefix="/api/v1/knowledge-bases",
@@ -165,7 +168,7 @@ def build_knowledge_router(service: KnowledgeService) -> APIRouter:
         from app.knowledge.service import MAX_FILE_BYTES
 
         try:
-            content = await _stage_upload(file, file.filename or "", MAX_FILE_BYTES)
+            content = await _stage_upload(file, file.filename or "", MAX_FILE_BYTES, validator)
             document, version_id = await service.create_file_document(
                 auth.user.id,
                 base_id,
@@ -207,7 +210,7 @@ def build_knowledge_router(service: KnowledgeService) -> APIRouter:
         from app.knowledge.service import MAX_FILE_BYTES
 
         try:
-            content = await _stage_upload(file, file.filename or "", MAX_FILE_BYTES)
+            content = await _stage_upload(file, file.filename or "", MAX_FILE_BYTES, validator)
             document, version_id = await service.replace_file_document(
                 auth.user.id,
                 base_id,
@@ -465,7 +468,12 @@ def _base_response(item: KnowledgeBase) -> KnowledgeBaseResponse:
     )
 
 
-async def _stage_upload(file: UploadFile, filename: str, maximum: int) -> bytes:
+async def _stage_upload(
+    file: UploadFile,
+    filename: str,
+    maximum: int,
+    validator: DocumentFileValidator,
+) -> bytes:
     """限制上传并先校验暂存文件，再读取受限大小内容供原件存储。"""
     digest = hashlib.sha256()
     size = 0
@@ -477,10 +485,9 @@ async def _stage_upload(file: UploadFile, filename: str, maximum: int) -> bytes:
             digest.update(chunk)
             await asyncio.to_thread(staged.write, chunk)
         staged.flush()
-        from infrastructure.knowledge.parsers import LocalDocumentParser
-
+        # 校验器由组合根注入，API 层不直接依赖 infrastructure 实现。
         await asyncio.to_thread(
-            LocalDocumentParser(ocr_languages="ch").validate_file,
+            validator.validate_file,
             filename,
             Path(staged.name),
             max_bytes=maximum,

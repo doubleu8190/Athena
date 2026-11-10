@@ -9,8 +9,6 @@ from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from typing import Literal
 
-from redis.exceptions import RedisError
-
 from domain.auth import Authenticator
 from domain.run.model import (
     RunEvent,
@@ -26,7 +24,12 @@ from domain.run.model import (
     RunStreamSnapshot,
     RunTextDeltaEvent,
 )
-from domain.run.ports import RunEventSubscription, RunEventTransport, RunRepository
+from domain.run.ports import (
+    RunEventSubscription,
+    RunEventTransport,
+    RunEventTransportError,
+    RunRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +167,8 @@ class RunStreamService:
                 if subscription is not None:
                     try:
                         incoming = await subscription.get(timeout=0.5)
-                    except RedisError as error:
+                    except RunEventTransportError as error:
+                        # 传输故障只影响实时性：断开订阅并发送中断标记，之后靠数据库对账补齐。
                         logger.warning(
                             "run_stream_subscriber_failed exception_type=%s",
                             type(error).__name__,
@@ -333,7 +337,8 @@ class RunStreamService:
             return None
         try:
             return await exit_stack.enter_async_context(self._transport.subscribe(run_id))
-        except (RedisError, TimeoutError) as error:
+        except (RunEventTransportError, TimeoutError) as error:
+            # 连接失败时降级为无实时订阅；数据库快照仍能提供权威状态。
             logger.warning("run_stream_connect_failed exception_type=%s", type(error).__name__)
             return None
 

@@ -8,6 +8,8 @@ from typing import Any
 import knowledge_worker
 import pytest
 
+import bootstrap.database as bootstrap_database
+import bootstrap.knowledge as bootstrap_knowledge
 from domain.knowledge.model import OriginalStorageConfigurationError
 
 
@@ -15,7 +17,7 @@ def test_storage_start_failure_disposes_database_and_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeDatabase:
-        def __init__(self, _url: str) -> None:
+        def __init__(self, _url: str, **_kwargs: Any) -> None:
             self.session_factory = object()
             self.disposed = False
 
@@ -41,14 +43,14 @@ def test_storage_start_failure_disposes_database_and_storage(
 
     databases: list[FakeDatabase] = []
 
-    def database_factory(url: str) -> FakeDatabase:
+    def database_factory(url: str, **_kwargs: Any) -> FakeDatabase:
         database = FakeDatabase(url)
         databases.append(database)
         return database
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
-    monkeypatch.setattr(knowledge_worker, "Database", database_factory)
-    monkeypatch.setattr(knowledge_worker, "MinioOriginalStore", FakeStore)
+    monkeypatch.setattr(bootstrap_database, "Database", database_factory)
+    monkeypatch.setattr(bootstrap_knowledge, "MinioOriginalStore", FakeStore)
 
     with pytest.raises(OriginalStorageConfigurationError):
         asyncio.run(knowledge_worker.run_worker())
@@ -63,7 +65,7 @@ def test_model_start_failure_closes_all_created_resources(
     events: list[str] = []
 
     class FakeDatabase:
-        def __init__(self, _url: str) -> None:
+        def __init__(self, _url: str, **_kwargs: Any) -> None:
             self.session_factory = object()
 
         async def dispose(self) -> None:
@@ -102,10 +104,10 @@ def test_model_start_failure_closes_all_created_resources(
             events.append("counter_close")
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
-    monkeypatch.setattr(knowledge_worker, "Database", FakeDatabase)
-    monkeypatch.setattr(knowledge_worker, "MinioOriginalStore", FakeStore)
-    monkeypatch.setattr(knowledge_worker, "LocalEmbedding", FakeEmbedding)
-    monkeypatch.setattr(knowledge_worker, "LocalKnowledgeTokenCounter", FakeCounter)
+    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
+    monkeypatch.setattr(bootstrap_knowledge, "MinioOriginalStore", FakeStore)
+    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", FakeEmbedding)
+    monkeypatch.setattr(bootstrap_knowledge, "LocalKnowledgeTokenCounter", FakeCounter)
 
     with pytest.raises(RuntimeError, match="model unavailable"):
         asyncio.run(knowledge_worker.run_worker())

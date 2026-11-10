@@ -39,7 +39,12 @@ from domain.run.model import (
     RunTextDeltaPayload,
     RunUsage,
 )
-from domain.run.ports import RunEventSubscription, RunEventTransport, RunRepository
+from domain.run.ports import (
+    RunEventSubscription,
+    RunEventTransport,
+    RunEventTransportError,
+    RunRepository,
+)
 
 
 def _run(status: RunStatus, epoch: int) -> Run:
@@ -53,7 +58,7 @@ def _run(status: RunStatus, epoch: int) -> Run:
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile_stream_test",
-        prompt_template_version="run-v1",
+        prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=epoch,
         worker_id="worker-stream-test" if status is RunStatus.RUNNING else None,
@@ -618,8 +623,6 @@ def test_pubsub_disconnect_reconnects_with_interrupt_and_fresh_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pub/Sub 中断后发 interruption，再从数据库重新校准快照。"""
-    from redis.exceptions import RedisError
-
     import app.run.stream as stream_module
 
     monkeypatch.setattr(stream_module, "REDIS_RECONNECT_SECONDS", 0.0)
@@ -640,7 +643,7 @@ def test_pubsub_disconnect_reconnects_with_interrupt_and_fresh_snapshot(
 
     class BrokenSubscription(_FakeSubscription):
         async def get(self, *, timeout: float) -> RunStreamEvent | None:
-            raise RedisError("subscriber disconnected")
+            raise RunEventTransportError("subscriber disconnected")
 
     class ReconnectingTransport(_FakeTransport):
         def __init__(self, repository: ChangingRepository) -> None:
@@ -704,8 +707,6 @@ def test_redis_subscription_overflow_surfaces_for_reconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """超过有界订阅队列时通知服务断开并重新对账。"""
-    from redis.exceptions import RedisError
-
     monkeypatch.setattr(redis_module, "MAX_SUBSCRIPTION_EVENTS", 1)
     event = RunTextDeltaEvent(
         run_id="run_stream_test",
@@ -738,7 +739,7 @@ def test_redis_subscription_overflow_surfaces_for_reconnect(
         subscription = _RedisRunSubscription(cast(PubSub, FakePubSub()))
         subscription.start()
         await asyncio.sleep(0)
-        with pytest.raises(RedisError, match="run_stream_buffer_overflow"):
+        with pytest.raises(RunEventTransportError, match="run_stream_buffer_overflow"):
             await subscription.get(timeout=0.1)
         await subscription.aclose()
 
@@ -769,7 +770,7 @@ def test_publisher_failure_before_sequence_is_reported_before_next_delta() -> No
     async def scenario() -> list[RunStreamEvent]:
         client = FailingRedis()
         transport = RedisRunTransport(cast(Redis, client))
-        with pytest.raises(RedisError):
+        with pytest.raises(RunEventTransportError):
             await transport.publish_text("run_failure_test", 3, "lost delta")
         await transport.publish_text("run_failure_test", 3, "next delta")
         return [redis_module._EVENT_ADAPTER.validate_json(raw) for raw in client.published]
@@ -863,11 +864,11 @@ def test_publisher_to_public_sse_suppresses_failed_epoch_suffixes() -> None:
     async def publish_scenario() -> None:
         await transport.publish_text(run_id, 1, "visible prefix")
         redis.fail_next_sequence = True
-        with pytest.raises(RedisError):
+        with pytest.raises(RunEventTransportError):
             await transport.publish_text(run_id, 1, "lost same epoch part")
         await transport.publish_text(run_id, 1, "hidden same epoch suffix")
         redis.fail_next_sequence = True
-        with pytest.raises(RedisError):
+        with pytest.raises(RunEventTransportError):
             await transport.publish_text(run_id, 2, "lost first new epoch part")
         await transport.publish_text(run_id, 2, "hidden new epoch suffix")
         await transport.publish_text(run_id, 3, "visible fresh epoch")
@@ -919,5 +920,61 @@ def test_sse_disconnects_when_asgi_send_exceeds_timeout() -> None:
 
         with pytest.raises(TimeoutError):
             await response.stream_response(cast(Send, slow_send))
+
+    asyncio.run(scenario())
+
+
+def test_redis_pump_translates_client_errors_to_transport_error() -> None:
+    """订阅泵内的 Redis 客户端异常翻译为领域传输异常并保留原因。"""
+    from redis.exceptions import RedisError
+
+    class FailingPubSub:
+        async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
+            raise RedisError("pump failed")
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        subscription = _RedisRunSubscription(cast(PubSub, FailingPubSub()))
+        subscription.start()
+        pump = subscription._pump_task
+        assert pump is not None
+        await asyncio.wait_for(pump, timeout=1.0)
+        with pytest.raises(RunEventTransportError, match="run_stream_transport_failed") as caught:
+            await subscription.get(timeout=0.1)
+        assert isinstance(caught.value.__cause__, RedisError)
+        await subscription.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_redis_subscribe_translates_client_errors_to_transport_error() -> None:
+    """订阅握手阶段的 Redis 客户端异常翻译为领域传输异常并保留原因。"""
+    from redis.exceptions import RedisError
+
+    class FailingPubSub:
+        async def subscribe(self, channel_name: str) -> None:
+            del channel_name
+            raise RedisError("subscribe failed")
+
+        async def aclose(self) -> None:
+            return None
+
+    class FailingRedis:
+        def pubsub(self) -> FailingPubSub:
+            return FailingPubSub()
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        transport = RedisRunTransport(cast(Redis, FailingRedis()))
+        with pytest.raises(RunEventTransportError, match="run_stream_subscribe_failed") as caught:
+            async with transport.subscribe("run_x"):
+                pass
+        assert isinstance(caught.value.__cause__, RedisError)
+        await transport.aclose()
 
     asyncio.run(scenario())

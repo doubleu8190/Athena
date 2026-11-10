@@ -7,6 +7,8 @@ import json
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import pytest
+
 from app.knowledge.service import KnowledgeService
 from app.memory.service import MemoryService
 from app.project.knowledge import ProjectKnowledgeService
@@ -187,9 +189,7 @@ def _mcp_definition() -> RuntimeToolDefinition:
     )
 
 
-def _mcp_snapshot_definition(
-    *, requires_approval: bool = False
-) -> McpRuntimeToolDefinition:
+def _mcp_snapshot_definition(*, requires_approval: bool = False) -> McpRuntimeToolDefinition:
     return McpRuntimeToolDefinition(
         tool_id="tool_lookup",
         server_id="mcp_1",
@@ -259,11 +259,12 @@ def _authorized() -> AuthorizedRunContext:
     )
 
 
-def test_snapshot_freezes_v1_and_hides_unavailable_v2_builtins() -> None:
+def test_snapshot_rejects_unsupported_version_and_hides_unavailable_v2_builtins() -> None:
     async def scenario() -> None:
         runtime, _ = _runtime(project_id=None)
-        v1 = await runtime.build_snapshot("run-v1", _authorized())
-        assert tuple(item.model_name for item in v1.tools) == ("request_user_input",)
+        # 历史 v1 版本不再兼容，必须在构建快照时直接拒绝。
+        with pytest.raises(ValueError, match="run_prompt_template_unsupported"):
+            await runtime.build_snapshot("run-v1", _authorized())
 
         hidden, _ = _runtime(memory_enabled=False, project_id=None)
         v2_hidden = await hidden.build_snapshot("run-v2", _authorized())

@@ -22,6 +22,7 @@ from api.dto.mcp import McpServerRequest, McpServerUpdateRequest
 from api.mcp_errors import mcp_error_to_http
 from api.security import get_current_auth
 from app.tool import ToolManager
+from bootstrap.config import env_csv_set
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.mcp import (
     McpCatalogPersistenceError,
@@ -35,7 +36,7 @@ from domain.mcp import (
     StreamableHttpConfig,
 )
 from domain.tool import AdminToolDefinition, PublicToolDefinition, ToolPage
-from main import _env_csv_set, create_app
+from main import create_app
 
 
 @pytest.mark.parametrize(
@@ -511,4 +512,4 @@ def test_deployment_allowlist_rejects_empty_or_invalid_values(
 ) -> None:
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=f"{name}_invalid"):
-        _env_csv_set(name)
+        env_csv_set(name)

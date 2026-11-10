@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import os
-import re
 import shutil
 import tempfile
 from collections.abc import AsyncGenerator
@@ -14,20 +12,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from redis.asyncio import Redis
 from sqlalchemy.exc import SQLAlchemyError
 
-from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.knowledge.repository import KnowledgeRepository
-from adapter.knowledge.storage import MinioStorageConfig
-from adapter.llm import OpenAIResponsesAdapter
-from adapter.llm.repository import SqlAlchemyModelProfileRepository
-from adapter.mcp.repository import SqlAlchemyMcpRepository
-from adapter.message.repository import SqlAlchemyMessageRepository
-from adapter.project.repository import SqlAlchemyProjectRepository
-from adapter.run.redis_transport import RedisRunTransport
-from adapter.run.repository import SqlAlchemyRunRepository
-from adapter.session import SqlAlchemySessionRepository
 from api.auth import AuthCookieConfig, build_auth_router
 from api.health import router as health_router
 from api.knowledge import build_knowledge_router
@@ -42,27 +28,17 @@ from api.sessions import build_session_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
 from app.knowledge.service import KnowledgeService
-from app.llm import LlmService, ModelProfileService, parse_profiles
+from app.llm import LlmService, ModelProfileService
 from app.memory.service import MemoryService
 from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.run.service import RunService
-from app.run.stream import RunStreamService
 from app.session.service import SessionService
 from app.tool import ToolManager
-from app.tool.dependencies import QueryServiceBundle, build_query_services
+from bootstrap.api import ApiDependencies, build_api_dependencies
+from bootstrap.config import env_flag, env_int
 from common.ids import new_id
-from domain.knowledge.ports import KnowledgeRepositoryPort, OriginalStore
-from domain.mcp import McpSecretError
-from infrastructure.database import (
-    DEFAULT_DATABASE_MAX_OVERFLOW,
-    DEFAULT_DATABASE_POOL_SIZE,
-    Database,
-)
-from infrastructure.embedding.profile import embedding_profile_id
-from infrastructure.mcp.discovery import McpDiscoveryClient
-from infrastructure.security.mcp_secrets import McpSecretCipher
-from infrastructure.security.password import Argon2PasswordHasher
+from domain.knowledge.ports import KnowledgeRepositoryPort
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +69,7 @@ class _KnowledgeUploadLimitMiddleware:
         receive_fn = receive
         send_fn = send
         assert callable(receive_fn) and callable(send_fn)
-        minimum_free_bytes = _env_int(
+        minimum_free_bytes = env_int(
             "ATHENA_KNOWLEDGE_UPLOAD_MIN_FREE_BYTES",
             default=384 * 1024 * 1024,
             minimum=1,
@@ -190,11 +166,6 @@ async def _send_json(send: object, status: int, detail: str) -> None:
     await send({"type": "http.response.body", "body": payload})
 
 
-def memory_profile_id(model: str, revision: str) -> str:
-    """根据模型权重与向量预处理规则生成不可混用的档案标识。"""
-    return embedding_profile_id(model, revision)
-
-
 _DATABASE_BACKED_ROUTE_PREFIXES = (
     "/api/v1/auth",
     "/api/v1/projects",
@@ -248,142 +219,25 @@ def create_app(
 
     参数：project_service、message_service、session_service、auth_service 为
     测试或嵌入场景提供已组装用例；auth_cookie_secure 和 public_origin 默认读取
-    ATHENA_COOKIE_SECURE、ATHENA_PUBLIC_ORIGIN。数据库用例默认按
-    ATHENA_DATABASE_URL 创建适配器。
+    ATHENA_COOKIE_SECURE、ATHENA_PUBLIC_ORIGIN。其余依赖由 bootstrap.api 按环境
+    变量统一装配。
     返回：FastAPI，已挂载可用路由的应用。
     异常：数据库 URL 无效时可能在创建引擎阶段抛出依赖异常。
     """
-    database: Database | None = None
-    project_use_case = project_service
-    message_use_case = message_service
-    session_use_case = session_service
-    run_use_case = run_service
-    auth_use_case = auth_service
-    database_url = os.getenv("ATHENA_DATABASE_URL")
-    mcp_use_case = tool_manager
-    llm_use_case = llm_service
-    llm_adapter: OpenAIResponsesAdapter | None = None
-    model_profile_use_case = model_profile_service
-    memory_use_case = memory_service
-    memory_enabled = memory_service is not None or _env_flag("ATHENA_MEMORY_ENABLED", default=False)
-    knowledge_enabled = knowledge_service is not None or _env_flag(
-        "ATHENA_KNOWLEDGE_ENABLED", default=False
+    deps: ApiDependencies = build_api_dependencies(
+        project_service=project_service,
+        message_service=message_service,
+        session_service=session_service,
+        run_service=run_service,
+        auth_service=auth_service,
+        tool_manager=tool_manager,
+        llm_service=llm_service,
+        model_profile_service=model_profile_service,
+        memory_service=memory_service,
+        knowledge_service=knowledge_service,
     )
-    knowledge_use_case: KnowledgeService | None = knowledge_service
-    knowledge_repository: KnowledgeRepository | None = None
-    knowledge_originals: OriginalStore | None = None
-    query_services: QueryServiceBundle | None = None
-    memory_owned = memory_service is None and memory_enabled
-    knowledge_owned = knowledge_service is None and knowledge_enabled
-    run_stream_service: RunStreamService | None = None
-    run_transport: RedisRunTransport | None = None
-    if memory_owned and not database_url:
-        raise RuntimeError("memory_database_required")
-    if knowledge_owned and not database_url:
-        raise RuntimeError("knowledge_database_required")
-    if knowledge_owned:
-        # Fail before constructing any database, Redis, or model resources.
-        # The same environment is parsed again by build_query_services.
-        MinioStorageConfig.from_environment()
-    if llm_use_case is None:
-        llm_profiles = parse_profiles()
-        if llm_profiles:
-            llm_adapter = OpenAIResponsesAdapter(llm_profiles)
-            llm_use_case = LlmService(llm_adapter, llm_profiles)
-    secret_cipher: McpSecretCipher | None = None
-    mcp_discovery: McpDiscoveryClient | None = None
-    if database_url and mcp_use_case is None:
-        # 在创建数据库连接池前验证 MCP 密钥，防止失败组装遗留资源。
-        secret_cipher = McpSecretCipher.from_environment()
-        allowed_private_hosts = _env_csv_set("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS")
-        stdio_names = _env_csv_set("ATHENA_MCP_STDIO_BASE_ENV_NAMES")
-        base_environment = {name: os.environ[name] for name in stdio_names if name in os.environ}
-        mcp_discovery = McpDiscoveryClient(
-            allowed_private_hosts=allowed_private_hosts,
-            stdio_base_environment=base_environment,
-            stdio_allowed_environment_names=stdio_names,
-        )
-    if database_url and (
-        auth_use_case is None
-        or project_use_case is None
-        or message_use_case is None
-        or session_use_case is None
-        or run_use_case is None
-        or mcp_use_case is None
-        or memory_owned
-        # Project bindings and query services share the API database session
-        # factory even when a pre-built KnowledgeService is injected.
-        or knowledge_enabled
-    ):
-        database = Database(
-            database_url,
-            pool_size=_env_int(
-                "ATHENA_DATABASE_POOL_SIZE",
-                default=DEFAULT_DATABASE_POOL_SIZE,
-                minimum=1,
-            ),
-            max_overflow=_env_int(
-                "ATHENA_DATABASE_MAX_OVERFLOW",
-                default=DEFAULT_DATABASE_MAX_OVERFLOW,
-                minimum=0,
-            ),
-        )
-        project_repository = SqlAlchemyProjectRepository(database.session_factory)
-        model_profile_repository = SqlAlchemyModelProfileRepository(database.session_factory)
-        if model_profile_use_case is None:
-            model_profile_use_case = ModelProfileService(
-                model_profile_repository, SqlAlchemyAuthRepository(database.session_factory)
-            )
-        session_repository = SqlAlchemySessionRepository(database.session_factory)
-        auth_repository = SqlAlchemyAuthRepository(database.session_factory)
-        if auth_use_case is None:
-            auth_use_case = AuthService(auth_repository, Argon2PasswordHasher())
-        if session_use_case is None:
-            session_use_case = SessionService(session_repository)
-        if project_use_case is None:
-            project_use_case = ProjectService(project_repository)
-        if message_use_case is None:
-            message_repository = SqlAlchemyMessageRepository(database.session_factory)
-            message_use_case = MessageService(message_repository)
-        else:
-            message_repository = SqlAlchemyMessageRepository(database.session_factory)
-        run_repository = SqlAlchemyRunRepository(database.session_factory, message_repository)
-        if run_use_case is None:
-            run_use_case = RunService(run_repository)
-        if auth_use_case is not None:
-            redis_url = os.getenv("ATHENA_REDIS_URL", "").strip()
-            if redis_url:
-                run_transport = RedisRunTransport(
-                    Redis.from_url(redis_url, decode_responses=False, socket_connect_timeout=1)
-                )
-            run_stream_service = RunStreamService(
-                run_repository,
-                auth_use_case,
-                run_transport,
-            )
-        if mcp_use_case is None:
-            if secret_cipher is None or mcp_discovery is None:
-                raise McpSecretError("mcp_secret_key_missing")
-            mcp_repository = SqlAlchemyMcpRepository(database.session_factory, secret_cipher)
-            mcp_use_case = ToolManager(
-                mcp_repository,
-                mcp_repository,
-                mcp_discovery,
-                auth_repository,
-            )
-        query_services = build_query_services(
-            database.session_factory,
-            projects=project_use_case,
-            memory_service=memory_use_case,
-            knowledge_service=knowledge_use_case,
-        )
-        memory_use_case = query_services.memory
-        knowledge_use_case = query_services.knowledge
-        knowledge_repository = query_services.knowledge_repository
-        knowledge_originals = query_services.knowledge_original_store
-
     if auth_cookie_secure is None:
-        auth_cookie_secure = _env_flag("ATHENA_COOKIE_SECURE", default=False)
+        auth_cookie_secure = env_flag("ATHENA_COOKIE_SECURE", default=False)
     configured_public_origin = (
         public_origin.strip()
         if public_origin is not None
@@ -392,154 +246,69 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-        """在应用退出时释放数据库连接池。"""
+        """启动共享查询资源，并在应用退出时释放全部进程级依赖。"""
         try:
-            if query_services is not None:
-                await query_services.start()
+            await deps.start()
             yield
         finally:
-            if run_transport is not None:
-                try:
-                    await run_transport.aclose()
-                except Exception as error:
-                    logger.error(
-                        "run_redis_shutdown_failed exception_type=%s",
-                        type(error).__name__,
-                    )
-            if llm_adapter is not None:
-                try:
-                    await llm_adapter.aclose()
-                except Exception:
-                    logger.error("llm_shutdown_failed code=llm_cleanup_failed")
-            if query_services is not None:
-                try:
-                    await query_services.aclose()
-                except Exception as error:
-                    logger.error(
-                        "query_service_shutdown_failed exception_type=%s",
-                        type(error).__name__,
-                    )
-            if database is not None:
-                try:
-                    await database.dispose()
-                except Exception:
-                    logger.error("database_shutdown_failed")
+            await deps.aclose()
 
     app = FastAPI(title="Athena", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         _KnowledgeUploadLimitMiddleware,
-        repository=knowledge_repository,
+        repository=deps.knowledge_repository,
     )
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
     app.add_exception_handler(OSError, _handle_os_error)
-    app.state.authenticator = auth_use_case
+    app.state.authenticator = deps.auth_service
     app.state.auth_cookie_name = DEFAULT_COOKIE_NAME
     app.state.public_origin = configured_public_origin or None
-    app.state.tool_manager = mcp_use_case
-    app.state.llm_service = llm_use_case
-    app.state.model_profile_service = model_profile_use_case
-    app.state.run_service = run_use_case
-    app.state.memory_service = memory_use_case
-    app.state.knowledge_service = knowledge_use_case
+    app.state.tool_manager = deps.tool_manager
+    app.state.llm_service = deps.llm_service
+    app.state.model_profile_service = deps.model_profile_service
+    app.state.run_service = deps.run_service
+    app.state.memory_service = deps.memory_service
+    app.state.knowledge_service = deps.knowledge_service
     app.include_router(health_router)
-    if model_profile_use_case is not None:
-        app.include_router(build_llm_admin_router(model_profile_use_case))
-    if project_use_case is not None:
-        app.include_router(build_project_router(project_use_case))
-    if session_use_case is not None:
-        app.include_router(build_session_router(session_use_case))
-    if run_use_case is not None:
-        app.include_router(build_run_router(run_use_case, run_stream_service))
-    if message_use_case is not None:
-        app.include_router(build_message_router(message_use_case))
-    if auth_use_case is not None:
+    if deps.model_profile_service is not None:
+        app.include_router(build_llm_admin_router(deps.model_profile_service))
+    if deps.project_service is not None:
+        app.include_router(build_project_router(deps.project_service))
+    if deps.session_service is not None:
+        app.include_router(build_session_router(deps.session_service))
+    if deps.run_service is not None:
+        app.include_router(build_run_router(deps.run_service, deps.run_stream_service))
+    if deps.message_service is not None:
+        app.include_router(build_message_router(deps.message_service))
+    if deps.auth_service is not None:
         app.include_router(
             build_auth_router(
-                auth_use_case,
+                deps.auth_service,
                 cookie=AuthCookieConfig(
                     name=DEFAULT_COOKIE_NAME,
                     secure=auth_cookie_secure,
                 ),
             )
         )
-    if mcp_use_case is not None:
-        app.include_router(build_mcp_router(mcp_use_case))
-        app.include_router(build_tools_router(mcp_use_case))
-    if knowledge_use_case is not None:
-        app.state.knowledge_original_store = knowledge_originals
-        app.include_router(build_knowledge_router(knowledge_use_case))
+    if deps.tool_manager is not None:
+        app.include_router(build_mcp_router(deps.tool_manager))
+        app.include_router(build_tools_router(deps.tool_manager))
+    if deps.knowledge_service is not None:
+        app.state.knowledge_original_store = deps.knowledge_originals
+        assert deps.document_validator is not None
+        app.include_router(build_knowledge_router(deps.knowledge_service, deps.document_validator))
         if (
-            project_use_case is not None
-            and query_services is not None
-            and query_services.project_knowledge is not None
+            deps.project_service is not None
+            and deps.query_services is not None
+            and deps.query_services.project_knowledge is not None
         ):
             app.include_router(
                 build_project_knowledge_router(
-                    query_services.project_knowledge,
-                    project_use_case,
+                    deps.query_services.project_knowledge,
+                    deps.project_service,
                 )
             )
     return app
 
 
-def _env_flag(name: str, *, default: bool) -> bool:
-    """解析严格布尔环境变量，拒绝含糊配置。"""
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"{name}_invalid")
-
-
-def _env_int(name: str, *, default: int, minimum: int) -> int:
-    """解析带下界的环境整数，拒绝 bool 语义和含糊文本。"""
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return default
-    try:
-        parsed = int(value.strip())
-    except ValueError as error:
-        raise ValueError(f"{name}_invalid") from error
-    if parsed < minimum:
-        raise ValueError(f"{name}_invalid")
-    return parsed
-
-
-def _env_csv_set(name: str) -> frozenset[str]:
-    """解析逗号分隔的部署白名单，拒绝空项和非法主机/变量名。"""
-    raw = os.getenv(name, "")
-    if not raw.strip():
-        return frozenset()
-    parts = [part.strip() for part in raw.split(",")]
-    if any(not part for part in parts):
-        raise ValueError(f"{name}_invalid")
-    if name == "ATHENA_MCP_ALLOWED_PRIVATE_HOSTS":
-        normalized_hosts: set[str] = set()
-        try:
-            for part in parts:
-                try:
-                    host = ipaddress.ip_address(part).compressed
-                except ValueError:
-                    ascii_host = part.encode("idna").decode("ascii").lower()
-                    labels = ascii_host.split(".")
-                    if len(ascii_host) > 253 or any(
-                        not label
-                        or len(label) > 63
-                        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
-                        for label in labels
-                    ):
-                        raise ValueError from None
-                    host = ascii_host
-                normalized_hosts.add(host)
-        except (UnicodeError, ValueError):
-            raise ValueError(f"{name}_invalid") from None
-        return frozenset(normalized_hosts)
-    else:
-        valid = all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) for part in parts)
-    if not valid:
-        raise ValueError(f"{name}_invalid")
-    return frozenset(parts)
+__all__ = ["create_app"]

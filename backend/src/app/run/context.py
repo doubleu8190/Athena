@@ -100,7 +100,9 @@ def messages_to_llm(
     retry_context: Sequence[ToolRetryContext] = (),
 ) -> tuple[LlmMessage, ...]:
     """把固定 cutoff 的正式消息及本 Run 协议交互转换为模型上下文。"""
+    # 固定 system prompt 永远在最前，确保模板版本行为稳定。
     result: list[LlmMessage] = [LlmMessage(role=LlmRole.SYSTEM, content=system_prompt_for_run(run))]
+    # 压缩摘要作为“历史资料”注入，并明确它不是新指令。
     if summary_text:
         result.append(
             LlmMessage(
@@ -111,6 +113,7 @@ def messages_to_llm(
                 ),
             )
         )
+    # 用户主动重试时注入来源 Run 的安全摘要，并说明不可复用其结果。
     if retry_context:
         safe_lines = "\n".join(
             f"- 工具 {item.tool_name}：{item.safe_error_code}" for item in retry_context
@@ -125,6 +128,7 @@ def messages_to_llm(
                 ),
             )
         )
+    # 正式会话消息与执行协议消息按 cutoff 顺序转换为模型消息。
     for message in messages:
         if isinstance(message, ConversationMessage):
             result.append(_conversation_to_llm(message))
@@ -166,6 +170,7 @@ def _build_llm_request(
     retry_context: Sequence[ToolRetryContext] = (),
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int]:
     """计数完整上下文和工具 Schema，拒绝超窗请求，不裁剪历史。"""
+    # 默认只暴露澄清工具；调用方传入的工具目录会整体计入预算。
     selected_tools = (REQUEST_USER_INPUT,) if tools is None else tuple(tools)
     llm_messages, input_tokens, output_tokens = _estimate_request(
         run,
@@ -175,6 +180,7 @@ def _build_llm_request(
         tools=selected_tools,
         retry_context=retry_context,
     )
+    # 输入 + 协议预留 + 输出预留必须装进模型窗口；超窗时拒绝而不是裁剪历史。
     if input_tokens + PROTOCOL_TOKEN_RESERVE + output_tokens > profile.context_window_tokens:
         raise RunContextError("run_context_window_exceeded")
     return llm_messages, selected_tools, output_tokens
@@ -195,9 +201,11 @@ def _estimate_request(
     except (KeyError, ValueError) as error:
         raise RunContextError("run_tokenizer_unsupported") from error
     llm_messages = messages_to_llm(run, messages, summary_text, retry_context)
+    # 每条消息额外 +4 覆盖角色分隔等协议开销。
     input_tokens = sum(
         len(encoding.encode_ordinary(_message_token_text(message))) + 4 for message in llm_messages
     )
+    # 工具 Schema 与名称/描述同样占用输入预算。
     for tool in selected_tools:
         tool_schema_text = json.dumps(
             dict(tool.input_schema),
@@ -210,6 +218,7 @@ def _estimate_request(
             + len(encoding.encode_ordinary(tool.name + tool.description))
             + 8
         )
+    # 输出预留取 profile 上限与窗口大小的较小值。
     output_tokens = min(profile.max_output_tokens, profile.context_window_tokens)
     return llm_messages, input_tokens + PROTOCOL_TOKEN_RESERVE, output_tokens
 
@@ -224,6 +233,7 @@ async def _run_context_work[ResultT](
     function: Callable[..., ResultT], *args: Any, timeout_seconds: float
 ) -> ResultT:
     """在有界 daemon 线程执行阻塞 tokenizer 工作，并让调用者可按 deadline 超时。"""
+    # tokenizer 是阻塞调用，必须离开事件循环，避免阻塞 Worker 心跳与取消轮询。
     if timeout_seconds <= 0:
         raise TimeoutError("run_context_worker_unavailable")
     loop = asyncio.get_running_loop()
@@ -289,6 +299,7 @@ async def build_llm_request(
     retry_context: Sequence[ToolRetryContext] = (),
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int]:
     """在线程池边界外计数，避免大上下文编码阻塞 Worker 心跳和取消轮询。"""
+    # 把可变参数复制成不可变序列后交给工作线程。
     return await _run_context_work(
         _build_llm_request,
         run,

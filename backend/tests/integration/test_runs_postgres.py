@@ -228,7 +228,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_run_test",
-                        prompt_template_version="run-v1",
+                        prompt_template_version="run-v2",
                         event_sequence=0,
                         execution_epoch=0,
                         queued_at=now,
@@ -246,7 +246,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                 run_id="run_submit_test",
                 request_id="req_submit_test",
                 fingerprint="a" * 64,
-                prompt_template_version="run-v1",
+                prompt_template_version="run-v2",
                 message=_draft(
                     message_id="msg_submit_test",
                     owner_id="usr_run_test",
@@ -818,7 +818,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id=f"run_race_{index}",
                     request_id=f"req_race_{index}",
                     fingerprint=f"{index + 1:064x}",
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id=f"msg_race_{index}",
                         owner_id="usr_run_test",
@@ -1120,7 +1120,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id="run_profile_race",
                     request_id="req_profile_race",
                     fingerprint="f" * 64,
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id="msg_profile_race",
                         owner_id="usr_run_test",
@@ -1196,7 +1196,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                 run_id="run_executor_test",
                 request_id="req_executor_test",
                 fingerprint="9" * 64,
-                prompt_template_version="run-v1",
+                prompt_template_version="run-v2",
                 message=_draft(
                     message_id="msg_executor_test",
                     owner_id="usr_run_test",
@@ -1280,7 +1280,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id=clarify_run_id,
                     request_id="req_executor_clarify",
                     fingerprint="8" * 64,
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id="msg_executor_clarify",
                         owner_id="usr_run_test",
@@ -1456,7 +1456,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id=retry_run_id,
                     request_id="req_executor_retry",
                     fingerprint="7" * 64,
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id="msg_executor_retry",
                         owner_id="usr_run_test",
@@ -1524,7 +1524,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id=auth_run_id,
                     request_id="req_executor_auth_error",
                     fingerprint="6" * 64,
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id="msg_executor_auth_error",
                         owner_id="usr_run_test",
@@ -1601,7 +1601,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id=context_deadline_run_id,
                     request_id="req_executor_context_deadline",
                     fingerprint="4" * 64,
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id="msg_executor_context_deadline",
                         owner_id="usr_run_test",
@@ -1662,7 +1662,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id=disabled_run_id,
                     request_id="req_executor_disabled_during_backoff",
                     fingerprint="5" * 64,
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id="msg_executor_disabled_during_backoff",
                         owner_id="usr_run_test",
@@ -1713,7 +1713,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands(
                     run_id=unavailable_run_id,
                     request_id="req_profile_unavailable_at_claim",
                     fingerprint="3" * 64,
-                    prompt_template_version="run-v1",
+                    prompt_template_version="run-v2",
                     message=_draft(
                         message_id="msg_profile_unavailable_at_claim",
                         owner_id="usr_run_test",

@@ -25,7 +25,7 @@ from domain.run.model import (
     RunTextDeltaEvent,
     RunTextDeltaPayload,
 )
-from domain.run.ports import RunEventSubscription, RunEventTransport
+from domain.run.ports import RunEventSubscription, RunEventTransport, RunEventTransportError
 
 MAX_REDIS_EVENT_BYTES = MAX_RUN_SSE_EVENT_BYTES
 MAX_SUBSCRIPTION_EVENTS = 256
@@ -46,7 +46,8 @@ class _RedisRunSubscription(RunEventSubscription):
         self._queued_bytes = 0
         self._overflow = asyncio.Event()
         self._pump_task: asyncio.Task[None] | None = None
-        self._error: RedisError | None = None
+        # 对外只保存领域异常，Redis 客户端异常在泵内部完成翻译。
+        self._error: RunEventTransportError | None = None
 
     def start(self) -> None:
         self._pump_task = asyncio.create_task(self._pump())
@@ -55,7 +56,7 @@ class _RedisRunSubscription(RunEventSubscription):
         if self._error is not None:
             raise self._error
         if self._overflow.is_set():
-            raise RedisError("run_stream_buffer_overflow")
+            raise RunEventTransportError("run_stream_buffer_overflow")
         try:
             event, size = await asyncio.wait_for(self._queue.get(), timeout=timeout)
         except TimeoutError:
@@ -92,7 +93,10 @@ class _RedisRunSubscription(RunEventSubscription):
         except asyncio.CancelledError:
             raise
         except RedisError as error:
-            self._error = error
+            # 把 Redis 客户端异常翻译为领域传输异常，并保留原始异常链供诊断。
+            translated = RunEventTransportError("run_stream_transport_failed")
+            translated.__cause__ = error
+            self._error = translated
 
     async def aclose(self) -> None:
         if self._pump_task is not None:
@@ -146,6 +150,10 @@ class RedisRunTransport(RunEventTransport):
                     chunk,
                     round=round,
                 )
+        except RedisError as error:
+            # 发布链路不可用时先记录失败代次，再翻译为领域异常并保留原始原因。
+            self._remember_failed_epoch(run_id, execution_epoch)
+            raise RunEventTransportError("run_stream_publish_failed") from error
         except BaseException:
             self._remember_failed_epoch(run_id, execution_epoch)
             raise
@@ -163,6 +171,10 @@ class RedisRunTransport(RunEventTransport):
                     payload=RunPersistedEventPayload(event=event),
                 ),
             )
+        except RedisError as error:
+            # 正式通知发布失败同样记录代次，后续恢复时补发中断标记。
+            self._remember_failed_epoch(run_id, execution_epoch)
+            raise RunEventTransportError("run_stream_publish_failed") from error
         except BaseException:
             self._remember_failed_epoch(run_id, execution_epoch)
             raise
@@ -173,11 +185,14 @@ class RedisRunTransport(RunEventTransport):
         try:
             async with asyncio.timeout(1.0):
                 await pubsub.subscribe(self._channel(run_id))
-        except BaseException:
+        except BaseException as error:
             with suppress(RedisError, TimeoutError):
                 async with asyncio.timeout(1.0):
                     close_pubsub = cast(Callable[[], Awaitable[None]], pubsub.aclose)
                     await close_pubsub()
+            if isinstance(error, RedisError):
+                # 订阅失败属于传输故障：先清理连接，再翻译为领域异常并保留原因。
+                raise RunEventTransportError("run_stream_subscribe_failed") from error
             raise
         subscription = _RedisRunSubscription(pubsub)
         subscription.start()

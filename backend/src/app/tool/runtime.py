@@ -19,6 +19,7 @@ from app.knowledge.service import (
 from app.memory.service import MemoryService
 from app.project.knowledge import KnowledgeNotFoundError as ProjectKnowledgeNotFoundError
 from app.project.knowledge import ProjectKnowledgeService
+from app.tool.ports import RunToolRuntime
 from common.date import utc_now
 from common.json import utf8_size
 from domain.auth.ports import CurrentSessionReader
@@ -39,7 +40,6 @@ from domain.tool import (
     McpToolSource,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
-    RunToolRuntime,
     ToolExecutionContext,
     ToolExecutionResult,
     ToolOutcome,
@@ -146,6 +146,7 @@ class RunToolRuntimeService(RunToolRuntime):
         auth_session_id: str | None,
     ) -> AuthorizedRunContext | None:
         del run_id
+        # 未绑定登录会话时不授权任何工具能力。
         if not auth_session_id:
             return None
         now = self._clock()
@@ -153,9 +154,11 @@ class RunToolRuntimeService(RunToolRuntime):
             now = now.replace(tzinfo=UTC)
         else:
             now = now.astimezone(UTC)
+        # 登录会话必须有效且属于当前 owner，否则视为未授权。
         user = await self._auth.get_current_session_user(owner_id, auth_session_id, now)
         if user is None or user.id != owner_id:
             return None
+        # 聊天会话必须对 owner 可见（未删除），项目归属用于项目级工具。
         session = await self._sessions.get_visible(
             SessionScope(session_id=chat_session_id, owner_id=owner_id)
         )
@@ -173,15 +176,16 @@ class RunToolRuntimeService(RunToolRuntime):
         prompt_template_version: str,
         context: AuthorizedRunContext,
     ) -> RuntimeToolSnapshot:
-        """Freeze v1 clarification-only or the complete v2 tool catalog."""
-        if prompt_template_version == "run-v1":
-            return RuntimeToolSnapshot(tools=(REQUEST_USER_INPUT_DEFINITION,))
+        """Freeze the complete v2 tool catalog."""
+        # 只支持当前模板版本；其余版本（含历史 v1）统一拒绝。
         if prompt_template_version != "run-v2":
             raise ValueError("run_prompt_template_unsupported")
 
         definitions: list[RuntimeToolDefinition] = [REQUEST_USER_INPUT_DEFINITION]
+        # 按部署开关与项目绑定关系逐步加入内置工具。
         if self._memory_enabled and self._memory is not None:
             definitions.append(MEMORY_SEARCH_DEFINITION)
+        # 只有绑定了项目且存在知识库时才暴露 knowledge_search。
         if (
             context.project_id
             and self._knowledge is not None
@@ -193,6 +197,7 @@ class RunToolRuntimeService(RunToolRuntime):
                 bases = []
             if bases:
                 definitions.append(KNOWLEDGE_SEARCH_DEFINITION)
+        # 合并 MCP 目录中的工具定义。
         mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
         for item in mcp_tools:
             definitions.append(
@@ -218,10 +223,12 @@ class RunToolRuntimeService(RunToolRuntime):
         arguments: dict[str, Any],
     ) -> ToolOutcome | None:
         """Validate frozen identity and local JSON Schema without network access."""
+        # 本地校验不触网：先看参数体积，再确认工具仍在冻结目录中。
         if arguments and utf8_size(arguments) > MAX_TOOL_ARGUMENT_BYTES:
             return _error("tool_arguments_too_large", "工具参数超过上限。")
         if definition is None or definition.model_name != model_name:
             return _error("tool_unknown", "模型请求了冻结目录中不存在的工具。")
+        # 按冻结的 JSON Schema 校验参数形状。
         validation_error = _validate_arguments(definition.input_schema, arguments)
         if validation_error is not None:
             return _error("tool_arguments_invalid", validation_error)
@@ -245,10 +252,12 @@ class RunToolRuntimeService(RunToolRuntime):
         run_remaining_seconds: float,
     ) -> ToolExecutionResult:
         """Validate locally, dispatch once, then re-authorize before delivery."""
+        # 执行前再校验一次，确保入口调用方无法绕过本地约束。
         validation_error = self.validate_call(definition, model_name, arguments)
         if validation_error is not None:
             return ToolExecutionResult(validation_error)
         assert definition is not None
+        # 按来源分派：MCP 有独立的三段超时收敛，内置工具直接执行。
         if definition.source.kind == "mcp":
             return await self._execute_mcp(
                 definition,
@@ -268,9 +277,11 @@ class RunToolRuntimeService(RunToolRuntime):
         run_remaining_seconds: float,
     ) -> ToolExecutionResult:
         loop = asyncio.get_running_loop()
+        # 同时跟踪业务截止时间与 Run 总截止时间，交付前鉴权也受其约束。
         started_at = loop.time()
         business_deadline = started_at + deadline_seconds
         run_deadline = started_at + max(0.0, run_remaining_seconds)
+        # 调用前鉴权：登录会话或聊天权限失效则拒绝执行。
         before = await self.authorize(
             context.owner_id,
             context.chat_session_id,
@@ -283,6 +294,7 @@ class RunToolRuntimeService(RunToolRuntime):
                 "run_auth_session_invalid",
             )
         source = cast(McpToolSource, definition.source)
+        # 按冻结的 server/remote/config 版本重新解析调用目标，配置变更即视为不可用。
         target = await self._mcp_catalog.get_call_target(
             definition.tool_id,
             source.server_id,
@@ -296,12 +308,14 @@ class RunToolRuntimeService(RunToolRuntime):
             return ToolExecutionResult(
                 _error("tool_deadline_exhausted", "工具执行前 Run 的执行时间已经耗尽。")
             )
+        # 只发起一次外部调用，不重试；超时与错误由 MCP envelope 收敛。
         result = await self._mcp_executor.call(
             target,
             dict(arguments),
             deadline_seconds=remaining,
         )
         outcome = _mcp_outcome(result)
+        # 结果返回后再鉴权：交付前权限失效则丢弃结果并终止 Run。
         remaining_after_result = run_deadline - loop.time()
         if remaining_after_result <= 0:
             return ToolExecutionResult(outcome, MCP_DELIVERY_AUTH_ERROR)
@@ -335,8 +349,10 @@ class RunToolRuntimeService(RunToolRuntime):
         deadline_seconds: float,
     ) -> ToolExecutionResult:
         source = cast(BuiltinToolSource, definition.source)
+        # 冻结目录中的内置工具版本必须与当前实现一致。
         if source.version != BUILTIN_VERSION:
             return ToolExecutionResult(_error("tool_unavailable", "内置工具版本不受支持。"))
+        # 执行前鉴权。
         before = await self.authorize(
             context.owner_id,
             context.chat_session_id,
@@ -348,16 +364,19 @@ class RunToolRuntimeService(RunToolRuntime):
                 _error("tool_permission_denied", "当前登录或聊天权限已失效。"),
                 "run_auth_session_invalid",
             )
+        # 澄清工具由执行器单独处理，运行时不允许直接调用。
         if definition.model_name == "request_user_input":
             return ToolExecutionResult(
                 _error("tool_unavailable", "澄清工具只能由 Run 执行器处理。")
             )
+        # 内置工具按冻结名称分派到对应实现。
         if definition.model_name == "memory_search":
             outcome = await self._memory_search(before, arguments)
         elif definition.model_name == "knowledge_search":
             outcome = await self._knowledge_search(before, arguments, deadline_seconds)
         else:
             return ToolExecutionResult(_error("tool_unavailable", "内置工具处理器不可用。"))
+        # 交付前再次鉴权：权限在工具执行期间被撤销时丢弃结果。
         after = await self.authorize(
             context.owner_id,
             context.chat_session_id,

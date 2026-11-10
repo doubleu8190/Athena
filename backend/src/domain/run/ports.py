@@ -47,6 +47,10 @@ from domain.tool import (
 )
 
 
+class RunEventTransportError(RuntimeError):
+    """实时事件传输暂时不可用；调用方应重连或降级。"""
+
+
 class RunRepository(Protocol):
     """通过原子命令管理 Run，不向应用层暴露 AsyncSession。"""
 
@@ -93,9 +97,7 @@ class RunRepository(Protocol):
     async def get_resumable_tool_batch(self, run_id: str) -> RunToolBatch | None:
         """在任何新模型请求前读取已批准但尚未执行的批次。"""
 
-    async def admit_tool_call(
-        self, command: AdmitToolCallCommand
-    ) -> RunToolCallRecord | None:
+    async def admit_tool_call(self, command: AdmitToolCallCommand) -> RunToolCallRecord | None:
         """以当前 Worker 和代次原子取得单调用外部执行准入。"""
 
     async def converge_tool_batch(self, command: ConvergeToolBatchCommand) -> Run | None:
@@ -247,7 +249,7 @@ class RunEventSubscription(Protocol):
     """一个 Run 的实时事件订阅。"""
 
     async def get(self, *, timeout: float) -> RunStreamEvent | None:
-        """读取下一事件；超时返回 None。"""
+        """读取下一事件；超时返回 None，传输故障抛出 RunEventTransportError。"""
 
     async def aclose(self) -> None:
         """释放 Pub/Sub 连接。"""
@@ -264,13 +266,13 @@ class RunEventTransport(Protocol):
         *,
         round: int = 0,
     ) -> None:
-        """发布不持久化的文本增量。"""
+        """发布不持久化的文本增量；传输故障抛出 RunEventTransportError。"""
 
     async def publish_persisted(self, run_id: str, execution_epoch: int, event: RunEvent) -> None:
-        """通知数据库已经提交的状态事件。"""
+        """通知数据库已经提交的状态事件；传输故障抛出 RunEventTransportError。"""
 
     def subscribe(self, run_id: str) -> AbstractAsyncContextManager[RunEventSubscription]:
-        """建立一个独立 Pub/Sub 订阅上下文。"""
+        """建立一个独立 Pub/Sub 订阅上下文；连接故障抛出 RunEventTransportError。"""
 
 
-__all__ = ["RunRepository"]
+__all__ = ["RunEventTransportError", "RunRepository"]

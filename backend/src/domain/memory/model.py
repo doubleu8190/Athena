@@ -96,22 +96,10 @@ class RecallSnapshot:
     memories: dict[str, Memory]
 
 
-class EmbeddingPort(Protocol):
-    """生成记忆和查询向量的适配器。"""
-
-    async def embed(self, texts: list[str]) -> list[list[float]]: ...
-
-
 class RerankerPort(Protocol):
     """对查询和记忆正文打相关性分数。"""
 
     async def score(self, query: str, contents: list[str]) -> list[float]: ...
-
-
-class TokenCounterPort(Protocol):
-    """估算记忆上下文预算。"""
-
-    def count(self, text: str) -> int: ...
 
 
 class MemoryRepositoryPort(Protocol):
@@ -155,7 +143,6 @@ class MemoryRepositoryPort(Protocol):
 __all__ = [
     "AccessContext",
     "AddMemory",
-    "EmbeddingPort",
     "Memory",
     "MemoryHit",
     "MemorySource",
@@ -164,5 +151,4 @@ __all__ = [
     "RecallResult",
     "RecallSnapshot",
     "RerankerPort",
-    "TokenCounterPort",
 ]

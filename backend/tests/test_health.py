@@ -6,13 +6,15 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
+import bootstrap.api as bootstrap_api
+import bootstrap.database as bootstrap_database
 import main
 from app.knowledge.service import KnowledgeService
 from app.memory.service import MemoryService
 from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
 from app.tool import ToolManager
-from app.tool.dependencies import QueryServiceBundle, build_query_services
+from bootstrap.tool import QueryServiceBundle, build_query_services
 from domain.knowledge.model import OriginalStorageConfigurationError
 from main import create_app
 
@@ -128,8 +130,8 @@ def test_knowledge_minio_configuration_fails_before_creating_query_resources(
         monkeypatch.delenv(name, raising=False)
     for name, value in overrides.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setattr(main, "Database", FakeDatabase)
-    monkeypatch.setattr(main, "build_query_services", unexpected_query_services)
+    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
+    monkeypatch.setattr(bootstrap_api, "build_query_services", unexpected_query_services)
 
     with pytest.raises(OriginalStorageConfigurationError):
         create_app(project_service=cast(ProjectService, object()))
@@ -171,8 +173,8 @@ def test_query_service_start_failure_closes_started_resources_and_database(
         _closables=(resource,),
     )
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
-    monkeypatch.setattr(main, "Database", FakeDatabase)
-    monkeypatch.setattr(main, "build_query_services", lambda *_args, **_kwargs: bundle)
+    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
+    monkeypatch.setattr(bootstrap_api, "build_query_services", lambda *_args, **_kwargs: bundle)
 
     app = create_app(
         project_service=cast(ProjectService, object()),
@@ -220,8 +222,8 @@ def test_injected_knowledge_service_mounts_project_routes_without_stealing_owner
     monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY", raising=False)
     monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_SECRET_KEY", raising=False)
     monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_BUCKET", raising=False)
-    monkeypatch.setattr(main, "Database", FakeDatabase)
-    monkeypatch.setattr("main.build_query_services", capture_query_services)
+    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
+    monkeypatch.setattr("bootstrap.api.build_query_services", capture_query_services)
     app = create_app(
         project_service=cast(ProjectService, object()),
         tool_manager=cast(ToolManager, object()),
@@ -269,7 +271,7 @@ def test_self_built_llm_adapter_closes_on_app_shutdown(monkeypatch: pytest.Monke
         "ATHENA_LLM_PROFILES", '{"test":{"api_key_env":"TEST_KEY","model":"m","capabilities":{}}}'
     )
     monkeypatch.setenv("TEST_KEY", "fake-key")
-    monkeypatch.setattr("main.OpenAIResponsesAdapter.aclose", close)
+    monkeypatch.setattr("bootstrap.api.OpenAIResponsesAdapter.aclose", close)
     with TestClient(create_app()) as client:
         assert client.get("/health").status_code == 200
     assert closed == [True]
@@ -298,8 +300,8 @@ def test_llm_close_failure_does_not_prevent_database_disposal(
         "ATHENA_LLM_PROFILES", '{"test":{"api_key_env":"TEST_KEY","model":"m","capabilities":{}}}'
     )
     monkeypatch.setenv("TEST_KEY", "fake-key")
-    monkeypatch.setattr(main, "Database", FakeDatabase)
-    monkeypatch.setattr("main.OpenAIResponsesAdapter.aclose", fail_close)
+    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
+    monkeypatch.setattr("bootstrap.api.OpenAIResponsesAdapter.aclose", fail_close)
     monkeypatch.setattr(main, "build_mcp_router", lambda _service: APIRouter())
     monkeypatch.setattr(main, "build_tools_router", lambda _service: APIRouter())
     with TestClient(create_app(tool_manager=cast(ToolManager, object()))) as client:

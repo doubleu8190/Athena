@@ -707,6 +707,7 @@ class SqlAlchemyRunRepository(RunRepository):
         self, command: BeginToolCallBatchCommand
     ) -> BeginToolCallBatchResult:
         """Persist one assistant tool batch, approval barrier, and local failures atomically."""
+        # 入库前先校验批次契约：数量上限、id 唯一性与协议 id 合法性。
         if not 1 <= len(command.calls) <= _MAX_TOOL_BATCH_SIZE:
             raise ValueError("run_tool_batch_size_invalid")
         record_ids = [item.record_id for item in command.calls]
@@ -715,6 +716,7 @@ class SqlAlchemyRunRepository(RunRepository):
             raise ValueError("run_tool_batch_duplicate")
         if any(not item.tool_call_id or len(item.tool_call_id) > 256 for item in command.calls):
             raise ValueError("run_tool_call_identity_invalid")
+        # 助手消息必须只包含与 calls 顺序一致的 ToolCallPart，且不能混入工具结果。
         call_parts = [
             part
             for part in command.call_message.parts
@@ -727,19 +729,23 @@ class SqlAlchemyRunRepository(RunRepository):
             or [part.name for part in call_parts] != [item.model_name for item in command.calls]
         ):
             raise RunStateError("run_tool_call_message_invalid")
+        # 即时结果与结果消息必须成对出现：要么本地已终结，要么留给后续执行。
         for item in command.calls:
             if (item.immediate_outcome is None) != (item.result_message is None):
                 raise RunStateError("run_tool_result_message_invalid")
 
         async with self._session_factory() as session:
             async with session.begin():
+                # 锁定会话与 Run，并用 worker_id + execution_epoch 做 fencing，拒绝失租写入。
                 row = await self._lock_worker_run(
                     session, command.run_id, command.worker_id, command.execution_epoch
                 )
                 locked_session = await session.get(SessionModel, row.session_id)
                 if locked_session is None or locked_session.deleted_time is not None:
                     raise SessionNotFoundError("session_not_found")
+                # 统一使用数据库时钟判断租约与执行截止时间，避免进程间时钟偏差。
                 db_now = await session.scalar(select(func.clock_timestamp()))
+                # 只有仍在执行、未被取消且租约/截止时间有效的 Run 才能写入工具批次。
                 if (
                     row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
@@ -749,6 +755,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     or not self._work_deadline_is_valid(row, db_now)
                 ):
                     raise RunStateError("run_execution_lease_lost")
+                # 助手消息必须属于当前 Run，防止跨 Run 写入。
                 if (
                     command.call_message.session_id != row.session_id
                     or command.call_message.owner_id != row.owner_id
@@ -756,6 +763,7 @@ class SqlAlchemyRunRepository(RunRepository):
                 ):
                     raise RunStateError("run_tool_call_message_invalid")
 
+                # 幂等重放：同一批助手消息已落库时，校验内容一致后直接返回已有批次。
                 existing_message = await session.get(
                     ExecutionMessageModel, command.call_message.id
                 )
@@ -772,6 +780,7 @@ class SqlAlchemyRunRepository(RunRepository):
                             )
                         ).all()
                     )
+                    # 调用 id、模型名或参数列表不一致说明不是同一批次，按冲突处理。
                     if (
                         [record.tool_call_id for record in existing_records] != protocol_ids
                         or [
@@ -785,12 +794,14 @@ class SqlAlchemyRunRepository(RunRepository):
                         != call_parts
                     ):
                         raise RunConflictError("run_tool_batch_conflict")
+                    # replayed 标志为 True；是否仍在审批等待取决于 Run 当前状态。
                     return BeginToolCallBatchResult(
                         await self._batch_from_records(session, row.id, existing_records),
                         row.status == RunStatus.WAITING_FOR_APPROVAL.value,
                         True,
                     )
 
+                # 续接 Run 内已有工具调用序号，保证批次内 ordinal 单调递增。
                 ordinal = int(
                     (
                         await session.scalar(
@@ -801,6 +812,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     )
                     or 0
                 )
+                # 先写入助手工具调用消息，再逐条关联工具调用记录。
                 await self._messages.append_execution_in_session(
                     session,
                     command.call_message,
@@ -809,6 +821,7 @@ class SqlAlchemyRunRepository(RunRepository):
                 )
                 records: list[RunToolCallModel] = []
                 pending_record_ids: list[str] = []
+                # 逐条落库工具调用：有即时结果的直接收敛，需要审批的进入屏障。
                 for item in command.calls:
                     ordinal += 1
                     outcome = (
@@ -816,11 +829,13 @@ class SqlAlchemyRunRepository(RunRepository):
                         if item.immediate_outcome is None
                         else bounded_outcome(item.immediate_outcome)
                     )
+                    # 默认状态：需审批且无即时结果时等待审批，否则直接标记为可执行。
                     status = (
                         ToolCallStatus.PENDING_APPROVAL
                         if item.requires_approval and outcome is None
                         else ToolCallStatus.APPROVED
                     )
+                    # 即时结果（如工具不可用、参数非法）按业务结果直接落为对应终态。
                     if outcome is not None:
                         status = persisted_status_for_outcome(outcome)
                     record = RunToolCallModel(
@@ -852,8 +867,10 @@ class SqlAlchemyRunRepository(RunRepository):
                         outcome=None if outcome is None else outcome.model_dump(mode="json"),
                         round=command.round,
                     )
+                    # 先把新记录写入事务，供后续结果消息与事件关联。
                     session.add(record)
                     await session.flush()
+                    # 有即时结果：校验结果消息形状并追加，同时记录工具调用完成事件。
                     if outcome is not None:
                         if item.result_message is None:
                             raise RunStateError("run_tool_result_message_invalid")
@@ -879,14 +896,17 @@ class SqlAlchemyRunRepository(RunRepository):
                             ),
                             command.requested_at,
                         )
+                    # 无即时结果且需审批：收集起来用于后面的审批屏障事件。
                     elif status is ToolCallStatus.PENDING_APPROVAL:
                         pending_record_ids.append(record.id)
                     records.append(record)
 
+                # 存在待审批调用时建立审批屏障：Run 暂停执行并释放租约。
                 if pending_record_ids:
                     row.status = RunStatus.WAITING_FOR_APPROVAL.value
                     row.updated_at = command.requested_at
                     self._clear_lease(row)
+                    # 事件携带本批全部待审批调用，供前端展示与后续决策校验。
                     await self._append_event(
                         session,
                         row,
@@ -897,6 +917,7 @@ class SqlAlchemyRunRepository(RunRepository):
                         command.requested_at,
                     )
                 batch = await self._batch_from_records(session, row.id, records)
+                # 在事务内构造返回结果，提交成功后由下方返回给调用方。
                 result = BeginToolCallBatchResult(
                     batch,
                     bool(pending_record_ids),
@@ -1055,11 +1076,14 @@ class SqlAlchemyRunRepository(RunRepository):
     ) -> Run | None:
         """Apply one idempotent approval decision and queue only after the last pending."""
         async with self._session_factory() as session:
+            # 决策写入、工具结果消息、事件与幂等台账都在同一事务内提交。
             async with session.begin():
+                # 先锁会话再锁 Run，与其它 Run 操作保持一致的加锁顺序，避免死锁。
                 locked_session = await self._lock_session(
                     session, command.session_id, command.owner_id
                 )
                 row = await self._lock_run(session, command.session_id, command.run_id)
+                # 请求级幂等：同一 request_id 已处理过则直接返回上次结果。
                 replay = await self._find_request(
                     session,
                     command.owner_id,
@@ -1068,6 +1092,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     command.request_id,
                 )
                 if replay is not None:
+                    # request_id 被复用于不同参数时视为冲突，防止误认领他人结果。
                     self._check_fingerprint(replay, command.fingerprint)
                     replay_run_id = RunRequestResult.model_validate(replay.result).run_id
                     replay_row = await session.scalar(
@@ -1080,6 +1105,7 @@ class SqlAlchemyRunRepository(RunRepository):
                         raise RunNotFoundError("run_not_found")
                     return run_to_domain(replay_row)
 
+                # 行锁工具调用记录，串行化同一调用上的并发决策。
                 record = await session.scalar(
                     select(RunToolCallModel)
                     .where(
@@ -1091,6 +1117,7 @@ class SqlAlchemyRunRepository(RunRepository):
                 )
                 if record is None:
                     raise RunNotFoundError("run_tool_call_not_found")
+                # 记录级幂等：换一个 request_id 重复提交同一决策也视为成功。
                 if record.approval_decision is not None:
                     if record.approval_decision == command.decision.value:
                         await self._store_request(
@@ -1104,23 +1131,28 @@ class SqlAlchemyRunRepository(RunRepository):
                             command.decided_at,
                         )
                         return run_to_domain(row)
+                    # 已做出相反决策时不允许覆盖。
                     raise RunConflictError("run_tool_approval_already_decided")
+                # 只有 Run 处于等待审批且该调用仍待审批时才接受决策。
                 if (
                     row.status != RunStatus.WAITING_FOR_APPROVAL.value
                     or record.status != ToolCallStatus.PENDING_APPROVAL.value
                 ):
                     raise RunStateError("run_tool_approval_not_pending")
 
+                # 落库决策本身；批准后调用保持 APPROVED，等待 Run 重新入队后执行。
                 record.approval_decision = command.decision.value
                 record.approval_decided_at = command.decided_at
                 if command.decision is ToolApprovalDecision.APPROVE:
                     record.status = ToolCallStatus.APPROVED.value
                 else:
+                    # 拒绝：写入一条失败的 tool 结果消息，让模型下一轮看到未执行及原因。
                     call_message = await session.get(
                         ExecutionMessageModel, record.call_message_id
                     )
                     if call_message is None:
                         raise RuntimeError("run_tool_call_message_missing")
+                    # 用结构化 error 结果表达拒绝，模型可据此调整后续计划。
                     denied = ToolOutcome(
                         status=ToolOutcomeStatus.ERROR,
                         code="tool_approval_denied",
@@ -1152,12 +1184,14 @@ class SqlAlchemyRunRepository(RunRepository):
                         locked_session=locked_session,
                         managed_run_id=row.id,
                     )
+                    # 记录终态与可审计的 outcome，并关联刚追加的结果消息。
                     record.status = ToolCallStatus.FAILED.value
                     record.result_message_id = result_message_id
                     record.finished_at = command.decided_at
                     record.safe_error_code = denied.code
                     record.outcome = denied.model_dump(mode="json")
 
+                # 追加审批结果事件到 Run 事件流，供前端推送与断线对账。
                 await self._append_event(
                     session,
                     row,
@@ -1170,9 +1204,12 @@ class SqlAlchemyRunRepository(RunRepository):
                     command.decided_at,
                 )
                 row.updated_at = command.decided_at
+                # 记录决策所依据的登录会话，供审计追踪。
                 if command.auth_session_id is not None:
                     row.auth_session_id = command.auth_session_id
+                # 先 flush，确保下面的待审批计数能看到本次状态变更。
                 await session.flush()
+                # 统计本 Run 是否还有未决审批；最后一个决策完成后才恢复执行。
                 remaining = await session.scalar(
                     select(func.count(RunToolCallModel.id)).where(
                         RunToolCallModel.run_id == row.id,
@@ -1180,6 +1217,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     )
                 )
                 if not remaining:
+                    # 全部审批完成：Run 重新入队并清空租约，等待 Worker 领取继续执行。
                     row.status = RunStatus.QUEUED.value
                     row.queued_at = command.decided_at
                     row.updated_at = command.decided_at
@@ -1192,6 +1230,7 @@ class SqlAlchemyRunRepository(RunRepository):
                         ),
                         command.decided_at,
                     )
+                # 写入幂等台账，供相同 request_id 的重试直接返回。
                 await self._store_request(
                     session,
                     command.owner_id,
@@ -1202,6 +1241,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     RunRequestResult(run_id=row.id),
                     command.decided_at,
                 )
+                # 在事务内构造返回快照，提交成功后才把结果交给调用方。
                 result = run_to_domain(row)
         return result
 
@@ -2803,7 +2843,10 @@ class SqlAlchemyRunRepository(RunRepository):
         records: list[RunToolCallModel] | None = None,
     ) -> None:
         """Cancel undispatched and mark already-started calls unknown."""
+        # 由调用方持有事务与 Session→Run 锁；这里只收敛未完成调用，不提交事务。
         if records is None:
+            # 未由调用方预先锁定时，在事务内按调用序号加行锁读取全部未完成调用，
+            # 避免与并发审批或工具执行产生状态竞争。
             records = list(
                 (
                     await session.scalars(
@@ -2824,16 +2867,21 @@ class SqlAlchemyRunRepository(RunRepository):
                 ).all()
             )
         for record in records:
+            # 幂等防线：等待行锁期间调用可能已被并发流程收敛为终态，直接跳过。
             if record.status not in {
                 ToolCallStatus.PENDING_APPROVAL.value,
                 ToolCallStatus.APPROVED.value,
                 ToolCallStatus.EXECUTING.value,
             }:
                 continue
+            # 结果消息需沿用调用消息的 thread 并保持调用/结果协议配对；
+            # 找不到调用消息说明持久化数据不一致，不能静默继续。
             call_message = await session.get(ExecutionMessageModel, record.call_message_id)
             if call_message is None:
                 raise RuntimeError("run_tool_call_message_missing")
             if record.status == ToolCallStatus.EXECUTING.value:
+                # 已进入 EXECUTING 的调用可能已产生外部副作用，但结果无法确认：
+                # 优先使用已持久化的 outcome，否则标记 UNKNOWN，绝不重新派发。
                 outcome = (
                     ToolOutcome.model_validate(record.outcome)
                     if record.outcome is not None
@@ -2845,6 +2893,7 @@ class SqlAlchemyRunRepository(RunRepository):
                 )
                 persisted_status = persisted_status_for_outcome(outcome)
             else:
+                # 仍待审批或已批准但未派发的调用没有外部副作用，可安全标记为未执行。
                 outcome = ToolOutcome(
                     status=ToolOutcomeStatus.CANCELLED,
                     code="tool_not_executed",
@@ -2852,6 +2901,7 @@ class SqlAlchemyRunRepository(RunRepository):
                 )
                 persisted_status = ToolCallStatus.CANCELLED
             if record.result_message_id is None:
+                # 为没有结果的调用补写 TOOL 结果消息，保持每条调用都有配对的协议结果。
                 result_message_id = new_id("exec")
                 result_draft = ExecutionMessageDraft(
                     id=result_message_id,
@@ -2880,11 +2930,13 @@ class SqlAlchemyRunRepository(RunRepository):
                 )
                 record.result_message_id = result_message_id
                 record.outcome = outcome.model_dump(mode="json")
+            # 落库终态与安全错误码；成功结果不写 safe_error_code。
             record.status = persisted_status.value
             record.finished_at = settled_at
             record.safe_error_code = (
                 outcome.code if outcome.status is not ToolOutcomeStatus.OK else None
             )
+            # 每个调用都追加终态事件，保证 SSE 与读取模型看到一致的收敛结果。
             await self._append_event(
                 session,
                 run,

@@ -5,11 +5,6 @@ from __future__ import annotations
 from domain.run.model import Run
 
 _PROMPTS = {
-    "run-v1": (
-        "你是 Athena 的会话助手。直接使用对话上下文回答用户。"
-        "如果缺少关键条件，调用 request_user_input 提出一个简短、明确的问题。"
-        "每次最多提出一个澄清问题。不要调用其他工具。"
-    ),
     "run-v2": (
         "你是 Athena 的会话助手。直接使用对话上下文回答用户。"
         "可以使用本次请求提供的业务工具执行管理员提供的能力或查询必要资料；"

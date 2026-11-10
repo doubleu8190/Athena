@@ -40,11 +40,10 @@ from domain.knowledge.model import (
 from domain.knowledge.ports import (
     ChineseTokenizer,
     DocumentParser,
-    EmbeddingPort,
     KnowledgeRepositoryPort,
     ParsedDocument,
-    TokenCounterPort,
 )
+from domain.llm.ports import EmbeddingPort, TokenCounterPort
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 _MINIO_ENV = (

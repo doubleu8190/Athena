@@ -42,7 +42,7 @@ from domain.run.model.errors import (
     SessionHasActiveRunError,
     ToolRetryConfirmationRequiredError,
 )
-from domain.run.ports import RunRepository
+from domain.run.ports import RunEventTransportError, RunRepository
 
 __all__ = [
     "AnswerRunCommand",
@@ -60,6 +60,7 @@ __all__ = [
     "RunConflictError",
     "RunEvent",
     "RunEventPayload",
+    "RunEventTransportError",
     "RunError",
     "RunFailedPayload",
     "RunInputRequest",

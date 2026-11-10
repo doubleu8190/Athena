@@ -9,14 +9,26 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from domain.knowledge.model import ChunkLocator, TextBlock
-from domain.knowledge.ports import ParsedDocument
+from domain.knowledge.ports import (
+    DocumentFileValidator,
+    DocumentParser,
+    DocumentParserFactory,
+    ParsedDocument,
+)
+
+# 解析器与工厂共用同一 OCR 默认语言，避免默认配置漂移。
+DEFAULT_OCR_LANGUAGES = "en"
 
 
-class LocalDocumentParser:
+class LocalDocumentParser(DocumentParser, DocumentFileValidator):
     """Extract searchable text and stable source locators from local documents."""
 
     def __init__(
-        self, *, min_pdf_chars: int = 24, ocr_languages: str = "en", ocr_engine: Any | None = None
+        self,
+        *,
+        min_pdf_chars: int = 24,
+        ocr_languages: str = DEFAULT_OCR_LANGUAGES,
+        ocr_engine: Any | None = None,
     ) -> None:
         self._min_pdf_chars = min_pdf_chars
         self._ocr_languages = ocr_languages
@@ -376,3 +388,13 @@ class LocalDocumentParser:
             for index, child in enumerate(shape.shapes, 1):
                 blocks.extend(self._pptx_shape(child, slide_no, f"{path}.{index}", shape_types))
         return blocks
+
+
+class LocalDocumentParserFactory(DocumentParserFactory):
+    """在解析子进程中创建本地解析器，避免父进程加载 OCR runtime。"""
+
+    def __init__(self, *, ocr_languages: str = DEFAULT_OCR_LANGUAGES) -> None:
+        self._ocr_languages = ocr_languages
+
+    def create(self) -> DocumentParser:
+        return LocalDocumentParser(ocr_languages=self._ocr_languages)

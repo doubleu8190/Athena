@@ -10,6 +10,18 @@ from domain.llm.model.profile import RuntimeModelProfile
 from domain.llm.model.types import LlmRequest, LlmResponse, LlmStreamEvent
 
 
+class EmbeddingPort(Protocol):
+    """将文本编码为向量。"""
+
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class TokenCounterPort(Protocol):
+    """估算文本占用的 token 数。"""
+
+    def count(self, text: str) -> int: ...
+
+
 class LlmProvider(Protocol):
     """单次调用供应商端口。"""
 

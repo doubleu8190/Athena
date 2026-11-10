@@ -21,6 +21,7 @@ from domain.knowledge.model import (
     OriginalStorageUnavailableError,
     SearchResult,
 )
+from infrastructure.knowledge.parsers import LocalDocumentParser
 
 
 class ApiService:
@@ -223,7 +224,10 @@ def _context(owner_id: str) -> AuthContext:
 
 def _app(authenticated: bool = True) -> FastAPI:
     app = FastAPI()
-    app.include_router(build_knowledge_router(cast(KnowledgeService, ApiService())))
+    # 上传校验继续使用真实解析器，锁定端口注入后的校验行为。
+    app.include_router(
+        build_knowledge_router(cast(KnowledgeService, ApiService()), LocalDocumentParser())
+    )
     if authenticated:
         app.dependency_overrides[get_current_auth] = lambda: _context("owner_a")
     return app

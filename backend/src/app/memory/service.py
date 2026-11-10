@@ -9,25 +9,17 @@ import unicodedata
 from builtins import list as List
 from dataclasses import replace
 
+from domain.llm.ports import EmbeddingPort, TokenCounterPort
 from domain.memory.model import (
     AccessContext,
     AddMemory,
-    EmbeddingPort,
     Memory,
     MemoryHit,
     MemoryRepositoryPort,
     RecallRequest,
     RecallResult,
     RerankerPort,
-    TokenCounterPort,
 )
-
-
-class SimpleTokenCounter(TokenCounterPort):
-    """为记忆文本提供保守的预算估算。"""
-
-    def count(self, text: str) -> int:
-        return max(1, len(text.encode("utf-8")) // 3)
 
 
 class MemoryService:

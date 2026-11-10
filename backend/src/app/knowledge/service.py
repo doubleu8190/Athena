@@ -25,11 +25,10 @@ from domain.knowledge.model import (
 )
 from domain.knowledge.ports import (
     ChineseTokenizer,
-    EmbeddingPort,
     KnowledgeRepositoryPort,
     OriginalStore,
-    TokenCounterPort,
 )
+from domain.llm.ports import EmbeddingPort, TokenCounterPort
 
 MAX_PAGE_SIZE = 100
 MAX_TEXT_LENGTH = 1_000_000

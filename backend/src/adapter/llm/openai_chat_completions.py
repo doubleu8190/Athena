@@ -38,6 +38,7 @@ from domain.llm.model import (
     LlmText,
     LlmToolCall,
     LlmUsage,
+    ModelProfileVersion,
     ResponseCompleted,
     TextDelta,
     ToolArgumentsDelta,
@@ -108,6 +109,18 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         self._closed = False
 
+    @staticmethod
+    def _request_timeout(config: ModelProfileVersion, request: LlmRequest) -> float:
+        """计算单次请求超时，同时不得超过模型版本的硬上限。"""
+        return min(
+            request.timeout_seconds or config.request_timeout_seconds,
+            config.request_timeout_seconds,
+        )
+
+    def _semaphore_for(self, config: ModelProfileVersion) -> asyncio.Semaphore:
+        """取得指定模型版本共享的并发配额。"""
+        return self._semaphores.setdefault(config.id, asyncio.Semaphore(config.max_concurrency))
+
     def stream(
         self, runtime: RuntimeModelProfile, request: LlmRequest
     ) -> AbstractAsyncContextManager[AsyncIterator[LlmStreamEvent]]:
@@ -130,13 +143,9 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             raise LlmRequestError() from None
         if request_bytes > MAX_TOTAL_RAW_BYTES:
             raise LlmRequestError("llm_input_too_large")
-        semaphore = self._semaphores.setdefault(
-            config.id, asyncio.Semaphore(config.max_concurrency)
-        )
-        timeout = min(
-            request.timeout_seconds or config.request_timeout_seconds,
-            config.request_timeout_seconds,
-        )
+        semaphore = self._semaphore_for(config)
+        timeout = self._request_timeout(config, request)
+        request_parameters = self._complete_request_parameters(config, messages, request)
         acquired = False
         timeout_scope = asyncio.timeout(timeout)
         try:
@@ -145,73 +154,14 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                 acquired = True
                 create = cast(Any, self._client(runtime).chat.completions.create)
                 try:
-                    response = await create(
-                        model=config.model,
-                        messages=messages,
-                        tools=[],
-                        tool_choice="none",
-                        max_tokens=request.max_output_tokens or config.max_output_tokens,
-                        stream=False,
-                        **(
-                            {"temperature": config.temperature}
-                            if config.temperature is not None
-                            else {}
-                        ),
-                    )
+                    response = await create(**request_parameters)
                 except asyncio.CancelledError:
                     raise
                 except LlmError:
                     raise
                 except Exception as error:
                     self._raise_provider_error(error)
-            try:
-                response_bytes = len(
-                    json.dumps(_json_value(response), ensure_ascii=False, allow_nan=False).encode(
-                        "utf-8"
-                    )
-                )
-            except (TypeError, ValueError, UnicodeError):
-                raise LlmProtocolError("llm_response_invalid") from None
-            if response_bytes > MAX_TOTAL_RAW_BYTES:
-                raise LlmProtocolError("llm_response_too_large")
-            choices = getattr(response, "choices", ())
-            if not isinstance(choices, Sequence) or len(choices) != 1:
-                raise LlmProtocolError("llm_response_invalid")
-            choice = cast(Any, choices[0])
-            finish_reason = getattr(choice, "finish_reason", None)
-            message = choice.message
-            if getattr(message, "refusal", None):
-                raise LlmRefusalError("llm_refusal")
-            if getattr(message, "tool_calls", None):
-                raise LlmProtocolError("llm_compression_tool_output_unsupported")
-            content = getattr(message, "content", None)
-            if not isinstance(content, str) or not content.strip():
-                raise LlmProtocolError("llm_compression_text_missing")
-            if len(content.encode("utf-8")) > MAX_TEXT_BYTES:
-                raise LlmProtocolError("llm_response_too_large")
-            if finish_reason == "length":
-                raise LlmIncompleteError("llm_incomplete")
-            if finish_reason != "stop":
-                raise LlmProtocolError("llm_response_invalid")
-            usage_item = getattr(response, "usage", None)
-            usage = (
-                None
-                if usage_item is None
-                else LlmUsage(
-                    input_tokens=getattr(usage_item, "prompt_tokens", None),
-                    output_tokens=getattr(usage_item, "completion_tokens", None),
-                    total_tokens=getattr(usage_item, "total_tokens", None),
-                )
-            )
-            return LlmResponse(
-                output=(LlmText(content),),
-                status="completed",
-                incomplete_reason=None,
-                model=getattr(response, "model", None) or config.model,
-                response_id=getattr(response, "id", None),
-                request_id=None,
-                usage=usage,
-            )
+            return self._complete_response(response, config)
         except TimeoutError:
             if not timeout_scope.expired():
                 raise
@@ -227,16 +177,10 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
         """持有并发名额直到流结束、失败或调用方退出。"""
         config = runtime.version
         # 先确认绑定版本支持流式与工具，再申请该版本的并发名额。
-        self._validate_capabilities(runtime, request)
-        semaphore = self._semaphores.setdefault(
-            config.id, asyncio.Semaphore(config.max_concurrency)
-        )
+        self._validate_capabilities(runtime)
+        semaphore = self._semaphore_for(config)
         stream: Any = None
-        # 请求超时不得超过模型配置的硬上限。
-        timeout = min(
-            request.timeout_seconds or config.request_timeout_seconds,
-            config.request_timeout_seconds,
-        )
+        timeout = self._request_timeout(config, request)
         acquired = False
         timeout_scope = asyncio.timeout(timeout)
         try:
@@ -247,21 +191,8 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                     create = cast(Any, self._client(runtime).chat.completions.create)
                     try:
                         # 只发起一次流式请求（SDK 重试已禁用），重试策略由执行器负责。
-                        stream = await create(
-                            model=config.model,
-                            messages=self._messages(request.messages),
-                            tools=self._tools(request),
-                            tool_choice=self._tool_choice(request),
-                            parallel_tool_calls=config.supports_parallel_tool_calls,
-                            max_tokens=request.max_output_tokens or config.max_output_tokens,
-                            stream=True,
-                            stream_options={"include_usage": True},
-                            **(
-                                {"temperature": config.temperature}
-                                if config.temperature is not None
-                                else {}
-                            ),
-                        )
+                        request_parameters = self._stream_request_parameters(config, request)
+                        stream = await create(**request_parameters)
                     except asyncio.CancelledError:
                         raise
                     except LlmError:
@@ -269,7 +200,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                     except Exception as error:
                         self._raise_provider_error(error)
                     # 事件转换器负责分片重组、体积上限与协议校验。
-                    yield self._events(stream, runtime, request)
+                    yield self._events(stream, runtime)
             except asyncio.CancelledError:
                 raise
             except TimeoutError:
@@ -291,7 +222,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                     semaphore.release()
 
     @staticmethod
-    def _validate_capabilities(runtime: RuntimeModelProfile, request: LlmRequest) -> None:
+    def _validate_capabilities(runtime: RuntimeModelProfile) -> None:
         """确保 Run 绑定版本支持所需的流式和澄清调用能力。"""
         if not runtime.version.supports_stream:
             raise LlmCapabilityError("llm_stream_unsupported")
@@ -330,6 +261,106 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             )
             self._clients[identity] = client
         return client
+
+    @staticmethod
+    def _common_request_parameters(
+        config: ModelProfileVersion,
+        messages: list[dict[str, Any]],
+        request: LlmRequest,
+    ) -> dict[str, Any]:
+        """构造非流式与流式入口共用的 Chat Completions 参数。"""
+        parameters: dict[str, Any] = {
+            "model": config.model,
+            "messages": messages,
+            "max_tokens": request.max_output_tokens or config.max_output_tokens,
+        }
+        if config.temperature is not None:
+            parameters["temperature"] = config.temperature
+        return parameters
+
+    @classmethod
+    def _complete_request_parameters(
+        cls,
+        config: ModelProfileVersion,
+        messages: list[dict[str, Any]],
+        request: LlmRequest,
+    ) -> dict[str, Any]:
+        """构造无工具、非流式的完整响应请求参数。"""
+        return {
+            **cls._common_request_parameters(config, messages, request),
+            "tools": [],
+            "tool_choice": "none",
+            "stream": False,
+        }
+
+    def _stream_request_parameters(
+        self, config: ModelProfileVersion, request: LlmRequest
+    ) -> dict[str, Any]:
+        """构造携带工具配置与 usage 尾分片的流式请求参数。"""
+        return {
+            **self._common_request_parameters(
+                config,
+                self._messages(request.messages),
+                request,
+            ),
+            "tools": self._tools(request),
+            "tool_choice": self._tool_choice(request),
+            "parallel_tool_calls": config.supports_parallel_tool_calls,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+
+    @staticmethod
+    def _usage(raw_usage: Any) -> LlmUsage | None:
+        """将 SDK usage 转为领域用量；缺失用量保持为未知。"""
+        if raw_usage is None:
+            return None
+        return LlmUsage(
+            input_tokens=getattr(raw_usage, "prompt_tokens", None),
+            output_tokens=getattr(raw_usage, "completion_tokens", None),
+            total_tokens=getattr(raw_usage, "total_tokens", None),
+        )
+
+    def _complete_response(self, response: Any, config: ModelProfileVersion) -> LlmResponse:
+        """校验非流式响应并转换为唯一文本结果。"""
+        try:
+            response_bytes = len(
+                json.dumps(_json_value(response), ensure_ascii=False, allow_nan=False).encode(
+                    "utf-8"
+                )
+            )
+        except (TypeError, ValueError, UnicodeError):
+            raise LlmProtocolError("llm_response_invalid") from None
+        if response_bytes > MAX_TOTAL_RAW_BYTES:
+            raise LlmProtocolError("llm_response_too_large")
+        choices = getattr(response, "choices", ())
+        if not isinstance(choices, Sequence) or len(choices) != 1:
+            raise LlmProtocolError("llm_response_invalid")
+        choice = cast(Any, choices[0])
+        finish_reason = getattr(choice, "finish_reason", None)
+        message = choice.message
+        if getattr(message, "refusal", None):
+            raise LlmRefusalError("llm_refusal")
+        if getattr(message, "tool_calls", None):
+            raise LlmProtocolError("llm_compression_tool_output_unsupported")
+        content = getattr(message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise LlmProtocolError("llm_compression_text_missing")
+        if len(content.encode("utf-8")) > MAX_TEXT_BYTES:
+            raise LlmProtocolError("llm_response_too_large")
+        if finish_reason == "length":
+            raise LlmIncompleteError("llm_incomplete")
+        if finish_reason != "stop":
+            raise LlmProtocolError("llm_response_invalid")
+        return LlmResponse(
+            output=(LlmText(content),),
+            status="completed",
+            incomplete_reason=None,
+            model=getattr(response, "model", None) or config.model,
+            response_id=getattr(response, "id", None),
+            request_id=None,
+            usage=self._usage(getattr(response, "usage", None)),
+        )
 
     @staticmethod
     def _messages(messages: tuple[LlmMessage, ...]) -> list[dict[str, Any]]:
@@ -417,8 +448,67 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             return {"type": "function", "function": {"name": name}}
         raise LlmRequestError("llm_tool_choice_invalid")
 
+    @staticmethod
+    def _measure_stream_chunk(
+        chunk: Any,
+        chunk_count: int,
+        total_raw_bytes: int,
+    ) -> tuple[int, int]:
+        """执行分片数量、单分片和累计原始字节检查。"""
+        chunk_count += 1
+        if chunk_count > MAX_STREAM_CHUNKS:
+            raise LlmProtocolError("llm_stream_too_large")
+        try:
+            chunk_bytes = len(
+                json.dumps(_json_value(chunk), ensure_ascii=False, allow_nan=False).encode("utf-8")
+            )
+        except (TypeError, ValueError, UnicodeError):
+            raise LlmProtocolError("llm_stream_event_invalid") from None
+        if chunk_bytes > MAX_RAW_EVENT_BYTES:
+            raise LlmProtocolError("llm_stream_event_too_large")
+        total_raw_bytes += chunk_bytes
+        if total_raw_bytes > MAX_TOTAL_RAW_BYTES:
+            raise LlmProtocolError("llm_stream_too_large")
+        return chunk_count, total_raw_bytes
+
+    async def _tool_fragment_events(
+        self,
+        calls: dict[int, _ToolCallAccumulator],
+        fragment: Any,
+    ) -> AsyncIterator[LlmStreamEvent]:
+        """累积一个工具调用分片，并按现有顺序产出开始与参数增量事件。"""
+        index = fragment.index
+        state = calls.get(index)
+        if state is None:
+            if len(calls) >= MAX_TOOL_CALLS:
+                raise LlmProtocolError("llm_stream_too_large")
+            state = _ToolCallAccumulator()
+            calls[index] = state
+        function = fragment.function
+        call_id = getattr(fragment, "id", None)
+        name = getattr(function, "name", None)
+        if call_id:
+            if state.call_id and state.call_id != call_id:
+                raise LlmProtocolError("llm_tool_call_identity_invalid")
+            state.call_id = call_id
+        if name:
+            if state.name and state.name != name:
+                raise LlmProtocolError("llm_tool_call_identity_invalid")
+            state.name = name
+        if call_id or name:
+            yield ToolCallStarted(output_index=index, call_id=state.call_id, name=state.name)
+        arguments = getattr(function, "arguments", None)
+        if arguments:
+            if not isinstance(arguments, str):
+                raise LlmProtocolError("llm_tool_arguments_invalid")
+            state.argument_bytes += len(arguments.encode("utf-8"))
+            if state.argument_bytes > MAX_TOOL_ARGUMENT_BYTES:
+                raise LlmProtocolError("llm_tool_arguments_too_large")
+            state.arguments += arguments
+            yield ToolArgumentsDelta(output_index=index, call_id=state.call_id, delta=arguments)
+
     async def _events(
-        self, stream: Any, runtime: RuntimeModelProfile, request: LlmRequest
+        self, stream: Any, runtime: RuntimeModelProfile
     ) -> AsyncIterator[LlmStreamEvent]:
         """重组分片调用，等待结束 chunk 后才发出完整结果。"""
         # 分片文本与工具调用参数先累积，只有完整结束后才产出最终 LlmResponse。
@@ -443,31 +533,14 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
             except Exception as error:
                 self._raise_provider_error(error)
             # 对分片数量、单片体积与累计体积设上限，防止异常流耗尽资源。
-            chunk_count += 1
-            if chunk_count > MAX_STREAM_CHUNKS:
-                raise LlmProtocolError("llm_stream_too_large")
-            try:
-                chunk_bytes = len(
-                    json.dumps(_json_value(chunk), ensure_ascii=False, allow_nan=False).encode(
-                        "utf-8"
-                    )
-                )
-            except (TypeError, ValueError, UnicodeError):
-                raise LlmProtocolError("llm_stream_event_invalid") from None
-            if chunk_bytes > MAX_RAW_EVENT_BYTES:
-                raise LlmProtocolError("llm_stream_event_too_large")
-            total_raw_bytes += chunk_bytes
-            if total_raw_bytes > MAX_TOTAL_RAW_BYTES:
-                raise LlmProtocolError("llm_stream_too_large")
+            chunk_count, total_raw_bytes = self._measure_stream_chunk(
+                chunk, chunk_count, total_raw_bytes
+            )
             response_id = getattr(chunk, "id", None) or response_id
             # 用量通常在最后一个 chunk 返回，允许覆盖为空的前值。
-            if getattr(chunk, "usage", None) is not None:
-                item = chunk.usage
-                usage = LlmUsage(
-                    input_tokens=getattr(item, "prompt_tokens", None),
-                    output_tokens=getattr(item, "completion_tokens", None),
-                    total_tokens=getattr(item, "total_tokens", None),
-                )
+            raw_usage = getattr(chunk, "usage", None)
+            if raw_usage is not None:
+                usage = self._usage(raw_usage)
             choices = getattr(chunk, "choices", ())
             for choice in choices:
                 if choice.finish_reason is not None:
@@ -490,39 +563,8 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
                     yield TextDelta(output_index=0, content_index=0, text=content)
                 # 工具调用按 index 累积：id/name 只出现一次，arguments 分片拼接。
                 for fragment in getattr(delta, "tool_calls", None) or ():
-                    index = fragment.index
-                    state = calls.get(index)
-                    if state is None:
-                        if len(calls) >= MAX_TOOL_CALLS:
-                            raise LlmProtocolError("llm_stream_too_large")
-                        state = _ToolCallAccumulator()
-                        calls[index] = state
-                    function = fragment.function
-                    call_id = getattr(fragment, "id", None)
-                    name = getattr(function, "name", None)
-                    if call_id:
-                        if state.call_id and state.call_id != call_id:
-                            raise LlmProtocolError("llm_tool_call_identity_invalid")
-                        state.call_id = call_id
-                    if name:
-                        if state.name and state.name != name:
-                            raise LlmProtocolError("llm_tool_call_identity_invalid")
-                        state.name = name
-                    if call_id or name:
-                        yield ToolCallStarted(
-                            output_index=index, call_id=state.call_id, name=state.name
-                        )
-                    arguments = getattr(function, "arguments", None)
-                    if arguments:
-                        if not isinstance(arguments, str):
-                            raise LlmProtocolError("llm_tool_arguments_invalid")
-                        state.argument_bytes += len(arguments.encode("utf-8"))
-                        if state.argument_bytes > MAX_TOOL_ARGUMENT_BYTES:
-                            raise LlmProtocolError("llm_tool_arguments_too_large")
-                        state.arguments += arguments
-                        yield ToolArgumentsDelta(
-                            output_index=index, call_id=state.call_id, delta=arguments
-                        )
+                    async for tool_event in self._tool_fragment_events(calls, fragment):
+                        yield tool_event
         # 只接受正常停止或工具调用结束；长度截断等其他原因都视为不完整。
         if finish_reason not in {"stop", "tool_calls"}:
             raise LlmIncompleteError("llm_incomplete")

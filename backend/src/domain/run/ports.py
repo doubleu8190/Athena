@@ -273,6 +273,7 @@ class RunEventTransport(Protocol):
 
     def subscribe(self, run_id: str) -> AbstractAsyncContextManager[RunEventSubscription]:
         """建立一个独立 Pub/Sub 订阅上下文；连接故障抛出 RunEventTransportError。"""
+        ...
 
 
 __all__ = ["RunEventTransportError", "RunRepository"]

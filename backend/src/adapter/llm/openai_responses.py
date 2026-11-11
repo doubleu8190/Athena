@@ -8,7 +8,8 @@ import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Any, NoReturn, cast
+from dataclasses import dataclass, field
+from typing import Any, NoReturn, TypeVar, cast
 
 import httpx2
 import openai
@@ -176,6 +177,64 @@ def _dump(value: Any) -> dict[str, Any]:
     raise LlmProtocolError()
 
 
+@dataclass(slots=True)
+class _MessageContentState:
+    """流式消息中单个文本内容的累计状态。"""
+
+    part_type: str
+    text: str
+    text_done: bool = False
+
+
+@dataclass(slots=True)
+class _MessageState:
+    """流式 assistant 消息及其内容 part 的累计状态。"""
+
+    item_id: str
+    contents: dict[int, _MessageContentState] = field(default_factory=dict)
+    completed_content_indices: set[int] = field(default_factory=set)
+    done: bool = False
+    done_item: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _ReasoningPartState:
+    """流式 reasoning content 或 summary 中单个 part 的状态。"""
+
+    text: str
+    text_done: bool = False
+    part_done: bool = False
+
+
+@dataclass(slots=True)
+class _ReasoningState:
+    """流式 reasoning 输出及其两类 part 的状态。"""
+
+    item_id: str
+    content: dict[int, _ReasoningPartState] = field(default_factory=dict)
+    summary: dict[int, _ReasoningPartState] = field(default_factory=dict)
+    done: bool = False
+    done_item: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _FunctionCallState:
+    """流式工具调用参数和最终构造结果的累计状态。"""
+
+    item_id: str
+    call_id: str
+    name: str
+    arguments: str = ""
+    arguments_done: bool = False
+    tool_call: LlmToolCall | None = None
+    done: bool = False
+    done_item: dict[str, Any] | None = None
+
+
+type _OutputItemState = _MessageState | _ReasoningState | _FunctionCallState
+_OutputItemStateT = TypeVar("_OutputItemStateT", _MessageState, _ReasoningState, _FunctionCallState)
+
+
 class OpenAIResponsesAdapter(LlmProvider):
     """按 Profile 复用客户端并实现 Responses 协议转换。"""
 
@@ -189,31 +248,9 @@ class OpenAIResponsesAdapter(LlmProvider):
         self._closed = False
 
     async def complete(self, profile: str, request: LlmRequest) -> LlmResponse:
-        """调用 Responses 一次并转换完整输出。"""
+        """调用带工具的 Responses 入口并转换完整输出。"""
         selected_profile = self._profile(profile)
-        semaphore = self._semaphores[profile]
-        timeout = request.timeout_seconds or selected_profile.request_timeout_seconds
-        try:
-            async with asyncio.timeout(timeout):
-                async with semaphore:
-                    create = cast(Any, self._client(selected_profile).responses.create)
-                    result = await create(
-                        model=selected_profile.model,
-                        input=self._input(request.messages),
-                        tools=self._tools(request),
-                        tool_choice=self._tool_choice(request),
-                        parallel_tool_calls=False,
-                        max_output_tokens=request.max_output_tokens
-                        or selected_profile.max_output_tokens,
-                        include=["reasoning.encrypted_content"],
-                        store=False,
-                        **self._temperature(request),
-                    )
-            return self._response(result, request, selected_profile)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self._raise_provider_error(error)
+        return await self._execute_non_stream(profile, selected_profile, request)
 
     def stream(
         self, profile: str, request: LlmRequest
@@ -237,23 +274,14 @@ class OpenAIResponsesAdapter(LlmProvider):
                 acquired = True
                 try:
                     create = cast(Any, self._client(profile).responses.create)
-                    stream = await create(
-                        model=profile.model,
-                        input=self._input(request.messages),
-                        tools=self._tools(request),
-                        tool_choice=self._tool_choice(request),
-                        parallel_tool_calls=False,
-                        max_output_tokens=request.max_output_tokens or profile.max_output_tokens,
-                        include=["reasoning.encrypted_content"],
-                        store=False,
-                        stream=True,
-                        **self._temperature(request),
-                    )
+                    request_parameters = self._text_request_parameters(profile, request)
+                    request_parameters["stream"] = True
+                    stream = await create(**request_parameters)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
                     self._raise_provider_error(error)
-                yield self._events(stream, request, profile)
+                yield self._events(stream, profile)
         except TimeoutError:
             raise LlmProviderError("llm_timeout") from None
         finally:
@@ -278,35 +306,14 @@ class OpenAIResponsesAdapter(LlmProvider):
         schema_name: str,
         schema: Mapping[str, Any],
     ) -> LlmResponse:
-        """调用一次 Responses strict JSON Schema 输出。"""
+        """调用不含工具和 reasoning include 的 strict JSON Schema 输出。"""
         profile_config = self._profile(profile)
-        semaphore = self._semaphores[profile]
-        timeout = request.timeout_seconds or profile_config.request_timeout_seconds
-        try:
-            async with asyncio.timeout(timeout):
-                async with semaphore:
-                    create = cast(Any, self._client(profile_config).responses.create)
-                    result = await create(
-                        model=profile_config.model,
-                        input=self._input(request.messages),
-                        text={
-                            "format": {
-                                "type": "json_schema",
-                                "name": schema_name,
-                                "strict": True,
-                                "schema": dict(schema),
-                            }
-                        },
-                        max_output_tokens=request.max_output_tokens
-                        or profile_config.max_output_tokens,
-                        store=False,
-                        **self._temperature(request),
-                    )
-            return self._response(result, request, profile_config)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self._raise_provider_error(error)
+        return await self._execute_non_stream(
+            profile,
+            profile_config,
+            request,
+            structured_schema=(schema_name, schema),
+        )
 
     async def aclose(self) -> None:
         """逐一关闭客户端；单个关闭失败不影响其他连接池。"""
@@ -418,7 +425,74 @@ class OpenAIResponsesAdapter(LlmProvider):
     def _temperature(request: LlmRequest) -> dict[str, float]:
         return {"temperature": request.temperature} if request.temperature is not None else {}
 
-    def _response(self, result: Response, request: LlmRequest, profile: LlmProfile) -> LlmResponse:
+    def _common_request_parameters(
+        self, profile: LlmProfile, request: LlmRequest
+    ) -> dict[str, Any]:
+        """构造普通文本、流式和结构化入口共用的 Responses 请求参数。"""
+        return {
+            "model": profile.model,
+            "input": self._input(request.messages),
+            "max_output_tokens": request.max_output_tokens or profile.max_output_tokens,
+            "store": False,
+            **self._temperature(request),
+        }
+
+    def _text_request_parameters(self, profile: LlmProfile, request: LlmRequest) -> dict[str, Any]:
+        """为普通文本和流式入口附加工具与 reasoning 续接参数。"""
+        return {
+            **self._common_request_parameters(profile, request),
+            "tools": self._tools(request),
+            "tool_choice": self._tool_choice(request),
+            "parallel_tool_calls": False,
+            "include": ["reasoning.encrypted_content"],
+        }
+
+    async def _execute_non_stream(
+        self,
+        profile_name: str,
+        profile: LlmProfile,
+        request: LlmRequest,
+        *,
+        structured_schema: tuple[str, Mapping[str, Any]] | None = None,
+    ) -> LlmResponse:
+        """在统一异常边界内构造参数、执行请求并转换完整响应。"""
+        timeout = request.timeout_seconds or profile.request_timeout_seconds
+        try:
+            async with asyncio.timeout(timeout):
+                async with self._semaphores[profile_name]:
+                    if structured_schema is None:
+                        request_parameters = self._text_request_parameters(profile, request)
+                    else:
+                        schema_name, schema = structured_schema
+                        request_parameters = self._common_request_parameters(profile, request)
+                        request_parameters["text"] = {
+                            "format": {
+                                "type": "json_schema",
+                                "name": schema_name,
+                                "strict": True,
+                                "schema": dict(schema),
+                            }
+                        }
+                    create = cast(Any, self._client(profile).responses.create)
+                    result = cast(Response, await create(**request_parameters))
+            return self._response(result, profile)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._raise_provider_error(error)
+
+    @staticmethod
+    def _tool_call(call_id: str, name: str, arguments: str) -> LlmToolCall:
+        """解析工具参数并构造领域调用，非法 JSON 或非对象统一报协议错误。"""
+        try:
+            parsed_arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            raise LlmProtocolError("llm_tool_arguments_invalid") from None
+        if not isinstance(parsed_arguments, dict):
+            raise LlmProtocolError("llm_tool_arguments_invalid")
+        return LlmToolCall(call_id, name, parsed_arguments)
+
+    def _response(self, result: Response, profile: LlmProfile) -> LlmResponse:
         """将 completed 响应转换成有序领域输出并验证工具参数。"""
         if result.status == "incomplete":
             raise LlmIncompleteError()
@@ -446,18 +520,9 @@ class OpenAIResponsesAdapter(LlmProvider):
                     call_ids.add(item.call_id)
                     if len(item.arguments.encode("utf-8")) > profile.max_tool_argument_bytes:
                         raise LlmProtocolError("llm_tool_arguments_too_large")
-                    if (
-                        sum(isinstance(output_item, LlmToolCall) for output_item in output)
-                        >= profile.max_tools
-                    ):
+                    if len(call_ids) > profile.max_tools:
                         raise LlmProtocolError("llm_tool_count_exceeded")
-                    try:
-                        arguments = json.loads(item.arguments)
-                    except (TypeError, ValueError):
-                        raise LlmProtocolError("llm_tool_arguments_invalid") from None
-                    if not isinstance(arguments, dict):
-                        raise LlmProtocolError("llm_tool_arguments_invalid")
-                    output.append(LlmToolCall(item.call_id, item.name, arguments))
+                    output.append(self._tool_call(item.call_id, item.name, item.arguments))
                 elif item.type == "message":
                     if item.role != "assistant":
                         raise LlmProtocolError("llm_message_role_invalid")
@@ -516,24 +581,26 @@ class OpenAIResponsesAdapter(LlmProvider):
                 ):
                     raise LlmProtocolError("llm_reasoning_item_invalid")
 
-    async def _events(
-        self, stream: Any, request: LlmRequest, profile: LlmProfile
-    ) -> AsyncIterator[LlmStreamEvent]:
+    async def _events(self, stream: Any, profile: LlmProfile) -> AsyncIterator[LlmStreamEvent]:
         """按 output 和 content 索引重组事件并逐项核对终态响应。"""
-        states: dict[int, dict[str, Any]] = {}
+        states: dict[int, _OutputItemState] = {}
         call_ids: set[str] = set()
         accumulated_bytes = 0
         final_response: Response | None = None
         terminal_seen = False
-        completed_tools: list[tuple[int, LlmToolCall]] = []
 
-        def item_state(index: int, item_id: str, item_type: str) -> dict[str, Any]:
+        def item_state(
+            index: int,
+            item_id: str,
+            state_type: type[_OutputItemStateT],
+        ) -> _OutputItemStateT:
+            """取得指定输出索引下类型、ID 和完成状态均匹配的累计状态。"""
             state = states.get(index)
             if (
                 state is None
-                or state["id"] != item_id
-                or state["type"] != item_type
-                or state["done"]
+                or not isinstance(state, state_type)
+                or state.item_id != item_id
+                or state.done
             ):
                 raise LlmProtocolError("llm_stream_item_mismatch")
             return state
@@ -553,23 +620,15 @@ class OpenAIResponsesAdapter(LlmProvider):
                         raise LlmProtocolError("llm_output_type_unsupported")
                     if not isinstance(item_id, str) or not item_id:
                         raise LlmProtocolError("llm_output_item_id_missing")
-                    state: dict[str, Any] = {
-                        "id": item_id,
-                        "type": item_type,
-                        "done": False,
-                        "added": raw_item,
-                        "contents": {},
-                        "reasoning_text": {},
-                        "reasoning_summary": {},
-                    }
                     if item_type == "message":
                         if raw_item.get("role") != "assistant":
                             raise LlmProtocolError("llm_message_role_invalid")
-                        state["content_done"] = set()
+                        state: _OutputItemState = _MessageState(item_id)
                     elif item_type == "reasoning":
-                        for key, target, expected in (
-                            ("content", "reasoning_text", "reasoning_text"),
-                            ("summary", "reasoning_summary", "summary_text"),
+                        reasoning_state = _ReasoningState(item_id)
+                        for key, target, expected_type in (
+                            ("content", reasoning_state.content, "reasoning_text"),
+                            ("summary", reasoning_state.summary, "summary_text"),
                         ):
                             entries = raw_item.get(key, [])
                             if not isinstance(entries, list):
@@ -577,15 +636,12 @@ class OpenAIResponsesAdapter(LlmProvider):
                             for part_index, part in enumerate(entries):
                                 if (
                                     not isinstance(part, dict)
-                                    or part.get("type") != expected
+                                    or part.get("type") != expected_type
                                     or not isinstance(part.get("text", ""), str)
                                 ):
                                     raise LlmProtocolError("llm_reasoning_item_invalid")
-                                state[target][part_index] = {
-                                    "text": part.get("text", ""),
-                                    "text_done": False,
-                                    "part_done": False,
-                                }
+                                target[part_index] = _ReasoningPartState(text=part.get("text", ""))
+                        state = reasoning_state
                     else:
                         call_id = raw_item.get("call_id")
                         name = raw_item.get("name")
@@ -599,19 +655,18 @@ class OpenAIResponsesAdapter(LlmProvider):
                         ):
                             raise LlmProtocolError("llm_function_call_identity_invalid")
                         call_ids.add(call_id)
-                        state.update(
+                        state = _FunctionCallState(
+                            item_id=item_id,
                             call_id=call_id,
                             name=name,
-                            arguments="",
-                            arguments_done=False,
                         )
                         yield ToolCallStarted(event.output_index, call_id, name)
                     states[event.output_index] = state
                     accumulated_bytes += len(json.dumps(raw_item, ensure_ascii=False).encode())
                 elif kind == "response.content_part.added":
-                    state = item_state(event.output_index, event.item_id, "message")
+                    state = item_state(event.output_index, event.item_id, _MessageState)
                     content_index = event.content_index
-                    if content_index != len(state["contents"]):
+                    if content_index != len(state.contents):
                         raise LlmProtocolError("llm_content_order_invalid")
                     raw_part = _dump(event.part)
                     part_type = raw_part.get("type")
@@ -619,86 +674,75 @@ class OpenAIResponsesAdapter(LlmProvider):
                         raise LlmRefusalError()
                     if part_type != "output_text" or not isinstance(raw_part.get("text", ""), str):
                         raise LlmProtocolError("llm_content_type_unsupported")
-                    state["contents"][content_index] = {
-                        "type": part_type,
-                        "text": raw_part.get("text", ""),
-                        "text_done": False,
-                    }
+                    state.contents[content_index] = _MessageContentState(
+                        part_type=part_type,
+                        text=raw_part.get("text", ""),
+                    )
                     accumulated_bytes += len(raw_part.get("text", "").encode())
                 elif kind == "response.output_text.delta":
-                    state = item_state(event.output_index, event.item_id, "message")
-                    content = state["contents"].get(event.content_index)
-                    if content is None or content["text_done"]:
+                    state = item_state(event.output_index, event.item_id, _MessageState)
+                    content = state.contents.get(event.content_index)
+                    if content is None or content.text_done:
                         raise LlmProtocolError("llm_content_delta_invalid")
-                    content["text"] += event.delta
+                    content.text += event.delta
                     accumulated_bytes += len(event.delta.encode("utf-8"))
                     if accumulated_bytes > profile.max_response_bytes:
                         raise LlmProtocolError("llm_response_too_large")
                     yield TextDelta(event.output_index, event.content_index, event.delta)
                 elif kind == "response.output_text.done":
-                    state = item_state(event.output_index, event.item_id, "message")
-                    content = state["contents"].get(event.content_index)
-                    if content is None or content["text_done"] or content["text"] != event.text:
+                    state = item_state(event.output_index, event.item_id, _MessageState)
+                    content = state.contents.get(event.content_index)
+                    if content is None or content.text_done or content.text != event.text:
                         raise LlmProtocolError("llm_output_text_done_mismatch")
-                    content["text_done"] = True
+                    content.text_done = True
                 elif kind == "response.content_part.done":
-                    state = item_state(event.output_index, event.item_id, "message")
-                    content = state["contents"].get(event.content_index)
+                    state = item_state(event.output_index, event.item_id, _MessageState)
+                    content = state.contents.get(event.content_index)
                     raw_part = _dump(event.part)
                     if (
                         content is None
-                        or event.content_index in state["content_done"]
-                        or not content["text_done"]
+                        or event.content_index in state.completed_content_indices
+                        or not content.text_done
                         or raw_part.get("type") != "output_text"
-                        or raw_part.get("text") != content["text"]
+                        or raw_part.get("text") != content.text
                     ):
                         if raw_part.get("type") == "refusal":
                             raise LlmRefusalError()
                         raise LlmProtocolError("llm_content_part_done_mismatch")
-                    state["content_done"].add(event.content_index)
+                    state.completed_content_indices.add(event.content_index)
                 elif kind == "response.function_call_arguments.delta":
-                    state = item_state(event.output_index, event.item_id, "function_call")
-                    if state["arguments_done"]:
+                    state = item_state(event.output_index, event.item_id, _FunctionCallState)
+                    if state.arguments_done:
                         raise LlmProtocolError("llm_tool_arguments_after_done")
-                    state["arguments"] += event.delta
-                    arg_size = len(state["arguments"].encode("utf-8"))
+                    state.arguments += event.delta
+                    arg_size = len(state.arguments.encode("utf-8"))
                     accumulated_bytes += len(event.delta.encode("utf-8"))
                     if arg_size > profile.max_tool_argument_bytes:
                         raise LlmProtocolError("llm_tool_arguments_too_large")
                     if accumulated_bytes > profile.max_response_bytes:
                         raise LlmProtocolError("llm_response_too_large")
-                    yield ToolArgumentsDelta(event.output_index, state["call_id"], event.delta)
+                    yield ToolArgumentsDelta(event.output_index, state.call_id, event.delta)
                 elif kind == "response.function_call_arguments.done":
-                    state = item_state(event.output_index, event.item_id, "function_call")
-                    if state["arguments_done"] or state["arguments"] != event.arguments:
+                    state = item_state(event.output_index, event.item_id, _FunctionCallState)
+                    if state.arguments_done or state.arguments != event.arguments:
                         raise LlmProtocolError("llm_tool_arguments_done_mismatch")
-                    try:
-                        arguments = json.loads(event.arguments)
-                        if not isinstance(arguments, dict):
-                            raise ValueError
-                    except (TypeError, ValueError):
-                        raise LlmProtocolError("llm_tool_arguments_invalid") from None
-                    state["arguments_done"] = True
-                    state["arguments_value"] = arguments
+                    state.arguments_done = True
+                    state.tool_call = self._tool_call(state.call_id, state.name, event.arguments)
                 elif kind in {
                     "response.reasoning_text.delta",
                     "response.reasoning_summary_text.delta",
                 }:
-                    state = item_state(event.output_index, event.item_id, "reasoning")
-                    target = (
-                        "reasoning_text"
-                        if kind == "response.reasoning_text.delta"
-                        else "reasoning_summary"
-                    )
-                    part_index = (
-                        event.content_index if target == "reasoning_text" else event.summary_index
-                    )
-                    part = state[target].setdefault(
-                        part_index, {"text": "", "text_done": False, "part_done": False}
-                    )
-                    if part["text_done"]:
+                    state = item_state(event.output_index, event.item_id, _ReasoningState)
+                    if kind == "response.reasoning_text.delta":
+                        parts = state.content
+                        part_index = event.content_index
+                    else:
+                        parts = state.summary
+                        part_index = event.summary_index
+                    part = parts.setdefault(part_index, _ReasoningPartState(text=""))
+                    if part.text_done:
                         raise LlmProtocolError("llm_reasoning_delta_after_done")
-                    part["text"] += event.delta
+                    part.text += event.delta
                     accumulated_bytes += len(event.delta.encode("utf-8"))
                     if accumulated_bytes > profile.max_response_bytes:
                         raise LlmProtocolError("llm_response_too_large")
@@ -706,110 +750,91 @@ class OpenAIResponsesAdapter(LlmProvider):
                     "response.reasoning_text.done",
                     "response.reasoning_summary_text.done",
                 }:
-                    state = item_state(event.output_index, event.item_id, "reasoning")
-                    target = (
-                        "reasoning_text"
-                        if kind == "response.reasoning_text.done"
-                        else "reasoning_summary"
-                    )
-                    part_index = (
-                        event.content_index if target == "reasoning_text" else event.summary_index
-                    )
-                    part = state[target].get(part_index)
-                    if part is None or part["text_done"] or part["text"] != event.text:
+                    state = item_state(event.output_index, event.item_id, _ReasoningState)
+                    if kind == "response.reasoning_text.done":
+                        part = state.content.get(event.content_index)
+                    else:
+                        part = state.summary.get(event.summary_index)
+                    if part is None or part.text_done or part.text != event.text:
                         raise LlmProtocolError("llm_reasoning_done_mismatch")
-                    part["text_done"] = True
+                    part.text_done = True
                 elif kind == "response.reasoning_summary_part.added":
-                    state = item_state(event.output_index, event.item_id, "reasoning")
+                    state = item_state(event.output_index, event.item_id, _ReasoningState)
                     part = _dump(event.part)
                     index = event.summary_index
                     if (
-                        index != len(state["reasoning_summary"])
+                        index != len(state.summary)
                         or part.get("type") != "summary_text"
                         or not isinstance(part.get("text", ""), str)
                     ):
                         raise LlmProtocolError("llm_reasoning_summary_invalid")
-                    state["reasoning_summary"][index] = {
-                        "text": part.get("text", ""),
-                        "text_done": False,
-                        "part_done": False,
-                    }
+                    state.summary[index] = _ReasoningPartState(text=part.get("text", ""))
                 elif kind == "response.reasoning_summary_part.done":
-                    state = item_state(event.output_index, event.item_id, "reasoning")
+                    state = item_state(event.output_index, event.item_id, _ReasoningState)
                     part = _dump(event.part)
-                    current = state["reasoning_summary"].get(event.summary_index)
+                    current = state.summary.get(event.summary_index)
                     if (
                         current is None
-                        or current["part_done"]
-                        or current["text"] != part.get("text")
+                        or current.part_done
+                        or current.text != part.get("text")
                         or part.get("type") != "summary_text"
                     ):
                         raise LlmProtocolError("llm_reasoning_summary_done_mismatch")
-                    current["part_done"] = True
+                    current.part_done = True
                 elif kind == "response.output_item.done":
-                    state = item_state(event.output_index, event.item.id, event.item.type)
                     raw_done = _dump(event.item)
-                    if state["type"] == "message":
+                    if event.item.type == "message":
+                        state = item_state(event.output_index, event.item.id, _MessageState)
                         final_content = raw_done.get("content")
                         if (
                             not isinstance(final_content, list)
-                            or len(final_content) != len(state["contents"])
-                            or set(state["contents"]) != state["content_done"]
-                            or any(
-                                not content["text_done"] for content in state["contents"].values()
-                            )
+                            or len(final_content) != len(state.contents)
+                            or set(state.contents) != state.completed_content_indices
+                            or any(not content.text_done for content in state.contents.values())
                             or any(
                                 not isinstance(part, dict)
-                                or part.get("type") != state["contents"][index]["type"]
-                                or part.get("text") != state["contents"][index]["text"]
+                                or part.get("type") != state.contents[index].part_type
+                                or part.get("text") != state.contents[index].text
                                 for index, part in enumerate(final_content)
                             )
                         ):
                             raise LlmProtocolError("llm_content_done_missing")
-                    elif state["type"] == "function_call":
+                    elif event.item.type == "function_call":
+                        state = item_state(event.output_index, event.item.id, _FunctionCallState)
                         if (
-                            not state["arguments_done"]
-                            or raw_done.get("call_id") != state["call_id"]
-                            or raw_done.get("name") != state["name"]
-                            or raw_done.get("arguments") != state["arguments"]
+                            not state.arguments_done
+                            or state.tool_call is None
+                            or raw_done.get("call_id") != state.call_id
+                            or raw_done.get("name") != state.name
+                            or raw_done.get("arguments") != state.arguments
                         ):
                             raise LlmProtocolError("llm_tool_item_done_mismatch")
-                        completed_tools.append(
-                            (
-                                event.output_index,
-                                LlmToolCall(
-                                    state["call_id"],
-                                    state["name"],
-                                    state["arguments_value"],
-                                ),
-                            )
-                        )
-                    else:
-                        if any(
-                            not part["text_done"] for part in state["reasoning_text"].values()
-                        ) or any(
-                            not part["part_done"] for part in state["reasoning_summary"].values()
+                    elif event.item.type == "reasoning":
+                        state = item_state(event.output_index, event.item.id, _ReasoningState)
+                        if any(not part.text_done for part in state.content.values()) or any(
+                            not part.part_done for part in state.summary.values()
                         ):
                             raise LlmProtocolError("llm_reasoning_done_missing")
-                        for key, target, expected in (
-                            ("content", "reasoning_text", "reasoning_text"),
-                            ("summary", "reasoning_summary", "summary_text"),
+                        for key, accumulated, expected_type in (
+                            ("content", state.content, "reasoning_text"),
+                            ("summary", state.summary, "summary_text"),
                         ):
                             final_parts = raw_done.get(key, [])
-                            accumulated = state[target]
                             if (
                                 not isinstance(final_parts, list)
                                 or len(final_parts) != len(accumulated)
                                 or any(
                                     not isinstance(part, dict)
-                                    or part.get("type") != expected
-                                    or part.get("text") != accumulated[index]["text"]
+                                    or part.get("type") != expected_type
+                                    or part.get("text") != accumulated[index].text
                                     for index, part in enumerate(final_parts)
                                 )
                             ):
                                 raise LlmProtocolError("llm_reasoning_item_mismatch")
-                    state["done"] = True
-                    state["done_item"] = raw_done
+                    else:
+                        raise LlmProtocolError("llm_stream_item_mismatch")
+                    state.done = True
+                    state.done_item = raw_done
                 elif kind == "response.completed":
                     terminal_seen = True
                     final_response = event.response
@@ -828,30 +853,43 @@ class OpenAIResponsesAdapter(LlmProvider):
                 }:
                     continue
                 elif kind == "response.output_text.annotation.added":
-                    state = item_state(event.output_index, event.item_id, "message")
-                    if event.content_index not in state["contents"]:
+                    state = item_state(event.output_index, event.item_id, _MessageState)
+                    if event.content_index not in state.contents:
                         raise LlmProtocolError("llm_annotation_content_missing")
                 else:
                     raise LlmProtocolError("llm_event_unknown")
             if final_response is None or not terminal_seen:
                 raise LlmProtocolError("llm_terminal_event_missing")
-            if not all(state["done"] for state in states.values()):
+            if not all(state.done for state in states.values()):
                 raise LlmProtocolError("llm_output_item_done_missing")
             if len(final_response.output) != len(states):
                 raise LlmProtocolError("llm_output_count_mismatch")
             for index, final_item in enumerate(final_response.output):
                 final_state = states.get(index)
                 raw_final = _dump(final_item)
+                state_type = (
+                    "message"
+                    if isinstance(final_state, _MessageState)
+                    else "reasoning"
+                    if isinstance(final_state, _ReasoningState)
+                    else "function_call"
+                    if isinstance(final_state, _FunctionCallState)
+                    else None
+                )
                 if (
                     final_state is None
-                    or final_state["done_item"] != raw_final
-                    or final_state["id"] != raw_final.get("id")
-                    or final_state["type"] != raw_final.get("type")
+                    or final_state.done_item != raw_final
+                    or final_state.item_id != raw_final.get("id")
+                    or state_type != raw_final.get("type")
                 ):
                     raise LlmProtocolError("llm_output_item_mismatch")
-            response = self._response(final_response, request, profile)
-            for output_index, tool_call in sorted(completed_tools, key=lambda item: item[0]):
-                yield ToolCallCompleted(output_index, tool_call)
+            response = self._response(final_response, profile)
+            # 工具完成事件只在最终响应逐项校验通过后发布，调用方不会观察到未确认的调用。
+            for output_index, state in sorted(states.items()):
+                if isinstance(state, _FunctionCallState):
+                    if state.tool_call is None:
+                        raise LlmProtocolError("llm_tool_item_done_mismatch")
+                    yield ToolCallCompleted(output_index, state.tool_call)
             yield ResponseCompleted(response)
         except asyncio.CancelledError:
             raise

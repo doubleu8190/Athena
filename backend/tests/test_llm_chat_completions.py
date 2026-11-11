@@ -102,7 +102,6 @@ def test_stream_keeps_reading_usage_chunk_after_finish() -> None:
             async for event in adapter._events(
                 async_chunks(stream),
                 runtime_profile(),
-                LlmRequest("unused", (LlmMessage(LlmRole.USER, "hi"),)),
             )
         ]
 
@@ -116,17 +115,6 @@ def test_stream_keeps_reading_usage_chunk_after_finish() -> None:
 def test_stream_reassembles_and_validates_tool_call() -> None:
     """跨分片调用参数重组并先校验 Schema 再报告完成。"""
     adapter = OpenAIChatCompletionsAdapter()
-    schema = {
-        "type": "object",
-        "properties": {"question": {"type": "string"}},
-        "required": ["question"],
-        "additionalProperties": False,
-    }
-    request = LlmRequest(
-        "unused",
-        (LlmMessage(LlmRole.USER, "clarify"),),
-        tools=(LlmTool("request_user_input", "Ask", schema),),
-    )
     first = SimpleNamespace(
         index=0,
         id="call_1",
@@ -147,7 +135,6 @@ def test_stream_reassembles_and_validates_tool_call() -> None:
                     ]
                 ),
                 runtime_profile(),
-                request,
             )
         ]
 
@@ -161,7 +148,6 @@ def test_stream_reassembles_and_validates_tool_call() -> None:
 def test_stream_preserves_repeated_tool_identity_without_concatenation() -> None:
     """跨分片重复声明同一 ID/名称时保留原值，冲突身份按协议错误拒绝。"""
     adapter = OpenAIChatCompletionsAdapter()
-    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "call"),))
     first = SimpleNamespace(
         index=0,
         id="call_1",
@@ -187,7 +173,6 @@ def test_stream_preserves_repeated_tool_identity_without_concatenation() -> None
                     + [chunk(finish_reason="tool_calls")]
                 ),
                 runtime_profile(),
-                request,
             )
         ]
 
@@ -211,7 +196,6 @@ def test_stream_without_normal_finish_is_incomplete() -> None:
             async for event in adapter._events(
                 async_chunks([chunk(content="partial")]),
                 runtime_profile(),
-                LlmRequest("unused", (LlmMessage(LlmRole.USER, "hi"),)),
             )
         ]
 
@@ -339,6 +323,25 @@ def test_public_stream_passes_through_consumer_error_and_closes_stream() -> None
     assert adapter._semaphores["llmprof_test"]._value == 1
 
 
+def test_public_stream_passes_through_consumer_timeout_object() -> None:
+    """调用方抛出的 TimeoutError 不属于请求超时，必须保持原对象透传。"""
+    stream = _ClosableStream([chunk(content="hello")])
+    adapter = _public_adapter(stream)
+    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "hi"),))
+    consumer_timeout = TimeoutError("caller timeout")
+
+    async def consume() -> None:
+        async with adapter.stream(runtime_profile(), request) as events:
+            async for _ in events:
+                raise consumer_timeout
+
+    with pytest.raises(TimeoutError) as error:
+        asyncio.run(consume())
+    assert error.value is consumer_timeout
+    assert stream.closed
+    assert adapter._semaphores["llmprof_test"]._value == 1
+
+
 def test_public_stream_maps_sdk_iteration_error_and_closes_stream() -> None:
     """上游迭代边界错误映射为安全供应商错误并关闭流。"""
 
@@ -362,6 +365,37 @@ def test_public_stream_maps_sdk_iteration_error_and_closes_stream() -> None:
         asyncio.run(consume())
     assert error.value.code == "llm_provider_error"
     assert stream.closed
+
+
+@pytest.mark.parametrize("entrypoint", ["complete", "stream"])
+def test_request_timeout_while_waiting_for_profile_capacity(entrypoint: str) -> None:
+    """等待并发配额超时按请求超时处理，且不会误释放他人占用的名额。"""
+
+    async def run() -> None:
+        adapter = OpenAIChatCompletionsAdapter()
+        runtime = runtime_profile()
+        semaphore = adapter._semaphore_for(runtime.version)
+        await semaphore.acquire()
+        request = LlmRequest(
+            "unused",
+            (LlmMessage(LlmRole.USER, "hi"),),
+            tool_choice="none",
+            timeout_seconds=0.01,
+        )
+        try:
+            with pytest.raises(LlmProviderError, match="llm_timeout"):
+                if entrypoint == "complete":
+                    await adapter.complete(runtime, request)
+                else:
+                    async with adapter.stream(runtime, request) as events:
+                        async for _ in events:
+                            pass
+            assert semaphore._value == 0
+        finally:
+            semaphore.release()
+        assert semaphore._value == 1
+
+    asyncio.run(run())
 
 
 def test_real_sdk_transport_limits_unterminated_sse_bytes(
@@ -412,9 +446,7 @@ def test_refusal_after_text_never_completes_response() -> None:
 
     async def run() -> None:
         try:
-            async for event in adapter._events(
-                async_chunks(stream), runtime_profile(), LlmRequest("unused", ())
-            ):
+            async for event in adapter._events(async_chunks(stream), runtime_profile()):
                 emitted.append(event)
         except LlmRefusalError:
             return
@@ -496,7 +528,6 @@ def test_tool_argument_and_call_count_limits() -> None:
     import adapter.llm.openai_chat_completions as chat_adapter
 
     adapter = OpenAIChatCompletionsAdapter()
-    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "hi"),))
     call = SimpleNamespace(
         index=0,
         id="call_1",
@@ -504,9 +535,7 @@ def test_tool_argument_and_call_count_limits() -> None:
     )
 
     async def arguments() -> None:
-        async for _ in adapter._events(
-            async_chunks([chunk(tool_calls=[call])]), runtime_profile(), request
-        ):
+        async for _ in adapter._events(async_chunks([chunk(tool_calls=[call])]), runtime_profile()):
             pass
 
     old_limit = chat_adapter.MAX_TOOL_ARGUMENT_BYTES
@@ -531,7 +560,7 @@ def test_tool_argument_and_call_count_limits() -> None:
     ]
 
     async def calls() -> None:
-        async for _ in adapter._events(async_chunks(call_chunks), runtime_profile(), request):
+        async for _ in adapter._events(async_chunks(call_chunks), runtime_profile()):
             pass
 
     with pytest.raises(LlmProtocolError, match="llm_stream_too_large"):
@@ -546,7 +575,6 @@ def test_tool_argument_limit_is_per_call_for_interleaved_fragments(
 
     monkeypatch.setattr(chat_adapter, "MAX_TOOL_ARGUMENT_BYTES", 10)
     adapter = OpenAIChatCompletionsAdapter()
-    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "call both"),))
 
     def fragment(
         index: int,
@@ -574,16 +602,11 @@ def test_tool_argument_limit_is_per_call_for_interleaved_fragments(
                     ]
                 ),
                 runtime_profile(),
-                request,
             )
         ]
 
     events = asyncio.run(collect())
-    completed = [
-        event.tool_call
-        for event in events
-        if isinstance(event, ToolCallCompleted)
-    ]
+    completed = [event.tool_call for event in events if isinstance(event, ToolCallCompleted)]
     assert [call.call_id for call in completed] == ["call_0", "call_1"]
     assert [call.arguments for call in completed] == [{"a": 1}, {"b": 2}]
     assert sum(len(json.dumps(call.arguments)) for call in completed) > 10
@@ -597,7 +620,6 @@ def test_tool_argument_limit_accumulates_across_fragments_per_call(
 
     monkeypatch.setattr(chat_adapter, "MAX_TOOL_ARGUMENT_BYTES", 10)
     adapter = OpenAIChatCompletionsAdapter()
-    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "call tool"),))
     first = SimpleNamespace(
         index=0,
         id="call_0",
@@ -619,7 +641,6 @@ def test_tool_argument_limit_accumulates_across_fragments_per_call(
                 ]
             ),
             runtime_profile(),
-            request,
         ):
             pass
 
@@ -629,11 +650,6 @@ def test_tool_argument_limit_accumulates_across_fragments_per_call(
 
 def test_stream_assembles_multiple_parallel_tool_calls_by_index() -> None:
     adapter = OpenAIChatCompletionsAdapter()
-    request = LlmRequest(
-        "unused",
-        (LlmMessage(LlmRole.USER, "call both"),),
-        tools=(LlmTool("tool", "Tool", {"type": "object"}),),
-    )
     calls: list[object] = [
         SimpleNamespace(
             index=0,
@@ -658,16 +674,11 @@ def test_stream_assembles_multiple_parallel_tool_calls_by_index() -> None:
                     ]
                 ),
                 runtime_profile(),
-                request,
             )
         ]
 
     events = asyncio.run(collect())
-    completed = [
-        event.tool_call
-        for event in events
-        if isinstance(event, ToolCallCompleted)
-    ]
+    completed = [event.tool_call for event in events if isinstance(event, ToolCallCompleted)]
     assert [call.call_id for call in completed] == ["call_0", "call_1"]
     assert [call.arguments for call in completed] == [
         {"query": "a"},
@@ -801,21 +812,6 @@ def test_sdk_wire_final_request_uses_no_tools_and_disables_retries() -> None:
 def test_adapter_defers_unknown_tool_and_schema_validation_to_execution() -> None:
     """工具不存在或参数不符合目录 Schema 时仍生成调用，由执行层记录拒绝。"""
     adapter = OpenAIChatCompletionsAdapter()
-    tool = LlmTool(
-        "known_tool",
-        "known",
-        {
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
-    request = LlmRequest(
-        "unused",
-        (LlmMessage(LlmRole.USER, "call a tool"),),
-        tools=(tool,),
-    )
     fragment = SimpleNamespace(
         index=0,
         id="call_unknown",
@@ -836,7 +832,6 @@ def test_adapter_defers_unknown_tool_and_schema_validation_to_execution() -> Non
                     ]
                 ),
                 runtime_profile(),
-                request,
             )
         ]
 
@@ -875,17 +870,6 @@ def test_adapter_keeps_protocol_failures_for_missing_id_or_invalid_arguments(
                 ]
             ),
             runtime_profile(),
-            LlmRequest(
-                "unused",
-                (LlmMessage(LlmRole.USER, "call"),),
-                tools=(
-                    LlmTool(
-                        "known_tool",
-                        "",
-                        {"type": "object", "properties": {}, "additionalProperties": False},
-                    ),
-                ),
-            ),
         ):
             pass
 

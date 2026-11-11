@@ -32,7 +32,11 @@ class LlmProvider(Protocol):
     ) -> AbstractAsyncContextManager[AsyncIterator[LlmStreamEvent]]: ...
 
     async def generate_structured(
-        self, profile: str, request: LlmRequest, schema_name: str, schema: Mapping[str, Any]
+        self,
+        profile: str,
+        request: LlmRequest,
+        schema_name: str,
+        schema: Mapping[str, Any],
     ) -> LlmResponse: ...
 
 
@@ -43,6 +47,7 @@ class LlmStreamProvider(Protocol):
         self, runtime: RuntimeModelProfile, request: LlmRequest
     ) -> AbstractAsyncContextManager[AsyncIterator[LlmStreamEvent]]:
         """持有上游流和并发配额直至消费或关闭。"""
+        ...
 
 
 class LlmRuntimeTextProvider(Protocol):
@@ -50,3 +55,4 @@ class LlmRuntimeTextProvider(Protocol):
 
     async def complete(self, runtime: RuntimeModelProfile, request: LlmRequest) -> LlmResponse:
         """执行一次完整的无工具文本请求。"""
+        ...

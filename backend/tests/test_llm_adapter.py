@@ -24,6 +24,7 @@ from domain.llm.model import (
     LlmIncompleteError,
     LlmMessage,
     LlmProtocolError,
+    LlmProviderError,
     LlmRefusalError,
     LlmRequest,
     LlmRole,
@@ -182,6 +183,204 @@ def test_openai_sdk_mock_transport_sends_one_stateless_responses_request() -> No
     asyncio.run(run())
 
 
+def test_non_stream_entrypoints_keep_text_and_structured_wire_options_distinct() -> None:
+    """普通文本请求携带工具与 reasoning include，结构化请求只增加 text.format。"""
+
+    async def run() -> None:
+        calls: list[dict[str, Any]] = []
+
+        async def handle(request: httpx2.Request) -> httpx2.Response:
+            calls.append(json.loads(request.content))
+            return httpx2.Response(
+                200,
+                json={
+                    "id": f"resp_{len(calls)}",
+                    "object": "response",
+                    "created_at": 1,
+                    "status": "completed",
+                    "model": "model",
+                    "output": [],
+                    "parallel_tool_calls": False,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "usage": None,
+                },
+                request=request,
+            )
+
+        profile_config = profile("assistant", "secret")
+        adapter = OpenAIResponsesAdapter({"assistant": profile_config})
+        sdk_http = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+        sdk = AsyncOpenAI(
+            api_key="secret",
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            http_client=sdk_http,
+        )
+        adapter._clients[
+            (
+                "https://api.openai.com/v1",
+                hashlib.sha256(b"secret").hexdigest(),
+                profile_config.max_response_bytes,
+            )
+        ] = sdk
+        tool = LlmTool(
+            "lookup",
+            "lookup records",
+            {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        )
+        await adapter.complete(
+            "assistant",
+            LlmRequest(
+                "assistant",
+                (LlmMessage(LlmRole.USER, "hello"),),
+                tools=(tool,),
+                tool_choice="tool:lookup",
+                max_output_tokens=64,
+                temperature=0.25,
+            ),
+        )
+        await adapter.generate_structured(
+            "assistant",
+            LlmRequest(
+                "assistant",
+                (LlmMessage(LlmRole.USER, "hello"),),
+                max_output_tokens=64,
+                temperature=0.25,
+            ),
+            "answer",
+            {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": False,
+            },
+        )
+        await adapter.aclose()
+
+        text_request, structured_request = calls
+        assert text_request["tools"][0]["name"] == "lookup"
+        assert text_request["tool_choice"] == {"type": "function", "name": "lookup"}
+        assert text_request["parallel_tool_calls"] is False
+        assert text_request["include"] == ["reasoning.encrypted_content"]
+        assert structured_request["text"]["format"]["name"] == "answer"
+        assert "tools" not in structured_request
+        assert "tool_choice" not in structured_request
+        assert "parallel_tool_calls" not in structured_request
+        assert "include" not in structured_request
+        for request_payload in calls:
+            assert request_payload["store"] is False
+            assert request_payload["max_output_tokens"] == 64
+            assert request_payload["temperature"] == 0.25
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("entrypoint", ["complete", "structured"])
+def test_non_stream_parameter_construction_errors_are_mapped(entrypoint: str) -> None:
+    """两个非流式入口均把参数构造阶段的非 LlmError 映射为固定供应商错误。"""
+
+    async def run() -> None:
+        adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
+        create_called = False
+
+        class ResponsesStub:
+            async def create(self, **_kwargs: Any) -> Any:
+                nonlocal create_called
+                create_called = True
+                raise AssertionError("无效参数不应进入 SDK 调用")
+
+        class ClientStub:
+            responses = ResponsesStub()
+
+            async def close(self) -> None:
+                return None
+
+        key = (
+            "https://api.openai.com/v1",
+            hashlib.sha256(b"secret").hexdigest(),
+            adapter._profile("assistant").max_response_bytes,
+        )
+        adapter._clients[key] = ClientStub()  # type: ignore[assignment]
+        request = LlmRequest(
+            "assistant",
+            (
+                LlmMessage(
+                    LlmRole.ASSISTANT,
+                    tool_calls=(LlmToolCall("call_unserializable", "lookup", {"value": object()}),),
+                ),
+            ),
+        )
+        with pytest.raises(LlmProviderError, match="llm_provider_error"):
+            if entrypoint == "complete":
+                await adapter.complete("assistant", request)
+            else:
+                await adapter.generate_structured(
+                    "assistant",
+                    request,
+                    "answer",
+                    {"type": "object", "properties": {}},
+                )
+        assert create_called is False
+        await asyncio.wait_for(adapter._semaphores["assistant"].acquire(), timeout=0.1)
+        adapter._semaphores["assistant"].release()
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("entrypoint", ["complete", "structured"])
+def test_non_stream_response_conversion_errors_are_mapped(entrypoint: str) -> None:
+    """两个非流式入口均把畸形 SDK 响应转换异常映射为固定供应商错误。"""
+
+    async def run() -> None:
+        adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
+
+        class ResponsesStub:
+            async def create(self, **_kwargs: Any) -> Any:
+                return SimpleNamespace(
+                    status="completed",
+                    output=[],
+                    incomplete_details=None,
+                    model="model",
+                    usage=None,
+                )
+
+        class ClientStub:
+            responses = ResponsesStub()
+
+            async def close(self) -> None:
+                return None
+
+        key = (
+            "https://api.openai.com/v1",
+            hashlib.sha256(b"secret").hexdigest(),
+            adapter._profile("assistant").max_response_bytes,
+        )
+        adapter._clients[key] = ClientStub()  # type: ignore[assignment]
+        request = LlmRequest("assistant", (LlmMessage(LlmRole.USER, "hello"),))
+        with pytest.raises(LlmProviderError, match="llm_provider_error"):
+            if entrypoint == "complete":
+                await adapter.complete("assistant", request)
+            else:
+                await adapter.generate_structured(
+                    "assistant",
+                    request,
+                    "answer",
+                    {"type": "object", "properties": {}},
+                )
+        await asyncio.wait_for(adapter._semaphores["assistant"].acquire(), timeout=0.1)
+        adapter._semaphores["assistant"].release()
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
 def test_responses_sdk_wire_final_request_uses_no_tools_and_disables_retries() -> None:
     """最终回答轮的真实 Responses 请求显式关闭工具，SDK 不隐式重试。"""
 
@@ -251,16 +450,6 @@ def test_responses_sdk_wire_final_request_uses_no_tools_and_disables_retries() -
 
 def test_responses_adapter_defers_unknown_tool_and_schema_validation() -> None:
     """Responses 同样将未知工具和 Schema 不匹配交给执行层。"""
-    tool = LlmTool(
-        "known_tool",
-        "",
-        {
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    )
     result = Response.model_validate(
         {
             "id": "resp_unknown_tool",
@@ -287,11 +476,6 @@ def test_responses_adapter_defers_unknown_tool_and_schema_validation() -> None:
     adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
     response = adapter._response(
         result,
-        LlmRequest(
-            "assistant",
-            (LlmMessage(LlmRole.USER, "call"),),
-            tools=(tool,),
-        ),
         profile("assistant", "secret"),
     )
     call = next(item for item in response.output if isinstance(item, LlmToolCall))
@@ -337,11 +521,7 @@ def test_responses_adapter_keeps_protocol_failures_for_missing_id_or_invalid_arg
     )
     adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
     with pytest.raises(LlmProtocolError):
-        adapter._response(
-            result,
-            LlmRequest("assistant", (LlmMessage(LlmRole.USER, "call"),)),
-            profile("assistant", "secret"),
-        )
+        adapter._response(result, profile("assistant", "secret"))
 
 
 @pytest.mark.parametrize("streaming", [False, True])
@@ -450,6 +630,105 @@ def test_sdk_mock_transport_accepts_identity_or_empty_encoding(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("entrypoint", ["complete", "structured"])
+def test_non_stream_timeout_maps_and_releases_profile_capacity(entrypoint: str) -> None:
+    """完整与结构化入口共用超时处理后均返回固定错误码并释放并发配额。"""
+
+    async def run() -> None:
+        adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
+
+        class ResponsesStub:
+            async def create(self, **_kwargs: Any) -> Any:
+                await asyncio.sleep(1)
+                raise AssertionError("调用应在返回前超时")
+
+        class ClientStub:
+            responses = ResponsesStub()
+
+            async def close(self) -> None:
+                return None
+
+        key = (
+            "https://api.openai.com/v1",
+            hashlib.sha256(b"secret").hexdigest(),
+            adapter._profile("assistant").max_response_bytes,
+        )
+        adapter._clients[key] = ClientStub()  # type: ignore[assignment]
+        request = LlmRequest(
+            "assistant",
+            (LlmMessage(LlmRole.USER, "hello"),),
+            timeout_seconds=0.01,
+        )
+        with pytest.raises(LlmProviderError, match="llm_timeout"):
+            if entrypoint == "complete":
+                await adapter.complete("assistant", request)
+            else:
+                await adapter.generate_structured(
+                    "assistant",
+                    request,
+                    "answer",
+                    {"type": "object", "properties": {}},
+                )
+        await asyncio.wait_for(adapter._semaphores["assistant"].acquire(), timeout=0.1)
+        adapter._semaphores["assistant"].release()
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("entrypoint", ["complete", "structured"])
+def test_non_stream_cancellation_propagates_and_releases_profile_capacity(
+    entrypoint: str,
+) -> None:
+    """完整与结构化入口取消后保留 CancelledError 语义并释放并发配额。"""
+
+    async def run() -> None:
+        adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
+        started = asyncio.Event()
+
+        class ResponsesStub:
+            async def create(self, **_kwargs: Any) -> Any:
+                started.set()
+                await asyncio.sleep(60)
+                raise AssertionError("取消应终止请求")
+
+        class ClientStub:
+            responses = ResponsesStub()
+
+            async def close(self) -> None:
+                return None
+
+        key = (
+            "https://api.openai.com/v1",
+            hashlib.sha256(b"secret").hexdigest(),
+            adapter._profile("assistant").max_response_bytes,
+        )
+        adapter._clients[key] = ClientStub()  # type: ignore[assignment]
+        request = LlmRequest("assistant", (LlmMessage(LlmRole.USER, "hello"),))
+
+        async def invoke() -> None:
+            if entrypoint == "complete":
+                await adapter.complete("assistant", request)
+            else:
+                await adapter.generate_structured(
+                    "assistant",
+                    request,
+                    "answer",
+                    {"type": "object", "properties": {}},
+                )
+
+        task = asyncio.create_task(invoke())
+        await asyncio.wait_for(started.wait(), timeout=0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(adapter._semaphores["assistant"].acquire(), timeout=0.1)
+        adapter._semaphores["assistant"].release()
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
 def test_stream_emits_text_and_one_completed_event() -> None:
     """正常终态只发出一次 ResponseCompleted。"""
     adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
@@ -527,12 +806,9 @@ def test_stream_emits_text_and_one_completed_event() -> None:
             SimpleNamespace(type="response.completed", response=final_response),
         ]
     )
-    request = LlmRequest("assistant", (LlmMessage(LlmRole.USER, "hello"),))
 
     async def run() -> list[Any]:
-        return [
-            event async for event in adapter._events(stream, request, adapter._profile("assistant"))
-        ]
+        return [event async for event in adapter._events(stream, adapter._profile("assistant"))]
 
     events = asyncio.run(run())
     assert isinstance(events[0], TextDelta)
@@ -853,6 +1129,64 @@ def test_sdk_mock_transport_interleaves_tools_and_orders_completions_by_output_i
     events = asyncio.run(run())
     completed = [event for event in events if isinstance(event, ToolCallCompleted)]
     assert [event.output_index for event in completed] == [0, 1]
+
+
+def test_stream_withholds_tool_completion_until_final_response_validation() -> None:
+    """末态响应与逐项结果不一致时不得发布已观察到的工具完成事件。"""
+    adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
+    final_item = {
+        "type": "function_call",
+        "id": "fc_pending",
+        "call_id": "call_pending",
+        "name": "lookup",
+        "arguments": "{}",
+        "status": "completed",
+    }
+    mismatched_item = {**final_item, "arguments": '{"changed":true}'}
+    stream = FakeStream(
+        [
+            SimpleNamespace(
+                type="response.output_item.added",
+                output_index=0,
+                item={**final_item, "status": "in_progress"},
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.done",
+                output_index=0,
+                item_id="fc_pending",
+                arguments="{}",
+            ),
+            SimpleNamespace(type="response.output_item.done", output_index=0, item=final_item),
+            SimpleNamespace(
+                type="response.completed",
+                response=Response.model_validate(
+                    {
+                        "id": "resp_pending",
+                        "object": "response",
+                        "created_at": 1,
+                        "status": "completed",
+                        "model": "model",
+                        "output": [mismatched_item],
+                        "parallel_tool_calls": False,
+                        "tool_choice": "auto",
+                        "tools": [],
+                        "usage": None,
+                    }
+                ),
+            ),
+        ]
+    )
+
+    async def consume() -> list[Any]:
+        emitted: list[Any] = []
+        with pytest.raises(LlmProtocolError):
+            async for event in adapter._events(stream, adapter._profile("assistant")):
+                emitted.append(event)
+        return emitted
+
+    emitted = asyncio.run(consume())
+    assert not any(isinstance(event, ToolCallCompleted) for event in emitted)
+    assert not any(isinstance(event, ResponseCompleted) for event in emitted)
 
 
 def test_sdk_mock_transport_parses_reasoning_summary_lifecycle() -> None:
@@ -1281,6 +1615,100 @@ def test_sdk_mock_transport_rejects_missing_item_completion_and_multiple_termina
         asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("following_event", "error_code"),
+    [
+        (None, "llm_terminal_event_missing"),
+        ("completed", "llm_multiple_terminal_events"),
+        ("created", "llm_multiple_terminal_events"),
+    ],
+)
+def test_sdk_mock_transport_empty_completed_reserves_terminal_slot(
+    following_event: str | None,
+    error_code: str,
+) -> None:
+    """真实 SDK SSE 中空 completed 也占用唯一终态槽位。"""
+
+    async def run() -> None:
+        response_payload = {
+            "id": "resp_after_empty",
+            "object": "response",
+            "created_at": 1,
+            "status": "in_progress" if following_event == "created" else "completed",
+            "model": "model",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": None,
+        }
+        payloads = [
+            (
+                "response.completed",
+                {"type": "response.completed", "sequence_number": 0, "response": None},
+            )
+        ]
+        if following_event == "completed":
+            payloads.append(
+                (
+                    "response.completed",
+                    {
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response_payload,
+                    },
+                )
+            )
+        elif following_event == "created":
+            payloads.append(
+                (
+                    "response.created",
+                    {
+                        "type": "response.created",
+                        "sequence_number": 1,
+                        "response": response_payload,
+                    },
+                )
+            )
+        body = b"".join(
+            f"event: {name}\ndata: {json.dumps(value)}\n\n".encode() for name, value in payloads
+        )
+
+        async def handle(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body,
+                request=request,
+            )
+
+        cfg = profile("assistant", "secret")
+        adapter = OpenAIResponsesAdapter({"assistant": cfg})
+        sdk_http = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+        sdk = AsyncOpenAI(
+            api_key="secret",
+            base_url="https://api.openai.com/v1",
+            max_retries=0,
+            http_client=sdk_http,
+        )
+        adapter._clients[
+            (
+                "https://api.openai.com/v1",
+                hashlib.sha256(b"secret").hexdigest(),
+                cfg.max_response_bytes,
+            )
+        ] = sdk
+        request = LlmRequest("assistant", (LlmMessage(LlmRole.USER, "hi"),))
+        try:
+            async with adapter.stream("assistant", request) as stream:
+                _ = [event async for event in stream]
+        finally:
+            await adapter.aclose()
+
+    with pytest.raises(LlmProtocolError, match=error_code):
+        asyncio.run(run())
+
+
 def test_sdk_mock_transport_rejects_function_arguments_done_conflict() -> None:
     """SDK function arguments done 必须与累计参数分片完全相同。"""
 
@@ -1363,10 +1791,9 @@ def test_stream_without_terminal_event_fails() -> None:
     """上游断流不能伪造正常完成。"""
     adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
     stream = FakeStream([])
-    request = LlmRequest("assistant", (LlmMessage(LlmRole.USER, "hello"),))
 
     async def run() -> None:
-        async for _event in adapter._events(stream, request, adapter._profile("assistant")):
+        async for _event in adapter._events(stream, adapter._profile("assistant")):
             pass
 
     with pytest.raises(LlmProtocolError):
@@ -1443,10 +1870,9 @@ def test_stream_rejects_conflicting_or_duplicate_message_part_completion(
             SimpleNamespace(type="response.output_item.done", output_index=0, item=final_item)
         )
     stream = FakeStream(events)
-    request = LlmRequest("assistant", (LlmMessage(LlmRole.USER, "hi"),))
 
     async def consume() -> None:
-        async for _ in adapter._events(stream, request, adapter._profile("assistant")):
+        async for _ in adapter._events(stream, adapter._profile("assistant")):
             pass
 
     with pytest.raises(LlmProtocolError):
@@ -1518,10 +1944,9 @@ def test_stream_incomplete_fails() -> None:
     adapter = OpenAIResponsesAdapter({"assistant": profile("assistant", "secret")})
     incomplete = SimpleNamespace(type="response.incomplete", response=response())
     stream = FakeStream([incomplete])
-    request = LlmRequest("assistant", (LlmMessage(LlmRole.USER, "hello"),))
 
     async def run() -> None:
-        async for _event in adapter._events(stream, request, adapter._profile("assistant")):
+        async for _event in adapter._events(stream, adapter._profile("assistant")):
             pass
 
     with pytest.raises(LlmIncompleteError):

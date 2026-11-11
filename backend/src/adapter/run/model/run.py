@@ -71,6 +71,18 @@ class RunModel(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
+            ["main_prompt_version_id"],
+            ["system_prompt_versions.id"],
+            name="fk_runs_main_prompt_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["compression_prompt_version_id"],
+            ["system_prompt_versions.id"],
+            name="fk_runs_compression_prompt_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
             ["compression_policy_version_id"],
             ["llm_compression_policy_versions.id"],
             name="fk_runs_compression_policy",
@@ -101,6 +113,8 @@ class RunModel(Base):
     context_cutoff_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     retry_of_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     model_config_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    main_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
     auth_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

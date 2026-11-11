@@ -10,6 +10,7 @@ import {
   makeCompressionPolicy,
   makeMcpServer,
   makeModelProfile,
+  makeSystemPromptVersion,
 } from "../../test/adminFixtures";
 import { jsonResponse } from "../../test/testUtils";
 import {
@@ -17,9 +18,14 @@ import {
   createModelProfile,
   getCompressionPolicy,
   getMcpServer,
+  getSystemPrompt,
+  getSystemPromptVersion,
   listAdminTools,
   listMcpServers,
   listModelProfiles,
+  listSystemPromptVersions,
+  restoreSystemPrompt,
+  saveSystemPrompt,
   setDefaultModelProfile,
   setModelProfileEnabled,
   updateCompressionPolicy,
@@ -205,6 +211,92 @@ describe("管理 API 契约", () => {
     });
   });
 
+  it("系统提示词使用 CAS 基线读取历史并提交保存与恢复", async () => {
+    const current = makeSystemPromptVersion({
+      content: "当前正文\n第二行",
+      id: "prompt-v2",
+      kind: "main",
+    });
+    const previous = makeSystemPromptVersion({
+      content: "旧正文",
+      id: "prompt-v1",
+      kind: "main",
+    });
+    const page = {
+      items: [
+        {
+          created_at: current.created_at,
+          created_by: current.created_by,
+          id: current.id,
+          kind: current.kind,
+          restored_from_version_id: null,
+        },
+      ],
+      page: 2,
+      page_size: 10,
+      total: 11,
+    };
+    const saved = makeSystemPromptVersion({
+      content: "新正文",
+      id: "prompt-v3",
+      kind: "main",
+    });
+    const restored = makeSystemPromptVersion({
+      content: previous.content,
+      id: "prompt-v4",
+      kind: "main",
+      restored_from_version_id: previous.id,
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(current))
+      .mockResolvedValueOnce(jsonResponse(page))
+      .mockResolvedValueOnce(jsonResponse(previous))
+      .mockResolvedValueOnce(jsonResponse(saved))
+      .mockResolvedValueOnce(jsonResponse(restored));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getSystemPrompt("main")).resolves.toEqual(current);
+    await expect(
+      listSystemPromptVersions("main", { page: 2, pageSize: 10 }),
+    ).resolves.toEqual(page);
+    await expect(
+      getSystemPromptVersion("main", previous.id),
+    ).resolves.toEqual(previous);
+    await expect(
+      saveSystemPrompt("main", "新正文", current.id),
+    ).resolves.toEqual(saved);
+    await expect(
+      restoreSystemPrompt("main", previous.id, saved.id),
+    ).resolves.toEqual(restored);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/admin/system-prompts/main",
+    );
+    expect(getRequestUrl(fetchMock.mock.calls[1][0])).toBe(
+      "/api/v1/admin/system-prompts/main/versions?page=2&page_size=10",
+    );
+    expect(fetchMock.mock.calls[2][0]).toBe(
+      `/api/v1/admin/system-prompts/main/versions/${previous.id}`,
+    );
+    expect(fetchMock.mock.calls[3][1]).toMatchObject({
+      body: JSON.stringify({
+        content: "新正文",
+        expected_current_version_id: current.id,
+      }),
+      method: "POST",
+    });
+    expect(fetchMock.mock.calls[4][1]).toMatchObject({
+      method: "POST",
+    });
+    expect(
+      JSON.parse(String(fetchMock.mock.calls[4][1]?.body)),
+    ).toEqual({
+      expected_current_version_id: saved.id,
+      source_version_id: previous.id,
+    });
+  });
+
   it("映射管理错误且不泄露后端原始异常文本", () => {
     expect(
       adminErrorMessage(new ApiError(403, "admin_required")),
@@ -225,5 +317,10 @@ describe("管理 API 契约", () => {
       adminErrorMessage(new ApiError(422, "raw-secret-value")),
     ).not.toContain("raw-secret-value");
     expect(isMcpConflict(new ApiError(409, "mcp_conflict"))).toBe(true);
+    expect(
+      adminErrorMessage(
+        new ApiError(409, "system_prompt_version_conflict"),
+      ),
+    ).toContain("输入仍保留");
   });
 });

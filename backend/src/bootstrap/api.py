@@ -15,6 +15,7 @@ from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
+from adapter.system_prompt import SqlAlchemySystemPromptRepository
 from app.auth.service import AuthService
 from app.knowledge.service import KnowledgeService
 from app.llm import LlmService, ModelProfileService
@@ -24,6 +25,7 @@ from app.project.service import ProjectService
 from app.run.service import RunService
 from app.run.stream import RunStreamService
 from app.session.service import SessionService
+from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.config import env_csv_set, env_flag
 from bootstrap.database import build_database
@@ -57,6 +59,7 @@ class ApiDependencies:
     tool_manager: ToolManager | None
     llm_service: LlmService | None
     model_profile_service: ModelProfileService | None
+    system_prompt_service: SystemPromptService | None
     memory_service: MemoryService | None
     knowledge_service: KnowledgeService | None
     knowledge_repository: KnowledgeRepositoryPort | None
@@ -109,6 +112,7 @@ def build_api_dependencies(
     tool_manager: ToolManager | None = None,
     llm_service: LlmService | None = None,
     model_profile_service: ModelProfileService | None = None,
+    system_prompt_service: SystemPromptService | None = None,
     memory_service: MemoryService | None = None,
     knowledge_service: KnowledgeService | None = None,
 ) -> ApiDependencies:
@@ -128,6 +132,7 @@ def build_api_dependencies(
     llm_use_case = llm_service
     llm_adapter: OpenAIResponsesAdapter | None = None
     model_profile_use_case = model_profile_service
+    system_prompt_use_case = system_prompt_service
     memory_use_case = memory_service
     memory_enabled = memory_service is not None or env_flag("ATHENA_MEMORY_ENABLED", default=False)
     knowledge_enabled = knowledge_service is not None or env_flag(
@@ -179,6 +184,7 @@ def build_api_dependencies(
         or memory_owned
         # 注入 KnowledgeService 时，项目绑定与查询服务仍共享 API 数据库会话工厂。
         or knowledge_enabled
+        or system_prompt_use_case is None
     ):
         database = build_database(database_url)
         project_repository = SqlAlchemyProjectRepository(database.session_factory)
@@ -193,6 +199,11 @@ def build_api_dependencies(
         auth_repository = SqlAlchemyAuthRepository(database.session_factory)
         if auth_use_case is None:
             auth_use_case = AuthService(auth_repository, Argon2PasswordHasher())
+        if system_prompt_use_case is None:
+            system_prompt_use_case = SystemPromptService(
+                SqlAlchemySystemPromptRepository(database.session_factory),
+                auth_repository,
+            )
         if session_use_case is None:
             session_use_case = SessionService(session_repository)
         if project_use_case is None:
@@ -250,6 +261,7 @@ def build_api_dependencies(
         tool_manager=mcp_use_case,
         llm_service=llm_use_case,
         model_profile_service=model_profile_use_case,
+        system_prompt_service=system_prompt_use_case,
         memory_service=memory_use_case,
         knowledge_service=knowledge_use_case,
         knowledge_repository=knowledge_repository,

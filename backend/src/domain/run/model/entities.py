@@ -249,6 +249,8 @@ class Run:
     context_cutoff_sequence: int
     retry_of_run_id: str | None
     model_config_version_id: str
+    main_prompt_version_id: str
+    compression_prompt_version_id: str
     prompt_template_version: str
     event_sequence: int
     execution_epoch: int

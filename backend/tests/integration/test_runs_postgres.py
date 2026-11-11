@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -29,6 +29,7 @@ from adapter.run.model import RunEventModel, RunModel, RunRequestModel
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
 from adapter.session.repository.session import SqlAlchemySessionRepository
+from adapter.system_prompt.repository import SqlAlchemySystemPromptRepository
 from app.run.executor import RunExecutor
 from domain.llm.model import (
     LlmRequest,
@@ -78,6 +79,7 @@ from domain.run.model.errors import (
     SessionHasActiveRunError,
 )
 from domain.run.ports import RunRepository
+from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
@@ -227,6 +229,8 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_run_test",
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
                         event_sequence=0,
                         execution_epoch=0,
@@ -995,6 +999,8 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         context_cutoff_sequence=claimed_run.context_cutoff_sequence,
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_run_test",
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
                         event_sequence=0,
                         execution_epoch=0,
@@ -1219,7 +1225,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 @asynccontextmanager
                 async def stream(
                     self, runtime: RuntimeModelProfile, request: LlmRequest
-                ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+                ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
                     assert request.messages[-1].content == "answer this literal <|endoftext|>"
 
                     async def events() -> AsyncIterator[LlmStreamEvent]:
@@ -1238,7 +1244,13 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                     yield events()
 
             repository_profiles = SqlAlchemyModelProfileRepository(factory, TEST_LLM_CIPHER)
-            executor = RunExecutor(repository, repository_profiles, FakeProvider())
+            system_prompts = SqlAlchemySystemPromptRepository(factory)
+            executor = RunExecutor(
+                repository,
+                repository_profiles,
+                FakeProvider(),
+                system_prompts=system_prompts,
+            )
             await executor.execute(executor_lease)
             completed = await repository.get(
                 "ses_executor_test", "usr_run_test", "run_executor_test"
@@ -1300,7 +1312,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 @asynccontextmanager
                 async def stream(
                     self, runtime: RuntimeModelProfile, request: LlmRequest
-                ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+                ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
                     prior_call_ids = tuple(
                         call.call_id for message in request.messages for call in message.tool_calls
                     )
@@ -1342,6 +1354,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                     repository,
                     repository_profiles,
                     OneResponseProvider(response, tuple(prior_calls)),
+                    system_prompts=system_prompts,
                 ).execute(round_lease)
                 pending = await repository.get_pending_input(
                     "ses_executor_clarify", "usr_run_test", clarify_run_id
@@ -1416,6 +1429,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 repository,
                 repository_profiles,
                 OneResponseProvider(final_response, tuple(prior_calls)),
+                system_prompts=system_prompts,
             ).execute(final_lease)
             clarified = await repository.get("ses_executor_clarify", "usr_run_test", clarify_run_id)
             assert clarified is not None and clarified.status is RunStatus.COMPLETED
@@ -1482,7 +1496,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 @asynccontextmanager
                 async def stream(
                     self, runtime: RuntimeModelProfile, request: LlmRequest
-                ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+                ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
                     self.calls += 1
                     self.api_keys.append(runtime.api_key)
                     call_number = self.calls
@@ -1504,6 +1518,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 repository,
                 repository_profiles,
                 retry_provider,
+                system_prompts=system_prompts,
                 sleep=record_retry_delay,
             ).execute(retry_lease)
             retried = await repository.get("ses_executor_retry", "usr_run_test", retry_run_id)
@@ -1548,7 +1563,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 @asynccontextmanager
                 async def stream(
                     self, runtime: RuntimeModelProfile, request: LlmRequest
-                ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+                ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
                     self.calls += 1
 
                     async def events() -> AsyncIterator[LlmStreamEvent]:
@@ -1577,6 +1592,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 repository,
                 repository_profiles,
                 auth_provider,
+                system_prompts=system_prompts,
                 sleep=auth_retry_delay,
             ).execute(auth_lease)
             auth_failed = await repository.get("ses_executor_retry", "usr_run_test", auth_run_id)
@@ -1637,6 +1653,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 cast(RunRepository, SlowContextRepository()),
                 repository_profiles,
                 context_provider,
+                system_prompts=system_prompts,
             ).execute(context_lease)
             context_failed = await repository.get(
                 "ses_executor_retry", "usr_run_test", context_deadline_run_id
@@ -1695,6 +1712,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 repository,
                 cast(ModelProfileRepository, disabled_profiles),
                 disabled_provider,
+                system_prompts=system_prompts,
                 sleep=record_retry_delay,
             ).execute(disabled_lease)
             disabled = await repository.get("ses_executor_retry", "usr_run_test", disabled_run_id)

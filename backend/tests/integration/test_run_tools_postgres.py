@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -88,13 +88,14 @@ pytestmark = [
 
 
 @asynccontextmanager
-async def _database() -> AsyncIterator[
+async def _database() -> AsyncGenerator[
     tuple[
         async_sessionmaker[AsyncSession],
         object,
         object,
         str,
-    ]
+    ],
+    None,
 ]:
     """Create one isolated PostgreSQL schema and apply the real migration chain."""
     database_url = DATABASE_URL

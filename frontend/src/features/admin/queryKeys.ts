@@ -1,4 +1,4 @@
-import type { AdminPageQuery } from "./model";
+import type { AdminPageQuery, SystemPromptKind } from "./model";
 import { ADMIN_QUERY_ROOT } from "../../app/queryClient";
 
 export const adminKeys = {
@@ -19,6 +19,40 @@ export const adminKeys = {
   mcpServersAll: () => ["admin", "mcp", "servers"] as const,
   modelProfiles: () =>
     ["admin", "llm", "model-profiles"] as const,
+  systemPrompt: (kind: SystemPromptKind) =>
+    ["admin", "system-prompts", kind, "current"] as const,
+  systemPromptVersion: (
+    kind: SystemPromptKind,
+    versionId: string,
+  ) =>
+    [
+      "admin",
+      "system-prompts",
+      kind,
+      "versions",
+      "detail",
+      versionId,
+    ] as const,
+  systemPromptVersions: (
+    kind: SystemPromptKind,
+    query: AdminPageQuery,
+  ) =>
+    [
+      "admin",
+      "system-prompts",
+      kind,
+      "versions",
+      "list",
+      query.page,
+      query.pageSize,
+    ] as const,
+  systemPromptVersionsAll: (kind: SystemPromptKind) =>
+    [
+      "admin",
+      "system-prompts",
+      kind,
+      "versions",
+    ] as const,
   tools: (query: AdminPageQuery) =>
     [
       "admin",

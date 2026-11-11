@@ -8,6 +8,10 @@ from typing import cast
 
 from auth_support import AuthTestClient, make_auth_service
 from fastapi.testclient import TestClient
+from system_prompt_support import (
+    TEST_COMPRESSION_PROMPT_ID,
+    TEST_MAIN_PROMPT_ID,
+)
 
 from app.session.service import SessionService
 from domain.message import ConversationMessage, TextPart
@@ -149,6 +153,8 @@ class InMemoryRunRepository:
             context_cutoff_sequence=message.sequence,
             retry_of_run_id=None,
             model_config_version_id="profile-public-id",
+            main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+            compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
             prompt_template_version=command.prompt_template_version,
             event_sequence=0,
             execution_epoch=0,

@@ -8,7 +8,7 @@ import socket
 import ssl
 import sys
 from collections import defaultdict
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, Iterable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -129,14 +129,15 @@ def _http_target(port: int) -> McpRuntimeToolTarget:
 @asynccontextmanager
 async def _tls_http_server(
     tmp_path: Path,
-) -> AsyncIterator[
+) -> AsyncGenerator[
     tuple[
         int,
         dict[str, int],
         dict[str, asyncio.Event],
         dict[str, asyncio.Event],
         list[_ObservedClient],
-    ]
+    ],
+    None,
 ]:
     from mcp.server import MCPServer
 

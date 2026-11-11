@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   makeAdminTool,
   makeMcpServer,
+  makeSystemPromptVersion,
   TEST_ADMIN,
 } from "../../test/adminFixtures";
 import { listResponse } from "../../test/fixtures";
@@ -27,6 +28,7 @@ import {
 import { getAuthIdentityEpoch } from "../../shared/api/client";
 import {
   useCreateMcpServerMutation,
+  useSaveSystemPromptMutation,
   useUpdateToolApprovalMutation,
   useUpdateMcpServerMutation,
 } from "./hooks";
@@ -295,6 +297,71 @@ describe("工具审批身份边界", () => {
     expect(
       client.getQueryState(adminKeys.tools(TOOL_QUERY))
         ?.isInvalidated,
+    ).toBe(false);
+  });
+});
+
+describe("系统提示词保存身份边界", () => {
+  it("旧管理员迟到响应不会覆盖新管理员的当前正文缓存", async () => {
+    const client = createTestQueryClient();
+    const promptA = makeSystemPromptVersion({
+      content: "A 管理员看到的正文",
+      id: "prompt-a",
+      kind: "main",
+    });
+    const promptB = makeSystemPromptVersion({
+      content: "B 管理员看到的正文",
+      id: "prompt-b",
+      kind: "main",
+    });
+    client.setQueryData(adminKeys.systemPrompt("main"), promptA);
+    const saveGate = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => saveGate.promise),
+    );
+    const { result } = renderHook(
+      () => useSaveSystemPromptMutation("main"),
+      { wrapper: wrapper(client) },
+    );
+
+    let mutationPromise!: Promise<unknown>;
+    const identityEpoch = getAuthIdentityEpoch();
+    act(() => {
+      mutationPromise = result.current.mutateAsync({
+        content: "A 的新正文",
+        expectedCurrentVersionId: promptA.id,
+        identityEpoch,
+      });
+    });
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      clearAuthenticatedIdentity(client);
+      setAuthenticatedIdentity(client, ADMIN_B);
+      client.setQueryData(adminKeys.systemPrompt("main"), promptB);
+    });
+    await act(async () => {
+      saveGate.resolve(
+        jsonResponse({
+          ...promptA,
+          content: "A 已保存但已迟到的正文",
+          id: "prompt-a-saved",
+        }),
+      );
+      await expect(mutationPromise).rejects.toMatchObject({
+        name: "AbortError",
+      });
+    });
+
+    expect(
+      client.getQueryData(adminKeys.systemPrompt("main")),
+    ).toEqual(promptB);
+    expect(
+      client.getQueryState(adminKeys.systemPromptVersionsAll("main"))
+        ?.isInvalidated ?? false,
     ).toBe(false);
   });
 });

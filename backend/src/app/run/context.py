@@ -96,12 +96,16 @@ def _execution_to_llm(message: ExecutionMessage) -> LlmMessage:
 def messages_to_llm(
     run: Run,
     messages: Sequence[ConversationMessage | ExecutionMessage],
+    *,
+    main_prompt: str,
     summary_text: str | None = None,
     retry_context: Sequence[ToolRetryContext] = (),
 ) -> tuple[LlmMessage, ...]:
     """把固定 cutoff 的正式消息及本 Run 协议交互转换为模型上下文。"""
     # 固定 system prompt 永远在最前，确保模板版本行为稳定。
-    result: list[LlmMessage] = [LlmMessage(role=LlmRole.SYSTEM, content=system_prompt_for_run(run))]
+    result: list[LlmMessage] = [
+        LlmMessage(role=LlmRole.SYSTEM, content=system_prompt_for_run(run, main_prompt))
+    ]
     # 压缩摘要作为“历史资料”注入，并明确它不是新指令。
     if summary_text:
         result.append(
@@ -165,6 +169,7 @@ def _build_llm_request(
     run: Run,
     messages: Sequence[ConversationMessage | ExecutionMessage],
     profile: ModelProfileVersion,
+    main_prompt: str,
     summary_text: str | None = None,
     tools: Sequence[LlmTool] | None = None,
     retry_context: Sequence[ToolRetryContext] = (),
@@ -176,6 +181,7 @@ def _build_llm_request(
         run,
         messages,
         profile,
+        main_prompt,
         summary_text,
         tools=selected_tools,
         retry_context=retry_context,
@@ -190,6 +196,7 @@ def _estimate_request(
     run: Run,
     messages: Sequence[ConversationMessage | ExecutionMessage],
     profile: ModelProfileVersion,
+    main_prompt: str,
     summary_text: str | None = None,
     tools: Sequence[LlmTool] | None = None,
     retry_context: Sequence[ToolRetryContext] = (),
@@ -200,7 +207,13 @@ def _estimate_request(
         encoding = tiktoken.get_encoding(profile.tokenizer_encoding)
     except (KeyError, ValueError) as error:
         raise RunContextError("run_tokenizer_unsupported") from error
-    llm_messages = messages_to_llm(run, messages, summary_text, retry_context)
+    llm_messages = messages_to_llm(
+        run,
+        messages,
+        main_prompt=main_prompt,
+        summary_text=summary_text,
+        retry_context=retry_context,
+    )
     # 每条消息额外 +4 覆盖角色分隔等协议开销。
     input_tokens = sum(
         len(encoding.encode_ordinary(_message_token_text(message))) + 4 for message in llm_messages
@@ -293,6 +306,7 @@ async def build_llm_request(
     messages: Sequence[ConversationMessage | ExecutionMessage],
     profile: ModelProfileVersion,
     *,
+    main_prompt: str,
     timeout_seconds: float,
     summary_text: str | None = None,
     tools: Sequence[LlmTool] | None = None,
@@ -305,6 +319,7 @@ async def build_llm_request(
         run,
         messages,
         profile,
+        main_prompt,
         summary_text,
         None if tools is None else tuple(tools),
         tuple(retry_context),
@@ -317,6 +332,7 @@ async def estimate_llm_input_tokens(
     messages: Sequence[ConversationMessage | ExecutionMessage],
     profile: ModelProfileVersion,
     *,
+    main_prompt: str,
     timeout_seconds: float,
     summary_text: str | None = None,
     tools: Sequence[LlmTool] | None = None,
@@ -328,6 +344,7 @@ async def estimate_llm_input_tokens(
         run,
         messages,
         profile,
+        main_prompt,
         summary_text,
         None if tools is None else tuple(tools),
         tuple(retry_context),

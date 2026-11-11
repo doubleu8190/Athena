@@ -27,6 +27,14 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
     "MCP 目录存储或秘密服务暂时不可用，请稍后重试。",
   mcp_query_invalid: "分页参数无效。",
   mcp_tool_policy_invalid: "工具审批策略参数无效。",
+  system_prompt_invalid:
+    "系统提示词不能全部为空白，也不能超过 100,000 个字符。",
+  system_prompt_version_conflict:
+    "当前配置已被其他管理员修改。本次输入仍保留，请核对后重新加载。",
+  system_prompt_not_found: "该提示词版本不存在或不属于当前类别。",
+  system_prompt_unavailable:
+    "系统提示词初始化配置不可用，请联系部署管理员检查数据库。",
+  system_prompt_page_invalid: "提示词历史分页参数无效。",
   resource_not_found: "目标资源不存在或已被删除。",
   network_error: "无法连接服务器，请检查网络后重试。",
   http_error: "服务器拒绝了本次管理请求，请稍后重试。",
@@ -58,6 +66,14 @@ export function isMcpConflict(error: unknown): boolean {
     error instanceof ApiError &&
     error.status === 409 &&
     error.detail === "mcp_conflict"
+  );
+}
+
+export function isSystemPromptConflict(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    error.detail === "system_prompt_version_conflict"
   );
 }
 

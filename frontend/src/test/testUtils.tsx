@@ -1,9 +1,9 @@
 import { QueryClient } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import {
-  MemoryRouter,
+  createMemoryRouter,
+  RouterProvider,
   useLocation,
-  useNavigate,
 } from "react-router-dom";
 
 import { AppRoutes } from "../app/AppRoutes";
@@ -23,13 +23,19 @@ export function createTestQueryClient(): QueryClient {
   });
 }
 
-export function renderApp(initialEntry: string) {
+interface RenderAppOptions {
+  initialIndex?: number;
+}
+
+export function renderApp(
+  initialEntry: string | string[],
+  options: RenderAppOptions = {},
+) {
   const client = createTestQueryClient();
   let currentLocation: {
     pathname: string;
     search: string;
   } | null = null;
-  let navigate: ReturnType<typeof useNavigate> | null = null;
 
   function LocationCapture() {
     const location = useLocation();
@@ -40,18 +46,31 @@ export function renderApp(initialEntry: string) {
     return null;
   }
 
-  function NavigationCapture() {
-    navigate = useNavigate();
-    return null;
+  function RouterRoot() {
+    return (
+      <>
+        <LocationCapture />
+        <AppRoutes />
+      </>
+    );
   }
 
+  const router = createMemoryRouter(
+    [
+      {
+        element: <RouterRoot />,
+        path: "*",
+      },
+    ],
+    {
+      initialEntries:
+        typeof initialEntry === "string" ? [initialEntry] : initialEntry,
+      initialIndex: options.initialIndex,
+    },
+  );
   const view = render(
     <AppProviders client={client}>
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <LocationCapture />
-        <NavigationCapture />
-        <AppRoutes />
-      </MemoryRouter>
+      <RouterProvider router={router} />
     </AppProviders>,
   );
 
@@ -64,18 +83,10 @@ export function renderApp(initialEntry: string) {
       }
       return currentLocation;
     },
-    navigateTo: (to: string) => {
-      if (!navigate) {
-        throw new Error("Router navigation is not available");
-      }
-      return navigate(to);
-    },
-    goBack: () => {
-      if (!navigate) {
-        throw new Error("Router navigation is not available");
-      }
-      return navigate(-1);
-    },
+    navigateTo: (to: string) => router.navigate(to),
+    goBack: () => router.navigate(-1),
+    goForward: () => router.navigate(1),
+    router,
   };
 }
 

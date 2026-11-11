@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,6 +31,7 @@ from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
+from adapter.system_prompt.repository import SqlAlchemySystemPromptRepository
 from api.runs import build_run_router
 from app.auth import AuthService
 from app.run.config import RunWorkerConfig
@@ -72,7 +73,7 @@ class _FakeStreamingProvider:
     @asynccontextmanager
     async def stream(
         self, runtime: RuntimeModelProfile, request: LlmRequest
-    ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+    ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
         async def events() -> AsyncIterator[LlmStreamEvent]:
             self.started.set()
             yield TextDelta(0, 0, "live provider delta")
@@ -236,6 +237,7 @@ def test_public_submit_worker_redis_sse_and_persisted_reply() -> None:
                 run_repository,
                 profile_repository,
                 fake_provider,
+                system_prompts=SqlAlchemySystemPromptRepository(factory),
                 publisher=worker_transport,
             )
             worker = RunWorker(

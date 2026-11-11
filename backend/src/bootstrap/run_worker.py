@@ -14,6 +14,7 @@ from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
+from adapter.system_prompt import SqlAlchemySystemPromptRepository
 from app.project.service import ProjectService
 from app.run import (
     NullRunProgressPublisher,
@@ -69,6 +70,7 @@ def build_run_worker_dependencies(
     projects_repository = SqlAlchemyProjectRepository(database.session_factory)
     messages = SqlAlchemyMessageRepository(database.session_factory)
     repository = SqlAlchemyRunRepository(database.session_factory, messages)
+    system_prompts = SqlAlchemySystemPromptRepository(database.session_factory)
     auth_repository = SqlAlchemyAuthRepository(database.session_factory)
     session_repository = SqlAlchemySessionRepository(database.session_factory)
     mcp_catalog = SqlAlchemyMcpRepository(database.session_factory, secret_cipher)
@@ -97,6 +99,7 @@ def build_run_worker_dependencies(
         repository,
         profiles,
         provider,
+        system_prompts=system_prompts,
         publisher=run_transport or NullRunProgressPublisher(),
         config=config,
         tool_runtime=tool_runtime,

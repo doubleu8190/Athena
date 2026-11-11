@@ -26,6 +26,7 @@ def context_summary_to_domain(row: SessionContextSummaryModel) -> ContextSummary
         policy_version_id=row.policy_version_id,
         compression_model_version_id=row.compression_model_version_id,
         prompt_version=row.prompt_version,
+        compression_prompt_version_id=row.compression_prompt_version_id,
         created_at=created_at,
     )
 

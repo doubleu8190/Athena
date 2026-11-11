@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from typing import Any, cast
 
@@ -180,7 +180,7 @@ class RedisRunTransport(RunEventTransport):
             raise
 
     @asynccontextmanager
-    async def subscribe(self, run_id: str) -> AsyncIterator[RunEventSubscription]:
+    async def subscribe(self, run_id: str) -> AsyncGenerator[RunEventSubscription, None]:
         pubsub = self._client.pubsub()
         try:
             async with asyncio.timeout(1.0):

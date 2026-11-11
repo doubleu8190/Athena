@@ -33,6 +33,10 @@ from adapter.run.model import (
     SessionContextSummaryModel,
 )
 from adapter.session.model import SessionModel
+from adapter.system_prompt.model import (
+    SystemPromptSettingModel,
+    SystemPromptVersionModel,
+)
 
 __all__ = [
     "AuthSessionModel",
@@ -66,5 +70,7 @@ __all__ = [
     "RunToolCallModel",
     "SessionContextSummaryModel",
     "SessionModel",
+    "SystemPromptSettingModel",
+    "SystemPromptVersionModel",
     "UserModel",
 ]

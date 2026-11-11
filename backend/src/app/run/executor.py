@@ -64,6 +64,7 @@ from domain.run.model import (
     RunUsage,
 )
 from domain.run.ports import RunRepository
+from domain.system_prompt import SystemPromptRepository
 from domain.tool import (
     AdmitToolCallCommand,
     AuthorizedRunContext,
@@ -138,6 +139,8 @@ class _ExecutionState:
     loop_deadline: float
     authorized: AuthorizedRunContext | None
     snapshot: RuntimeToolSnapshot
+    main_prompt: str
+    compression_prompt: str
     budget: RunLlmBudget
     retry_context: tuple[ToolRetryContext, ...]
     event_cursor: int
@@ -164,6 +167,7 @@ class RunExecutor:
         profiles: ModelProfileRepository,
         provider: LlmStreamProvider,
         *,
+        system_prompts: SystemPromptRepository,
         tool_runtime: RunToolRuntime | None = None,
         publisher: RunProgressPublisher | None = None,
         config: RunWorkerConfig | None = None,
@@ -175,6 +179,7 @@ class RunExecutor:
         self._repository = repository
         self._profiles = profiles
         self._provider = provider
+        self._system_prompts = system_prompts
         self._tool_runtime = tool_runtime
         self._publisher = publisher or NullRunProgressPublisher()
         self._config = config or RunWorkerConfig()
@@ -230,6 +235,14 @@ class RunExecutor:
         # 仅执行当前支持的模板版本；历史 v1 Run 安全失败，不再兼容。
         if run.prompt_template_version != "run-v2":
             raise LlmError("run_prompt_template_unsupported")
+        # 内容版本绑定在执行准备阶段解析一次；后续所有轮次都复用同一对不可变正文。
+        prompts = await self._system_prompts.get_pair_by_ids(
+            run.main_prompt_version_id,
+            run.compression_prompt_version_id,
+        )
+        if prompts is None:
+            raise LlmError("system_prompt_unavailable")
+        main_prompt, compression_prompt = (item.content for item in prompts)
         authorized: AuthorizedRunContext | None = None
         if self._tool_runtime is not None:
             # 启用业务工具时必须绑定有效登录会话，否则无法做 owner/项目级鉴权。
@@ -273,6 +286,8 @@ class RunExecutor:
             loop_deadline=loop_deadline,
             authorized=authorized,
             snapshot=snapshot,
+            main_prompt=main_prompt,
+            compression_prompt=compression_prompt,
             budget=budget,
             retry_context=retry_context or (),
             event_cursor=run.event_sequence,
@@ -432,6 +447,7 @@ class RunExecutor:
                 messages,
                 runtime.version,
                 timeout_seconds=remaining,
+                main_prompt=state.main_prompt,
                 tools=tools,
                 retry_context=state.retry_context,
             )
@@ -447,6 +463,8 @@ class RunExecutor:
                 messages,
                 runtime,
                 policy,
+                main_prompt=state.main_prompt,
+                compression_prompt=state.compression_prompt,
                 timeout_seconds=remaining,
                 tools=tools,
                 retry_context=state.retry_context,
@@ -461,6 +479,7 @@ class RunExecutor:
                 messages,
                 runtime.version,
                 timeout_seconds=remaining,
+                main_prompt=state.main_prompt,
                 tools=tools,
                 retry_context=state.retry_context,
             )

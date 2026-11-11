@@ -58,17 +58,21 @@ class RunRepository(Protocol):
         self, session_id: str, owner_id: str, command: SubmitRunCommand
     ) -> SubmitRunResult:
         """写入触发消息、Run、queued 事件与幂等结果。"""
+        ...
 
     async def answer(self, session_id: str, owner_id: str, command: AnswerRunCommand) -> Run:
         """保存回答及协议结果并将等待 Run 重新排队。"""
+        ...
 
     async def claim(
         self, worker_id: str, *, lease_seconds: int, execution_seconds: int, limit: int
     ) -> tuple[RunLease, ...]:
         """按 Session → Run 锁顺序领取有限数量的 queued Run。"""
+        ...
 
     async def reclaim_expired(self, *, limit: int) -> tuple[Run, ...]:
         """把失租 running/cancelling Run 分别收敛为失败或已取消。"""
+        ...
 
     async def heartbeat(
         self, run_id: str, worker_id: str, execution_epoch: int, *, lease_seconds: int
@@ -88,11 +92,13 @@ class RunRepository(Protocol):
 
     async def begin_tool_call(self, command: BeginToolCallCommand) -> BeginToolCallResult:
         """原子保存调用协议、记录和开始事件，仅首次提交允许执行。"""
+        ...
 
     async def begin_tool_call_batch(
         self, command: BeginToolCallBatchCommand
     ) -> BeginToolCallBatchResult:
         """原子保存助手调用消息、全部调用记录和审批等待点。"""
+        ...
 
     async def get_resumable_tool_batch(self, run_id: str) -> RunToolBatch | None:
         """在任何新模型请求前读取已批准但尚未执行的批次。"""
@@ -144,6 +150,7 @@ class RunRepository(Protocol):
 
     async def request_input(self, command: RequestRunInputCommand) -> RunInputRequest:
         """原子保存澄清消息、调用轨迹、输入请求与 waiting 状态事件。"""
+        ...
 
     async def finish(self, command: FinishRunCommand) -> Run | None:
         """校验执行租约并原子保存最终回复、用量和终态事件。"""
@@ -201,6 +208,7 @@ class RunRepository(Protocol):
         through_sequence: int | None = None,
     ) -> tuple[RunEvent, ...]:
         """按 Run 内序号读取状态事件，可限制在固定快照游标内。"""
+        ...
 
     async def get_pending_input(
         self, session_id: str, owner_id: str, run_id: str
@@ -243,6 +251,7 @@ class RunRepository(Protocol):
 
     async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
         """按数据库时钟校验本代执行仍处于 running 且租约有效。"""
+        ...
 
 
 class RunEventSubscription(Protocol):

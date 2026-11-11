@@ -82,6 +82,8 @@ def run_to_domain(row: RunModel) -> Run:
         context_cutoff_sequence=row.context_cutoff_sequence,
         retry_of_run_id=row.retry_of_run_id,
         model_config_version_id=row.model_config_version_id,
+        main_prompt_version_id=row.main_prompt_version_id,
+        compression_prompt_version_id=row.compression_prompt_version_id,
         prompt_template_version=row.prompt_template_version,
         event_sequence=row.event_sequence,
         execution_epoch=row.execution_epoch,

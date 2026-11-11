@@ -12,6 +12,9 @@ import type {
   ModelProfile,
   ModelProfileCreateInput,
   ModelProfileListResponse,
+  SystemPromptKind,
+  SystemPromptVersion,
+  SystemPromptVersionListResponse,
 } from "./model";
 
 function pageQuery(query: AdminPageQuery): string {
@@ -128,6 +131,69 @@ export function updateToolApprovalPolicy(
     {
       method: "PATCH",
       body: { requires_approval: requiresApproval },
+    },
+  );
+}
+
+export function getSystemPrompt(
+  kind: SystemPromptKind,
+): Promise<SystemPromptVersion> {
+  return apiRequest<SystemPromptVersion>(
+    `/admin/system-prompts/${kind}`,
+    { method: "GET" },
+  );
+}
+
+export function listSystemPromptVersions(
+  kind: SystemPromptKind,
+  query: AdminPageQuery,
+): Promise<SystemPromptVersionListResponse> {
+  return apiRequest<SystemPromptVersionListResponse>(
+    `/admin/system-prompts/${kind}/versions${pageQuery(query)}`,
+    { method: "GET" },
+  );
+}
+
+export function getSystemPromptVersion(
+  kind: SystemPromptKind,
+  versionId: string,
+): Promise<SystemPromptVersion> {
+  return apiRequest<SystemPromptVersion>(
+    `/admin/system-prompts/${kind}/versions/${encodeURIComponent(versionId)}`,
+    { method: "GET" },
+  );
+}
+
+export function saveSystemPrompt(
+  kind: SystemPromptKind,
+  content: string,
+  expectedCurrentVersionId: string,
+): Promise<SystemPromptVersion> {
+  return apiRequest<SystemPromptVersion>(
+    `/admin/system-prompts/${kind}/versions`,
+    {
+      method: "POST",
+      body: {
+        content,
+        expected_current_version_id: expectedCurrentVersionId,
+      },
+    },
+  );
+}
+
+export function restoreSystemPrompt(
+  kind: SystemPromptKind,
+  sourceVersionId: string,
+  expectedCurrentVersionId: string,
+): Promise<SystemPromptVersion> {
+  return apiRequest<SystemPromptVersion>(
+    `/admin/system-prompts/${kind}/restore`,
+    {
+      method: "POST",
+      body: {
+        source_version_id: sourceVersionId,
+        expected_current_version_id: expectedCurrentVersionId,
+      },
     },
   );
 }

@@ -35,6 +35,7 @@ from adapter.run.model import (
     SessionContextSummaryModel,
 )
 from adapter.session.model import SessionModel
+from adapter.system_prompt.repository import current_system_prompts
 from common.ids import new_id, now_utc
 from domain.message import (
     ConversationMessage,
@@ -196,6 +197,9 @@ class SqlAlchemyRunRepository(RunRepository):
                         raise RunConflictError("run_already_active")
                     profile_id = await self._lock_default_profile(session)
                     compression_policy_id = await self._current_compression_policy_id(session)
+                    system_prompts = await current_system_prompts(session)
+                    if system_prompts is None:
+                        raise RunStateError("system_prompt_unavailable")
                     message = await self._messages.append_conversation_in_session(
                         session,
                         command.message,
@@ -212,6 +216,8 @@ class SqlAlchemyRunRepository(RunRepository):
                         context_cutoff_sequence=locked_session.last_message_sequence,
                         retry_of_run_id=None,
                         model_config_version_id=profile_id,
+                        main_prompt_version_id=system_prompts.main.id,
+                        compression_prompt_version_id=system_prompts.compression.id,
                         compression_policy_version_id=compression_policy_id,
                         prompt_template_version=command.prompt_template_version,
                         event_sequence=0,
@@ -2110,6 +2116,9 @@ class SqlAlchemyRunRepository(RunRepository):
                         raise RunConflictError("run_already_active")
                     profile_id = await self._lock_default_profile(session)
                     compression_policy_id = await self._current_compression_policy_id(session)
+                    system_prompts = await current_system_prompts(session)
+                    if system_prompts is None:
+                        raise RunStateError("system_prompt_unavailable")
                     created_at = await self._next_run_created_at(session, session_id)
                     row = RunModel(
                         id=new_run_id,
@@ -2120,6 +2129,8 @@ class SqlAlchemyRunRepository(RunRepository):
                         context_cutoff_sequence=source.context_cutoff_sequence,
                         retry_of_run_id=source.id,
                         model_config_version_id=profile_id,
+                        main_prompt_version_id=system_prompts.main.id,
+                        compression_prompt_version_id=system_prompts.compression.id,
                         compression_policy_version_id=compression_policy_id,
                         prompt_template_version=prompt_template_version,
                         event_sequence=0,
@@ -2471,6 +2482,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     policy_version_id=command.policy_version_id,
                     compression_model_version_id=command.compression_model_version_id,
                     prompt_version=command.prompt_version,
+                    compression_prompt_version_id=row.compression_prompt_version_id,
                     created_at=db_now or command.created_at,
                 )
                 session.add(summary_row)

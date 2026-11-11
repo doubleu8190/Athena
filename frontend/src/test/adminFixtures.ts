@@ -3,6 +3,8 @@ import type {
   CompressionPolicy,
   McpServer,
   ModelProfile,
+  SystemPromptVersion,
+  SystemPromptVersionSummary,
 } from "../features/admin/model";
 import type { User } from "../features/auth/model";
 
@@ -86,4 +88,27 @@ export function makeAdminTool(
     tool_id,
     ...rest,
   };
+}
+
+export function makeSystemPromptVersion(
+  overrides: Partial<SystemPromptVersion> &
+    Pick<SystemPromptVersion, "id" | "kind">,
+): SystemPromptVersion {
+  const { id, kind, ...rest } = overrides;
+  return {
+    content: "你是 Athena 的主对话系统提示词。",
+    created_at: "2026-11-11T01:00:00Z",
+    created_by: "admin-1",
+    id,
+    kind,
+    restored_from_version_id: null,
+    ...rest,
+  };
+}
+
+export function makeSystemPromptSummary(
+  version: SystemPromptVersion,
+): SystemPromptVersionSummary {
+  const { content: _content, ...summary } = version;
+  return summary;
 }

@@ -22,6 +22,7 @@ class ContextSummary:
     policy_version_id: str
     compression_model_version_id: str
     prompt_version: str
+    compression_prompt_version_id: str
     created_at: datetime
 
 

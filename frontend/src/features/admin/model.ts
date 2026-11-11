@@ -8,6 +8,7 @@ export const TIMEOUT_SECONDS_MAX = 3_600;
 export const MAX_CONCURRENCY = 128;
 export const MCP_SERVER_NAME_MAX_LENGTH = 120;
 export const MCP_SECRET_MAX_BYTES = 16 * 1024;
+export const SYSTEM_PROMPT_CONTENT_MAX_LENGTH = 100_000;
 
 export const TOKENIZER_ENCODINGS = [
   "o200k_base",
@@ -16,6 +17,31 @@ export const TOKENIZER_ENCODINGS = [
 
 export type TokenizerEncoding = (typeof TOKENIZER_ENCODINGS)[number];
 export type McpTransport = "streamable_http" | "stdio";
+export type SystemPromptKind = "main" | "compression";
+
+export interface SystemPromptVersion {
+  id: string;
+  kind: SystemPromptKind;
+  content: string;
+  created_by: string | null;
+  created_at: string;
+  restored_from_version_id: string | null;
+}
+
+export interface SystemPromptVersionSummary {
+  id: string;
+  kind: SystemPromptKind;
+  created_by: string | null;
+  created_at: string;
+  restored_from_version_id: string | null;
+}
+
+export interface SystemPromptVersionListResponse {
+  items: SystemPromptVersionSummary[];
+  page: number;
+  page_size: number;
+  total: number;
+}
 
 export interface ModelProfile {
   id: string;
@@ -234,6 +260,16 @@ const RESERVED_HTTP_SECRET_NAMES = new Set([
 
 function unicodeLength(value: string): number {
   return Array.from(value).length;
+}
+
+export function validateSystemPromptContent(content: string): string | null {
+  if (!content.trim()) {
+    return "系统提示词不能全部为空白。";
+  }
+  if (unicodeLength(content) > SYSTEM_PROMPT_CONTENT_MAX_LENGTH) {
+    return `系统提示词不能超过 ${SYSTEM_PROMPT_CONTENT_MAX_LENGTH.toLocaleString()} 个字符。`;
+  }
+  return null;
 }
 
 function parseInteger(value: string): number | null {

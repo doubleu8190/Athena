@@ -32,6 +32,7 @@ const BASE_NAVIGATION: NavigationItem[] = [
 
 const ADMIN_NAVIGATION: NavigationItem[] = [
   { icon: "sliders", label: "模型与压缩策略", to: "/admin/models" },
+  { icon: "book", label: "系统提示词", to: "/admin/system-prompts" },
   { icon: "settings", label: "MCP Server", to: "/admin/mcp" },
   { icon: "tools", label: "工具审批策略", to: "/admin/tools" },
 ];

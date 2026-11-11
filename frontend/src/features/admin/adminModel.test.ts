@@ -7,6 +7,7 @@ import {
   validateCompressionPolicyForm,
   validateMcpServerForm,
   validateModelProfileForm,
+  validateSystemPromptContent,
   type McpServerFormValues,
 } from "./model";
 
@@ -198,5 +199,15 @@ describe("管理表单纯校验", () => {
         value: "",
       },
     ]);
+  });
+
+  it("系统提示词按 Unicode 字符计数，拒绝全空白和超过十万字符", () => {
+    expect(validateSystemPromptContent(" \n\t ")).toContain("空白");
+    expect(
+      validateSystemPromptContent("😀".repeat(100_000)),
+    ).toBeNull();
+    expect(
+      validateSystemPromptContent("a".repeat(100_001)),
+    ).toContain("100,000");
   });
 });

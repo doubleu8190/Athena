@@ -12,6 +12,7 @@ import { DraftChatPage } from "../features/chat/DraftChatPage";
 import { SessionChatPage } from "../features/chat/SessionChatPage";
 import { AdminMcpPage } from "../features/admin/AdminMcpPage";
 import { AdminModelsPage } from "../features/admin/AdminModelsPage";
+import { AdminSystemPromptsPage } from "../features/admin/AdminSystemPromptsPage";
 import { AdminToolsPage } from "../features/admin/AdminToolsPage";
 import { KnowledgeDetailPage } from "../features/knowledge/KnowledgeDetailPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
@@ -57,6 +58,10 @@ export function AppRoutes() {
             <Route element={<Navigate replace to="/admin/models" />} index />
             <Route element={<AdminModelsPage />} path="models" />
             <Route element={<AdminMcpPage />} path="mcp" />
+            <Route
+              element={<AdminSystemPromptsPage />}
+              path="system-prompts"
+            />
             <Route element={<AdminToolsPage />} path="tools" />
           </Route>
         </Route>

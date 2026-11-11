@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -15,10 +15,15 @@ from unittest.mock import patch
 
 import pytest
 from run_worker import run_worker_process
+from system_prompt_support import (
+    TEST_COMPRESSION_PROMPT_ID,
+    TEST_MAIN_PROMPT_ID,
+    FakeSystemPromptRepository,
+)
 
 from app.run.config import RunWorkerConfig
 from app.run.context import _context_threads, _run_context_work, prepare_run_tokenizers
-from app.run.executor import RunExecutor
+from app.run.executor import RunExecutor as _RunExecutor
 from app.run.worker import RunWorker
 from domain.llm.model import LlmRequest, LlmStreamEvent, TextDelta
 from domain.llm.model.profile import ModelProfileVersion, RuntimeModelProfile
@@ -26,6 +31,22 @@ from domain.llm.ports import LlmStreamProvider
 from domain.llm.profile_ports import ModelProfileRepository
 from domain.run.model import FailRunCommand, Run, RunLease, RunStatus, RunUsage
 from domain.run.ports import RunRepository
+
+
+def RunExecutor(
+    repository: RunRepository,
+    profiles: ModelProfileRepository,
+    provider: LlmStreamProvider,
+    **kwargs: Any,
+) -> _RunExecutor:
+    """为 Worker 单元测试注入固定系统提示词正文。"""
+    return _RunExecutor(
+        repository,
+        profiles,
+        provider,
+        system_prompts=FakeSystemPromptRepository(),
+        **kwargs,
+    )
 
 
 def _lease(status: RunStatus = RunStatus.RUNNING) -> RunLease:
@@ -39,6 +60,8 @@ def _lease(status: RunStatus = RunStatus.RUNNING) -> RunLease:
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile_worker_test",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
@@ -268,7 +291,7 @@ def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
             @asynccontextmanager
             async def stream(
                 self, runtime: RuntimeModelProfile, request: LlmRequest
-            ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
                 async def events() -> AsyncIterator[LlmStreamEvent]:
                     started.set()
                     await asyncio.Event().wait()
@@ -361,7 +384,7 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
             @asynccontextmanager
             async def stream(
                 self, runtime: RuntimeModelProfile, request: LlmRequest
-            ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
                 async def events() -> AsyncIterator[LlmStreamEvent]:
                     started.set()
                     try:
@@ -675,7 +698,7 @@ def test_executor_does_not_start_provider_after_context_work_deadline() -> None:
             @asynccontextmanager
             async def stream(
                 self, _runtime: RuntimeModelProfile, _request: LlmRequest
-            ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
                 nonlocal provider_called
                 provider_called = True
                 yield _empty_events()

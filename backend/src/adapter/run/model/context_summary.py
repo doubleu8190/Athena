@@ -55,6 +55,12 @@ class SessionContextSummaryModel(Base):
             name="fk_context_summaries_model",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["compression_prompt_version_id"],
+            ["system_prompt_versions.id"],
+            name="fk_context_summaries_compression_prompt",
+            ondelete="RESTRICT",
+        ),
         Index(
             "ix_context_summaries_session_coverage",
             "session_id",
@@ -76,6 +82,7 @@ class SessionContextSummaryModel(Base):
     policy_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
     compression_model_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

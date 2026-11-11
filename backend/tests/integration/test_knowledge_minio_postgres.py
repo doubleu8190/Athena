@@ -7,7 +7,7 @@ import hashlib
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -222,7 +222,7 @@ command.upgrade(config, 'head')
 @asynccontextmanager
 async def _isolated_postgres(
     database_url: str,
-) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     schema = f"athena_knowledge_joint_{token_hex(8)}"
     admin = create_async_engine(database_url, poolclass=NullPool, connect_args=DB_CONNECT_ARGS)
     engine: AsyncEngine = create_async_engine(

@@ -15,9 +15,14 @@ import {
   createModelProfile,
   getCompressionPolicy,
   getMcpServer,
+  getSystemPrompt,
+  getSystemPromptVersion,
   listAdminTools,
   listMcpServers,
   listModelProfiles,
+  listSystemPromptVersions,
+  restoreSystemPrompt,
+  saveSystemPrompt,
   setDefaultModelProfile,
   setModelProfileEnabled,
   updateCompressionPolicy,
@@ -33,6 +38,7 @@ import type {
   McpServerWriteInput,
   ModelProfile,
   ModelProfileCreateInput,
+  SystemPromptKind,
 } from "./model";
 import { adminKeys } from "./queryKeys";
 import { isAdminForbidden } from "./errorMessages";
@@ -48,6 +54,107 @@ export function useCompressionPolicy() {
   return useQuery({
     queryKey: adminKeys.compressionPolicy(),
     queryFn: getCompressionPolicy,
+  });
+}
+
+export function useSystemPrompt(kind: SystemPromptKind) {
+  return useQuery({
+    queryKey: adminKeys.systemPrompt(kind),
+    queryFn: () => getSystemPrompt(kind),
+  });
+}
+
+export function useSystemPromptVersions(
+  kind: SystemPromptKind,
+  query: AdminPageQuery,
+) {
+  return useQuery({
+    queryKey: adminKeys.systemPromptVersions(kind, query),
+    queryFn: () => listSystemPromptVersions(kind, query),
+  });
+}
+
+export function useSystemPromptVersion(
+  kind: SystemPromptKind,
+  versionId: string | null,
+) {
+  return useQuery({
+    queryKey: adminKeys.systemPromptVersion(kind, versionId ?? ""),
+    queryFn: () => getSystemPromptVersion(kind, versionId ?? ""),
+    enabled: Boolean(versionId),
+    refetchOnMount: "always",
+    staleTime: 0,
+  });
+}
+
+async function refreshSystemPromptQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  kind: SystemPromptKind,
+  version: Awaited<ReturnType<typeof saveSystemPrompt>>,
+) {
+  queryClient.setQueryData(adminKeys.systemPrompt(kind), version);
+  await queryClient.invalidateQueries({
+    queryKey: adminKeys.systemPromptVersionsAll(kind),
+  });
+}
+
+export function useSaveSystemPromptMutation(kind: SystemPromptKind) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      content,
+      expectedCurrentVersionId,
+      identityEpoch,
+    }: {
+      content: string;
+      expectedCurrentVersionId: string;
+      identityEpoch: number;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        // 保存提交前再次核对身份，旧页面不能借用新管理员 Cookie 写入提示词。
+        throw authIdentityChangedError();
+      }
+      return saveSystemPrompt(kind, content, expectedCurrentVersionId);
+    },
+    onSuccess: async (version, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        // 响应解析与回调之间也可能发生账号切换，禁止旧版本覆盖新身份缓存。
+        return;
+      }
+      await refreshSystemPromptQueries(queryClient, kind, version);
+    },
+  });
+}
+
+export function useRestoreSystemPromptMutation(kind: SystemPromptKind) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      expectedCurrentVersionId,
+      identityEpoch,
+      sourceVersionId,
+    }: {
+      expectedCurrentVersionId: string;
+      identityEpoch: number;
+      sourceVersionId: string;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        // 恢复同样会立即切换全局配置，跨身份时必须中止而不是复用当前 Cookie。
+        throw authIdentityChangedError();
+      }
+      return restoreSystemPrompt(
+        kind,
+        sourceVersionId,
+        expectedCurrentVersionId,
+      );
+    },
+    onSuccess: async (version, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        // 迟到的恢复结果只能属于旧身份，不得污染新身份的管理缓存。
+        return;
+      }
+      await refreshSystemPromptQueries(queryClient, kind, version);
+    },
   });
 }
 

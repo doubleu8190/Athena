@@ -26,6 +26,7 @@ from api.projects import build_project_router
 from api.runs import build_run_router
 from api.security import DEFAULT_COOKIE_NAME
 from api.sessions import build_session_router
+from api.system_prompt import build_system_prompt_admin_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
 from app.knowledge.service import KnowledgeService
@@ -35,6 +36,7 @@ from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.run.service import RunService
 from app.session.service import SessionService
+from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.api import ApiDependencies, build_api_dependencies
 from bootstrap.config import env_flag, env_int
@@ -225,6 +227,7 @@ def create_app(
     tool_manager: ToolManager | None = None,
     llm_service: LlmService | None = None,
     model_profile_service: ModelProfileService | None = None,
+    system_prompt_service: SystemPromptService | None = None,
     memory_service: MemoryService | None = None,
     knowledge_service: KnowledgeService | None = None,
     auth_cookie_secure: bool | None = None,
@@ -248,6 +251,7 @@ def create_app(
         tool_manager=tool_manager,
         llm_service=llm_service,
         model_profile_service=model_profile_service,
+        system_prompt_service=system_prompt_service,
         memory_service=memory_service,
         knowledge_service=knowledge_service,
     )
@@ -282,12 +286,15 @@ def create_app(
     app.state.tool_manager = deps.tool_manager
     app.state.llm_service = deps.llm_service
     app.state.model_profile_service = deps.model_profile_service
+    app.state.system_prompt_service = deps.system_prompt_service
     app.state.run_service = deps.run_service
     app.state.memory_service = deps.memory_service
     app.state.knowledge_service = deps.knowledge_service
     app.include_router(health_router)
     if deps.model_profile_service is not None:
         app.include_router(build_llm_admin_router(deps.model_profile_service))
+    if deps.system_prompt_service is not None:
+        app.include_router(build_system_prompt_admin_router(deps.system_prompt_service))
     if deps.project_service is not None:
         app.include_router(build_project_router(deps.project_service))
     if deps.session_service is not None:

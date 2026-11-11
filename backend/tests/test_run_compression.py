@@ -11,6 +11,12 @@ from typing import Literal, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from system_prompt_support import (
+    TEST_COMPRESSION_PROMPT,
+    TEST_COMPRESSION_PROMPT_ID,
+    TEST_MAIN_PROMPT,
+    TEST_MAIN_PROMPT_ID,
+)
 
 from adapter.run.repository.run import SqlAlchemyRunRepository
 from app.run import compression as compression_module
@@ -167,6 +173,8 @@ def test_recent_suffix_budget_uses_complete_main_request_count_for_short_message
         context_cutoff_sequence=101,
         retry_of_run_id=None,
         model_config_version_id="profile_recent_budget",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
@@ -214,15 +222,29 @@ def test_recent_suffix_budget_uses_complete_main_request_count_for_short_message
 
     async def scenario() -> None:
         base_tokens, output_tokens = await estimate_llm_input_tokens(
-            run, (), profile_version, timeout_seconds=10
+            run,
+            (),
+            profile_version,
+            main_prompt=TEST_MAIN_PROMPT,
+            timeout_seconds=10,
         )
         input_budget = profile_version.context_window_tokens - output_tokens - base_tokens
         recent_limit = int(input_budget * 0.2)
         remaining, recent = await _split_recent_suffix(
-            run, groups, profile, base_tokens, recent_limit, timeout_seconds=10
+            run,
+            groups,
+            profile,
+            base_tokens,
+            recent_limit,
+            timeout_seconds=10,
+            main_prompt=TEST_MAIN_PROMPT,
         )
         actual_tokens, _ = await estimate_llm_input_tokens(
-            run, recent, profile_version, timeout_seconds=10
+            run,
+            recent,
+            profile_version,
+            main_prompt=TEST_MAIN_PROMPT,
+            timeout_seconds=10,
         )
         assert recent
         assert max(0, actual_tokens - base_tokens) <= recent_limit
@@ -265,6 +287,8 @@ def test_compression_retry_consumes_the_same_atomic_llm_budget() -> None:
         context_cutoff_sequence=2,
         retry_of_run_id=None,
         model_config_version_id="profile_main_budget",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
@@ -354,6 +378,7 @@ def test_compression_retry_consumes_the_same_atomic_llm_budget() -> None:
             0,
             128,
             10,
+            TEST_COMPRESSION_PROMPT,
             budget,
         )
         assert summary == "compressed summary"
@@ -387,6 +412,8 @@ def test_prepare_bounds_summary_output_across_tokenizers(
         context_cutoff_sequence=9,
         retry_of_run_id=None,
         model_config_version_id="profile_main_cross",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
@@ -494,6 +521,7 @@ def test_prepare_bounds_summary_output_across_tokenizers(
                     policy_version_id=policy.id,
                     compression_model_version_id=compression.version.id,
                     prompt_version=policy.prompt_template_version,
+                    compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
                     created_at=now,
                 ),
                 completed_event,
@@ -514,7 +542,11 @@ def test_prepare_bounds_summary_output_across_tokenizers(
 
     async def scenario() -> None:
         base_tokens, output_tokens = await estimate_llm_input_tokens(
-            run, (), main.version, timeout_seconds=10
+            run,
+            (),
+            main.version,
+            main_prompt=TEST_MAIN_PROMPT,
+            timeout_seconds=10,
         )
         summary_budget = int(
             (main.version.context_window_tokens - output_tokens - base_tokens)
@@ -531,9 +563,12 @@ def test_prepare_bounds_summary_output_across_tokenizers(
             messages,
             main,
             policy,
+            main_prompt=TEST_MAIN_PROMPT,
+            compression_prompt=TEST_COMPRESSION_PROMPT,
             timeout_seconds=10,
         )
         request = cast(LlmRequest, captured["request"])
+        assert request.messages[0].content == TEST_COMPRESSION_PROMPT
         assert request.max_output_tokens is not None
         target_characters = min(summary_budget, request.max_output_tokens) // 4
         assert request.max_output_tokens <= summary_budget
@@ -624,6 +659,8 @@ def test_compression_retries_only_provider_errors_and_records_each_attempt() -> 
         context_cutoff_sequence=2,
         retry_of_run_id=None,
         model_config_version_id="profile_main",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
@@ -688,6 +725,7 @@ def test_compression_retries_only_provider_errors_and_records_each_attempt() -> 
                 0,
                 30,
                 30,
+                TEST_COMPRESSION_PROMPT,
             )
         )
     assert provider.complete.await_count == 3
@@ -706,6 +744,8 @@ def test_compression_does_not_retry_uncertain_provider_outcome() -> None:
         context_cutoff_sequence=2,
         retry_of_run_id=None,
         model_config_version_id="profile_main",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
@@ -770,6 +810,7 @@ def test_compression_does_not_retry_uncertain_provider_outcome() -> None:
                 0,
                 30,
                 30,
+                TEST_COMPRESSION_PROMPT,
             )
         )
     assert provider.complete.await_count == 1
@@ -791,6 +832,8 @@ def test_prepare_commits_summary_before_trigger_and_preserves_trigger(
         context_cutoff_sequence=4,
         retry_of_run_id=None,
         model_config_version_id="profile_main",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=1,
@@ -868,6 +911,7 @@ def test_prepare_commits_summary_before_trigger_and_preserves_trigger(
     saved: dict[str, object] = {}
     events: list[RunEventPayload] = []
     built_contexts: list[tuple[tuple[str, ...], object]] = []
+    compression_requests: list[LlmRequest] = []
     provider_fails = mode == "failed_fallback"
 
     class Repository:
@@ -892,6 +936,7 @@ def test_prepare_commits_summary_before_trigger_and_preserves_trigger(
                     policy_version_id=policy.id,
                     compression_model_version_id=compression_runtime.version.id,
                     prompt_version=policy.prompt_template_version,
+                    compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
                     created_at=now,
                 ),
             )
@@ -924,13 +969,19 @@ def test_prepare_commits_summary_before_trigger_and_preserves_trigger(
                     policy_version_id=policy.id,
                     compression_model_version_id=compression_runtime.version.id,
                     prompt_version=policy.prompt_template_version,
+                    compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
                     created_at=now,
                 ),
                 SimpleNamespace(type="compression_completed"),
             )
 
     class Provider:
-        async def complete(self, *_: object) -> LlmResponse:
+        async def complete(
+            self,
+            _runtime: RuntimeModelProfile,
+            request: LlmRequest,
+        ) -> LlmResponse:
+            compression_requests.append(request)
             if provider_fails:
                 raise LlmProviderError("llm_authentication_failed")
             return LlmResponse(
@@ -976,10 +1027,22 @@ def test_prepare_commits_summary_before_trigger_and_preserves_trigger(
             Provider(),
             SimpleNamespace(publish_persisted=AsyncMock()),
         )
-        result = await compressor.prepare(lease, messages, main, policy, timeout_seconds=30)
+        result = await compressor.prepare(
+            lease,
+            messages,
+            main,
+            policy,
+            main_prompt=TEST_MAIN_PROMPT,
+            compression_prompt=TEST_COMPRESSION_PROMPT,
+            timeout_seconds=30,
+        )
         assert result[3] is not None
 
     asyncio.run(scenario())
+    assert compression_requests
+    assert {
+        request.messages[0].content for request in compression_requests
+    } == {TEST_COMPRESSION_PROMPT}
     if provider_fails:
         assert "command" not in saved
         assert len(events) == 2

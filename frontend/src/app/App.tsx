@@ -1,11 +1,21 @@
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
-import { BrowserRouter } from "react-router-dom";
+import {
+  createBrowserRouter,
+  RouterProvider,
+} from "react-router-dom";
 
 import { AuthProvider } from "../features/auth/AuthProvider";
 import { ErrorBoundary } from "../shared/ui/ErrorBoundary";
 import { AppRoutes } from "./AppRoutes";
 import { queryClient as defaultQueryClient } from "./queryClient";
+
+const appRouter = createBrowserRouter([
+  {
+    element: <AppRoutes />,
+    path: "*",
+  },
+]);
 
 interface AppProvidersProps extends PropsWithChildren {
   client?: QueryClient;
@@ -26,9 +36,7 @@ export function App() {
   return (
     <ErrorBoundary>
       <AppProviders>
-        <BrowserRouter>
-          <AppRoutes />
-        </BrowserRouter>
+        <RouterProvider router={appRouter} />
       </AppProviders>
     </ErrorBoundary>
   );

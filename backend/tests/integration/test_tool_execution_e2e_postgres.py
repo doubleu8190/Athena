@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,6 +33,7 @@ from adapter.run.model import RunEventModel, RunToolCallModel
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
 from adapter.session.repository import SqlAlchemySessionRepository
+from adapter.system_prompt.repository import SqlAlchemySystemPromptRepository
 from api.runs import build_run_router
 from app.auth import AuthService
 from app.run.config import RunWorkerConfig
@@ -72,8 +73,8 @@ pytestmark = [
 
 
 @asynccontextmanager
-async def _database() -> AsyncIterator[
-    tuple[async_sessionmaker[AsyncSession], object, object, str]
+async def _database() -> AsyncGenerator[
+    tuple[async_sessionmaker[AsyncSession], object, object, str], None
 ]:
     database_url = DATABASE_URL
     if database_url is None:
@@ -278,7 +279,7 @@ class _ScriptedProvider:
         self,
         runtime: RuntimeModelProfile,
         request: LlmRequest,
-    ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+    ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
         del runtime
         self.requests.append(request)
         response = self.responses.pop(0)
@@ -462,6 +463,7 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                 run_repository,
                 profile_repository,
                 provider,
+                system_prompts=SqlAlchemySystemPromptRepository(factory),
                 tool_runtime=runtime,
                 config=RunWorkerConfig(),
             )
@@ -613,6 +615,7 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                     run_repository,
                     profile_repository,
                     unknown_provider,
+                    system_prompts=SqlAlchemySystemPromptRepository(factory),
                     tool_runtime=unknown_runtime,
                     config=RunWorkerConfig(),
                 )

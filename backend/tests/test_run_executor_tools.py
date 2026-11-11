@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -13,9 +13,14 @@ from typing import Any, cast
 
 import pytest
 from mcp import types
+from system_prompt_support import (
+    TEST_COMPRESSION_PROMPT_ID,
+    TEST_MAIN_PROMPT_ID,
+    FakeSystemPromptRepository,
+)
 
 from app.run.config import RunWorkerConfig
-from app.run.executor import RunExecutor
+from app.run.executor import RunExecutor as _RunExecutor
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import RunToolRuntimeService
 from domain.auth.model import User, UserRole, UserStatus
@@ -73,6 +78,22 @@ from domain.tool import (
 from infrastructure.mcp.execution import McpToolCallClient
 
 NOW = datetime.now(UTC)
+
+
+def RunExecutor(
+    repository: RunRepository,
+    profiles: ModelProfileRepository,
+    provider: LlmStreamProvider,
+    **kwargs: Any,
+) -> _RunExecutor:
+    """为单元测试注入固定正文，实际执行仍使用生产 RunExecutor。"""
+    return _RunExecutor(
+        repository,
+        profiles,
+        provider,
+        system_prompts=FakeSystemPromptRepository(),
+        **kwargs,
+    )
 
 
 def _runtime_profile(*, supports_parallel_tool_calls: bool = False) -> RuntimeModelProfile:
@@ -156,6 +177,8 @@ def _lease(
     used: int = 0,
     definition: RuntimeToolDefinition | None = None,
 ) -> RunLease:
+    # 全量测试运行时间可能超过固定模块时钟，每个用例都使用当前时刻避免任务刚创建就被判超时。
+    now = datetime.now(UTC)
     run = Run(
         id="run-tools",
         session_id="session-tools",
@@ -165,18 +188,20 @@ def _lease(
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile-tools",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=0,
         execution_epoch=1,
         worker_id="worker-tools",
-        lease_expires_at=NOW + timedelta(minutes=2),
-        execution_started_at=NOW,
-        execution_deadline_at=NOW + timedelta(minutes=1),
-        queued_at=NOW,
-        first_started_at=NOW,
+        lease_expires_at=now + timedelta(minutes=2),
+        execution_started_at=now,
+        execution_deadline_at=now + timedelta(minutes=1),
+        queued_at=now,
+        first_started_at=now,
         finished_at=None,
-        created_at=NOW,
-        updated_at=NOW,
+        created_at=now,
+        updated_at=now,
         cancel_requested_at=None,
         safe_error_code=None,
         usage=RunUsage(),
@@ -184,7 +209,7 @@ def _lease(
         auth_session_id="auth-tools",
         llm_request_count=used,
     )
-    return RunLease(run, run.lease_expires_at or NOW, run.execution_deadline_at or NOW)
+    return RunLease(run, run.lease_expires_at or now, run.execution_deadline_at or now)
 
 
 class _ToolRuntime:
@@ -633,7 +658,7 @@ class _ScriptedProvider:
     @asynccontextmanager
     async def stream(
         self, runtime: RuntimeModelProfile, request: LlmRequest
-    ) -> AsyncIterator[AsyncIterator[LlmStreamEvent]]:
+    ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
         self.requests.append(request)
         outcome = self.outcomes.pop(0)
 
@@ -1199,6 +1224,80 @@ def test_unsupported_prompt_version_fails_before_provider_or_tool_calls() -> Non
     asyncio.run(scenario())
 
 
+def test_executor_uses_the_main_prompt_content_bound_to_the_run() -> None:
+    """执行请求的首条 system 正文来自 Run 绑定版本，而不是代码常量。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = _ScriptedProvider([_response(text="custom prompt completed")])
+        custom_prompt = "CUSTOM BOUND MAIN PROMPT"
+        executor = _RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            system_prompts=FakeSystemPromptRepository(main_content=custom_prompt),
+        )
+
+        await executor.execute(lease)
+
+        assert len(provider.requests) == 1
+        assert provider.requests[0].messages[0].content == custom_prompt
+        assert repository.run.status is RunStatus.COMPLETED
+
+    asyncio.run(scenario())
+
+
+def test_missing_bound_prompt_fails_without_provider_or_content_fallback() -> None:
+    """Run 引用缺失或类别损坏时安全失败，不回退到当前或代码内正文。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        lease = replace(
+            lease,
+            run=replace(lease.run, main_prompt_version_id="sysp_missing"),
+        )
+        repository = _Repository(lease.run)
+        provider = _ScriptedProvider([_response(text="must not run")])
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+        )
+
+        await executor.execute(lease)
+
+        assert provider.requests == []
+        assert repository.failures == ["system_prompt_unavailable"]
+        assert repository.run.status is RunStatus.FAILED
+
+    asyncio.run(scenario())
+
+
+def test_oversized_bound_main_prompt_is_rejected_without_truncation() -> None:
+    """主提示词在所有预算路径中计入窗口；超限时拒绝请求而不截断正文。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = _ScriptedProvider([_response(text="must not run")])
+        oversized_prompt = "完整系统提示词不能截断" * 4_000
+        executor = _RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            system_prompts=FakeSystemPromptRepository(main_content=oversized_prompt),
+        )
+
+        await executor.execute(lease)
+
+        assert provider.requests == []
+        assert repository.failures == ["run_context_window_exceeded"]
+        assert repository.run.status is RunStatus.FAILED
+
+    asyncio.run(scenario())
+
+
 def test_penultimate_failed_request_uses_last_slot_as_final_answer() -> None:
     async def scenario() -> None:
         lease = _lease(used=38)
@@ -1320,18 +1419,20 @@ def test_approval_barrier_holds_safe_calls_and_resume_does_not_replay_model() ->
             approval_decision=ToolApprovalDecision.APPROVE,
             approval_decided_at=NOW,
         )
+        # 恢复发生在场景实际运行时；不能使用模块导入时时钟，否则长套件会提前过期。
+        resumed_at = datetime.now(UTC)
         repository.run = replace(
             repository.run,
             status=RunStatus.RUNNING,
             execution_epoch=2,
             worker_id="worker-resume",
-            lease_expires_at=NOW + timedelta(minutes=2),
-            execution_deadline_at=NOW + timedelta(minutes=1),
+            lease_expires_at=resumed_at + timedelta(minutes=2),
+            execution_deadline_at=resumed_at + timedelta(minutes=1),
         )
         resumed_lease = RunLease(
             repository.run,
-            NOW + timedelta(minutes=2),
-            NOW + timedelta(minutes=1),
+            resumed_at + timedelta(minutes=2),
+            resumed_at + timedelta(minutes=1),
         )
 
         await executor.execute(resumed_lease)

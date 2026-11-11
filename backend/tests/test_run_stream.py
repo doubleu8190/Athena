@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -16,6 +16,10 @@ from fastapi.testclient import TestClient
 from redis.asyncio import Redis
 from redis.asyncio.client import PubSub
 from starlette.types import Message, Send
+from system_prompt_support import (
+    TEST_COMPRESSION_PROMPT_ID,
+    TEST_MAIN_PROMPT_ID,
+)
 
 from adapter.run import redis_transport as redis_module
 from adapter.run.redis_transport import RedisRunTransport, _RedisRunSubscription
@@ -58,6 +62,8 @@ def _run(status: RunStatus, epoch: int) -> Run:
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile_stream_test",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
         event_sequence=1,
         execution_epoch=epoch,
@@ -146,7 +152,7 @@ class _FakeTransport:
         return None
 
     @asynccontextmanager
-    async def subscribe(self, run_id: str) -> AsyncIterator[RunEventSubscription]:
+    async def subscribe(self, run_id: str) -> AsyncGenerator[RunEventSubscription, None]:
         self.repository.subscribed = True
         yield cast(RunEventSubscription, _FakeSubscription(self.events))
 
@@ -651,7 +657,7 @@ def test_pubsub_disconnect_reconnects_with_interrupt_and_fresh_snapshot(
             self.connections = 0
 
         @asynccontextmanager
-        async def subscribe(self, run_id: str) -> AsyncIterator[RunEventSubscription]:
+        async def subscribe(self, run_id: str) -> AsyncGenerator[RunEventSubscription, None]:
             self.connections += 1
             self.repository.subscribed = True
             subscription: RunEventSubscription = (

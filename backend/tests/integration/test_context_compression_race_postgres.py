@@ -50,6 +50,7 @@ from domain.run.model import (
     SubmitRunCommand,
 )
 from domain.run.model.errors import RunStateError
+from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
@@ -256,6 +257,8 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_compression_pg",
                         compression_policy_version_id="cmpol_compression_pg",
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
                         event_sequence=0,
                         execution_epoch=1,
@@ -559,6 +562,8 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                         retry_of_run_id="run_compression_pg",
                         model_config_version_id="llmprof_main_pg",
                         compression_policy_version_id="cmpol_compression_pg",
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
                         event_sequence=0,
                         execution_epoch=1,

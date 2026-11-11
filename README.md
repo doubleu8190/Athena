@@ -285,7 +285,9 @@ source scripts/load-test-env.sh && scripts/dev.sh --env-file docker/test.env --m
 `athena_test` 数据库，`ATHENA_REDIS_URL` 指向本 Compose 的 Redis。Compose 的
 `--env-file` 只提供端口、数据库名和桶名等非敏感配置，不会自动导出给宿主机上的
 Alembic 或 pytest。
-知识库功能默认关闭，启动时不会触发嵌入模型下载。
+本地测试配置默认启用知识库：`scripts/dev.sh` 会同时启动 Knowledge Worker，
+首次启动会加载或下载嵌入模型。如不需要知识库，可在 `docker/test.env` 中显式设为
+`ATHENA_KNOWLEDGE_ENABLED=false`。
 
 测试后可执行 `docker compose --env-file docker/test.env -f compose.test.yml down` 停止并
 移除本套容器；`data/postgres`、`data/redis` 和 `data/minio` 中的 bind mount 数据会保留，

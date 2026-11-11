@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.converter.auth import auth_session_to_domain, user_to_domain
 from adapter.auth.model.auth import AuthSessionModel, UserModel
+from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
 from domain.auth import (
     AuthContext,
     AuthRepository,
@@ -223,6 +224,34 @@ class SqlAlchemyAuthRepository(AuthRepository, CurrentSessionReader):
                     .values(revoked_time=revoked_at)
                 )
         return True
+
+    async def update_display_name(
+        self,
+        user_id: str,
+        session_id: str,
+        display_name: str | None,
+        updated_at: datetime,
+    ) -> User | None:
+        """复核会话有效性后仅写显示名，避免覆盖并发更新的凭据或角色。
+
+        参数：user_id 和 session_id 来自当前 Cookie 身份；display_name 是已规范化名称；
+        updated_at 是服务层提供的 UTC 更新时间。
+        返回：身份仍有效时返回更新后的用户，否则返回 None。
+        异常：数据库错误由 SQLAlchemy 原样传播。
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                guard = SqlAlchemyAuthTransactionGuard(session)
+                current_user = await guard.lock_current_session_user(user_id, session_id)
+                if current_user is None:
+                    return None
+                row = await session.get(UserModel, user_id, populate_existing=True)
+                if row is None:
+                    return None
+                row.display_name = display_name
+                row.updated_at = updated_at
+                await session.flush()
+                return user_to_domain(row)
 
 
 __all__ = ["SqlAlchemyAuthRepository"]

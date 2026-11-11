@@ -12,6 +12,7 @@ from api.dto.auth import (
     ChangePasswordRequest,
     LoginRequest,
     RegisterRequest,
+    UpdateCurrentUserRequest,
     UserResponse,
 )
 from api.security import (
@@ -219,6 +220,23 @@ def build_auth_router(
         """返回当前有效登录用户。"""
         response.headers["Cache-Control"] = "no-store"
         return user_result_to_response(user_to_result(current_auth.user))
+
+    @router.patch("/me", response_model=UserResponse)
+    async def update_me(
+        request: UpdateCurrentUserRequest,
+        current_auth: CurrentAuth,
+        response: Response,
+    ) -> UserResponse:
+        """更新当前用户显示名并返回最新身份资料。"""
+        try:
+            updated_user = await service.update_display_name(
+                current_auth,
+                request.display_name,
+            )
+        except (InvalidDisplayNameError, InvalidSessionError) as error:
+            _raise_auth_error(error)
+        response.headers["Cache-Control"] = "no-store"
+        return user_result_to_response(updated_user)
 
     @router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
     async def change_password(

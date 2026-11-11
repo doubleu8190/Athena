@@ -154,6 +154,28 @@ class InMemoryAuthRepository(AuthRepository):
                 )
         return True
 
+    async def update_display_name(
+        self,
+        user_id: str,
+        session_id: str,
+        display_name: str | None,
+        updated_at: datetime,
+    ) -> User | None:
+        """仅修改内存用户显示名并验证会话仍有效。"""
+        user = self.users.get(user_id)
+        active = any(
+            session.id == session_id
+            and session.user_id == user_id
+            and session.revoked_time is None
+            and session.expires_at > updated_at
+            for session in self.sessions.values()
+        )
+        if user is None or not active:
+            return None
+        updated = replace(user, display_name=display_name, updated_at=updated_at)
+        self.users[user_id] = updated
+        return updated
+
 
 def incrementing_factory(prefix: str) -> Callable[[], str]:
     """创建带固定前缀的递增 ID/token 工厂。"""

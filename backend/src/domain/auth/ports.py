@@ -82,6 +82,15 @@ class AuthRepository(CurrentSessionReader, Protocol):
     ) -> bool:
         """原子修改密码并撤销当前会话之外的其他会话。"""
 
+    async def update_display_name(
+        self,
+        user_id: str,
+        session_id: str,
+        display_name: str | None,
+        updated_at: datetime,
+    ) -> User | None:
+        """在事务内复核当前会话后，仅更新显示名和修改时间。"""
+
 
 class Authenticator(Protocol):
     """HTTP 层所需的 token 认证能力。"""

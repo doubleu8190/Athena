@@ -38,6 +38,14 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class UpdateCurrentUserRequest(BaseModel):
+    """当前用户可编辑资料请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None
+
+
 class UserResponse(BaseModel):
     """可安全返回给当前用户的账号字段。"""
 
@@ -53,4 +61,5 @@ __all__ = [
     "LoginRequest",
     "RegisterRequest",
     "UserResponse",
+    "UpdateCurrentUserRequest",
 ]

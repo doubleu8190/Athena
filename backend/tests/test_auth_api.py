@@ -154,6 +154,27 @@ class InMemoryAuthRepository(AuthRepository):
                 )
         return True
 
+    async def update_display_name(
+        self,
+        user_id: str,
+        session_id: str,
+        display_name: str | None,
+        updated_at: datetime,
+    ) -> User | None:
+        user = self.users.get(user_id)
+        session = next((item for item in self.sessions.values() if item.id == session_id), None)
+        if (
+            user is None
+            or session is None
+            or session.user_id != user_id
+            or session.revoked_time is not None
+            or session.expires_at <= updated_at
+        ):
+            return None
+        updated = replace(user, display_name=display_name, updated_at=updated_at)
+        self.users[user_id] = updated
+        return updated
+
 
 def _incrementing_factory(prefix: str) -> Callable[[], str]:
     counter = 0
@@ -248,6 +269,49 @@ def test_register_sets_http_only_cookie_and_me_returns_user() -> None:
     assert me.status_code == 200
     assert me.json()["id"] == response.json()["id"]
     assert me.json()["role"] == "user"
+
+
+def test_update_current_display_name_requires_auth_and_rejects_extra_fields() -> None:
+    service = _service()
+    with TestClient(_app(service)) as client:
+        unauthenticated = client.patch(
+            "/api/v1/auth/me",
+            json={"display_name": "New name"},
+        )
+        _register(client)
+        updated = client.patch(
+            "/api/v1/auth/me",
+            json={"display_name": "  Updated name  "},
+        )
+        cleared = client.patch(
+            "/api/v1/auth/me",
+            json={"display_name": ""},
+        )
+        invalid = client.patch(
+            "/api/v1/auth/me",
+            json={"display_name": "bad\nname"},
+        )
+        extra = client.patch(
+            "/api/v1/auth/me",
+            json={"display_name": "Name", "role": "admin"},
+        )
+        disallowed_origin = client.patch(
+            "/api/v1/auth/me",
+            json={"display_name": "Name"},
+            headers={"Origin": "https://attacker.example"},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert updated.status_code == 200
+    assert updated.json()["display_name"] == "Updated name"
+    assert updated.headers["cache-control"] == "no-store"
+    assert "password_hash" not in updated.json()
+    assert cleared.status_code == 200
+    assert cleared.json()["display_name"] is None
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"] == "display_name_invalid"
+    assert extra.status_code == 422
+    assert disallowed_origin.status_code == 403
 
 
 def test_admin_dependency_returns_401_403_and_allows_current_admin() -> None:

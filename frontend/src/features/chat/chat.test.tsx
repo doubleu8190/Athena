@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getRequestUrl,
@@ -10,13 +10,44 @@ import {
   PROJECT_B,
   TEST_USER,
 } from "../../test/fixtures";
+import { projectKeys } from "../projects/queryKeys";
 import { jsonResponse, renderApp } from "../../test/testUtils";
 
 const INITIAL_WINDOW_WIDTH = window.innerWidth;
+const RECENT_SECTION_STORAGE_KEY = "athena.chat.recent-collapsed";
+
+beforeEach(() => {
+  window.localStorage.removeItem(RECENT_SECTION_STORAGE_KEY);
+});
 
 afterEach(() => {
   window.innerWidth = INITIAL_WINDOW_WIDTH;
 });
+
+async function chooseProject(
+  user: ReturnType<typeof userEvent.setup>,
+  projectId: string,
+) {
+  const trigger = screen.getByRole("combobox", { name: "更改项目" });
+  await user.click(trigger);
+  const name =
+    projectId === ""
+      ? "未归属项目"
+      : projectId === PROJECT_A.id
+        ? PROJECT_A.name
+        : PROJECT_B.name;
+  await user.click(screen.getByRole("option", { name: new RegExp(name) }));
+}
+
+function expectSelectedProject(projectId: string) {
+  const name =
+    projectId === ""
+      ? "未归属项目"
+      : projectId === PROJECT_A.id
+        ? PROJECT_A.name
+        : PROJECT_B.name;
+  expect(screen.getByRole("combobox", { name: "更改项目" })).toHaveTextContent(name);
+}
 
 interface ChatFetchOptions {
   projects?: typeof PROJECT_A[];
@@ -114,6 +145,65 @@ function installChatFetch(options: ChatFetchOptions = {}) {
 }
 
 describe("对话侧栏项目树", () => {
+  it("最近列表默认展开，点击与键盘折叠状态跨路由和重新挂载保留", async () => {
+    const recent = [
+      makeSession({ id: "recent-one", title: "最近对话一" }),
+      makeSession({ id: "recent-two", title: "最近对话二" }),
+    ];
+    installChatFetch({ recent });
+    const user = userEvent.setup();
+    const view = renderApp("/chat");
+
+    const section = await screen.findByRole("region", { name: "最近" });
+    const toggle = within(section).getByRole("button", { name: "最近" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(await within(section).findByText("最近对话一")).toBeVisible();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(section.querySelector("#recent-sessions-content")).not.toBeVisible();
+
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveFocus();
+    await user.keyboard(" ");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    view.navigateTo("/chat/recent-one");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    view.unmount();
+    installChatFetch({ recent });
+    renderApp("/chat");
+    const reloadedSection = await screen.findByRole("region", { name: "最近" });
+    expect(
+      within(reloadedSection).getByRole("button", { name: "最近" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(reloadedSection.querySelector("#recent-sessions-content")).not.toBeVisible();
+  });
+
+  it("本地存储读取或写入失败时仍可正常展开收起", async () => {
+    installChatFetch({ recent: [makeSession({ id: "recent-one", title: "最近对话一" })] });
+    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    const user = userEvent.setup();
+
+    renderApp("/chat");
+    const section = await screen.findByRole("region", { name: "最近" });
+    const toggle = within(section).getByRole("button", { name: "最近" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(section.querySelector("#recent-sessions-content")).not.toBeVisible();
+
+    getItemSpy.mockRestore();
+    setItemSpy.mockRestore();
+  });
+
   it("点击项目只展开会话，多个项目可同时展开且不会导航", async () => {
     installChatFetch({
       projectSessions: {
@@ -371,6 +461,86 @@ describe("窄屏工作区目录", () => {
 });
 
 describe("新对话草稿", () => {
+  it("目录异步重排或缩短时仍按项目 ID 选择有效活动项", async () => {
+    let directoryProjects = [PROJECT_A, PROJECT_B];
+    const fetchMock = installChatFetch();
+    const defaultFetch = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = new URL(getRequestUrl(input), "http://localhost");
+      if (url.pathname === "/api/v1/projects" && (!init?.method || init.method === "GET")) {
+        return jsonResponse(
+          listResponse(directoryProjects, 1, 100, directoryProjects.length),
+        );
+      }
+      return defaultFetch!(input, init);
+    });
+    const user = userEvent.setup();
+    const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
+
+    const trigger = await screen.findByRole("combobox", { name: "更改项目" });
+    await waitFor(() => expectSelectedProject(PROJECT_A.id));
+    await user.click(trigger);
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{ArrowDown}");
+    expect(
+      screen.getByRole("option", { name: new RegExp(PROJECT_B.name) }),
+    ).toHaveAttribute("data-active", "true");
+
+    directoryProjects = [PROJECT_B, PROJECT_A];
+    await view.client.invalidateQueries({ queryKey: projectKeys.directory() });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("option", { name: new RegExp(PROJECT_B.name) }),
+      ).toHaveAttribute("data-active", "true");
+    });
+    await user.keyboard("{Enter}");
+    expectSelectedProject(PROJECT_B.id);
+
+    await chooseProject(user, PROJECT_A.id);
+    await user.click(trigger);
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{ArrowDown}");
+    directoryProjects = [PROJECT_A];
+    await view.client.invalidateQueries({ queryKey: projectKeys.directory() });
+    await waitFor(() => {
+      expect(screen.queryByRole("option", { name: new RegExp(PROJECT_B.name) })).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("option", { name: new RegExp(PROJECT_A.name) }),
+      ).toHaveAttribute("data-active", "true");
+    });
+    await user.keyboard("{Enter}");
+    expectSelectedProject(PROJECT_A.id);
+  });
+
+  it("项目菜单支持键盘选择、Escape 关闭和点击外部关闭", async () => {
+    installChatFetch({});
+    const user = userEvent.setup();
+    renderApp("/chat");
+
+    const trigger = await screen.findByRole("combobox", { name: "更改项目" });
+    await waitFor(() => expect(trigger).not.toBeDisabled());
+    trigger.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByRole("listbox", { name: "项目" })).toBeInTheDocument();
+    await user.keyboard("{ArrowDown}");
+    expect(
+      screen.getByRole("option", { name: new RegExp(PROJECT_A.name) }),
+    ).toHaveAttribute("data-active", "true");
+    await user.keyboard("{End}");
+    await user.keyboard("{Enter}");
+    expectSelectedProject(PROJECT_B.id);
+    expect(trigger).toHaveFocus();
+
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("listbox", { name: "项目" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    await user.click(screen.getByLabelText("对话草稿"));
+    expect(screen.queryByRole("listbox", { name: "项目" })).not.toBeInTheDocument();
+  });
+
   it("无效项目安全回退为未归属，且不创建 Session", async () => {
     const fetchMock = installChatFetch({});
     fetchMock.mockImplementation(
@@ -399,7 +569,7 @@ describe("新对话草稿", () => {
     expect(
       await screen.findByText("该项目不可访问，已切换为未归属项目。"),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("更改项目")).toHaveValue("");
+    expectSelectedProject("");
     expect(
       fetchMock.mock.calls.some(
         ([input, init]) =>
@@ -420,13 +590,10 @@ describe("新对话草稿", () => {
     renderApp("/chat");
 
     await screen.findByRole("heading", { name: "对话工作台" });
-    await user.selectOptions(
-      await screen.findByLabelText("更改项目"),
-      PROJECT_A.id,
-    );
+    await chooseProject(user, PROJECT_A.id);
     await user.type(screen.getByLabelText("对话草稿"), "这是一段本地草稿");
 
-    expect(screen.getByLabelText("更改项目")).toHaveValue(PROJECT_A.id);
+    expectSelectedProject(PROJECT_A.id);
     expect(screen.getByText("这是一段本地草稿")).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "新建对话" }),
@@ -447,11 +614,11 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const select = await screen.findByLabelText("更改项目");
+    const select = await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
-      expect(select).toHaveValue(PROJECT_A.id);
+      expectSelectedProject(PROJECT_A.id);
     });
-    await user.selectOptions(select, PROJECT_B.id);
+    await chooseProject(user, PROJECT_B.id);
     const newChatLink = screen.getByRole("link", {
       name: "新建对话",
     });
@@ -470,7 +637,7 @@ describe("新对话草稿", () => {
         search: `?project=${PROJECT_B.id}`,
       });
     });
-    expect(screen.getByLabelText("更改项目")).toHaveValue(PROJECT_B.id);
+    expectSelectedProject(PROJECT_B.id);
     expect(screen.getByLabelText("对话草稿")).toHaveValue("");
     expect(
       screen.getByRole("heading", { name: "对话工作台" }),
@@ -484,7 +651,7 @@ describe("新对话草稿", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByLabelText("更改项目")).toHaveValue(PROJECT_B.id);
+      expectSelectedProject(PROJECT_B.id);
       expect(screen.getByLabelText("对话草稿")).toHaveValue(
         "旧项目草稿",
       );
@@ -497,9 +664,9 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const select = await screen.findByLabelText("更改项目");
+    const select = await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
-      expect(select).toHaveValue(PROJECT_A.id);
+      expectSelectedProject(PROJECT_A.id);
     });
     await user.type(screen.getByLabelText("对话草稿"), "项目 A 的旧草稿");
 
@@ -516,7 +683,7 @@ describe("新对话草稿", () => {
         search: `?project=${PROJECT_B.id}`,
       });
     });
-    expect(screen.getByLabelText("更改项目")).toHaveValue(PROJECT_B.id);
+    expectSelectedProject(PROJECT_B.id);
     expect(screen.getByLabelText("对话草稿")).toHaveValue("");
   });
 
@@ -526,9 +693,9 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const initialSelect = await screen.findByLabelText("更改项目");
+    const initialSelect = await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
-      expect(initialSelect).toHaveValue(PROJECT_A.id);
+      expectSelectedProject(PROJECT_A.id);
     });
     await user.type(screen.getByLabelText("对话草稿"), "项目 A 草稿");
 
@@ -561,7 +728,7 @@ describe("新对话草稿", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByLabelText("更改项目")).toHaveValue(PROJECT_A.id);
+      expectSelectedProject(PROJECT_A.id);
       expect(screen.getByLabelText("对话草稿")).toHaveValue(
         "项目 A 草稿",
       );
@@ -574,11 +741,11 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const select = await screen.findByLabelText("更改项目");
+    const select = await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
-      expect(select).toHaveValue(PROJECT_A.id);
+      expectSelectedProject(PROJECT_A.id);
     });
-    await user.selectOptions(select, "");
+    await chooseProject(user, "");
     expect(
       screen.getByRole("link", { name: "新建对话" }),
     ).toHaveAttribute("href", "/chat");
@@ -592,7 +759,7 @@ describe("新对话草稿", () => {
         search: "",
       });
     });
-    expect(screen.getByLabelText("更改项目")).toHaveValue("");
+    expectSelectedProject("");
     expect(
       screen.getByText("这次对话不会归入任何项目。"),
     ).toBeInTheDocument();
@@ -606,12 +773,9 @@ describe("新对话草稿", () => {
 
     await screen.findByRole("heading", { name: "对话工作台" });
     await waitFor(() => {
-      expect(screen.getByLabelText("更改项目")).not.toBeDisabled();
+      expect(screen.getByRole("combobox", { name: "更改项目" })).not.toBeDisabled();
     });
-    await user.selectOptions(
-      screen.getByLabelText("更改项目"),
-      PROJECT_A.id,
-    );
+    await chooseProject(user, PROJECT_A.id);
     await user.type(screen.getByLabelText("对话草稿"), "第一次草稿");
     await user.click(
       screen.getByRole("link", { name: "新建对话" }),
@@ -624,7 +788,7 @@ describe("新对话草稿", () => {
       });
     });
     expect(screen.getByLabelText("对话草稿")).toHaveValue("");
-    expect(screen.getByLabelText("更改项目")).toHaveValue(PROJECT_A.id);
+    expectSelectedProject(PROJECT_A.id);
 
     await user.type(screen.getByLabelText("对话草稿"), "第二次草稿");
     await user.click(
@@ -653,7 +817,7 @@ describe("新对话草稿", () => {
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("更改项目")).toHaveValue(PROJECT_A.id);
+      expectSelectedProject(PROJECT_A.id);
     });
     await user.type(screen.getByLabelText("对话草稿"), "会话页返回草稿");
 

@@ -97,10 +97,13 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const value = useMemo<AuthContextValue>(() => {
     let status: AuthStatus = "loading";
-    if (query.isError) {
+    if (query.data !== undefined) {
+      // 后台复核失败时仍可使用已核验的身份快照；只有首轮无身份且请求失败才阻断工作区。
+      status = query.data ? "authenticated" : "anonymous";
+    } else if (query.isError) {
       status = "error";
     } else if (!query.isPending) {
-      status = query.data ? "authenticated" : "anonymous";
+      status = "anonymous";
     }
 
     return {

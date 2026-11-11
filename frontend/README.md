@@ -191,6 +191,10 @@ npm run preview
 npx playwright install chromium
 ```
 
+在 Codex 沙箱内执行时，Chromium 子进程可能因 macOS 进程权限限制以 `SIGTRAP`
+退出；请在宿主机终端或允许沙箱外执行的会话中运行 `npm run test:e2e`。这属于
+执行环境限制，不是测试断言或前端功能失败。
+
 ## 测试
 
 自动化测试使用 Vitest、jsdom 和 React Testing Library；HTTP 与

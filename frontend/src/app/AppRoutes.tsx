@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { LoginPage } from "../features/auth/LoginPage";
 import { RegisterPage } from "../features/auth/RegisterPage";
+import { ProfilePage } from "../features/auth/ProfilePage";
 import {
   AdminRoute,
   ProtectedRoute,
@@ -36,6 +37,7 @@ export function AppRoutes() {
           <Route element={<DraftChatPage />} path="/chat" />
           <Route element={<DraftChatPage />} path="/chat/new" />
           <Route element={<SessionChatPage />} path="/chat/:sessionId" />
+          <Route element={<ProfilePage />} path="/profile" />
           <Route element={<ProjectsPage />} path="/projects" />
           <Route
             element={<ProjectIndexRedirect />}

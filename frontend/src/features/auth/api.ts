@@ -27,3 +27,20 @@ export function logout(): Promise<void> {
     method: "POST",
   });
 }
+
+export function updateCurrentUser(displayName: string): Promise<User> {
+  return apiRequest<User>("/auth/me", {
+    method: "PATCH",
+    body: { display_name: displayName },
+  });
+}
+
+export function changePassword(input: {
+  current_password: string;
+  new_password: string;
+}): Promise<void> {
+  return apiRequest<void>("/auth/password", {
+    method: "POST",
+    body: input,
+  });
+}

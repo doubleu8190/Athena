@@ -212,6 +212,71 @@ def test_password_change_revokes_other_sessions_and_keeps_current() -> None:
     _run(scenario())
 
 
+def test_display_name_update_only_changes_name_and_requires_active_session() -> None:
+    async def scenario() -> None:
+        engine, session_factory, repository = await _make_repository()
+        try:
+            now = datetime.now(UTC)
+            user = _user("usr_display", "display@example.com")
+            active_session = _session(
+                "ses_display",
+                user.id,
+                "f" * 64,
+                expires_at=now + timedelta(days=7),
+            )
+            expired_session = _session(
+                "ses_expired_display",
+                user.id,
+                "e" * 64,
+                expires_at=now - timedelta(seconds=1),
+            )
+            await repository.create_user_with_session(user, active_session)
+            await repository.create_session(expired_session)
+
+            updated = await repository.update_display_name(
+                user.id,
+                active_session.id,
+                "New Name",
+                now,
+            )
+            assert updated is not None
+            assert updated.display_name == "New Name"
+            assert updated.password_hash == user.password_hash
+            assert updated.role is user.role
+            assert updated.status is user.status
+
+            rejected = await repository.update_display_name(
+                user.id,
+                expired_session.id,
+                None,
+                now,
+            )
+            assert rejected is None
+            stored = await repository.get_user_by_email(user.email)
+            assert stored is not None
+            assert stored.display_name == "New Name"
+
+            async with session_factory() as db_session:
+                async with db_session.begin():
+                    session_row = await db_session.get(
+                        AuthSessionModel,
+                        active_session.id,
+                    )
+                    assert session_row is not None
+                    session_row.revoked_time = now
+            rejected_revoked = await repository.update_display_name(
+                user.id,
+                active_session.id,
+                "Ignored",
+                now,
+            )
+            assert rejected_revoked is None
+        finally:
+            await engine.dispose()
+
+    _run(scenario())
+
+
 def test_repository_revalidates_current_role_and_session_state() -> None:
     async def scenario() -> None:
         engine, session_factory, repository = await _make_repository()

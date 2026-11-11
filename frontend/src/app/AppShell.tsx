@@ -44,15 +44,7 @@ function getInitial(name: string): string {
   return Array.from(name.trim())[0]?.toUpperCase() ?? "A";
 }
 
-interface WorkspaceSidebarProps {
-  isLoggingOut: boolean;
-  onLogout: () => void;
-}
-
-function WorkspaceSidebar({
-  isLoggingOut,
-  onLogout,
-}: WorkspaceSidebarProps) {
+function WorkspaceSidebar() {
   const { pathname } = useLocation();
   const { user } = useAuth();
   if (!user) {
@@ -110,29 +102,6 @@ function WorkspaceSidebar({
         <ChatSidebarContent />
       )}
 
-      <footer className="sidebar-footer">
-        <div className="sidebar-user">
-          <span className="user-avatar" aria-hidden="true">
-            {initial}
-          </span>
-          <div className="sidebar-user-copy">
-            <strong>{name}</strong>
-            <span title={user.email}>{user.email}</span>
-            <small>{roleLabel}</small>
-          </div>
-        </div>
-        <button
-          aria-label="退出登录"
-          className="sidebar-logout"
-          disabled={isLoggingOut}
-          onClick={onLogout}
-          title="退出登录"
-          type="button"
-        >
-          <Icon name="logout" size={16} />
-          <span>{isLoggingOut ? "正在退出…" : "退出登录"}</span>
-        </button>
-      </footer>
     </aside>
   );
 }
@@ -165,7 +134,12 @@ export function AppShell() {
   const logoutMutation = useLogoutMutation();
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [directoryOpen, setDirectoryOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+  const accountTriggerRef = useRef<HTMLButtonElement>(null);
+  const profileLinkRef = useRef<HTMLAnchorElement>(null);
+  const logoutButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     // 路由切换后把焦点移到主内容，键盘和读屏用户不会停留在旧导航项。
@@ -176,6 +150,38 @@ export function AppShell() {
     // 移动目录中的任意导航完成后自动关闭，避免遮罩继续阻断主内容。
     setDirectoryOpen(false);
   }, [location.key]);
+
+  useEffect(() => {
+    setAccountMenuOpen(false);
+  }, [location.key]);
+
+  useEffect(() => {
+    if (accountMenuOpen) profileLinkRef.current?.focus();
+  }, [accountMenuOpen]);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!accountMenuRef.current?.contains(event.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [accountMenuOpen]);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setAccountMenuOpen(false);
+        accountTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [accountMenuOpen]);
 
   if (!user) {
     return null;
@@ -232,28 +238,97 @@ export function AppShell() {
             ))}
           </nav>
 
-          <span className="rail-avatar" title={`${name} · ${roleLabel}`}>
-            <span aria-hidden="true">{initial}</span>
-            <span className="sr-only">
-              {name}，{roleLabel}
-            </span>
-          </span>
+          <div
+            className="account-menu-anchor"
+            onBlur={(event) => {
+              if (
+                !event.currentTarget.contains(event.relatedTarget as Node | null)
+              ) {
+                // 焦点用 Tab 离开账户控件后收起菜单，并保留正常的焦点目标。
+                setAccountMenuOpen(false);
+              }
+            }}
+            ref={accountMenuRef}
+          >
+            <button
+              aria-expanded={accountMenuOpen}
+              aria-haspopup="menu"
+              aria-label="账户菜单"
+              className="rail-avatar"
+              onClick={() => setAccountMenuOpen((open) => !open)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && accountMenuOpen) {
+                  event.preventDefault();
+                  setAccountMenuOpen(false);
+                  accountTriggerRef.current?.focus();
+                }
+              }}
+              ref={accountTriggerRef}
+              title={`${name} · ${roleLabel}`}
+              type="button"
+            >
+              <span aria-hidden="true">{initial}</span>
+              <span className="sr-only">{name}，{roleLabel}</span>
+            </button>
+            {accountMenuOpen ? (
+              <div
+                className="account-menu"
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setAccountMenuOpen(false);
+                    accountTriggerRef.current?.focus();
+                  } else if (
+                    event.key === "ArrowDown" ||
+                    event.key === "ArrowUp"
+                  ) {
+                    event.preventDefault();
+                    if (document.activeElement === profileLinkRef.current) {
+                      logoutButtonRef.current?.focus();
+                    } else {
+                      profileLinkRef.current?.focus();
+                    }
+                  }
+                }}
+                role="menu"
+              >
+                <div className="account-menu-identity">
+                  <strong>{name}</strong>
+                  <span title={user.email}>{user.email}</span>
+                  <small>{roleLabel}</small>
+                </div>
+                <Link
+                  className="account-menu-item"
+                  onClick={() => setAccountMenuOpen(false)}
+                  ref={profileLinkRef}
+                  role="menuitem"
+                  to="/profile"
+                >
+                  <Icon name="user" size={15} />
+                  <span>个人页面</span>
+                </Link>
+                <button
+                  className="account-menu-item account-menu-logout"
+                  disabled={logoutMutation.isPending}
+                  onClick={() => void handleLogout()}
+                  ref={logoutButtonRef}
+                  role="menuitem"
+                  type="button"
+                >
+                  <Icon name="logout" size={15} />
+                  <span>{logoutMutation.isPending ? "正在退出…" : "退出登录"}</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
         </aside>
 
         {!directoryOpen ? (
-          <WorkspaceSidebar
-            isLoggingOut={logoutMutation.isPending}
-            onLogout={handleLogout}
-          />
+          <WorkspaceSidebar />
         ) : null}
 
         <div className="main-column">
           <header className="mobile-topbar">
-            <div className="mobile-user">
-              <strong>{name}</strong>
-              <span>{user.email}</span>
-              <small>{roleLabel}</small>
-            </div>
             <div className="mobile-topbar-actions">
               <button
                 aria-controls="mobile-workspace-directory"
@@ -266,15 +341,6 @@ export function AppShell() {
               >
                 <Icon name="folder" size={17} />
                 <span>目录</span>
-              </button>
-              <button
-                aria-label="退出登录"
-                className="mobile-logout"
-                disabled={logoutMutation.isPending}
-                onClick={handleLogout}
-                type="button"
-              >
-                <Icon name="logout" size={18} />
               </button>
             </div>
           </header>
@@ -310,10 +376,7 @@ export function AppShell() {
           className="mobile-directory-shell"
           id="mobile-workspace-directory"
         >
-          <WorkspaceSidebar
-            isLoggingOut={logoutMutation.isPending}
-            onLogout={handleLogout}
-          />
+          <WorkspaceSidebar />
         </div>
       </Modal>
     </DraftChatProvider>

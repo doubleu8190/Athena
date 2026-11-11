@@ -11,6 +11,16 @@ import { sessionDisplayTitle, type Session } from "../sessions/model";
 import { useDraftChat } from "./DraftChatContext";
 import { newChatHref } from "./draft";
 
+const RECENT_SECTION_STORAGE_KEY = "athena.chat.recent-collapsed";
+
+function readRecentExpanded(): boolean {
+  try {
+    return window.localStorage.getItem(RECENT_SECTION_STORAGE_KEY) !== "collapsed";
+  } catch {
+    return true;
+  }
+}
+
 function activeSessionIdFromPath(pathname: string): string | null {
   const match = /^\/chat\/([^/]+)$/.exec(pathname);
   if (!match || match[1] === "new") {
@@ -180,6 +190,7 @@ export function ChatSidebarContent() {
     unbound: true,
   });
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [recentExpanded, setRecentExpanded] = useState(readRecentExpanded);
   const activeSessionId = activeSessionIdFromPath(location.pathname);
   const activeSession = useSession(activeSessionId);
   const isDraftRoute =
@@ -187,6 +198,18 @@ export function ChatSidebarContent() {
   const activeProjectId = activeSession.data?.project_id ?? null;
   const contextProjectId =
     activeProjectId ?? (isDraftRoute ? draftProjectId : null);
+
+  useEffect(() => {
+    try {
+      // 最近列表折叠状态只保存在当前浏览器，跨会话导航与刷新后继续生效。
+      window.localStorage.setItem(
+        RECENT_SECTION_STORAGE_KEY,
+        recentExpanded ? "expanded" : "collapsed",
+      );
+    } catch {
+      // 浏览器禁用本地存储时保留当前内存状态，不影响侧栏操作。
+    }
+  }, [recentExpanded]);
 
   const projectNames = new Map(
     (projects.data ?? []).map((project) => [project.id, project.name]),
@@ -247,40 +270,55 @@ export function ChatSidebarContent() {
 
         <section className="sidebar-section" aria-labelledby="recent-title">
           <div className="sidebar-section-title-row">
-            <span id="recent-title">最近</span>
+            <button
+              aria-controls="recent-sessions-content"
+              aria-expanded={recentExpanded}
+              className="sidebar-section-toggle"
+              onClick={() => setRecentExpanded((expanded) => !expanded)}
+              type="button"
+            >
+              <span id="recent-title">最近</span>
+              <Icon
+                className={`tree-chevron${recentExpanded ? " is-open" : ""}`}
+                name="chevron"
+                size={12}
+              />
+            </button>
           </div>
-          {recent.isPending ? (
-            <p className="tree-state">正在加载最近会话…</p>
-          ) : recent.isError ? (
-            <p className="tree-state tree-state--error" role="alert">
-              最近会话加载失败
-            </p>
-          ) : recent.data.items.length === 0 ? (
-            <p className="tree-state">还没有对话记录</p>
-          ) : (
-            <div className="recent-list">
-              {recent.data.items.slice(0, 8).map((session) => (
-                <Link
-                  aria-current={
-                    activeSessionId === session.id ? "page" : undefined
-                  }
-                  className={`recent-session${
-                    activeSessionId === session.id ? " is-active" : ""
-                  }`}
-                  key={session.id}
-                  to={`/chat/${encodeURIComponent(session.id)}`}
-                >
-                  <strong>{sessionDisplayTitle(session.title)}</strong>
-                  <span>
-                    {session.project_id
-                      ? projectNames.get(session.project_id) ?? "项目不可访问"
-                      : "未归属项目"}{" "}
-                    · {formatShortDateTime(session.updated_at)}
-                  </span>
-                </Link>
-              ))}
-            </div>
-          )}
+          <div hidden={!recentExpanded} id="recent-sessions-content">
+              {recent.isPending ? (
+                <p className="tree-state">正在加载最近会话…</p>
+              ) : recent.isError ? (
+                <p className="tree-state tree-state--error" role="alert">
+                  最近会话加载失败
+                </p>
+              ) : recent.data.items.length === 0 ? (
+                <p className="tree-state">还没有对话记录</p>
+              ) : (
+                <div className="recent-list">
+                  {recent.data.items.slice(0, 8).map((session) => (
+                    <Link
+                      aria-current={
+                        activeSessionId === session.id ? "page" : undefined
+                      }
+                      className={`recent-session${
+                        activeSessionId === session.id ? " is-active" : ""
+                      }`}
+                      key={session.id}
+                      to={`/chat/${encodeURIComponent(session.id)}`}
+                    >
+                      <strong>{sessionDisplayTitle(session.title)}</strong>
+                      <span>
+                        {session.project_id
+                          ? projectNames.get(session.project_id) ?? "项目不可访问"
+                          : "未归属项目"}{" "}
+                        · {formatShortDateTime(session.updated_at)}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+          </div>
         </section>
       </div>
 

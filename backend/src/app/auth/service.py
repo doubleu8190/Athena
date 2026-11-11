@@ -13,7 +13,7 @@ from typing import TypeVar
 from email_validator import EmailNotValidError, validate_email
 
 from app.auth.converter.result import user_to_result
-from app.auth.model.result import IssuedAuthResult
+from app.auth.model.result import IssuedAuthResult, UserResult
 from app.auth.rate_limit import FixedWindowRateLimiter, RateLimiter
 from common.ids import new_id, now_utc
 from domain.auth import (
@@ -347,6 +347,29 @@ class AuthService:
         )
         if not changed:
             raise InvalidSessionError("invalid_session")
+
+    async def update_display_name(
+        self,
+        context: AuthContext,
+        display_name: str | None,
+    ) -> UserResult:
+        """更新当前用户显示名，并在持久化边界复核会话。
+
+        参数：context 是请求认证得到的用户与会话；display_name 是允许清空的原始输入。
+        返回：持久化后的用户安全结果。
+        异常：名称含控制字符或过长时抛出 InvalidDisplayNameError；
+        会话失效时抛出 InvalidSessionError。
+        """
+        normalized_display_name = _normalize_display_name(display_name)
+        updated = await self._repository.update_display_name(
+            context.user.id,
+            context.session_id,
+            normalized_display_name,
+            _utc_value(self._clock()),
+        )
+        if updated is None:
+            raise InvalidSessionError("invalid_session")
+        return user_to_result(updated)
 
     def _new_session(
         self,

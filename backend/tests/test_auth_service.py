@@ -170,6 +170,27 @@ class InMemoryAuthRepository(AuthRepository):
                 )
         return True
 
+    async def update_display_name(
+        self,
+        user_id: str,
+        session_id: str,
+        display_name: str | None,
+        updated_at: datetime,
+    ) -> User | None:
+        user = self.users.get(user_id)
+        session = next((item for item in self.sessions.values() if item.id == session_id), None)
+        if (
+            user is None
+            or session is None
+            or session.user_id != user_id
+            or session.revoked_time is not None
+            or session.expires_at <= updated_at
+        ):
+            return None
+        updated = replace(user, display_name=display_name, updated_at=updated_at)
+        self.users[user_id] = updated
+        return updated
+
 
 class MutableClock:
     """可以推进的 UTC 时钟。"""
@@ -309,6 +330,30 @@ def test_register_rejects_invalid_input_and_duplicate_email() -> None:
         await service.register("user@example.com", "long-enough-password")
         with pytest.raises(EmailAlreadyRegisteredError):
             await service.register("user@example.com", "long-enough-password")
+
+    _run(scenario())
+
+
+def test_update_display_name_normalizes_clear_and_rejects_invalid_values() -> None:
+    async def scenario() -> None:
+        service, repository, _, _ = _service()
+        issued = await service.register(
+            "user@example.com",
+            "long-enough-password",
+            display_name="Original",
+        )
+        context = await service.authenticate(issued.token)
+        assert context is not None
+        original_password_hash = repository.users[context.user.id].password_hash
+
+        updated = await service.update_display_name(context, "  New Name  ")
+        assert updated.display_name == "New Name"
+        assert repository.users[updated.id].password_hash == original_password_hash
+
+        cleared = await service.update_display_name(context, " ")
+        assert cleared.display_name is None
+        with pytest.raises(InvalidDisplayNameError):
+            await service.update_display_name(context, "bad\nname")
 
     _run(scenario())
 

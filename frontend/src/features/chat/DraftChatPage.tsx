@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
@@ -41,6 +41,19 @@ export function DraftChatPage() {
     (selectedProjectQuery.data?.id === selectedProjectId
       ? selectedProjectQuery.data.name
       : null);
+  const projectOptions = [
+    { id: "", name: "未归属项目" },
+    ...allProjects.map((project) => ({ id: project.id, name: project.name })),
+  ];
+  if (
+    selectedProjectQuery.data &&
+    !allProjects.some((project) => project.id === selectedProjectQuery.data?.id)
+  ) {
+    projectOptions.push({
+      id: selectedProjectQuery.data.id,
+      name: selectedProjectQuery.data.name,
+    });
+  }
 
   const handleSubmit = async () => {
     const text = draft.trim();
@@ -121,32 +134,16 @@ export function DraftChatPage() {
               : "这次对话不会归入任何项目。"}
           </span>
         </div>
-        <label className="chat-context-select" htmlFor={selectId}>
+        <div className="chat-context-select">
           <span>更改项目</span>
-          <select
+          <ProjectDropdown
             disabled={!contextReady || projects.isPending}
             id={selectId}
-            onChange={(event) => {
-              chooseProject(event.target.value || null);
-            }}
+            onChange={(projectId) => chooseProject(projectId || null)}
+            options={projectOptions}
             value={selectedProjectId ?? ""}
-          >
-            <option value="">未归属项目</option>
-            {allProjects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-            {selectedProjectQuery.data &&
-            !allProjects.some(
-              (project) => project.id === selectedProjectQuery.data?.id,
-            ) ? (
-              <option value={selectedProjectQuery.data.id}>
-                {selectedProjectQuery.data.name}
-              </option>
-            ) : null}
-          </select>
-        </label>
+          />
+        </div>
       </section>
 
       {contextNotice ? (
@@ -206,6 +203,163 @@ export function DraftChatPage() {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+interface ProjectDropdownProps {
+  disabled: boolean;
+  id: string;
+  onChange: (projectId: string) => void;
+  options: Array<{ id: string; name: string }>;
+  value: string;
+}
+
+function ProjectDropdown({
+  disabled,
+  id,
+  onChange,
+  options,
+  value,
+}: ProjectDropdownProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const selectedIndex = Math.max(
+    0,
+    options.findIndex((option) => option.id === value),
+  );
+  const [activeProjectId, setActiveProjectId] = useState(
+    () => options[selectedIndex]?.id ?? "",
+  );
+  const effectiveActiveProjectId =
+    options.find((option) => option.id === activeProjectId)?.id ??
+    options[selectedIndex]?.id ??
+    options[0]?.id ??
+    "";
+  const effectiveActiveIndex = Math.max(
+    0,
+    options.findIndex((option) => option.id === effectiveActiveProjectId),
+  );
+  const selected = options[selectedIndex];
+  const activeOptionId = `${id}-option-${effectiveActiveIndex}`;
+
+  useEffect(() => {
+    if (!options.some((option) => option.id === activeProjectId)) {
+      // 目录刷新移除了当前项时，回到已选项目，避免 Enter 落到无效项目。
+      setActiveProjectId(options[selectedIndex]?.id ?? options[0]?.id ?? "");
+    }
+  }, [activeProjectId, options, selectedIndex]);
+
+  useEffect(() => {
+    if (disabled && open) setOpen(false);
+  }, [disabled, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const activeOption = rootRef.current?.querySelector<HTMLElement>(
+      `[id="${activeOptionId}"]`,
+    );
+    activeOption?.scrollIntoView?.({ block: "nearest" });
+  }, [activeOptionId, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    // 只在点击控件外部时收起菜单，内部选择仍由选项自身处理。
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [open]);
+
+  const openAt = (index: number) => {
+    const boundedIndex = Math.min(options.length - 1, Math.max(0, index));
+    setActiveProjectId(options[boundedIndex]?.id ?? options[selectedIndex]?.id ?? "");
+    setOpen(true);
+  };
+
+  return (
+    <div className="chat-project-dropdown" ref={rootRef}>
+      <button
+        aria-activedescendant={open ? activeOptionId : undefined}
+        aria-controls={`${id}-listbox`}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label="更改项目"
+        className="chat-project-dropdown-trigger"
+        disabled={disabled}
+        id={id}
+        role="combobox"
+        onClick={() => (open ? setOpen(false) : openAt(selectedIndex))}
+        onBlur={(event) => {
+          if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
+            setOpen(false);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            openAt(open ? effectiveActiveIndex + 1 : selectedIndex);
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            openAt(open ? effectiveActiveIndex - 1 : selectedIndex);
+          } else if (event.key === "Home" && open) {
+            event.preventDefault();
+            setActiveProjectId(options[0]?.id ?? "");
+          } else if (event.key === "End" && open) {
+            event.preventDefault();
+            setActiveProjectId(options[options.length - 1]?.id ?? "");
+          } else if ((event.key === "Enter" || event.key === " ") && open) {
+            event.preventDefault();
+            onChange(effectiveActiveProjectId);
+            setOpen(false);
+          } else if (event.key === "Escape" && open) {
+            event.preventDefault();
+            setOpen(false);
+          }
+        }}
+        type="button"
+      >
+        <span>{selected?.name ?? "未归属项目"}</span>
+        <Icon className="chat-project-dropdown-chevron" name="chevron" size={12} />
+      </button>
+      {open ? (
+        <div
+          aria-label="项目"
+          className="chat-project-dropdown-menu"
+          id={`${id}-listbox`}
+          role="listbox"
+        >
+          {options.map((option, index) => (
+            <button
+              aria-selected={option.id === value}
+              className="chat-project-dropdown-option"
+              data-active={option.id === effectiveActiveProjectId}
+              id={`${id}-option-${index}`}
+              key={option.id || "unassigned"}
+              onClick={() => {
+                onChange(option.id);
+                setOpen(false);
+              }}
+              onMouseDown={(event) => {
+                // 保持焦点在触发器，选择后仍可继续使用键盘操作。
+                event.preventDefault();
+              }}
+              onMouseMove={() => setActiveProjectId(option.id)}
+              role="option"
+              tabIndex={-1}
+              type="button"
+            >
+              <span className="chat-project-dropdown-option-label">{option.name}</span>
+              {option.id === value ? (
+                <span aria-hidden="true" className="chat-project-dropdown-check">
+                  ✓
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,6 +1,12 @@
-import type { QueryClient } from "@tanstack/react-query";
+import { CancelledError, type QueryClient } from "@tanstack/react-query";
 
-import { advanceAuthIdentityEpoch } from "../../shared/api/client";
+import {
+  ApiError,
+  advanceAuthIdentityEpoch,
+  authIdentityChangedError,
+  getAuthIdentityEpoch,
+  isAuthIdentityCurrent,
+} from "../../shared/api/client";
 import { authKeys, type User } from "./model";
 
 const AUTH_QUERY_ROOT = authKeys.currentUser[0];
@@ -48,4 +54,101 @@ export function clearAuthenticatedIdentity(
   cancelCurrentUserQuery(queryClient);
   clearProtectedQueries(queryClient);
   queryClient.setQueryData<User | null>(authKeys.currentUser, null);
+}
+
+export type AuthenticatedUserRefreshResult =
+  | { status: "refreshed" }
+  | {
+      error: unknown;
+      reason:
+        | "cancelled"
+        | "paused"
+        | "request_failed"
+        | "superseded"
+        | "unavailable";
+      status: "failed";
+    };
+
+let authenticatedUserRefreshGeneration = 0;
+
+function incompleteRefreshError(reason: string): Error {
+  const error = new Error(`authenticated_user_refresh_${reason}`);
+  error.name = "AuthenticatedUserRefreshIncompleteError";
+  return error;
+}
+
+export async function refreshAuthenticatedUser(
+  queryClient: QueryClient,
+): Promise<AuthenticatedUserRefreshResult> {
+  const identityEpoch = getAuthIdentityEpoch();
+  const refreshGeneration = ++authenticatedUserRefreshGeneration;
+  const previousDataUpdateCount =
+    queryClient.getQueryState(authKeys.currentUser)?.dataUpdateCount ?? -1;
+  try {
+    await queryClient.refetchQueries(
+      { exact: true, queryKey: authKeys.currentUser },
+      {
+        // PATCH 已提交后取消旧 /auth/me 并发起新核验，避免旧资料覆盖当前状态。
+        cancelRefetch: true,
+        // 必须让刷新失败进入调用方，才能区分写入成功与身份刷新失败。
+        throwOnError: true,
+      },
+    );
+
+    // 成功后仍需复核身份与刷新归属，避免旧请求搭上新请求或账号切换后的结果。
+    if (!isAuthIdentityCurrent(identityEpoch)) {
+      throw authIdentityChangedError();
+    }
+    if (refreshGeneration !== authenticatedUserRefreshGeneration) {
+      return {
+        error: incompleteRefreshError("superseded"),
+        reason: "superseded",
+        status: "failed",
+      };
+    }
+
+    const queryState = queryClient.getQueryState(authKeys.currentUser);
+    if (queryState?.fetchStatus === "paused") {
+      return {
+        error: incompleteRefreshError("paused"),
+        reason: "paused",
+        status: "failed",
+      };
+    }
+    if (
+      !queryState ||
+      queryState.status !== "success" ||
+      queryState.data === null ||
+      queryState.data === undefined ||
+      queryState.dataUpdateCount <= previousDataUpdateCount
+    ) {
+      return {
+        error: incompleteRefreshError("unavailable"),
+        reason: "unavailable",
+        status: "failed",
+      };
+    }
+    return { status: "refreshed" };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      throw error;
+    }
+    // 账号切换或退出时，旧身份的普通刷新结果不得生成当前身份的重试提示。
+    if (!isAuthIdentityCurrent(identityEpoch)) {
+      throw authIdentityChangedError();
+    }
+    if (refreshGeneration !== authenticatedUserRefreshGeneration) {
+      return {
+        error,
+        reason: "superseded",
+        status: "failed",
+      };
+    }
+    return {
+      error,
+      reason:
+        error instanceof CancelledError ? "cancelled" : "request_failed",
+      status: "failed",
+    };
+  }
 }

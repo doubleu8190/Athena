@@ -1,0 +1,741 @@
+"""会话文件的发布、类型交叉校验、文本分页和流式下载用例。"""
+
+from __future__ import annotations
+
+import asyncio
+import codecs
+import hashlib
+import json
+import re
+import threading
+import unicodedata
+import zipfile
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path, PurePosixPath
+
+from common.ids import new_id, now_utc
+from common.json_stream import JsonStreamValidationError, validate_json_stream
+from domain.file import (
+    MAX_SESSION_FILE_BYTES,
+    PendingSessionFile,
+    SessionFile,
+    SessionFilePage,
+    SessionFileRepository,
+    SessionFileTextSlice,
+    TextFileReadError,
+)
+from domain.file.ports import FileObjectStore
+from domain.session import SessionNotFoundError
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")
+_TEXT_TYPES = {
+    ".txt": ("text/plain", {"text/plain"}),
+    ".csv": ("text/csv", {"text/csv", "text/plain", "application/csv"}),
+    ".json": ("application/json", {"application/json", "text/json", "text/plain"}),
+    ".md": ("text/markdown", {"text/markdown", "text/plain"}),
+    ".log": ("text/plain", {"text/plain"}),
+}
+_BINARY_TYPES = {
+    ".xlsx": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/zip",
+        },
+    ),
+    ".docx": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/zip",
+        },
+    ),
+    ".pptx": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/zip",
+        },
+    ),
+    ".pdf": ("application/pdf", {"application/pdf"}),
+    ".png": ("image/png", {"image/png"}),
+    ".jpg": ("image/jpeg", {"image/jpeg", "image/jpg"}),
+    ".jpeg": ("image/jpeg", {"image/jpeg", "image/jpg"}),
+    ".webp": ("image/webp", {"image/webp"}),
+}
+_GENERIC_MIME = {"", "application/octet-stream", "binary/octet-stream"}
+_SAFE_PUBLISH_REJECTIONS = {
+    "idempotency_conflict",
+    "session_file_quota_exceeded",
+}
+@dataclass(frozen=True, slots=True)
+class _FileInspection:
+    """一次线程内完成的文件大小、类型和摘要结果。"""
+
+    size_bytes: int
+    mime_type: str
+    sha256: str
+
+
+class FileInputError(ValueError):
+    """文件内容或输入不符合会话白名单。"""
+
+    def __init__(self, code: str) -> None:
+        """保存稳定错误码。"""
+        super().__init__(code)
+        self.code = code
+
+
+class _FileInspectionCancelled(RuntimeError):
+    """调用方取消后在文件检查线程内使用的统一退出信号。"""
+
+
+def sanitize_filename(value: str) -> str:
+    """去除路径与控制字符，只保留纯文本安全文件名。"""
+    if not isinstance(value, str):
+        raise FileInputError("file_name_invalid")
+    normalized = unicodedata.normalize("NFC", value.replace("\\", "/"))
+    filename = PurePosixPath(normalized).name.strip()
+    if (
+        not filename
+        or filename in {".", ".."}
+        or len(filename) > 255
+        or _CONTROL.search(filename)
+    ):
+        raise FileInputError("file_name_invalid")
+    return filename
+
+
+def validate_file_type(
+    path: Path,
+    filename: str,
+    declared_mime: str | None,
+    *,
+    cancellation: threading.Event | None = None,
+) -> str:
+    """按扩展名、实际内容特征和可选 MIME 交叉校验并返回规范 MIME。"""
+    extension = Path(filename).suffix.lower()
+    if extension in _TEXT_TYPES:
+        expected, aliases = _TEXT_TYPES[extension]
+        _validate_declared_mime(declared_mime, aliases)
+        if extension == ".json":
+            _validate_json_document(path, cancellation=cancellation)
+        else:
+            _strict_utf8(path, cancellation=cancellation)
+        return expected
+    if extension not in _BINARY_TYPES:
+        raise FileInputError("file_type_unsupported")
+    expected, aliases = _BINARY_TYPES[extension]
+    _validate_declared_mime(declared_mime, aliases)
+    if extension in {".xlsx", ".docx", ".pptx"}:
+        required = {
+            ".xlsx": "xl/workbook.xml",
+            ".docx": "word/document.xml",
+            ".pptx": "ppt/presentation.xml",
+        }[extension]
+        _validate_office_archive(
+            path,
+            required_marker=required,
+            cancellation=cancellation,
+        )
+        return expected
+    with path.open("rb") as stream:
+        header = stream.read(16)
+    signatures = {
+        ".pdf": header.startswith(b"%PDF-"),
+        ".png": header.startswith(b"\x89PNG\r\n\x1a\n"),
+        ".jpg": header.startswith(b"\xff\xd8\xff"),
+        ".jpeg": header.startswith(b"\xff\xd8\xff"),
+        ".webp": (
+            len(header) >= 12
+            and header.startswith(b"RIFF")
+            and header[8:12] == b"WEBP"
+        ),
+    }
+    if not signatures[extension]:
+        raise FileInputError("file_content_mismatch")
+    return expected
+
+
+def _validate_office_archive(
+    path: Path,
+    *,
+    required_marker: str,
+    cancellation: threading.Event | None,
+) -> None:
+    """用标准库读取中央目录，先校验成员路径再核对 Office marker。
+
+    参数:
+        path: 待检查的 Office ZIP 文件。
+        required_marker: xlsx、docx 或 pptx 对应格式的根 marker。
+        cancellation: 调用方取消时设置的线程停止事件。
+
+    返回:
+        无返回值。
+
+    异常:
+        文件不是可读取 ZIP、成员路径不安全或缺少 marker 时抛出
+        ``FileInputError``；检查线程被取消时抛出内部取消异常。
+    """
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            members = archive.infolist()
+            _raise_if_cancelled(cancellation)
+            names: list[str] = []
+            # 标准库会一次载入中央目录；路径检查完成前不读取任何成员正文，
+            # 也不把 marker 命中提前为跳过危险成员的捷径。
+            for member in members:
+                _raise_if_cancelled(cancellation)
+                name = member.orig_filename
+                _validate_zip_member_path(name)
+                names.append(name)
+                _raise_if_cancelled(cancellation)
+    except _FileInspectionCancelled:
+        raise
+    except (
+        EOFError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+    ) as error:
+        raise FileInputError("file_content_mismatch") from error
+    if "[Content_Types].xml" not in names or required_marker not in names:
+        raise FileInputError("file_content_mismatch")
+
+
+def _validate_zip_member_path(name: str) -> None:
+    """拒绝控制字符、绝对路径、反斜杠、空段和目录穿越。
+
+    参数:
+        name: ``ZipInfo.orig_filename`` 返回的原始成员名。
+
+    返回:
+        无返回值；路径安全时直接结束。
+
+    异常:
+        成员名不安全时抛出 ``FileInputError("file_content_mismatch")``。
+    """
+    trimmed = name[:-1] if name.endswith("/") else name
+    parts = trimmed.split("/")
+    if (
+        not trimmed
+        or "\x00" in name
+        or _CONTROL.search(name)
+        or name.startswith("/")
+        or "\\" in name
+        or (len(name) >= 2 and name[1] == ":")
+        or "//" in name
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise FileInputError("file_content_mismatch")
+
+
+def sha256_file(
+    path: Path,
+    *,
+    cancellation: threading.Event | None = None,
+) -> str:
+    """流式计算摘要，并在每个读取块边界响应取消。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            _raise_if_cancelled(cancellation)
+            chunk = stream.read(128 * 1024)
+            if not chunk:
+                break
+            _raise_if_cancelled(cancellation)
+            digest.update(chunk)
+    _raise_if_cancelled(cancellation)
+    return digest.hexdigest()
+
+
+class SessionFileService:
+    """统一发布用户上传和脚本清单声明的产物。"""
+
+    def __init__(
+        self,
+        repository: SessionFileRepository,
+        object_store: FileObjectStore,
+        *,
+        id_factory: Callable[[str], str] = new_id,
+        clock: Callable[[], datetime] = now_utc,
+    ) -> None:
+        """保存文件元数据仓储、对象存储和业务标识生成器。"""
+        self._repository = repository
+        self._object_store = object_store
+        self._id_factory = id_factory
+        self._clock = clock
+
+    async def upload(
+        self,
+        session_id: str,
+        owner_id: str,
+        *,
+        idempotency_key: str,
+        filename: str,
+        declared_mime: str | None,
+        path: Path,
+    ) -> SessionFile:
+        """先写私有对象，再按数量配额原子发布上传元数据。"""
+        idempotency_key = _validate_idempotency_key(idempotency_key)
+        safe_filename = sanitize_filename(filename)
+        # 用户上传上限必须在格式检测和完整摘要前生效，避免超大文件白白消耗 I/O。
+        size = await asyncio.to_thread(lambda: path.stat().st_size)
+        if size < 0 or size > MAX_SESSION_FILE_BYTES:
+            raise FileInputError("document_file_too_large")
+        inspection = await _inspect_file_cancellable(
+            path,
+            safe_filename,
+            declared_mime,
+        )
+        mime_type = inspection.mime_type
+        digest = inspection.sha256
+        fingerprint = _upload_fingerprint(
+            session_id=session_id,
+            owner_id=owner_id,
+            filename=safe_filename,
+            mime_type=mime_type,
+            size_bytes=size,
+            sha256=digest,
+        )
+        existing = await self._repository.find_upload_request(
+            session_id,
+            owner_id,
+            idempotency_key,
+        )
+        if existing is not None:
+            if existing.sha256 != digest or existing.filename != safe_filename:
+                raise FileInputError("idempotency_conflict")
+            return existing
+        return await self._write_and_publish_upload(
+            session_id,
+            owner_id,
+            idempotency_key=idempotency_key,
+            filename=safe_filename,
+            mime_type=mime_type,
+            size_bytes=size,
+            digest=digest,
+            fingerprint=fingerprint,
+            path=path,
+        )
+
+    async def _write_and_publish_upload(
+        self,
+        session_id: str,
+        owner_id: str,
+        *,
+        idempotency_key: str,
+        filename: str,
+        mime_type: str,
+        size_bytes: int,
+        digest: str,
+        fingerprint: str,
+        path: Path,
+    ) -> SessionFile:
+        """先写私有对象，再在数据库事务中提交文件引用。"""
+        file_id = self._id_factory("file")
+        key = self._upload_key(digest, file_id)
+        try:
+            await self._object_store.put_file(key, path, content_type=mime_type)
+        except BaseException:
+            await self._delete_orphan(key)
+            raise
+        pending = PendingSessionFile(
+            id=file_id,
+            filename=filename,
+            label=None,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            sha256=digest,
+            object_key=key,
+            output_index=-1,
+            created_at=self._clock(),
+        )
+        try:
+            result = await self._repository.publish_upload(
+                session_id,
+                owner_id,
+                pending,
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+                published_at=self._clock(),
+            )
+            if result.id != file_id:
+                # 并发同键请求可能都在写入前查询为空；败者必须删除自己的对象。
+                await self._abandon_upload_object(key)
+            return result
+        except ValueError as error:
+            replay_known, replay = await self._replay_upload_after_failure(
+                session_id,
+                owner_id,
+                idempotency_key,
+            )
+            if replay is not None and replay.sha256 == digest and replay.filename == filename:
+                if replay.object_key != key:
+                    await self._abandon_upload_object(key)
+                return replay
+            if replay_known and str(error) in _SAFE_PUBLISH_REJECTIONS:
+                await self._abandon_upload_object(key)
+            if str(error) == "idempotency_conflict":
+                raise FileInputError("idempotency_conflict") from error
+            raise
+        except asyncio.CancelledError:
+            # 取消可能发生在数据库提交后的响应阶段；保留对象并依靠幂等重查确认。
+            raise
+        except Exception:
+            _, replay = await self._replay_upload_after_failure(
+                session_id,
+                owner_id,
+                idempotency_key,
+            )
+            if replay is not None and replay.sha256 == digest and replay.filename == filename:
+                if replay.object_key != key:
+                    await self._abandon_upload_object(key)
+                return replay
+            # 未知异常无法区分回滚与提交后回包失败，禁止立即删除潜在引用对象。
+            raise
+
+    async def prepare_artifact(
+        self,
+        *,
+        source_call_id: str,
+        output_index: int,
+        path: Path,
+        filename: str,
+        label: str,
+    ) -> PendingSessionFile:
+        """校验并私有上传脚本产物，等待与调用结果同事务发布。"""
+        if output_index < 0:
+            raise FileInputError("session_file_output_index_invalid")
+        safe_filename = sanitize_filename(filename)
+        inspection = await _inspect_file_cancellable(
+            path,
+            safe_filename,
+            None,
+        )
+        mime_type = inspection.mime_type
+        size = inspection.size_bytes
+        digest = inspection.sha256
+        file_id = self._id_factory("file")
+        call_digest = hashlib.sha256(source_call_id.encode("utf-8")).hexdigest()
+        key = f"session-artifacts/{call_digest[:2]}/{call_digest}/{file_id}"
+        try:
+            await self._object_store.put_file(key, path, content_type=mime_type)
+        except BaseException:
+            await self._delete_orphan(key)
+            raise
+        return PendingSessionFile(
+            id=file_id,
+            filename=safe_filename,
+            label=label,
+            mime_type=mime_type,
+            size_bytes=size,
+            sha256=digest,
+            object_key=key,
+            output_index=output_index,
+            created_at=self._clock(),
+        )
+
+    async def abandon_artifacts(
+        self,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> None:
+        """明确放弃尚未进入 Run 完成事务的已知产物。"""
+        for artifact in artifacts:
+            await self._delete_orphan(artifact.object_key)
+
+    async def list(
+        self,
+        session_id: str,
+        owner_id: str,
+        *,
+        after_file_id: str | None,
+        limit: int,
+    ) -> SessionFilePage:
+        """读取会话文件分页。"""
+        page = await self._repository.list_visible(
+            session_id,
+            owner_id,
+            after_file_id=after_file_id,
+            limit=limit,
+        )
+        if page is None:
+            raise SessionNotFoundError("session_not_found")
+        return page
+
+    async def get(
+        self,
+        session_id: str,
+        owner_id: str,
+        file_id: str,
+    ) -> SessionFile:
+        """读取已授权文件元数据。"""
+        result = await self._repository.get_visible(session_id, owner_id, file_id)
+        if result is None:
+            raise FileInputError("session_file_not_found")
+        return result
+
+    async def get_many(
+        self,
+        session_id: str,
+        owner_id: str,
+        file_ids: tuple[str, ...],
+    ) -> tuple[SessionFile, ...]:
+        """批量关联脚本输入文件并拒绝跨会话或已失效 ID。"""
+        try:
+            return await self._repository.get_visible_many(
+                session_id,
+                owner_id,
+                file_ids,
+            )
+        except ValueError as error:
+            if str(error) == "session_file_not_found":
+                raise FileInputError("session_file_not_found") from error
+            if str(error) == "session_file_ids_duplicate":
+                raise FileInputError("session_file_ids_duplicate") from error
+            raise
+
+    async def iter_download(self, file: SessionFile) -> AsyncGenerator[bytes, None]:
+        """按鉴权后的对象键分块读取，不暴露存储 URL。"""
+        async for chunk in self._object_store.iter_range(file.object_key):
+            yield chunk
+
+    async def read_text(
+        self,
+        session_id: str,
+        owner_id: str,
+        file_id: str,
+        *,
+        offset: int,
+        limit_bytes: int,
+    ) -> SessionFileTextSlice:
+        """仅读取白名单文本文件，并按 UTF-8 字符边界推进字节游标。"""
+        if offset < 0 or not 1 <= limit_bytes <= 64 * 1024:
+            raise FileInputError("session_file_range_invalid")
+        file = await self.get(session_id, owner_id, file_id)
+        if Path(file.filename).suffix.lower() not in _TEXT_TYPES:
+            raise TextFileReadError("file_not_text", file)
+        if offset > file.size_bytes:
+            raise TextFileReadError("file_offset_invalid", file)
+        chunk = await self._object_store.get_range(
+            file.object_key,
+            offset=offset,
+            length=limit_bytes,
+        )
+        if chunk and chunk[0] & 0xC0 == 0x80:
+            raise TextFileReadError("file_offset_invalid", file)
+        requested_nonempty = bool(chunk)
+        while chunk:
+            try:
+                content = chunk.decode("utf-8")
+                break
+            except UnicodeDecodeError as error:
+                if error.reason == "unexpected end of data" and error.end == len(chunk):
+                    chunk = chunk[: error.start]
+                    continue
+                raise TextFileReadError("file_content_not_text", file) from error
+        else:
+            content = ""
+        if requested_nonempty and not chunk:
+            # 窗口小于当前多字节字符时不能返回零进度，否则模型或前端会永久停滞。
+            raise TextFileReadError("file_range_too_small", file)
+        next_offset = offset + len(chunk)
+        return SessionFileTextSlice(
+            file=file,
+            offset=offset,
+            next_offset=next_offset,
+            content=content,
+            eof=next_offset >= file.size_bytes,
+            truncated=next_offset < file.size_bytes,
+        )
+
+    @staticmethod
+    def _upload_key(sha256: str, file_id: str) -> str:
+        return f"session-files/{sha256[:2]}/{file_id}"
+
+    async def _delete_orphan(self, key: str) -> None:
+        """清理未发布的并发重试/事务失败对象，不覆盖主业务错误。"""
+        try:
+            await self._object_store.delete(key)
+        except Exception:
+            return
+
+    async def _abandon_upload_object(self, key: str) -> None:
+        """删除已经确认没有数据库引用的对象。"""
+        await self._delete_orphan(key)
+
+    async def _replay_upload_after_failure(
+        self,
+        session_id: str,
+        owner_id: str,
+        idempotency_key: str,
+    ) -> tuple[bool, SessionFile | None]:
+        """复核异常事务是否已提交；查询本身失败时返回未知状态。"""
+        try:
+            return (
+                True,
+                await self._repository.find_upload_request(
+                    session_id,
+                    owner_id,
+                    idempotency_key,
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False, None
+
+
+def _validate_declared_mime(value: str | None, aliases: set[str]) -> None:
+    normalized = "" if value is None else value.split(";", 1)[0].strip().lower()
+    if normalized not in _GENERIC_MIME and normalized not in aliases:
+        raise FileInputError("file_mime_mismatch")
+
+
+def _strict_utf8(
+    path: Path,
+    *,
+    cancellation: threading.Event | None = None,
+) -> str:
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    try:
+        with path.open("rb") as stream:
+            while True:
+                _raise_if_cancelled(cancellation)
+                chunk = stream.read(128 * 1024)
+                if not chunk:
+                    break
+                _raise_if_cancelled(cancellation)
+                decoder.decode(chunk)
+            _raise_if_cancelled(cancellation)
+            decoder.decode(b"", final=True)
+    except UnicodeDecodeError as error:
+        raise FileInputError("file_content_not_text") from error
+    return ""
+
+
+def _validate_json_document(
+    path: Path,
+    *,
+    cancellation: threading.Event | None = None,
+) -> None:
+    """使用可取消状态机验证 JSON，不构造标量或递归容器。"""
+    try:
+        with path.open("rb") as stream:
+            validate_json_stream(stream, cancellation=cancellation)
+    except JsonStreamValidationError as error:
+        raise FileInputError("file_content_mismatch") from error
+
+
+def _inspect_file(
+    path: Path,
+    filename: str,
+    declared_mime: str | None,
+    stop_event: threading.Event,
+) -> _FileInspection:
+    """在阻塞工作线程内完成大小、格式和摘要检查。"""
+    size = path.stat().st_size
+    mime_type = validate_file_type(
+        path,
+        filename,
+        declared_mime,
+        cancellation=stop_event,
+    )
+    return _FileInspection(
+        size_bytes=size,
+        mime_type=mime_type,
+        sha256=sha256_file(path, cancellation=stop_event),
+    )
+
+
+async def _inspect_file_cancellable(
+    path: Path,
+    filename: str,
+    declared_mime: str | None,
+) -> _FileInspection:
+    """在线程检查被取消时设置停止事件，并等待线程实际退出。"""
+    stop_event = threading.Event()
+    inspection_task = asyncio.create_task(
+        asyncio.to_thread(
+            _inspect_file,
+            path,
+            filename,
+            declared_mime,
+            stop_event,
+        ),
+        name="athena-session-file-inspection",
+    )
+    try:
+        return await asyncio.shield(inspection_task)
+    except asyncio.CancelledError:
+        stop_event.set()
+        # to_thread 的协程取消不会终止底层线程；等待 helper 在读取块边界
+        # 观察到停止事件后退出，避免取消返回后继续读取大 JSON。
+        while not inspection_task.done():
+            try:
+                await asyncio.shield(inspection_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                # helper 可能因停止事件主动抛出取消错误；线程已经完成后，
+                # 外层仍必须传播最初的 asyncio 取消，而不是替换为检查错误。
+                break
+        try:
+            inspection_task.result()
+        except BaseException:
+            pass
+        raise
+
+
+def _validate_idempotency_key(value: str) -> str:
+    """上传键只接受可见 ASCII，并参与会话内唯一约束。"""
+    if not isinstance(value, str) or _IDEMPOTENCY_KEY.fullmatch(value) is None:
+        raise FileInputError("idempotency_key_invalid")
+    return value
+
+
+def _raise_if_cancelled(cancellation: threading.Event | None) -> None:
+    """在阻塞文件检查的每个块边界统一退出。"""
+    if cancellation is not None and cancellation.is_set():
+        raise _FileInspectionCancelled("file_inspection_cancelled")
+
+
+def _upload_fingerprint(
+    *,
+    session_id: str,
+    owner_id: str,
+    filename: str,
+    mime_type: str,
+    size_bytes: int,
+    sha256: str,
+) -> str:
+    """摘要覆盖调用方可见上传身份，防止同键复用到不同内容。"""
+    payload = json.dumps(
+        {
+            "operation": "session_file_upload",
+            "session_id": session_id,
+            "owner_id": owner_id,
+            "filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+__all__ = [
+    "FileInputError",
+    "SessionFileService",
+    "sanitize_filename",
+    "sha256_file",
+    "validate_file_type",
+]

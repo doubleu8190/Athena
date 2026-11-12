@@ -15,7 +15,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
+from adapter.file.storage import FileStorageError
 from api.auth import AuthCookieConfig, build_auth_router
+from api.file import build_session_file_router
 from api.health import router as health_router
 from api.knowledge import build_knowledge_router
 from api.llm import build_llm_admin_router
@@ -26,16 +28,19 @@ from api.projects import build_project_router
 from api.runs import build_run_router
 from api.security import DEFAULT_COOKIE_NAME
 from api.sessions import build_session_router
+from api.skill import build_skill_admin_router, build_skill_user_router
 from api.system_prompt import build_system_prompt_admin_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
+from app.file import SessionFileService
 from app.knowledge.service import KnowledgeService
-from app.llm import LlmService, ModelProfileService
+from app.llm import ModelProfileService
 from app.memory.service import MemoryService
 from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.run.service import RunService
 from app.session.service import SessionService
+from app.skill import SkillService
 from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.api import ApiDependencies, build_api_dependencies
@@ -47,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 
 class _KnowledgeUploadLimitMiddleware:
-    """Bound multipart requests before Starlette parses/spools their fields."""
+    """在 Starlette 解析 multipart 字段前限制原始请求体。"""
 
     _maximum = 22 * 1024 * 1024  # 20 MiB file plus bounded multipart metadata.
 
@@ -63,31 +68,57 @@ class _KnowledgeUploadLimitMiddleware:
     async def __call__(self, scope: dict[str, object], receive: object, send: object) -> None:
         path = str(scope.get("path", ""))
         method = str(scope.get("method", ""))
-        upload_path = path.startswith("/api/v1/knowledge-bases/") and (
+        knowledge_upload = path.startswith("/api/v1/knowledge-bases/") and (
             path.endswith("/documents/upload") or path.endswith("/versions/upload")
         )
-        if method != "POST" or not upload_path:
+        skill_upload = path == "/api/v1/admin/skills/import" or (
+            path.startswith("/api/v1/admin/skills/") and path.endswith("/versions")
+        )
+        session_file_upload = path.startswith("/api/v1/sessions/") and path.endswith("/files")
+        upload_kind = (
+            "knowledge"
+            if knowledge_upload
+            else "skill"
+            if skill_upload
+            else "session_file"
+            if session_file_upload
+            else None
+        )
+        if method != "POST" or upload_kind is None:
             await self.app(scope, receive, send)  # type: ignore[operator]
             return
+        maximum = (
+            26 * 1024 * 1024
+            if upload_kind == "skill"
+            else 52 * 1024 * 1024
+            if upload_kind == "session_file"
+            else self._maximum
+        )
+        overflow_code = (
+            "skill_zip_too_large"
+            if upload_kind == "skill"
+            else "document_file_too_large"
+        )
         receive_fn = receive
         send_fn = send
         assert callable(receive_fn) and callable(send_fn)
-        minimum_free_bytes = env_int(
-            "ATHENA_KNOWLEDGE_UPLOAD_MIN_FREE_BYTES",
-            default=384 * 1024 * 1024,
-            minimum=1,
-        )
-        try:
-            temp_free = shutil.disk_usage(tempfile.gettempdir()).free
-            if temp_free < minimum_free_bytes:
-                await _send_json(send_fn, 503, "knowledge_upload_storage_low")
+        if upload_kind == "knowledge":
+            minimum_free_bytes = env_int(
+                "ATHENA_KNOWLEDGE_UPLOAD_MIN_FREE_BYTES",
+                default=384 * 1024 * 1024,
+                minimum=1,
+            )
+            try:
+                temp_free = shutil.disk_usage(tempfile.gettempdir()).free
+                if temp_free < minimum_free_bytes:
+                    await _send_json(send_fn, 503, "knowledge_upload_storage_low")
+                    return
+            except OSError:
+                await _send_json(send_fn, 503, "knowledge_upload_storage_unavailable")
                 return
-        except OSError:
-            await _send_json(send_fn, 503, "knowledge_upload_storage_unavailable")
-            return
         slot_token = new_id("kuslot")
         acquired = False
-        if self._repository is None:
+        if upload_kind != "knowledge" or self._repository is None:
             await self._local_slots.acquire()
             acquired = True
         else:
@@ -117,8 +148,8 @@ class _KnowledgeUploadLimitMiddleware:
                             return
                         chunk = message.get("body", b"")
                         size += len(chunk)
-                        if size > self._maximum:
-                            await _send_json(tracked_send, 413, "document_file_too_large")
+                        if size > maximum:
+                            await _send_json(tracked_send, 413, overflow_code)
                             return
                         body.write(chunk)
                         if not message.get("more_body", False):
@@ -143,7 +174,7 @@ class _KnowledgeUploadLimitMiddleware:
             if not response_started:
                 await _send_json(tracked_send, 504, "knowledge_upload_timeout")
         finally:
-            if self._repository is None:
+            if upload_kind != "knowledge" or self._repository is None:
                 self._local_slots.release()
             else:
                 try:
@@ -203,6 +234,18 @@ async def _handle_os_error(request: Request, error: Exception) -> JSONResponse:
     return await _handle_database_unavailable(request, error)
 
 
+async def _handle_file_storage_unavailable(
+    request: Request, error: Exception
+) -> JSONResponse:
+    """只映射专用对象存储异常，不吞掉其他 RuntimeError。"""
+    del error
+    logger.error("file_storage_unavailable path=%s", request.url.path)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "file_storage_unavailable"},
+    )
+
+
 async def _handle_request_validation_error(
     request: Request, error: Exception
 ) -> JSONResponse:
@@ -225,11 +268,12 @@ def create_app(
     auth_service: AuthService | None = None,
     *,
     tool_manager: ToolManager | None = None,
-    llm_service: LlmService | None = None,
     model_profile_service: ModelProfileService | None = None,
     system_prompt_service: SystemPromptService | None = None,
     memory_service: MemoryService | None = None,
     knowledge_service: KnowledgeService | None = None,
+    skill_service: SkillService | None = None,
+    session_file_service: SessionFileService | None = None,
     auth_cookie_secure: bool | None = None,
     public_origin: str | None = None,
 ) -> FastAPI:
@@ -249,11 +293,12 @@ def create_app(
         run_service=run_service,
         auth_service=auth_service,
         tool_manager=tool_manager,
-        llm_service=llm_service,
         model_profile_service=model_profile_service,
         system_prompt_service=system_prompt_service,
         memory_service=memory_service,
         knowledge_service=knowledge_service,
+        skill_service=skill_service,
+        session_file_service=session_file_service,
     )
     if auth_cookie_secure is None:
         auth_cookie_secure = env_flag("ATHENA_COOKIE_SECURE", default=False)
@@ -279,14 +324,16 @@ def create_app(
     )
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
     app.add_exception_handler(OSError, _handle_os_error)
+    app.add_exception_handler(FileStorageError, _handle_file_storage_unavailable)
     app.add_exception_handler(RequestValidationError, _handle_request_validation_error)
     app.state.authenticator = deps.auth_service
     app.state.auth_cookie_name = DEFAULT_COOKIE_NAME
     app.state.public_origin = configured_public_origin or None
     app.state.tool_manager = deps.tool_manager
-    app.state.llm_service = deps.llm_service
     app.state.model_profile_service = deps.model_profile_service
     app.state.system_prompt_service = deps.system_prompt_service
+    app.state.skill_service = deps.skill_service
+    app.state.session_file_service = deps.session_file_service
     app.state.run_service = deps.run_service
     app.state.memory_service = deps.memory_service
     app.state.knowledge_service = deps.knowledge_service
@@ -295,6 +342,11 @@ def create_app(
         app.include_router(build_llm_admin_router(deps.model_profile_service))
     if deps.system_prompt_service is not None:
         app.include_router(build_system_prompt_admin_router(deps.system_prompt_service))
+    if deps.skill_service is not None:
+        app.include_router(build_skill_admin_router(deps.skill_service))
+        app.include_router(build_skill_user_router(deps.skill_service))
+    if deps.session_file_service is not None:
+        app.include_router(build_session_file_router(deps.session_file_service))
     if deps.project_service is not None:
         app.include_router(build_project_router(deps.project_service))
     if deps.session_service is not None:

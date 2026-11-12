@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from adapter.message.model.conversation import ConversationMessageModel
 from adapter.message.model.execution import ExecutionMessageModel
 from domain.message import (
+    ArtifactFileRef,
     ConversationMessage,
     ConversationRole,
     ExecutionMessage,
@@ -96,6 +97,17 @@ def serialize_parts(parts: tuple[MessagePart, ...]) -> list[dict[str, object]]:
                 item["output"] = part.output
             if part.artifact_id is not None:
                 item["artifact_id"] = part.artifact_id
+            if part.artifacts:
+                item["artifacts"] = [
+                    {
+                        "file_id": artifact.file_id,
+                        "filename": artifact.filename,
+                        **({"label": artifact.label} if artifact.label is not None else {}),
+                        "mime_type": artifact.mime_type,
+                        "size_bytes": artifact.size_bytes,
+                    }
+                    for artifact in part.artifacts
+                ]
             values.append(item)
     return values
 
@@ -156,12 +168,36 @@ def deserialize_parts(values: list[dict[str, object]]) -> tuple[MessagePart, ...
             raw_output = value.get("output")
             if raw_output is not None and not isinstance(raw_output, str):
                 raise InvalidMessageError("stored_message_invalid")
+            raw_artifacts = value.get("artifacts", [])
+            if not isinstance(raw_artifacts, list):
+                raise InvalidMessageError("stored_message_invalid")
+            artifacts: list[ArtifactFileRef] = []
+            for raw_artifact in raw_artifacts:
+                if not isinstance(raw_artifact, dict):
+                    raise InvalidMessageError("stored_message_invalid")
+                size_bytes = raw_artifact.get("size_bytes")
+                if (
+                    not isinstance(size_bytes, int)
+                    or isinstance(size_bytes, bool)
+                    or size_bytes < 0
+                ):
+                    raise InvalidMessageError("stored_message_invalid")
+                artifacts.append(
+                    ArtifactFileRef(
+                        file_id=_required_string(raw_artifact, "file_id"),
+                        filename=_required_string(raw_artifact, "filename"),
+                        label=_optional_string(raw_artifact, "label"),
+                        mime_type=_required_string(raw_artifact, "mime_type"),
+                        size_bytes=size_bytes,
+                    )
+                )
             parts.append(
                 ToolResultPart(
                     tool_call_id=_required_string(value, "tool_call_id"),
                     status=status,
                     output=raw_output,
                     artifact_id=_optional_string(value, "artifact_id"),
+                    artifacts=tuple(artifacts),
                 )
             )
         else:

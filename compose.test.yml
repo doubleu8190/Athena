@@ -71,6 +71,8 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       MINIO_DEV_BUCKET: ${MINIO_DEV_BUCKET:-athena-knowledge-dev}
       MINIO_TEST_BUCKET: ${MINIO_TEST_BUCKET:-athena-knowledge-test}
+      MINIO_FILES_DEV_BUCKET: ${MINIO_FILES_DEV_BUCKET:-athena-files-dev}
+      MINIO_FILES_TEST_BUCKET: ${MINIO_FILES_TEST_BUCKET:-athena-files-test}
     command:
       - |
         # MinIO 已健康后分别创建私有开发桶和测试桶，保持对象存储数据隔离。
@@ -80,7 +82,8 @@ services:
           if [ "$$attempt" -ge 60 ]; then echo 'MinIO 未在 60 秒内就绪' >&2; exit 1; fi
           sleep 1
         done
-        for bucket in "$$MINIO_DEV_BUCKET" "$$MINIO_TEST_BUCKET"; do
+        for bucket in "$$MINIO_DEV_BUCKET" "$$MINIO_TEST_BUCKET" \
+          "$$MINIO_FILES_DEV_BUCKET" "$$MINIO_FILES_TEST_BUCKET"; do
           if ! aws --endpoint-url http://minio:9000 s3api head-bucket --bucket "$$bucket" >/dev/null 2>&1; then
             aws --endpoint-url http://minio:9000 s3api create-bucket --bucket "$$bucket"
           fi

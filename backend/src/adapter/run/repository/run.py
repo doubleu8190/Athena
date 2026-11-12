@@ -10,6 +10,12 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.file.model import SessionFileModel
+from adapter.file.repository import (
+    count_published_session_files,
+    lock_session_file_quota,
+    pending_file_to_model,
+)
 from adapter.llm.model.profile import (
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,
@@ -35,15 +41,20 @@ from adapter.run.model import (
     SessionContextSummaryModel,
 )
 from adapter.session.model import SessionModel
+from adapter.skill.model import SkillExecutionModel
+from adapter.skill.repository import build_run_skill_snapshot
 from adapter.system_prompt.repository import current_system_prompts
 from common.ids import new_id, now_utc
+from domain.file import PendingSessionFile
 from domain.message import (
+    ArtifactFileRef,
     ConversationMessage,
     ConversationMessageDraft,
     ConversationRole,
     ExecutionMessage,
     ExecutionMessageDraft,
     ExecutionRole,
+    FileRefPart,
     MessageMetadata,
     SessionNotFoundError,
     TextPart,
@@ -95,11 +106,21 @@ from domain.run.model import (
 )
 from domain.run.model.errors import (
     RunConflictError,
+    RunInputResourceError,
     RunNotFoundError,
     RunStateError,
     ToolRetryConfirmationRequiredError,
 )
 from domain.run.ports import RunRepository
+from domain.skill import (
+    SKILL_EXECUTE_TOOL_ID,
+    SKILL_LOAD_TOOL_ID,
+    RunSkillSnapshot,
+    SafeSkillApprovalProjection,
+    SkillExecutionArtifact,
+    SkillExecutionCompletion,
+    SkillExecutionStatus,
+)
 from domain.tool import (
     AdmitToolCallCommand,
     BeginToolCallBatchCommand,
@@ -180,6 +201,17 @@ class SqlAlchemyRunRepository(RunRepository):
                     run, message = await self._load_submit_result(session, replay)
                     result = SubmitRunResult(run, message, True)
                 else:
+                    skill_snapshot = await build_run_skill_snapshot(
+                        session,
+                        command.selected_skill_ids,
+                    )
+                    input_file_ids = await self._validated_input_file_ids(
+                        session,
+                        session_id,
+                        owner_id,
+                        existing=(),
+                        incoming=command.input_files.file_ids,
+                    )
                     if (
                         command.message.session_id != session_id
                         or command.message.owner_id != owner_id
@@ -219,6 +251,8 @@ class SqlAlchemyRunRepository(RunRepository):
                         main_prompt_version_id=system_prompts.main.id,
                         compression_prompt_version_id=system_prompts.compression.id,
                         compression_policy_version_id=compression_policy_id,
+                        skill_snapshot=skill_snapshot.model_dump(mode="json"),
+                        input_file_ids=list(input_file_ids),
                         prompt_template_version=command.prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -287,6 +321,13 @@ class SqlAlchemyRunRepository(RunRepository):
                         or command.execution_message.role is not ExecutionRole.TOOL
                     ):
                         raise RunStateError("run_answer_messages_invalid")
+                    input_file_ids = await self._validated_input_file_ids(
+                        session,
+                        session_id,
+                        owner_id,
+                        existing=tuple(row.input_file_ids),
+                        incoming=command.input_files.file_ids,
+                    )
                     request = await session.scalar(
                         select(RunInputRequestModel)
                         .where(
@@ -337,6 +378,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     if command.auth_session_id is not None:
                         row.auth_session_id = command.auth_session_id
                     row.status = RunStatus.QUEUED.value
+                    row.input_file_ids = list(input_file_ids)
                     row.queued_at = command.queued_at
                     row.worker_id = None
                     row.lease_expires_at = None
@@ -800,6 +842,17 @@ class SqlAlchemyRunRepository(RunRepository):
                         != call_parts
                     ):
                         raise RunConflictError("run_tool_batch_conflict")
+                    if [
+                        None
+                        if record.safe_skill_projection is None
+                        else SafeSkillApprovalProjection.model_validate(
+                            record.safe_skill_projection
+                        )
+                        for record in existing_records
+                    ] != [
+                        item.safe_skill_projection for item in command.calls
+                    ]:
+                        raise RunConflictError("run_tool_batch_conflict")
                     # replayed 标志为 True；是否仍在审批等待取决于 Run 当前状态。
                     return BeginToolCallBatchResult(
                         await self._batch_from_records(session, row.id, existing_records),
@@ -871,6 +924,11 @@ class SqlAlchemyRunRepository(RunRepository):
                             else outcome.code
                         ),
                         outcome=None if outcome is None else outcome.model_dump(mode="json"),
+                        safe_skill_projection=(
+                            None
+                            if item.safe_skill_projection is None
+                            else item.safe_skill_projection.model_dump(mode="json")
+                        ),
                         round=command.round,
                     )
                     # 先把新记录写入事务，供后续结果消息与事件关联。
@@ -1139,6 +1197,22 @@ class SqlAlchemyRunRepository(RunRepository):
                         return run_to_domain(row)
                     # 已做出相反决策时不允许覆盖。
                     raise RunConflictError("run_tool_approval_already_decided")
+                if (
+                    command.decision is ToolApprovalDecision.APPROVE
+                    and record.tool_id == SKILL_EXECUTE_TOOL_ID
+                    and record.safe_skill_projection is None
+                ):
+                    raise RunStateError("skill_approval_projection_unavailable")
+                if (
+                    command.decision is ToolApprovalDecision.APPROVE
+                    and record.tool_id == SKILL_EXECUTE_TOOL_ID
+                ):
+                    projection = await self._refresh_safe_skill_projection(
+                        session,
+                        record,
+                    )
+                    if projection is None or not projection.can_approve:
+                        raise RunStateError("skill_approval_metadata_unavailable")
                 # 只有 Run 处于等待审批且该调用仍待审批时才接受决策。
                 if (
                     row.status != RunStatus.WAITING_FOR_APPROVAL.value
@@ -1280,24 +1354,36 @@ class SqlAlchemyRunRepository(RunRepository):
                     .order_by(RunToolCallModel.ordinal)
                 )
             ).all()
-        pending: list[PendingToolApproval] = []
-        for row in rows:
-            if row.requested_at is None:
-                raise RuntimeError("run_tool_call_requested_at_missing")
-            pending.append(
-                PendingToolApproval(
-                    call_id=row.id,
-                    batch_message_id=row.call_message_id,
-                    ordinal=row.ordinal,
-                    model_name=row.model_name,
-                    tool_kind=None if row.tool_kind is None else ToolKind(row.tool_kind),
-                    requested_at=row.requested_at,
+            pending: list[PendingToolApproval] = []
+            for row in rows:
+                if row.requested_at is None:
+                    raise RuntimeError("run_tool_call_requested_at_missing")
+                pending.append(
+                    PendingToolApproval(
+                        call_id=row.id,
+                        batch_message_id=row.call_message_id,
+                        ordinal=row.ordinal,
+                        model_name=row.model_name,
+                        tool_kind=(
+                            None if row.tool_kind is None else ToolKind(row.tool_kind)
+                        ),
+                        requested_at=row.requested_at,
+                        safe_skill_projection=await self._refresh_safe_skill_projection(
+                            session, row
+                        ),
+                    )
                 )
-            )
         return tuple(pending)
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
         """Persist one result and atomically converge/fail when required."""
+        return await self._finish_tool_call_transaction(command)
+
+    async def _finish_tool_call_transaction(
+        self,
+        command: FinishToolCallCommand,
+    ) -> Run | None:
+        """在 Session/Run 既有序内完成结果、对象引用与配额提交。"""
         async with self._session_factory() as session:
             async with session.begin():
                 row = await self._lock_worker_run(
@@ -1319,11 +1405,38 @@ class SqlAlchemyRunRepository(RunRepository):
                     raise RunStateError("run_tool_call_not_found")
                 outcome = bounded_outcome(command.outcome)
                 self._validate_tool_result_message(record, command.result_message, row, outcome)
+                pending_artifacts = self._validated_pending_artifacts(
+                    record,
+                    command.result_message,
+                    command.artifacts,
+                )
+                self._validate_delivery_message(
+                    record,
+                    command.delivery_message,
+                    pending_artifacts,
+                    row,
+                )
                 if record.status != ToolCallStatus.EXECUTING.value:
                     requested_outcome = outcome.model_dump(mode="json")
                     if (
                         record.outcome == requested_outcome
                         and record.result_message_id == command.result_message.id
+                        and await self._artifact_rows_match(
+                            session,
+                            record,
+                            pending_artifacts,
+                        )
+                        and await self._skill_completion_matches(
+                            session,
+                            record,
+                            command.skill_execution_completion,
+                            pending_artifacts,
+                            outcome=outcome,
+                        )
+                        and await self._delivery_message_matches(
+                            session,
+                            command.delivery_message,
+                        )
                     ):
                         return run_to_domain(row)
                     raise RunConflictError("run_tool_call_already_finished")
@@ -1338,12 +1451,52 @@ class SqlAlchemyRunRepository(RunRepository):
                     or not self._work_deadline_is_valid(row, db_now)
                 ):
                     return None
+                if pending_artifacts:
+                    await lock_session_file_quota(session, row.session_id)
+                    count = await count_published_session_files(session, row.session_id)
+                    if count + len(pending_artifacts) > 100:
+                        raise ValueError("session_file_quota_exceeded")
+                    for artifact in pending_artifacts:
+                        session.add(
+                            pending_file_to_model(
+                                artifact,
+                                session_id=row.session_id,
+                                owner_id=row.owner_id,
+                                source="artifact",
+                                source_call_id=record.id,
+                            )
+                        )
+                if command.skill_execution_completion is not None:
+                    await self._finish_skill_execution_in_transaction(
+                        session,
+                        record,
+                        row,
+                        command.skill_execution_completion,
+                        pending_artifacts,
+                    )
+                elif outcome.status is ToolOutcomeStatus.UNKNOWN:
+                    # 启动回查失败时没有可信 execution_id，不能猜测新 ID；
+                    # 工具结果已确定 UNKNOWN，按 tool_call_record_id 收敛 running 审计。
+                    await self._settle_running_skill_execution(
+                        session,
+                        record.id,
+                        command.finished_at,
+                    )
                 await self._messages.append_execution_in_session(
                     session,
                     command.result_message,
                     locked_session=locked_session,
                     managed_run_id=row.id,
                 )
+                if command.delivery_message is not None:
+                    # 产物交付同时作为普通助手消息发布，使分页刷新后的公开消息流
+                    # 可恢复同一组 FileRefPart；内部 TOOL 消息仍保持唯一。
+                    await self._messages.append_conversation_in_session(
+                        session,
+                        command.delivery_message,
+                        locked_session=locked_session,
+                        managed_run_id=row.id,
+                    )
                 record.status = persisted_status_for_outcome(outcome).value
                 record.result_message_id = command.result_message.id
                 record.finished_at = command.finished_at
@@ -1465,6 +1618,7 @@ class SqlAlchemyRunRepository(RunRepository):
             None,
         )
         output: str | None = None
+        artifacts: tuple[ArtifactFileRef, ...] = ()
         if result_message is not None:
             result_domain = execution_to_domain(result_message)
             result_part = next(
@@ -1476,10 +1630,15 @@ class SqlAlchemyRunRepository(RunRepository):
                 None,
             )
             output = None if result_part is None else result_part.output
+            artifacts = () if result_part is None else result_part.artifacts
+        async with self._session_factory() as session:
+            safe_skill_projection = await self._refresh_safe_skill_projection(session, row)
         return RunToolCallDetails(
             tool_call_to_domain(row),
             {} if call_part is None else dict(call_part.arguments),
             output,
+            artifacts,
+            safe_skill_projection,
         )
 
     async def list_retry_context(
@@ -2119,6 +2278,24 @@ class SqlAlchemyRunRepository(RunRepository):
                     system_prompts = await current_system_prompts(session)
                     if system_prompts is None:
                         raise RunStateError("system_prompt_unavailable")
+                    selected_skill_ids = (
+                        ()
+                        if source.skill_snapshot is None
+                        else RunSkillSnapshot.model_validate(
+                            source.skill_snapshot
+                        ).selected_skill_ids
+                    )
+                    skill_snapshot = await build_run_skill_snapshot(
+                        session,
+                        selected_skill_ids,
+                    )
+                    input_file_ids = await self._validated_input_file_ids(
+                        session,
+                        session_id,
+                        owner_id,
+                        existing=(),
+                        incoming=tuple(source.input_file_ids),
+                    )
                     created_at = await self._next_run_created_at(session, session_id)
                     row = RunModel(
                         id=new_run_id,
@@ -2132,6 +2309,8 @@ class SqlAlchemyRunRepository(RunRepository):
                         main_prompt_version_id=system_prompts.main.id,
                         compression_prompt_version_id=system_prompts.compression.id,
                         compression_policy_version_id=compression_policy_id,
+                        skill_snapshot=skill_snapshot.model_dump(mode="json"),
+                        input_file_ids=list(input_file_ids),
                         prompt_template_version=prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -2348,6 +2527,48 @@ class SqlAlchemyRunRepository(RunRepository):
                 ordered.append(result_message)
                 consumed_results.add(result_message.id)
         return tuple(ordered)
+
+    async def list_successfully_loaded_skill_ids(self, run_id: str) -> tuple[str, ...]:
+        """扫描全部已提交 skill_load，不受摘要 cutoff 或分页窗口影响。"""
+        async with self._session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(RunToolCallModel)
+                    .where(
+                        RunToolCallModel.run_id == run_id,
+                        RunToolCallModel.tool_id == SKILL_LOAD_TOOL_ID,
+                        RunToolCallModel.status == ToolCallStatus.COMPLETED.value,
+                    )
+                    .order_by(RunToolCallModel.ordinal)
+                )
+            ).all()
+            loaded: list[str] = []
+            seen: set[str] = set()
+            for row in rows:
+                if row.outcome is None:
+                    continue
+                outcome = ToolOutcome.model_validate(row.outcome)
+                if outcome.status is not ToolOutcomeStatus.OK:
+                    continue
+                message = await session.get(ExecutionMessageModel, row.call_message_id)
+                if message is None:
+                    raise ValueError("skill_load_call_message_missing")
+                call = next(
+                    (
+                        part
+                        for part in execution_to_domain(message).parts
+                        if isinstance(part, ToolCallPart)
+                        and part.tool_call_id == row.tool_call_id
+                    ),
+                    None,
+                )
+                skill_id = None if call is None else call.arguments.get("skill_id")
+                if not isinstance(skill_id, str) or not skill_id:
+                    raise ValueError("skill_load_call_arguments_invalid")
+                if skill_id not in seen:
+                    seen.add(skill_id)
+                    loaded.append(skill_id)
+        return tuple(loaded)
 
     async def list_context_summaries(
         self, session_id: str, owner_id: str, run_id: str
@@ -2827,6 +3048,262 @@ class SqlAlchemyRunRepository(RunRepository):
             raise RunStateError("run_tool_result_message_invalid")
 
     @staticmethod
+    def _validated_pending_artifacts(
+        record: RunToolCallModel,
+        message: ExecutionMessageDraft,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> tuple[PendingSessionFile, ...]:
+        """确保待发布文件与唯一 TOOL 结果中的有序引用完全一致。"""
+        if len(artifacts) > 100:
+            raise RunStateError("session_file_quota_exceeded")
+        if tuple(item.output_index for item in artifacts) != tuple(range(len(artifacts))):
+            raise RunStateError("run_tool_artifacts_invalid")
+        if len({item.id for item in artifacts}) != len(artifacts) or len(
+            {item.object_key for item in artifacts}
+        ) != len(artifacts):
+            raise RunStateError("run_tool_artifacts_invalid")
+        result = next(
+            part for part in message.parts if isinstance(part, ToolResultPart)
+        )
+        expected = tuple(
+            ArtifactFileRef(
+                file_id=item.id,
+                filename=item.filename,
+                label=item.label,
+                mime_type=item.mime_type,
+                size_bytes=item.size_bytes,
+            )
+            for item in artifacts
+        )
+        if result.artifacts != expected:
+            raise RunStateError("run_tool_result_message_invalid")
+        return artifacts
+
+    @staticmethod
+    def _validate_delivery_message(
+        record: RunToolCallModel,
+        message: ConversationMessageDraft | None,
+        artifacts: tuple[PendingSessionFile, ...],
+        run: RunModel,
+    ) -> None:
+        """产物必须同时形成一条安全、可恢复的普通助手文件引用消息。"""
+        if not artifacts:
+            if message is not None:
+                raise RunStateError("run_tool_delivery_message_invalid")
+            return
+        if message is None:
+            raise RunStateError("run_tool_delivery_message_invalid")
+        references = tuple(
+            ArtifactFileRef(
+                file_id=file.id,
+                filename=file.filename,
+                label=file.label,
+                mime_type=file.mime_type,
+                size_bytes=file.size_bytes,
+            )
+            for file in artifacts
+        )
+        file_parts = tuple(part for part in message.parts if isinstance(part, FileRefPart))
+        expected_parts = tuple(
+            FileRefPart(
+                file_id=item.file_id,
+                filename=item.filename,
+                mime_type=item.mime_type,
+                size_bytes=item.size_bytes,
+            )
+            for item in references
+        )
+        if (
+            message.session_id != run.session_id
+            or message.owner_id != run.owner_id
+            or message.run_id != run.id
+            or message.role is not ConversationRole.ASSISTANT
+            or file_parts != expected_parts
+        ):
+            raise RunStateError("run_tool_delivery_message_invalid")
+
+    @staticmethod
+    async def _delivery_message_matches(
+        session: AsyncSession,
+        message: ConversationMessageDraft | None,
+    ) -> bool:
+        """重放已终态调用时核对已提交的普通助手交付消息。"""
+        if message is None:
+            return True
+        existing = await session.get(ConversationMessageModel, message.id)
+        if existing is None:
+            return False
+        domain = conversation_to_domain(existing)
+        return (
+            domain.session_id == message.session_id
+            and domain.role is message.role
+            and domain.status is message.status
+            and domain.parts == message.parts
+            and domain.run_id == message.run_id
+        )
+
+    @staticmethod
+    async def _finish_skill_execution_in_transaction(
+        session: AsyncSession,
+        record: RunToolCallModel,
+        run: RunModel,
+        completion: SkillExecutionCompletion,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> None:
+        """脚本审计记录与文件、结果消息和调用终态使用同一事务。"""
+        skill_execution = await session.scalar(
+            select(SkillExecutionModel)
+            .where(
+                SkillExecutionModel.id == completion.execution_id,
+                SkillExecutionModel.run_id == run.id,
+                SkillExecutionModel.session_id == run.session_id,
+                SkillExecutionModel.tool_call_record_id == record.id,
+            )
+            .with_for_update()
+        )
+        if skill_execution is None:
+            raise RunStateError("skill_execution_record_missing")
+        if skill_execution.status != SkillExecutionStatus.RUNNING.value:
+            if not _skill_execution_row_matches(
+                skill_execution,
+                completion,
+                artifacts,
+            ):
+                raise RunConflictError("skill_execution_completion_conflict")
+            return
+        skill_execution.status = completion.status.value
+        skill_execution.log_object_key = completion.log_object_key
+        skill_execution.log_truncated = completion.log_truncated
+        skill_execution.log_error_code = completion.log_error_code
+        skill_execution.error_code = completion.error_code
+        skill_execution.cleanup_error_code = completion.cleanup_error_code
+        skill_execution.result_artifacts = [
+            SkillExecutionArtifact(
+                file_id=artifact.id,
+                filename=artifact.filename,
+                label=artifact.label,
+                mime_type=artifact.mime_type,
+                size_bytes=artifact.size_bytes,
+                sha256=artifact.sha256,
+                object_key=artifact.object_key,
+                output_index=artifact.output_index,
+            ).model_dump(mode="json")
+            for artifact in artifacts
+        ]
+        skill_execution.finished_at = completion.finished_at
+        await session.flush()
+
+    @staticmethod
+    async def _skill_completion_matches(
+        session: AsyncSession,
+        record: RunToolCallModel,
+        completion: SkillExecutionCompletion | None,
+        artifacts: tuple[PendingSessionFile, ...],
+        *,
+        outcome: ToolOutcome,
+    ) -> bool:
+        """已提交工具调用重放时核对脚本审计结论，避免返回冲突版本。"""
+        if completion is None:
+            if record.tool_id != SKILL_EXECUTE_TOOL_ID:
+                return True
+            # 启动结果无法确认时没有可信 execution_id，完成路径会按调用身份
+            # 收口 running 审计后再提交 UNKNOWN；重放必须接受“无审计记录”或
+            # “审计已是终态”，但不能接受仍遗留 running 的不一致状态。
+            if outcome.status is not ToolOutcomeStatus.UNKNOWN:
+                return False
+            status = await session.scalar(
+                select(SkillExecutionModel.status).where(
+                    SkillExecutionModel.tool_call_record_id == record.id
+                )
+            )
+            return (
+                status is None
+                or status != SkillExecutionStatus.RUNNING.value
+            )
+        row = await session.scalar(
+            select(SkillExecutionModel).where(
+                SkillExecutionModel.id == completion.execution_id,
+                SkillExecutionModel.tool_call_record_id == record.id,
+            )
+        )
+        return row is not None and _skill_execution_row_matches(
+            row,
+            completion,
+            artifacts,
+        )
+
+    @staticmethod
+    async def _refresh_safe_skill_projection(
+        session: AsyncSession,
+        row: RunToolCallModel,
+    ) -> SafeSkillApprovalProjection | None:
+        """按冻结摘要重新核对输入文件，不读取当前 Skill 管理配置。"""
+        if row.safe_skill_projection is None:
+            return None
+        projection = SafeSkillApprovalProjection.model_validate(
+            row.safe_skill_projection
+        )
+        if not projection.input_files:
+            return projection
+        file_ids = tuple(item.file_id for item in projection.input_files)
+        visible_ids = set(
+            (
+                await session.scalars(
+                    select(SessionFileModel.id).where(
+                        SessionFileModel.session_id == row.session_id,
+                        SessionFileModel.id.in_(file_ids),
+                    )
+                )
+            ).all()
+        )
+        files = tuple(
+            item.model_copy(update={"available": item.file_id in visible_ids})
+            for item in projection.input_files
+        )
+        all_available = all(item.available for item in files)
+        return projection.model_copy(
+            update={
+                "input_files": files,
+                "can_approve": projection.can_approve and all_available,
+                "unavailable_reason": (
+                    projection.unavailable_reason
+                    if all_available
+                    else "skill_approval_input_unavailable"
+                ),
+            }
+        )
+
+    @staticmethod
+    async def _artifact_rows_match(
+        session: AsyncSession,
+        record: RunToolCallModel,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> bool:
+        """确认已完成调用已发布的文件 ID 和顺序与本次重放命令一致。"""
+        rows = list(
+            (
+                await session.scalars(
+                    select(SessionFileModel)
+                    .where(SessionFileModel.source_call_id == record.id)
+                    .order_by(SessionFileModel.output_index)
+                )
+            ).all()
+        )
+        if len(rows) != len(artifacts):
+            return False
+        return all(
+            row.id == artifact.id
+            and row.filename == artifact.filename
+            and row.label == artifact.label
+            and row.mime_type == artifact.mime_type
+            and row.size_bytes == artifact.size_bytes
+            and row.sha256 == artifact.sha256
+            and row.object_key == artifact.object_key
+            and row.output_index == artifact.output_index
+            for row, artifact in zip(rows, artifacts, strict=True)
+        )
+
+    @staticmethod
     async def _has_unsettled_tool_calls(session: AsyncSession, run_id: str) -> bool:
         return bool(
             await session.scalar(
@@ -2948,6 +3425,14 @@ class SqlAlchemyRunRepository(RunRepository):
             record.safe_error_code = (
                 outcome.code if outcome.status is not ToolOutcomeStatus.OK else None
             )
+            if record.status == ToolCallStatus.UNKNOWN.value:
+                # 脚本附加记录不能比工具调用更早变为可见终态；二者正常完成时
+                # 同事务提交，这里只收敛此前事务失败或进程中断遗留的 running。
+                await self._settle_running_skill_execution(
+                    session,
+                    record.id,
+                    settled_at,
+                )
             # 每个调用都追加终态事件，保证 SSE 与读取模型看到一致的收敛结果。
             await self._append_event(
                 session,
@@ -2961,6 +3446,26 @@ class SqlAlchemyRunRepository(RunRepository):
                 ),
                 settled_at,
             )
+
+    @staticmethod
+    async def _settle_running_skill_execution(
+        session: AsyncSession,
+        tool_call_record_id: str,
+        settled_at: datetime,
+    ) -> None:
+        """按工具调用身份收敛遗留 running 审计，不使用回查失败时的新 ID。"""
+        skill_execution = await session.scalar(
+            select(SkillExecutionModel)
+            .where(
+                SkillExecutionModel.tool_call_record_id == tool_call_record_id,
+                SkillExecutionModel.status == SkillExecutionStatus.RUNNING.value,
+            )
+            .with_for_update()
+        )
+        if skill_execution is not None:
+            skill_execution.status = SkillExecutionStatus.UNKNOWN.value
+            skill_execution.error_code = "tool_outcome_unknown"
+            skill_execution.finished_at = settled_at
 
     async def _fail_run_in_transaction(
         self,
@@ -3048,6 +3553,38 @@ class SqlAlchemyRunRepository(RunRepository):
         if latest_created_at is None or database_now > latest_created_at:
             return database_now
         return latest_created_at + timedelta(microseconds=1)
+
+    async def _validated_input_file_ids(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        owner_id: str,
+        *,
+        existing: tuple[str, ...],
+        incoming: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """在同一 Run 事务中验证文件归属，并按首次提供顺序合并。"""
+        if len(incoming) != len(set(incoming)):
+            raise RunInputResourceError("run_input_file_ids_duplicate")
+        ordered = tuple(dict.fromkeys((*existing, *incoming)))
+        if len(ordered) != len(existing) + len(incoming):
+            raise RunInputResourceError("run_input_file_ids_duplicate")
+        if not incoming:
+            return ordered
+        visible = set(
+            (
+                await session.scalars(
+                    select(SessionFileModel.id).where(
+                        SessionFileModel.id.in_(incoming),
+                        SessionFileModel.session_id == session_id,
+                        SessionFileModel.owner_id == owner_id,
+                    )
+                )
+            ).all()
+        )
+        if visible != set(incoming):
+            raise RunInputResourceError("run_input_file_unavailable")
+        return ordered
 
     @staticmethod
     async def _lock_session(session: AsyncSession, session_id: str, owner_id: str) -> SessionModel:
@@ -3217,6 +3754,37 @@ class SqlAlchemyRunRepository(RunRepository):
         if run is None or message is None:
             raise RunNotFoundError("run_request_result_missing")
         return run_to_domain(run), conversation_to_domain(message)
+
+
+def _skill_execution_row_matches(
+    row: SkillExecutionModel,
+    completion: SkillExecutionCompletion,
+    artifacts: tuple[PendingSessionFile, ...],
+) -> bool:
+    """比较脚本审计终态，重放不能替换日志、错误或产物集合。"""
+    expected_artifacts = [
+        SkillExecutionArtifact(
+            file_id=artifact.id,
+            filename=artifact.filename,
+            label=artifact.label,
+            mime_type=artifact.mime_type,
+            size_bytes=artifact.size_bytes,
+            sha256=artifact.sha256,
+            object_key=artifact.object_key,
+            output_index=artifact.output_index,
+        ).model_dump(mode="json")
+        for artifact in artifacts
+    ]
+    return (
+        row.status == completion.status.value
+        and row.log_object_key == completion.log_object_key
+        and row.log_truncated == completion.log_truncated
+        and row.log_error_code == completion.log_error_code
+        and row.error_code == completion.error_code
+        and row.cleanup_error_code == completion.cleanup_error_code
+        and row.result_artifacts == expected_artifacts
+        and row.finished_at == completion.finished_at
+    )
 
 
 __all__ = ["SqlAlchemyRunRepository"]

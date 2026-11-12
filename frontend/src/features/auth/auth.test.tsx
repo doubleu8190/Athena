@@ -381,6 +381,9 @@ describe("认证流程", () => {
         if (url.includes("/api/v1/sessions")) {
           return jsonResponse({ items: [], page: 1, page_size: 8, total: 0 });
         }
+        if (url.endsWith("/api/v1/skills")) {
+          return jsonResponse({ items: [] });
+        }
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
@@ -418,6 +421,9 @@ describe("认证流程", () => {
         }
         if (url.includes("/api/v1/sessions")) {
           return jsonResponse({ items: [], page: 1, page_size: 8, total: 0 });
+        }
+        if (url.endsWith("/api/v1/skills")) {
+          return jsonResponse({ items: [] });
         }
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -851,7 +857,7 @@ describe("认证流程", () => {
     expect(screen.getByRole("link", { name: "管理" })).toBeInTheDocument();
   });
 
-  it("管理子导航始终渲染在主区域并提供三类管理路由入口", async () => {
+  it("管理子导航始终渲染在主区域并提供完整管理路由入口", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -895,5 +901,11 @@ describe("认证流程", () => {
     expect(
       within(subnav).getByRole("link", { name: "工具审批策略" }),
     ).toHaveAttribute("href", "/admin/tools");
+    expect(
+      within(subnav).getByRole("link", { name: "系统提示词" }),
+    ).toHaveAttribute("href", "/admin/system-prompts");
+    expect(
+      within(subnav).getByRole("link", { name: "技能管理" }),
+    ).toHaveAttribute("href", "/admin/skills");
   });
 });

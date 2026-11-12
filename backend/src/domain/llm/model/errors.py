@@ -55,7 +55,7 @@ class LlmProviderError(LlmError):
 
 
 class LlmProtocolError(LlmError):
-    """上游响应或事件不符合 Responses 协议。"""
+    """上游响应或事件不符合当前 LLM 协议。"""
 
     code = "llm_protocol_error"
 
@@ -76,21 +76,3 @@ class LlmToolArgumentsError(LlmError):
     """模型生成的工具参数未通过 JSON Schema 校验。"""
 
     code = "llm_tool_arguments_invalid"
-
-
-class LlmStructuredOutputError(LlmError):
-    """结构化输出未通过解析或 Pydantic 校验。"""
-
-    code = "llm_structured_output_invalid"
-
-
-class LlmStructuredJsonError(LlmStructuredOutputError):
-    """结构化输出不是有效 JSON。"""
-
-    code = "llm_structured_json_invalid"
-
-
-class LlmStructuredValidationError(LlmStructuredOutputError):
-    """结构化 JSON 未通过 Pydantic 验证。"""
-
-    code = "llm_structured_validation_failed"

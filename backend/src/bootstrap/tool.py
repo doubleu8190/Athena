@@ -14,10 +14,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.knowledge.repository import KnowledgeRepository
+from app.file.service import SessionFileService
 from app.knowledge.service import KnowledgeService
 from app.memory.service import MemoryService
 from app.project.knowledge import ProjectKnowledgeRepository, ProjectKnowledgeService
 from app.project.service import ProjectService
+from app.skill.execution_service import SkillExecutionService
+from app.skill.service import SkillService
 from app.tool.runtime import RunToolRuntimeService
 from bootstrap.config import env_csv_set, env_flag
 from bootstrap.knowledge import build_knowledge_models, build_knowledge_original_store
@@ -212,6 +215,9 @@ def build_run_tool_runtime(
     mcp_catalog: McpToolRuntimeReader,
     mcp_executor: McpToolExecutor,
     query_services: QueryServiceBundle,
+    skills: SkillService | None = None,
+    session_files: SessionFileService | None = None,
+    skill_execution: SkillExecutionService | None = None,
 ) -> RunToolRuntimeService:
     """Bind the shared query services and MCP ports to the Run tool runtime."""
     return RunToolRuntimeService(
@@ -223,6 +229,9 @@ def build_run_tool_runtime(
         memory_enabled=query_services.memory_enabled,
         knowledge=query_services.knowledge,
         project_knowledge=query_services.project_knowledge,
+        skills=skills,
+        session_files=session_files,
+        skill_execution=skill_execution,
     )
 
 

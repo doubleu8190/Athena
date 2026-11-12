@@ -10,7 +10,18 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from common.json import dumps
-from domain.message import ExecutionMessageDraft, ToolResultStatus
+from domain.file import PendingSessionFile
+from domain.message import (
+    ArtifactFileRef,
+    ConversationMessageDraft,
+    ExecutionMessageDraft,
+    ToolResultStatus,
+)
+from domain.skill import (
+    RunSkillSnapshot,
+    SafeSkillApprovalProjection,
+    SkillExecutionCompletion,
+)
 
 if TYPE_CHECKING:
     from domain.tool.model.runtime import RuntimeToolSnapshot
@@ -97,6 +108,8 @@ class ToolExecutionContext:
     execution_epoch: int
     auth_session_id: str
     deadline_at: datetime
+    tool_call_record_id: str | None = None
+    skill_snapshot: RunSkillSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +146,7 @@ class RunToolCallRecord:
     requested_at: datetime | None = None
     approval_decided_at: datetime | None = None
     approval_decision: ToolApprovalDecision | None = None
+    safe_skill_projection: SafeSkillApprovalProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +156,8 @@ class RunToolCallDetails:
     record: RunToolCallRecord
     arguments: dict[str, Any]
     output: str | None
+    artifacts: tuple[ArtifactFileRef, ...] = ()
+    safe_skill_projection: SafeSkillApprovalProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +225,9 @@ class FinishToolCallCommand:
     result_message: ExecutionMessageDraft
     outcome: ToolOutcome
     finished_at: datetime
+    artifacts: tuple[PendingSessionFile, ...] = ()
+    delivery_message: ConversationMessageDraft | None = None
+    skill_execution_completion: SkillExecutionCompletion | None = None
     terminate_error_code: str | None = None
     defer_terminal_convergence: bool = False
 
@@ -225,6 +244,7 @@ class BeginToolCallBatchItem:
     requires_approval: bool
     immediate_outcome: ToolOutcome | None = None
     result_message: ExecutionMessageDraft | None = None
+    safe_skill_projection: SafeSkillApprovalProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,14 +335,26 @@ class PendingToolApproval:
     model_name: str
     tool_kind: ToolKind | None
     requested_at: datetime
+    safe_skill_projection: SafeSkillApprovalProjection | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallPreparation:
+    """本地校验和 Run 固定策略解析后的单次调用准备结果。"""
+
+    outcome: ToolOutcome | None
+    requires_approval: bool
+    safe_skill_projection: SafeSkillApprovalProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionResult:
-    """A normalized business result and an optional delivery revocation."""
+    """工具结果及同事务待发布的文件/脚本附加信息。"""
 
     outcome: ToolOutcome
     terminate_run_error_code: str | None = None
+    artifacts: tuple[PendingSessionFile, ...] = ()
+    skill_execution_completion: SkillExecutionCompletion | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +443,7 @@ __all__ = [
     "RunToolBatch",
     "RunToolBatchCall",
     "ToolApprovalDecision",
+    "ToolCallPreparation",
     "ToolCallStatus",
     "ToolExecutionResult",
     "ToolExecutionContext",

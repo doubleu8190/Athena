@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
+from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
 from adapter.llm import OpenAIChatCompletionsAdapter
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
@@ -14,7 +17,10 @@ from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
+from adapter.skill import SqlAlchemySkillRepository
+from adapter.skill.execution import PythonScriptExecutor
 from adapter.system_prompt import SqlAlchemySystemPromptRepository
+from app.file import SessionFileService
 from app.project.service import ProjectService
 from app.run import (
     NullRunProgressPublisher,
@@ -22,6 +28,9 @@ from app.run import (
     RunWorker,
     worker_config_from_environment,
 )
+from app.skill import DependencyChecker, SkillService
+from app.skill.execution_service import SkillExecutionService
+from bootstrap.config import env_flag
 from bootstrap.database import build_database
 from bootstrap.redis import build_run_transport
 from bootstrap.tool import (
@@ -30,6 +39,7 @@ from bootstrap.tool import (
     build_query_services,
     build_run_tool_runtime,
 )
+from domain.file import FileObjectStore
 from infrastructure.database import Database
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
@@ -42,7 +52,24 @@ class RunWorkerBundle:
     provider: OpenAIChatCompletionsAdapter | None = None
     run_transport: RedisRunTransport | None = None
     query_services: QueryServiceBundle | None = None
+    file_object_store: FileObjectStore | None = None
+    skill_execution: SkillExecutionService | None = None
     worker: RunWorker | None = None
+
+
+_FILE_STORAGE_SETTING_NAMES = (
+    "ATHENA_FILE_MINIO_ENDPOINT",
+    "ATHENA_FILE_MINIO_ACCESS_KEY",
+    "ATHENA_FILE_MINIO_SECRET_KEY",
+    "ATHENA_FILE_MINIO_BUCKET",
+)
+
+
+def _files_enabled() -> bool:
+    """Worker 使用独立文件配置，不依赖知识库或嵌入模型开关。"""
+    if "ATHENA_FILES_ENABLED" in os.environ:
+        return env_flag("ATHENA_FILES_ENABLED", default=False)
+    return any(os.getenv(name, "").strip() for name in _FILE_STORAGE_SETTING_NAMES)
 
 
 def build_run_worker_dependencies(
@@ -81,12 +108,53 @@ def build_run_worker_dependencies(
         projects=projects,
     )
     bundle.query_services = query_services
+    skills = None
+    session_files = None
+    skill_execution = None
+    if _files_enabled():
+        object_store = MinioFileObjectStore.from_environment(deferred=True)
+        bundle.file_object_store = object_store
+        skill_repository = SqlAlchemySkillRepository(database.session_factory)
+        python_executable = Path(
+            os.getenv("ATHENA_SKILL_PYTHON_EXECUTABLE", sys.executable)
+        )
+        skills = SkillService(
+            skill_repository,
+            object_store,
+            auth_repository,
+            dependency_checker=DependencyChecker(
+                python_executable=python_executable
+            ),
+        )
+        file_repository = SqlAlchemySessionFileRepository(database.session_factory)
+        session_files = SessionFileService(
+            file_repository,
+            object_store,
+        )
+        temp_root = Path(
+            os.getenv(
+                "ATHENA_SKILL_TEMP_ROOT",
+                str(Path(sys.prefix) / "tmp" / "athena-skill-executions"),
+            )
+        )
+        skill_execution = SkillExecutionService(
+            skills=skills,
+            files=session_files,
+            repository=skill_repository,
+            object_store=object_store,
+            runner=PythonScriptExecutor(python_executable),
+            temp_root=temp_root,
+        )
+        bundle.skill_execution = skill_execution
     tool_runtime = build_run_tool_runtime(
         auth=auth_repository,
         sessions=session_repository,
         mcp_catalog=mcp_catalog,
         mcp_executor=mcp_executor,
         query_services=query_services,
+        skills=skills,
+        session_files=session_files,
+        skill_execution=skill_execution,
     )
     provider = OpenAIChatCompletionsAdapter()
     bundle.provider = provider

@@ -13,6 +13,10 @@ import type {
   RunToolCallDetail,
   RunToolCallSummary,
 } from "../features/chat/model";
+import type {
+  ArtifactFileRef,
+  SessionFile,
+} from "../features/files/model";
 
 export const TEST_USER: User = {
   created_at: "2026-11-10T00:00:00Z",
@@ -116,6 +120,39 @@ export function makeSession(
   };
 }
 
+export function makeSessionFile(
+  overrides: Partial<SessionFile> & Pick<SessionFile, "id">,
+): SessionFile {
+  const { id, ...rest } = overrides;
+  return {
+    created_at: "2026-11-12T02:00:00Z",
+    filename: "sales.csv",
+    id,
+    label: null,
+    mime_type: "text/csv",
+    session_id: "session-1",
+    size_bytes: 1024,
+    source: "upload",
+    ...rest,
+  };
+}
+
+export function makeArtifact(
+  overrides: Partial<ArtifactFileRef> &
+    Pick<ArtifactFileRef, "file_id">,
+): ArtifactFileRef {
+  const { file_id, ...rest } = overrides;
+  return {
+    file_id,
+    filename: "report.xlsx",
+    label: "月度销售报表",
+    mime_type:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    size_bytes: 20_480,
+    ...rest,
+  };
+}
+
 export function makeMessage(
   overrides: Partial<ConversationMessage> &
     Pick<ConversationMessage, "id" | "sequence" | "session_id">,
@@ -153,6 +190,7 @@ export function makeRun(
     first_started_at: null,
     id,
     model_config_version_id: "model-config-1",
+    input_file_ids: [],
     pending_approvals: [],
     pending_input: null,
     prompt_template_version: "run_prompt_v1",
@@ -162,6 +200,7 @@ export function makeRun(
     retry_warning: null,
     safe_error_code: null,
     session_id,
+    skill_snapshot: null,
     status,
     trigger_message_id: "msg-user-1",
     updated_at: "2026-11-10T03:00:00Z",
@@ -207,6 +246,7 @@ export function makeToolCallDetail(
   return {
     ...makeToolCall(overrides),
     arguments: { query: "真实参数" },
+    artifacts: [],
     outcome: {
       cleanup_error_code: null,
       code: "ok",
@@ -215,6 +255,7 @@ export function makeToolCallDetail(
       status: "success",
       truncated: false,
     },
+    safe_skill_projection: null,
     ...overrides,
   };
 }

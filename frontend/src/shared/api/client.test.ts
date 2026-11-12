@@ -105,6 +105,63 @@ describe("apiRequest", () => {
     });
   });
 
+  it("结构化技能包错误保留稳定 code 和中文控制转义成员路径", async () => {
+    const memberPath = "references/中文\\x01<b>说明</b>.txt";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            detail: {
+              code: "skill_zip_path_invalid",
+              member_path: memberPath,
+            },
+          },
+          422,
+        ),
+      ),
+    );
+
+    const error = await apiRequest("/admin/skills/import").catch(
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({
+      detail: "skill_zip_path_invalid",
+      memberPath,
+      status: 422,
+    });
+    expect((error as Error).message).toBe(
+      "API 422: skill_zip_path_invalid",
+    );
+  });
+
+  it("原有 string detail 仍保持原错误码且没有成员路径", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({ detail: "skill_package_invalid" }, 422),
+      ),
+    );
+
+    await expect(
+      apiRequest("/admin/skills/import"),
+    ).rejects.toMatchObject({
+      detail: "skill_package_invalid",
+      memberPath: undefined,
+      status: 422,
+    });
+  });
+
+  it("ApiError 继续兼容原有 cause ErrorOptions", () => {
+    const cause = new TypeError("upstream failed");
+    const error = new ApiError(0, "network_error", { cause });
+
+    expect(error.cause).toBe(cause);
+    expect(error.memberPath).toBeUndefined();
+  });
+
   it("网络失败安全转换为 network_error", async () => {
     vi.stubGlobal(
       "fetch",

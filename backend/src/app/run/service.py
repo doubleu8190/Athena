@@ -26,12 +26,14 @@ from domain.run.model import (
     AnswerRunCommand,
     Run,
     RunEvent,
+    RunInputFiles,
     SubmitRunCommand,
     SubmitRunResult,
 )
-from domain.run.model.errors import RunNotFoundError, RunStateError
+from domain.run.model.errors import RunConflictError, RunNotFoundError, RunStateError
 from domain.run.ports import RunRepository
 from domain.session import SessionNotFoundError
+from domain.skill import SkillConflictError
 from domain.tool import (
     MAX_TOOL_CALL_ID_LENGTH,
     DecideToolApprovalCommand,
@@ -92,6 +94,20 @@ def _validate_request_id(request_id: str) -> str:
     return request_id
 
 
+def _validate_resource_ids(values: tuple[str, ...], *, code: str) -> tuple[str, ...]:
+    """校验可选技能/文件 ID 列表，拒绝重复、空白和控制字符。"""
+    if len(values) > 100 or len(values) != len(set(values)):
+        raise InvalidRunInputError(code)
+    if any(
+        not value
+        or len(value) > 128
+        or any(unicodedata.category(character) == "Cc" for character in value)
+        for value in values
+    ):
+        raise InvalidRunInputError(code)
+    return values
+
+
 def _encode_cursor(run: Run) -> str:
     value = f"{run.created_at.isoformat()}|{run.id}".encode()
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
@@ -135,10 +151,17 @@ class RunService:
         request_id: str,
         text: str,
         *,
+        skill_ids: tuple[str, ...] = (),
+        input_file_ids: tuple[str, ...] = (),
         auth_session_id: str | None = None,
     ) -> SubmitRunResult:
         request_id = _validate_request_id(request_id)
         text = _validate_text(text)
+        skill_ids = _validate_resource_ids(skill_ids, code="run_skill_ids_invalid")
+        input_file_ids = _validate_resource_ids(
+            input_file_ids,
+            code="run_input_file_ids_invalid",
+        )
         run_id = self._id_factory("run")
         message_id = self._id_factory("msg")
         now = _utc_value(self._clock())
@@ -157,21 +180,40 @@ class RunService:
             metadata=MessageMetadata(),
             context_turn_id=message_id,
         )
-        return await self._repository.submit(
-            session_id,
-            owner_id,
-            SubmitRunCommand(
-                run_id=run_id,
-                request_id=request_id,
-                fingerprint=_fingerprint(
-                    operation="submit", fields={"session_id": session_id, "text": text}
+        try:
+            return await self._repository.submit(
+                session_id,
+                owner_id,
+                SubmitRunCommand(
+                    run_id=run_id,
+                    request_id=request_id,
+                    fingerprint=_fingerprint(
+                        operation="submit",
+                        fields={
+                            "session_id": session_id,
+                            "text": text,
+                            "skill_ids": json.dumps(
+                                skill_ids,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            "input_file_ids": json.dumps(
+                                input_file_ids,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    ),
+                    prompt_template_version=CURRENT_PROMPT_TEMPLATE_VERSION,
+                    message=draft,
+                    queued_at=now,
+                    selected_skill_ids=skill_ids,
+                    input_files=RunInputFiles(file_ids=input_file_ids),
+                    auth_session_id=auth_session_id,
                 ),
-                prompt_template_version=CURRENT_PROMPT_TEMPLATE_VERSION,
-                message=draft,
-                queued_at=now,
-                auth_session_id=auth_session_id,
-            ),
-        )
+            )
+        except SkillConflictError as error:
+            raise RunConflictError(str(error)) from error
 
     async def answer(
         self,
@@ -182,11 +224,16 @@ class RunService:
         request_id: str,
         text: str,
         *,
+        input_file_ids: tuple[str, ...] = (),
         auth_session_id: str | None = None,
     ) -> Run:
         input_request_id = _validate_request_id(input_request_id)
         request_id = _validate_request_id(request_id)
         text = _validate_text(text)
+        input_file_ids = _validate_resource_ids(
+            input_file_ids,
+            code="run_input_file_ids_invalid",
+        )
         run = await self._repository.get(session_id, owner_id, run_id)
         if run is None:
             raise RunNotFoundError("run_not_found")
@@ -244,11 +291,17 @@ class RunService:
                         "run_id": run_id,
                         "input_request_id": input_request_id,
                         "text": text,
+                        "input_file_ids": json.dumps(
+                            input_file_ids,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                     },
                 ),
                 answer_message=answer,
                 execution_message=execution,
                 queued_at=now,
+                input_files=RunInputFiles(file_ids=input_file_ids),
                 auth_session_id=auth_session_id,
             ),
         )
@@ -274,20 +327,23 @@ class RunService:
         request_id = _validate_request_id(request_id)
         new_run_id = self._id_factory("run")
         now = _utc_value(self._clock())
-        result = await self._repository.retry(
-            session_id=session_id,
-            owner_id=owner_id,
-            source_run_id=run_id,
-            request_id=request_id,
-            fingerprint=_fingerprint(
-                operation="retry", fields={"session_id": session_id, "run_id": run_id}
-            ),
-            new_run_id=new_run_id,
-            prompt_template_version=CURRENT_PROMPT_TEMPLATE_VERSION,
-            now=now,
-            confirm_unknown=confirm_unknown,
-            auth_session_id=auth_session_id,
-        )
+        try:
+            result = await self._repository.retry(
+                session_id=session_id,
+                owner_id=owner_id,
+                source_run_id=run_id,
+                request_id=request_id,
+                fingerprint=_fingerprint(
+                    operation="retry", fields={"session_id": session_id, "run_id": run_id}
+                ),
+                new_run_id=new_run_id,
+                prompt_template_version=CURRENT_PROMPT_TEMPLATE_VERSION,
+                now=now,
+                confirm_unknown=confirm_unknown,
+                auth_session_id=auth_session_id,
+            )
+        except SkillConflictError as error:
+            raise RunConflictError(str(error)) from error
         if result is None:
             raise RunNotFoundError("run_not_found")
         return result

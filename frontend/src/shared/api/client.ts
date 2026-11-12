@@ -30,15 +30,25 @@ function assertAuthIdentityCurrent(identityEpoch: number): void {
   }
 }
 
+export interface ApiErrorOptions extends ErrorOptions {
+  memberPath?: string;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
+  readonly memberPath?: string;
 
-  constructor(status: number, detail: string, options?: ErrorOptions) {
+  constructor(
+    status: number,
+    detail: string,
+    options: ApiErrorOptions = {},
+  ) {
     super(`API ${status}: ${detail}`, options);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.memberPath = options.memberPath;
   }
 }
 
@@ -67,7 +77,14 @@ function publishAdminForbidden(): void {
   }
 }
 
-async function readErrorDetail(response: Response): Promise<string> {
+interface ParsedErrorDetail {
+  code: string;
+  memberPath?: string;
+}
+
+async function readErrorDetail(
+  response: Response,
+): Promise<ParsedErrorDetail> {
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.toLowerCase().includes("application/json")) {
     try {
@@ -75,16 +92,34 @@ async function readErrorDetail(response: Response): Promise<string> {
       if (
         typeof payload === "object" &&
         payload !== null &&
-        "detail" in payload &&
-        typeof payload.detail === "string"
+        "detail" in payload
       ) {
-        return payload.detail;
+        if (typeof payload.detail === "string") {
+          return { code: payload.detail };
+        }
+        // 仅管理员技能包 ZIP 422 使用结构化 detail；业务错误码仍是稳定主体，
+        // 成员路径独立保留，不能污染 401/403 等权限判断。
+        if (
+          typeof payload.detail === "object" &&
+          payload.detail !== null &&
+          "code" in payload.detail &&
+          typeof payload.detail.code === "string"
+        ) {
+          return {
+            code: payload.detail.code,
+            memberPath:
+              "member_path" in payload.detail &&
+              typeof payload.detail.member_path === "string"
+                ? payload.detail.member_path
+                : undefined,
+          };
+        }
       }
     } catch {
       // 服务端异常时可能声明 JSON 但返回截断内容，统一降级为稳定错误码。
     }
   }
-  return "http_error";
+  return { code: "http_error" };
 }
 
 async function performRequest(
@@ -116,16 +151,25 @@ async function performRequest(
   assertAuthIdentityCurrent(requestIdentityEpoch);
 
   if (!response.ok) {
-    const detail = await readErrorDetail(response);
+    const parsedDetail = await readErrorDetail(response);
     // 错误体读取可能跨过登录/退出边界，过期请求不得发布权限事件。
     assertAuthIdentityCurrent(requestIdentityEpoch);
     if (response.status === 401) {
       publishUnauthorized();
     }
-    if (response.status === 403 && detail === "admin_required") {
+    if (
+      response.status === 403 &&
+      parsedDetail.code === "admin_required"
+    ) {
       publishAdminForbidden();
     }
-    throw new ApiError(response.status, detail);
+    throw new ApiError(
+      response.status,
+      parsedDetail.code,
+      parsedDetail.memberPath === undefined
+        ? undefined
+        : { memberPath: parsedDetail.memberPath },
+    );
   }
   return { identityEpoch: requestIdentityEpoch, response };
 }

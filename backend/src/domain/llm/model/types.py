@@ -94,23 +94,6 @@ class LlmResponse:
 
 
 @dataclass(frozen=True, slots=True)
-class StructuredLlmRequest:
-    """无工具的 Pydantic 结构化输出请求。"""
-
-    request: LlmRequest
-    output_model: type[Any]
-    schema_name: str = "result"
-
-
-@dataclass(frozen=True, slots=True)
-class StructuredLlmResponse:
-    """已通过 Pydantic 验证的结构化结果。"""
-
-    value: Any
-    response: LlmResponse
-
-
-@dataclass(frozen=True, slots=True)
 class TextDelta:
     """文本内容增量。"""
 

@@ -74,6 +74,7 @@ describe("会话消息合并", () => {
     };
     const resultPart = {
       artifact_id: "artifact-1",
+      artifacts: [],
       output: "查询完成",
       status: "completed",
       tool_call_id: "tool-call-1",

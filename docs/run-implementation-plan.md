@@ -3,11 +3,13 @@
 状态：设计方案已获用户整体确认；S1–S6 已完成实施、独立审查及 Root 验收。真实供应商联调尚未执行。
 依据：`docs/run-design.md`。代码核对日期：2026-11-08，分支：`v2`。
 
+> **后续代码状态（2026-11-12）**：旧 Responses Adapter、`LlmService`、`LlmProfile` 及其配置模块已删除。当前 Run 只使用 Chat Completions Adapter 和管理员模型版本；下文涉及保留 Responses 调用方的描述仅为历史实施记录。
+
 ## 1. 交付目标与约束
 
 交付后端完整闭环：提交文本任务 → PostgreSQL 排队 → 独立 Worker 调用 Chat Completions → Redis/SSE 展示增量 → 原子保存完整回复并结束。包含多轮澄清、取消、失败重试、租约回收、模型版本管理和安全 Trace。
 
-保留已有 Responses Adapter 和部署 Profile 调用路径；首期 Run 显式使用新增 Chat Completions Adapter，无协议探测或自动回退。不接入业务工具、子 Agent、执行中追加指令、上下文压缩、前端页面或通用 Trace 平台。
+首期 Run 使用新增 Chat Completions Adapter，无协议探测或自动回退。首期实施时曾保留历史 Responses Adapter 和部署 Profile 调用路径，该通路已于 2026-11-12 删除。不接入业务工具、子 Agent、执行中追加指令、上下文压缩、前端页面或通用 Trace 平台。
 
 以上为 Run 首期实施范围记录。后续上下文压缩方案与实现状态见[上下文压缩实施方案](context-compression-implementation-plan.md)，其中的策略、预算、事件和失败规则适用于后续 Run 执行。
 
@@ -33,9 +35,9 @@
 ### 3.1 修改位置
 
 - `domain/llm/model/`、`domain/llm/ports.py`：增加不可变模型配置版本、凭据引用和配置仓储契约；补充 Run 调用所需配置输入、关闭并行调用的控制和安全错误分类。
-- `app/llm/`：模型版本管理用例、默认选择、启停校验、凭据解析及调用前可用性检查。保留当前 LlmService/Profile 接口供既有调用方使用。
+- `app/llm/`：模型版本管理用例、默认选择、启停校验、凭据解析及调用前可用性检查。当前只保留 `ModelProfileService`；旧 `LlmService`/Profile 接口已删除。
 - `adapter/llm/model/`、`repository/`、`converter/`：新增配置版本及默认指向的持久化。数据库 JSON 明确类型，不存解析后的 API Key。
-- `adapter/llm/openai_chat_completions.py`：新增 Run 所需流式能力及工具调用重组，显式实现适合该能力的端口。不要为凑齐既有完整 LlmProvider 接口实现无需求的结构化能力；必要时拆出最小流式端口，让既有 Provider 兼容继承，避免影响旧调用方。
+- `adapter/llm/openai_chat_completions.py`：新增 Run 所需流式能力及工具调用重组，显式实现适合该能力的端口。旧完整 `LlmProvider` 接口已删除；当前只保留 Run 流式与 runtime 文本能力，不实现无需求的结构化接口。
 - `api/llm.py`、对应 DTO/converter：管理员创建/读取版本、启停、读取/设置默认；复用 AdminAuth，并按现有约定在管理服务执行最终管理员身份复核。
 - `main.py`、`adapter/models.py`：注册配置服务、路由及模型；客户端资源按创建者负责关闭。
 

@@ -1,6 +1,8 @@
 # LLM 模块实施方案
 
-状态：原始 Responses API 提案。当前生产 Run 路径使用管理员后台配置的 Chat Completions Profile；Responses 服务仅作为调用方显式注入的低层组件保留，应用不会从环境或 Run Profile 自动构建它。
+> **废弃状态（2026-11-12）**：本方案对应的 `openai_responses.py`、`app/llm/service.py`、`app/llm/config.py` 及旧 `LlmService`/`LlmProfile`/Responses 结构化输出契约已删除，不再作为生产保留能力。当前生产 Run 路径使用管理员后台配置的 Chat Completions 模型版本与 `OpenAIChatCompletionsAdapter`。
+
+状态：原始 Responses API 提案，已废弃；相关文件已删除，仅保留历史实施记录。
 
 ## 1. 当前项目与目标
 
@@ -39,7 +41,7 @@
 - LLM Profile 和 API Key 由管理员后台管理；API Key 以 AES-GCM 密文持久化，部署密钥仅用于加密和解密，不提供供应商配置。缺少密钥的旧模型会停用；默认模型及当前压缩策略指针清除，历史版本和 Run 快照保留，管理员需重新配置模型与压缩策略。升级后旧 Run 仍固定原压缩策略；若其模型不可用，Run 会回退到完整上下文继续执行，超出模型上下文窗口时才会失败。管理员停用当前策略模型时，策略配置和新 Run 快照保持不变，Run 会回退到完整上下文继续执行，超出模型上下文窗口时才会失败。
 - 能力明确列出 tools、stream、structured 和支持的生成参数。请求要求未声明能力则调用前失败；可选参数仅在受支持时发送。请求可设置更严格的超时/大小限制，不得突破部署上限；明确区分请求的输出 token 上限和本地字节、工具数量上限。
 - 按实际连接配置及凭据身份复用客户端；不同凭据不共用。并发配额按 Profile 独立限制，等待、调用和流消费均在受控时限内；流持有配额至关闭。明确错误与取消路径都释放配额，不在日志或对象展示中泄露秘密。
-- `create_app` 保留显式注入的低层 Responses 服务，注入对象由调用方管理；生产管理员配置驱动 Run Chat Completions。应用不会从部署变量自动构建 Responses 服务。
+- `create_app` 不再保留低层 Responses 服务注入位；生产管理员配置驱动 Run Chat Completions。历史 Responses 服务已删除，应用也不会从部署变量自动构建它。
 - 限制及默认值在代码和文档中统一定义并验证；数值属于实施提案，需在编码前定稿，不依赖请求方自行限流。SDK 的 `max_retries=0`，应用层也不重试。
 
 ## 5. 协议、流与错误

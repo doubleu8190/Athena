@@ -2,6 +2,7 @@ import { apiRequest } from "../../shared/api/client";
 import type {
   ConversationMessagePage,
   Run,
+  RunEventListResponse,
   RunListResponse,
   RunToolCallDetail,
   RunToolCallListResponse,
@@ -47,14 +48,37 @@ export function getRun(sessionId: string, runId: string): Promise<Run> {
   return apiRequest<Run>(runPath(sessionId, runId), { method: "GET" });
 }
 
+export function listRunEvents(
+  sessionId: string,
+  runId: string,
+  afterSequence = 0,
+  limit = 100,
+): Promise<RunEventListResponse> {
+  const params = new URLSearchParams({
+    after_sequence: String(afterSequence),
+    limit: String(limit),
+  });
+  return apiRequest<RunEventListResponse>(
+    `${runPath(sessionId, runId)}/events?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
 export function submitRun(
   sessionId: string,
   requestId: string,
   text: string,
+  skillIds: string[] = [],
+  inputFileIds: string[] = [],
 ): Promise<Run> {
   return apiRequest<Run>(sessionRunsPath(sessionId), {
     method: "POST",
-    body: { request_id: requestId, text },
+    body: {
+      request_id: requestId,
+      text,
+      skill_ids: skillIds,
+      input_file_ids: inputFileIds,
+    },
   });
 }
 
@@ -71,7 +95,10 @@ export function retryRun(
 ): Promise<Run> {
   return apiRequest<Run>(`${runPath(sessionId, runId)}/retry`, {
     method: "POST",
-    body: { request_id: requestId, confirm_unknown: true },
+    body: {
+      request_id: requestId,
+      confirm_unknown: true,
+    },
   });
 }
 
@@ -81,6 +108,7 @@ export function answerRunInput(
   inputRequestId: string,
   requestId: string,
   text: string,
+  inputFileIds: string[] = [],
 ): Promise<Run> {
   return apiRequest<Run>(
     `${runPath(sessionId, runId)}/input-requests/${encodeURIComponent(
@@ -88,7 +116,11 @@ export function answerRunInput(
     )}/answer`,
     {
       method: "POST",
-      body: { request_id: requestId, text },
+      body: {
+        request_id: requestId,
+        text,
+        input_file_ids: inputFileIds,
+      },
     },
   );
 }

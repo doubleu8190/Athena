@@ -35,6 +35,7 @@ from app.run.stream import RunStreamService
 from domain.run.model import MAX_RUN_SSE_EVENT_BYTES, MAX_RUN_SSE_SNAPSHOT_BYTES
 from domain.run.model.errors import (
     RunConflictError,
+    RunInputResourceError,
     RunNotFoundError,
     RunStateError,
     ToolRetryConfirmationRequiredError,
@@ -90,13 +91,15 @@ def build_run_router(
                 current_auth.user.id,
                 request.request_id,
                 request.text,
+                skill_ids=tuple(request.skill_ids),
+                input_file_ids=tuple(request.input_file_ids),
                 auth_session_id=current_auth.session_id,
             )
         except (RunNotFoundError, SessionNotFoundError) as error:
             raise _not_found(error) from error
         except (RunConflictError, RunStateError) as error:
             raise _conflict(error) from error
-        except InvalidRunInputError as error:
+        except (InvalidRunInputError, RunInputResourceError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         response.headers["Location"] = f"/api/v1/sessions/{session_id}/runs/{result.run.id}"
         return run_to_response(result.run, replayed=result.replayed)
@@ -115,7 +118,7 @@ def build_run_router(
             )
         except SessionNotFoundError as error:
             raise _not_found(error) from error
-        except InvalidRunInputError as error:
+        except (InvalidRunInputError, RunInputResourceError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @router.get("/{run_id}", response_model=RunResponse)
@@ -174,7 +177,7 @@ def build_run_router(
             ) from error
         except (RunConflictError, RunStateError) as error:
             raise _conflict(error) from error
-        except InvalidRunInputError as error:
+        except (InvalidRunInputError, RunInputResourceError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @router.post(
@@ -197,6 +200,7 @@ def build_run_router(
                 input_request_id,
                 request.request_id,
                 request.text,
+                input_file_ids=tuple(request.input_file_ids),
                 auth_session_id=current_auth.session_id,
             )
             return run_to_response(run)
@@ -204,7 +208,7 @@ def build_run_router(
             raise _not_found(error) from error
         except (RunConflictError, RunStateError) as error:
             raise _conflict(error) from error
-        except InvalidRunInputError as error:
+        except (InvalidRunInputError, RunInputResourceError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     @router.get("/{run_id}/events", response_model=RunEventListResponse)

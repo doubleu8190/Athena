@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from domain.message import ConversationMessage, ConversationMessageDraft, ExecutionMessageDraft
+from domain.skill import RunSkillSnapshot
 from domain.tool import (
     RuntimeToolSnapshot,
     ToolApprovalDecision,
@@ -82,6 +83,36 @@ class RunUsage(BaseModel):
     legacy_total_tokens: int | None = Field(default=None, ge=0)
     legacy_answer_tokens: int | None = Field(default=None, ge=0)
     legacy_complete: bool = False
+
+
+class RunInputFiles(BaseModel):
+    """Run 创建与澄清过程中由用户明确关联的会话文件集合。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[1] = 1
+    file_ids: tuple[str, ...] = ()
+
+    def model_post_init(self, __context: object) -> None:
+        if len(self.file_ids) != len(set(self.file_ids)):
+            raise ValueError("run_input_file_ids_duplicate")
+
+    @property
+    def ids(self) -> list[str]:
+        """返回持久化 JSON 使用的稳定列表。"""
+        return list(self.file_ids)
+
+
+@dataclass(frozen=True, slots=True)
+class RunInputFileContext:
+    """经鉴权后供模型引用的最小文件元数据。"""
+
+    file_id: str
+    filename: str
+    label: str | None
+    mime_type: str
+    size_bytes: int
+    source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +301,8 @@ class Run:
     tool_snapshot: RuntimeToolSnapshot | None = None
     auth_session_id: str | None = None
     llm_request_count: int = 0
+    skill_snapshot: RunSkillSnapshot | None = None
+    input_files: RunInputFiles = RunInputFiles()
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +364,8 @@ class SubmitRunCommand:
     prompt_template_version: str
     message: ConversationMessageDraft
     queued_at: datetime
+    selected_skill_ids: tuple[str, ...] = ()
+    input_files: RunInputFiles = RunInputFiles()
     auth_session_id: str | None = None
 
 
@@ -354,6 +389,7 @@ class AnswerRunCommand:
     answer_message: ConversationMessageDraft
     execution_message: ExecutionMessageDraft
     queued_at: datetime
+    input_files: RunInputFiles = RunInputFiles()
     auth_session_id: str | None = None
 
 
@@ -417,6 +453,7 @@ __all__ = [
     "RunEventPayload",
     "RunFailedPayload",
     "RunInputRequest",
+    "RunInputFiles",
     "RunInputCall",
     "RunLease",
     "RunQueuedPayload",

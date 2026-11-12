@@ -2,6 +2,8 @@
 
 状态：核心产品规则与实施方案均已确认并实施。独立 Reviewer 第 2 轮结论为 PASS，Root 已于 2026-11-09 完成后端验收；真实外部模型联调尚未执行。
 
+> **模块状态（2026-11-12）**：旧通用 `LlmProvider` 已删除；压缩仍使用 `domain/llm/ports.py` 中固定 runtime 配置的 `LlmRuntimeTextProvider`，由 Chat Completions Adapter 实现。历史 Responses 低层通路不再是当前依赖。
+
 ## 1. 目标与范围
 
 系统自动将较早会话整理成摘要，使长会话能继续调用 LLM。原始消息与用户查看的聊天记录完整保留。摘要归属于当前 Session，只服务上下文组织，不自动写入长期记忆。
@@ -24,7 +26,7 @@
 | `backend/src/app/run/stream.py`、`backend/src/domain/run/model/stream.py` | Run 事件与快照流 | 支持压缩事件重放与状态恢复 |
 | `backend/src/domain/llm/model/profile.py`、`backend/src/app/llm/profile_service.py` | 持久化模型版本、启停、默认选择与管理员鉴权 | 独立选择压缩模型版本，沿用凭据引用与启停规则 |
 | `backend/src/api/llm.py` | `/api/v1/admin/llm/model-profiles` 管理模型配置 | 增加独立压缩策略管理入口，不改变主模型默认指向 |
-| `backend/src/domain/llm/ports.py` | 通用 LlmProvider 有 complete；Run 使用的 LlmStreamProvider 仅支持 runtime 流式调用 | 为 runtime 模型提供无工具文本生成能力，不能假定通用旧 Profile 接口可直接复用 |
+| `backend/src/domain/llm/ports.py` | 旧通用 `LlmProvider` 已删除；当前保留 `LlmStreamProvider` 和 `LlmRuntimeTextProvider`，均使用固定 runtime 配置 | 压缩通过 runtime 无工具文本生成能力执行，不复用旧 Profile 接口 |
 | `backend/src/app/run/prompt.py` | 按 Run 固定提示模板版本生成系统提示 | 加入摘要解释规则，摘要内容不提升为系统指令 |
 
 `docs/run-design.md` 中首期“不压缩、超窗失败”的规则是原 Run 阶段范围；本设计整体确认并实施后，才由本文替代其中的上下文压缩限制。模型返回的超窗仍需明确失败，不能静默截断。

@@ -1,0 +1,714 @@
+"""Skill 管理目录、Run 快照与脚本附加记录的 SQLAlchemy 仓储。"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import datetime
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
+from adapter.run.model import RunToolCallModel
+from adapter.skill.converter import (
+    skill_execution_to_domain,
+    skill_to_domain,
+    skill_version_to_domain,
+)
+from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from domain.auth import AuthContext, UserRole
+from domain.file import PendingSessionFile
+from domain.skill.model import (
+    DependencyCheck,
+    DependencyCheckStatus,
+    RunSkillEntry,
+    RunSkillSnapshot,
+    Skill,
+    SkillConflictError,
+    SkillExecutionArtifact,
+    SkillExecutionRecord,
+    SkillExecutionStart,
+    SkillExecutionStatus,
+    SkillImportRequestResult,
+    SkillNotFoundError,
+    SkillPackageManifest,
+    SkillVersion,
+    SkillVersionPage,
+)
+from domain.skill.ports import SkillRepository
+
+
+async def build_run_skill_snapshot(
+    session: AsyncSession,
+    selected_skill_ids: tuple[str, ...],
+) -> RunSkillSnapshot:
+    """在当前 Run 创建事务中读取一条一致目录并固定版本。"""
+    if len(selected_skill_ids) != len(set(selected_skill_ids)):
+        raise SkillConflictError("skill_selection_invalid")
+    rows = (
+        await session.execute(
+            select(SkillModel, SkillVersionModel)
+            .join(
+                SkillVersionModel,
+                SkillVersionModel.id == SkillModel.current_version_id,
+            )
+            .where(SkillModel.enabled.is_(True))
+            .order_by(SkillModel.slug, SkillModel.id)
+        )
+    ).all()
+    available: list[tuple[SkillModel, SkillVersionModel]] = []
+    for skill_row, version_row in rows:
+        # 持久化 dependency_check 只是上次探测快照，不能成为新 Run 的永久门禁；
+        # 实际脚本执行前仍会实时复核，这里只验证目录和不可变清单完整性。
+        # 清单解析失败说明不可变记录损坏，不能让 Run 以不完整目录继续。
+        version = skill_version_to_domain(version_row)
+        available.append((skill_row, version_row))
+        if version.manifest.slug != skill_row.slug:
+            raise SkillConflictError("skill_catalog_integrity_invalid")
+    available_ids = {skill.id for skill, _ in available}
+    if not set(selected_skill_ids) <= available_ids:
+        raise SkillConflictError("skill_selection_unavailable")
+    selected_set = set(selected_skill_ids)
+    catalog = tuple(
+        RunSkillEntry(
+            skill_id=skill.id,
+            slug=skill.slug,
+            name=SkillPackageManifest.model_validate(version.manifest).name,
+            description=SkillPackageManifest.model_validate(version.manifest).description,
+            version_id=version.id,
+            version_label=version.label,
+            requires_approval=skill.script_requires_approval,
+        )
+        for skill, version in available
+    )
+    selected_in_catalog = tuple(item.skill_id for item in catalog if item.skill_id in selected_set)
+    return RunSkillSnapshot(
+        skills=catalog,
+        selected_skill_ids=selected_in_catalog,
+    )
+
+
+class SqlAlchemySkillRepository(SkillRepository):
+    """在管理员事务内维护稳定身份和不可变版本指针。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """保存共享数据库会话工厂。"""
+        self._session_factory = session_factory
+
+    async def list_skills(self) -> tuple[Skill, ...]:
+        """按 slug 稳定读取全部管理目录项。"""
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .outerjoin(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .order_by(SkillModel.slug, SkillModel.id)
+                )
+            ).all()
+        return tuple(skill_to_domain(row, version) for row, version in rows)
+
+    async def get_skill(self, skill_id: str) -> Skill | None:
+        """读取一个管理目录项及其当前版本展示元数据。"""
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .outerjoin(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .where(SkillModel.id == skill_id)
+                )
+            ).one_or_none()
+        return None if row is None else skill_to_domain(row[0], row[1])
+
+    async def get_public_directory(self) -> tuple[Skill, ...]:
+        """读取全部已启用候选，依赖状态由服务层实时探测。"""
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .join(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .where(
+                        SkillModel.enabled.is_(True),
+                    )
+                    .order_by(SkillModel.slug, SkillModel.id)
+                )
+            ).all()
+        return tuple(skill_to_domain(row, version) for row, version in rows)
+
+    async def list_versions(
+        self, skill_id: str, *, page: int, page_size: int
+    ) -> SkillVersionPage | None:
+        """分页读取不可变版本历史。"""
+        if page < 1 or not 1 <= page_size <= 100:
+            raise ValueError("skill_version_page_invalid")
+        async with self._session_factory() as session:
+            exists = await session.scalar(
+                select(SkillModel.id).where(SkillModel.id == skill_id)
+            )
+            if exists is None:
+                return None
+            total = int(
+                (
+                    await session.scalar(
+                        select(func.count(SkillVersionModel.id)).where(
+                            SkillVersionModel.skill_id == skill_id
+                        )
+                    )
+                )
+                or 0
+            )
+            rows = (
+                await session.scalars(
+                    select(SkillVersionModel)
+                    .where(SkillVersionModel.skill_id == skill_id)
+                    .order_by(
+                        SkillVersionModel.ordinal.desc(),
+                        SkillVersionModel.id.desc(),
+                    )
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                )
+            ).all()
+        return SkillVersionPage(
+            items=tuple(skill_version_to_domain(row) for row in rows),
+            total=total,
+        )
+
+    async def get_version(self, version_id: str) -> SkillVersion | None:
+        """读取任意不可变版本。"""
+        async with self._session_factory() as session:
+            row = await session.get(SkillVersionModel, version_id)
+        return None if row is None else skill_version_to_domain(row)
+
+    async def create_skill(
+        self,
+        *,
+        skill_id: str,
+        version_id: str,
+        label: str,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> tuple[Skill, SkillVersion]:
+        """原子插入身份和首个未启用版本；重复 slug 由唯一约束兜底。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_admin(session, actor)
+                    skill_row = SkillModel(
+                        id=skill_id,
+                        slug=manifest.slug,
+                        current_version_id=None,
+                        enabled=False,
+                        script_requires_approval=False,
+                        revision=1,
+                        created_by=actor.user.id,
+                        created_at=created_at,
+                        updated_at=created_at,
+                    )
+                    session.add(skill_row)
+                    await session.flush()
+                    version_row = self._version_model(
+                        version_id=version_id,
+                        skill_id=skill_id,
+                        ordinal=1,
+                        label=label,
+                        manifest=manifest,
+                        object_key=object_key,
+                        package_sha256=package_sha256,
+                        dependency_check=dependency_check,
+                        created_by=actor.user.id,
+                        request_operation="import",
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        request_target_skill_id=None,
+                        created_at=created_at,
+                    )
+                    session.add(version_row)
+                    await session.flush()
+                    return (
+                        skill_to_domain(skill_row, version_row),
+                        skill_version_to_domain(version_row),
+                    )
+        except IntegrityError as error:
+            replay = await self._read_import_result(
+                actor,
+                operation="import",
+                target_skill_id=None,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                return replay.skill, replay.version
+            raise SkillConflictError("skill_slug_exists") from error
+
+    async def add_version(
+        self,
+        skill_id: str,
+        *,
+        version_id: str,
+        label: str | None,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> SkillVersion | None:
+        """追加完整新版本，不改变当前指针、启用状态或审批配置。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_admin(session, actor)
+                    skill_row = await session.scalar(
+                        select(SkillModel)
+                        .where(SkillModel.id == skill_id)
+                        .with_for_update()
+                    )
+                    if skill_row is None:
+                        return None
+                    if skill_row.slug != manifest.slug:
+                        raise SkillConflictError("skill_slug_mismatch")
+                    ordinal = (
+                        int(
+                            (
+                                await session.scalar(
+                                    select(func.max(SkillVersionModel.ordinal)).where(
+                                        SkillVersionModel.skill_id == skill_id
+                                    )
+                                )
+                            )
+                            or 0
+                        )
+                        + 1
+                    )
+                    version_row = self._version_model(
+                        version_id=version_id,
+                        skill_id=skill_id,
+                        ordinal=ordinal,
+                        label=label or f"v{ordinal}",
+                        manifest=manifest,
+                        object_key=object_key,
+                        package_sha256=package_sha256,
+                        dependency_check=dependency_check,
+                        created_by=actor.user.id,
+                        request_operation="add_version",
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        request_target_skill_id=skill_id,
+                        created_at=created_at,
+                    )
+                    session.add(version_row)
+                    await session.flush()
+                    return skill_version_to_domain(version_row)
+        except IntegrityError as error:
+            replay = await self._read_import_result(
+                actor,
+                operation="add_version",
+                target_skill_id=skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                return replay.version
+            raise SkillConflictError("skill_version_conflict") from error
+
+    async def find_import_result(
+        self,
+        actor: AuthContext,
+        *,
+        operation: str,
+        target_skill_id: str | None,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> SkillImportRequestResult | None:
+        """在写对象前查询导入请求键，网络重试不会生成第二个版本。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_admin(session, actor)
+                return await self._read_import_result_in_session(
+                    session,
+                    actor,
+                    operation=operation,
+                    target_skill_id=target_skill_id,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                )
+
+    async def update_configuration(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: int,
+        enabled: bool,
+        current_version_id: str,
+        script_requires_approval: bool,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        updated_at: datetime,
+    ) -> Skill | None:
+        """以修订号 CAS 原子切换版本、启停和脚本审批。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_admin(session, actor)
+                skill_row = await session.scalar(
+                    select(SkillModel)
+                    .where(SkillModel.id == skill_id)
+                    .with_for_update()
+                )
+                if skill_row is None:
+                    return None
+                if skill_row.revision != expected_revision:
+                    raise SkillConflictError("skill_revision_conflict")
+                version_row = await session.scalar(
+                    select(SkillVersionModel).where(
+                        SkillVersionModel.id == current_version_id,
+                        SkillVersionModel.skill_id == skill_id,
+                    )
+                )
+                if version_row is None:
+                    raise SkillNotFoundError("skill_version_not_found")
+                if enabled and dependency_check.status is not DependencyCheckStatus.SATISFIED:
+                    raise ValueError("skill_dependency_unsatisfied")
+                version_row.dependency_check = dependency_check.model_dump(mode="json")
+                if (
+                    skill_row.current_version_id != current_version_id
+                    or skill_row.enabled != enabled
+                    or skill_row.script_requires_approval != script_requires_approval
+                ):
+                    skill_row.current_version_id = current_version_id
+                    skill_row.enabled = enabled
+                    skill_row.script_requires_approval = script_requires_approval
+                    skill_row.revision += 1
+                    skill_row.updated_at = updated_at
+                    await session.flush()
+                return skill_to_domain(skill_row, version_row)
+
+    async def record_dependency_check(
+        self,
+        version_id: str,
+        dependency_check: DependencyCheck,
+    ) -> SkillVersion | None:
+        """刷新依赖检查记录，不修改 manifest、对象键或包摘要。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(SkillVersionModel)
+                    .where(SkillVersionModel.id == version_id)
+                    .with_for_update()
+                )
+                if row is None:
+                    return None
+                row.dependency_check = dependency_check.model_dump(mode="json")
+                await session.flush()
+                return skill_version_to_domain(row)
+
+    async def start_script_execution(
+        self,
+        *,
+        execution_id: str,
+        run_id: str,
+        session_id: str,
+        tool_call_record_id: str,
+        skill_id: str,
+        skill_version_id: str,
+        script_path: str,
+        input_file_ids: tuple[str, ...],
+        parameters_sha256: str,
+        python_version: str,
+        dependency_check: DependencyCheck,
+        created_at: datetime,
+    ) -> SkillExecutionStart | None:
+        """以工具调用唯一约束保证同一调用只有一条脚本附加记录。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    call = await session.scalar(
+                        select(RunToolCallModel).where(
+                            RunToolCallModel.id == tool_call_record_id,
+                            RunToolCallModel.run_id == run_id,
+                            RunToolCallModel.session_id == session_id,
+                        )
+                    )
+                    if call is None:
+                        raise SkillNotFoundError("skill_tool_call_not_found")
+                    existing = await session.scalar(
+                        select(SkillExecutionModel)
+                        .where(
+                            SkillExecutionModel.tool_call_record_id
+                            == tool_call_record_id
+                        )
+                        .with_for_update()
+                    )
+                    if existing is not None:
+                        return self._existing_execution_start(
+                            existing,
+                            run_id=run_id,
+                            session_id=session_id,
+                            skill_id=skill_id,
+                            skill_version_id=skill_version_id,
+                            script_path=script_path,
+                            input_file_ids=input_file_ids,
+                            parameters_sha256=parameters_sha256,
+                        )
+                    row = SkillExecutionModel(
+                        id=execution_id,
+                        run_id=run_id,
+                        session_id=session_id,
+                        tool_call_record_id=tool_call_record_id,
+                        skill_id=skill_id,
+                        skill_version_id=skill_version_id,
+                        script_path=script_path,
+                        input_file_ids=list(input_file_ids),
+                        parameters_sha256=parameters_sha256,
+                        python_version=python_version,
+                        dependency_check=dependency_check.model_dump(mode="json"),
+                        status=SkillExecutionStatus.RUNNING.value,
+                        log_object_key=None,
+                        log_truncated=False,
+                        log_error_code=None,
+                        error_code=None,
+                        cleanup_error_code=None,
+                        result_artifacts=[],
+                        created_at=created_at,
+                        finished_at=None,
+                    )
+                    session.add(row)
+                    await session.flush()
+                    return SkillExecutionStart(
+                        record=skill_execution_to_domain(row),
+                        created=True,
+                    )
+        except IntegrityError:
+            # 两个并发请求可能同时通过“无记录”检查；唯一约束只会放行一个，
+            # 败者必须在事务回滚后重读胜者，绝不能把插入失败当成可重试的新执行。
+            async with self._session_factory() as session:
+                existing = await session.scalar(
+                    select(SkillExecutionModel).where(
+                        SkillExecutionModel.tool_call_record_id == tool_call_record_id
+                    )
+                )
+            if existing is None:
+                # 不是同一工具调用的并发重复；保留原始完整性错误供上层定位。
+                raise
+            return self._existing_execution_start(
+                existing,
+                run_id=run_id,
+                session_id=session_id,
+                skill_id=skill_id,
+                skill_version_id=skill_version_id,
+                script_path=script_path,
+                input_file_ids=input_file_ids,
+                parameters_sha256=parameters_sha256,
+            )
+
+    @staticmethod
+    def _existing_execution_start(
+        existing: SkillExecutionModel,
+        *,
+        run_id: str,
+        session_id: str,
+        skill_id: str,
+        skill_version_id: str,
+        script_path: str,
+        input_file_ids: tuple[str, ...],
+        parameters_sha256: str,
+    ) -> SkillExecutionStart:
+        """校验既有记录与本次请求一致，并明确标记为非本次新建。"""
+        matches = (
+            existing.run_id == run_id
+            and existing.session_id == session_id
+            and existing.skill_id == skill_id
+            and existing.skill_version_id == skill_version_id
+            and existing.script_path == script_path
+            and tuple(existing.input_file_ids) == input_file_ids
+            and existing.parameters_sha256 == parameters_sha256
+        )
+        if not matches:
+            raise SkillConflictError("skill_execution_request_conflict")
+        return SkillExecutionStart(
+            record=skill_execution_to_domain(existing),
+            created=False,
+        )
+
+    async def finish_script_execution(
+        self,
+        execution_id: str,
+        *,
+        status: SkillExecutionStatus,
+        log_object_key: str | None,
+        log_truncated: bool,
+        log_error_code: str | None,
+        error_code: str | None,
+        cleanup_error_code: str | None,
+        artifacts: Sequence[PendingSessionFile],
+        finished_at: datetime,
+    ) -> SkillExecutionRecord | None:
+        """保存脚本终态；已完成的相同调用幂等返回原记录。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(SkillExecutionModel)
+                    .where(SkillExecutionModel.id == execution_id)
+                    .with_for_update()
+                )
+                if row is None:
+                    return None
+                if row.status != SkillExecutionStatus.RUNNING.value:
+                    return skill_execution_to_domain(row)
+                row.status = status.value
+                row.log_object_key = log_object_key
+                row.log_truncated = log_truncated
+                row.log_error_code = log_error_code
+                row.error_code = error_code
+                row.cleanup_error_code = cleanup_error_code
+                row.result_artifacts = [
+                    SkillExecutionArtifact(
+                        file_id=item.id,
+                        filename=item.filename,
+                        label=item.label,
+                        mime_type=item.mime_type,
+                        size_bytes=item.size_bytes,
+                        sha256=item.sha256,
+                        object_key=item.object_key,
+                        output_index=item.output_index,
+                    ).model_dump(mode="json")
+                    for item in artifacts
+                ]
+                row.finished_at = finished_at
+                await session.flush()
+                return skill_execution_to_domain(row)
+
+    async def get_script_execution(
+        self, tool_call_record_id: str
+    ) -> SkillExecutionRecord | None:
+        """读取与现有工具调用一对一的附加记录。"""
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(SkillExecutionModel).where(
+                    SkillExecutionModel.tool_call_record_id == tool_call_record_id
+                )
+            )
+        return None if row is None else skill_execution_to_domain(row)
+
+    async def get_admin_execution(self, call_id: str) -> SkillExecutionRecord | None:
+        """读取管理员排查所需的脚本元数据和日志对象引用。"""
+        return await self.get_script_execution(call_id)
+
+    async def _read_import_result(
+        self,
+        actor: AuthContext,
+        *,
+        operation: str,
+        target_skill_id: str | None,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> SkillImportRequestResult | None:
+        """唯一约束冲突后在新事务中读取已提交的胜者。"""
+        async with self._session_factory() as session:
+            return await self._read_import_result_in_session(
+                session,
+                actor,
+                operation=operation,
+                target_skill_id=target_skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+
+    @staticmethod
+    async def _read_import_result_in_session(
+        session: AsyncSession,
+        actor: AuthContext,
+        *,
+        operation: str,
+        target_skill_id: str | None,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> SkillImportRequestResult | None:
+        """校验请求键绑定的内容和目标，再返回原版本。"""
+        row = await session.scalar(
+            select(SkillVersionModel).where(
+                SkillVersionModel.created_by == actor.user.id,
+                SkillVersionModel.request_operation == operation,
+                SkillVersionModel.idempotency_key == idempotency_key,
+            )
+        )
+        if row is None:
+            return None
+        if (
+            row.request_fingerprint != request_fingerprint
+            or row.request_target_skill_id != target_skill_id
+        ):
+            raise SkillConflictError("idempotency_conflict")
+        skill_row = await session.get(SkillModel, row.skill_id)
+        if skill_row is None:
+            raise SkillConflictError("skill_catalog_integrity_invalid")
+        return SkillImportRequestResult(
+            skill=skill_to_domain(skill_row, row),
+            version=skill_version_to_domain(row),
+        )
+
+    @staticmethod
+    async def _require_admin(session: AsyncSession, actor: AuthContext) -> None:
+        """在管理写事务内重新锁定并校验当前管理员身份。"""
+        guard = SqlAlchemyAuthTransactionGuard(session)
+        user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
+        if user is None or user.role is not UserRole.ADMIN:
+            raise PermissionError("admin_required")
+
+    @staticmethod
+    def _version_model(
+        *,
+        version_id: str,
+        skill_id: str,
+        ordinal: int,
+        label: str,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        created_by: str,
+        request_operation: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        request_target_skill_id: str | None,
+        created_at: datetime,
+    ) -> SkillVersionModel:
+        """构造不可变版本行，集中避免漏存显式清单字段。"""
+        return SkillVersionModel(
+            id=version_id,
+            skill_id=skill_id,
+            ordinal=ordinal,
+            label=label,
+            guide=manifest.guide,
+            manifest=manifest.model_dump(mode="json"),
+            object_key=object_key,
+            package_sha256=package_sha256,
+            dependency_requirements=list(manifest.dependencies),
+            dependency_check=dependency_check.model_dump(mode="json"),
+            created_by=created_by,
+            request_operation=request_operation,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            request_target_skill_id=request_target_skill_id,
+            created_at=created_at,
+        )
+
+
+__all__ = ["SqlAlchemySkillRepository", "build_run_skill_snapshot"]

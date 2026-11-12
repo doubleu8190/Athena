@@ -116,6 +116,15 @@ class RunModel(Base):
     main_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    skill_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), nullable=True
+    )
+    input_file_ids: Mapped[list[str]] = mapped_column(
+        _json_type(),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
     tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
     auth_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     llm_request_count: Mapped[int] = mapped_column(

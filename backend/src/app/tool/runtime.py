@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
+from app.file.service import FileInputError, SessionFileService
 from app.knowledge.service import (
     KnowledgeInputError,
     KnowledgeNotFoundError,
@@ -19,10 +20,15 @@ from app.knowledge.service import (
 from app.memory.service import MemoryService
 from app.project.knowledge import KnowledgeNotFoundError as ProjectKnowledgeNotFoundError
 from app.project.knowledge import ProjectKnowledgeService
+from app.skill.errors import public_skill_error_code
+from app.skill.execution_service import SkillExecutionService
+from app.skill.service import SkillService
+from app.skill.tooling import summarize_parameters
 from app.tool.ports import RunToolRuntime
 from common.date import utc_now
 from common.json import utf8_size
 from domain.auth.ports import CurrentSessionReader
+from domain.file import SessionFile, TextFileReadError
 from domain.knowledge.model import SearchResult
 from domain.mcp import (
     McpCallResult,
@@ -32,7 +38,22 @@ from domain.mcp import (
 )
 from domain.memory.model import AccessContext, RecallRequest
 from domain.project import ProjectNotFoundError
+from domain.run import Run, RunInputFileContext
 from domain.session import SessionRepository, SessionScope
+from domain.skill import (
+    SESSION_FILE_LIST_TOOL_ID,
+    SESSION_FILE_READ_TOOL_ID,
+    SKILL_EXECUTE_TOOL_ID,
+    SKILL_LOAD_TOOL_ID,
+    SKILL_READ_RESOURCE_TOOL_ID,
+    RunSkillPromptContext,
+    SafeSkillApprovalProjection,
+    SafeSkillInputFile,
+    SkillDependencyUnsatisfiedError,
+    SkillExecutionStatus,
+    SkillNotFoundError,
+    SkillPackageError,
+)
 from domain.tool import (
     MAX_TOOL_ARGUMENT_BYTES,
     AuthorizedRunContext,
@@ -40,6 +61,7 @@ from domain.tool import (
     McpToolSource,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
+    ToolCallPreparation,
     ToolExecutionContext,
     ToolExecutionResult,
     ToolOutcome,
@@ -111,6 +133,114 @@ KNOWLEDGE_SEARCH_DEFINITION = RuntimeToolDefinition(
     requires_approval=False,
 )
 
+SKILL_LOAD_DEFINITION = RuntimeToolDefinition(
+    tool_id=SKILL_LOAD_TOOL_ID,
+    model_name="skill_load",
+    description=(
+        "加载当前 Run 固定目录中的一个 Skill。成功后的完整指南会进入下一轮基础上下文；"
+        "返回资源与登记脚本清单，不执行脚本。"
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {"skill_id": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "required": ["skill_id"],
+        "additionalProperties": False,
+    },
+    source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
+)
+
+SKILL_READ_RESOURCE_DEFINITION = RuntimeToolDefinition(
+    tool_id=SKILL_READ_RESOURCE_TOOL_ID,
+    model_name="skill_read_resource",
+    description="按当前 Run 固定 Skill 版本分段读取一个文本资源。",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "path": {"type": "string", "minLength": 1, "maxLength": 512},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "limit_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65536,
+                "default": 65536,
+            },
+        },
+        "required": ["skill_id", "path"],
+        "additionalProperties": False,
+    },
+    source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
+)
+
+SKILL_EXECUTE_DEFINITION = RuntimeToolDefinition(
+    tool_id=SKILL_EXECUTE_TOOL_ID,
+    model_name="skill_execute",
+    description=(
+        "执行当前 Run 固定 Skill 中登记的 Python 脚本。必须显式提供结构化参数和当前会话"
+        "输入文件；是否要求用户审批由 Run 创建时冻结的 Skill 策略决定。"
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "skill_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "script_path": {"type": "string", "minLength": 1, "maxLength": 512},
+            "parameters": {"type": "object"},
+            "input_file_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                "maxItems": 100,
+                "uniqueItems": True,
+                "default": [],
+            },
+        },
+        "required": ["skill_id", "script_path", "parameters"],
+        "additionalProperties": False,
+    },
+    source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
+)
+
+SESSION_FILE_LIST_DEFINITION = RuntimeToolDefinition(
+    tool_id=SESSION_FILE_LIST_TOOL_ID,
+    model_name="session_file_list",
+    description="按稳定顺序列出当前会话中可引用的上传文件和产物。",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "after_file_id": {"type": ["string", "null"], "maxLength": 128},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+        },
+        "additionalProperties": False,
+    },
+    source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
+)
+
+SESSION_FILE_READ_DEFINITION = RuntimeToolDefinition(
+    tool_id=SESSION_FILE_READ_TOOL_ID,
+    model_name="session_file_read",
+    description="严格按 UTF-8 字符边界分段读取当前会话白名单文本文件。",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "file_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "limit_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65536,
+                "default": 65536,
+            },
+        },
+        "required": ["file_id"],
+        "additionalProperties": False,
+    },
+    source=BuiltinToolSource(version=BUILTIN_VERSION),
+    requires_approval=False,
+)
+
 
 class RunToolRuntimeService(RunToolRuntime):
     """Build a frozen catalog and execute one validated tool without retries."""
@@ -126,6 +256,9 @@ class RunToolRuntimeService(RunToolRuntime):
         memory_enabled: bool,
         knowledge: KnowledgeService | None,
         project_knowledge: ProjectKnowledgeService | None,
+        skills: SkillService | None = None,
+        session_files: SessionFileService | None = None,
+        skill_execution: SkillExecutionService | None = None,
         clock: Any = utc_now,
     ) -> None:
         self._auth = auth
@@ -136,6 +269,9 @@ class RunToolRuntimeService(RunToolRuntime):
         self._memory_enabled = memory_enabled
         self._knowledge = knowledge
         self._project_knowledge = project_knowledge
+        self._skills = skills
+        self._session_files = session_files
+        self._skill_execution = skill_execution
         self._clock = clock
 
     async def authorize(
@@ -197,6 +333,18 @@ class RunToolRuntimeService(RunToolRuntime):
                 bases = []
             if bases:
                 definitions.append(KNOWLEDGE_SEARCH_DEFINITION)
+        # Skill 与文件工具由独立能力开关启用，不依赖知识库或嵌入模型。
+        if self._skills is not None:
+            definitions.extend((SKILL_LOAD_DEFINITION, SKILL_READ_RESOURCE_DEFINITION))
+        if self._skill_execution is not None:
+            definitions.append(SKILL_EXECUTE_DEFINITION)
+        if self._session_files is not None:
+            definitions.extend(
+                (
+                    SESSION_FILE_LIST_DEFINITION,
+                    SESSION_FILE_READ_DEFINITION,
+                )
+            )
         # 合并 MCP 目录中的工具定义。
         mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
         for item in mcp_tools:
@@ -215,6 +363,162 @@ class RunToolRuntimeService(RunToolRuntime):
                 )
             )
         return RuntimeToolSnapshot(tools=tuple(definitions))
+
+    async def prepare_call(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+        run: Run,
+        context: AuthorizedRunContext | None,
+        *,
+        call_id: str,
+    ) -> ToolCallPreparation:
+        """在审批屏障前校验参数、固定版本、依赖和输入文件权限。"""
+        if context is None:
+            return ToolCallPreparation(
+                _error("tool_permission_denied", "当前登录或聊天权限已失效。"),
+                False,
+            )
+        if (
+            definition is None
+            or definition.source.kind != "builtin"
+            or definition.tool_id != SKILL_EXECUTE_TOOL_ID
+        ):
+            validation = self.validate_call(definition, model_name, arguments)
+            return ToolCallPreparation(
+                outcome=validation,
+                requires_approval=(
+                    False
+                    if validation is not None or definition is None
+                    else definition.requires_approval
+                ),
+            )
+        validation = self.validate_call(definition, model_name, arguments)
+        if validation is not None:
+            return ToolCallPreparation(validation, False)
+        if self._skills is None or self._session_files is None:
+            return ToolCallPreparation(
+                _error("tool_unavailable", "当前部署未启用 Skill/文件能力。"),
+                False,
+            )
+        snapshot = run.skill_snapshot
+        if snapshot is None:
+            return ToolCallPreparation(
+                _error("skill_snapshot_unavailable", "当前 Run 没有固定 Skill 目录。"),
+                False,
+            )
+        skill_id = arguments.get("skill_id")
+        script_path = arguments.get("script_path")
+        parameters = arguments.get("parameters")
+        input_file_ids = arguments.get("input_file_ids", [])
+        if (
+            not isinstance(skill_id, str)
+            or not isinstance(script_path, str)
+            or not isinstance(parameters, dict)
+            or not isinstance(input_file_ids, list)
+            or any(not isinstance(item, str) for item in input_file_ids)
+        ):
+            return ToolCallPreparation(
+                _error("skill_parameters_invalid", "脚本调用参数结构不合法。"),
+                False,
+            )
+        try:
+            entry, version, script, _dependency_check = (
+                await self._skills.prepare_script_target(
+                    snapshot,
+                    skill_id=skill_id,
+                    script_path=script_path,
+                    parameters=cast(dict[str, Any], parameters),
+                )
+            )
+            files = await self._session_files.get_many(
+                context.chat_session_id,
+                context.owner_id,
+                tuple(cast(list[str], input_file_ids)),
+            )
+        except (
+            FileInputError,
+            SkillDependencyUnsatisfiedError,
+            SkillNotFoundError,
+            SkillPackageError,
+            ValueError,
+        ) as error:
+            return ToolCallPreparation(_skill_preparation_error(error), False)
+        summary, hidden_count = summarize_parameters(script, parameters)
+        projection = SafeSkillApprovalProjection(
+            call_id=call_id,
+            skill_id=entry.skill_id,
+            skill_name=entry.name,
+            skill_version_id=version.id,
+            skill_version_label=entry.version_label,
+            script_label=script.label,
+            purpose=script.purpose,
+            input_files=tuple(
+                SafeSkillInputFile(
+                    file_id=file.id,
+                    filename=file.filename,
+                    mime_type=file.mime_type,
+                    size_bytes=file.size_bytes,
+                    available=True,
+                )
+                for file in files
+            ),
+            parameter_summary=summary,
+            hidden_parameter_count=hidden_count,
+            can_approve=True,
+        )
+        return ToolCallPreparation(
+            outcome=None,
+            requires_approval=entry.requires_approval,
+            safe_skill_projection=projection,
+        )
+
+    async def build_skill_context(
+        self,
+        run: Run,
+        loaded_skill_ids: tuple[str, ...],
+    ) -> RunSkillPromptContext:
+        """从 Run 固定快照和持久化成功加载证据重建指南。"""
+        # 空固定目录表示 Run 未启用 Skill，不要求装配 SkillService。
+        if run.skill_snapshot is None or not run.skill_snapshot.skills:
+            return RunSkillPromptContext()
+        if self._skills is None:
+            raise ValueError("skill_runtime_unavailable")
+        selected = set(run.skill_snapshot.selected_skill_ids)
+        active_ids = tuple(
+            item.skill_id
+            for item in run.skill_snapshot.skills
+            if item.skill_id in selected or item.skill_id in set(loaded_skill_ids)
+        )
+        return await self._skills.prompt_context(run.skill_snapshot, active_ids)
+
+    async def build_run_input_file_context(
+        self,
+        run: Run,
+    ) -> tuple[RunInputFileContext, ...]:
+        """解析 Run 累计绑定文件；任何失效或跨会话引用都阻止模型执行。"""
+        file_ids = run.input_files.file_ids
+        if not file_ids:
+            return ()
+        if self._session_files is None:
+            raise FileInputError("session_file_runtime_unavailable")
+        files = await self._session_files.get_many(
+            run.session_id,
+            run.owner_id,
+            file_ids,
+        )
+        return tuple(
+            RunInputFileContext(
+                file_id=file.id,
+                filename=file.filename,
+                label=file.label,
+                mime_type=file.mime_type,
+                size_bytes=file.size_bytes,
+                source=file.source.value,
+            )
+            for file in files
+        )
 
     def validate_call(
         self,
@@ -266,7 +570,12 @@ class RunToolRuntimeService(RunToolRuntime):
                 deadline_seconds,
                 run_remaining_seconds,
             )
-        return await self._execute_builtin(definition, arguments, context, deadline_seconds)
+        return await self._execute_builtin(
+            definition,
+            arguments,
+            context,
+            deadline_seconds,
+        )
 
     async def _execute_mcp(
         self,
@@ -369,11 +678,51 @@ class RunToolRuntimeService(RunToolRuntime):
             return ToolExecutionResult(
                 _error("tool_unavailable", "澄清工具只能由 Run 执行器处理。")
             )
+        if definition.tool_id == SKILL_EXECUTE_TOOL_ID:
+            if self._skill_execution is None:
+                return ToolExecutionResult(
+                    _error("tool_unavailable", "脚本执行能力未启用。")
+                )
+            result = await self._skill_execution.execute(arguments, context)
+            after = await self.authorize(
+                context.owner_id,
+                context.chat_session_id,
+                context.run_id,
+                context.auth_session_id,
+            )
+            if after is None:
+                completion = result.skill_execution_completion
+                if completion is not None:
+                    completion = completion.model_copy(
+                        update={
+                            "status": SkillExecutionStatus.FAILED,
+                            "error_code": "script_delivery_auth_revoked",
+                        }
+                    )
+                if result.artifacts and self._session_files is not None:
+                    await self._session_files.abandon_artifacts(result.artifacts)
+                return ToolExecutionResult(
+                    outcome=_error(
+                        "tool_permission_revoked",
+                        "交付前权限复核失败，脚本结果与文件已丢弃。",
+                    ),
+                    skill_execution_completion=completion,
+                    terminate_run_error_code="run_auth_session_invalid",
+                )
+            return result
         # 内置工具按冻结名称分派到对应实现。
         if definition.model_name == "memory_search":
             outcome = await self._memory_search(before, arguments)
         elif definition.model_name == "knowledge_search":
             outcome = await self._knowledge_search(before, arguments, deadline_seconds)
+        elif definition.tool_id == SKILL_LOAD_TOOL_ID:
+            outcome = await self._skill_load(context, arguments)
+        elif definition.tool_id == SKILL_READ_RESOURCE_TOOL_ID:
+            outcome = await self._skill_read_resource(context, arguments)
+        elif definition.tool_id == SESSION_FILE_LIST_TOOL_ID:
+            outcome = await self._session_file_list(before, arguments)
+        elif definition.tool_id == SESSION_FILE_READ_TOOL_ID:
+            outcome = await self._session_file_read(before, arguments)
         else:
             return ToolExecutionResult(_error("tool_unavailable", "内置工具处理器不可用。"))
         # 交付前再次鉴权：权限在工具执行期间被撤销时丢弃结果。
@@ -517,6 +866,161 @@ class RunToolRuntimeService(RunToolRuntime):
             )
         return _knowledge_outcome(result)
 
+    async def _skill_load(
+        self,
+        context: ToolExecutionContext,
+        arguments: Mapping[str, Any],
+    ) -> ToolOutcome:
+        if self._skills is None or context.skill_snapshot is None:
+            return _error("skill_snapshot_unavailable", "当前 Run 没有固定 Skill 目录。")
+        skill_id = str(arguments["skill_id"])
+        try:
+            entry, version = await self._skills.resolve_run_entry(
+                context.skill_snapshot,
+                skill_id,
+            )
+        except SkillNotFoundError:
+            return _error("skill_not_in_run_snapshot", "Skill 不在当前 Run 固定目录中。")
+        return ToolOutcome(
+            status=ToolOutcomeStatus.OK,
+            code="skill_loaded",
+            message=f"已加载 Skill：{entry.name}。",
+            data={
+                "skill_id": entry.skill_id,
+                "name": entry.name,
+                "description": entry.description,
+                "version_id": version.id,
+                "version_label": version.label,
+                "resources": [
+                    {
+                        "path": item.path,
+                        "size_bytes": item.size_bytes,
+                        "text": item.text,
+                    }
+                    for item in version.manifest.files
+                    if item.path != "SKILL.md"
+                ],
+                "scripts": [
+                    {
+                        "path": item.path,
+                        "label": item.label,
+                        "purpose": item.purpose,
+                        "parameters": item.parameters,
+                    }
+                    for item in version.manifest.scripts
+                ],
+            },
+        )
+
+    async def _skill_read_resource(
+        self,
+        context: ToolExecutionContext,
+        arguments: Mapping[str, Any],
+    ) -> ToolOutcome:
+        if self._skills is None or context.skill_snapshot is None:
+            return _error("skill_snapshot_unavailable", "当前 Run 没有固定 Skill 目录。")
+        try:
+            resource = await self._skills.read_resource(
+                context.skill_snapshot,
+                skill_id=str(arguments["skill_id"]),
+                path=str(arguments["path"]),
+                offset=int(arguments.get("offset", 0)),
+                limit_bytes=int(arguments.get("limit_bytes", 65536)),
+            )
+        except (SkillNotFoundError, ValueError) as error:
+            return _skill_resource_error(error)
+        return ToolOutcome(
+            status=ToolOutcomeStatus.OK,
+            code="skill_resource_read",
+            message="已读取 Skill 文本资源。",
+            data={
+                "skill_id": resource.skill_id,
+                "skill_version_id": resource.skill_version_id,
+                "path": resource.path,
+                "offset": resource.offset,
+                "next_offset": resource.next_offset,
+                "eof": resource.eof,
+                "truncated": resource.next_offset < resource.size_bytes,
+                "size_bytes": resource.size_bytes,
+                "content": resource.content,
+            },
+        )
+
+    async def _session_file_list(
+        self,
+        context: AuthorizedRunContext,
+        arguments: Mapping[str, Any],
+    ) -> ToolOutcome:
+        if self._session_files is None:
+            return _error("file_tool_unavailable", "会话文件能力未启用。")
+        try:
+            limit = _bounded_integer(arguments.get("limit"), default=50, minimum=1, maximum=100)
+            page = await self._session_files.list(
+                context.chat_session_id,
+                context.owner_id,
+                after_file_id=cast(str | None, arguments.get("after_file_id")),
+                limit=limit,
+            )
+        except ValueError:
+            return _error("session_file_cursor_invalid", "文件分页参数不合法。")
+        except Exception:
+            return _error("session_file_unavailable", "会话文件暂时不可用。")
+        return ToolOutcome(
+            status=ToolOutcomeStatus.OK,
+            code="session_files_listed",
+            message="已列出当前会话文件。",
+            data={
+                "items": [_session_file_data(item) for item in page.items],
+                "next_after_file_id": page.next_after_file_id,
+            },
+        )
+
+    async def _session_file_read(
+        self,
+        context: AuthorizedRunContext,
+        arguments: Mapping[str, Any],
+    ) -> ToolOutcome:
+        if self._session_files is None:
+            return _error("file_tool_unavailable", "会话文件能力未启用。")
+        try:
+            result = await self._session_files.read_text(
+                context.chat_session_id,
+                context.owner_id,
+                str(arguments["file_id"]),
+                offset=int(arguments.get("offset", 0)),
+                limit_bytes=int(arguments.get("limit_bytes", 65536)),
+            )
+        except TextFileReadError as error:
+            return ToolOutcome(
+                status=ToolOutcomeStatus.ERROR,
+                code=error.code,
+                message=(
+                    "该文件不是可读取的 UTF-8 文本文件，请使用 Skill 脚本处理。"
+                    if error.code == "file_not_text"
+                    else "文件文本读取范围或内容不合法。"
+                ),
+                data={
+                    "file": None
+                    if error.file is None
+                    else _session_file_data(error.file)
+                },
+            )
+        except (FileInputError, ValueError):
+            return _error("session_file_read_failed", "会话文件读取失败。")
+        return ToolOutcome(
+            status=ToolOutcomeStatus.OK,
+            code="session_file_read",
+            message="已读取当前会话文件。",
+            data={
+                "file": _session_file_data(result.file),
+                "offset": result.offset,
+                "next_offset": result.next_offset,
+                "content": result.content,
+                "eof": result.eof,
+                "truncated": result.truncated,
+            },
+        )
+
 
 def _knowledge_outcome(result: SearchResult) -> ToolOutcome:
     items = [
@@ -600,10 +1104,70 @@ def _error(code: str, message: str) -> ToolOutcome:
     )
 
 
+def _skill_preparation_error(error: Exception) -> ToolOutcome:
+    """把 Skill 预校验异常映射为不带路径或包正文的稳定错误。"""
+    code = public_skill_error_code(error, fallback="skill_preparation_failed")
+    messages = {
+        "skill_not_in_run_snapshot": "Skill 不在当前 Run 固定目录中。",
+        "skill_version_unavailable": "当前 Run 固定的 Skill 版本不可用。",
+        "skill_script_not_registered": "请求的脚本未在该 Skill 中登记。",
+        "skill_parameters_invalid": "脚本参数不符合登记结构。",
+        "skill_dependency_unsatisfied": "当前执行环境不满足 Skill 依赖。",
+        "session_file_not_found": "输入文件不存在或已失去当前会话权限。",
+        "session_file_ids_duplicate": "输入文件 ID 不能重复。",
+    }
+    return _error(code, messages.get(code, "Skill 调用准备失败。"))
+
+
+def _skill_resource_error(error: Exception) -> ToolOutcome:
+    """只把已登记资源错误投影给模型，未知异常正文不会进入结果。"""
+    code = public_skill_error_code(error, fallback="skill_resource_unavailable")
+    messages = {
+        "skill_resource_not_found": "Skill 资源不存在。",
+        "skill_resource_not_text": "请求的资源不是可分段读取的文本。",
+        "skill_resource_offset_invalid": "资源读取位置无效。",
+        "skill_resource_range_invalid": "资源读取范围无效。",
+        "skill_resource_too_large": "Skill 资源超过单次读取上限。",
+    }
+    return _error(code, messages.get(code, "Skill 资源暂时不能读取。"))
+
+
+def _session_file_data(file: SessionFile) -> dict[str, object]:
+    """只投影可下载文件的安全元数据，不暴露对象键或宿主路径。"""
+    return {
+        "file_id": file.id,
+        "filename": file.filename,
+        "label": file.label,
+        "mime_type": file.mime_type,
+        "size_bytes": file.size_bytes,
+        "source": file.source.value,
+        "created_at": file.created_at.isoformat(),
+    }
+
+
 def _bounded_limit(value: object, *, default: int) -> int:
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 8:
+        raise ValueError("tool_arguments_invalid")
+    return value
+
+
+def _bounded_integer(
+    value: object,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """校验 JSON 整数边界，拒绝 bool 冒充整数。"""
+    if value is None:
+        return default
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= maximum
+    ):
         raise ValueError("tool_arguments_invalid")
     return value
 
@@ -649,5 +1213,15 @@ __all__ = [
     "MEMORY_SEARCH_ID",
     "REQUEST_USER_INPUT_DEFINITION",
     "REQUEST_USER_INPUT_ID",
+    "SESSION_FILE_LIST_DEFINITION",
+    "SESSION_FILE_LIST_TOOL_ID",
+    "SESSION_FILE_READ_DEFINITION",
+    "SESSION_FILE_READ_TOOL_ID",
+    "SKILL_EXECUTE_DEFINITION",
+    "SKILL_EXECUTE_TOOL_ID",
+    "SKILL_LOAD_DEFINITION",
+    "SKILL_LOAD_TOOL_ID",
+    "SKILL_READ_RESOURCE_DEFINITION",
+    "SKILL_READ_RESOURCE_TOOL_ID",
     "RunToolRuntimeService",
 ]

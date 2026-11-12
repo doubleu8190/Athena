@@ -1,5 +1,14 @@
-import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  useQueryClient,
+  type InfiniteData,
+} from "@tanstack/react-query";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
@@ -7,6 +16,10 @@ import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import { useProjectDirectory } from "../projects/hooks";
+import { SessionFilesPanel } from "../files/SessionFilesPanel";
+import type { PendingSessionUpload } from "../files/model";
+import { sessionFileKeys } from "../files/queryKeys";
+import { SkillCatalogPicker } from "../skills/SkillCatalogPicker";
 import {
   isSessionNotFound,
   sessionErrorMessage,
@@ -37,8 +50,11 @@ import {
 import { MarkdownContent } from "./MarkdownContent";
 import {
   isActiveRunStatus,
+  isTerminalRunStatus,
   mergeConversationMessages,
   runResultIsStale,
+  selectRunProjection,
+  type ConversationMessagePage,
   type Run,
   type RunListResponse,
   type RunPendingApproval,
@@ -46,16 +62,22 @@ import {
 } from "./model";
 import { chatKeys } from "./queryKeys";
 import { newRequestId } from "./requestId";
+import {
+  projectRunStatus,
+  reconcileCompletedRun,
+} from "./runStream";
 import { RunExecutionTrace } from "./RunExecutionTrace";
 import { RunStatusBadge } from "./RunStatusBadge";
 import { ToolApprovalPanel } from "./ToolApprovalPanel";
 import { useRunStream } from "./useRunStream";
 
 interface FailedComposerCommand {
+  fileIds: string[];
   inputRequestId?: string;
   kind: "answer" | "submit";
   requestId: string;
   reuseRequestId: boolean;
+  skillIds: string[];
   text: string;
 }
 
@@ -67,10 +89,72 @@ interface ActiveRunCommand {
   token: number;
 }
 
+interface TerminalMessageFailure {
+  kind: "not_found" | "sync_failed";
+  runId: string;
+}
+
+type MessageInfiniteData = InfiniteData<
+  ConversationMessagePage,
+  number | undefined
+>;
+
 const RETRY_RISK_WARNING =
   "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。";
 
-function ComposerHint({ status }: { status: RunStatus | null }) {
+function mergeReconciledMessages(
+  current: MessageInfiniteData | undefined,
+  fetched: {
+    page: ConversationMessagePage;
+    beforeSequence: number | undefined;
+  }[],
+): MessageInfiniteData {
+  if (!current) {
+    return {
+      pageParams: fetched.map((item) => item.beforeSequence),
+      pages: fetched.map((item) => item.page),
+    };
+  }
+  const existingSequences = new Set(
+    current.pages.flatMap((page) =>
+      page.items.map((message) => message.sequence),
+    ),
+  );
+  const additions = fetched.filter((item) =>
+    item.page.items.some(
+      (message) => !existingSequences.has(message.sequence),
+    ),
+  );
+  if (additions.length === 0) {
+    return current;
+  }
+  return {
+    pageParams: [
+      ...current.pageParams,
+      ...additions.map((item) => item.beforeSequence),
+    ],
+    pages: [
+      ...current.pages,
+      ...additions.map((item) => item.page),
+    ],
+  };
+}
+
+function ComposerHint({
+  hasPendingUploads,
+  status,
+}: {
+  hasPendingUploads: boolean;
+  status: RunStatus | null;
+}) {
+  if (hasPendingUploads) {
+    return (
+      <span>
+        <Icon name="upload" size={13} />
+        请先在会话文件中上传或移除待上传文件，再提交消息或补充回答。
+      </span>
+    );
+  }
   if (status === "queued") {
     return <span>任务已排队，重复提交已锁定；停止后以服务端状态为准。</span>;
   }
@@ -123,6 +207,11 @@ function RunSummary({
     );
   }
 
+  const selectedSkills =
+    run.skill_snapshot?.skills.filter((skill) =>
+      run.skill_snapshot?.selected_skill_ids.includes(skill.skill_id),
+    ) ?? [];
+
   return (
     <div className="run-summary">
       <div className="run-summary-primary">
@@ -144,6 +233,24 @@ function RunSummary({
       </div>
       {run.safe_error_code ? (
         <p className="run-summary-error">安全错误码：{run.safe_error_code}</p>
+      ) : null}
+      {run.skill_snapshot ? (
+        <div className="run-skill-snapshot" aria-label="本次运行固定技能">
+          <span>固定技能</span>
+          {selectedSkills.length === 0 ? (
+            <small>未手动指定，允许 Agent 按任务加载已启用技能</small>
+          ) : (
+            selectedSkills.map((skill) => (
+              <span
+                className="run-skill-snapshot-item"
+                key={skill.skill_id}
+                title={`${skill.name} · ${skill.version_label}`}
+              >
+                {skill.name} · {skill.version_label}
+              </span>
+            ))
+          )}
+        </div>
       ) : null}
       {run.retry_warning ? (
         <p
@@ -187,6 +294,16 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     [getSessionHandoff, sessionId],
   );
   const [draft, setDraft] = useState(initialHandoff?.draft ?? "");
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>(
+    initialHandoff?.selectedSkillIds ?? [],
+  );
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>(
+    initialHandoff?.inputFileIds ?? [],
+  );
+  const [handoffUploads, setHandoffUploads] = useState<
+    PendingSessionUpload[]
+  >(initialHandoff?.pendingUploads ?? []);
+  const [filePanelBusy, setFilePanelBusy] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(
     initialHandoff?.error ?? null,
   );
@@ -196,8 +313,10 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
       initialHandoff
         ? {
             kind: "submit",
+            fileIds: initialHandoff.inputFileIds ?? [],
             requestId: initialHandoff.requestId,
-          reuseRequestId: initialHandoff.reuseRequestId,
+            reuseRequestId: initialHandoff.reuseRequestId,
+            skillIds: initialHandoff.selectedSkillIds ?? [],
             text: initialHandoff.draft,
           }
         : null,
@@ -213,6 +332,9 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   >({});
   const [retryOpen, setRetryOpen] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [terminalMessageFailure, setTerminalMessageFailure] =
+    useState<TerminalMessageFailure | null>(null);
+  const [terminalMessageRetry, setTerminalMessageRetry] = useState(0);
   const [traceOpen, setTraceOpen] = useState(
     () => typeof window === "undefined" || window.innerWidth > 920,
   );
@@ -237,15 +359,18 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     requestId: string;
     runId: string;
   } | null>(null);
+  const settledTerminalRunsRef = useRef(new Set<string>());
 
   const messagesQuery = useSessionMessages(sessionId);
   const latestRuns = useLatestRun(sessionId);
   const latestRun = latestRuns.data?.items[0] ?? null;
   const currentRunId = selectedRunId ?? latestRun?.id ?? null;
   const runDetails = useRunDetails(sessionId, currentRunId);
-  const run =
-    runDetails.data ??
-    (latestRun?.id === currentRunId ? latestRun : null);
+  const run = selectRunProjection(
+    currentRunId,
+    latestRun,
+    runDetails.data ?? null,
+  );
 
   const reconcileRunState = useCallback(() => {
     void queryClient.invalidateQueries({
@@ -275,12 +400,13 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   const transientText = streamMatchesRun
     ? stream.state.transientText
     : "";
-  // SSE 投影可先于查询刷新反映 queued/running/cancelling；接口命令返回时
-  // 通过 syncStatus 注入最新权威状态，避免旧查询覆盖即时状态变化。
-  const status =
-    streamMatchesRun && stream.state.status
-      ? stream.state.status
-      : run?.status ?? null;
+  // SSE 先驱动中间状态；服务端查询确认终态后，终态必须覆盖残留的 live 状态。
+  const status = projectRunStatus({
+    queryStatus: run?.status ?? null,
+    runId: currentRunId,
+    streamRunId: stream.state.runId,
+    streamStatus: stream.state.status,
+  });
   const isActive = isActiveRunStatus(status);
   const isWaitingInput = status === "waiting_for_input";
   const isWaitingApproval = status === "waiting_for_approval";
@@ -296,6 +422,86 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     streamRunId: stream.state.runId,
     streamStatus: stream.state.status,
   };
+
+  useEffect(() => {
+    if (
+      !currentRunId ||
+      !status ||
+      !isTerminalRunStatus(status)
+    ) {
+      return;
+    }
+    const terminalRunId = currentRunId;
+    const terminalStatus = status;
+    const triggerMessageId = run?.trigger_message_id;
+    stream.closeTerminal(terminalRunId, terminalStatus);
+    // 刷新和终态恢复都重新读取服务端文件发布记录，不能只依赖临时消息投影。
+    void queryClient.invalidateQueries({
+      queryKey: sessionFileKeys.list(sessionId),
+    });
+    // 失败和取消没有权威最终回答；旧工具/文件交付消息不能用于清除临时文本。
+    if (terminalStatus === "failed" || terminalStatus === "cancelled") {
+      return;
+    }
+    if (!triggerMessageId) {
+      setTerminalMessageFailure({
+        kind: "sync_failed",
+        runId: terminalRunId,
+      });
+      return;
+    }
+    const terminalKey = terminalRunId + ":" + terminalStatus;
+    if (settledTerminalRunsRef.current.has(terminalKey)) {
+      return;
+    }
+    let active = true;
+    setTerminalMessageFailure(null);
+    void reconcileCompletedRun(
+      sessionId,
+      terminalRunId,
+      triggerMessageId,
+    )
+      .then((result) => {
+        if (result.kind === "not_found") {
+          if (active) {
+            setTerminalMessageFailure({
+              kind: "not_found",
+              runId: terminalRunId,
+            });
+          }
+          return;
+        }
+        if (!active) {
+          return;
+        }
+        queryClient.setQueryData<MessageInfiniteData>(
+          chatKeys.messages(sessionId),
+          (current) => mergeReconciledMessages(current, result.messages),
+        );
+        settledTerminalRunsRef.current.add(terminalKey);
+        stream.settleTerminal(terminalRunId, terminalStatus);
+      })
+      .catch(() => {
+        if (active) {
+          setTerminalMessageFailure({
+            kind: "sync_failed",
+            runId: terminalRunId,
+          });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    currentRunId,
+    queryClient,
+    run?.trigger_message_id,
+    sessionId,
+    status,
+    stream.closeTerminal,
+    stream.settleTerminal,
+    terminalMessageRetry,
+  ]);
 
   // 同一 Run 的所有用户命令共享一个显式锁；ref 在事件入口同步生效，
   // activeCommand 仅负责驱动按钮 disabled 与 aria-busy。
@@ -442,6 +648,12 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     if (!text || commandLockRef.current) {
       return;
     }
+    if (handoffUploads.length > 0) {
+      setCommandError(
+        "请先上传或移除会话文件面板中的待上传文件，再提交消息或补充回答。",
+      );
+      return;
+    }
     if (isWaitingInput && !run?.pending_input) {
       setCommandError("服务端尚未返回可回答的输入请求，正在同步状态。");
       reconcileRunState();
@@ -457,6 +669,8 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     const inputRequestId = isWaitingInput
       ? run?.pending_input?.id
       : undefined;
+    const submittedSkillIds = isWaitingInput ? [] : [...selectedSkillIds];
+    const submittedFileIds = [...selectedFileIds];
     const commandKind: RunCommandKind = isWaitingInput ? "answer" : "submit";
     const commandToken = beginRunCommand(commandKind, run?.id ?? null);
     if (commandToken === null) {
@@ -465,6 +679,10 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     const canReuse =
       failedCommand?.reuseRequestId === true &&
       failedCommand?.text === text &&
+      failedCommand.fileIds.join("\u0000") ===
+        submittedFileIds.join("\u0000") &&
+      failedCommand.skillIds.join("\u0000") ===
+        submittedSkillIds.join("\u0000") &&
       (isWaitingInput
         ? failedCommand.kind === "answer" &&
           failedCommand.inputRequestId === inputRequestId
@@ -481,8 +699,15 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
               inputRequestId,
               requestId,
               text,
+              submittedFileIds,
             )
-          : await submitRun(sessionId, requestId, text);
+          : await submitRun(
+              sessionId,
+              requestId,
+              text,
+              submittedSkillIds,
+              submittedFileIds,
+            );
       // HTTP 成功先确认命令结果；投影是否采纳只决定 Run 状态如何同步。
       applyRunResult(nextRun, commandToken);
       if (isCurrentRunCommand(commandToken)) {
@@ -491,6 +716,11 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
           current === submittedDraft ? "" : current,
         );
         setFailedCommand(null);
+        setSelectedFileIds([]);
+        // 新 Run 与澄清回答都只消费已经提交的固定快照；交回控制权后不能把
+        // 上一 Run 的手动选择静默带入后续任务。
+        setSelectedSkillIds([]);
+        setHandoffUploads([]);
         clearSessionHandoff(sessionId);
         setCommandNotice(
           isWaitingInput
@@ -501,10 +731,12 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     } catch (error) {
       if (isCurrentRunCommand(commandToken)) {
         setFailedCommand({
+          fileIds: submittedFileIds,
           inputRequestId,
           kind: isWaitingInput ? "answer" : "submit",
           requestId,
           reuseRequestId: requestIdCanBeReused(error),
+          skillIds: submittedSkillIds,
           text,
         });
         setCommandNotice(null);
@@ -647,12 +879,19 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     }
   };
 
+  // 待上传文件还没有服务端 file ID，必须阻止 Run 以免静默漏掉用户选择。
+  const hasPendingUploads = handoffUploads.length > 0;
   const canSubmit =
     !commandPending &&
+    !filePanelBusy &&
+    !hasPendingUploads &&
     Boolean(draft.trim()) &&
     ((isWaitingInput && Boolean(run?.pending_input)) ||
       (!isActive && Boolean(run || latestRuns.isSuccess)));
   const streamNotice = streamMatchesRun ? stream.state.notice : null;
+  const transientUnfinished =
+    Boolean(transientText) &&
+    (status === "failed" || status === "cancelled");
   const serverRetryWarning = run?.retry_warning?.trim() ?? "";
   const distinctServerRetryWarning =
     serverRetryWarning && serverRetryWarning !== RETRY_RISK_WARNING
@@ -696,6 +935,17 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
               <span>{streamNotice}</span>
             </div>
           ) : null}
+          {transientUnfinished ? (
+            <div className="run-stream-notice" role="status">
+              <Icon name="shield" size={15} />
+              <span>
+                {status === "failed"
+                  ? "运行失败，未完成回答已保留在当前页面。"
+                  : "运行已取消，未完成回答已保留在当前页面。"}
+                刷新后不承诺恢复该文本。
+              </span>
+            </div>
+          ) : null}
           {commandNotice ? (
             <div className="run-command-notice" role="status">
               <Icon name="inbox" size={15} />
@@ -703,6 +953,19 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             </div>
           ) : null}
           {commandError ? <ErrorBanner message={commandError} /> : null}
+          {terminalMessageFailure?.runId === currentRunId ? (
+            <ErrorBanner
+              message={
+                terminalMessageFailure.kind === "not_found"
+                  ? "运行已完成，但未找到完成事件所指的最终消息。清空草稿前请重试对账。"
+                  : "运行已完成，但最终消息同步失败。请重试加载最终回答。"
+              }
+              onRetry={() =>
+                setTerminalMessageRetry((attempt) => attempt + 1)
+              }
+              retryLabel="重试加载最终消息"
+            />
+          ) : null}
 
           <ChatMessageList
             error={messagesQuery.isError ? messagesQuery.error : null}
@@ -712,7 +975,27 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             messages={messages}
             onLoadMore={() => void messagesQuery.fetchNextPage()}
             onRetry={() => void messagesQuery.refetch()}
+            sessionId={sessionId}
             transientText={transientText}
+            transientUnfinished={transientUnfinished}
+          />
+
+          <SkillCatalogPicker
+            disabled={commandPending || isActive || filePanelBusy}
+            onChange={setSelectedSkillIds}
+            selectedSkillIds={selectedSkillIds}
+          />
+
+          <SessionFilesPanel
+            disabled={
+              commandPending || (isActive && !isWaitingInput)
+            }
+            initialPendingUploads={handoffUploads}
+            onBusyChange={setFilePanelBusy}
+            onChangeSelectedFileIds={setSelectedFileIds}
+            onInitialPendingUploadsChange={setHandoffUploads}
+            selectedFileIds={new Set(selectedFileIds)}
+            sessionId={sessionId}
           />
 
           {isWaitingInput && run ? (
@@ -774,7 +1057,10 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
               value={draft}
             />
             <div className="chat-composer-footer">
-              <ComposerHint status={status} />
+              <ComposerHint
+                hasPendingUploads={hasPendingUploads}
+                status={status}
+              />
               <div className="chat-composer-actions">
                 {isActive && run ? (
                   <button

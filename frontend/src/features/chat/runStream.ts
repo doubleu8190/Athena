@@ -1,10 +1,12 @@
 import {
   isTerminalRunStatus,
+  type ConversationMessagePage,
   type RunEvent,
   type RunSnapshotPayload,
   type RunStatus,
   type RunStreamMessage,
 } from "./model";
+import { listMessages, listRunEvents } from "./api";
 
 export type RunStreamConnection =
   | "idle"
@@ -28,6 +30,8 @@ export interface RunStreamState {
 export type RunStreamAction =
   | { type: "start"; runId: string; status: RunStatus | null }
   | { type: "sync_status"; runId: string; status: RunStatus }
+  | { type: "query_terminal"; runId: string; status: RunStatus }
+  | { type: "settle_terminal"; runId: string; status: RunStatus }
   | { type: "open" }
   | { type: "error" }
   | { type: "closed" }
@@ -111,6 +115,22 @@ export function runStreamReducer(
         };
       }
       return { ...state, status: action.status };
+    case "query_terminal":
+      if (state.runId !== action.runId) {
+        return state;
+      }
+      return { ...state, connection: "closed", status: action.status };
+    case "settle_terminal":
+      if (state.runId !== action.runId) {
+        return state;
+      }
+      return {
+        ...state,
+        connection: "closed",
+        notice: null,
+        status: action.status,
+        transientText: "",
+      };
     case "open":
       return {
         ...state,
@@ -159,6 +179,7 @@ export function runStreamReducer(
     }
     case "snapshot": {
       const authoritativeStatus = action.payload.status;
+      const terminalSnapshot = isTerminalRunStatus(authoritativeStatus);
       return {
         ...state,
         connection:
@@ -169,8 +190,9 @@ export function runStreamReducer(
             : "open",
         events: action.payload.events,
         messages: action.payload.messages,
-        // 快照是 PostgreSQL 权威结果，必须丢弃此前可能不完整的临时增量。
-        transientText: "",
+        // 非终态快照代表可继续生成的权威进度；终态 snapshot 不含未完成文本，
+        // 不能把旧交付消息误当成最终回答，必须等 completed 精确对账或终态保留。
+        transientText: terminalSnapshot ? state.transientText : "",
         notice: null,
         status: authoritativeStatus,
       };
@@ -199,5 +221,156 @@ export function runStreamMode(
     return "waiting";
   }
   return null;
+}
+
+interface ProjectRunStatusInput {
+  queryStatus: RunStatus | null;
+  runId: string | null;
+  streamRunId: string | null;
+  streamStatus: RunStatus | null;
+}
+
+export function projectRunStatus({
+  queryStatus,
+  runId,
+  streamRunId,
+  streamStatus,
+}: ProjectRunStatusInput): RunStatus | null {
+  // 终态不可逆，查询已确认后必须覆盖可能漏掉完成事件的 SSE 残留状态。
+  if (queryStatus && isTerminalRunStatus(queryStatus)) {
+    return queryStatus;
+  }
+  // 非终态仍优先采用 SSE，让 started、取消请求等状态先于查询显示。
+  if (runId && streamRunId === runId && streamStatus) {
+    return streamStatus;
+  }
+  return queryStatus;
+}
+
+export type CompletedRunReconciliation =
+  | {
+      kind: "settled";
+      messages: {
+        page: ConversationMessagePage;
+        beforeSequence: number | undefined;
+      }[];
+    }
+  | {
+      kind: "not_found";
+      reason: "completed_event" | "final_message";
+    };
+
+function completedAssistantMessageId(
+  events: RunEvent[],
+  runId: string,
+): string | null {
+  for (const event of events) {
+    if (
+      event.run_id !== runId ||
+      event.type !== "completed" ||
+      typeof event.payload.assistant_message_id !== "string" ||
+      !event.payload.assistant_message_id
+    ) {
+      continue;
+    }
+    return event.payload.assistant_message_id;
+  }
+  return null;
+}
+
+async function findCompletedAssistantMessageId(
+  sessionId: string,
+  runId: string,
+): Promise<string | null> {
+  let afterSequence = 0;
+  while (true) {
+    const page = await listRunEvents(sessionId, runId, afterSequence, 100);
+    const assistantMessageId = completedAssistantMessageId(
+      page.items,
+      runId,
+    );
+    if (assistantMessageId) {
+      return assistantMessageId;
+    }
+    const next = page.next_after_sequence;
+    // 游标不前进说明接口已耗尽或返回异常，不能猜测 latest assistant 回退。
+    if (next === null || next <= afterSequence) {
+      return null;
+    }
+    afterSequence = next;
+  }
+}
+
+async function finalAssistantMessageExists(
+  sessionId: string,
+  runId: string,
+  assistantMessageId: string,
+  triggerMessageId: string,
+): Promise<{
+  found: boolean;
+  pages: {
+    page: ConversationMessagePage;
+    beforeSequence: number | undefined;
+  }[];
+}> {
+  let beforeSequence: number | undefined;
+  const pages: {
+    page: ConversationMessagePage;
+    beforeSequence: number | undefined;
+  }[] = [];
+  while (true) {
+    const page = await listMessages(sessionId, beforeSequence, 20);
+    pages.push({ page, beforeSequence });
+    if (
+      page.items.some(
+        (message) =>
+          message.id === assistantMessageId &&
+          message.role === "assistant" &&
+          message.run_id === runId &&
+          message.status === "completed",
+      )
+    ) {
+      return { found: true, pages };
+    }
+    if (
+      page.items.some(
+        (message) => message.id === triggerMessageId,
+      )
+    ) {
+      return { found: false, pages };
+    }
+    const next = page.next_before_sequence;
+    if (
+      next === null ||
+      (beforeSequence !== undefined && next >= beforeSequence)
+    ) {
+      return { found: false, pages };
+    }
+    beforeSequence = next;
+  }
+}
+
+export async function reconcileCompletedRun(
+  sessionId: string,
+  runId: string,
+  triggerMessageId: string,
+): Promise<CompletedRunReconciliation> {
+  // completed 事件携带权威消息 ID；事件或消息任一游标耗尽都明确失败。
+  const assistantMessageId = await findCompletedAssistantMessageId(
+    sessionId,
+    runId,
+  );
+  if (!assistantMessageId) {
+    return { kind: "not_found", reason: "completed_event" };
+  }
+  const finalMessage = await finalAssistantMessageExists(
+    sessionId,
+    runId,
+    assistantMessageId,
+    triggerMessageId,
+  );
+  return finalMessage.found
+    ? { kind: "settled", messages: finalMessage.pages }
+    : { kind: "not_found", reason: "final_message" };
 }
 

@@ -2,7 +2,10 @@ import { formatDateTime } from "../../shared/lib/format";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { MarkdownContent } from "./MarkdownContent";
+import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
+import { fileDisplayName } from "../files/model";
 import {
+  isSkillTool,
   messageText,
   type ConversationMessage,
   type ConversationMessagePart,
@@ -18,18 +21,34 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function MessagePart({ part }: { part: ConversationMessagePart }) {
+function MessagePart({
+  part,
+  sessionId,
+  suppressOutput,
+}: {
+  part: ConversationMessagePart;
+  sessionId: string;
+  suppressOutput: boolean;
+}) {
   if (part.type === "text") {
     return <MarkdownContent text={part.text} />;
   }
   if (part.type === "file_ref") {
     return (
       <div className="message-file-ref">
-        <strong>文件引用 · {part.filename}</strong>
-        <span>
-          {part.mime_type ?? "未知类型"}
-          {part.size_bytes === null ? "" : ` · ${formatBytes(part.size_bytes)}`}
-        </span>
+        <div>
+          <strong>文件引用 · {part.filename}</strong>
+          <span>
+            {part.mime_type ?? "未知类型"}
+            {part.size_bytes === null ? "" : ` · ${formatBytes(part.size_bytes)}`}
+          </span>
+        </div>
+        <SessionFileDownloadButton
+          compact
+          fileId={part.file_id}
+          filename={part.filename}
+          sessionId={sessionId}
+        />
       </div>
     );
   }
@@ -46,13 +65,53 @@ function MessagePart({ part }: { part: ConversationMessagePart }) {
       <summary>
         工具结果 · {part.status} · {part.tool_call_id}
       </summary>
-      {part.output ? <pre>{part.output}</pre> : null}
-      {part.artifact_id ? <span>产物：{part.artifact_id}</span> : null}
+      {suppressOutput ? (
+        <p className="trace-empty">
+          技能原始结果正文不在普通用户消息中展示；状态、交付文件与安全调用详情见执行轨迹。
+        </p>
+      ) : part.output ? (
+        <pre>{part.output}</pre>
+      ) : null}
+      {!suppressOutput && part.artifact_id ? (
+        <span>产物：{part.artifact_id}</span>
+      ) : null}
+      {(part.artifacts ?? []).length > 0 ? (
+        <ul className="message-artifact-list">
+          {part.artifacts?.map((artifact) => (
+            <li
+              className="message-artifact"
+              key={artifact.file_id}
+            >
+              <span>
+                <strong>{fileDisplayName(artifact)}</strong>
+                <small>
+                  {artifact.filename} · {artifact.mime_type} ·{" "}
+                  {formatBytes(artifact.size_bytes)}
+                </small>
+              </span>
+              <SessionFileDownloadButton
+                compact
+                fileId={artifact.file_id}
+                filename={fileDisplayName(artifact)}
+                sessionId={sessionId}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </details>
   );
 }
 
-function MessageRow({ message }: { message: ConversationMessage }) {
+function MessageRow({
+  message,
+  sessionId,
+  skillToolCallIds,
+}: {
+  message: ConversationMessage;
+  sessionId: string;
+  skillToolCallIds: ReadonlySet<string>;
+}) {
   const isAssistant = message.role === "assistant";
   return (
     <article
@@ -72,6 +131,11 @@ function MessageRow({ message }: { message: ConversationMessage }) {
           <MessagePart
             key={`${part.type}-${index}`}
             part={part}
+            sessionId={sessionId}
+            suppressOutput={
+              part.type === "tool_result" &&
+              skillToolCallIds.has(part.tool_call_id)
+            }
           />
         ))}
         {message.parts.length === 0 ? (
@@ -90,7 +154,9 @@ interface ChatMessageListProps {
   messages: ConversationMessage[];
   onLoadMore: () => void;
   onRetry: () => void;
+  sessionId: string;
   transientText: string;
+  transientUnfinished: boolean;
 }
 
 export function ChatMessageList({
@@ -101,8 +167,19 @@ export function ChatMessageList({
   messages,
   onLoadMore,
   onRetry,
+  sessionId,
   transientText,
+  transientUnfinished,
 }: ChatMessageListProps) {
+  const skillToolCallIds = new Set<string>();
+  messages.forEach((message) => {
+    message.parts.forEach((part) => {
+      if (part.type === "tool_call" && isSkillTool(part.name)) {
+        skillToolCallIds.add(part.tool_call_id);
+      }
+    });
+  });
+
   if (isLoading && !transientText) {
     return (
       <div className="chat-history-state" role="status">
@@ -141,7 +218,12 @@ export function ChatMessageList({
       ) : (
         <div className="chat-messages">
           {messages.map((message) => (
-            <MessageRow key={`${message.sequence}-${message.id}`} message={message} />
+            <MessageRow
+              key={`${message.sequence}-${message.id}`}
+              message={message}
+              sessionId={sessionId}
+              skillToolCallIds={skillToolCallIds}
+            />
           ))}
           {transientText ? (
             <article
@@ -150,8 +232,12 @@ export function ChatMessageList({
             >
               <header className="chat-message-meta">
                 <strong>Athena</strong>
-                <span>实时草稿</span>
-                <span>等待快照校正</span>
+                <span>{transientUnfinished ? "未完成回答" : "实时草稿"}</span>
+                <span>
+                  {transientUnfinished
+                    ? "仅保留在当前页面，刷新后不承诺恢复"
+                    : "等待快照校正"}
+                </span>
               </header>
               <div className="chat-message-body">
                 <MarkdownContent text={transientText} />

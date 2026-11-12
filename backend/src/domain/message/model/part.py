@@ -44,6 +44,17 @@ class ToolCallPart:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactFileRef:
+    """已发布会话产物的权威、有序引用。"""
+
+    file_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ToolResultPart:
     """工具调用产生的安全结果或大型结果引用。"""
 
@@ -51,6 +62,7 @@ class ToolResultPart:
     status: ToolResultStatus
     output: str | None = None
     artifact_id: str | None = None
+    artifacts: tuple[ArtifactFileRef, ...] = ()
     type: Literal["tool_result"] = field(default="tool_result", init=False)
 
 
@@ -59,6 +71,7 @@ type MessagePart = TextPart | FileRefPart | ToolCallPart | ToolResultPart
 
 __all__ = [
     "FileRefPart",
+    "ArtifactFileRef",
     "MessagePart",
     "TextPart",
     "ToolCallPart",

@@ -1,15 +1,15 @@
 # LLM 调用模块设计
 
-> 当前生产 Run 路径采用管理员后台管理的 Chat Completions 模型配置。本文的 Responses API 设计只适用于显式注入的低层 `LlmService`；应用不会从环境变量或 Run Profile 自动创建 Responses 服务。
+> **废弃状态（2026-11-12）**：`backend/src/adapter/llm/openai_responses.py`、`backend/src/app/llm/service.py`、`backend/src/app/llm/config.py` 及相关 `OpenAIResponsesAdapter`、`LlmService`、`LlmProfile` 和结构化输出契约已删除。本文仅保留历史 Responses 设计；当前生产 Run 路径只使用管理员后台管理的 Chat Completions 配置与 `OpenAIChatCompletionsAdapter`。共享 HTTP 响应限流工具已迁移到 `backend/src/adapter/llm/bounded_http.py`。
 
-状态：原 Responses 模块方案保持有效；Run 另使用已确认的 Chat Completions Adapter 和持久化模型版本。
+状态：历史设计，已废弃；不再代表当前生产实现。
 
 ## 1. 已确认选择与首版范围
 
 - 首个供应商为 OpenAI，使用官方异步 Python SDK。
 - 支持服务端配置自定义 `base_url`，接入支持 Responses API 的兼容服务。
 - 首版仅支持 Responses API，不探测协议、不自动回退。
-- Run 首期另行增加 Chat Completions Adapter；既有 Responses Adapter 和部署 Profile 保持独立，不自动探测或回退。
+- Run 首期使用 Chat Completions Adapter 和持久化模型版本；历史 Responses Adapter 与部署 Profile 已删除，不自动探测或回退。
 
 首版提供普通非流式、流式和非流式结构化输出，以及请求级动态 tools 绑定。
 本文件描述的 Responses 模块不新增 HTTP/SSE 接口、数据库表、模型管理后台；Run 设计单独增加 Chat Completions 模型版本管理和执行接口。
@@ -34,11 +34,11 @@ backend/src/
 │   │   └── errors.py
 │   └── ports.py
 ├── app/llm/
-│   └── service.py
+│   └── service.py  # 已删除
 └── adapter/llm/
     ├── model/
     ├── converter/
-    └── openai_responses.py
+    └── openai_responses.py  # 已删除
 ```
 
 | 层 | 职责 |
@@ -153,7 +153,7 @@ Adapter 处理名称分片、参数跨 chunk 和多个调用交错，累积续�
 
 未来 HTTP 层负责映射 SSE，不将供应商事件名直接作为前端协议。
 
-## 7. 非流式结构化输出
+## 7. 非流式结构化输出（历史能力，已删除）
 
 业务方传入 Pydantic 模型，返回 `StructuredLlmResponse[T]`，其中 value 是已验证对象。
 
@@ -204,7 +204,7 @@ class Classification(BaseModel):
 Run
   → 获取并裁剪上下文
   → 从 ToolManager 选择公开工具定义
-  → 调用 LlmService
+  → [历史] 调用 LlmService（已删除）
   → 收集完整响应
   → 复核工具执行权限
   → 执行工具并记录结果

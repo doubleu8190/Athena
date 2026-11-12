@@ -1,6 +1,7 @@
 """消息领域公共接口。"""
 
 from domain.message.model import (
+    ArtifactFileRef,
     ConversationMessage,
     ConversationMessageDraft,
     ConversationMessagePage,
@@ -32,6 +33,7 @@ __all__ = [
     "ExecutionMessageDraft",
     "ExecutionRole",
     "FileRefPart",
+    "ArtifactFileRef",
     "InvalidMessageError",
     "InvalidMessageReferenceError",
     "MessageConflictError",

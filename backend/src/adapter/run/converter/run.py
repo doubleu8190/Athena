@@ -21,6 +21,7 @@ from domain.run.model import (
     RunEvent,
     RunEventPayload,
     RunFailedPayload,
+    RunInputFiles,
     RunInputRequest,
     RunQueuedPayload,
     RunResumedPayload,
@@ -33,6 +34,7 @@ from domain.run.model import (
     RunWaitingForApprovalPayload,
     RunWaitingPayload,
 )
+from domain.skill import RunSkillSnapshot, SafeSkillApprovalProjection
 from domain.tool import (
     RuntimeToolSnapshot,
     RunToolCallRecord,
@@ -73,6 +75,11 @@ def run_to_domain(row: RunModel) -> Run:
     tool_snapshot = (
         None if row.tool_snapshot is None else RuntimeToolSnapshot.model_validate(row.tool_snapshot)
     )
+    skill_snapshot = (
+        None
+        if row.skill_snapshot is None
+        else RunSkillSnapshot.model_validate(row.skill_snapshot)
+    )
     return Run(
         id=row.id,
         session_id=row.session_id,
@@ -103,6 +110,8 @@ def run_to_domain(row: RunModel) -> Run:
         tool_snapshot=tool_snapshot,
         auth_session_id=row.auth_session_id,
         llm_request_count=row.llm_request_count,
+        skill_snapshot=skill_snapshot,
+        input_files=RunInputFiles(file_ids=tuple(row.input_file_ids)),
     )
 
 
@@ -172,6 +181,11 @@ def tool_call_to_domain(row: RunToolCallModel) -> RunToolCallRecord:
             None
             if row.approval_decision is None
             else ToolApprovalDecision(row.approval_decision)
+        ),
+        safe_skill_projection=(
+            None
+            if row.safe_skill_projection is None
+            else SafeSkillApprovalProjection.model_validate(row.safe_skill_projection)
         ),
     )
 

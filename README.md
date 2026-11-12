@@ -211,8 +211,8 @@ SELECT count(*) FROM projects WHERE owner_id IS NULL;
 
 项目根目录的 [compose.test.yml](compose.test.yml) 提供一套独立的 PostgreSQL、Redis
 和 MinIO 测试依赖。PostgreSQL 同时创建 `athena` 开发库和 `athena_test` 测试库，
-并预装迁移需要的 `vector` 与 `zhparser` 扩展；MinIO 初始化两个默认私有桶，分别供
-开发和测试使用。Compose 项目名和持久数据目录与其他项目隔离，端口只绑定本机：
+并预装迁移需要的 `vector` 与 `zhparser` 扩展；MinIO 初始化知识库和会话文件各自
+独立的开发/测试私有桶。Compose 项目名和持久数据目录与其他项目隔离，端口只绑定本机：
 PostgreSQL `5432`、Redis `6379`、MinIO S3 `9000`、MinIO Console `9001`。
 PostgreSQL 基于固定摘要的 PostgreSQL 18.6/pgvector 0.8.7 镜像，并从固定上游
 `zhparser` commit 和带 SHA-256 校验的 SCWS 1.2.3 源码构建扩展；Redis 固定为 7.4.7，
@@ -260,7 +260,7 @@ docker compose --env-file docker/test.env -f compose.test.yml run --rm minio-ini
 docker compose --env-file docker/test.env -f compose.test.yml ps
 ```
 
-`minio-init` 成功退出表示两个桶已创建；若初始化失败，Compose 命令会返回非零状态。
+`minio-init` 成功退出表示四个租户隔离桶已创建；若初始化失败，Compose 命令会返回非零状态。
 迁移前先导入本地 helper，再运行 Alembic。该连接明确指向新建的
 开发数据库 `127.0.0.1:5432/athena`，不会迁移项目中其他数据库：
 
@@ -458,8 +458,9 @@ Run 仍保留原模型和压缩策略快照；若后续仍需调用没有密钥�
 压缩策略指针仍会供新 Run 固定；若策略模型停用或密钥不可用，Run 会回退到完整
 上下文继续执行，超出模型上下文窗口时才会失败。请重新启用有效模型并保存新策略版本。
 
-`app.state.llm_service` 是可显式注入的低层 Responses 服务扩展点。应用不会从环境变量
-或管理员 Run Profile 自动构建它，也没有当前生产路由调用它；注入对象由调用方管理。
+原低层 Responses 服务、`app.state.llm_service` 注入位及 `LlmService`/`LlmProfile`
+已删除；应用不会从环境变量自动构建模型服务。共享 HTTP 响应限流工具位于
+`backend/src/adapter/llm/bounded_http.py`，仅由 Chat Completions 适配器使用。
 管理后台配置驱动 Run Worker 的 Chat Completions 适配器。模型版本的
 `supports_parallel_tool_calls` 默认为 `false`；开启时必须同时支持工具调用。
 
@@ -522,6 +523,35 @@ TLS 默认开启，布尔值必须明确；证书校验使用系统信任库，�
 跳过。写入过新对象后不能退回旧本地原件目录，故障时应暂停写入并修复 MinIO 配置。
 更完整的启动、权限、切换与回滚边界见
 [知识库运行环境](docs/knowledge-base-operations.md)。
+
+## Skills 与会话文件
+
+Skills 和会话文件使用独立的 `ATHENA_FILE_MINIO_*` 私有桶，不依赖知识库开关，
+也不会加载 embedding、OCR 或 Paddle 依赖。API 和 Run Worker 必须指向同一数据库
+和文件桶；脚本解释器应与 Worker 使用同一 Python 环境。启用前预建私有桶，并给
+服务账号桶检查、读取、上传、删除和列举权限：
+
+```text
+ATHENA_FILES_ENABLED=true
+ATHENA_FILE_MINIO_ENDPOINT=host[:port]
+ATHENA_FILE_MINIO_ACCESS_KEY=<由 secret manager 注入>
+ATHENA_FILE_MINIO_SECRET_KEY=<由 secret manager 注入>
+ATHENA_FILE_MINIO_BUCKET=<预建私有桶>
+ATHENA_FILE_MINIO_SECURE=true
+ATHENA_SKILL_TEMP_ROOT=/srv/athena/skill-executions
+ATHENA_SKILL_PYTHON_EXECUTABLE=/srv/athena/.venv/bin/python
+```
+
+API 和 Worker 使用同一个 `ATHENA_SKILL_PYTHON_EXECUTABLE` 做真实依赖探测并运行
+脚本；未设置时两类进程都退回各自的 `sys.executable`，跨环境部署应显式设置绝对
+路径。用户上传单文件上限 50 MiB，单会话上传与脚本产物合计最多 100 个文件；
+生成产物没有单文件 50 MiB 限制。Skill ZIP 上限 25 MiB、解压后 100 MiB、最多
+500 个文件。执行日志保留上限为 5 MiB。API 和 Worker 不自动回收对象，也不扫描
+遗留临时目录。对象回收只在停写维护窗口使用离线命令：默认 dry-run，`--execute`
+必须同时确认所有写入者已停止；命令从桶起点分页扫描，并复核会话文件、Skill 版本和
+执行日志三类数据库引用。不要给对象前缀配置按年龄删除的生命周期规则。升级顺序、
+MinIO 数据保留、离线维护和真实闭环验证见
+[Skills 与会话文件运行手册](docs/skills-files-operations.md)。
 
 ## 开发检查
 

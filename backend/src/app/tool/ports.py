@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from domain.run import Run, RunInputFileContext
+from domain.skill import RunSkillPromptContext
 from domain.tool import (
     AuthorizedRunContext,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
+    ToolCallPreparation,
     ToolExecutionContext,
     ToolExecutionResult,
     ToolOutcome,
@@ -36,6 +39,31 @@ class RunToolRuntime(Protocol):
         context: AuthorizedRunContext,
     ) -> RuntimeToolSnapshot:
         """Build a bounded catalog without relying on a default page size."""
+
+    async def prepare_call(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+        run: Run,
+        context: AuthorizedRunContext | None,
+        *,
+        call_id: str,
+    ) -> ToolCallPreparation:
+        """校验一次调用并解析 Run 固定 Skill 审批/安全投影。"""
+
+    async def build_skill_context(
+        self,
+        run: Run,
+        loaded_skill_ids: tuple[str, ...],
+    ) -> RunSkillPromptContext:
+        """从 Run 快照和持久化加载证据重建不可压缩技能上下文。"""
+
+    async def build_run_input_file_context(
+        self,
+        run: Run,
+    ) -> tuple[RunInputFileContext, ...]:
+        """按当前会话权限解析 Run 固定文件的安全引用元数据。"""
 
     async def execute(
         self,

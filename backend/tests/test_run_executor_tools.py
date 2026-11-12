@@ -20,10 +20,12 @@ from system_prompt_support import (
 )
 
 from app.run.config import RunWorkerConfig
+from app.run.context import RunInputFileContext
 from app.run.executor import RunExecutor as _RunExecutor
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import RunToolRuntimeService
 from domain.auth.model import User, UserRole, UserStatus
+from domain.file import PendingSessionFile
 from domain.llm.model import (
     LlmProviderError,
     LlmRequest,
@@ -45,9 +47,10 @@ from domain.mcp import (
     McpRuntimeToolTarget,
     StdioConfig,
 )
-from domain.message import ToolCallPart, ToolResultPart
+from domain.message import ConversationRole, FileRefPart, ToolCallPart, ToolResultPart
 from domain.run.model import (
     Run,
+    RunInputFiles,
     RunLease,
     RunStatus,
     RunUsage,
@@ -69,6 +72,7 @@ from domain.tool import (
     RunToolBatchCall,
     RunToolCallRecord,
     ToolApprovalDecision,
+    ToolCallPreparation,
     ToolCallStatus,
     ToolExecutionResult,
     ToolKind,
@@ -176,6 +180,7 @@ def _lease(
     *,
     used: int = 0,
     definition: RuntimeToolDefinition | None = None,
+    input_file_ids: tuple[str, ...] = (),
 ) -> RunLease:
     # 全量测试运行时间可能超过固定模块时钟，每个用例都使用当前时刻避免任务刚创建就被判超时。
     now = datetime.now(UTC)
@@ -208,6 +213,7 @@ def _lease(
         tool_snapshot=_snapshot(definition),
         auth_session_id="auth-tools",
         llm_request_count=used,
+        input_files=RunInputFiles(file_ids=input_file_ids),
     )
     return RunLease(run, run.lease_expires_at or now, run.execution_deadline_at or now)
 
@@ -781,7 +787,25 @@ class _ValidatingToolRuntime(_ToolRuntime):
                 code="tool_arguments_invalid",
                 message="schema mismatch",
             )
-        return None
+
+
+class _InputFileRuntime(_ToolRuntime):
+    """返回已授权的文件安全投影，用于断言真实 provider 请求。"""
+
+    async def build_run_input_file_context(
+        self, run: Run
+    ) -> tuple[RunInputFileContext, ...]:
+        return tuple(
+            RunInputFileContext(
+                file_id=file_id,
+                filename=f"{file_id}.txt",
+                label=None,
+                mime_type="text/plain",
+                size_bytes=12,
+                source="upload",
+            )
+            for file_id in run.input_files.file_ids
+        )
 
 
 def test_unknown_tool_result_stops_model_and_tool_loop() -> None:
@@ -824,6 +848,130 @@ def test_unknown_tool_result_stops_model_and_tool_loop() -> None:
         assert repository.normal_finishes == 0
         assert repository.run.status is RunStatus.FAILED
         assert repository.run.safe_error_code == "tool_outcome_unknown"
+
+    asyncio.run(scenario())
+
+
+def test_run_input_file_projection_is_in_the_actual_provider_request() -> None:
+    """提交与澄清累积的文件必须进入真实模型请求，而非只保存在 Run 行。"""
+
+    async def scenario() -> None:
+        lease = _lease(input_file_ids=("file_initial",))
+        repository = _Repository(lease.run)
+        tool_runtime = _InputFileRuntime(
+            ToolExecutionResult(
+                ToolOutcome(status=ToolOutcomeStatus.OK, code="tool_completed")
+            )
+        )
+        provider = _ScriptedProvider(
+            [_response(text="initial done"), _response(text="answer done")]
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+        )
+
+        await executor.execute(lease)
+        answer_lease = replace(
+            lease,
+            run=replace(
+                lease.run,
+                input_files=RunInputFiles(
+                    file_ids=("file_initial", "file_answer")
+                ),
+            ),
+        )
+        await executor.execute(answer_lease)
+
+        initial_request = "\n".join(
+            message.content for message in provider.requests[0].messages
+        )
+        answer_request = "\n".join(
+            message.content for message in provider.requests[1].messages
+        )
+        assert '"file_id":"file_initial"' in initial_request
+        assert '"file_id":"file_answer"' not in initial_request
+        assert '"file_id":"file_initial"' in answer_request
+        assert '"file_id":"file_answer"' in answer_request
+        assert '"filename":"file_answer.txt"' in answer_request
+        assert "session-files/" not in answer_request
+
+    asyncio.run(scenario())
+
+
+def test_multiple_artifacts_publish_one_tool_result_and_one_chat_delivery() -> None:
+    """双产物保留唯一 TOOL 消息，同时形成可分页恢复的普通助手文件消息。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        now = datetime.now(UTC)
+        artifacts = (
+            PendingSessionFile(
+                id="file_report",
+                filename="report.csv",
+                label="report",
+                mime_type="text/csv",
+                size_bytes=10,
+                sha256="a" * 64,
+                object_key="session-artifacts/aa/key/report",
+                output_index=0,
+                created_at=now,
+            ),
+            PendingSessionFile(
+                id="file_chart",
+                filename="chart.png",
+                label="chart",
+                mime_type="image/png",
+                size_bytes=20,
+                sha256="b" * 64,
+                object_key="session-artifacts/bb/key/chart",
+                output_index=1,
+                created_at=now,
+            ),
+        )
+        tool_runtime = _ToolRuntime(
+            ToolExecutionResult(
+                ToolOutcome(status=ToolOutcomeStatus.OK, code="tool_completed"),
+                artifacts=artifacts,
+            )
+        )
+        provider = _ScriptedProvider(
+            [
+                _response(call=LlmToolCall("call-artifacts", "test_tool", {"query": "x"})),
+                _response(text="done"),
+            ]
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+        )
+
+        await executor.execute(lease)
+
+        assert repository.last_finish_command is not None
+        command = repository.last_finish_command
+        tool_results = [
+            part for part in command.result_message.parts if isinstance(part, ToolResultPart)
+        ]
+        assert len(tool_results) == 1
+        assert [item.file_id for item in tool_results[0].artifacts] == [
+            "file_report",
+            "file_chart",
+        ]
+        assert command.delivery_message is not None
+        assert command.delivery_message.role is ConversationRole.ASSISTANT
+        assert [
+            (part.file_id, part.filename)
+            for part in command.delivery_message.parts
+            if isinstance(part, FileRefPart)
+        ] == [("file_report", "report.csv"), ("file_chart", "chart.png")]
+        for part in command.delivery_message.parts:
+            assert not hasattr(part, "object_key")
 
     asyncio.run(scenario())
 
@@ -1443,6 +1591,96 @@ def test_approval_barrier_holds_safe_calls_and_resume_does_not_replay_model() ->
         assert repository.finish_order == [1, 2]
         assert repository.normal_finishes == 1
         assert repository.run.status is RunStatus.COMPLETED
+
+    asyncio.run(scenario())
+
+
+def test_dynamic_skill_preparation_only_sends_valid_call_to_approval_barrier() -> None:
+    """同批非法 Skill 即时失败，合法项仍按 Run 固定策略进入审批屏障。"""
+
+    async def scenario() -> None:
+        skill_definition = _named_definition("skill_execute")
+        lease = _lease()
+        lease = replace(
+            lease,
+            run=replace(
+                lease.run,
+                tool_snapshot=RuntimeToolSnapshot(tools=(skill_definition,)),
+            ),
+        )
+        repository = _Repository(lease.run)
+
+        class DynamicApprovalRuntime(_ToolRuntime):
+            async def prepare_call(
+                self,
+                definition: RuntimeToolDefinition | None,
+                model_name: str,
+                arguments: dict[str, Any],
+                run: Run,
+                context: AuthorizedRunContext | None,
+                *,
+                call_id: str,
+            ) -> ToolCallPreparation:
+                del definition, model_name, run, context, call_id
+                if arguments["skill_id"] == "invalid":
+                    return ToolCallPreparation(
+                        ToolOutcome(
+                            status=ToolOutcomeStatus.ERROR,
+                            code="skill_not_in_run_snapshot",
+                            message="invalid skill",
+                        ),
+                        False,
+                    )
+                return ToolCallPreparation(None, True)
+
+        tool_runtime = DynamicApprovalRuntime(
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
+        )
+        provider = _ScriptedProvider(
+            [
+                _multi_response(
+                    LlmToolCall(
+                        "call-invalid-skill",
+                        "skill_execute",
+                        {"skill_id": "invalid"},
+                    ),
+                    LlmToolCall(
+                        "call-valid-skill",
+                        "skill_execute",
+                        {"skill_id": "valid"},
+                    ),
+                )
+            ]
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(supports_parallel_tool_calls=True)),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, tool_runtime),
+            config=RunWorkerConfig(),
+        )
+
+        await executor.execute(lease)
+
+        assert len(provider.requests) == 1
+        assert tool_runtime.calls == 0
+        assert repository.run.status is RunStatus.WAITING_FOR_APPROVAL
+        records = {
+            record.tool_call_id: record
+            for record in repository.records.values()
+        }
+        assert records["call-invalid-skill"].status is ToolCallStatus.FAILED
+        assert records["call-invalid-skill"].outcome is not None
+        assert (
+            records["call-invalid-skill"].outcome.code
+            == "skill_not_in_run_snapshot"
+        )
+        assert records["call-valid-skill"].status is ToolCallStatus.PENDING_APPROVAL
+        assert records["call-valid-skill"].requires_approval is True
+        assert [
+            item.requires_approval
+            for item in repository.last_batch_command.calls
+        ] == [False, True]
 
     asyncio.run(scenario())
 

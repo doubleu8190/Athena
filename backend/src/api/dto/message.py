@@ -34,6 +34,16 @@ class ToolCallPartResponse(BaseModel):
     arguments: dict[str, object]
 
 
+class ArtifactFileRefResponse(BaseModel):
+    """一个已发布会话产物的用户态引用。"""
+
+    file_id: str
+    filename: str
+    label: str | None = None
+    mime_type: str
+    size_bytes: int
+
+
 class ToolResultPartResponse(BaseModel):
     """工具结果内容块。"""
 
@@ -42,6 +52,7 @@ class ToolResultPartResponse(BaseModel):
     status: str
     output: str | None = None
     artifact_id: str | None = None
+    artifacts: list[ArtifactFileRefResponse] = Field(default_factory=list)
 
 
 type MessagePartResponse = Annotated[
@@ -73,6 +84,7 @@ class ConversationMessageListResponse(BaseModel):
 
 
 __all__ = [
+    "ArtifactFileRefResponse",
     "ConversationMessageListResponse",
     "ConversationMessageResponse",
     "FileRefPartResponse",

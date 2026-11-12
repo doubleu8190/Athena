@@ -6,6 +6,13 @@ import { Icon } from "../../shared/ui/Icons";
 import { projectErrorMessage } from "../projects/errorMessages";
 import { useProject, useProjectDirectory } from "../projects/hooks";
 import { useCreateSessionMutation } from "../sessions/hooks";
+import { uploadSessionFile } from "../files/api";
+import { fileErrorMessage } from "../files/errorMessages";
+import {
+  validateSessionUpload,
+  type PendingSessionUpload,
+} from "../files/model";
+import { SkillCatalogPicker } from "../skills/SkillCatalogPicker";
 import { submitRun } from "./api";
 import { useDraftChat } from "./DraftChatContext";
 import {
@@ -23,14 +30,25 @@ export function DraftChatPage() {
     contextNotice,
     contextReady,
     draft,
+    pendingUploads,
     projectId: selectedProjectId,
+    selectedSkillIds,
     chooseProject,
     setSessionHandoff,
     setDraft,
+    setPendingUploads,
+    setSelectedSkillIds,
   } = useDraftChat();
   const selectedProjectQuery = useProject(selectedProjectId);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [fileErrors, setFileErrors] = useState<Record<string, string>>(
+    {},
+  );
+  const [submitStage, setSubmitStage] = useState<
+    "idle" | "creating" | "uploading" | "submitting"
+  >("idle");
 
   const allProjects = projects.data ?? [];
   const selectedProject = allProjects.find(
@@ -67,6 +85,7 @@ export function DraftChatPage() {
 
     setSubmitError(null);
     setSubmitting(true);
+    setSubmitStage("creating");
     let createdSessionId: string;
     try {
       // 新草稿直到用户真正发送才创建 Session；标题保持为空，由后端展示“未命名对话”。
@@ -78,26 +97,103 @@ export function DraftChatPage() {
     } catch (error) {
       setSubmitError(chatErrorMessage(error));
       setSubmitting(false);
+      setSubmitStage("idle");
       return;
     }
 
     const requestId = newRequestId();
+    const uploadedFileIds: string[] = [];
+    const remainingUploads = [...pendingUploads];
+    setSubmitStage("uploading");
+    for (const pending of pendingUploads) {
+      try {
+        const uploaded = await uploadSessionFile(
+          createdSessionId,
+          pending.file,
+          pending.requestId,
+        );
+        uploadedFileIds.push(uploaded.id);
+        remainingUploads.shift();
+      } catch (error) {
+        // Session 已创建时记录已发布文件 ID 与剩余本地文件，避免重传成功项。
+        setSessionHandoff(createdSessionId, {
+          draft: text,
+          error: fileErrorMessage(error),
+          inputFileIds: uploadedFileIds,
+          pendingUploads: remainingUploads,
+          requestId,
+          reuseRequestId: false,
+          selectedSkillIds,
+        });
+        setDraft("");
+        setPendingUploads([]);
+        setSelectedSkillIds([]);
+        setSubmitting(false);
+        setSubmitStage("idle");
+        navigate(`/chat/${encodeURIComponent(createdSessionId)}`);
+        return;
+      }
+    }
+
+    setSubmitStage("submitting");
     try {
-      await submitRun(createdSessionId, requestId, text);
+      await submitRun(
+        createdSessionId,
+        requestId,
+        text,
+        selectedSkillIds,
+        uploadedFileIds,
+      );
       setDraft("");
+      setPendingUploads([]);
+      setSelectedSkillIds([]);
       setSubmitting(false);
+      setSubmitStage("idle");
       navigate(`/chat/${encodeURIComponent(createdSessionId)}`);
     } catch (error) {
       // Run 结果不明时不再停留在草稿页，避免用户再次发送时重复创建 Session。
       setSessionHandoff(createdSessionId, {
         draft: text,
         error: chatErrorMessage(error),
+        inputFileIds: uploadedFileIds,
+        pendingUploads: [],
         requestId,
         reuseRequestId: requestIdCanBeReused(error),
+        selectedSkillIds,
       });
       setDraft("");
+      setPendingUploads([]);
+      setSelectedSkillIds([]);
       setSubmitting(false);
+      setSubmitStage("idle");
       navigate(`/chat/${encodeURIComponent(createdSessionId)}`);
+    }
+  };
+
+  const addDraftFiles = (selected: FileList | null) => {
+    if (!selected) {
+      return;
+    }
+    const nextErrors: Record<string, string> = {};
+    const accepted: PendingSessionUpload[] = [];
+    Array.from(selected).forEach((file, index) => {
+      const error = validateSessionUpload(file);
+      if (error) {
+        nextErrors[`${file.name}-${index}`] = error;
+      } else {
+        accepted.push({
+          file,
+          requestId: newRequestId(),
+          reuseRequestId: false,
+        });
+      }
+    });
+    setFileErrors(nextErrors);
+    if (accepted.length > 0) {
+      setPendingUploads([...pendingUploads, ...accepted]);
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
     }
   };
 
@@ -171,6 +267,84 @@ export function DraftChatPage() {
         </p>
       </section>
 
+      <SkillCatalogPicker
+        disabled={submitting}
+        onChange={setSelectedSkillIds}
+        selectedSkillIds={selectedSkillIds}
+      />
+
+      <section
+        aria-labelledby="draft-files-title"
+        className="draft-file-panel"
+      >
+        <header>
+          <div>
+            <span className="empty-panel-kicker">Input files</span>
+            <h2 id="draft-files-title">任务文件</h2>
+            <p>
+              首次发送时先创建 Session，再逐个上传；文件发布后才提交包含文件 ID 的 Run。
+            </p>
+          </div>
+          <button
+            className="button-quiet"
+            disabled={submitting}
+            onClick={() => fileInputRef.current?.click()}
+            type="button"
+          >
+            <Icon name="plus" size={14} />
+            选择文件
+          </button>
+          <input
+            aria-label="选择任务文件"
+            className="sr-only"
+            disabled={submitting}
+            multiple
+            onChange={(event) => addDraftFiles(event.target.files)}
+            ref={fileInputRef}
+            type="file"
+          />
+        </header>
+        {pendingUploads.length === 0 ? (
+          <p className="draft-file-empty">
+            可将文本、Office、PDF 或常见图片作为本次任务输入。
+          </p>
+        ) : (
+          <ul className="draft-file-list">
+            {pendingUploads.map((pending) => (
+              <li key={pending.requestId}>
+                <Icon name="inbox" size={15} />
+                <span>
+                  <strong>{pending.file.name}</strong>
+                  <small>
+                    {Math.ceil(pending.file.size / 1024).toLocaleString()} KiB
+                  </small>
+                </span>
+                <button
+                  aria-label={`移除任务文件：${pending.file.name}`}
+                  className="text-button"
+                  disabled={submitting}
+                  onClick={() =>
+                    setPendingUploads(
+                      pendingUploads.filter(
+                        (item) => item.requestId !== pending.requestId,
+                      ),
+                    )
+                  }
+                  type="button"
+                >
+                  移除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {Object.entries(fileErrors).map(([key, error]) => (
+          <p className="field-error" key={key} role="alert">
+            {error}
+          </p>
+        ))}
+      </section>
+
       <form
         className="draft-composer"
         onSubmit={(event) => {
@@ -199,7 +373,13 @@ export function DraftChatPage() {
             disabled={!draft.trim() || submitting || !contextReady}
             type="submit"
           >
-            {submitting ? "正在提交…" : "发送消息"}
+            {submitting
+              ? submitStage === "creating"
+                ? "正在创建会话…"
+                : submitStage === "uploading"
+                  ? "正在上传文件…"
+                  : "正在提交…"
+              : "发送消息"}
           </button>
         </div>
       </form>

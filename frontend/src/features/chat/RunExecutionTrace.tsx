@@ -4,7 +4,10 @@ import { formatDateTime } from "../../shared/lib/format";
 import { Icon } from "../../shared/ui/Icons";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { useRunToolCalls, useToolCallDetail } from "./hooks";
-import type { RunToolCallSummary } from "./model";
+import { isSkillTool, type RunToolCallSummary } from "./model";
+import { SafeSkillProjection } from "./SafeSkillProjection";
+import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
+import { fileDisplayName } from "../files/model";
 
 function ToolCallRow({
   call,
@@ -22,6 +25,13 @@ function ToolCallRow({
     call.id,
     expanded,
   );
+  // 安全投影本身也是权威技能判别；即使模型展示名变化也不能回退裸参数。
+  const skillCall =
+    isSkillTool(call.model_name, call.tool_id) ||
+    Boolean(details.data?.safe_skill_projection);
+  const skillProjection =
+    details.data?.safe_skill_projection ?? null;
+  const artifacts = details.data?.artifacts ?? [];
 
   return (
     <li className="trace-call">
@@ -55,6 +65,42 @@ function ToolCallRow({
               message="工具调用详情加载失败。"
               onRetry={() => void details.refetch()}
             />
+          ) : details.data && skillCall ? (
+            <>
+              <div className="trace-detail-meta">
+                <span>
+                  开始：
+                  {details.data.started_at
+                    ? formatDateTime(details.data.started_at)
+                    : "未开始"}
+                </span>
+                <span>
+                  结束：
+                  {details.data.finished_at
+                    ? formatDateTime(details.data.finished_at)
+                    : "未结束"}
+                </span>
+              </div>
+              {skillProjection ? (
+                <SafeSkillProjection
+                  projection={skillProjection}
+                  sessionId={sessionId}
+                />
+              ) : (
+                <div
+                  className="skill-projection-unavailable"
+                  role="alert"
+                >
+                  该技能调用缺少服务端安全投影。普通用户详情不会回退展示原始参数、输出或日志。
+                </div>
+              )}
+              {artifacts.length > 0 ? (
+                <ArtifactList
+                  artifacts={artifacts}
+                  sessionId={sessionId}
+                />
+              ) : null}
+            </>
           ) : details.data ? (
             <>
               <div className="trace-detail-meta">
@@ -74,7 +120,9 @@ function ToolCallRow({
               </div>
               <div className="trace-code-block">
                 <strong>arguments</strong>
-                <pre>{JSON.stringify(details.data.arguments, null, 2)}</pre>
+                <pre>
+                  {JSON.stringify(details.data.arguments ?? {}, null, 2)}
+                </pre>
               </div>
               {details.data.outcome ? (
                 <div className="trace-code-block">
@@ -93,11 +141,52 @@ function ToolCallRow({
               ) : (
                 <p className="trace-empty">该调用尚未产生 outcome。</p>
               )}
+              {artifacts.length > 0 ? (
+                <ArtifactList
+                  artifacts={artifacts}
+                  sessionId={sessionId}
+                />
+              ) : null}
             </>
           ) : null}
         </div>
       ) : null}
     </li>
+  );
+}
+
+function ArtifactList({
+  artifacts,
+  sessionId,
+}: {
+  artifacts: NonNullable<
+    ReturnType<typeof useToolCallDetail>["data"]
+  >["artifacts"];
+  sessionId: string;
+}) {
+  return (
+    <div className="trace-code-block">
+      <strong>交付文件</strong>
+      <ul className="message-artifact-list">
+        {(artifacts ?? []).map((artifact) => (
+          <li className="message-artifact" key={artifact.file_id}>
+            <span>
+              <strong>{fileDisplayName(artifact)}</strong>
+              <small>
+                {artifact.filename} · {artifact.mime_type} ·{" "}
+                {artifact.size_bytes.toLocaleString()} B
+              </small>
+            </span>
+            <SessionFileDownloadButton
+              compact
+              fileId={artifact.file_id}
+              filename={fileDisplayName(artifact)}
+              sessionId={sessionId}
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

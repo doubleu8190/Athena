@@ -96,6 +96,9 @@ class RunToolCallModel(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     outcome: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
+    safe_skill_projection: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), nullable=True
+    )
     round: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
 

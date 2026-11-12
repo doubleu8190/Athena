@@ -33,6 +33,8 @@ async def run_worker_process(
         await prepare_run_tokenizers()
         # 资源构造全部收敛在组合根；构造中途失败时 bundle 只保留已完成的资源。
         build_run_worker_dependencies(bundle, database_url=database_url)
+        if bundle.file_object_store is not None:
+            await bundle.file_object_store.start()
         # 本地模型必须在领取任务前启动，避免首个 Run 撞上冷加载。
         if bundle.query_services is not None:
             await bundle.query_services.start()
@@ -72,6 +74,16 @@ async def run_worker_process(
             except BaseException as error:
                 logger.error(
                     "run_worker_shutdown_failed exception_type=%s",
+                    type(error).__name__,
+                )
+                if failure is None:
+                    failure = error
+        if bundle.file_object_store is not None:
+            try:
+                await bundle.file_object_store.aclose()
+            except BaseException as error:
+                logger.error(
+                    "run_worker_file_storage_cleanup_failed exception_type=%s",
                     type(error).__name__,
                 )
                 if failure is None:

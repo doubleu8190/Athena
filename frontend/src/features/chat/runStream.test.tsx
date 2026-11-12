@@ -12,6 +12,7 @@ import type {
 } from "./model";
 import {
   INITIAL_RUN_STREAM_STATE,
+  projectRunStatus,
   runStreamReducer,
   type RunStreamAction,
 } from "./runStream";
@@ -84,7 +85,7 @@ describe("Run 状态投影", () => {
     expect(terminal.status).toBe("cancelled");
   });
 
-  it("snapshot 权威覆盖 text_delta，interrupted 保留临时文本", () => {
+  it("非终态 snapshot 权威覆盖 text_delta，interrupted 保留临时文本", () => {
     const streaming = reduce([
       { runId: "run-1", status: "running", type: "start" },
       { text: "临时输出", type: "text_delta" },
@@ -97,13 +98,125 @@ describe("Run 状态投影", () => {
     expect(interrupted.notice).toContain("重新同步");
 
     const corrected = runStreamReducer(interrupted, {
-      payload: snapshot("completed", "正式完整回答"),
+      payload: snapshot("running", "权威进度回答"),
       type: "snapshot",
     });
     expect(corrected.transientText).toBe("");
-    expect(corrected.messages[0].text).toBe("正式完整回答");
-    expect(corrected.connection).toBe("closed");
+    expect(corrected.messages[0].text).toBe("权威进度回答");
+    expect(corrected.connection).toBe("open");
     expect(corrected.notice).toBeNull();
+  });
+
+  it("终态 snapshot 与先到终态事件都保留 transient，completed 只能显式 settle", () => {
+    const streaming = reduce([
+      { runId: "run-1", status: "running", type: "start" },
+      { text: "不能丢失的未完成回答", type: "text_delta" },
+    ]);
+
+    for (const terminalStatus of [
+      "completed",
+      "failed",
+      "cancelled",
+    ] as const) {
+      const snapshotTerminal = runStreamReducer(streaming, {
+        payload: snapshot(terminalStatus, "旧交付消息"),
+        type: "snapshot",
+      });
+      expect(snapshotTerminal.status).toBe(terminalStatus);
+      expect(snapshotTerminal.connection).toBe("closed");
+      expect(snapshotTerminal.transientText).toBe("不能丢失的未完成回答");
+      expect(snapshotTerminal.messages[0].text).toBe("旧交付消息");
+    }
+
+    const eventTerminal = runStreamReducer(streaming, {
+      event: event("failed", 5),
+      type: "run_event",
+    });
+    const queryTerminal = runStreamReducer(eventTerminal, {
+      runId: "run-1",
+      status: "failed",
+      type: "query_terminal",
+    });
+    expect(queryTerminal.transientText).toBe("不能丢失的未完成回答");
+
+    const completedSnapshot = runStreamReducer(streaming, {
+      payload: snapshot("completed", "旧交付消息"),
+      type: "snapshot",
+    });
+    const settled = runStreamReducer(completedSnapshot, {
+      runId: "run-1",
+      status: "completed",
+      type: "settle_terminal",
+    });
+    expect(settled.transientText).toBe("");
+  });
+
+  it("查询终态覆盖残留 SSE running，非终态仍保留 SSE 实时投影", () => {
+    expect(
+      projectRunStatus({
+        queryStatus: "completed",
+        runId: "run-1",
+        streamRunId: "run-1",
+        streamStatus: "running",
+      }),
+    ).toBe("completed");
+    expect(
+      projectRunStatus({
+        queryStatus: "running",
+        runId: "run-1",
+        streamRunId: "run-1",
+        streamStatus: "cancelling",
+      }),
+    ).toBe("cancelling");
+    expect(
+      projectRunStatus({
+        queryStatus: "running",
+        runId: "run-2",
+        streamRunId: "run-1",
+        streamStatus: "completed",
+      }),
+    ).toBe("running");
+  });
+
+  it("查询终态先关闭连接并保留草稿，持久消息对账后才清除 transient", () => {
+    const streaming = reduce([
+      { runId: "run-1", status: "running", type: "start" },
+      { text: "待对账草稿", type: "text_delta" },
+    ]);
+    const closed = runStreamReducer(streaming, {
+      runId: "run-1",
+      status: "completed",
+      type: "query_terminal",
+    });
+    expect(closed.connection).toBe("closed");
+    expect(closed.transientText).toBe("待对账草稿");
+
+    const settled = runStreamReducer(closed, {
+      runId: "run-1",
+      status: "completed",
+      type: "settle_terminal",
+    });
+    expect(settled.connection).toBe("closed");
+    expect(settled.transientText).toBe("");
+  });
+
+  it("切换到新 Run 时清空旧 SSE，并恢复查询等待状态", () => {
+    const stale = runStreamReducer(
+      { ...INITIAL_RUN_STREAM_STATE, runId: "run-1" },
+      {
+        payload: snapshot("completed", "旧回答"),
+        type: "snapshot",
+      },
+    );
+    const switched = runStreamReducer(stale, {
+      runId: "run-2",
+      status: "waiting_for_input",
+      type: "start",
+    });
+    expect(switched.runId).toBe("run-2");
+    expect(switched.status).toBe("waiting_for_input");
+    expect(switched.messages).toEqual([]);
+    expect(switched.events).toEqual([]);
   });
 });
 

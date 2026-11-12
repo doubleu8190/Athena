@@ -7,12 +7,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from api.dto.message import ArtifactFileRefResponse
+
 
 class RunSubmitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=32_000)
+    skill_ids: list[str] = Field(default_factory=list, max_length=100)
+    input_file_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class RunAnswerRequest(BaseModel):
@@ -20,6 +24,7 @@ class RunAnswerRequest(BaseModel):
 
     request_id: str = Field(min_length=1, max_length=128)
     text: str = Field(min_length=1, max_length=32_000)
+    input_file_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class RunRetryRequest(BaseModel):
@@ -36,6 +41,35 @@ class RunToolApprovalRequest(BaseModel):
     decision: Literal["approve", "reject"]
 
 
+class SafeSkillInputFileResponse(BaseModel):
+    file_id: str
+    filename: str
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    available: bool
+
+
+class SkillParameterSummaryItemResponse(BaseModel):
+    name: str
+    label: str
+    value: str
+
+
+class SafeSkillApprovalProjectionResponse(BaseModel):
+    call_id: str
+    skill_id: str
+    skill_name: str
+    skill_version_id: str
+    skill_version_label: str
+    script_label: str
+    purpose: str
+    input_files: list[SafeSkillInputFileResponse] = Field(default_factory=list)
+    parameter_summary: list[SkillParameterSummaryItemResponse] = Field(default_factory=list)
+    hidden_parameter_count: int = 0
+    can_approve: bool = True
+    unavailable_reason: str | None = None
+
+
 class RunPendingToolApprovalResponse(BaseModel):
     call_id: str
     batch_message_id: str
@@ -43,6 +77,7 @@ class RunPendingToolApprovalResponse(BaseModel):
     model_name: str
     tool_kind: str | None
     requested_at: datetime
+    safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
 
 
 class RunAttemptUsageResponse(BaseModel):
@@ -76,6 +111,22 @@ class RunInputRequestResponse(BaseModel):
     created_at: datetime
 
 
+class RunSkillEntryResponse(BaseModel):
+    skill_id: str
+    slug: str
+    name: str
+    description: str
+    version_id: str
+    version_label: str
+    requires_approval: bool
+
+
+class RunSkillSnapshotResponse(BaseModel):
+    version: int
+    skills: list[RunSkillEntryResponse]
+    selected_skill_ids: list[str]
+
+
 class RunResponse(BaseModel):
     id: str
     session_id: str
@@ -95,6 +146,8 @@ class RunResponse(BaseModel):
     cancel_requested_at: datetime | None
     safe_error_code: str | None
     usage: RunUsageResponse
+    skill_snapshot: RunSkillSnapshotResponse | None
+    input_file_ids: list[str]
     pending_input: RunInputRequestResponse | None = None
     pending_approvals: list[RunPendingToolApprovalResponse] = Field(default_factory=list)
     replayed: bool = False
@@ -145,8 +198,10 @@ class RunToolCallSummaryResponse(BaseModel):
 
 
 class RunToolCallDetailResponse(RunToolCallSummaryResponse):
-    arguments: dict[str, object]
+    arguments: dict[str, object] | None = None
     outcome: RunToolOutcomeResponse | None
+    artifacts: list[ArtifactFileRefResponse] = Field(default_factory=list)
+    safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
 
 
 class RunToolCallListResponse(BaseModel):
@@ -163,6 +218,8 @@ __all__ = [
     "RunListResponse",
     "RunPendingToolApprovalResponse",
     "RunResponse",
+    "RunSkillEntryResponse",
+    "RunSkillSnapshotResponse",
     "RunRetryRequest",
     "RunSubmitRequest",
     "RunToolCallDetailResponse",
@@ -171,4 +228,7 @@ __all__ = [
     "RunToolApprovalRequest",
     "RunToolOutcomeResponse",
     "RunUsageResponse",
+    "SafeSkillApprovalProjectionResponse",
+    "SafeSkillInputFileResponse",
+    "SkillParameterSummaryItemResponse",
 ]

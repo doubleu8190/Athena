@@ -229,6 +229,9 @@ class RunRepository(Protocol):
     ) -> tuple[ConversationMessage | ExecutionMessage, ...] | None:
         """按已固定 cutoff 读取 Run 的消息上下文，None 表示不可见。"""
 
+    async def list_successfully_loaded_skill_ids(self, run_id: str) -> tuple[str, ...]:
+        """从本 Run 已成功完成的 skill_load 调用恢复活跃加载证据。"""
+
     async def list_context_summaries(
         self, session_id: str, owner_id: str, run_id: str
     ) -> tuple[ContextSummary, ...] | None:

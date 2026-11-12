@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from typing import Any, Protocol
+from typing import Protocol
 
 from domain.llm.model.profile import RuntimeModelProfile
 from domain.llm.model.types import LlmRequest, LlmResponse, LlmStreamEvent
@@ -20,24 +20,6 @@ class TokenCounterPort(Protocol):
     """估算文本占用的 token 数。"""
 
     def count(self, text: str) -> int: ...
-
-
-class LlmProvider(Protocol):
-    """单次调用供应商端口。"""
-
-    async def complete(self, profile: str, request: LlmRequest) -> LlmResponse: ...
-
-    def stream(
-        self, profile: str, request: LlmRequest
-    ) -> AbstractAsyncContextManager[AsyncIterator[LlmStreamEvent]]: ...
-
-    async def generate_structured(
-        self,
-        profile: str,
-        request: LlmRequest,
-        schema_name: str,
-        schema: Mapping[str, Any],
-    ) -> LlmResponse: ...
 
 
 class LlmStreamProvider(Protocol):

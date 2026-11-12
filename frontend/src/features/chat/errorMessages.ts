@@ -4,7 +4,13 @@ const CHAT_ERROR_COPY: Record<string, string> = {
   run_already_active: "该会话已有运行中的任务，请等待完成或先停止。",
   run_request_id_conflict:
     "请求标识已被另一条内容占用，请检查内容后重新发送。",
+  run_request_id_invalid: "请求标识无效，请刷新页面后重新发送。",
   run_text_invalid: "消息内容为空或超过 32,000 个字符。",
+  run_skill_ids_invalid: "技能选择包含重复、空白或无效的技能 ID。",
+  run_input_file_ids_invalid: "文件选择包含重复、空白或无效的文件 ID。",
+  run_input_file_ids_duplicate: "文件选择包含重复 ID，请刷新后重新选择。",
+  run_input_file_unavailable:
+    "所选文件已失效或不属于当前会话，请刷新文件列表后重试。",
   run_input_request_not_pending:
     "该补充输入请求已失效，正在同步最新运行状态。",
   run_not_found: "运行记录不存在或已被删除。",
@@ -13,6 +19,19 @@ const CHAT_ERROR_COPY: Record<string, string> = {
   run_not_latest: "已有更新的任务，不能重试该运行。",
   run_tool_approval_not_pending: "该工具调用已不在待审批状态。",
   run_tool_approval_already_decided: "该工具调用已经完成审批。",
+  skill_selection_invalid:
+    "技能选择重复或包含当前 Run 不支持的项目，请重新选择。",
+  skill_selection_unavailable:
+    "所选技能已停用、依赖失效或版本不可用，请刷新目录后重新选择。",
+  skill_catalog_integrity_invalid:
+    "技能目录数据不完整，当前不能安全创建 Run，请稍后重试。",
+  skill_approval_projection_unavailable:
+    "该技能审批缺少安全投影，服务端只允许拒绝。请刷新后重试。",
+  skill_approval_metadata_unavailable:
+    "技能审批元数据已失效，服务端只允许拒绝。请刷新后重试。",
+  session_file_quota_exceeded:
+    "当前会话已达到文件数量上限，请创建新会话继续。",
+  file_storage_unavailable: "文件存储暂时不可用，请稍后重试。",
   tool_retry_confirmation_required: "重试可能重复已成功操作，请确认后重试。",
   project_not_found: "指定项目不存在或不可访问。",
   network_error: "无法连接服务器，请检查网络后重试。",

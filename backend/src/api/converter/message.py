@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from api.dto.message import (
+    ArtifactFileRefResponse,
     ConversationMessageListResponse,
     ConversationMessageResponse,
     FileRefPartResponse,
@@ -37,6 +38,16 @@ def _part_to_response(part: MessagePart) -> MessagePartResponse:
         status=part.status.value,
         output=part.output,
         artifact_id=part.artifact_id,
+        artifacts=[
+            ArtifactFileRefResponse(
+                file_id=artifact.file_id,
+                filename=artifact.filename,
+                label=artifact.label,
+                mime_type=artifact.mime_type,
+                size_bytes=artifact.size_bytes,
+            )
+            for artifact in part.artifacts
+        ],
     )
 
 

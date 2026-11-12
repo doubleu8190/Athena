@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from api.dto.message import ArtifactFileRefResponse
 from api.dto.run import (
     RunAttemptUsageResponse,
     RunEventListResponse,
@@ -10,14 +11,25 @@ from api.dto.run import (
     RunListResponse,
     RunPendingToolApprovalResponse,
     RunResponse,
+    RunSkillEntryResponse,
+    RunSkillSnapshotResponse,
     RunToolCallDetailResponse,
     RunToolCallListResponse,
     RunToolCallSummaryResponse,
     RunToolOutcomeResponse,
     RunUsageResponse,
+    SafeSkillApprovalProjectionResponse,
+    SafeSkillInputFileResponse,
+    SkillParameterSummaryItemResponse,
 )
 from app.run.model.result import RunDetailsResult, RunListResult
 from domain.run.model import Run, RunEvent, RunInputRequest, RunStatus, RunUsage
+from domain.skill import (
+    SKILL_EXECUTE_TOOL_ID,
+    SKILL_LOAD_TOOL_ID,
+    SKILL_READ_RESOURCE_TOOL_ID,
+    SafeSkillApprovalProjection,
+)
 from domain.tool import (
     PendingToolApproval,
     RunToolCallDetails,
@@ -26,6 +38,31 @@ from domain.tool import (
 )
 
 RETRY_WARNING = "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。"
+
+_SKILL_TOOL_IDS = frozenset(
+    {
+        SKILL_EXECUTE_TOOL_ID,
+        SKILL_LOAD_TOOL_ID,
+        SKILL_READ_RESOURCE_TOOL_ID,
+    }
+)
+_SKILL_MODEL_NAMES = frozenset(
+    {
+        "skill_execute",
+        "skill_load",
+        "skill_read_resource",
+    }
+)
+
+
+def _is_skill_call(tool_id: str | None, model_name: str) -> bool:
+    """工具身份缺失或冲突时，仍按归一化 modelName 识别 Skill 调用。"""
+    if tool_id in _SKILL_TOOL_IDS:
+        return True
+    normalized = model_name.strip().lower()
+    return normalized in _SKILL_MODEL_NAMES or any(
+        normalized.endswith(f"_{name}") for name in _SKILL_MODEL_NAMES
+    )
 
 
 def _usage_to_response(usage: RunUsage) -> RunUsageResponse:
@@ -64,6 +101,42 @@ def _input_to_response(request: RunInputRequest) -> RunInputRequestResponse:
     )
 
 
+def safe_skill_projection_to_response(
+    projection: SafeSkillApprovalProjection,
+) -> SafeSkillApprovalProjectionResponse:
+    """只序列化已冻结审批摘要，不查询当前 Skill 或原始参数。"""
+    return SafeSkillApprovalProjectionResponse(
+        call_id=projection.call_id,
+        skill_id=projection.skill_id,
+        skill_name=projection.skill_name,
+        skill_version_id=projection.skill_version_id,
+        skill_version_label=projection.skill_version_label,
+        script_label=projection.script_label,
+        purpose=projection.purpose,
+        input_files=[
+            SafeSkillInputFileResponse(
+                file_id=item.file_id,
+                filename=item.filename,
+                mime_type=item.mime_type,
+                size_bytes=item.size_bytes,
+                available=item.available,
+            )
+            for item in projection.input_files
+        ],
+        parameter_summary=[
+            SkillParameterSummaryItemResponse(
+                name=item.name,
+                label=item.label,
+                value=item.value,
+            )
+            for item in projection.parameter_summary
+        ],
+        hidden_parameter_count=projection.hidden_parameter_count,
+        can_approve=projection.can_approve,
+        unavailable_reason=projection.unavailable_reason,
+    )
+
+
 def run_to_response(
     run: Run,
     *,
@@ -91,6 +164,27 @@ def run_to_response(
         cancel_requested_at=run.cancel_requested_at,
         safe_error_code=run.safe_error_code,
         usage=_usage_to_response(run.usage),
+        skill_snapshot=(
+            None
+            if run.skill_snapshot is None
+            else RunSkillSnapshotResponse(
+                version=run.skill_snapshot.version,
+                skills=[
+                    RunSkillEntryResponse(
+                        skill_id=item.skill_id,
+                        slug=item.slug,
+                        name=item.name,
+                        description=item.description,
+                        version_id=item.version_id,
+                        version_label=item.version_label,
+                        requires_approval=item.requires_approval,
+                    )
+                    for item in run.skill_snapshot.skills
+                ],
+                selected_skill_ids=list(run.skill_snapshot.selected_skill_ids),
+            )
+        ),
+        input_file_ids=run.input_files.ids,
         pending_input=None if pending_input is None else _input_to_response(pending_input),
         pending_approvals=[
             RunPendingToolApprovalResponse(
@@ -100,6 +194,13 @@ def run_to_response(
                 model_name=item.model_name,
                 tool_kind=None if item.tool_kind is None else item.tool_kind.value,
                 requested_at=item.requested_at,
+                safe_skill_projection=(
+                    None
+                    if item.safe_skill_projection is None
+                    else safe_skill_projection_to_response(
+                        item.safe_skill_projection
+                    )
+                ),
             )
             for item in pending_approvals
         ],
@@ -178,9 +279,16 @@ def tool_calls_to_response(page: RunToolCallPage) -> RunToolCallListResponse:
 def tool_call_to_response(details: RunToolCallDetails) -> RunToolCallDetailResponse:
     summary = tool_call_summary_to_response(details.record)
     outcome = details.record.outcome
+    safe_projection = details.safe_skill_projection
+    # Skill 调用即使投影损坏、tool_id 缺失或与 modelName 分叉也必须统一脱敏，
+    # 不能因数据库旧记录缺少新字段而回退到裸参数和内部结果数据。
+    is_skill_call = _is_skill_call(
+        details.record.tool_id,
+        details.record.model_name,
+    )
     return RunToolCallDetailResponse(
         **summary.model_dump(),
-        arguments=details.arguments,
+        arguments=None if is_skill_call else details.arguments,
         outcome=(
             None
             if outcome is None
@@ -188,10 +296,25 @@ def tool_call_to_response(details: RunToolCallDetails) -> RunToolCallDetailRespo
                 status=outcome.status.value,
                 code=outcome.code,
                 message=outcome.message,
-                data=outcome.data,
+                data={} if is_skill_call else outcome.data,
                 truncated=outcome.truncated,
                 cleanup_error_code=outcome.cleanup_error_code,
             )
+        ),
+        artifacts=[
+            ArtifactFileRefResponse(
+                file_id=artifact.file_id,
+                filename=artifact.filename,
+                label=artifact.label,
+                mime_type=artifact.mime_type,
+                size_bytes=artifact.size_bytes,
+            )
+            for artifact in details.artifacts
+        ],
+        safe_skill_projection=(
+            None
+            if safe_projection is None
+            else safe_skill_projection_to_response(safe_projection)
         ),
     )
 
@@ -202,6 +325,7 @@ __all__ = [
     "run_details_to_response",
     "run_list_to_response",
     "run_to_response",
+    "safe_skill_projection_to_response",
     "tool_call_summary_to_response",
     "tool_call_to_response",
     "tool_calls_to_response",

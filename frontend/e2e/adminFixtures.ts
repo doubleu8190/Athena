@@ -205,6 +205,12 @@ export async function installAdminFixtures(
       });
     }
     if (
+      path === "/api/v1/admin/skills" &&
+      method === "GET"
+    ) {
+      return json(route, { items: [] });
+    }
+    if (
       path === "/api/v1/admin/tools/tool-e2e" &&
       method === "PATCH"
     ) {

@@ -3,6 +3,8 @@
 状态：设计方案已获用户整体确认；实施方案见 `run-implementation-plan.md`，S1–S6 已完成实施、独立审查及 Root 验收。真实供应商联调尚未执行。
 核对日期：2026-11-08。本文保留已确认设计及设计时的代码基线；最终实施与验证结果见实施方案第 9 节。
 
+> **后续代码状态（2026-11-12）**：设计时引用的 `app/llm/config.py`、`app/llm/service.py` 和 `adapter/llm/openai_responses.py` 已删除；当前只有管理员模型版本、`ModelProfileService` 和 `OpenAIChatCompletionsAdapter`，不再保留 Responses 低层调用通路。
+
 ## 1. 目标与范围
 
 Run 表示用户一次任务从发起、执行、澄清到结束的生命周期。Session 承载持续会话，Message 保存对话及执行交互。
@@ -24,8 +26,8 @@ Run 表示用户一次任务从发起、执行、澄清到结束的生命周期�
 | `backend/src/adapter/message/model/conversation.py`、`repository/message.py` | client_message_id 幂等；还按 Session/run/role 唯一及查重 | 必须移除后者，支持同 Run 多条用户回答、助手澄清及最终回复 |
 | `backend/src/domain/message/model/entity.py` | 两种流、run_id/thread_id/source_message_id 等已有定义 | 接入 Run 关联校验，不能仅凭字符串写入任意 Run |
 | `backend/src/adapter/message/repository/message.py` | 每次 append 自开事务，在 Session 行锁内分配共享序号 | 增加接受同一事务上下文的内部写入能力；不能串联两个独立提交冒充原子操作 |
-| `backend/src/main.py`、`app/llm/config.py`、`app/llm/service.py` | 命名部署 Profile，启动时载入；没有持久化版本管理 | 增加管理员版本/default 管理，Worker 按 Run 版本解析凭据 |
-| `backend/src/adapter/llm/openai_responses.py` | 已有 Responses Adapter；工作树中还有未提交修改 | 与本次 Chat Completions 决策有差异，见第 13 节 |
+| `backend/src/main.py`、`app/llm/config.py`、`app/llm/service.py`（后两者已删除） | 设计时使用命名部署 Profile；旧接口当前已删除，生产使用管理员版本/default 管理 | 旧 Profile 路径不再扩展，Worker 按 Run 版本解析凭据 |
+| `backend/src/adapter/llm/openai_responses.py`（已删除） | 设计时已有 Responses Adapter | 当前 Run 只使用 Chat Completions Adapter，见第 13 节 |
 | `backend/src/app/knowledge/worker.py`、`adapter/knowledge/repository.py` | 知识库已有独立 Worker、租约及 fencing token 模式 | 参考其模式，不复用其任务表、不改变知识库故障策略 |
 | `pyproject.toml`、`adapter/models.py` | 有 OpenAI SDK，无 Redis 依赖及 Run 模型注册 | 新增 Redis 依赖、Run 模型、迁移和进程入口 |
 
@@ -199,7 +201,7 @@ SSE 建连使用当前登录身份，不在 URL 放密钥；长连接定期复�
 
 已确认的设计实施顺序如下，具体执行拆分见实施方案：
 
-1. 模型协议差异确认，补齐模型版本及默认配置管理；扩展 LLM 端口的版本配置解析和并行调用控制，不破坏既有 Responses 调用方。
+1. 模型协议差异确认，补齐模型版本及默认配置管理；扩展 LLM 端口的版本配置解析和并行调用控制。历史 Responses 调用方后续已从生产代码删除。
 2. Run/请求/事件/幂等实体、迁移、事务写入；移除旧消息 run-role 唯一规则，保留客户端幂等和共享消息序号。
 3. 提交、回答、取消、重试、查询、Session 删除保护及所有者隔离。
 4. Worker 领取/续约/回收、上下文、模型响应判定、有限重试及安全 Trace。
@@ -231,7 +233,7 @@ SSE 建连使用当前登录身份，不在 URL 放密钥；长连接定期复�
 
 用户已整体确认设计并要求整理实施方案；当前尚未授权开始代码实现：
 
-1. **协议差异已确认处理方式**：保留当前 Responses 能力，新增 Chat Completions Adapter 供首期 Run 显式使用，不替换既有实现、不探测协议、不自动回退。后续实施应同步相关 LLM 文档，明确两种 Adapter 的使用边界。
+1. **协议差异已确认处理方式**：首期 Run 使用 Chat Completions Adapter，不探测协议、不自动回退；历史 Responses 低层 Adapter、`LlmService` 和部署 Profile 已于 2026-11-12 删除，不再维护双 Adapter。
 2. **本文整体方案已确认**：表结构、端点、澄清协议持久化、SSE 对账及模型管理纳入设计基线；实施方案单独列明执行步骤和进一步的兼容落点，设计确认不等同于本轮代码实施授权。
 3. **环境参数在实施/联调前落实**：实际模型/base_url/凭据、tokenizer 映射、Redis 地址，以及 Worker 并发、租约/续约/轮询周期、执行超时、缓冲和请求大小上限。秘密值不写文档；参数需有可校验默认值及范围。
 4. **历史数据和工作树在实施前再审计**：保护现有未提交工作，检查历史 run_id 与最新 migration head。没有证据时不承诺可无条件添加外键。

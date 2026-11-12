@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.llm import OpenAIResponsesAdapter
+from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
@@ -15,16 +17,19 @@ from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
+from adapter.skill import SqlAlchemySkillRepository
 from adapter.system_prompt import SqlAlchemySystemPromptRepository
 from app.auth.service import AuthService
+from app.file import SessionFileService
 from app.knowledge.service import KnowledgeService
-from app.llm import LlmService, ModelProfileService
+from app.llm import ModelProfileService
 from app.memory.service import MemoryService
 from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.run.service import RunService
 from app.run.stream import RunStreamService
 from app.session.service import SessionService
+from app.skill import DependencyChecker, SkillService
 from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.config import env_csv_set, env_flag
@@ -32,6 +37,7 @@ from bootstrap.database import build_database
 from bootstrap.knowledge import validate_knowledge_storage_configuration
 from bootstrap.redis import build_run_transport
 from bootstrap.tool import QueryServiceBundle, build_query_services
+from domain.file.ports import FileObjectStore
 from domain.knowledge.ports import DocumentFileValidator, KnowledgeRepositoryPort, OriginalStore
 from domain.mcp import McpSecretError
 from infrastructure.database import Database
@@ -42,13 +48,28 @@ from infrastructure.security.password import Argon2PasswordHasher
 
 logger = logging.getLogger(__name__)
 
+_FILE_STORAGE_SETTING_NAMES = (
+    "ATHENA_FILE_MINIO_ENDPOINT",
+    "ATHENA_FILE_MINIO_ACCESS_KEY",
+    "ATHENA_FILE_MINIO_SECRET_KEY",
+    "ATHENA_FILE_MINIO_BUCKET",
+)
+
+
+def _file_storage_enabled() -> bool:
+    """按独立文件存储配置启用 Skills/files，不依赖知识库功能。"""
+    if "ATHENA_FILES_ENABLED" in os.environ:
+        return env_flag("ATHENA_FILES_ENABLED", default=False)
+    # 任一专用连接项存在即视为已配置，让不完整配置在启动时明确失败；
+    # 完全没有文件存储配置的开发/旧测试实例则不挂载相关路由。
+    return any(os.getenv(name, "").strip() for name in _FILE_STORAGE_SETTING_NAMES)
+
 
 @dataclass(slots=True)
 class ApiDependencies:
     """API 进程持有并负责清理的进程级资源。"""
 
     database: Database | None
-    llm_adapter: OpenAIResponsesAdapter | None
     run_transport: RedisRunTransport | None
     query_services: QueryServiceBundle | None
     project_service: ProjectService | None
@@ -57,7 +78,6 @@ class ApiDependencies:
     run_service: RunService | None
     auth_service: AuthService | None
     tool_manager: ToolManager | None
-    llm_service: LlmService | None
     model_profile_service: ModelProfileService | None
     system_prompt_service: SystemPromptService | None
     memory_service: MemoryService | None
@@ -66,9 +86,14 @@ class ApiDependencies:
     knowledge_originals: OriginalStore | None
     run_stream_service: RunStreamService | None
     document_validator: DocumentFileValidator | None
+    file_object_store: FileObjectStore | None
+    skill_service: SkillService | None
+    session_file_service: SessionFileService | None
 
     async def start(self) -> None:
         """在首个请求前启动共享查询资源。"""
+        if self.file_object_store is not None:
+            await self.file_object_store.start()
         if self.query_services is not None:
             await self.query_services.start()
 
@@ -82,17 +107,20 @@ class ApiDependencies:
                     "run_redis_shutdown_failed exception_type=%s",
                     type(error).__name__,
                 )
-        if self.llm_adapter is not None:
-            try:
-                await self.llm_adapter.aclose()
-            except Exception:
-                logger.error("llm_shutdown_failed code=llm_cleanup_failed")
         if self.query_services is not None:
             try:
                 await self.query_services.aclose()
             except Exception as error:
                 logger.error(
                     "query_service_shutdown_failed exception_type=%s",
+                    type(error).__name__,
+                )
+        if self.file_object_store is not None:
+            try:
+                await self.file_object_store.aclose()
+            except Exception as error:
+                logger.error(
+                    "file_storage_shutdown_failed exception_type=%s",
                     type(error).__name__,
                 )
         if self.database is not None:
@@ -110,11 +138,12 @@ def build_api_dependencies(
     auth_service: AuthService | None = None,
     *,
     tool_manager: ToolManager | None = None,
-    llm_service: LlmService | None = None,
     model_profile_service: ModelProfileService | None = None,
     system_prompt_service: SystemPromptService | None = None,
     memory_service: MemoryService | None = None,
     knowledge_service: KnowledgeService | None = None,
+    skill_service: SkillService | None = None,
+    session_file_service: SessionFileService | None = None,
 ) -> ApiDependencies:
     """按环境变量与注入参数组装 API 进程依赖。
 
@@ -129,8 +158,6 @@ def build_api_dependencies(
     auth_use_case = auth_service
     database_url = os.getenv("ATHENA_DATABASE_URL")
     mcp_use_case = tool_manager
-    llm_use_case = llm_service
-    llm_adapter: OpenAIResponsesAdapter | None = None
     model_profile_use_case = model_profile_service
     system_prompt_use_case = system_prompt_service
     memory_use_case = memory_service
@@ -248,9 +275,34 @@ def build_api_dependencies(
     document_validator: DocumentFileValidator | None = (
         LocalDocumentParser(ocr_languages="ch") if knowledge_use_case is not None else None
     )
+    file_object_store: FileObjectStore | None = None
+    skill_use_case = skill_service
+    session_file_use_case = session_file_service
+    files_enabled = _file_storage_enabled()
+    if (
+        database is not None
+        and files_enabled
+        and (skill_use_case is None or session_file_use_case is None)
+    ):
+        file_object_store = MinioFileObjectStore.from_environment(deferred=True)
+        if skill_use_case is None:
+            skill_use_case = SkillService(
+                SqlAlchemySkillRepository(database.session_factory),
+                file_object_store,
+                auth_repository,
+                dependency_checker=DependencyChecker(
+                    python_executable=Path(
+                        os.getenv("ATHENA_SKILL_PYTHON_EXECUTABLE", sys.executable)
+                    )
+                ),
+            )
+        if session_file_use_case is None:
+            session_file_use_case = SessionFileService(
+                SqlAlchemySessionFileRepository(database.session_factory),
+                file_object_store,
+            )
     return ApiDependencies(
         database=database,
-        llm_adapter=llm_adapter,
         run_transport=run_transport,
         query_services=query_services,
         project_service=project_use_case,
@@ -259,7 +311,6 @@ def build_api_dependencies(
         run_service=run_use_case,
         auth_service=auth_use_case,
         tool_manager=mcp_use_case,
-        llm_service=llm_use_case,
         model_profile_service=model_profile_use_case,
         system_prompt_service=system_prompt_use_case,
         memory_service=memory_use_case,
@@ -268,6 +319,9 @@ def build_api_dependencies(
         knowledge_originals=knowledge_originals,
         run_stream_service=run_stream_service,
         document_validator=document_validator,
+        file_object_store=file_object_store,
+        skill_service=skill_use_case,
+        session_file_service=session_file_use_case,
     )
 
 

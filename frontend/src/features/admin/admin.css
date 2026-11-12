@@ -1280,3 +1280,336 @@
     font-size: 16px;
   }
 }
+
+/* 技能管理：列表负责发布状态，详情把不可变版本内容与可修改指针分开。 */
+
+.admin-skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-skill-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #e2ddd3;
+  border-radius: 12px;
+  background: rgba(255, 254, 250, 0.82);
+}
+
+.admin-skill-import-modal {
+  width: min(680px, 100%);
+}
+
+.admin-skill-selected-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid #d9e2db;
+  border-radius: 8px;
+  background: #f4f8f5;
+  color: var(--green);
+  font-size: 12px;
+}
+
+.admin-skill-selected-file span {
+  margin-left: auto;
+  color: var(--muted-2);
+}
+
+.admin-skill-detail-modal {
+  width: min(1100px, 100%);
+  max-height: min(92vh, 1040px);
+}
+
+.admin-skill-detail {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.admin-skill-config,
+.admin-skill-version-upload,
+.admin-skill-versions {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #e2ddd3;
+  border-radius: 11px;
+  background: rgba(255, 254, 250, 0.78);
+}
+
+.admin-skill-config > header,
+.admin-skill-versions > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 13px;
+}
+
+.admin-skill-config h3,
+.admin-skill-versions h3,
+.admin-skill-version-upload h4 {
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.admin-skill-config header p,
+.admin-skill-versions header p,
+.admin-skill-version-upload p,
+.admin-skill-version-content p {
+  margin-top: 4px;
+  color: var(--muted-2);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.admin-skill-config .admin-check-grid {
+  margin-top: 12px;
+}
+
+.admin-skill-config > div.admin-inline-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.admin-skill-config > div.admin-inline-warning p {
+  margin: 0;
+  font-weight: 500;
+}
+
+.admin-skill-version-upload {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 0.8fr) auto;
+  align-items: end;
+  gap: 11px;
+}
+
+.admin-skill-version-upload > :first-child {
+  align-self: start;
+}
+
+.admin-skill-version-upload > .workspace-error,
+.admin-skill-version-upload > small,
+.admin-skill-version-upload > .admin-skill-inline-success {
+  grid-column: 1 / -1;
+}
+
+.admin-skill-versions > ol {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  margin: 0 0 14px;
+  padding: 0 0 4px;
+  list-style: none;
+}
+
+.admin-skill-version-pagination {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 11px;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+
+.admin-skill-version-pagination > span:first-child {
+  margin-right: auto;
+}
+
+.admin-skill-versions > ol > li {
+  flex: 0 0 auto;
+}
+
+.admin-skill-version-tab {
+  display: flex;
+  min-width: 215px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 11px;
+  border: 1px solid #ded9ce;
+  border-radius: 9px;
+  background: #fffefa;
+  text-align: left;
+}
+
+.admin-skill-version-tab:hover,
+.admin-skill-versions > ol > li.is-selected .admin-skill-version-tab {
+  border-color: #b8d1c3;
+  background: #f1f8f4;
+}
+
+.admin-skill-version-tab > span:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.admin-skill-version-tab strong {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.admin-skill-version-tab small {
+  color: var(--muted-2);
+  font-size: 12px;
+}
+
+.admin-skill-version-content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 17px;
+}
+
+.admin-skill-version-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.admin-skill-version-heading strong {
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 20px;
+}
+
+.admin-skill-version-content section > h4 {
+  margin-bottom: 8px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.admin-skill-guide {
+  max-height: 440px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #e2ddd3;
+  border-radius: 9px;
+  background: #fbfaf5;
+}
+
+.admin-skill-file-list,
+.admin-skill-script-list,
+.admin-skill-dependency-list ul {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-skill-file-list li,
+.admin-skill-script-list li,
+.admin-skill-dependency-list li {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 1px solid #e6e1d7;
+  border-radius: 8px;
+  background: #faf8f2;
+}
+
+.admin-skill-file-list li > span,
+.admin-skill-script-list li {
+  min-width: 0;
+}
+
+.admin-skill-file-list strong,
+.admin-skill-script-list strong {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.admin-skill-file-list small,
+.admin-skill-script-list p,
+.admin-skill-dependency-list li > span:last-child {
+  color: var(--muted-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.admin-skill-file-list code,
+.admin-skill-script-list code {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.admin-skill-script-list li {
+  flex-direction: column;
+}
+
+.admin-skill-dependency-list > p {
+  margin-bottom: 9px;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+
+.admin-skill-dependency-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.admin-skill-dependency-list code {
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.admin-skill-inline-success {
+  padding: 9px 10px;
+  border: 1px solid #cfe1d5;
+  border-radius: 7px;
+  background: #f0f7f2;
+  color: var(--green);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .admin-skill-card .admin-card-heading,
+  .admin-skill-config > header,
+  .admin-skill-versions > header {
+    flex-direction: column;
+  }
+
+  .admin-skill-version-upload {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-skill-config > div.admin-inline-warning,
+  .admin-skill-version-pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-skill-dependency-list li {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+}

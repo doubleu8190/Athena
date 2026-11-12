@@ -4,38 +4,55 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
+from types import SimpleNamespace
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from integration.llm_fixtures import encrypted_llm_key_fields
 from sqlalchemy import func, select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
-from adapter.auth.model import UserModel
+from adapter.auth.model import AuthSessionModel, UserModel
+from adapter.file.model import SessionFileModel
+from adapter.file.repository import SqlAlchemySessionFileRepository
 from adapter.knowledge.model import KnowledgeBaseModel
 from adapter.knowledge.repository import KnowledgeRepository
 from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
+from adapter.message.converter import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.project.model import ProjectModel
 from adapter.run.model import RunEventModel, RunModel, RunRequestModel, RunToolCallModel
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
+from adapter.skill import SqlAlchemySkillRepository
+from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from app.file import FileObjectMaintenance
+from app.skill.service import SkillService
+from domain.auth import AuthContext, User, UserRole, UserStatus
+from domain.file import FileObjectScanEntry, PendingSessionFile
 from domain.knowledge import ProjectKnowledgeLimitReachedError
 from domain.message import (
+    ArtifactFileRef,
     ConversationMessageDraft,
     ConversationRole,
     ExecutionMessage,
     ExecutionMessageDraft,
     ExecutionRole,
+    FileRefPart,
     MessageMetadata,
     MessageStatus,
     TextPart,
@@ -58,12 +75,23 @@ from domain.run.model.errors import (
     RunStateError,
     ToolRetryConfirmationRequiredError,
 )
+from domain.skill import (
+    SKILL_EXECUTE_TOOL_ID,
+    DependencyCheck,
+    DependencyCheckStatus,
+    PackageResource,
+    SkillExecutionCompletion,
+    SkillExecutionStatus,
+    SkillPackageManifest,
+    SkillScriptDefinition,
+)
 from domain.tool import (
     AdmitToolCallCommand,
     BeginToolCallBatchCommand,
     BeginToolCallBatchItem,
     BeginToolCallCommand,
     BuiltinToolSource,
+    ConvergeToolBatchCommand,
     DecideToolApprovalCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
@@ -88,11 +116,14 @@ pytestmark = [
 
 
 @asynccontextmanager
-async def _database() -> AsyncGenerator[
+async def _database(
+    *,
+    pool_size: int | None = None,
+) -> AsyncGenerator[
     tuple[
         async_sessionmaker[AsyncSession],
-        object,
-        object,
+        AsyncEngine,
+        AsyncEngine,
         str,
     ],
     None,
@@ -103,11 +134,20 @@ async def _database() -> AsyncGenerator[
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
     schema = f"athena_v2_tool_test_{token_hex(8)}"
     admin_engine = create_async_engine(database_url, poolclass=NullPool)
-    engine = create_async_engine(
-        database_url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"search_path": f"{schema},public"}},
-    )
+    engine_kwargs: dict[str, object] = {
+        "connect_args": {"server_settings": {"search_path": f"{schema},public"}},
+    }
+    if pool_size is None:
+        engine_kwargs["poolclass"] = NullPool
+    else:
+        engine_kwargs.update(
+            {
+                "pool_size": pool_size,
+                "max_overflow": 0,
+                "pool_timeout": 0.5,
+            }
+        )
+    engine = create_async_engine(database_url, **engine_kwargs)
     try:
         async with admin_engine.begin() as connection:
             await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
@@ -122,6 +162,75 @@ async def _database() -> AsyncGenerator[
         async with admin_engine.begin() as connection:
             await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await admin_engine.dispose()
+
+
+def test_0023_round_trip_removes_only_online_maintenance_tables_in_isolated_schema() -> None:
+    """只在隔离 schema 中验证 0023 的 downgrade 与再次 upgrade。"""
+
+    async def scenario() -> None:
+        async with _database() as (_factory, engine, _admin, schema):
+            async with engine.connect() as connection:
+                for table_name in (
+                    "file_object_publications",
+                    "file_object_reclamation_cursors",
+                ):
+                    exists = await connection.scalar(
+                        text(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema = :schema AND table_name = :table_name"
+                        ),
+                        {"schema": schema, "table_name": table_name},
+                    )
+                    assert exists is None
+
+            config = Config(str(ALEMBIC_INI))
+            config.set_main_option(
+                "sqlalchemy.url",
+                (DATABASE_URL or "").replace("%", "%%"),
+            )
+            config.attributes["connect_args"] = {
+                "server_settings": {"search_path": f"{schema},public"}
+            }
+            config.attributes["version_table_schema"] = schema
+
+            await asyncio.to_thread(command.downgrade, config, "20261121_0022")
+            async with engine.connect() as connection:
+                for table_name in (
+                    "file_object_publications",
+                    "file_object_reclamation_cursors",
+                ):
+                    exists = await connection.scalar(
+                        text(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema = :schema AND table_name = :table_name"
+                        ),
+                        {"schema": schema, "table_name": table_name},
+                    )
+                    assert exists == 1
+                cursor_generation = await connection.scalar(
+                    text(
+                        "SELECT generation FROM file_object_reclamation_cursors "
+                        "WHERE id = 'file-orphan-objects'"
+                    )
+                )
+                assert cursor_generation == 0
+
+            await asyncio.to_thread(command.upgrade, config, "20261122_0023")
+            async with engine.connect() as connection:
+                for table_name in (
+                    "file_object_publications",
+                    "file_object_reclamation_cursors",
+                ):
+                    exists = await connection.scalar(
+                        text(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema = :schema AND table_name = :table_name"
+                        ),
+                        {"schema": schema, "table_name": table_name},
+                    )
+                    assert exists is None
+
+    asyncio.run(scenario())
 
 
 async def _seed_owner_and_profile(
@@ -258,6 +367,9 @@ def _begin_command(
     suffix: str,
     tool_call_id: str,
     ordinal_label: str = "",
+    model_name: str = "safe_tool",
+    tool_id: str = "builtin_safe_tool",
+    arguments: dict[str, object] | None = None,
 ) -> BeginToolCallCommand:
     now = datetime.now(UTC)
     run = lease.run
@@ -267,8 +379,8 @@ def _begin_command(
         execution_epoch=run.execution_epoch,
         record_id=f"record_{suffix}_{ordinal_label}",
         tool_call_id=tool_call_id,
-        model_name="safe_tool",
-        tool_id="builtin_safe_tool",
+        model_name=model_name,
+        tool_id=tool_id,
         tool_kind=ToolKind.BUILTIN,
         call_message=ExecutionMessageDraft(
             id=f"exec_call_{suffix}_{ordinal_label}",
@@ -280,8 +392,9 @@ def _begin_command(
             parts=(
                 ToolCallPart(
                     tool_call_id,
-                    "safe_tool",
-                    {"query": f"value-{suffix}-{ordinal_label}"},
+                    model_name,
+                    arguments
+                    or {"query": f"value-{suffix}-{ordinal_label}"},
                 ),
             ),
             tool_call_id=None,
@@ -339,6 +452,275 @@ def _finish_command(
         outcome=selected,
         finished_at=now,
     )
+
+
+async def _start_skill_execution(
+    factory: async_sessionmaker[AsyncSession],
+    lease: RunLease,
+    begun: RunToolCallRecord,
+    *,
+    suffix: str,
+) -> tuple[str, str, str]:
+    """为已准入调用创建不可变 Skill 版本及 running 脚本附加记录。"""
+    now = datetime.now(UTC)
+    skill_id = f"skill_{suffix}"
+    version_id = f"skillver_{suffix}"
+    manifest = SkillPackageManifest(
+        slug=f"tool-{suffix}",
+        name="工具测试 Skill",
+        description="验证脚本产物与工具调用同事务发布。",
+        guide="只执行登记脚本。",
+        scripts=(
+            SkillScriptDefinition(
+                path="scripts/task.py",
+                label="执行任务",
+                purpose="验证原子产物发布。",
+                parameters={"type": "object", "additionalProperties": True},
+            ),
+        ),
+        files=(
+            PackageResource(
+                path="SKILL.md",
+                size_bytes=1,
+                sha256="a" * 64,
+                text=True,
+            ),
+            PackageResource(
+                path="scripts/task.py",
+                size_bytes=1,
+                sha256="b" * 64,
+                text=True,
+            ),
+        ),
+    )
+    dependency_check = DependencyCheck(
+        status=DependencyCheckStatus.SATISFIED,
+        python_version="3.13",
+        python_implementation="CPython",
+        items=(),
+        checked_at=now,
+    )
+    async with factory() as session, session.begin():
+        skill = SkillModel(
+            id=skill_id,
+            slug=manifest.slug,
+            current_version_id=None,
+            enabled=True,
+            script_requires_approval=False,
+            revision=1,
+            created_by=lease.run.owner_id,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(skill)
+        await session.flush()
+        version = SkillVersionModel(
+            id=version_id,
+            skill_id=skill_id,
+            ordinal=1,
+            label="v1",
+            guide=manifest.guide,
+            manifest=manifest.model_dump(mode="json"),
+            object_key=f"skill-packages/{suffix}.zip",
+            package_sha256="c" * 64,
+            dependency_requirements=[],
+            dependency_check=dependency_check.model_dump(mode="json"),
+            created_by=lease.run.owner_id,
+            request_operation="import",
+            idempotency_key=f"import-{suffix}",
+            request_fingerprint="d" * 64,
+            request_target_skill_id=None,
+            created_at=now,
+        )
+        session.add(version)
+        await session.flush()
+        skill.current_version_id = version_id
+    execution = await _start_script_execution_record(
+        SqlAlchemySkillRepository(factory),
+        lease=lease,
+        begun=begun,
+        suffix=suffix,
+        skill_id=skill_id,
+        version_id=version_id,
+        dependency_check=dependency_check,
+    )
+    return skill_id, version_id, execution
+
+
+async def _start_script_execution_record(
+    repository: SqlAlchemySkillRepository,
+    *,
+    lease: RunLease,
+    begun: RunToolCallRecord,
+    suffix: str,
+    skill_id: str,
+    version_id: str,
+    dependency_check: DependencyCheck,
+) -> str:
+    """隔离测试辅助：创建脚本执行记录并返回其 ID。"""
+    execution_id = f"skexec_{suffix}"
+    start = await repository.start_script_execution(
+        execution_id=execution_id,
+        run_id=lease.run.id,
+        session_id=lease.run.session_id,
+        tool_call_record_id=begun.id,
+        skill_id=skill_id,
+        skill_version_id=version_id,
+        script_path="scripts/task.py",
+        input_file_ids=(),
+        parameters_sha256="e" * 64,
+        python_version=dependency_check.python_version,
+        dependency_check=dependency_check,
+        created_at=datetime.now(UTC),
+    )
+    assert start is not None and start.created is True
+    return start.record.id
+
+
+def _pending_artifacts(
+    call_id: str,
+    *,
+    count: int,
+    prefix: str,
+) -> tuple[PendingSessionFile, ...]:
+    """构造已上传但尚未由 Run 事务发布的有序产物元数据。"""
+    now = datetime.now(UTC)
+    return tuple(
+        PendingSessionFile(
+            id=f"file_{prefix}_{index}",
+            filename=f"{prefix}-{index}.csv",
+            label=f"产物 {index}",
+            mime_type="text/csv",
+            size_bytes=2 * 1024 * 1024 * 1024 + index,
+            sha256=f"{index:x}" * 64,
+            object_key=f"session-artifacts/{prefix}/{index}",
+            output_index=index,
+            created_at=now,
+        )
+        for index in range(count)
+    )
+
+
+def _skill_finish_command(
+    lease: RunLease,
+    begun: RunToolCallRecord,
+    *,
+    suffix: str,
+    execution_id: str,
+    artifacts: tuple[PendingSessionFile, ...],
+) -> FinishToolCallCommand:
+    """构造成功脚本结果；展平用户拒绝的产物尺寸也远高于上传 50 MiB。"""
+    now = datetime.now(UTC)
+    outcome = ToolOutcome(
+        status=ToolOutcomeStatus.OK,
+        code="skill_execution_succeeded",
+        message="脚本执行成功。",
+        data={"internal_object_key": artifacts[0].object_key if artifacts else ""},
+    )
+    refs = tuple(
+        ArtifactFileRef(
+            file_id=item.id,
+            filename=item.filename,
+            label=item.label,
+            mime_type=item.mime_type,
+            size_bytes=item.size_bytes,
+        )
+        for item in artifacts
+    )
+    return FinishToolCallCommand(
+        run_id=lease.run.id,
+        worker_id=lease.run.worker_id or "",
+        execution_epoch=lease.run.execution_epoch,
+        record_id=begun.id,
+        result_message=ExecutionMessageDraft(
+            id=f"exec_skill_result_{suffix}",
+            session_id=lease.run.session_id,
+            owner_id=lease.run.owner_id,
+            run_id=lease.run.id,
+            thread_id=lease.run.id,
+            role=ExecutionRole.TOOL,
+            parts=(
+                ToolResultPart(
+                    tool_call_id=begun.tool_call_id,
+                    status=protocol_status_for_outcome(outcome),
+                    output=outcome.canonical_output(),
+                    artifacts=refs,
+                ),
+            ),
+            tool_call_id=begun.tool_call_id,
+            source_message_id=None,
+            created_at=now,
+            metadata=MessageMetadata(),
+        ),
+        outcome=outcome,
+        finished_at=now,
+        artifacts=artifacts,
+        delivery_message=ConversationMessageDraft(
+            id=f"delivery_skill_{suffix}",
+            session_id=lease.run.session_id,
+            owner_id=lease.run.owner_id,
+            role=ConversationRole.ASSISTANT,
+            status=MessageStatus.COMPLETED,
+            parts=tuple(
+                FileRefPart(
+                    file_id=item.id,
+                    filename=item.filename,
+                    mime_type=item.mime_type,
+                    size_bytes=item.size_bytes,
+                )
+                for item in artifacts
+            ),
+            reply_to_message_id=lease.run.trigger_message_id,
+            run_id=lease.run.id,
+            client_message_id=None,
+            created_at=now,
+            completed_at=now,
+            metadata=MessageMetadata(),
+        ),
+        skill_execution_completion=SkillExecutionCompletion(
+            execution_id=execution_id,
+            status=SkillExecutionStatus.SUCCEEDED,
+            log_object_key=f"skill-logs/{suffix}.log",
+            log_truncated=False,
+            log_error_code=None,
+            error_code=None,
+            cleanup_error_code=None,
+            finished_at=now,
+        ),
+    )
+
+
+async def _seed_published_files(
+    factory: async_sessionmaker[AsyncSession],
+    lease: RunLease,
+    *,
+    count: int,
+) -> None:
+    """直接写入配额测试所需的已发布上传行，不创建额外 Run。"""
+    now = datetime.now(UTC)
+    async with factory() as session, session.begin():
+        session.add_all(
+            [
+                SessionFileModel(
+                    id=f"seed_file_{index}",
+                    session_id=lease.run.session_id,
+                    owner_id=lease.run.owner_id,
+                    source="upload",
+                    filename=f"seed-{index}.txt",
+                    label=None,
+                    mime_type="text/plain",
+                    size_bytes=1,
+                    sha256=f"{index % 10}" * 64,
+                    object_key=f"session-files/seed/{index}",
+                    source_call_id=None,
+                    output_index=None,
+                    idempotency_key=f"seed-{index}",
+                    request_fingerprint="f" * 64,
+                    created_at=now,
+                )
+                for index in range(count)
+            ]
+        )
 
 
 def _reply(run: Run, *, suffix: str) -> ConversationMessageDraft:
@@ -567,6 +949,218 @@ def test_tool_snapshot_llm_quota_begin_finish_and_query_are_atomic() -> None:
             assert run_row is not None and run_row.llm_request_count == 40
             assert call_count == result_count == 2
             assert finish_events == 2
+
+    asyncio.run(scenario())
+
+
+def test_skill_artifacts_messages_and_execution_completion_are_one_transaction() -> None:
+    """真实 PostgreSQL 中多产物、脚本终态、TOOL 消息和调用终态原子提交并可重放。"""
+
+    async def scenario() -> None:
+        async with _database() as (factory, _engine, _admin, _schema):
+            owner_id, _profile_id = await _seed_owner_and_profile(
+                factory,
+                suffix="skill-artifacts",
+            )
+            repository = SqlAlchemyRunRepository(
+                factory,
+                SqlAlchemyMessageRepository(factory),
+            )
+            lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="skill-artifacts",
+            )
+            begun = await repository.begin_tool_call(
+                _begin_command(
+                    lease,
+                    suffix="skill-artifacts",
+                    tool_call_id="call_skill_artifacts",
+                    model_name="skill_execute",
+                    tool_id=SKILL_EXECUTE_TOOL_ID,
+                    arguments={
+                        "skill_id": "skill_test",
+                        "script_path": "scripts/task.py",
+                        "parameters": {"api_token": "must-stay-server-side"},
+                        "input_file_ids": [],
+                    },
+                )
+            )
+            assert begun.execute is True
+            skill_id, version_id, execution_id = await _start_skill_execution(
+                factory,
+                lease,
+                begun.item,
+                suffix="skill-artifacts",
+            )
+            assert skill_id == "skill_skill-artifacts"
+            assert version_id == "skillver_skill-artifacts"
+            artifacts = _pending_artifacts(
+                begun.item.id,
+                count=2,
+                prefix="skill-artifacts",
+            )
+            # 会话产物不继承用户上传的 50 MiB 单文件限制。
+            assert all(item.size_bytes > 50 * 1024 * 1024 for item in artifacts)
+            command = _skill_finish_command(
+                lease,
+                begun.item,
+                suffix="skill-artifacts",
+                execution_id=execution_id,
+                artifacts=artifacts,
+            )
+
+            completed = await repository.finish_tool_call(command)
+            replay = await repository.finish_tool_call(command)
+
+            assert completed is not None and replay is not None
+            async with factory() as session:
+                call = await session.get(RunToolCallModel, begun.item.id)
+                files = (
+                    await session.scalars(
+                        select(SessionFileModel)
+                        .where(SessionFileModel.source_call_id == begun.item.id)
+                        .order_by(SessionFileModel.output_index)
+                    )
+                ).all()
+                execution = await session.get(SkillExecutionModel, execution_id)
+                result = await session.get(
+                    ExecutionMessageModel,
+                    command.result_message.id,
+                )
+                assert command.delivery_message is not None
+                delivery = await session.get(
+                    ConversationMessageModel,
+                    command.delivery_message.id,
+                )
+                result_count = await session.scalar(
+                    select(func.count(ExecutionMessageModel.id)).where(
+                        ExecutionMessageModel.id == command.result_message.id
+                    )
+                )
+            assert call is not None
+            assert call.status == ToolCallStatus.COMPLETED.value
+            assert call.result_message_id == command.result_message.id
+            assert [item.id for item in files] == [item.id for item in artifacts]
+            assert [item.size_bytes for item in files] == [
+                item.size_bytes for item in artifacts
+            ]
+            assert execution is not None
+            assert execution.status == SkillExecutionStatus.SUCCEEDED.value
+            assert [
+                item["file_id"] for item in execution.result_artifacts
+            ] == [item.id for item in artifacts]
+            assert result is not None and result_count == 1
+            assert delivery is not None
+            delivery_message = conversation_to_domain(delivery)
+            assert delivery_message.role is ConversationRole.ASSISTANT
+            assert tuple(
+                part.file_id
+                for part in delivery_message.parts
+                if isinstance(part, FileRefPart)
+            ) == tuple(item.id for item in artifacts)
+            result_message = execution_to_domain(result)
+            result_part = next(
+                part
+                for part in result_message.parts
+                if isinstance(part, ToolResultPart)
+            )
+            assert result_part.artifacts == tuple(
+                ArtifactFileRef(
+                    file_id=item.id,
+                    filename=item.filename,
+                    label=item.label,
+                    mime_type=item.mime_type,
+                    size_bytes=item.size_bytes,
+                )
+                for item in artifacts
+            )
+
+    asyncio.run(scenario())
+
+
+def test_skill_start_unknown_without_completion_settles_running_audit_by_call_id() -> None:
+    """启动回查失败后无伪 completion 的 UNKNOWN 仍可按工具调用身份原子收敛。"""
+
+    async def scenario() -> None:
+        async with _database() as (factory, _engine, _admin, _schema):
+            owner_id, _profile_id = await _seed_owner_and_profile(
+                factory,
+                suffix="skill-start-unknown",
+            )
+            repository = SqlAlchemyRunRepository(
+                factory,
+                SqlAlchemyMessageRepository(factory),
+            )
+            lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="skill-start-unknown",
+            )
+            begun = await repository.begin_tool_call(
+                _begin_command(
+                    lease,
+                    suffix="skill-start-unknown",
+                    tool_call_id="call_skill_start_unknown",
+                    model_name="skill_execute",
+                    tool_id=SKILL_EXECUTE_TOOL_ID,
+                )
+            )
+            _skill_id, _version_id, execution_id = await _start_skill_execution(
+                factory,
+                lease,
+                begun.item,
+                suffix="skill-start-unknown",
+            )
+            unknown = ToolOutcome(
+                status=ToolOutcomeStatus.UNKNOWN,
+                code="skill_execution_start_unknown",
+                message="脚本执行记录状态无法确认。",
+            )
+            finish = replace(
+                _finish_command(
+                    lease,
+                    begun.item,
+                    suffix="skill-start-unknown",
+                    outcome=unknown,
+                ),
+                # 对齐 executor：先提交当前工具结果，再由 converge 收敛批次/Run。
+                defer_terminal_convergence=True,
+            )
+
+            await repository.finish_tool_call(finish)
+            # 完成回包丢失后的重放不能因没有 completion 而误判为状态冲突。
+            replayed = await repository.finish_tool_call(finish)
+
+            async with factory() as session:
+                call = await session.get(RunToolCallModel, begun.item.id)
+                execution = await session.get(SkillExecutionModel, execution_id)
+            assert replayed is not None
+            assert call is not None and call.status == ToolCallStatus.UNKNOWN.value
+            assert execution is not None
+            assert execution.status == SkillExecutionStatus.UNKNOWN.value
+            assert execution.error_code == "tool_outcome_unknown"
+            assert execution.finished_at is not None
+
+            converged = await repository.converge_tool_batch(
+                ConvergeToolBatchCommand(
+                    run_id=lease.run.id,
+                    worker_id=lease.run.worker_id or "",
+                    execution_epoch=lease.run.execution_epoch,
+                    call_message_id=begun.item.call_message_id,
+                    safe_error_code="tool_outcome_unknown",
+                    failed_at=datetime.now(UTC),
+                )
+            )
+            assert converged is not None
+            assert converged.status is RunStatus.FAILED
+            assert converged.safe_error_code == "tool_outcome_unknown"
+            async with factory() as session:
+                execution = await session.get(SkillExecutionModel, execution_id)
+            assert execution is not None
+            assert execution.status == SkillExecutionStatus.UNKNOWN.value
 
     asyncio.run(scenario())
 
@@ -1437,5 +2031,524 @@ def test_concurrent_last_approval_decision_queues_once_and_cancel_closes_pending
                         decided_at=datetime.now(UTC),
                     )
                 )
+
+    asyncio.run(scenario())
+
+
+def test_skill_artifact_quota_rejection_rolls_back_and_converges_running_record() -> None:
+    """配额超额时整组文件、结果消息和脚本终态都不提交，失败收敛不再遗留 running。"""
+
+    async def scenario() -> None:
+        async with _database() as (factory, _engine, _admin, _schema):
+            owner_id, _profile_id = await _seed_owner_and_profile(
+                factory,
+                suffix="skill-quota",
+            )
+            repository = SqlAlchemyRunRepository(
+                factory,
+                SqlAlchemyMessageRepository(factory),
+            )
+            lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="skill-quota",
+            )
+            await _seed_published_files(factory, lease, count=99)
+            begun = await repository.begin_tool_call(
+                _begin_command(
+                    lease,
+                    suffix="skill-quota",
+                    tool_call_id="call_skill_quota",
+                    model_name="skill_execute",
+                    tool_id=SKILL_EXECUTE_TOOL_ID,
+                )
+            )
+            _skill_id, _version_id, execution_id = await _start_skill_execution(
+                factory,
+                lease,
+                begun.item,
+                suffix="skill-quota",
+            )
+            artifacts = _pending_artifacts(
+                begun.item.id,
+                count=2,
+                prefix="skill-quota",
+            )
+            command = _skill_finish_command(
+                lease,
+                begun.item,
+                suffix="skill-quota",
+                execution_id=execution_id,
+                artifacts=artifacts,
+            )
+
+            with pytest.raises(ValueError, match="session_file_quota_exceeded"):
+                await repository.finish_tool_call(command)
+
+            async with factory() as session:
+                call = await session.get(RunToolCallModel, begun.item.id)
+                execution = await session.get(SkillExecutionModel, execution_id)
+                artifact_count = await session.scalar(
+                    select(func.count(SessionFileModel.id)).where(
+                        SessionFileModel.source_call_id == begun.item.id
+                    )
+                )
+                result = await session.get(
+                    ExecutionMessageModel,
+                    command.result_message.id,
+                )
+                assert command.delivery_message is not None
+                delivery = await session.get(
+                    ConversationMessageModel,
+                    command.delivery_message.id,
+                )
+            assert call is not None and call.status == ToolCallStatus.EXECUTING.value
+            assert call.result_message_id is None
+            assert execution is not None
+            assert execution.status == SkillExecutionStatus.RUNNING.value
+            assert artifact_count == 0
+            assert result is None
+            assert delivery is None
+
+            failed = await repository.fail(
+                FailRunCommand(
+                    run_id=lease.run.id,
+                    worker_id=lease.run.worker_id or "",
+                    execution_epoch=lease.run.execution_epoch,
+                    safe_error_code="execution_failed",
+                    failed_at=datetime.now(UTC),
+                )
+            )
+            assert failed is not None and failed.status is RunStatus.FAILED
+            async with factory() as session:
+                call = await session.get(RunToolCallModel, begun.item.id)
+                execution = await session.get(SkillExecutionModel, execution_id)
+            assert call is not None
+            assert call.status == ToolCallStatus.UNKNOWN.value
+            assert call.result_message_id is not None
+            assert execution is not None
+            assert execution.status == SkillExecutionStatus.UNKNOWN.value
+            assert execution.error_code == "tool_outcome_unknown"
+            assert execution.finished_at is not None
+
+    asyncio.run(scenario())
+
+
+def test_upload_and_multi_artifact_publish_concurrency_never_exceeds_quota() -> None:
+    """共享配额锁下上传与多产物整组发布只有一个可提交到 100 文件边界。"""
+
+    async def scenario() -> None:
+        async with _database() as (factory, _engine, _admin, _schema):
+            owner_id, _profile_id = await _seed_owner_and_profile(
+                factory,
+                suffix="skill-race",
+            )
+            repository = SqlAlchemyRunRepository(
+                factory,
+                SqlAlchemyMessageRepository(factory),
+            )
+            files_repository = SqlAlchemySessionFileRepository(factory)
+            lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="skill-race",
+            )
+            await _seed_published_files(factory, lease, count=98)
+            begun = await repository.begin_tool_call(
+                _begin_command(
+                    lease,
+                    suffix="skill-race",
+                    tool_call_id="call_skill_race",
+                    model_name="skill_execute",
+                    tool_id=SKILL_EXECUTE_TOOL_ID,
+                )
+            )
+            _skill_id, _version_id, execution_id = await _start_skill_execution(
+                factory,
+                lease,
+                begun.item,
+                suffix="skill-race",
+            )
+            artifacts = _pending_artifacts(
+                begun.item.id,
+                count=2,
+                prefix="skill-race",
+            )
+            finish = _skill_finish_command(
+                lease,
+                begun.item,
+                suffix="skill-race",
+                execution_id=execution_id,
+                artifacts=artifacts,
+            )
+            upload = PendingSessionFile(
+                id="file_upload_race",
+                filename="upload-race.txt",
+                label=None,
+                mime_type="text/plain",
+                size_bytes=1,
+                sha256="9" * 64,
+                object_key="session-files/upload-race",
+                output_index=-1,
+                created_at=datetime.now(UTC),
+            )
+            finish_result, upload_result = await asyncio.gather(
+                repository.finish_tool_call(finish),
+                files_repository.publish_upload(
+                    lease.run.session_id,
+                    owner_id,
+                    upload,
+                    idempotency_key="upload-race",
+                    request_fingerprint="8" * 64,
+                    published_at=datetime.now(UTC),
+                ),
+                return_exceptions=True,
+            )
+
+            async with factory() as session:
+                count = await session.scalar(
+                    select(func.count(SessionFileModel.id)).where(
+                        SessionFileModel.session_id == lease.run.session_id
+                    )
+                )
+                call = await session.get(RunToolCallModel, begun.item.id)
+                execution = await session.get(SkillExecutionModel, execution_id)
+            assert count is not None and count <= 100
+            assert isinstance(finish_result, BaseException) != isinstance(
+                upload_result,
+                BaseException,
+            )
+            if isinstance(finish_result, Exception):
+                assert str(finish_result) == "session_file_quota_exceeded"
+                assert not isinstance(upload_result, Exception)
+                assert count == 99
+                assert call is not None
+                assert call.status == ToolCallStatus.EXECUTING.value
+                assert execution is not None
+                assert execution.status == SkillExecutionStatus.RUNNING.value
+                failed = await repository.fail(
+                    FailRunCommand(
+                        run_id=lease.run.id,
+                        worker_id=lease.run.worker_id or "",
+                        execution_epoch=lease.run.execution_epoch,
+                        safe_error_code="execution_failed",
+                        failed_at=datetime.now(UTC),
+                    )
+                )
+                assert failed is not None
+                async with factory() as session:
+                    execution = await session.get(SkillExecutionModel, execution_id)
+                assert execution is not None
+                assert execution.status == SkillExecutionStatus.UNKNOWN.value
+            else:
+                assert isinstance(upload_result, ValueError)
+                assert str(upload_result) == "session_file_quota_exceeded"
+                assert count == 100
+                assert call is not None
+                assert call.status == ToolCallStatus.COMPLETED.value
+                assert execution is not None
+                assert execution.status == SkillExecutionStatus.SUCCEEDED.value
+
+    asyncio.run(scenario())
+
+
+def test_upload_and_run_finish_both_wait_on_session_before_quota_lock() -> None:
+    """真实 PostgreSQL 中上传和 Run 完成都先等 Session，再串行占用配额。"""
+
+    async def scenario() -> None:
+        async with _database() as (factory, _engine, _admin, _schema):
+            owner_id, _profile_id = await _seed_owner_and_profile(
+                factory,
+                suffix="skill-lock-order",
+            )
+            repository = SqlAlchemyRunRepository(
+                factory,
+                SqlAlchemyMessageRepository(factory),
+            )
+            files_repository = SqlAlchemySessionFileRepository(factory)
+            lease = await _running_run(
+                repository,
+                factory,
+                owner_id=owner_id,
+                suffix="skill-lock-order",
+            )
+            begun = await repository.begin_tool_call(
+                _begin_command(
+                    lease,
+                    suffix="skill-lock-order",
+                    tool_call_id="call_skill_lock_order",
+                    model_name="skill_execute",
+                    tool_id=SKILL_EXECUTE_TOOL_ID,
+                )
+            )
+            _skill_id, _version_id, execution_id = await _start_skill_execution(
+                factory,
+                lease,
+                begun.item,
+                suffix="skill-lock-order",
+            )
+            artifacts = _pending_artifacts(
+                begun.item.id,
+                count=2,
+                prefix="skill-lock-order",
+            )
+            upload = PendingSessionFile(
+                id="file_upload_lock_order",
+                filename="upload-lock-order.txt",
+                label=None,
+                mime_type="text/plain",
+                size_bytes=1,
+                sha256="7" * 64,
+                object_key="session-files/lock-order",
+                output_index=-1,
+                created_at=datetime.now(UTC),
+            )
+            finish = _skill_finish_command(
+                lease,
+                begun.item,
+                suffix="skill-lock-order",
+                execution_id=execution_id,
+                artifacts=artifacts,
+            )
+
+            # 两任务同时先阻塞在同一 Session 行，释放后各自在同一配额锁内
+            # 提交文件；这里验证上传与多产物不会越过 100 文件边界。
+            async with factory() as blocker, blocker.begin():
+                await blocker.scalar(
+                    select(SessionModel.id)
+                    .where(SessionModel.id == lease.run.session_id)
+                    .with_for_update()
+                )
+                finish_task = asyncio.create_task(repository.finish_tool_call(finish))
+                upload_task = asyncio.create_task(
+                    files_repository.publish_upload(
+                        lease.run.session_id,
+                        owner_id,
+                        upload,
+                        idempotency_key="upload-lock-order",
+                        request_fingerprint="6" * 64,
+                        published_at=datetime.now(UTC),
+                    )
+                )
+                await asyncio.sleep(0.15)
+                assert finish_task.done() is False
+                assert upload_task.done() is False
+
+            finished, uploaded = await asyncio.wait_for(
+                asyncio.gather(finish_task, upload_task),
+                timeout=5,
+            )
+            assert finished is not None
+            assert uploaded.id == upload.id
+            async with factory() as session:
+                count = await session.scalar(
+                    select(func.count(SessionFileModel.id)).where(
+                        SessionFileModel.session_id == lease.run.session_id
+                    )
+                )
+            assert count == 3
+
+    asyncio.run(scenario())
+
+
+def test_pool_size_one_maintenance_imports_and_publishes_without_nested_connections(
+    tmp_path: Path,
+) -> None:
+    """真实 pool_size=1 下离线维护、Skill 导入和文件发布并发不会等待自身连接。"""
+
+    class PoolStore:
+        def __init__(self) -> None:
+            self.values: dict[str, bytes] = {}
+            self.deleted: list[str] = []
+
+        async def put_file(
+            self,
+            key: str,
+            path: Path,
+            *,
+            content_type: str,
+        ) -> None:
+            del content_type
+            self.values[key] = path.read_bytes()
+
+        async def delete(self, key: str) -> None:
+            self.deleted.append(key)
+            self.values.pop(key, None)
+
+        async def iter_maintenance_candidates(
+            self,
+            *,
+            older_than_seconds: int = 86400,
+            after_key: str | None = None,
+            maximum_items: int = 1000,
+        ) -> AsyncIterator[FileObjectScanEntry]:
+            del older_than_seconds
+            examined = 0
+            for key in sorted(self.values):
+                if after_key is not None and key <= after_key:
+                    continue
+                if examined >= maximum_items:
+                    return
+                examined += 1
+                yield FileObjectScanEntry(object_key=key, is_candidate=True)
+
+        async def aclose(self) -> None:
+            return None
+
+    class AdminReader:
+        def __init__(self, user: User) -> None:
+            self.user = user
+
+        async def get_current_session_user(
+            self,
+            user_id: str,
+            session_id: str,
+            now: datetime,
+        ) -> User | None:
+            del session_id, now
+            return self.user if self.user.id == user_id else None
+
+    class Checker:
+        def check(
+            self,
+            requirements: tuple[str, ...],
+            *,
+            checked_at: datetime,
+        ) -> DependencyCheck:
+            del requirements
+            return DependencyCheck(
+                status=DependencyCheckStatus.SATISFIED,
+                python_version="3.14.0",
+                python_implementation="CPython",
+                checked_at=checked_at,
+            )
+
+    async def scenario() -> None:
+        async with _database(pool_size=1) as (factory, _engine, _admin, _schema):
+            owner_id, _profile_id = await _seed_owner_and_profile(
+                factory,
+                suffix="pool-one",
+            )
+            async with factory() as session, session.begin():
+                await session.execute(
+                    update(UserModel)
+                    .where(UserModel.id == owner_id)
+                    .values(role="admin")
+                )
+                session.add(
+                    AuthSessionModel(
+                        id="auth_pool_one",
+                        user_id=owner_id,
+                        token_hash="e" * 64,
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                        revoked_time=None,
+                        created_at=datetime.now(UTC),
+                    )
+                )
+            now = datetime.now(UTC)
+            actor_user = User(
+                id=owner_id,
+                email="tool-pool-one@example.test",
+                password_hash="unused",
+                display_name=None,
+                status=UserStatus.ACTIVE,
+                created_at=now,
+                updated_at=now,
+                role=UserRole.ADMIN,
+            )
+            actor = AuthContext(actor_user, "auth_pool_one")
+            store = PoolStore()
+            orphan_key = "session-files/00/orphan"
+            store.values[orphan_key] = b"orphan"
+            manifest = SkillPackageManifest(
+                slug="pool-one",
+                name="pool one",
+                description="connection pool regression",
+                guide="guide",
+                files=(
+                    PackageResource(
+                        path="SKILL.md",
+                        size_bytes=6,
+                        sha256="a" * 64,
+                        text=True,
+                    ),
+                ),
+            )
+            package_path = tmp_path / "pool-one.zip"
+            package_path.write_bytes(b"package")
+            package_sha256 = "b" * 64
+            skill_repository = SqlAlchemySkillRepository(factory)
+            skill_ids = iter(("skill_pool_one", "skillver_pool_one"))
+            skill_service = SkillService(
+                skill_repository,
+                store,  # type: ignore[arg-type]
+                AdminReader(actor_user),
+                package_validator=SimpleNamespace(
+                    validate=lambda path: SimpleNamespace(
+                        package_sha256=package_sha256,
+                        manifest=manifest,
+                    )
+                ),  # type: ignore[arg-type]
+                dependency_checker=Checker(),  # type: ignore[arg-type]
+                id_factory=lambda prefix: next(skill_ids),
+                clock=lambda: now,
+            )
+
+            run_repository = SqlAlchemyRunRepository(
+                factory,
+                SqlAlchemyMessageRepository(factory),
+            )
+            lease = await _running_run(
+                run_repository,
+                factory,
+                owner_id=owner_id,
+                suffix="pool-one",
+            )
+            file_repository = SqlAlchemySessionFileRepository(factory)
+            upload = PendingSessionFile(
+                id="file_pool_one",
+                filename="pool-one.txt",
+                label=None,
+                mime_type="text/plain",
+                size_bytes=1,
+                sha256="c" * 64,
+                object_key="session-files/10/upload",
+                output_index=-1,
+                created_at=now,
+            )
+            store.values[upload.object_key] = b"x"
+            maintenance = FileObjectMaintenance(
+                store=store,  # type: ignore[arg-type]
+                references=file_repository,
+            )
+
+            imported = await skill_service.import_package(
+                actor,
+                package_path,
+                idempotency_key="pool-one",
+            )
+            published = await file_repository.publish_upload(
+                lease.run.session_id,
+                owner_id,
+                upload,
+                idempotency_key="pool-one-upload",
+                request_fingerprint="d" * 64,
+                published_at=now,
+            )
+            maintained = await maintenance.run(
+                execute=True,
+                writers_stopped=True,
+            )
+            assert maintained.failed_count == 0
+            assert orphan_key in store.deleted
+            assert imported.skill.id == "skill_pool_one"
+            assert published.id == upload.id
+            async with factory() as session:
+                skill_count = await session.scalar(
+                    select(func.count()).select_from(SkillVersionModel)
+                )
+            assert skill_count == 1
 
     asyncio.run(scenario())

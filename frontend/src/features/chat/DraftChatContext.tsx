@@ -15,12 +15,15 @@ import {
   projectErrorMessage,
 } from "../projects/errorMessages";
 import { useProject } from "../projects/hooks";
+import type { PendingSessionUpload } from "../files/model";
 
 interface DraftChatState {
   contextNotice: string | null;
   contextReady: boolean;
   draft: string;
+  pendingUploads: PendingSessionUpload[];
   projectId: string | null;
+  selectedSkillIds: string[];
 }
 
 interface DraftChatEntry extends DraftChatState {
@@ -35,8 +38,11 @@ interface DraftChatStore {
 export interface SessionSubmissionHandoff {
   draft: string;
   error: string | null;
+  inputFileIds?: string[];
+  pendingUploads?: PendingSessionUpload[];
   requestId: string;
   reuseRequestId: boolean;
+  selectedSkillIds?: string[];
 }
 
 interface DraftChatContextValue extends DraftChatState {
@@ -46,6 +52,8 @@ interface DraftChatContextValue extends DraftChatState {
     sessionId: string,
   ) => SessionSubmissionHandoff | null;
   setDraft: (draft: string) => void;
+  setPendingUploads: (uploads: PendingSessionUpload[]) => void;
+  setSelectedSkillIds: (skillIds: string[]) => void;
   setSessionHandoff: (
     sessionId: string,
     handoff: SessionSubmissionHandoff,
@@ -73,8 +81,10 @@ function createEntry(requestedProjectId: string | null): DraftChatEntry {
     contextNotice: null,
     contextReady: !requestedProjectId,
     draft: "",
+    pendingUploads: [],
     projectContext: requestedProjectId ? "pending" : "ready",
     projectId: null,
+    selectedSkillIds: [],
   };
 }
 
@@ -232,6 +242,53 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
     });
   }, []);
 
+  const setPendingUploads = useCallback(
+    (pendingUploads: PendingSessionUpload[]) => {
+      setStore((current) => {
+        if (!current.activeKey) {
+          return current;
+        }
+        const entry = current.entries[current.activeKey];
+        if (!entry) {
+          return current;
+        }
+        return {
+          ...current,
+          entries: {
+            ...current.entries,
+            [current.activeKey]: {
+              ...entry,
+              pendingUploads,
+            },
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const setSelectedSkillIds = useCallback((selectedSkillIds: string[]) => {
+    setStore((current) => {
+      if (!current.activeKey) {
+        return current;
+      }
+      const entry = current.entries[current.activeKey];
+      if (!entry) {
+        return current;
+      }
+      return {
+        ...current,
+        entries: {
+          ...current.entries,
+          [current.activeKey]: {
+            ...entry,
+            selectedSkillIds,
+          },
+        },
+      };
+    });
+  }, []);
+
   const setSessionHandoff = useCallback(
     (sessionId: string, handoff: SessionSubmissionHandoff) => {
       sessionHandoffsRef.current[sessionId] = handoff;
@@ -255,7 +312,9 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
     contextNotice,
     contextReady,
     draft,
+    pendingUploads,
     projectId,
+    selectedSkillIds,
   } = activeEntry;
   const value = useMemo(
     () => ({
@@ -265,9 +324,13 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
       contextReady,
       draft,
       getSessionHandoff,
+      pendingUploads,
       projectId,
+      selectedSkillIds,
       setDraft,
+      setPendingUploads,
       setSessionHandoff,
+      setSelectedSkillIds,
     }),
     [
       chooseProject,
@@ -276,9 +339,13 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
       contextReady,
       draft,
       getSessionHandoff,
+      pendingUploads,
       projectId,
+      selectedSkillIds,
       setDraft,
+      setPendingUploads,
       setSessionHandoff,
+      setSelectedSkillIds,
     ],
   );
 

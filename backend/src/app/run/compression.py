@@ -12,6 +12,7 @@ from typing import Protocol
 from app.run.budget import RunLlmBudget
 from app.run.context import (
     RunContextError,
+    RunInputFileContext,
     build_llm_request,
     count_plain_text_tokens_async,
     estimate_llm_input_tokens,
@@ -48,6 +49,7 @@ from domain.run.model import (
     SaveContextSummaryCommand,
 )
 from domain.run.ports import RunRepository
+from domain.skill import RunSkillPromptContext
 from domain.tool import ToolRetryContext
 
 
@@ -94,6 +96,10 @@ async def _split_recent_suffix(
     recent_limit: int,
     timeout_seconds: float,
     main_prompt: str,
+    skill_context: RunSkillPromptContext | None = None,
+    tools: Sequence[LlmTool] | None = None,
+    retry_context: Sequence[ToolRetryContext] = (),
+    input_files: Sequence[RunInputFileContext] = (),
 ) -> tuple[list[tuple[ConversationMessage, ...]], tuple[ConversationMessage, ...]]:
     """按主模型完整请求的计数口径保留不超预算的连续近期轮次。"""
     remaining_groups = list(groups)
@@ -108,6 +114,10 @@ async def _split_recent_suffix(
             profile.version,
             main_prompt=main_prompt,
             timeout_seconds=timeout_seconds,
+            tools=tools,
+            retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
         )
         if max(0, candidate_tokens - base_tokens) > recent_limit:
             break
@@ -216,6 +226,8 @@ class ContextCompressor:
         timeout_seconds: float,
         tools: Sequence[LlmTool] | None = None,
         retry_context: Sequence[ToolRetryContext] = (),
+        skill_context: RunSkillPromptContext | None = None,
+        input_files: Sequence[RunInputFileContext] = (),
         budget: RunLlmBudget | None = None,
     ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, RunEvent | None]:
         """压缩需要的历史并返回可直接调用主模型的完整上下文。"""
@@ -239,6 +251,8 @@ class ContextCompressor:
             timeout_seconds=timeout_seconds,
             tools=tools,
             retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
         )
         input_budget = main_runtime.version.context_window_tokens - output_tokens - base_tokens
         if input_budget <= 0:
@@ -293,10 +307,13 @@ class ContextCompressor:
             summary_text=summary_text,
             tools=tools,
             retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
         )
-        # 未达到触发阈值且无需重压缩时，直接返回普通请求。
-        threshold = int(main_runtime.version.context_window_tokens * policy.trigger_ratio)
-        if used_tokens + output_tokens < threshold and not refresh_oversized_summary:
+        # 指南与目录已计入 base_tokens，只对扣除后历史用量应用触发比例。
+        history_tokens = max(0, used_tokens - base_tokens)
+        threshold = int(input_budget * policy.trigger_ratio)
+        if history_tokens < threshold and not refresh_oversized_summary:
             built, tools, output = await build_llm_request(
                 run,
                 active_messages,
@@ -306,6 +323,8 @@ class ContextCompressor:
                 summary_text=summary_text,
                 tools=tools,
                 retry_context=retry_context,
+                skill_context=skill_context,
+                input_files=input_files,
             )
             return built, tools, output, None
 
@@ -327,6 +346,8 @@ class ContextCompressor:
                 summary_text=summary_text,
                 tools=tools,
                 retry_context=retry_context,
+                skill_context=skill_context,
+                input_files=input_files,
             )
             return built, tools, output, None
         # 从尾部保留完整轮次，并将超出 20% 预算的连续前缀送入摘要。
@@ -339,6 +360,10 @@ class ContextCompressor:
             recent_limit,
             timeout_seconds,
             main_prompt,
+            skill_context,
+            tools,
+            retry_context,
+            input_files,
         )
         if not groups and not refresh_oversized_summary:
             built, tools, output = await build_llm_request(
@@ -350,6 +375,8 @@ class ContextCompressor:
                 summary_text=summary_text,
                 tools=tools,
                 retry_context=retry_context,
+                skill_context=skill_context,
+                input_files=input_files,
             )
             return built, tools, output, None
 
@@ -381,6 +408,10 @@ class ContextCompressor:
                 timeout_seconds,
                 main_prompt,
                 compression_prompt,
+                skill_context,
+                tools,
+                retry_context,
+                input_files,
                 budget,
             )
         except RunContextError as error:
@@ -412,6 +443,8 @@ class ContextCompressor:
                 summary_text=fallback_summary_text,
                 tools=tools,
                 retry_context=retry_context,
+                skill_context=skill_context,
+                input_files=input_files,
             )
             return *fallback, failed
         if not chunks:
@@ -433,6 +466,8 @@ class ContextCompressor:
                 summary_text=final_summary,
                 tools=tools,
                 retry_context=retry_context,
+                skill_context=skill_context,
+                input_files=input_files,
             )
         except RunContextError as error:
             failed = await self._repository.append_compression_event(
@@ -459,6 +494,8 @@ class ContextCompressor:
                 summary_text=fallback_summary_text,
                 tools=tools,
                 retry_context=retry_context,
+                skill_context=skill_context,
+                input_files=input_files,
             )
             return *fallback, failed
         # 完整请求校验失败时仍保留完整原文供回退判断，不保存摘要。
@@ -501,6 +538,10 @@ class ContextCompressor:
         timeout_seconds: float,
         main_prompt: str,
         compression_prompt: str,
+        skill_context: RunSkillPromptContext | None,
+        tools: Sequence[LlmTool] | None,
+        retry_context: Sequence[ToolRetryContext],
+        input_files: Sequence[RunInputFileContext],
         budget: RunLlmBudget | None = None,
     ) -> tuple[str, int, int, RuntimeModelProfile]:
         """顺序压缩完整轮次；中间摘要仅驻内存。"""
@@ -514,6 +555,10 @@ class ContextCompressor:
             main_runtime.version,
             main_prompt=main_prompt,
             timeout_seconds=timeout_seconds,
+            tools=tools,
+            retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
         )
         # 摘要可占用的 token 预算 = 主模型剩余窗口 × 摘要比例。
         summary_budget = int(

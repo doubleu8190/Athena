@@ -19,6 +19,35 @@ export const adminKeys = {
   mcpServersAll: () => ["admin", "mcp", "servers"] as const,
   modelProfiles: () =>
     ["admin", "llm", "model-profiles"] as const,
+  skill: (skillId: string) =>
+    ["admin", "skills", "detail", skillId] as const,
+  skillVersion: (skillId: string, versionId: string) =>
+    [
+      "admin",
+      "skills",
+      "versions",
+      skillId,
+      "detail",
+      versionId,
+    ] as const,
+  skillVersions: (
+    skillId: string,
+    page: number,
+    pageSize: number,
+  ) =>
+    [
+      "admin",
+      "skills",
+      "versions",
+      skillId,
+      "list",
+      page,
+      pageSize,
+    ] as const,
+  skillVersionsAll: (skillId: string) =>
+    ["admin", "skills", "versions", skillId] as const,
+  skills: () => ["admin", "skills", "list"] as const,
+  skillsAll: () => ["admin", "skills"] as const,
   systemPrompt: (kind: SystemPromptKind) =>
     ["admin", "system-prompts", kind, "current"] as const,
   systemPromptVersion: (

@@ -1,3 +1,5 @@
+import type { ArtifactFileRef } from "../files/model";
+
 export type MessageRole = "user" | "assistant";
 
 export type RunStatus =
@@ -36,6 +38,7 @@ export interface ToolResultMessagePart {
   status: string;
   output: string | null;
   artifact_id: string | null;
+  artifacts: ArtifactFileRef[];
 }
 
 export type ConversationMessagePart =
@@ -100,6 +103,52 @@ export interface RunPendingApproval {
   model_name: string;
   tool_kind: string | null;
   requested_at: string;
+  safe_skill_projection: SafeSkillApprovalProjection | null;
+}
+
+export interface SafeSkillInputFile {
+  file_id: string;
+  filename: string;
+  mime_type: string | null;
+  size_bytes: number | null;
+  available: boolean;
+}
+
+export interface SkillParameterSummaryItem {
+  name: string;
+  label: string;
+  value: string;
+}
+
+export interface SafeSkillApprovalProjection {
+  call_id: string;
+  skill_id: string;
+  skill_name: string;
+  skill_version_id: string;
+  skill_version_label: string;
+  script_label: string;
+  purpose: string;
+  input_files: SafeSkillInputFile[];
+  parameter_summary: SkillParameterSummaryItem[];
+  hidden_parameter_count: number;
+  can_approve: boolean;
+  unavailable_reason: string | null;
+}
+
+export interface RunSkillEntry {
+  skill_id: string;
+  slug: string;
+  name: string;
+  description: string;
+  version_id: string;
+  version_label: string;
+  requires_approval: boolean;
+}
+
+export interface RunSkillSnapshot {
+  version: number;
+  skills: RunSkillEntry[];
+  selected_skill_ids: string[];
 }
 
 export interface Run {
@@ -123,6 +172,8 @@ export interface Run {
   usage: RunUsage;
   pending_input: RunPendingInput | null;
   pending_approvals: RunPendingApproval[];
+  skill_snapshot: RunSkillSnapshot | null;
+  input_file_ids: string[];
   replayed: boolean;
   retry_warning: string | null;
 }
@@ -139,6 +190,11 @@ export interface RunEvent {
   type: string;
   created_at: string;
   payload: Record<string, unknown>;
+}
+
+export interface RunEventListResponse {
+  items: RunEvent[];
+  next_after_sequence: number | null;
 }
 
 export interface RunStreamMessage {
@@ -186,8 +242,10 @@ export interface RunToolCallSummary {
 }
 
 export interface RunToolCallDetail extends RunToolCallSummary {
-  arguments: Record<string, unknown>;
+  arguments: Record<string, unknown> | null;
   outcome: RunToolOutcome | null;
+  artifacts: ArtifactFileRef[];
+  safe_skill_projection: SafeSkillApprovalProjection | null;
 }
 
 export interface RunToolCallListResponse {
@@ -222,6 +280,24 @@ export function isTerminalRunStatus(status: RunStatus | null | undefined): boole
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
+export function isSkillTool(
+  modelName: string,
+  toolId: string | null = null,
+): boolean {
+  const normalized = modelName.toLowerCase();
+  return (
+    toolId === "builtin_skill_execute" ||
+    toolId === "builtin_skill_load" ||
+    toolId === "builtin_skill_read_resource" ||
+    normalized === "skill_execute" ||
+    normalized === "skill_load" ||
+    normalized === "skill_read_resource" ||
+    normalized.endsWith("_skill_execute") ||
+    normalized.endsWith("_skill_load") ||
+    normalized.endsWith("_skill_read_resource")
+  );
+}
+
 function isCancellationStatus(status: RunStatus): boolean {
   return status === "cancelling" || status === "cancelled";
 }
@@ -252,6 +328,41 @@ export function runResultIsStale(candidate: Run, current: Run): boolean {
     );
   }
   return false;
+}
+
+export function selectRunProjection(
+  currentRunId: string | null,
+  latestRun: Run | null,
+  runDetail: Run | null,
+): Run | null {
+  const candidates = [runDetail, latestRun].filter(
+    (candidate): candidate is Run =>
+      Boolean(candidate && candidate.id === currentRunId),
+  );
+  return candidates.reduce<Run | null>((current, candidate) => {
+    if (!current) {
+      return candidate;
+    }
+    const currentTerminal = isTerminalRunStatus(current.status);
+    const candidateTerminal = isTerminalRunStatus(candidate.status);
+    if (candidateTerminal !== currentTerminal) {
+      return candidateTerminal ? candidate : current;
+    }
+    if (candidate.execution_epoch !== current.execution_epoch) {
+      return candidate.execution_epoch > current.execution_epoch
+        ? candidate
+        : current;
+    }
+    if (candidate.event_sequence !== current.event_sequence) {
+      return candidate.event_sequence > current.event_sequence
+        ? candidate
+        : current;
+    }
+    // 同版本仍保留第一来源的完整 detail，避免精简 list 投影清空 pending_approvals。
+    return Date.parse(candidate.updated_at) > Date.parse(current.updated_at)
+      ? candidate
+      : current;
+  }, null);
 }
 
 export function messageText(message: ConversationMessage): string {

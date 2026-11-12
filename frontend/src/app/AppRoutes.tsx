@@ -14,6 +14,7 @@ import { AdminMcpPage } from "../features/admin/AdminMcpPage";
 import { AdminModelsPage } from "../features/admin/AdminModelsPage";
 import { AdminSystemPromptsPage } from "../features/admin/AdminSystemPromptsPage";
 import { AdminToolsPage } from "../features/admin/AdminToolsPage";
+import { AdminSkillsPage } from "../features/skills/AdminSkillsPage";
 import { KnowledgeDetailPage } from "../features/knowledge/KnowledgeDetailPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
 import { ProjectsPage } from "../features/projects/ProjectsPage";
@@ -63,6 +64,7 @@ export function AppRoutes() {
               path="system-prompts"
             />
             <Route element={<AdminToolsPage />} path="tools" />
+            <Route element={<AdminSkillsPage />} path="skills" />
           </Route>
         </Route>
       </Route>

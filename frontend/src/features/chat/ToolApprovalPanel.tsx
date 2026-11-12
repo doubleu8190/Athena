@@ -3,7 +3,15 @@ import { useState } from "react";
 import { formatDateTime } from "../../shared/lib/format";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { useToolCallDetail } from "./hooks";
-import type { RunPendingApproval } from "./model";
+import { isSkillTool, type RunPendingApproval } from "./model";
+import { SafeSkillProjection } from "./SafeSkillProjection";
+
+function isSkillApproval(approval: RunPendingApproval): boolean {
+  return (
+    Boolean(approval.safe_skill_projection) ||
+    isSkillTool(approval.model_name)
+  );
+}
 
 function ApprovalRow({
   approval,
@@ -23,12 +31,19 @@ function ApprovalRow({
   sessionId: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const projectedSkill = approval.safe_skill_projection ?? null;
+  const skillCall = isSkillApproval(approval);
   const details = useToolCallDetail(
     sessionId,
     runId,
     approval.call_id,
-    expanded,
+    expanded && !projectedSkill && !skillCall,
   );
+  const detailProjection =
+    details.data?.safe_skill_projection ?? null;
+  const effectiveProjection = projectedSkill ?? detailProjection;
+  const canApprove =
+    !skillCall || Boolean(effectiveProjection?.can_approve);
 
   return (
     <li className="approval-row">
@@ -48,13 +63,31 @@ function ApprovalRow({
           onClick={() => setExpanded((value) => !value)}
           type="button"
         >
-          {expanded ? "收起参数" : "查看参数"}
+          {expanded
+            ? skillCall
+              ? "收起安全详情"
+              : "收起参数"
+            : skillCall
+              ? "查看安全详情"
+              : "查看参数"}
         </button>
       </div>
 
+      {effectiveProjection ? (
+        <SafeSkillProjection
+          projection={effectiveProjection}
+          sessionId={sessionId}
+          showParameters={expanded}
+        />
+      ) : null}
+
       {expanded ? (
         <div className="approval-detail">
-          {details.isPending ? (
+          {effectiveProjection ? null : skillCall ? (
+            <div className="skill-projection-unavailable" role="alert">
+              服务端没有返回可审批的安全投影，页面不会读取或展示原始技能参数。请拒绝该调用，刷新后再重试。
+            </div>
+          ) : details.isPending ? (
             <p role="status">正在读取工具参数…</p>
           ) : details.isError ? (
             <ErrorBanner
@@ -62,7 +95,9 @@ function ApprovalRow({
               onRetry={() => void details.refetch()}
             />
           ) : details.data ? (
-            <pre>{JSON.stringify(details.data.arguments, null, 2)}</pre>
+            <pre>
+              {JSON.stringify(details.data.arguments ?? {}, null, 2)}
+            </pre>
           ) : null}
         </div>
       ) : null}
@@ -79,7 +114,7 @@ function ApprovalRow({
         </button>
         <button
           className="button-primary"
-          disabled={decisionPending}
+          disabled={decisionPending || !canApprove}
           onClick={() => onDecision("approve")}
           type="button"
         >
@@ -87,7 +122,9 @@ function ApprovalRow({
             ? "正在提交…"
             : decisionPending
               ? "等待其他审批…"
-              : "批准"}
+              : canApprove
+                ? "批准"
+                : "安全投影缺失，不可批准"}
         </button>
       </div>
     </li>

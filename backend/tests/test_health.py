@@ -4,7 +4,7 @@ import asyncio
 from typing import Any, cast
 
 import pytest
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
@@ -32,15 +32,6 @@ def test_health() -> None:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-
-
-def test_llm_is_optional_without_profiles() -> None:
-    """未配置 Profile 时不创建 LLM 服务且健康检查仍可用。"""
-    app = create_app()
-    assert app.state.llm_service is None
-    with TestClient(app) as client:
-        response = client.get("/health")
-    assert response.status_code == 200
 
 
 def test_request_validation_errors_do_not_echo_sensitive_input() -> None:
@@ -261,70 +252,6 @@ def test_injected_knowledge_service_mounts_project_routes_without_stealing_owner
     assert not knowledge.closed
     assert len(databases) == 1
     assert databases[0].disposed
-
-
-def test_injected_llm_service_ignores_invalid_environment_and_keeps_ownership(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """注入服务不解析部署配置，也不关闭调用方持有的资源。"""
-
-    class InjectedService:
-        closed = False
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    service = InjectedService()
-    monkeypatch.setenv("ATHENA_LLM_PROFILES", "not-json")
-    app = create_app(llm_service=service)  # type: ignore[arg-type]
-    assert app.state.llm_service is service
-    with TestClient(app) as client:
-        assert client.get("/health").status_code == 200
-    assert not service.closed
-
-
-def test_llm_environment_profiles_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    """LLM Profile 环境变量不会自动启用或覆盖管理员配置。"""
-    monkeypatch.setenv(
-        "ATHENA_LLM_PROFILES", '{"test":{"api_key_env":"TEST_KEY","model":"m","capabilities":{}}}'
-    )
-    monkeypatch.setenv("TEST_KEY", "fake-key")
-    with TestClient(create_app()) as client:
-        assert client.get("/health").status_code == 200
-    assert client.app.state.llm_service is None
-
-
-def test_llm_close_failure_does_not_prevent_database_disposal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """LLM 资源关闭异常时仍释放 lifespan 中的数据库资源。"""
-    disposed: list[bool] = []
-
-    class FakeDatabase:
-        session_factory = object()
-
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            return None
-
-        async def dispose(self) -> None:
-            disposed.append(True)
-
-    async def fail_close(self: Any) -> None:
-        raise RuntimeError("safe fake")
-
-    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
-    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv(
-        "ATHENA_LLM_PROFILES", '{"test":{"api_key_env":"TEST_KEY","model":"m","capabilities":{}}}'
-    )
-    monkeypatch.setenv("TEST_KEY", "fake-key")
-    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
-    monkeypatch.setattr("bootstrap.api.OpenAIResponsesAdapter.aclose", fail_close)
-    monkeypatch.setattr(main, "build_mcp_router", lambda _service: APIRouter())
-    monkeypatch.setattr(main, "build_tools_router", lambda _service: APIRouter())
-    with TestClient(create_app(tool_manager=cast(ToolManager, object()))) as client:
-        assert client.get("/health").status_code == 200
-    assert disposed == [True]
 
 
 def test_os_error_outside_database_routes_is_not_masked_as_503() -> None:

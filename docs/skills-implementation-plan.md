@@ -1,6 +1,8 @@
 # Skills 实施计划
 
-日期：2026-11-12。状态：实施文档已整理，待整体确认与实施授权。未实施业务代码，未运行功能测试，未经过独立 Reviewer 审查。
+日期：2026-11-12。状态：用户已确认
+[Skills 精简方案](skills-simplification-plan.md)；后端相应用途已在当前工作树实施并通过
+隔离 PostgreSQL/MinIO 验证，独立 Reviewer 与 Root 最终验收尚未完成。
 
 依据：[Skills 功能设计](skills-design.md)。设计中的产品规则和用户后续修订优先；本文将其拆成可交给 Implementer 的任务，新增字段、方法名和模块拆分均为实施建议。本文不以“开始整理实施文档”推定已经授权编码。
 
@@ -21,7 +23,8 @@
 
 ## 2. 代码基线与现状
 
-2026-11-12 只读核对 `v2` 工作树。系统提示词、Run、Redis transport、集成测试和前端管理页面等有大量未提交修改。未发现已实现的 `domain/skill`、会话文件服务或脚本执行 adapter；实施前须再次核对，而非依赖本文断言未来状态。
+下表保留 2026-11-12 实施前的基线核对，用于说明接入位置。Skills、会话文件、脚本执行
+和对象维护代码已在用户确认后加入当前未提交工作树；本节不再表示这些能力缺失。
 
 | 现有位置 | 实际接入与差距 |
 | --- | --- |
@@ -61,7 +64,7 @@ session_files 保存 owner/session、来源、调用 ID、文件 ID、名称/可
 
 ### 3.2 技能包与依赖
 
-ZIP 根 SKILL.md，元数据包含 slug/name/description/dependencies/scripts，正文为指南；脚本登记 path/用途/参数 JSON schema。首期统一选择一个受支持的 JSON Schema 子集并在导入时拒绝不支持关键字，不能导入时接受、运行时忽略。schema 和参数字节仍遵守现有工具协议边界。
+ZIP 根 SKILL.md，元数据包含 slug/name/description/dependencies/scripts，正文为指南；脚本登记 path/用途/参数 JSON Schema。实施采用 Draft 2020-12：根省略 `type` 时按 `object` 处理，显式非 object 根拒绝；允许 `allOf`、`anyOf`、`$defs`、本地 `$ref`、`pattern` 和 boolean 子 schema。`format` 遵循库默认 annotation，不额外承诺强制校验；验证器使用空 `referencing.Registry()`，本地引用可解析而外部引用稳定失败，不执行隐式网络 I/O。实施依据为 `backend/src/app/skill/package.py` 当前标准 validator 边界，schema 和参数字节仍遵守现有工具协议边界。
 
 包限额按设计：25 MiB ZIP、100 MiB 解压、500 文件、单文件 25 MiB、指南 100,000 字符；路径/链接/冲突/加密包/压缩比校验在实际解压流中执行。压缩比具体阈值需在实施配置中给出并覆盖测试，未配置时不能假装已校验。
 
@@ -99,7 +102,10 @@ start_new_session=True，记录启动时 PGID。取消、失租、Run 截止时�
 
 stdout/stderr 并发有界读取，合计保留 5 MiB，溢出 log_truncated 后继续排空丢弃，不能停止读管道。用增量日志落盘/上传，不能 communicate 后再截断。输入/清单用结构化文件读写，超大清单需增量解析，不恢复输出数量限额；文件正文流式处理。
 
-finally 先收敛进程/管道，再删除本次目录；产物和保留日志已独立落存储。失败清理记录 cleanup_error_code 并重试；崩溃遗留先核实租约/活跃进程再回收。不得把 PID 存活误当作相同进程身份，跨重启排查需校验启动身份，无法确认时不盲杀复用 PID。
+finally 先收敛进程/管道，再删除本次目录；产物和保留日志已独立落存储。失败清理记录
+cleanup_error_code，由同一执行路径尽力收敛。Worker 启动及周期任务不扫描或自动删除
+遗留目录；本地诊断 JSON 仅记录 Run/调用/Worker/PID/PGID/时间/目录，供人工排查，
+不是跨重启身份或存活证明，不能据此自动杀 PID/PGID。
 
 ### 3.6 文件配额与原子多文件结果
 
@@ -109,7 +115,14 @@ finally 先收敛进程/管道，再删除本次目录；产物和保留日志�
 
 上传和脚本发布共享同一会话配额锁。建议使用以 session ID 派生稳定键的事务级 advisory lock，上传仅取此锁，Run 完成先沿既有顺序取 Run 锁再取配额锁；持有配额锁的路径不得反向取 Run 锁。不要在 finish_tool_call 中临时加入 Session 行锁，形成既有 Session→Run 的反向顺序。实施时审查所有新写路径后固定顺序，若需更改既有锁架构交回 Root。
 
-对象先写私有存储，DB 事务只发布引用，不执行对象上传。任一失败整组不发布，孤立对象延后清理；已提交结果重放原文件 ID，不重复启动脚本。日志失败与业务发布分开，不能成功交付后为补日志重跑。
+对象先写私有存储，DB 事务只发布引用，不执行对象上传。任一失败整组不发布，孤立对象
+保留到停写窗口中的离线维护；已提交结果重放原文件 ID，不重复启动脚本。日志失败与
+业务发布分开，不能成功交付后为补日志重跑。
+
+离线维护默认 dry-run。只有 `--execute --confirm-all-writers-stopped` 才能删除宽限期外
+的合法前缀对象，并必须逐项确认 `session_files.object_key`、
+`skill_versions.object_key` 和 `skill_executions.log_object_key` 均无引用。引用查询失败
+时保留对象并计入失败；每次命令从桶起点分页扫描，不读写持久游标、代次或发布 owner。
 
 ToolResultPart 增加 ArtifactFileRef 集合，贯通 ORM JSON converter、API DTO、前端、执行结果/完成命令、模型 TOOL 转换和压缩。原 artifact_id 不承担技能交付；一个调用仍只有一个 TOOL 结果。非空 output 也要渲染文件引用，文本截断不能丢失权威集合；模型预算不足时通过文件列表发现全集。
 
@@ -151,19 +164,26 @@ ToolApprovalPanel 与 RunExecutionTrace 不再对技能调用 JSON.stringify 原
 | 审批集成 | 两技能开关不同；非法 ID/脚本/参数即时失败；混批只合法项待审批；展示冻结与请求一致；后端拒绝元数据缺失的批准。 |
 | 文件与消息 | 多文件各字段/顺序持久化往返，output 非空仍可见；UTF-8 边界和二进制拒绝；跨会话/删除后不可用；类型伪装及下载头；50 MiB/100 文件并发边界。 |
 | 实际子进程 | 文件 IPC、大参数不在 argv/env；非零退出/坏清单零发布；父先退/同组后代、取消/失租/Run 到期、双路日志溢出、finally 清理；不得仅 mock runner。 |
+| 离线对象维护 | 默认 dry-run 不删除；未确认停写时拒绝 execute；三张引用表任一命中即保留；引用/单删失败计数并保留；每次从桶起点开始；共享桶测试只处理本次创建的键。 |
+| Office 类型 | 标准库 `zipfile` 读取真实 xlsx/docx/pptx；先检查每个 `ZipInfo.orig_filename` 的安全路径，再核对 `[Content_Types].xml` 与格式 root marker；不解压、不读取正文。 |
+| 迁移 | 隔离 schema 完整升级到唯一 head；只执行 `0023 -> 0022 -> 0023`，确认旧维护表仅在该往返窗口内存在且业务 schema 不被根 public 影响。 |
 | 产物发布竞争 | 第 N 文件上传失败、DB 完成失败、取消/失租胜出整组不可见；配额与上传竞争无超额/死锁；提交后重放同文件 ID；UNKNOWN 不自动启动。 |
 | 安全投影 | 直接访问待审批/详情/消息/流接口不能得到技能裸参数、日志、对象键、宿主路径或凭据；普通用户不能调用管理员排查接口。 |
 | 前端和真实闭环 | 管理导入/启停/冲突、技能选择、上传失败保留、审批拒绝/批准、两产物下载、刷新恢复、下一 Run 引用。 |
 
 新增测试建议放在 backend/tests 的 skill/file 单元与 integration 目录；实际文件名由实施者按现有组织选定。相关既有回归包括 test_run_executor_tools、test_run_compression、test_runs_api、test_run_worker、test_run_stream 与 Run/压缩/工具 PostgreSQL 集成，不只运行新增测试。
 
-已核对仓库使用根 pyproject.toml 和根 `.venv`，前端 package.json 提供 test/typecheck/build/test:e2e。实施后的建议命令（本次未执行）：
+已核对仓库使用根 pyproject.toml 和根 `.venv`，前端 package.json 提供
+test/typecheck/build/test:e2e。后端验证命令如下；集成测试只会创建并删除隔离 schema，
+文件存储验证必须使用独占 bucket，或让测试包装层允许列举共享桶元数据但只把本测试
+创建的键交给维护器。不得把共享桶中的其他对象当作候选、读取其正文或删除：
 
 ```sh
 # 仓库根目录；环境脚本按既有部署提供，不输出密钥。
 source scripts/load-test-env.sh
 .venv/bin/python -m pytest backend/tests/test_run_executor_tools.py backend/tests/test_run_compression.py backend/tests/test_runs_api.py backend/tests/test_run_worker.py backend/tests/test_run_stream.py
 .venv/bin/python -m pytest -m integration backend/tests/integration
+.venv/bin/python -m pytest -q backend/tests/integration/test_skills_files_e2e_postgres_minio.py
 ```
 
 ```sh
@@ -178,18 +198,33 @@ npm run test:e2e
 
 ## 7. 数据变更与交付
 
-新增 Alembic revision 基于实施时真实 head，不预占现有系统提示词迁移的编号。开发阶段无兼容产品范围，但不得清库；停掉旧执行进程后升级结构，将保留旧 Run 的技能快照初始化为空目录，消息新增 artifacts 缺省为空集合，不为旧任务追溯绑定当前技能。迁移/降级涉及已有文件和版本数据时先提出具体操作，不自动删数据或对象。
+新增迁移按实际 head 顺序追加；本轮新增
+`20261122_0023_remove_online_file_maintenance`，只删除
+`file_object_publications` 和 `file_object_reclamation_cursors`。不修改已有迁移链，
+不提供旧预留/游标数据回填。downgrade 只恢复两张空结构及游标初值，不恢复历史对象引用
+或业务数据。
 
-本期部署交付包括：执行解释器/依赖检查方式、MinIO 私有对象前缀与生命周期、临时根目录和权限、包/上传/日志参数、清理扫描规则、必要环境变量示例及错误排查。上传与技能功能不能因为知识库默认关闭而失效；不要为了技能强制启动知识嵌入模型。
+本期部署交付包括：执行解释器/依赖检查方式、MinIO 私有对象前缀、临时根目录和权限、
+包/上传/日志参数、离线维护命令及错误排查。`ATHENA_SKILL_TEMP_STALE_SECONDS`、
+`ATHENA_FILE_ORPHAN_RETENTION_SECONDS` 和
+`ATHENA_FILE_MAINTENANCE_INTERVAL_SECONDS` 不再由应用读取；维护宽限期通过命令参数
+指定。上传与技能功能不能因为知识库默认关闭而失效；不要为了技能强制启动知识嵌入模型。
 
-对存储孤立对象的扫描需保留上传中的对象，目录清理需识别活跃执行。保留期是部署参数，应给出可配置默认值并说明依据，不擅自承诺任意用户/全站容量或速率防刷已解决。
+对象写入与数据库引用仍按“先对象、后引用”进行；提交结果不确定时先按幂等键或来源
+重查，确认未发布后再交给离线维护，不能把空引用查询当成仍在写入的证明。离线执行前
+必须停止 API、Worker、迁移脚本及全部其他写入者；命令默认 dry-run，删除按小批执行。
 
 Implementer 返回：实际修改文件、分阶段完成情况、准确测试命令/结果、migration 与环境步骤、未处理问题。Reviewer 独立检查实际 Diff，返回 PASS 或 CHANGES_REQUIRED，Finding 包含位置、触发条件、影响和建议。有效问题优先交回原 Implementer，修复后必须重新 Review，最多三轮。Root 核验目标、测试和阻断问题后验收；未经 Review 不宣称完成。
 
 ## 8. 当前准备程度
 
-设计规则和五类关键补全已能映射到具体实现链路，可作为整体方案审阅及实施委派依据。本文仅整理计划，没有启动 Implementer，也没有验证真实 Python/数据库/对象存储环境。
+设计规则、进程执行、原子发布、离线维护、Office 校验和迁移已映射到当前实现。后端
+Implementer 已完成必要的单元与隔离 PostgreSQL/MinIO 集成验证；本文仍不代表独立
+Reviewer PASS、真实外部模型全绿或生产部署完成。
 
-实施前仍需落实：实际预装依赖清单与环境一致性、参数 schema 支持范围、压缩比阈值/对象清理保留期、管理员版本详情/日志接口契约，以及与当前未提交系统提示词工作的集成基线。这些是 S0 的具体产出，不应由 Implementer 静默改变已确认产品边界；有架构或行为变化时先交回 Root。
+仍需由 Root 统一验收：前端终态对账、浏览器 harness、真实外部模型工具流、完整部署
+编排和服务级 E2E。离线对象维护没有在线自动容量收敛；崩溃遗留临时目录由人工复核。
+这些边界不得被改写为“自动清理已完成”。
 
-只有用户授权整体实施后才进入 Root → Implementer → Reviewer → Root 流程。本计划编写完成不等于代码实现、环境验收或独立审查通过。
+当前仍处于 Implementer → Reviewer → Root 流程；Reviewer 通过并完成最终验收前，
+不能宣称整体完成。

@@ -3,8 +3,10 @@
 ## 模型与角色
 
 Root: 当前选择模型
-Implementer: implementer
-Reviewer: terra-reviewer
+Product Manager: product-manager
+Designer: ui-designer
+Implementer: implementer (后端) / frontend-implementer (前端)
+Reviewer: reviewer
 
 ## 固定工作流
 

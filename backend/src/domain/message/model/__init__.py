@@ -18,6 +18,7 @@ from domain.message.model.errors import (
     SessionNotFoundError,
 )
 from domain.message.model.part import (
+    ArtifactFileRef,
     FileRefPart,
     MessagePart,
     TextPart,
@@ -35,6 +36,7 @@ __all__ = [
     "ExecutionMessageDraft",
     "ExecutionRole",
     "FileRefPart",
+    "ArtifactFileRef",
     "InvalidMessageError",
     "InvalidMessageReferenceError",
     "MessageConflictError",

@@ -7,6 +7,12 @@ import type {
   SystemPromptVersionSummary,
 } from "../features/admin/model";
 import type { User } from "../features/auth/model";
+import type {
+  DependencyCheck,
+  Skill,
+  SkillAdminDetails,
+  SkillVersion,
+} from "../features/skills/model";
 
 export const TEST_ADMIN: User = {
   created_at: "2026-11-01T00:00:00Z",
@@ -111,4 +117,101 @@ export function makeSystemPromptSummary(
 ): SystemPromptVersionSummary {
   const { content: _content, ...summary } = version;
   return summary;
+}
+
+export function makeDependencyCheck(
+  overrides: Partial<DependencyCheck> = {},
+): DependencyCheck {
+  return {
+    checked_at: "2026-11-12T01:00:00Z",
+    items: [],
+    python_implementation: "CPython",
+    python_version: "3.14.0",
+    status: "satisfied",
+  };
+}
+
+export function makeSkillVersion(
+  overrides: Partial<SkillVersion> &
+    Pick<SkillVersion, "id" | "skill_id" | "ordinal">,
+): SkillVersion {
+  const { id, ordinal, skill_id, ...rest } = overrides;
+  return {
+    created_at: "2026-11-12T01:00:00Z",
+    dependency_check: makeDependencyCheck(),
+    dependencies: [],
+    description: "生成月度销售报表与趋势图。",
+    files: [
+      {
+        path: "SKILL.md",
+        sha256: "a".repeat(64),
+        size_bytes: 128,
+        text: true,
+      },
+      {
+        path: "scripts/build_report.py",
+        sha256: "b".repeat(64),
+        size_bytes: 64,
+        text: true,
+      },
+    ],
+    guide: "# 月度销售报表\n\n1. 读取输入文件。\n2. 生成交付。",
+    id,
+    label: `v${ordinal}`,
+    name: "销售报表",
+    ordinal,
+    package_sha256: "c".repeat(64),
+    scripts: [
+      {
+        label: "生成报表",
+        parameters: { type: "object" },
+        path: "scripts/build_report.py",
+        purpose: "根据销售明细生成交付文件。",
+      },
+    ],
+    skill_id,
+    slug: "sales-report",
+    ...rest,
+  };
+}
+
+export function makeSkill(
+  overrides: Partial<Skill> & Pick<Skill, "id">,
+): Skill {
+  const { id, ...rest } = overrides;
+  return {
+    current_version_id: "skill-version-1",
+    current_version_label: "v1",
+    dependency_check: makeDependencyCheck(),
+    description: "生成月度销售报表与趋势图。",
+    enabled: false,
+    id,
+    name: "销售报表",
+    revision: 1,
+    script_requires_approval: false,
+    slug: "sales-report",
+    updated_at: "2026-11-12T01:00:00Z",
+    ...rest,
+  };
+}
+
+export function makeSkillDetails(
+  overrides: Partial<SkillAdminDetails> = {},
+  versionOverrides: Partial<SkillVersion> = {},
+): SkillAdminDetails {
+  const skill = makeSkill({
+    id: "skill-1",
+    ...overrides,
+  });
+  return {
+    ...skill,
+    versions: [
+      makeSkillVersion({
+        id: skill.current_version_id ?? "skill-version-1",
+        ordinal: 1,
+        skill_id: skill.id,
+        ...versionOverrides,
+      }),
+    ],
+  };
 }

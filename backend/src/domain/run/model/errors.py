@@ -17,6 +17,10 @@ class RunStateError(RunError):
     """命令不适用于 Run 当前状态。"""
 
 
+class RunInputResourceError(RunError):
+    """提交或澄清附带的技能/文件资源已不可用或越权。"""
+
+
 class SessionHasActiveRunError(RunConflictError):
     """会话存在未结束 Run，不能删除。"""
 
@@ -28,6 +32,7 @@ class ToolRetryConfirmationRequiredError(RunConflictError):
 __all__ = [
     "RunConflictError",
     "RunError",
+    "RunInputResourceError",
     "RunNotFoundError",
     "RunStateError",
     "SessionHasActiveRunError",

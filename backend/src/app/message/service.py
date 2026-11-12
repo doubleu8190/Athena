@@ -17,6 +17,7 @@ from app.message.model.result import (
 )
 from common.ids import now_utc
 from domain.message import (
+    ArtifactFileRef,
     ConversationMessageDraft,
     ConversationRole,
     ExecutionMessageDraft,
@@ -111,8 +112,26 @@ def _validate_tool_result_part(part: ToolResultPart) -> None:
         raise InvalidMessageError("invalid_tool_result")
     if part.artifact_id is not None:
         _require_identifier(part.artifact_id, "invalid_tool_result")
+    artifact_ids: set[str] = set()
+    for artifact in part.artifacts:
+        if not isinstance(artifact, ArtifactFileRef):
+            raise InvalidMessageError("invalid_tool_result")
+        _require_identifier(artifact.file_id, "invalid_tool_result")
+        _require_identifier(artifact.filename, "invalid_tool_result", max_length=255)
+        _require_identifier(artifact.mime_type, "invalid_tool_result", max_length=255)
+        if (
+            isinstance(artifact.size_bytes, bool)
+            or not isinstance(artifact.size_bytes, int)
+            or artifact.size_bytes < 0
+        ):
+            raise InvalidMessageError("invalid_tool_result")
+        if artifact.label is not None:
+            _require_identifier(artifact.label, "invalid_tool_result", max_length=255)
+        if artifact.file_id in artifact_ids:
+            raise InvalidMessageError("invalid_tool_result")
+        artifact_ids.add(artifact.file_id)
     has_output = isinstance(part.output, str) and bool(part.output.strip())
-    if not has_output and part.artifact_id is None:
+    if not has_output and part.artifact_id is None and not part.artifacts:
         raise InvalidMessageError("invalid_tool_result")
 
 

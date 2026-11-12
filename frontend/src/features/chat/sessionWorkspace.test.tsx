@@ -20,6 +20,7 @@ import { jsonResponse, renderApp } from "../../test/testUtils";
 import type {
   ConversationMessagePage,
   Run,
+  RunEventListResponse,
   RunPendingApproval,
   RunToolCallDetail,
   RunToolCallSummary,
@@ -40,7 +41,10 @@ interface WorkspaceFetchOptions {
     init: RequestInit | undefined,
   ) => Promise<Response>;
   messages: (beforeSequence?: number) => ConversationMessagePage;
+  messagesResponse?: (beforeSequence?: number) => Promise<Response>;
   runDetails?: (runId: string) => Run | undefined;
+  runEvents?: (afterSequence?: number) => RunEventListResponse;
+  runEventsResponse?: () => Promise<Response>;
   sessionResponse?: () => Promise<Response>;
   toolCallDetail?: (
     runId: string,
@@ -64,6 +68,12 @@ function installWorkspaceFetch(options: WorkspaceFetchOptions) {
       const method = init?.method ?? "GET";
       if (url.pathname.endsWith("/auth/me")) {
         return jsonResponse(TEST_USER);
+      }
+      if (
+        url.pathname === "/api/v1/skills" &&
+        method === "GET"
+      ) {
+        return jsonResponse({ items: [] });
       }
       if (url.pathname === "/api/v1/projects") {
         return jsonResponse(listResponse([PROJECT_A], 1, 100, 1));
@@ -91,9 +101,23 @@ function installWorkspaceFetch(options: WorkspaceFetchOptions) {
         method === "GET"
       ) {
         const raw = url.searchParams.get("before_sequence");
+        if (options.messagesResponse) {
+          return await options.messagesResponse(
+            raw === null ? undefined : Number(raw),
+          );
+        }
         return jsonResponse(
           options.messages(raw === null ? undefined : Number(raw)),
         );
+      }
+      if (
+        url.pathname === `/api/v1/sessions/${SESSION.id}/files` &&
+        method === "GET"
+      ) {
+        return jsonResponse({
+          items: [],
+          next_after_file_id: null,
+        });
       }
       if (method !== "GET") {
         return options.handleWrite(url.pathname, method, init);
@@ -109,6 +133,20 @@ function installWorkspaceFetch(options: WorkspaceFetchOptions) {
           items,
           next_cursor: items.length < options.getRuns().length ? "next" : null,
         });
+      }
+      const runEventsMatch = new RegExp(
+        `^/api/v1/sessions/${SESSION.id}/runs/([^/]+)/events$`,
+      ).exec(url.pathname);
+      if (runEventsMatch) {
+        if (options.runEventsResponse) {
+          return await options.runEventsResponse();
+        }
+        const raw = url.searchParams.get("after_sequence");
+        return jsonResponse(
+          options.runEvents?.(
+            raw === null ? undefined : Number(raw),
+          ) ?? { items: [], next_after_sequence: null },
+        );
       }
       const runMatch = new RegExp(
         `^/api/v1/sessions/${SESSION.id}/runs/([^/]+)$`,
@@ -348,6 +386,613 @@ describe("会话工作台初始加载与历史", () => {
 });
 
 describe("Run 命令与真实状态", () => {
+  it("latest list 与 detail 同版本时保留 detail 的待审批投影", async () => {
+    const pending: RunPendingApproval = {
+      batch_message_id: "batch-1",
+      call_id: "call-1",
+      model_name: "approval_tool",
+      ordinal: 2,
+      requested_at: "2026-11-10T03:00:02Z",
+      safe_skill_projection: null,
+      tool_kind: "builtin",
+    };
+    const latest = makeRun({
+      event_sequence: 3,
+      id: "run-pending-detail",
+      pending_approvals: [],
+      session_id: SESSION.id,
+      status: "waiting_for_approval",
+    });
+    const detail = { ...latest, pending_approvals: [pending] };
+    installWorkspaceFetch({
+      getRuns: () => [latest],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({ items: [], next_before_sequence: null }),
+      runDetails: () => detail,
+    });
+
+    renderApp(`/chat/${SESSION.id}`);
+
+    const approval = await screen.findByRole("region", {
+      name: "等待工具审批",
+    });
+    expect(
+      within(approval).getByText(/approval_tool/),
+    ).toBeInTheDocument();
+    expect(
+      within(approval).queryByText("服务端当前没有返回待审批项。"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("查询终态关闭流并在持久消息到达后收敛同一 Run 的临时输出", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    let latestMessagesPage: ConversationMessagePage = {
+      items: [],
+      next_before_sequence: null,
+    };
+    let olderMessagesPage: ConversationMessagePage = {
+      items: [],
+      next_before_sequence: null,
+    };
+    let runs = [
+      makeRun({
+        id: "run-terminal-query",
+        session_id: SESSION.id,
+        status: "running",
+      }),
+    ];
+    installWorkspaceFetch({
+      getRuns: () => runs,
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: (beforeSequence) =>
+        beforeSequence === undefined
+          ? latestMessagesPage
+          : olderMessagesPage,
+      runEvents: (afterSequence) => {
+        if (afterSequence === 0) {
+          return {
+            items: [
+              {
+                created_at: "2026-11-10T03:00:01Z",
+                id: "event-started",
+                payload: {},
+                run_id: runs[0].id,
+                sequence: 1,
+                type: "started",
+              },
+            ],
+            next_after_sequence: 1,
+          };
+        }
+        return {
+          items: [
+            {
+              created_at: "2026-11-10T03:00:03Z",
+              id: "event-completed",
+              payload: {
+                assistant_message_id: "msg-terminal-assistant",
+              },
+              run_id: runs[0].id,
+              sequence: 2,
+              type: "completed",
+            },
+          ],
+          next_after_sequence: null,
+        };
+      },
+    });
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: 2,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [],
+          messages_before_sequence: null,
+          messages_complete: true,
+          status: "running",
+        },
+      });
+      source.emit("text_delta", {
+        payload: { text: "未经快照确认的临时输出" },
+      });
+    });
+    expect(
+      screen.getByLabelText("Athena 的临时流式输出"),
+    ).toBeInTheDocument();
+
+    const completed = {
+      ...runs[0],
+      event_sequence: 3,
+      finished_at: "2026-11-10T03:00:03Z",
+      status: "completed" as const,
+      updated_at: "2026-11-10T03:00:03Z",
+    };
+    latestMessagesPage = {
+      items: [
+        makeMessage({
+          id: "msg-terminal-delivery",
+          parts: [{ text: "已交付文件", type: "text" }],
+          role: "assistant",
+          run_id: completed.id,
+          sequence: 3,
+          session_id: SESSION.id,
+          status: "completed",
+        }),
+      ],
+      next_before_sequence: 2,
+    };
+    olderMessagesPage = {
+      items: [
+        makeMessage({
+          id: "msg-terminal-assistant",
+          parts: [{ text: "持久最终回答 42", type: "text" }],
+          role: "assistant",
+          run_id: completed.id,
+          sequence: 2,
+          session_id: SESSION.id,
+          status: "completed",
+        }),
+      ],
+      next_before_sequence: null,
+    };
+    runs = [completed];
+    act(() => {
+      // 终态 snapshot 只带旧交付消息；清理 transient 必须等 events 中的精确 ID 对账。
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: completed.event_sequence,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              created_at: "2026-11-10T03:00:02Z",
+              id: "msg-terminal-delivery-snapshot",
+              role: "assistant",
+              sequence: 3,
+              status: "completed",
+              text: "已交付文件",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          status: "completed",
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText("已完成")).toBeInTheDocument();
+    });
+
+    const summary = document.querySelector<HTMLElement>(".run-summary");
+    expect(summary).not.toBeNull();
+    expect(within(summary as HTMLElement).getByText("已完成")).toBeInTheDocument();
+    expect(
+      within(summary as HTMLElement).queryByText("运行中"),
+    ).not.toBeInTheDocument();
+    expect(source.closed).toBe(true);
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 2",
+      }),
+    ).toHaveTextContent("持久最终回答 42");
+    expect(
+      screen.queryByLabelText("Athena 的临时流式输出"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("同 Run 缓存交付消息时，终态 refetch 503 仍保留草稿并等待最终回答", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    let completed = false;
+    let failTerminalReconcile = true;
+    const runs = [
+      makeRun({
+        id: "run-terminal-retry",
+        session_id: SESSION.id,
+        status: "running",
+      }),
+    ];
+    const delivery = makeMessage({
+      id: "msg-terminal-delivery",
+      parts: [{ text: "较早的交付消息", type: "text" }],
+      role: "assistant",
+      run_id: runs[0].id,
+      sequence: 1,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const finalAnswer = makeMessage({
+      id: "msg-terminal-retry",
+      parts: [{ text: "重试后的持久回答", type: "text" }],
+      role: "assistant",
+      run_id: runs[0].id,
+      sequence: 2,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    installWorkspaceFetch({
+      getRuns: () =>
+        completed
+          ? [
+              {
+                ...runs[0],
+                event_sequence: 3,
+                status: "completed",
+                updated_at: "2026-11-10T03:00:03Z",
+              },
+            ]
+          : runs,
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [delivery],
+        next_before_sequence: null,
+      }),
+      messagesResponse: async () => {
+        if (!completed) {
+          return jsonResponse({
+            items: [delivery],
+            next_before_sequence: null,
+          });
+        }
+        if (failTerminalReconcile) {
+          return jsonResponse({ detail: "temporary_failure" }, 503);
+        }
+        return jsonResponse({
+          items: [delivery, finalAnswer],
+          next_before_sequence: null,
+        });
+      },
+      runEvents: () => ({
+        items: [
+          {
+            created_at: "2026-11-10T03:00:03Z",
+            id: "event-terminal-retry",
+            payload: { assistant_message_id: finalAnswer.id },
+            run_id: runs[0].id,
+            sequence: 3,
+            type: "completed",
+          },
+        ],
+        next_after_sequence: null,
+      }),
+    });
+    const { client } = renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.emit("text_delta", {
+        payload: { text: "失败时保留的草稿" },
+      });
+    });
+    const completedRun = {
+      ...runs[0],
+      event_sequence: 3,
+      status: "completed" as const,
+      updated_at: "2026-11-10T03:00:03Z",
+    };
+    completed = true;
+    act(() => {
+      client.setQueryData(chatKeys.latestRun(SESSION.id), {
+        items: [completedRun],
+        next_cursor: null,
+      });
+      client.setQueryData(
+        chatKeys.run(SESSION.id, completedRun.id),
+        completedRun,
+      );
+    });
+
+    expect(
+      await screen.findByText(
+        "运行已完成，但最终消息同步失败。请重试加载最终回答。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Athena 的临时流式输出"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("article", { name: "Athena的消息，序号 1" }),
+    ).toHaveTextContent("较早的交付消息");
+
+    failTerminalReconcile = false;
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "重试加载最终消息" }));
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 2",
+      }),
+    ).toHaveTextContent("重试后的持久回答");
+    expect(
+      screen.queryByLabelText("Athena 的临时流式输出"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("completed 的消息页耗尽时保留草稿且不回退旧交付消息", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const running = makeRun({
+      id: "run-message-exhausted",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const delivery = makeMessage({
+      id: "msg-old-delivery",
+      parts: [{ text: "旧文件交付", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 3,
+      session_id: SESSION.id,
+    });
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: (beforeSequence) => {
+        if (beforeSequence === undefined) {
+          return {
+            items: [delivery],
+            next_before_sequence: 2,
+          };
+        }
+        if (beforeSequence === 2) {
+          return {
+            items: [
+              makeMessage({
+                id: running.trigger_message_id,
+                parts: [{ text: "当前 Run 的触发消息", type: "text" }],
+                role: "user",
+                run_id: null,
+                sequence: 1,
+                session_id: SESSION.id,
+              }),
+            ],
+            next_before_sequence: 1,
+          };
+        }
+        throw new Error("不应扫描当前 Run 触发消息之前的会话历史");
+      },
+      runEvents: () => ({
+        items: [
+          {
+            created_at: "2026-11-10T03:00:03Z",
+            id: "event-message-exhausted",
+            payload: { assistant_message_id: "msg-authoritative-missing" },
+            run_id: running.id,
+            sequence: 4,
+            type: "completed",
+          },
+        ],
+        next_after_sequence: null,
+      }),
+    });
+    const { client } = renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.emit("text_delta", {
+        payload: { text: "消息耗尽时仍需保留" },
+      });
+    });
+    const completed = {
+      ...running,
+      event_sequence: 4,
+      status: "completed" as const,
+      updated_at: "2026-11-10T03:00:03Z",
+    };
+    act(() => {
+      client.setQueryData(chatKeys.latestRun(SESSION.id), {
+        items: [completed],
+        next_cursor: null,
+      });
+      client.setQueryData(chatKeys.run(SESSION.id, running.id), completed);
+    });
+
+    expect(
+      await screen.findByText(/未找到完成事件所指的最终消息/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("消息耗尽时仍需保留");
+    expect(screen.getByText("旧文件交付")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) => {
+        const url = new URL(getRequestUrl(input), "http://localhost");
+        return (
+          url.pathname === `/api/v1/sessions/${SESSION.id}/messages` &&
+          url.searchParams.get("before_sequence") === "2"
+        );
+      }),
+    ).toBe(true);
+  });
+
+  it("completed 的事件页耗尽时保留草稿且不读取 latest assistant", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const running = makeRun({
+      id: "run-event-exhausted",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const delivery = makeMessage({
+      id: "msg-event-old-delivery",
+      parts: [{ text: "旧交付不能被当成最终回答", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 2,
+      session_id: SESSION.id,
+    });
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [delivery],
+        next_before_sequence: null,
+      }),
+      runEvents: (afterSequence) =>
+        afterSequence === 0
+          ? {
+              items: [
+                {
+                  created_at: "2026-11-10T03:00:02Z",
+                  id: "event-started-exhausted",
+                  payload: {},
+                  run_id: running.id,
+                  sequence: 2,
+                  type: "started",
+                },
+              ],
+              next_after_sequence: 2,
+            }
+          : {
+              items: [],
+              next_after_sequence: null,
+            },
+    });
+    const { client } = renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.emit("text_delta", {
+        payload: { text: "事件耗尽时仍需保留" },
+      });
+    });
+    const completed = {
+      ...running,
+      event_sequence: 4,
+      status: "completed" as const,
+      updated_at: "2026-11-10T03:00:03Z",
+    };
+    act(() => {
+      client.setQueryData(chatKeys.latestRun(SESSION.id), {
+        items: [completed],
+        next_cursor: null,
+      });
+      client.setQueryData(chatKeys.run(SESSION.id, running.id), completed);
+    });
+
+    expect(
+      await screen.findByText(/未找到完成事件所指的最终消息/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("事件耗尽时仍需保留");
+    expect(screen.getByText("旧交付不能被当成最终回答")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/events",
+        ),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it.each([
+    ["failed", "失败", "运行失败"],
+    ["cancelled", "已取消", "运行已取消"],
+  ] as const)(
+    "%s 终态保留旧交付旁的未完成回答且不猜测 settle",
+    async (terminalStatus, statusLabel, retentionLabel) => {
+      vi.stubGlobal("EventSource", FakeEventSource);
+      const running = makeRun({
+        id: `run-${terminalStatus}-delivery`,
+        session_id: SESSION.id,
+        status: "running",
+      });
+      const delivery = makeMessage({
+        id: `msg-${terminalStatus}-delivery`,
+        parts: [
+          {
+            artifact_id: "artifact-1",
+            artifacts: [],
+            output: null,
+            status: "success",
+            tool_call_id: "call-delivery",
+            type: "tool_result",
+          },
+        ],
+        role: "assistant",
+        run_id: running.id,
+        sequence: 1,
+        session_id: SESSION.id,
+        status: "completed",
+      });
+      const fetchMock = installWorkspaceFetch({
+        getRuns: () => [running],
+        handleWrite: async () => {
+          throw new Error("unexpected write");
+        },
+        messages: () => ({
+          items: [delivery],
+          next_before_sequence: null,
+        }),
+      });
+      renderApp(`/chat/${SESSION.id}`);
+
+      expect(await screen.findByText("运行中")).toBeInTheDocument();
+      const source = FakeEventSource.instances[0];
+      act(() => {
+        source.emit("text_delta", {
+          payload: { text: `${terminalStatus} 时仍需保留的回答` },
+        });
+        source.emit("run_event", {
+          payload: {
+            event: {
+              created_at: "2026-11-10T03:00:03Z",
+              id: `event-${terminalStatus}`,
+              payload:
+                terminalStatus === "failed"
+                  ? { safe_error_code: "e2e_failed" }
+                  : {},
+              run_id: running.id,
+              sequence: 3,
+              type: terminalStatus,
+            },
+          },
+        });
+      });
+
+      expect(await screen.findByText(statusLabel)).toBeInTheDocument();
+      expect(
+        screen.getByLabelText("Athena 的临时流式输出"),
+      ).toHaveTextContent(`${terminalStatus} 时仍需保留的回答`);
+      expect(
+        screen.getByText(retentionLabel, { exact: false }),
+      ).toHaveTextContent("刷新后不承诺恢复");
+      expect(
+        screen.getByRole("article", {
+          name: "Athena的消息，序号 1",
+        }),
+      ).toBeInTheDocument();
+      await waitFor(() => {
+        expect(source.closed).toBe(true);
+      });
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+            "/events",
+          ),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it("SSE run_event 先于查询刷新投影取消中，终态快照关闭连接", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
@@ -1045,6 +1690,7 @@ describe("审批与失败重试", () => {
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
+      safe_skill_projection: null,
       tool_kind: "mcp",
     };
     const pendingTwo: RunPendingApproval = {
@@ -1053,6 +1699,7 @@ describe("审批与失败重试", () => {
       model_name: "send_email",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:01Z",
+      safe_skill_projection: null,
       tool_kind: "mcp",
     };
     let runs = [
@@ -1140,6 +1787,7 @@ describe("审批与失败重试", () => {
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
+      safe_skill_projection: null,
       tool_kind: "mcp",
     };
     const pendingTwo: RunPendingApproval = {
@@ -1148,6 +1796,7 @@ describe("审批与失败重试", () => {
       model_name: "send_email",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:01Z",
+      safe_skill_projection: null,
       tool_kind: "mcp",
     };
     let runs = [
@@ -1243,6 +1892,7 @@ describe("审批与失败重试", () => {
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
+      safe_skill_projection: null,
       tool_kind: "mcp",
     };
     const waiting = makeRun({
@@ -1315,6 +1965,7 @@ describe("审批与失败重试", () => {
       model_name: "send_email",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
+      safe_skill_projection: null,
       tool_kind: "mcp",
     };
     let runs = [
@@ -1628,6 +2279,9 @@ describe("新草稿创建与提交部分失败", () => {
         if (url.pathname === "/api/v1/projects") {
           return jsonResponse(listResponse([], 1, 100, 0));
         }
+        if (url.pathname === "/api/v1/skills") {
+          return jsonResponse({ items: [] });
+        }
         if (url.pathname === "/api/v1/sessions" && method === "GET") {
           return jsonResponse(listResponse([]));
         }
@@ -1667,6 +2321,12 @@ describe("新草稿创建与提交部分失败", () => {
           url.pathname === `/api/v1/sessions/${created.id}/messages`
         ) {
           return jsonResponse({ items: [], next_before_sequence: null });
+        }
+        if (url.pathname === `/api/v1/sessions/${created.id}/files`) {
+          return jsonResponse({
+            items: [],
+            next_after_file_id: null,
+          });
         }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },

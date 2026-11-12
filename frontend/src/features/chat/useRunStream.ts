@@ -9,7 +9,12 @@ import {
 } from "react";
 
 import { runStreamUrl } from "./api";
-import type { RunEvent, RunSnapshotPayload, RunStatus } from "./model";
+import {
+  isTerminalRunStatus,
+  type RunEvent,
+  type RunSnapshotPayload,
+  type RunStatus,
+} from "./model";
 import {
   INITIAL_RUN_STREAM_STATE,
   runStreamMode,
@@ -43,6 +48,8 @@ interface UseRunStreamOptions {
 }
 
 interface UseRunStreamResult {
+  closeTerminal: (runId: string, status: RunStatus) => void;
+  settleTerminal: (runId: string, status: RunStatus) => void;
   source: RunEventSource | null;
   state: RunStreamState;
   syncStatus: (runId: string, status: RunStatus) => void;
@@ -227,6 +234,38 @@ export function useRunStream({
     [],
   );
 
+  const closeTerminal = useCallback(
+    (targetRunId: string, nextStatus: RunStatus) => {
+      sourceRef.current?.close();
+      sourceRef.current = null;
+      dispatch({
+        runId: targetRunId,
+        status: nextStatus,
+        type: "query_terminal",
+      });
+    },
+    [],
+  );
+
+  const settleTerminal = useCallback(
+    (targetRunId: string, nextStatus: RunStatus) => {
+      dispatch({
+        runId: targetRunId,
+        status: nextStatus,
+        type: "settle_terminal",
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!runId || !status || !isTerminalRunStatus(status)) {
+      return;
+    }
+    // 查询已确认终态时先停止实时流；临时文本等待持久消息对账成功后再收敛。
+    closeTerminal(runId, status);
+  }, [closeTerminal, runId, status]);
+
   useEffect(() => {
     if (!shouldConnect || !runId) {
       return;
@@ -323,6 +362,12 @@ export function useRunStream({
     streamUrl,
   ]);
 
-  return { source: sourceRef.current, state, syncStatus };
+  return {
+    closeTerminal,
+    settleTerminal,
+    source: sourceRef.current,
+    state,
+    syncStatus,
+  };
 }
 

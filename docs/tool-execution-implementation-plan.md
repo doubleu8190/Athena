@@ -4,6 +4,8 @@
 依据：docs/tool-execution-design.md 的核心流程；2026-11-09 按“先完成可靠主流程”精简。
 代码核对日期：2026-11-09；基于 v2 当前工作树，包括未提交的 Run、LLM 与上下文压缩实现。
 
+> **后续代码状态（2026-11-12）**：`adapter/llm/openai_responses.py` 已删除，当前只有 Chat Completions 适配器。下文涉及“两个适配器”或 Responses 校验的表述均为历史实施记录，不再代表当前代码。
+
 ## 1. 首期目标与边界
 
 后端完成 MCP、memory_search、knowledge_search 的统一执行闭环：固定工具目录、模型单工具串行调用、执行前持久化、结果回传、多轮回答、取消、权限校验和持久事件。
@@ -164,11 +166,11 @@ S0 对锁定 `mcp==2.3.0` 的源码、官方资料和可执行样例核对调用
 5. 每次 provider 请求前执行 `reserve_llm_request`；第 40 次强制纯回答，禁用工具、澄清和压缩。
 6. waiting 与终态转换前关闭工具连接；状态和取消结算仍遵守既有规则。
 
-校验职责：同时调整 adapter/llm/openai_chat_completions.py 和 openai_responses.py，将输出工具名称匹配和业务参数 Schema 校验移至工具执行层；适配器保留协议结构、非空合法调用 ID、参数可解析为 JSON 对象和大小校验。非法 JSON、非对象参数或缺失调用 ID 仍是协议错误；未知工具、工具不可用或 Schema 不匹配由执行层保存拒绝结果，再交回模型修正。
+校验职责：调整 adapter/llm/openai_chat_completions.py，将输出工具名称匹配和业务参数 Schema 校验移至工具执行层；适配器保留协议结构、非空合法调用 ID、参数可解析为 JSON 对象和大小校验。非法 JSON、非对象参数或缺失调用 ID 仍是协议错误；未知工具、工具不可用或 Schema 不匹配由执行层保存拒绝结果，再交回模型修正。
 
 提示词版本：保留 `run-v1` 原文不变，新增 `run-v2` 工具循环模板；新提交和 retry 使用 v2。执行器按 Run 固定版本选择能力：v1 只支持原澄清模式，不因部署获得业务工具；v2 使用本方案工具循环。
 
-Chat Completions 必须映射 `request.tool_choice`，与 Responses 一致处理 `auto`、`none`、`required` 和指定工具；最终纯回答请求明确传 `none`。两个适配器都验证发往 SDK 的实际参数，不能仅断言领域请求字段。
+Chat Completions 必须映射 `request.tool_choice`，处理 `auto`、`none`、`required` 和指定工具；最终纯回答请求明确传 `none`。适配器测试必须验证发往 SDK 的实际参数，不能仅断言领域请求字段。
 
 现有模型临时错误重试只针对无输出请求，不能包裹工具执行。每次模型循环使用唯一 operation_id，usage 中区分轮次和 attempt；任何重试重新执行 `reserve_llm_request`。不实现跨 Run 自动结果复用；retry 上下文只带安全 unknown 摘要。
 
@@ -234,7 +236,7 @@ S1 先冻结端口形状，S2 再实现；不得用测试替身代替阶段完�
 | 从头 retry 说明 | 包含与不包含 unknown 的来源均提示可能重复已成功操作，不承诺只执行失败步骤 | 查询 DTO + API 契约测试 |
 | 结果边界 | 文本/JSON 合法有界；非文本不下载；参数超 64 KiB 协议失败；结果截断标记正确 | transport + 规范化测试 |
 | 快照容量 | 目录最多 200 个、完整快照最多 2 MiB；超限写库前失败且无半快照 | 有界读取 + 仓储测试 |
-| 适配器校验 | 两个适配器对未知工具/Schema 不匹配交给执行层；非法 JSON、非对象参数、缺失调用 ID 仍协议失败；最终请求实际传 none | 两适配器 + 执行器测试 |
+| 适配器校验 | Chat Completions 对未知工具/Schema 不匹配交给执行层；非法 JSON、非对象参数、缺失调用 ID 仍协议失败；最终请求实际传 none | 适配器 + 执行器测试 |
 | 事件对账 | Pub/Sub 丢失仍可查询，重连可重建，旧代 delta 被过滤 | Redis + PG/SSE |
 
 建议新增 test_tool_runtime.py、test_builtin_tools.py、test_mcp_execution.py、integration/test_run_tools_postgres.py、integration/test_tool_execution_e2e_postgres.py；扩展现有 Worker、compression、stream、runs API 和 MCP transport 测试。

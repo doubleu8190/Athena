@@ -2,6 +2,8 @@
 
 状态：实施完成，独立 Reviewer 第 2 轮结论为 PASS，Root 于 2026-11-09 完成后端验收。产品规则以 `docs/context-compression-design.md` 第 3 节为准；真实外部模型联调尚未执行。
 
+> **模块状态（2026-11-12）**：旧 `LlmProvider`、`LlmService` 和 Responses 低层模块已删除；压缩与主回答均通过固定 runtime 配置的 Chat Completions Adapter 执行。下文涉及旧 Provider/Responses 的表述仅为历史实施记录。
+
 ## 1. 实施基线与交付目标
 
 当前工作树已具备 Run、管理员模型版本、Chat Completions Adapter、Worker、数据库事件和 SSE。本方案在现有结构中增加压缩闭环，不增加新 Worker、任务队列、通用 Trace 表或独立摘要服务进程。
@@ -23,7 +25,7 @@
 | `domain/run/model/entities.py`、`adapter/run/converter/run.py` | usage 与事件是 typed JSON，需扩展类型、事件映射及旧数据读取兼容 |
 | `api/dto/run.py`、`api/converter/run.py` | 对外 usage 有独立 DTO，不能只改领域模型；摘要正文与凭据不得透出 |
 | `adapter/llm/openai_chat_completions.py` | 仅 runtime stream，当前能力校验同时要求 stream/tools；complete 必须支持无 stream/tools 模型，不能复用该校验原样调用 |
-| `domain/llm/ports.py` | 旧 LlmProvider.complete 使用旧 Profile 名称；新增 runtime 文本能力，不把持久模型 ID 当旧 Profile 名称 |
+| `domain/llm/ports.py` | 旧 `LlmProvider` 已删除；当前 `LlmRuntimeTextProvider` 使用固定 runtime 配置，不把持久模型 ID 当旧 Profile 名称 |
 | `adapter/llm/repository/profile.py` | 现有模型版本和事务内管理员复核可复用；压缩默认指向独立于主模型默认指向 |
 | `app/run/stream.py`、`domain/run/model/stream.py` | 已有持久事件重放、数据库对账和快照；压缩只增加 typed payload，沿用传输 envelope |
 | `run_worker.py`、`main.py` | 分别组装 Worker 与 API 依赖；压缩共用 Worker 内的 LLM Adapter 实例和配额 |
@@ -98,7 +100,7 @@
 
 ### S4：runtime 压缩模型调用
 
-1. 在 `domain/llm/ports.py` 增加 runtime complete 文本能力，Chat Completions Adapter 显式实现；保留原流式接口和 Responses 行为。
+1. 在 `domain/llm/ports.py` 增加 runtime complete 文本能力，Chat Completions Adapter 显式实现；保留原流式接口。历史 Responses 行为已随模块删除，不再是兼容目标。
 2. complete 与 stream 共用客户端、按模型版本的 semaphore、超时、响应大小限制和错误映射。complete 不检查 stream/tools 能力，不传业务工具。SDK 隐藏重试继续关闭。
 3. 为非流式正常文本响应转换成现有 LlmResponse，显式校验完成原因、拒绝、空文本、工具调用及长度截断。不因 HTTP 200 就接受摘要；压缩内部结果不发用户文本 delta。
 4. 逐批计算压缩模型 tokenizer 输入与输出预算；摘要输出请求上限受该模型 max_output_tokens/窗口约束。响应再按主模型 tokenizer 校验 10% B，不能把两种 tokenizer 的 Token 数视为等价。

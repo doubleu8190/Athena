@@ -2,6 +2,7 @@
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.base import Base
+from adapter.file.model import SessionFileModel
 from adapter.knowledge.model import (
     KnowledgeBaseModel,
     KnowledgeChunkModel,
@@ -33,6 +34,7 @@ from adapter.run.model import (
     SessionContextSummaryModel,
 )
 from adapter.session.model import SessionModel
+from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
 from adapter.system_prompt.model import (
     SystemPromptSettingModel,
     SystemPromptVersionModel,
@@ -68,8 +70,12 @@ __all__ = [
     "RunModel",
     "RunRequestModel",
     "RunToolCallModel",
+    "SessionFileModel",
     "SessionContextSummaryModel",
     "SessionModel",
+    "SkillExecutionModel",
+    "SkillModel",
+    "SkillVersionModel",
     "SystemPromptSettingModel",
     "SystemPromptVersionModel",
     "UserModel",

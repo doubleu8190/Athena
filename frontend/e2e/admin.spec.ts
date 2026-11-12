@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
   await installAdminFixtures(page);
 });
 
-test("管理导航在三个真实页面间切换", async ({ page }) => {
+test("管理导航在四个真实页面间切换", async ({ page }) => {
   await page.goto("/admin/models");
   await expect(
     page.getByRole("heading", {
@@ -29,6 +29,12 @@ test("管理导航在三个真实页面间切换", async ({ page }) => {
     }),
   ).toBeVisible();
   await expect(page.getByText("后端返回 1 个工具")).toBeVisible();
+
+  await nav.getByRole("link", { name: "技能管理" }).click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "技能管理" }),
+  ).toBeVisible();
+  await expect(page.getByText("还没有技能包")).toBeVisible();
 });
 
 test("模型创建表单提交真实字段并更新列表", async ({ page }) => {
@@ -120,6 +126,7 @@ test("920px 与 390px 管理页无水平溢出", async ({ page }) => {
     },
     { heading: "MCP Server", path: "/admin/mcp" },
     { heading: "工具审批策略", path: "/admin/tools" },
+    { heading: "技能管理", path: "/admin/skills" },
   ];
 
   for (const target of pages) {

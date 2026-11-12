@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from app.run.budget import RunLlmBudget
 from app.run.compression import ContextCompressor
 from app.run.config import RunWorkerConfig
-from app.run.context import RunContextError, build_llm_request
+from app.run.context import RunContextError, RunInputFileContext, build_llm_request
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import (
     MCP_DELIVERY_AUTH_TIMEOUT_SECONDS,
@@ -43,10 +43,12 @@ from domain.llm.model.profile import RuntimeModelProfile
 from domain.llm.ports import LlmRuntimeTextProvider, LlmStreamProvider
 from domain.llm.profile_ports import CompressionPolicyRepository, ModelProfileRepository
 from domain.message import (
+    ArtifactFileRef,
     ConversationMessageDraft,
     ConversationRole,
     ExecutionMessageDraft,
     ExecutionRole,
+    FileRefPart,
     MessageMetadata,
     MessageStatus,
     TextPart,
@@ -64,6 +66,7 @@ from domain.run.model import (
     RunUsage,
 )
 from domain.run.ports import RunRepository
+from domain.skill import SKILL_EXECUTE_TOOL_ID
 from domain.system_prompt import SystemPromptRepository
 from domain.tool import (
     AdmitToolCallCommand,
@@ -77,6 +80,7 @@ from domain.tool import (
     RuntimeToolSnapshot,
     RunToolBatch,
     RunToolBatchCall,
+    ToolCallPreparation,
     ToolCallStatus,
     ToolExecutionContext,
     ToolExecutionResult,
@@ -143,6 +147,7 @@ class _ExecutionState:
     compression_prompt: str
     budget: RunLlmBudget
     retry_context: tuple[ToolRetryContext, ...]
+    input_files: tuple[RunInputFileContext, ...]
     event_cursor: int
     round: int = 0
     publish_disabled: bool = False
@@ -266,6 +271,7 @@ class RunExecutor:
             execution_epoch=run.execution_epoch,
             auth_session_id=run.auth_session_id or "",
             deadline_at=lease.execution_deadline_at,
+            skill_snapshot=run.skill_snapshot,
         )
         # 预算从数据库已用次数继续，跨进程重试也不会超发模型请求。
         budget = RunLlmBudget(
@@ -279,6 +285,17 @@ class RunExecutor:
         retry_context = await self._repository.list_retry_context(
             run.session_id, run.owner_id, run.id
         )
+        input_files: tuple[RunInputFileContext, ...] = ()
+        if run.input_files.file_ids:
+            # 解析必须发生在授权成功之后；解析结果只保留安全元数据。
+            resolver = (
+                None
+                if self._tool_runtime is None
+                else getattr(self._tool_runtime, "build_run_input_file_context", None)
+            )
+            if resolver is None:
+                raise LlmError("run_input_file_context_unavailable")
+            input_files = await resolver(run)
         # event_cursor 记录已推送事件位置，执行期间只增量发布新事件。
         return _ExecutionState(
             lease=lease,
@@ -290,6 +307,7 @@ class RunExecutor:
             compression_prompt=compression_prompt,
             budget=budget,
             retry_context=retry_context or (),
+            input_files=input_files,
             event_cursor=run.event_sequence,
         )
 
@@ -433,6 +451,26 @@ class RunExecutor:
         )
         if messages is None:
             raise LlmError("run_context_unavailable")
+        loaded_skill_reader = getattr(
+            self._repository,
+            "list_successfully_loaded_skill_ids",
+            None,
+        )
+        loaded_skill_ids = (
+            ()
+            if loaded_skill_reader is None
+            else await loaded_skill_reader(run.id)
+        )
+        build_skill_context = (
+            None
+            if self._tool_runtime is None
+            else getattr(self._tool_runtime, "build_skill_context", None)
+        )
+        skill_context = (
+            None
+            if build_skill_context is None
+            else await build_skill_context(run, loaded_skill_ids)
+        )
         # final-only 轮次不暴露任何工具，强制模型直接给出回答。
         tools = () if final_only else self._available_tools(state)
         # 剩余执行时间就是本轮上下文构建与压缩的硬上限。
@@ -450,6 +488,8 @@ class RunExecutor:
                 main_prompt=state.main_prompt,
                 tools=tools,
                 retry_context=state.retry_context,
+                skill_context=skill_context,
+                input_files=state.input_files,
             )
         policy = await cast(CompressionPolicyRepository, self._profiles).get_compression_policy(
             policy_id
@@ -468,6 +508,8 @@ class RunExecutor:
                 timeout_seconds=remaining,
                 tools=tools,
                 retry_context=state.retry_context,
+                skill_context=skill_context,
+                input_files=state.input_files,
                 budget=state.budget,
             )
         except RunContextError as error:
@@ -482,6 +524,8 @@ class RunExecutor:
                 main_prompt=state.main_prompt,
                 tools=tools,
                 retry_context=state.retry_context,
+                skill_context=skill_context,
+                input_files=state.input_files,
             )
         # 压缩过程本身会消耗预算，若因此进入 final-only，同样清空工具。
         if state.budget.final_only:
@@ -694,6 +738,42 @@ class RunExecutor:
             validator(definition, call.name, dict(call.arguments)),
         )
 
+    async def _prepare_business_call(
+        self,
+        state: _ExecutionState,
+        definition: RuntimeToolDefinition | None,
+        call: LlmToolCall,
+        *,
+        record_id: str,
+    ) -> ToolCallPreparation:
+        """先做本地和 Run 固定 Skill 预校验，再决定是否进入审批。"""
+        prepare = (
+            None
+            if self._tool_runtime is None
+            else getattr(self._tool_runtime, "prepare_call", None)
+        )
+        if prepare is not None:
+            return cast(
+                ToolCallPreparation,
+                await prepare(
+                    definition,
+                    call.name,
+                    dict(call.arguments),
+                    state.run,
+                    state.authorized,
+                    call_id=record_id,
+                ),
+            )
+        outcome = self._validate_business_call(definition, call)
+        return ToolCallPreparation(
+            outcome=outcome,
+            requires_approval=bool(
+                outcome is None
+                and definition is not None
+                and definition.requires_approval
+            ),
+        )
+
     def _tool_result_draft(
         self,
         state: _ExecutionState,
@@ -702,6 +782,7 @@ class RunExecutor:
         outcome: ToolOutcome,
         created_at: datetime,
         thread_id: str | None = None,
+        artifacts: tuple[ArtifactFileRef, ...] = (),
     ) -> ExecutionMessageDraft:
         return ExecutionMessageDraft(
             id=self._id_factory("exec"),
@@ -715,6 +796,7 @@ class RunExecutor:
                     tool_call_id=tool_call_id,
                     status=protocol_status_for_outcome(outcome),
                     output=outcome.canonical_output(),
+                    artifacts=artifacts,
                 ),
             ),
             tool_call_id=tool_call_id,
@@ -755,18 +837,23 @@ class RunExecutor:
         # 逐条先做本地校验：校验失败生成即时错误结果，不进入审批或外部执行。
         for call in calls:
             definition = self._definition_for_call(state, call.name)
-            outcome = self._validate_business_call(definition, call)
+            record_id = self._id_factory("toolcall")
+            prepared = await self._prepare_business_call(
+                state,
+                definition,
+                call,
+                record_id=record_id,
+            )
+            outcome = prepared.outcome
             items.append(
                 BeginToolCallBatchItem(
-                    record_id=self._id_factory("toolcall"),
+                    record_id=record_id,
                     tool_call_id=call.call_id,
                     model_name=call.name,
                     tool_id=None if definition is None else definition.tool_id,
                     tool_kind=(None if definition is None else ToolKind(definition.source.kind)),
                     # 只有校验通过且定义要求审批的调用才进入审批屏障。
-                    requires_approval=bool(
-                        outcome is None and definition is not None and definition.requires_approval
-                    ),
+                    requires_approval=prepared.requires_approval,
                     immediate_outcome=outcome,
                     result_message=(
                         None
@@ -781,6 +868,7 @@ class RunExecutor:
                             created_at=created_at,
                         )
                     ),
+                    safe_skill_projection=prepared.safe_skill_projection,
                 )
             )
         # 仓储在同一事务内写入消息、调用记录、即时结果与事件，
@@ -1009,12 +1097,54 @@ class RunExecutor:
                 call.record.model_name,
                 call.arguments,
             ),
+            record_id=call.record.id,
         )
         outcome = bounded_outcome(
             result.outcome,
             maximum_bytes=self._config.tool_result_bytes,
         )
+        artifact_refs = tuple(
+            ArtifactFileRef(
+                file_id=artifact.id,
+                filename=artifact.filename,
+                label=artifact.label,
+                mime_type=artifact.mime_type,
+                size_bytes=artifact.size_bytes,
+            )
+            for artifact in result.artifacts
+        )
         finished_at = self._now()
+        delivery_message = (
+            None
+            if not result.artifacts
+            else ConversationMessageDraft(
+                # 调用记录一对一决定消息 ID，完成回包不明时重放仍能核对同一条交付。
+                id=f"msg-{call.record.id}",
+                session_id=state.run.session_id,
+                owner_id=state.run.owner_id,
+                role=ConversationRole.ASSISTANT,
+                status=MessageStatus.COMPLETED,
+                parts=(
+                    TextPart("已生成以下交付文件。"),
+                    *(
+                        FileRefPart(
+                            file_id=artifact.id,
+                            filename=artifact.filename,
+                            mime_type=artifact.mime_type,
+                            size_bytes=artifact.size_bytes,
+                        )
+                        for artifact in result.artifacts
+                    ),
+                ),
+                reply_to_message_id=state.run.trigger_message_id,
+                run_id=state.run.id,
+                client_message_id=None,
+                created_at=finished_at,
+                completed_at=finished_at,
+                metadata=MessageMetadata(),
+                context_turn_id=state.run.trigger_message_id,
+            )
+        )
         # 原子写入结果消息、事件与记录终态；返回 None 表示租约已丢失。
         finished = await self._repository.finish_tool_call(
             FinishToolCallCommand(
@@ -1028,9 +1158,13 @@ class RunExecutor:
                     outcome=outcome,
                     created_at=finished_at,
                     thread_id=thread_id,
+                    artifacts=artifact_refs,
                 ),
                 outcome=outcome,
                 finished_at=finished_at,
+                artifacts=result.artifacts,
+                delivery_message=delivery_message,
+                skill_execution_completion=result.skill_execution_completion,
                 terminate_error_code=result.terminate_run_error_code,
                 defer_terminal_convergence=True,
             )
@@ -1061,6 +1195,8 @@ class RunExecutor:
         state: _ExecutionState,
         definition: RuntimeToolDefinition | None,
         call: LlmToolCall,
+        *,
+        record_id: str,
     ) -> ToolExecutionResult:
         """Execute exactly one business tool with a bounded deadline and no retry."""
         # 定义缺失或未启用工具运行时：返回安全错误，不发起外部调用。
@@ -1080,9 +1216,17 @@ class RunExecutor:
                     message="当前 Run 未启用业务工具执行。",
                 )
             )
-        # 工具超时取配置上限与 Run 剩余执行时间的较小值。
         run_remaining_seconds = self._remaining_seconds(state)
-        deadline_seconds = min(self._config.tool_timeout_seconds, run_remaining_seconds)
+        # skill_execute 只受 Run 总截止时间约束；其他工具保留通用 tool_timeout 语义。
+        skill_execution = (
+            definition.source.kind == "builtin"
+            and definition.tool_id == SKILL_EXECUTE_TOOL_ID
+        )
+        deadline_seconds = (
+            run_remaining_seconds
+            if skill_execution
+            else min(self._config.tool_timeout_seconds, run_remaining_seconds)
+        )
         if deadline_seconds <= 0:
             # 执行前时间已耗尽：外部操作是否发生不可知，按 UNKNOWN 处理。
             return ToolExecutionResult(
@@ -1100,6 +1244,8 @@ class RunExecutor:
             execution_epoch=state.run.execution_epoch,
             auth_session_id=state.run.auth_session_id or "",
             deadline_at=self._now() + timedelta(seconds=deadline_seconds),
+            tool_call_record_id=record_id,
+            skill_snapshot=state.run.skill_snapshot,
         )
         # MCP 内部按业务、清理、交付认证三段收敛；外层守护必须完整包住该 envelope
         # 并留调度余量，否则已确定结果会被抢先误报为 unknown。内置工具不加额外预算。

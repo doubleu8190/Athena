@@ -73,6 +73,12 @@ function installChatFetch(options: ChatFetchOptions = {}) {
         return jsonResponse(TEST_USER);
       }
       if (
+        url.pathname === "/api/v1/skills" &&
+        (!init?.method || init.method === "GET")
+      ) {
+        return jsonResponse({ items: [] });
+      }
+      if (
         url.pathname === "/api/v1/projects" &&
         (!init?.method || init.method === "GET")
       ) {
@@ -136,6 +142,16 @@ function installChatFetch(options: ChatFetchOptions = {}) {
         url.pathname === `/api/v1/sessions/${activeSession.id}`
       ) {
         return jsonResponse(activeSession);
+      }
+      if (
+        activeSession &&
+        url.pathname ===
+          `/api/v1/sessions/${activeSession.id}/files`
+      ) {
+        return jsonResponse({
+          items: [],
+          next_after_file_id: null,
+        });
       }
       throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
     },

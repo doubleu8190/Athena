@@ -14,6 +14,7 @@ build/
 .env
 .env.*
 !.env.example
+!.env.*.example
 !docker/test.env.example
 docker/test.env
 docker/test.env.tmp
@@ -21,3 +22,5 @@ node_modules/
 var/
 data/
 secrets/
+.agents/
+AGENTS.md

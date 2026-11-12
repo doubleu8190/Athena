@@ -1,0 +1,57 @@
+# ==============================================================================
+# Athena v2 Docker 构建忽略清单
+# 排除版本控制、敏感密钥、虚拟环境、构建产物、本地测试缓存与文档
+# ==============================================================================
+
+# 版本控制与 Git 元数据
+.git/
+.gitignore
+.gitattributes
+
+# 敏感环境变量与密钥文件
+.env*
+secrets/
+*.pem
+*.key
+
+# Python 虚拟环境
+.venv/
+.venv*/
+venv/
+env/
+
+# Python 字节码、测试及静态检查缓存
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Node.js 依赖、构建产物与测试报告
+**/node_modules/
+**/dist/
+frontend/playwright-report/
+frontend/test-results/
+
+# 运行时数据与日志目录
+data/
+var/
+*.log
+
+# 项目文档、测试及 Agent 配置（非容器运行必需）
+docs/
+.agents/
+backend/tests/
+frontend/e2e/
+
+# 编辑器配置与操作系统临时文件
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

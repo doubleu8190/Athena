@@ -1,0 +1,40 @@
+# ==============================================================================
+# Athena v2 前端生产环境 Dockerfile
+# 多阶段构建：Node 22 编译打包 -> Nginx Alpine 静态托管与 API 反向代理
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 阶段一：前端静态资源构建
+# ------------------------------------------------------------------------------
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+# 优先拷贝 package.json 和 package-lock.json，利用 Docker 缓存加速依赖构建
+COPY frontend/package*.json ./
+
+# 安装确定性生产与构建依赖
+RUN npm ci
+
+# 拷贝前端全部源代码
+COPY frontend/ ./
+
+# 执行 TypeScript 严格类型检查并编译打包至 dist/
+RUN npm run build
+
+# ------------------------------------------------------------------------------
+# 阶段二：Nginx Alpine 生产托管与反向代理
+# ------------------------------------------------------------------------------
+FROM nginx:alpine
+
+# 拷贝第一阶段构建完成的静态资源产物
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# 覆盖默认 Nginx 配置，加载 Athena 专属 SPA 回退与 API/SSE 反向代理配置
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+# 暴露 HTTP 服务端口
+EXPOSE 80
+
+# 前台保持 Nginx 运行
+CMD ["nginx", "-g", "daemon off;"]

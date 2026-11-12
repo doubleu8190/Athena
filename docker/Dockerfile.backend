@@ -1,0 +1,46 @@
+# ==============================================================================
+# Athena v2 后端业务应用镜像 Dockerfile (athena-backend:latest)
+# ==============================================================================
+# 架构考量：
+#   基于独立预构的基础依赖镜像 athena-backend-base:latest，实现第三方依赖与业务源码解耦。
+#   由于所有第三方依赖在 Base 镜像中已全部安装就绪，本镜像仅拷贝业务源码、Alembic 迁移脚本
+#   并执行耗时约 0.1 秒的 --no-deps 元数据注册，日常业务代码修改重新构建均可在 1 秒内完成！
+# ==============================================================================
+
+FROM athena-backend-base:latest
+
+WORKDIR /app
+
+# 设置 Python 运行时应用环境变量：
+# 1. PYTHONUNBUFFERED=1：保证日志实时输出到标准输出，便于容器日志收集与分析
+# 2. PYTHONDONTWRITEBYTECODE=1：避免写入 .pyc 文件以减小容器层体积与开销
+# 3. PYTHONPATH=/app/backend/src：将应用源码目录加入模块导入路径，确保各领域层模块被正确加载
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/backend/src
+
+# 构建参数兼容（由 Base 镜像或 Compose 传入）
+ARG INSTALL_KNOWLEDGE=false
+
+# 步骤 1：拷贝业务源码、文档与配置文件（业务代码变动仅在此层生效）
+COPY README.md ./
+COPY backend/ ./backend/
+
+# 在工作目录下放置 alembic.ini 并修正相对路径
+# 适配后无论执行 `alembic upgrade head` 还是 `alembic -c backend/alembic.ini upgrade head` 均能正确寻址
+COPY backend/alembic.ini ./alembic.ini
+RUN sed -i 's|%(here)s/|%(here)s/backend/|g' ./alembic.ini
+
+# 步骤 2：仅安装项目本身包元数据（依赖已在 Base 镜像中就绪，--no-deps 安装耗时仅约 0.1 秒）
+RUN pip install --no-deps .
+
+# 步骤 3：拷贝通用容器入口调度脚本并赋予可执行权限
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# 暴露 FastAPI HTTP 监听端口
+EXPOSE 8000
+
+# 容器启动入口与默认命令（默认启动 API 服务）
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["api"]

@@ -5,6 +5,8 @@ import {
   FakeEventSource,
   fakeEventSourceFactory,
 } from "../../test/fakeEventSource";
+import { getRequestUrl, makeMessage } from "../../test/fixtures";
+import { jsonResponse } from "../../test/testUtils";
 import type {
   RunEvent,
   RunSnapshotPayload,
@@ -13,6 +15,7 @@ import type {
 import {
   INITIAL_RUN_STREAM_STATE,
   projectRunStatus,
+  reconcileFailedRun,
   runStreamReducer,
   type RunStreamAction,
 } from "./runStream";
@@ -22,11 +25,15 @@ beforeEach(() => {
   FakeEventSource.instances = [];
 });
 
-function event(type: string, sequence: number): RunEvent {
+function event(
+  type: string,
+  sequence: number,
+  payload: Record<string, unknown> = {},
+): RunEvent {
   return {
     created_at: "2026-11-10T03:00:00Z",
     id: `event-${sequence}`,
-    payload: {},
+    payload,
     run_id: "run-1",
     sequence,
     type,
@@ -36,6 +43,7 @@ function event(type: string, sequence: number): RunEvent {
 function snapshot(
   status: RunSnapshotPayload["status"],
   text = "",
+  reportMessageId: string | null = null,
 ): RunSnapshotPayload {
   return {
     events: [],
@@ -56,6 +64,7 @@ function snapshot(
       : [],
     messages_before_sequence: null,
     messages_complete: true,
+    report_message_id: reportMessageId,
     status,
   };
 }
@@ -178,6 +187,29 @@ describe("Run 状态投影", () => {
     ).toBe("running");
   });
 
+  it("failed snapshot 和 failed 事件都保留同一权威报告标识", () => {
+    const snapshotState = runStreamReducer(
+      { ...INITIAL_RUN_STREAM_STATE, runId: "run-1" },
+      {
+        payload: snapshot("failed", "", "msg-report"),
+        type: "snapshot",
+      },
+    );
+    expect(snapshotState.reportMessageId).toBe("msg-report");
+
+    const eventState = runStreamReducer(
+      { ...INITIAL_RUN_STREAM_STATE, runId: "run-1" },
+      {
+        event: event("failed", 5, {
+          report_message_id: "msg-report-event",
+          safe_error_code: "run_context_safety_stop",
+        }),
+        type: "run_event",
+      },
+    );
+    expect(eventState.reportMessageId).toBe("msg-report-event");
+  });
+
   it("查询终态先关闭连接并保留草稿，持久消息对账后才清除 transient", () => {
     const streaming = reduce([
       { runId: "run-1", status: "running", type: "start" },
@@ -220,7 +252,190 @@ describe("Run 状态投影", () => {
   });
 });
 
+describe("失败报告精确对账", () => {
+  it("跨事件页找到报告 ID，再跨消息页校验 Run、触发关联和序号", async () => {
+    const trigger = makeMessage({
+      id: "msg-trigger",
+      role: "user",
+      run_id: null,
+      sequence: 5,
+      session_id: "session-1",
+    });
+    const report = makeMessage({
+      id: "msg-report",
+      reply_to_message_id: trigger.id,
+      role: "assistant",
+      run_id: "run-1",
+      sequence: 6,
+      session_id: "session-1",
+      status: "completed",
+    });
+    const unrelatedDelivery = makeMessage({
+      id: "msg-delivery",
+      reply_to_message_id: null,
+      role: "assistant",
+      run_id: "run-1",
+      sequence: 9,
+      session_id: "session-1",
+    });
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL) => {
+        const url = new URL(getRequestUrl(input), "http://localhost");
+        if (url.pathname.endsWith("/events")) {
+          const after = Number(url.searchParams.get("after_sequence"));
+          return after === 0
+            ? jsonResponse({
+                items: [event("started", 1)],
+                next_after_sequence: 1,
+              })
+            : jsonResponse({
+                items: [
+                  event("failed", 2, {
+                    report_message_id: report.id,
+                    safe_error_code: "run_context_safety_stop",
+                  }),
+                ],
+                next_after_sequence: null,
+              });
+        }
+        const before = url.searchParams.get("before_sequence");
+        if (before === null) {
+          return jsonResponse({
+            items: [unrelatedDelivery],
+            next_before_sequence: 9,
+          });
+        }
+        if (before === "9") {
+          return jsonResponse({
+            items: [report],
+            next_before_sequence: 6,
+          });
+        }
+        return jsonResponse({
+          items: [trigger],
+          next_before_sequence: null,
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await reconcileFailedRun(
+      "session-1",
+      "run-1",
+      trigger.id,
+      null,
+    );
+
+    expect(result.kind).toBe("settled");
+    if (result.kind === "settled") {
+      expect(result.messages.map((item) => item.page)).toEqual([
+        expect.objectContaining({ items: [unrelatedDelivery] }),
+        expect.objectContaining({ items: [report] }),
+        expect.objectContaining({ items: [trigger] }),
+      ]);
+    }
+  });
+
+  it.each([
+    ["非 assistant", { role: "user" }],
+    ["错误 Run", { run_id: "run-other" }],
+    ["未完成", { status: "streaming" }],
+    ["触发关联错误", { reply_to_message_id: "msg-other-trigger" }],
+    ["早于触发消息", { sequence: 4 }],
+  ])("拒绝%s的报告身份", async (_label, reportOverride) => {
+    const trigger = makeMessage({
+      id: "msg-trigger",
+      role: "user",
+      run_id: null,
+      sequence: 5,
+      session_id: "session-1",
+    });
+    const report = {
+      ...makeMessage({
+        id: "msg-report",
+        reply_to_message_id: trigger.id,
+        role: "assistant",
+        run_id: "run-1",
+        sequence: 6,
+        session_id: "session-1",
+        status: "completed",
+      }),
+      ...reportOverride,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          items: [report, trigger],
+          next_before_sequence: null,
+        }),
+      ),
+    );
+
+    await expect(
+      reconcileFailedRun(
+        "session-1",
+        "run-1",
+        trigger.id,
+        report.id,
+      ),
+    ).resolves.toEqual({
+      kind: "not_found",
+      reason: "report_message",
+    });
+  });
+
+  it("普通 failed 没有报告事件时不猜测 latest assistant", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL) =>
+        jsonResponse({
+          items: [event("failed", 2, { safe_error_code: "ordinary_failure" })],
+          next_after_sequence: null,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      reconcileFailedRun("session-1", "run-1", "msg-trigger", null),
+    ).resolves.toEqual({
+      kind: "not_found",
+      reason: "failed_event",
+    });
+    expect(
+      fetchMock.mock.calls.every(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/events",
+        ),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("原生 EventSource Run hook", () => {
+  it("失败快照解析并保留权威报告 ID", () => {
+    const { result } = renderHook(() =>
+      useRunStream({
+        eventSourceFactory: fakeEventSourceFactory,
+        runId: "run-1",
+        sessionId: "session-1",
+        status: "running",
+      }),
+    );
+    const source = FakeEventSource.instances.at(-1);
+
+    act(() => {
+      source?.emit("snapshot", {
+        payload: snapshot("failed", "", "msg-report-snapshot"),
+      });
+    });
+
+    expect(result.current.state.status).toBe("failed");
+    expect(result.current.state.reportMessageId).toBe(
+      "msg-report-snapshot",
+    );
+    expect(source?.closed).toBe(true);
+  });
+
   it("running 时收到中断会主动换新连接，由新快照校正文本并阻止终态重连", async () => {
     const { result } = renderHook(() =>
       useRunStream({

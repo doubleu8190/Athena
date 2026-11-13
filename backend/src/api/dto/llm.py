@@ -6,6 +6,14 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from domain.llm.model.compression_policy import (
+    DEFAULT_RECENT_RATIO,
+    DEFAULT_RECENT_TOKEN_CAP,
+    DEFAULT_SUMMARY_RATIO,
+    DEFAULT_SUMMARY_TOKEN_CAP,
+    DEFAULT_TRIGGER_TOKENS,
+    MAX_COMPRESSION_TOKEN_BUDGET,
+)
 from domain.llm.model.profile import MAX_CONTEXT_WINDOW_TOKENS, MAX_OUTPUT_TOKENS
 
 
@@ -82,9 +90,23 @@ class CompressionPolicyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     compression_model_profile_id: str = Field(min_length=1, max_length=64)
-    trigger_ratio: float = Field(default=0.8, gt=0, lt=1)
-    recent_ratio: float = Field(default=0.2, gt=0, lt=1)
-    summary_ratio: float = Field(default=0.1, gt=0, lt=1)
+    trigger_tokens: int = Field(
+        default=DEFAULT_TRIGGER_TOKENS,
+        ge=1,
+        le=MAX_COMPRESSION_TOKEN_BUDGET,
+    )
+    recent_ratio: float = Field(default=DEFAULT_RECENT_RATIO, gt=0, lt=1)
+    recent_token_cap: int = Field(
+        default=DEFAULT_RECENT_TOKEN_CAP,
+        ge=1,
+        le=MAX_COMPRESSION_TOKEN_BUDGET,
+    )
+    summary_ratio: float = Field(default=DEFAULT_SUMMARY_RATIO, gt=0, lt=1)
+    summary_token_cap: int = Field(
+        default=DEFAULT_SUMMARY_TOKEN_CAP,
+        ge=1,
+        le=MAX_COMPRESSION_TOKEN_BUDGET,
+    )
 
 
 class CompressionPolicyResponse(BaseModel):
@@ -92,9 +114,11 @@ class CompressionPolicyResponse(BaseModel):
 
     id: str | None
     compression_model_profile_id: str | None
-    trigger_ratio: float | None
+    trigger_tokens: int | None
     recent_ratio: float | None
+    recent_token_cap: int | None
     summary_ratio: float | None
+    summary_token_cap: int | None
     prompt_template_version: str | None
     created_at: datetime | None
 

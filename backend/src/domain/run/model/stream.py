@@ -34,6 +34,7 @@ class RunSnapshotPayload(BaseModel):
 
     status: RunStatus
     event_sequence: int
+    report_message_id: str | None = None
     messages: tuple[RunStreamMessage, ...]
     events: tuple[RunEvent, ...]
     messages_complete: bool = True

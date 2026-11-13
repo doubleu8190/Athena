@@ -109,6 +109,7 @@ class RunStreamService:
                 payload=RunSnapshotPayload(
                     status=snapshot.run.status,
                     event_sequence=snapshot.run.event_sequence,
+                    report_message_id=snapshot.run.report_message_id,
                     messages=snapshot.messages,
                     events=snapshot.events,
                     messages_complete=snapshot.messages_complete,
@@ -293,6 +294,7 @@ class RunStreamService:
                             payload=RunSnapshotPayload(
                                 status=snapshot.run.status,
                                 event_sequence=snapshot.run.event_sequence,
+                                report_message_id=snapshot.run.report_message_id,
                                 messages=snapshot.messages,
                                 events=snapshot.events,
                                 messages_complete=snapshot.messages_complete,

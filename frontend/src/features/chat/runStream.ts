@@ -22,6 +22,7 @@ export interface RunStreamState {
   lastHeartbeatAt: string | null;
   messages: RunStreamMessage[];
   notice: string | null;
+  reportMessageId: string | null;
   runId: string | null;
   status: RunStatus | null;
   transientText: string;
@@ -47,6 +48,7 @@ export const INITIAL_RUN_STREAM_STATE: RunStreamState = {
   lastHeartbeatAt: null,
   messages: [],
   notice: null,
+  reportMessageId: null,
   runId: null,
   status: null,
   transientText: "",
@@ -75,6 +77,24 @@ function eventStatus(type: string): RunStatus | null {
     default:
       return null;
   }
+}
+
+function failedEventReportMessageId(
+  events: RunEvent[],
+  runId: string,
+): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (
+      event.run_id === runId &&
+      event.type === "failed" &&
+      typeof event.payload.report_message_id === "string" &&
+      event.payload.report_message_id
+    ) {
+      return event.payload.report_message_id;
+    }
+  }
+  return null;
 }
 
 function interruptedNotice(reason: string): string {
@@ -174,6 +194,14 @@ export function runStreamReducer(
       return {
         ...state,
         events: [...state.events, action.event],
+        reportMessageId:
+          action.event.run_id === state.runId &&
+          action.event.type === "failed"
+            ? failedEventReportMessageId(
+                [...state.events, action.event],
+                action.event.run_id,
+              ) ?? state.reportMessageId
+            : state.reportMessageId,
         status: eventStatus(action.event.type) ?? state.status,
       };
     }
@@ -191,9 +219,10 @@ export function runStreamReducer(
         events: action.payload.events,
         messages: action.payload.messages,
         // 非终态快照代表可继续生成的权威进度；终态 snapshot 不含未完成文本，
-        // 不能把旧交付消息误当成最终回答，必须等 completed 精确对账或终态保留。
+        // 必须等 completed 或带报告的 failed 精确对账后才能收敛临时文本。
         transientText: terminalSnapshot ? state.transientText : "",
         notice: null,
+        reportMessageId: action.payload.report_message_id,
         status: authoritativeStatus,
       };
     }
@@ -258,6 +287,19 @@ export type CompletedRunReconciliation =
   | {
       kind: "not_found";
       reason: "completed_event" | "final_message";
+    };
+
+export type FailedRunReconciliation =
+  | {
+      kind: "settled";
+      messages: {
+        page: ConversationMessagePage;
+        beforeSequence: number | undefined;
+      }[];
+    }
+  | {
+      kind: "not_found";
+      reason: "failed_event" | "report_message";
     };
 
 function completedAssistantMessageId(
@@ -350,6 +392,96 @@ async function finalAssistantMessageExists(
   }
 }
 
+async function findFailedReportMessageId(
+  sessionId: string,
+  runId: string,
+  knownEvents: RunEvent[],
+): Promise<string | null> {
+  const knownReportMessageId = failedEventReportMessageId(
+    knownEvents,
+    runId,
+  );
+  if (knownReportMessageId) {
+    return knownReportMessageId;
+  }
+
+  let afterSequence = 0;
+  while (true) {
+    const page = await listRunEvents(sessionId, runId, afterSequence, 100);
+    const reportMessageId = failedEventReportMessageId(page.items, runId);
+    if (reportMessageId) {
+      return reportMessageId;
+    }
+    const next = page.next_after_sequence;
+    // 事件游标不前进时明确失败，不能转为猜测其他 assistant 消息。
+    if (next === null || next <= afterSequence) {
+      return null;
+    }
+    afterSequence = next;
+  }
+}
+
+async function failedReportMessageExists(
+  sessionId: string,
+  runId: string,
+  reportMessageId: string,
+  triggerMessageId: string,
+): Promise<{
+  found: boolean;
+  pages: {
+    page: ConversationMessagePage;
+    beforeSequence: number | undefined;
+  }[];
+}> {
+  let beforeSequence: number | undefined;
+  let reportSequence: number | null = null;
+  let triggerSequence: number | null = null;
+  const pages: {
+    page: ConversationMessagePage;
+    beforeSequence: number | undefined;
+  }[] = [];
+
+  while (true) {
+    const page = await listMessages(sessionId, beforeSequence, 20);
+    pages.push({ page, beforeSequence });
+
+    for (const message of page.items) {
+      if (message.id === triggerMessageId) {
+        triggerSequence = message.sequence;
+      }
+      if (
+        message.id === reportMessageId &&
+        message.role === "assistant" &&
+        message.run_id === runId &&
+        message.status === "completed" &&
+        message.reply_to_message_id === triggerMessageId
+      ) {
+        reportSequence = message.sequence;
+      }
+    }
+
+    if (reportSequence !== null && triggerSequence !== null) {
+      return {
+        found: reportSequence > triggerSequence,
+        pages,
+      };
+    }
+    // 消息页从新到旧；先遇到触发消息后，更旧页面不可能再提供合法报告。
+    if (triggerSequence !== null) {
+      return { found: false, pages };
+    }
+
+    const next = page.next_before_sequence;
+    if (
+      next === null ||
+      (beforeSequence !== undefined && next >= beforeSequence)
+    ) {
+      return { found: false, pages };
+    }
+    beforeSequence = next;
+  }
+}
+
 export async function reconcileCompletedRun(
   sessionId: string,
   runId: string,
@@ -372,5 +504,29 @@ export async function reconcileCompletedRun(
   return finalMessage.found
     ? { kind: "settled", messages: finalMessage.pages }
     : { kind: "not_found", reason: "final_message" };
+}
+
+export async function reconcileFailedRun(
+  sessionId: string,
+  runId: string,
+  triggerMessageId: string,
+  projectedReportMessageId: string | null,
+  knownEvents: RunEvent[] = [],
+): Promise<FailedRunReconciliation> {
+  const reportMessageId =
+    projectedReportMessageId ??
+    (await findFailedReportMessageId(sessionId, runId, knownEvents));
+  if (!reportMessageId) {
+    return { kind: "not_found", reason: "failed_event" };
+  }
+  const reportMessage = await failedReportMessageExists(
+    sessionId,
+    runId,
+    reportMessageId,
+    triggerMessageId,
+  );
+  return reportMessage.found
+    ? { kind: "settled", messages: reportMessage.pages }
+    : { kind: "not_found", reason: "report_message" };
 }
 

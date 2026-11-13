@@ -89,18 +89,22 @@ export interface ModelProfileCreateInput {
 export interface CompressionPolicy {
   id: string | null;
   compression_model_profile_id: string | null;
-  trigger_ratio: number | null;
+  trigger_tokens: number | null;
   recent_ratio: number | null;
+  recent_token_cap: number | null;
   summary_ratio: number | null;
+  summary_token_cap: number | null;
   prompt_template_version: string | null;
   created_at: string | null;
 }
 
 export interface CompressionPolicyInput {
   compression_model_profile_id: string;
-  trigger_ratio: number;
+  trigger_tokens: number;
   recent_ratio: number;
+  recent_token_cap: number;
   summary_ratio: number;
+  summary_token_cap: number;
 }
 
 export interface McpSecretMetadata {
@@ -207,9 +211,11 @@ export type FieldErrors<Field extends string> = Partial<
 
 export interface CompressionPolicyFormValues {
   compression_model_profile_id: string;
-  trigger_ratio: string;
+  trigger_tokens: string;
   recent_ratio: string;
+  recent_token_cap: string;
   summary_ratio: string;
+  summary_token_cap: string;
 }
 
 export type CompressionPolicyField =
@@ -455,9 +461,11 @@ export function validateCompressionPolicyForm(
   input: CompressionPolicyInput | null;
 } {
   const errors: FieldErrors<CompressionPolicyField> = {};
-  const trigger = parseRatio(values.trigger_ratio);
+  const triggerTokens = parseInteger(values.trigger_tokens);
   const recent = parseRatio(values.recent_ratio);
+  const recentTokenCap = parseInteger(values.recent_token_cap);
   const summary = parseRatio(values.summary_ratio);
+  const summaryTokenCap = parseInteger(values.summary_token_cap);
   const selected = enabledProfiles.find(
     (profile) =>
       profile.id === values.compression_model_profile_id &&
@@ -468,14 +476,20 @@ export function validateCompressionPolicyForm(
     errors.compression_model_profile_id =
       "请选择一个当前已启用的模型版本。";
   }
-  if (trigger === null || trigger <= 0 || trigger >= 1) {
-    errors.trigger_ratio = "触发比例必须大于 0 且小于 1。";
+  if (triggerTokens === null || triggerTokens <= 0) {
+    errors.trigger_tokens = "触发 Token 必须为正整数。";
   }
   if (recent === null || recent <= 0 || recent >= 1) {
     errors.recent_ratio = "近期原文比例必须大于 0 且小于 1。";
   }
+  if (recentTokenCap === null || recentTokenCap <= 0) {
+    errors.recent_token_cap = "近期原文 Token 上限必须为正整数。";
+  }
   if (summary === null || summary <= 0 || summary >= 1) {
     errors.summary_ratio = "摘要比例必须大于 0 且小于 1。";
+  }
+  if (summaryTokenCap === null || summaryTokenCap <= 0) {
+    errors.summary_token_cap = "摘要 Token 上限必须为正整数。";
   }
   if (
     recent !== null &&
@@ -492,11 +506,65 @@ export function validateCompressionPolicyForm(
     errors,
     input: {
       compression_model_profile_id: selected.id,
-      trigger_ratio: trigger as number,
+      trigger_tokens: triggerTokens as number,
       recent_ratio: recent as number,
+      recent_token_cap: recentTokenCap as number,
       summary_ratio: summary as number,
+      summary_token_cap: summaryTokenCap as number,
     },
   };
+}
+
+interface CompressionBudgetInput {
+  trigger_tokens: number | null;
+  recent_ratio: number | null;
+  recent_token_cap: number | null;
+  summary_ratio: number | null;
+  summary_token_cap: number | null;
+}
+
+export interface CompressionPolicyBudgets {
+  recent: number | null;
+  summary: number | null;
+}
+
+function deriveTokenBudget(
+  triggerTokens: number | null,
+  ratio: number | null,
+  tokenCap: number | null,
+): number | null {
+  return triggerTokens === null || ratio === null || tokenCap === null
+    ? null
+    : Math.min(triggerTokens * ratio, tokenCap);
+}
+
+export function compressionPolicyBudgets(
+  policy: CompressionBudgetInput,
+): CompressionPolicyBudgets {
+  return {
+    recent: deriveTokenBudget(
+      policy.trigger_tokens,
+      policy.recent_ratio,
+      policy.recent_token_cap,
+    ),
+    summary: deriveTokenBudget(
+      policy.trigger_tokens,
+      policy.summary_ratio,
+      policy.summary_token_cap,
+    ),
+  };
+}
+
+export function compressionPolicyFormBudgets(
+  values: CompressionPolicyFormValues,
+): CompressionPolicyBudgets {
+  return compressionPolicyBudgets({
+    trigger_tokens: parseInteger(values.trigger_tokens),
+    recent_ratio: parseRatio(values.recent_ratio),
+    recent_token_cap: parseInteger(values.recent_token_cap),
+    summary_ratio: parseRatio(values.summary_ratio),
+    summary_token_cap: parseInteger(values.summary_token_cap),
+  });
 }
 
 function validateSecretName(
@@ -669,18 +737,26 @@ export function compressionPolicyForm(
   return {
     compression_model_profile_id:
       policy.compression_model_profile_id ?? "",
-    trigger_ratio:
-      policy.trigger_ratio === null
-        ? "0.8"
-        : String(policy.trigger_ratio),
+    trigger_tokens:
+      policy.trigger_tokens === null
+        ? "262144"
+        : String(policy.trigger_tokens),
     recent_ratio:
       policy.recent_ratio === null
         ? "0.2"
         : String(policy.recent_ratio),
+    recent_token_cap:
+      policy.recent_token_cap === null
+        ? "32768"
+        : String(policy.recent_token_cap),
     summary_ratio:
       policy.summary_ratio === null
         ? "0.1"
         : String(policy.summary_ratio),
+    summary_token_cap:
+      policy.summary_token_cap === null
+        ? "8192"
+        : String(policy.summary_token_cap),
   };
 }
 

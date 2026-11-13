@@ -3,6 +3,7 @@
 from domain.run.model.compression import ContextSummary, SaveContextSummaryCommand
 from domain.run.model.entities import (
     AnswerRunCommand,
+    ContextStopReason,
     FailRunCommand,
     FinishRunCommand,
     InputRequestStatus,
@@ -41,6 +42,7 @@ from domain.run.model.entities import (
     SubmitRunCommand,
     SubmitRunResult,
 )
+from domain.run.model.errors import RunContextSafetyCommitError
 from domain.run.model.stream import (
     MAX_RUN_SSE_EVENT_BYTES,
     MAX_RUN_SSE_SNAPSHOT_BYTES,
@@ -63,6 +65,7 @@ __all__ = [
     "MAX_RUN_SSE_EVENT_BYTES",
     "MAX_RUN_SSE_SNAPSHOT_BYTES",
     "AnswerRunCommand",
+    "ContextStopReason",
     "ContextSummary",
     "SaveContextSummaryCommand",
     "FailRunCommand",
@@ -77,6 +80,7 @@ __all__ = [
     "RunCompressionStartedPayload",
     "RunCancelRequestedPayload",
     "RunCompletedPayload",
+    "RunContextSafetyCommitError",
     "RunEvent",
     "RunEventPayload",
     "RunFailedPayload",

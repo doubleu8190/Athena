@@ -12,17 +12,20 @@ from secrets import token_hex
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import AuthSessionModel, UserModel
-from adapter.llm.model.profile import ModelProfileVersionModel
+from adapter.llm.model.profile import CompressionPolicyVersionModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.repository.message import SqlAlchemyMessageRepository
 from adapter.run.repository import SqlAlchemyRunRepository
 from domain.auth import AuthContext, User, UserRole, UserStatus
-from domain.llm.model.compression_policy import CompressionPolicyInput
+from domain.llm.model.compression_policy import (
+    MAX_COMPRESSION_TOKEN_BUDGET,
+    CompressionPolicyInput,
+)
 from domain.llm.model.profile import ModelProfileInput
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
@@ -128,24 +131,51 @@ def test_model_profile_migration_admin_and_runtime_credentials(
             assert await repository.get_default_id(actor) == created.id
             runtime = await repository.get_default_runtime()
             assert runtime is not None and runtime.api_key == "first-secret"
-            policy = await repository.set_compression_policy(
+            policy_input = CompressionPolicyInput(
+                compression_model_profile_id=created.id,
+                trigger_tokens=262_144,
+                recent_ratio=0.2,
+                recent_token_cap=32_768,
+                summary_ratio=0.1,
+                summary_token_cap=8_192,
+            )
+            await repository.set_compression_policy(actor, policy_input)
+            for field in ("trigger_tokens", "recent_token_cap", "summary_token_cap"):
+                for invalid in (MAX_COMPRESSION_TOKEN_BUDGET + 1, 2**80):
+                    if field == "trigger_tokens":
+                        invalid_policy = replace(policy_input, trigger_tokens=invalid)
+                    elif field == "recent_token_cap":
+                        invalid_policy = replace(policy_input, recent_token_cap=invalid)
+                    else:
+                        invalid_policy = replace(policy_input, summary_token_cap=invalid)
+                    with pytest.raises(ValueError, match="llm_compression_policy_invalid"):
+                        await repository.set_compression_policy(actor, invalid_policy)
+            async with factory() as session:
+                policy_count = await session.scalar(
+                    select(func.count()).select_from(CompressionPolicyVersionModel)
+                )
+            assert policy_count == 1
+            max_policy = await repository.set_compression_policy(
                 actor,
-                CompressionPolicyInput(
-                    compression_model_profile_id=created.id,
-                    trigger_ratio=0.8,
-                    recent_ratio=0.2,
-                    summary_ratio=0.1,
+                replace(
+                    policy_input,
+                    trigger_tokens=MAX_COMPRESSION_TOKEN_BUDGET,
+                    recent_token_cap=MAX_COMPRESSION_TOKEN_BUDGET,
+                    summary_token_cap=MAX_COMPRESSION_TOKEN_BUDGET,
                 ),
             )
+            assert max_policy.trigger_tokens == MAX_COMPRESSION_TOKEN_BUDGET
+            assert max_policy.recent_token_cap == MAX_COMPRESSION_TOKEN_BUDGET
+            assert max_policy.summary_token_cap == MAX_COMPRESSION_TOKEN_BUDGET
             await repository.set_enabled(actor, created.id, False)
-            assert await repository.get_current_compression_policy() == policy
+            assert await repository.get_current_compression_policy() == max_policy
             run_repository = SqlAlchemyRunRepository(
                 factory, SqlAlchemyMessageRepository(factory)
             )
             async with factory() as session:
-                assert await run_repository._current_compression_policy_id(session) == policy.id
+                assert await run_repository._current_compression_policy_id(session) == max_policy.id
             await repository.set_enabled(actor, created.id, True)
-            assert await repository.get_current_compression_policy() == policy
+            assert await repository.get_current_compression_policy() == max_policy
             unsupported = await repository.create(
                 actor, replace(value, name="Unsupported model", supports_tools=False)
             )

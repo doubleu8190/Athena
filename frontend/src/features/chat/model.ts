@@ -169,6 +169,7 @@ export interface Run {
   updated_at: string;
   cancel_requested_at: string | null;
   safe_error_code: string | null;
+  report_message_id: string | null;
   usage: RunUsage;
   pending_input: RunPendingInput | null;
   pending_approvals: RunPendingApproval[];
@@ -181,6 +182,23 @@ export interface Run {
 export interface RunListResponse {
   items: Run[];
   next_cursor: string | null;
+}
+
+export type RunContextStopReason =
+  | "no_compressible_history"
+  | "compression_not_configured"
+  | "compression_model_unavailable"
+  | "compression_budget_exhausted"
+  | "compression_input_too_large"
+  | "compression_failed"
+  | "compression_insufficient"
+  | "hard_window_exceeded";
+
+export interface RunFailedEventPayload {
+  type: "failed";
+  safe_error_code: string;
+  report_message_id?: string | null;
+  context_stop_reason?: RunContextStopReason | null;
 }
 
 export interface RunEvent {
@@ -209,6 +227,7 @@ export interface RunStreamMessage {
 export interface RunSnapshotPayload {
   status: RunStatus;
   event_sequence: number;
+  report_message_id: string | null;
   messages: RunStreamMessage[];
   events: RunEvent[];
   messages_complete: boolean;

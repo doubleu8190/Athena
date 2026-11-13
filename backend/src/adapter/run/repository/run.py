@@ -56,6 +56,7 @@ from domain.message import (
     ExecutionRole,
     FileRefPart,
     MessageMetadata,
+    MessageStatus,
     SessionNotFoundError,
     TextPart,
     ToolCallPart,
@@ -2013,15 +2014,42 @@ class SqlAlchemyRunRepository(RunRepository):
         """在租约有效时原子保存安全失败状态和事件。"""
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._lock_worker_run(
-                    session, command.run_id, command.worker_id, command.execution_epoch
+                session_id = await session.scalar(
+                    select(RunModel.session_id).where(RunModel.id == command.run_id)
                 )
+                if session_id is None:
+                    raise RunNotFoundError("run_not_found")
+                await self._lock_session_by_id(session, session_id)
+                row = await self._lock_run(session, session_id, command.run_id)
+                # 同一稳定报告已提交后，并发重放应返回既有终态而不是因租约已清理误报失租。
+                if (
+                    row.status == RunStatus.FAILED.value
+                    and row.cancel_requested_at is None
+                    and command.report_message is not None
+                    and row.report_message_id == command.report_message.id
+                    and row.safe_error_code == command.safe_error_code
+                ):
+                    return run_to_domain(row)
+                if (
+                    row.worker_id != command.worker_id
+                    or row.execution_epoch != command.execution_epoch
+                ):
+                    raise RunStateError("run_execution_lease_lost")
                 db_now = await session.scalar(select(func.clock_timestamp()))
                 if not self._lease_is_valid(
                     row, command.worker_id, command.execution_epoch, db_now
                 ):
                     return None
-                if row.status != RunStatus.RUNNING.value:
+                # 安全报告不得在 deadline 已失效后补写；普通失败仍允许记录 execution_timeout。
+                if (
+                    command.context_stop_reason is not None
+                    and not self._work_deadline_is_valid(row, db_now)
+                ):
+                    return None
+                if (
+                    row.status != RunStatus.RUNNING.value
+                    or row.cancel_requested_at is not None
+                ):
                     return None
                 locked_session = await session.get(SessionModel, row.session_id)
                 if locked_session is None or locked_session.deleted_time is not None:
@@ -2032,16 +2060,61 @@ class SqlAlchemyRunRepository(RunRepository):
                     row,
                     command.failed_at,
                 )
+                report_message_id: str | None = None
+                if command.report_message is not None:
+                    report = command.report_message
+                    if (
+                        not report.id
+                        or len(report.id) > 64
+                        or report.session_id != row.session_id
+                        or report.owner_id != row.owner_id
+                        or report.run_id != row.id
+                        or report.role is not ConversationRole.ASSISTANT
+                        or report.status is not MessageStatus.COMPLETED
+                        or report.reply_to_message_id != row.trigger_message_id
+                        or report.context_turn_id != row.trigger_message_id
+                        or len(report.parts) != 1
+                        or not isinstance(report.parts[0], TextPart)
+                        or not report.parts[0].text.strip()
+                    ):
+                        raise RunStateError("run_context_report_invalid")
+                    trigger_sequence = await session.scalar(
+                        select(ConversationMessageModel.sequence).where(
+                            ConversationMessageModel.id == row.trigger_message_id,
+                            ConversationMessageModel.session_id == row.session_id,
+                        )
+                    )
+                    if trigger_sequence is None:
+                        raise RunStateError("run_context_report_trigger_invalid")
+                    persisted_report = await self._messages.append_conversation_in_session(
+                        session,
+                        report,
+                        locked_session=locked_session,
+                        managed_run_id=row.id,
+                    )
+                    if (
+                        persisted_report.run_id != row.id
+                        or persisted_report.reply_to_message_id != row.trigger_message_id
+                        or persisted_report.sequence <= trigger_sequence
+                    ):
+                        raise RunStateError("run_context_report_reference_invalid")
+                    report_message_id = persisted_report.id
                 row.status = RunStatus.FAILED.value
                 row.safe_error_code = command.safe_error_code
                 row.finished_at = command.failed_at
                 row.updated_at = command.failed_at
+                row.report_message_id = report_message_id
+                row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
                 self._clear_lease(row)
                 await self._close_pending_input(session, row, command.failed_at)
                 await self._append_event(
                     session,
                     row,
-                    RunFailedPayload(safe_error_code=command.safe_error_code),
+                    RunFailedPayload(
+                        safe_error_code=command.safe_error_code,
+                        report_message_id=report_message_id,
+                        context_stop_reason=command.context_stop_reason,
+                    ),
                     command.failed_at,
                 )
                 result = run_to_domain(row)
@@ -2831,6 +2904,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     payload = RunSnapshotPayload(
                         status=RunStatus(row.status),
                         event_sequence=row.event_sequence,
+                        report_message_id=row.report_message_id,
                         messages=tuple(messages),
                         events=tuple(events),
                         messages_complete=messages_before_sequence is None,

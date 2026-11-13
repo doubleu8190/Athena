@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { makeMcpServer, makeModelProfile } from "../../test/adminFixtures";
 import {
+  compressionPolicyBudgets,
   defaultModelProfileForm,
   mcpServerForm,
   validateCompressionPolicyForm,
@@ -67,7 +68,7 @@ describe("管理表单纯校验", () => {
     ).toBeDefined();
   });
 
-  it("压缩策略只接受已启用模型和合法比例", () => {
+  it("压缩策略只接受已启用模型、正整数 Token 和合法比例", () => {
     const enabled = makeModelProfile({
       id: "model-enabled",
       name: "已启用模型",
@@ -80,8 +81,10 @@ describe("管理表单纯校验", () => {
     const values = {
       compression_model_profile_id: disabled.id,
       recent_ratio: "0.6",
+      recent_token_cap: "0",
       summary_ratio: "0.5",
-      trigger_ratio: "0.8",
+      summary_token_cap: "8192.5",
+      trigger_tokens: "262144",
     };
 
     const invalid = validateCompressionPolicyForm(values, [
@@ -93,19 +96,50 @@ describe("管理表单纯校验", () => {
       "已启用",
     );
     expect(invalid.errors.summary_ratio).toContain("之和");
+    expect(invalid.errors.recent_token_cap).toContain("正整数");
+    expect(invalid.errors.summary_token_cap).toContain("正整数");
 
     values.compression_model_profile_id = enabled.id;
     values.recent_ratio = "0.2";
+    values.recent_token_cap = "32768";
     values.summary_ratio = "0.1";
+    values.summary_token_cap = "8192";
+    values.trigger_tokens = "262144";
     expect(
       validateCompressionPolicyForm(values, [enabled, disabled])
         .input,
     ).toEqual({
       compression_model_profile_id: enabled.id,
       recent_ratio: 0.2,
+      recent_token_cap: 32768,
       summary_ratio: 0.1,
-      trigger_ratio: 0.8,
+      summary_token_cap: 8192,
+      trigger_tokens: 262144,
     });
+  });
+
+  it("派生预算使用当前触发 Token、实际比例和当前上限的最小值", () => {
+    expect(
+      compressionPolicyBudgets({
+        recent_ratio: 0.2,
+        recent_token_cap: 32768,
+        summary_ratio: 0.1,
+        summary_token_cap: 8192,
+        trigger_tokens: 262144,
+      }),
+    ).toEqual({
+      recent: 32768,
+      summary: 8192,
+    });
+    const customBudgets = compressionPolicyBudgets({
+      recent_ratio: 0.55,
+      recent_token_cap: 200,
+      summary_ratio: 0.25,
+      summary_token_cap: 40,
+      trigger_tokens: 100,
+    });
+    expect(customBudgets.recent).toBeCloseTo(55);
+    expect(customBudgets.summary).toBeCloseTo(25);
   });
 
   it("MCP 表单校验协议秘密名、stdin 环境变量与完整替换", () => {

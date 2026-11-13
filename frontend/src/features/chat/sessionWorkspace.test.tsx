@@ -983,15 +983,288 @@ describe("Run 命令与真实状态", () => {
       await waitFor(() => {
         expect(source.closed).toBe(true);
       });
-      expect(
-        fetchMock.mock.calls.some(([input]) =>
-          new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
-            "/events",
-          ),
+      const eventLookups = fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/events",
         ),
-      ).toBe(false);
+      );
+      expect(eventLookups).toHaveLength(terminalStatus === "failed" ? 1 : 0);
     },
   );
+
+  it("failed 事件有报告 ID 时跨消息页恢复权威报告并清除瞬时文本", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const running = makeRun({
+      id: "run-failed-report",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "触发安全收尾", type: "text" }],
+      reply_to_message_id: null,
+      role: "user",
+      run_id: null,
+      sequence: 3,
+      session_id: SESSION.id,
+    });
+    const report = makeMessage({
+      id: "msg-failed-report",
+      parts: [{ text: "权威失败报告：未完成原任务", type: "text" }],
+      reply_to_message_id: trigger.id,
+      role: "assistant",
+      run_id: running.id,
+      sequence: 5,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const delivery = makeMessage({
+      id: "msg-failed-delivery",
+      parts: [{ text: "普通工具交付消息", type: "text" }],
+      reply_to_message_id: null,
+      role: "assistant",
+      run_id: running.id,
+      sequence: 9,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const otherRunReport = makeMessage({
+      id: "msg-other-run-report",
+      parts: [{ text: "其他 Run 的报告", type: "text" }],
+      reply_to_message_id: trigger.id,
+      role: "assistant",
+      run_id: "run-other",
+      sequence: 7,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    installWorkspaceFetch({
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: (beforeSequence) => {
+        if (beforeSequence === undefined) {
+          return {
+            items: [delivery],
+            next_before_sequence: 9,
+          };
+        }
+        if (beforeSequence === 9) {
+          return {
+            items: [otherRunReport],
+            next_before_sequence: 7,
+          };
+        }
+        if (beforeSequence === 7) {
+          return {
+            items: [report],
+            next_before_sequence: 5,
+          };
+        }
+        return {
+          items: [trigger],
+          next_before_sequence: null,
+        };
+      },
+    });
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.emit("text_delta", {
+        payload: { text: "不能当作报告的瞬时回答" },
+      });
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:03Z",
+            id: "event-failed-report",
+            payload: {
+              context_stop_reason: "compression_failed",
+              report_message_id: report.id,
+              safe_error_code: "run_context_safety_stop",
+            },
+            run_id: running.id,
+            sequence: 4,
+            type: "failed",
+          },
+        },
+      });
+    });
+
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 5",
+      }),
+    ).toHaveTextContent("权威失败报告：未完成原任务");
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("普通工具交付消息")).toBeInTheDocument();
+    expect(screen.getByText("其他 Run 的报告")).toBeInTheDocument();
+  });
+
+  it("刷新后的 failed Run 从投影报告 ID 精确恢复，不读取 latest assistant", async () => {
+    const trigger = makeMessage({
+      id: "msg-refresh-trigger",
+      parts: [{ text: "刷新前的触发消息", type: "text" }],
+      reply_to_message_id: null,
+      role: "user",
+      run_id: null,
+      sequence: 3,
+      session_id: SESSION.id,
+    });
+    const report = makeMessage({
+      id: "msg-refresh-report",
+      parts: [{ text: "刷新后仍可见的失败报告", type: "text" }],
+      reply_to_message_id: trigger.id,
+      role: "assistant",
+      run_id: "run-refresh-report",
+      sequence: 5,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const latestAssistant = makeMessage({
+      id: "msg-latest-assistant",
+      parts: [{ text: "另一个 Run 的 latest assistant", type: "text" }],
+      reply_to_message_id: null,
+      role: "assistant",
+      run_id: "run-other",
+      sequence: 9,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const failed = makeRun({
+      id: "run-refresh-report",
+      report_message_id: report.id,
+      safe_error_code: "run_context_safety_stop",
+      session_id: SESSION.id,
+      status: "failed",
+      trigger_message_id: trigger.id,
+    });
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [failed],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: (beforeSequence) => {
+        if (beforeSequence === undefined) {
+          return {
+            items: [latestAssistant],
+            next_before_sequence: 9,
+          };
+        }
+        if (beforeSequence === 9) {
+          return {
+            items: [report],
+            next_before_sequence: 5,
+          };
+        }
+        return {
+          items: [trigger],
+          next_before_sequence: null,
+        };
+      },
+    });
+
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("失败")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 5",
+      }),
+    ).toHaveTextContent("刷新后仍可见的失败报告");
+    expect(
+      screen.queryByText(
+        "运行失败，但未找到失败事件所指的权威报告。清空状态前请重试对账。",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) => {
+        const url = new URL(getRequestUrl(input), "http://localhost");
+        return (
+          url.pathname === `/api/v1/sessions/${SESSION.id}/messages` &&
+          url.searchParams.get("before_sequence") === "9"
+        );
+      }),
+    ).toBe(true);
+  });
+
+  it("failed 报告身份不匹配时保留瞬时文本并显示明确安全状态", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const running = makeRun({
+      id: "run-invalid-report",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "触发报告校验", type: "text" }],
+      reply_to_message_id: null,
+      role: "user",
+      run_id: null,
+      sequence: 3,
+      session_id: SESSION.id,
+    });
+    const wrongRunReport = makeMessage({
+      id: "msg-invalid-report",
+      parts: [{ text: "不能冒充目标 Run 报告", type: "text" }],
+      reply_to_message_id: trigger.id,
+      role: "assistant",
+      run_id: "run-other",
+      sequence: 5,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    installWorkspaceFetch({
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [wrongRunReport, trigger],
+        next_before_sequence: null,
+      }),
+    });
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.emit("text_delta", {
+        payload: { text: "身份不符时必须保留的瞬时文本" },
+      });
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:03Z",
+            id: "event-invalid-report",
+            payload: {
+              report_message_id: wrongRunReport.id,
+              safe_error_code: "run_context_safety_stop",
+            },
+            run_id: running.id,
+            sequence: 4,
+            type: "failed",
+          },
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "运行失败，但未找到失败事件所指的权威报告。清空状态前请重试对账。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("身份不符时必须保留的瞬时文本");
+  });
 
   it("SSE run_event 先于查询刷新投影取消中，终态快照关闭连接", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);

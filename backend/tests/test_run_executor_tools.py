@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from mcp import types
@@ -19,9 +20,13 @@ from system_prompt_support import (
     FakeSystemPromptRepository,
 )
 
+from app.run import executor as executor_module
+from app.run.budget import RunLlmBudget
+from app.run.compression import ContextPreparation
 from app.run.config import RunWorkerConfig
 from app.run.context import RunInputFileContext
 from app.run.executor import RunExecutor as _RunExecutor
+from app.run.executor import _ExecutionState
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import RunToolRuntimeService
 from domain.auth.model import User, UserRole, UserStatus
@@ -36,6 +41,7 @@ from domain.llm.model import (
     LlmUsage,
     ResponseCompleted,
 )
+from domain.llm.model.compression_policy import CompressionPolicyVersion
 from domain.llm.model.profile import ModelProfileVersion, RuntimeModelProfile
 from domain.llm.ports import LlmStreamProvider
 from domain.llm.profile_ports import ModelProfileRepository
@@ -47,16 +53,35 @@ from domain.mcp import (
     McpRuntimeToolTarget,
     StdioConfig,
 )
-from domain.message import ConversationRole, FileRefPart, ToolCallPart, ToolResultPart
+from domain.message import (
+    ArtifactFileRef,
+    ConversationMessage,
+    ConversationRole,
+    ExecutionMessage,
+    ExecutionRole,
+    FileRefPart,
+    MessageMetadata,
+    MessageStatus,
+    TextPart,
+    ToolCallPart,
+    ToolResultPart,
+    ToolResultStatus,
+)
 from domain.run.model import (
+    ContextStopReason,
+    FailRunCommand,
+    RecordRunUsageCommand,
     Run,
+    RunContextSafetyCommitError,
     RunInputFiles,
     RunLease,
     RunStatus,
     RunUsage,
 )
+from domain.run.model.errors import RunStateError
 from domain.run.ports import RunRepository
 from domain.session.model import Session
+from domain.skill import ActiveSkillGuide, RunSkillEntry, RunSkillPromptContext
 from domain.tool import (
     AuthorizedRunContext,
     BeginToolCallBatchCommand,
@@ -74,10 +99,12 @@ from domain.tool import (
     ToolApprovalDecision,
     ToolCallPreparation,
     ToolCallStatus,
+    ToolExecutionContext,
     ToolExecutionResult,
     ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
+    ToolRetryContext,
 )
 from infrastructure.mcp.execution import McpToolCallClient
 
@@ -264,6 +291,7 @@ class _Repository:
         self.finish_order: list[int] = []
         self.normal_finishes = 0
         self.failures: list[str] = []
+        self.fail_commands: list[FailRunCommand] = []
         self.converge_calls: list[Any] = []
 
     async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
@@ -495,16 +523,29 @@ class _Repository:
 
     async def fail(self, command: Any) -> Run:
         self.failures.append(command.safe_error_code)
+        self.fail_commands.append(command)
         self.run = replace(self.run, status=RunStatus.FAILED)
         return self.run
 
 
 class _Profiles:
-    def __init__(self, *, supports_parallel_tool_calls: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        supports_parallel_tool_calls: bool = False,
+        compression_policy: CompressionPolicyVersion | None = None,
+    ) -> None:
         self._supports_parallel_tool_calls = supports_parallel_tool_calls
+        self._compression_policy = compression_policy
 
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
         return _runtime_profile(supports_parallel_tool_calls=self._supports_parallel_tool_calls)
+
+    async def get_compression_policy(
+        self, policy_id: str
+    ) -> CompressionPolicyVersion | None:
+        del policy_id
+        return self._compression_policy
 
 
 class _DeliveryAuth:
@@ -1440,8 +1481,11 @@ def test_oversized_bound_main_prompt_is_rejected_without_truncation() -> None:
         await executor.execute(lease)
 
         assert provider.requests == []
-        assert repository.failures == ["run_context_window_exceeded"]
+        assert repository.failures == ["run_context_safety_stop"]
         assert repository.run.status is RunStatus.FAILED
+        command = repository.fail_commands[-1]
+        assert command.context_stop_reason is ContextStopReason.HARD_WINDOW_EXCEEDED
+        assert command.report_message is not None
 
     asyncio.run(scenario())
 
@@ -1931,5 +1975,1164 @@ def test_invalid_arguments_for_approval_tool_do_not_create_waiting_state() -> No
         assert repository.finish_tool_calls == 1
         assert repository.run.status is RunStatus.COMPLETED
         assert all(record.status is ToolCallStatus.FAILED for record in repository.records.values())
+
+    asyncio.run(scenario())
+
+
+def _context_state(repository: _Repository) -> _ExecutionState:
+    """构造只执行上下文预检的 RunExecutor 状态。"""
+    lease = RunLease(
+        repository.run,
+        repository.run.lease_expires_at or NOW,
+        repository.run.execution_deadline_at or NOW,
+    )
+    context = ToolExecutionContext(
+        owner_id=repository.run.owner_id,
+        chat_session_id=repository.run.session_id,
+        project_id=None,
+        run_id=repository.run.id,
+        execution_epoch=repository.run.execution_epoch,
+        auth_session_id=repository.run.auth_session_id or "",
+        deadline_at=repository.run.execution_deadline_at or NOW,
+    )
+    return _ExecutionState(
+        lease=lease,
+        run=repository.run,
+        loop_deadline=asyncio.get_running_loop().time() + 60,
+        authorized=None,
+        snapshot=repository.run.tool_snapshot or _snapshot(),
+        main_prompt="main prompt",
+        compression_prompt="compression prompt",
+        budget=RunLlmBudget(
+            cast(RunRepository, repository),
+            context,
+            used=repository.run.llm_request_count,
+            maximum=40,
+            worker_id=repository.run.worker_id or "",
+        ),
+        retry_context=(),
+        input_files=(),
+        event_cursor=repository.run.event_sequence,
+    )
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens", "expected_reason"),
+    [
+        (7373, 256, ContextStopReason.COMPRESSION_NOT_CONFIGURED),
+        (7000, 2000, ContextStopReason.HARD_WINDOW_EXCEEDED),
+    ],
+)
+def test_context_safety_gate_covers_final_only_without_compression_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    input_tokens: int,
+    output_tokens: int,
+    expected_reason: ContextStopReason,
+) -> None:
+    """无策略和 final-only 都先按原业务 tools 做 90% 与硬窗口裁决。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        captured_tools: list[tuple[str, ...]] = []
+
+        async def fake_measure(
+            run: Run,
+            messages: tuple[object, ...],
+            profile: ModelProfileVersion,
+            **kwargs: Any,
+        ) -> tuple[tuple[object, ...], tuple[object, ...], int, int]:
+            del run, messages, profile
+            tools = kwargs["tools"]
+            captured_tools.append(tuple(item.name for item in tools))
+            return (), tuple(tools), input_tokens, output_tokens
+
+        monkeypatch.setattr(executor_module, "measure_llm_request", fake_measure)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, SimpleNamespace()),
+            tool_runtime=cast(RunToolRuntime, SimpleNamespace()),
+        )
+        stop = AsyncMock()
+        monkeypatch.setattr(executor, "_stop_for_context_safety", stop)
+        state = _context_state(repository)
+
+        prepared = await executor._prepare_request(
+            state,
+            _runtime_profile(),
+            final_only=True,
+        )
+
+        assert prepared is None
+        assert captured_tools == [("test_tool",)]
+        stop.assert_awaited_once()
+        stop_call = stop.await_args
+        assert stop_call is not None
+        assert stop_call.args[3] is expected_reason
+
+    asyncio.run(scenario())
+
+
+def test_hard_window_stop_preserves_compression_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """压缩输入过大与主请求硬窗同时发生时，报告必须保留两项停止事实。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        policy = CompressionPolicyVersion(
+            id="cmpol-hard-window",
+            compression_model_profile_id="profile-tools",
+            trigger_tokens=256_000,
+            recent_ratio=0.2,
+            recent_token_cap=32_768,
+            summary_ratio=0.1,
+            summary_token_cap=8_192,
+            prompt_template_version="context-summary-v1",
+            created_at=NOW,
+        )
+        run = replace(lease.run, compression_policy_version_id=policy.id)
+        lease = RunLease(run, lease.lease_expires_at, lease.execution_deadline_at)
+        repository = _Repository(run)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(compression_policy=policy)),
+            cast(LlmStreamProvider, SimpleNamespace()),
+            tool_runtime=cast(RunToolRuntime, SimpleNamespace()),
+        )
+        monkeypatch.setattr(
+            executor,
+            "_compressor",
+            SimpleNamespace(
+                prepare=AsyncMock(
+                    return_value=ContextPreparation(
+                        messages=(),
+                        tools=(),
+                        input_tokens=7000,
+                        output_tokens=2000,
+                        had_new_history=True,
+                        stop_reason_hint=(ContextStopReason.COMPRESSION_INPUT_TOO_LARGE),
+                    )
+                )
+            ),
+        )
+        stop = AsyncMock()
+        monkeypatch.setattr(executor, "_stop_for_context_safety", stop)
+        state = _context_state(repository)
+
+        prepared = await executor._prepare_request(
+            state,
+            _runtime_profile(),
+            final_only=True,
+        )
+
+        assert prepared is None
+        stop_call = stop.await_args
+        assert stop_call is not None
+        assert stop_call.args[3] is ContextStopReason.HARD_WINDOW_EXCEEDED
+        assert (
+            stop_call.kwargs["compression_stop_reason"]
+            is ContextStopReason.COMPRESSION_INPUT_TOO_LARGE
+        )
+
+        persisted_state = await executor._context_report_state(
+            state,
+            (),
+            compression_stop_reason=ContextStopReason.COMPRESSION_INPUT_TOO_LARGE,
+        )
+        report = executor._system_context_report(
+            ContextStopReason.HARD_WINDOW_EXCEEDED,
+            persisted_state,
+        )
+        assert "完整输入与输出预留超过模型硬窗" in report
+        assert "压缩输入无法一次装入模型窗口" in report
+        assert "code: compression_input_too_large" in report
+        report_without_compression_fact = "\n".join(
+            line
+            for line in report.splitlines()
+            if not line.startswith("- 压缩尝试结论：")
+        )
+        assert not executor._is_context_report_text_valid(
+            report_without_compression_fact,
+            report,
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("context_window_tokens", "input_tokens", "output_tokens"),
+    [
+        (8192, 7372, 256),
+        (10_000, 8000, 2000),
+    ],
+)
+def test_context_safety_gate_allows_below_ninety_and_exact_hard_window(
+    monkeypatch: pytest.MonkeyPatch,
+    context_window_tokens: int,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """完整输入低于 90% 且 I+O 恰好等于 W 时允许业务调用。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+
+        async def fake_measure(
+            run: Run,
+            messages: tuple[object, ...],
+            profile: ModelProfileVersion,
+            **kwargs: Any,
+        ) -> tuple[tuple[object, ...], tuple[object, ...], int, int]:
+            del run, messages, profile
+            return (), tuple(kwargs["tools"]), input_tokens, output_tokens
+
+        monkeypatch.setattr(executor_module, "measure_llm_request", fake_measure)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, SimpleNamespace()),
+        )
+        stop = AsyncMock()
+        monkeypatch.setattr(executor, "_stop_for_context_safety", stop)
+        runtime = replace(
+            _runtime_profile(),
+            version=replace(
+                _runtime_profile().version,
+                context_window_tokens=context_window_tokens,
+            ),
+        )
+
+        prepared = await executor._prepare_request(
+            _context_state(repository),
+            runtime,
+            final_only=True,
+        )
+
+        assert prepared is not None
+        assert prepared.input_tokens == input_tokens
+        assert prepared.output_tokens == output_tokens
+        assert prepared.tools == ()
+        stop.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_resumable_batch_is_blocked_before_side_effect_at_safety_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """待恢复工具批次在主循环中先经上下文闸门，命中后不再执行。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        repository.get_resumable_tool_batch = AsyncMock(return_value=object())  # type: ignore[method-assign]
+
+        async def fake_measure(
+            run: Run,
+            messages: tuple[object, ...],
+            profile: ModelProfileVersion,
+            **kwargs: Any,
+        ) -> tuple[tuple[object, ...], tuple[object, ...], int, int]:
+            del run, messages, profile
+            return (), tuple(kwargs["tools"]), 7373, 256
+
+        monkeypatch.setattr(executor_module, "measure_llm_request", fake_measure)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, SimpleNamespace()),
+            tool_runtime=cast(RunToolRuntime, SimpleNamespace()),
+        )
+        stop = AsyncMock()
+        execute_batch = AsyncMock(return_value=True)
+        monkeypatch.setattr(executor, "_stop_for_context_safety", stop)
+        monkeypatch.setattr(executor, "_execute_persisted_batch", execute_batch)
+
+        await executor._run_loop(_context_state(repository))
+
+        stop.assert_awaited_once()
+        execute_batch.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_context_safety_report_rechecks_authorization_after_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """报告模型返回后若授权被撤销，只走普通鉴权失败且不写报告。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(
+            complete=AsyncMock(
+                return_value=LlmResponse(
+                    output=(LlmText("untrusted model report"),),
+                    status="completed",
+                    incomplete_reason=None,
+                    model="tools-model",
+                    response_id="report-response",
+                    request_id=None,
+                    usage=LlmUsage(input_tokens=10, output_tokens=3, total_tokens=13),
+                )
+            )
+        )
+        authorization = SimpleNamespace(
+            authorize=AsyncMock(
+                side_effect=[
+                    AuthorizedRunContext(
+                        lease.run.owner_id,
+                        lease.run.session_id,
+                        None,
+                        lease.run.auth_session_id or "",
+                    ),
+                    None,
+                ]
+            )
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(RunToolRuntime, authorization),
+        )
+        state = _context_state(repository)
+
+        async def forced_context_stop(_: _ExecutionState) -> None:
+            await executor._stop_for_context_safety(
+                state,
+                _runtime_profile(),
+                (),
+                ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+
+        monkeypatch.setattr(executor, "_prepare", AsyncMock(return_value=state))
+        monkeypatch.setattr(executor, "_run_loop", forced_context_stop)
+
+        await executor.execute(lease)
+
+        assert authorization.authorize.await_count == 2
+        assert provider.complete.await_count == 1
+        assert repository.failures == ["run_auth_session_invalid"]
+        command = repository.fail_commands[-1]
+        assert command.report_message is None
+        assert command.context_stop_reason is None
+        assert len(command.usage.attempts) == 1
+        assert command.usage.attempts[0].total_tokens == 13
+
+    asyncio.run(scenario())
+
+
+def test_report_window_allows_ninety_percent_input_when_output_still_fits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """报告请求允许输入达到 90%，但必须满足 I_report + O_report <= W。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        system_report = "\n".join(
+            (
+                "上下文安全停止。任务未标记为完成。",
+                "",
+                "已完成：",
+                "- 当前 Run 已持久化 0 条会话消息、0 条执行消息、0 条工具调用记录。",
+                "",
+                "产出：",
+                "- 没有已持久化的交付文件或当前 Run 文件引用。",
+                "",
+                "未完成：",
+                "- 业务循环已安全停止，尚未形成可安全提交的最终回答。",
+                "",
+                "停止原因：",
+                "- 没有新的可压缩旧历史；完整业务输入达到 90% 安全线或无法满足 I+O<=W。",
+            )
+        )
+        provider = SimpleNamespace(
+            complete=AsyncMock(
+                return_value=LlmResponse(
+                    output=(LlmText(system_report),),
+                    status="completed",
+                    incomplete_reason=None,
+                    model="tools-model",
+                    response_id="report-response",
+                    request_id=None,
+                    usage=LlmUsage(input_tokens=900, output_tokens=10, total_tokens=910),
+                )
+            )
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "count_plain_text_tokens_async",
+            AsyncMock(return_value=644),
+        )
+        state = _context_state(repository)
+        report_runtime = replace(
+            _runtime_profile(),
+            version=replace(
+                _runtime_profile().version,
+                context_window_tokens=1000,
+                max_output_tokens=100,
+            ),
+        )
+
+        text, used_model, usage = await executor._try_model_context_report(
+            state,
+            report_runtime,
+            {"run_id": lease.run.id},
+            system_report,
+        )
+
+        assert text == system_report
+        assert used_model
+        assert len(usage.attempts) == 1
+        assert usage.attempts[0].total_tokens == 910
+        request = cast(LlmRequest, provider.complete.await_args.args[1])
+        assert request.tools == ()
+        assert request.tool_choice == "none"
+        assert state.budget.used == 1
+
+    asyncio.run(scenario())
+
+
+def test_context_report_overflow_skips_provider_and_uses_system_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """完整报告状态无法满足硬窗时不得调用或预占报告模型。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(complete=AsyncMock())
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "count_plain_text_tokens_async",
+            AsyncMock(return_value=901),
+        )
+        state = _context_state(repository)
+        report_runtime = replace(
+            _runtime_profile(),
+            version=replace(
+                _runtime_profile().version,
+                context_window_tokens=1000,
+                max_output_tokens=100,
+            ),
+        )
+        system_report = "canonical system report"
+
+        text, used_model, usage = await executor._try_model_context_report(
+            state,
+            report_runtime,
+            {"run_id": lease.run.id},
+            system_report,
+        )
+
+        assert text == system_report
+        assert not used_model
+        assert usage.attempts == ()
+        assert state.budget.used == 0
+        provider.complete.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_context_report_falls_back_to_system_text_when_provider_fails() -> None:
+    """报告模型失败仍以一次原子失败命令持久化确定性系统报告。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(
+            complete=AsyncMock(side_effect=LlmProviderError("llm_timeout"))
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            id_factory=lambda prefix: f"{prefix}-fixed",
+        )
+        state = _context_state(repository)
+
+        await executor._stop_for_context_safety(
+            state,
+            _runtime_profile(),
+            (),
+            ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+        )
+
+        assert repository.failures == ["run_context_safety_stop"]
+        command = repository.fail_commands[-1]
+        assert command.context_stop_reason is ContextStopReason.NO_COMPRESSIBLE_HISTORY
+        assert command.report_message is not None
+        report_text = command.report_message.parts[0]
+        assert isinstance(report_text, TextPart)
+        assert "任务未标记为完成" in report_text.text
+        assert command.report_message.metadata.provider == "system_context_safety"
+        assert provider.complete.await_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_context_safety_gate_covers_exhausted_compression_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """只剩最终槽位时仍先按原业务工具测量，并按预算耗尽原因安全停机。"""
+
+    async def scenario() -> None:
+        lease = _lease(used=39)
+        run = replace(lease.run, compression_policy_version_id="cmpol-no-slot")
+        lease = RunLease(
+            run,
+            lease.lease_expires_at,
+            lease.execution_deadline_at,
+        )
+        repository = _Repository(run)
+        policy = CompressionPolicyVersion(
+            id="cmpol-no-slot",
+            compression_model_profile_id="profile-tools",
+            trigger_tokens=262_144,
+            recent_ratio=0.2,
+            recent_token_cap=32_768,
+            summary_ratio=0.1,
+            summary_token_cap=8_192,
+            prompt_template_version="context-summary-v1",
+            created_at=NOW,
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(compression_policy=policy)),
+            cast(LlmStreamProvider, SimpleNamespace()),
+        )
+        prepare = AsyncMock(
+            return_value=ContextPreparation(
+                messages=(),
+                tools=(),
+                input_tokens=7373,
+                output_tokens=256,
+                had_new_history=True,
+                stop_reason_hint=ContextStopReason.COMPRESSION_BUDGET_EXHAUSTED,
+            )
+        )
+        monkeypatch.setattr(
+            executor,
+            "_compressor",
+            SimpleNamespace(prepare=prepare),
+        )
+        stop = AsyncMock()
+        monkeypatch.setattr(executor, "_stop_for_context_safety", stop)
+
+        prepared = await executor._prepare_request(
+            _context_state(repository),
+            _runtime_profile(),
+            final_only=True,
+        )
+
+        assert prepared is None
+        prepare.assert_awaited_once()
+        assert prepare.await_args is not None
+        assert prepare.await_args.kwargs["allow_compression"] is False
+        stop.assert_awaited_once()
+        stop_call = stop.await_args
+        assert stop_call is not None
+        assert stop_call.args[3] is ContextStopReason.COMPRESSION_BUDGET_EXHAUSTED
+
+    asyncio.run(scenario())
+
+
+def test_oversized_existing_summary_without_new_history_stops_at_safety_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """旧摘要即使超过新 cap 也照常计入完整输入，达到 90% 后安全停机。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        run = replace(lease.run, compression_policy_version_id="cmpol-old-summary")
+        lease = RunLease(
+            run,
+            lease.lease_expires_at,
+            lease.execution_deadline_at,
+        )
+        repository = _Repository(run)
+        policy = CompressionPolicyVersion(
+            id="cmpol-old-summary",
+            compression_model_profile_id="profile-tools",
+            trigger_tokens=262_144,
+            recent_ratio=0.2,
+            recent_token_cap=32_768,
+            summary_ratio=0.1,
+            summary_token_cap=8_192,
+            prompt_template_version="context-summary-v1",
+            created_at=NOW,
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles(compression_policy=policy)),
+            cast(LlmStreamProvider, SimpleNamespace()),
+        )
+        prepare = AsyncMock(
+            return_value=ContextPreparation(
+                messages=(),
+                tools=(),
+                input_tokens=7373,
+                output_tokens=256,
+                had_new_history=False,
+                stop_reason_hint=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+        )
+        monkeypatch.setattr(
+            executor,
+            "_compressor",
+            SimpleNamespace(prepare=prepare),
+        )
+        stop = AsyncMock()
+        monkeypatch.setattr(executor, "_stop_for_context_safety", stop)
+
+        prepared = await executor._prepare_request(
+            _context_state(repository),
+            _runtime_profile(),
+            final_only=False,
+        )
+
+        assert prepared is None
+        stop.assert_awaited_once()
+        stop_call = stop.await_args
+        assert stop_call is not None
+        assert stop_call.args[3] is ContextStopReason.NO_COMPRESSIBLE_HISTORY
+
+    asyncio.run(scenario())
+
+
+def test_context_report_with_missing_sections_uses_system_fallback() -> None:
+    """报告模型缺少四项结构时丢弃其文本，但保留该次已派发调用的 usage。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(
+            complete=AsyncMock(
+                return_value=LlmResponse(
+                    output=(LlmText("已完成：某一步\n产出：无"),),
+                    status="completed",
+                    incomplete_reason=None,
+                    model="tools-model",
+                    response_id="invalid-report",
+                    request_id=None,
+                    usage=LlmUsage(input_tokens=20, output_tokens=5, total_tokens=25),
+                )
+            )
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            id_factory=lambda prefix: f"{prefix}-invalid-report",
+        )
+
+        await executor._stop_for_context_safety(
+            _context_state(repository),
+            _runtime_profile(),
+            (),
+            ContextStopReason.COMPRESSION_INSUFFICIENT,
+        )
+
+        command = repository.fail_commands[-1]
+        assert command.report_message is not None
+        report_text = command.report_message.parts[0]
+        assert isinstance(report_text, TextPart)
+        assert all(
+            label in report_text.text
+            for label in ("已完成", "产出", "未完成", "停止原因")
+        )
+        assert command.report_message.metadata.provider == "system_context_safety"
+        assert len(command.usage.attempts) == 1
+        assert command.usage.attempts[0].total_tokens == 25
+
+    asyncio.run(scenario())
+
+
+def test_model_context_report_only_accepts_canonical_fact_lines() -> None:
+    """模型可重排节内事实行，但不得增删、改写或错放任何事实。"""
+    system_report = "\n".join(
+        (
+            "上下文安全停止。任务未标记为完成。",
+            "",
+            "已完成：",
+            "- 工具 lookup 已完成（调用状态 completed）",
+            "- Skill 财报分析 已加载完整指南"
+            "（skill_id: skill_finance，version_id: skillver_1，version_label: v1）",
+            "",
+            "产出：",
+            "- 交付文件 report.pdf（file_id: file_report，mime_type: application/pdf，"
+            "size_bytes: 12）",
+            "",
+            "未完成：",
+            "- 业务循环已安全停止，尚未形成可安全提交的最终回答。",
+            "",
+            "停止原因：",
+            "- 没有新的可压缩旧历史；完整业务输入达到 90% 安全线或无法满足 I+O<=W。",
+        )
+    )
+    reordered = system_report.replace(
+        "- 工具 lookup 已完成（调用状态 completed）\n"
+        "- Skill 财报分析 已加载完整指南"
+        "（skill_id: skill_finance，version_id: skillver_1，version_label: v1）",
+        "- Skill 财报分析 已加载完整指南"
+        "（skill_id: skill_finance，version_id: skillver_1，version_label: v1）\n"
+        "- 工具 lookup 已完成（调用状态 completed）",
+    )
+    assert _RunExecutor._is_context_report_text_valid(reordered, system_report)
+    assert not _RunExecutor._is_context_report_text_valid(
+        system_report.replace("file_id: file_report", "file_id: file_invented"),
+        system_report,
+    )
+    assert not _RunExecutor._is_context_report_text_valid(
+        system_report.replace(
+            "工具 lookup 已完成（调用状态 completed）",
+            "全部任务已经完成",
+        ),
+        system_report,
+    )
+    assert not _RunExecutor._is_context_report_text_valid(
+        system_report.replace(
+            "- 业务循环已安全停止，尚未形成可安全提交的最终回答。\n",
+            "",
+        ),
+        system_report,
+    )
+
+
+def test_context_report_state_preserves_files_skills_retry_and_tool_results() -> None:
+    """报告模型状态不得遗漏当前 Run 文件、Skill、重试和完整工具结果。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, SimpleNamespace()),
+        )
+        skill_context = RunSkillPromptContext(
+            catalog=(
+                RunSkillEntry(
+                    skill_id="skill_finance",
+                    slug="finance",
+                    name="财报分析",
+                    description="分析财报",
+                    version_id="skillver_1",
+                    version_label="v1",
+                    requires_approval=True,
+                ),
+            ),
+            active=(
+                ActiveSkillGuide(
+                    skill_id="skill_finance",
+                    name="财报分析",
+                    version_id="skillver_1",
+                    version_label="v1",
+                    guide="完整技能指南正文",
+                ),
+            ),
+        )
+        conversation = ConversationMessage(
+            id=lease.run.trigger_message_id,
+            session_id=lease.run.session_id,
+            role=ConversationRole.USER,
+            status=MessageStatus.COMPLETED,
+            sequence=1,
+            parts=(
+                TextPart("完整用户请求"),
+                FileRefPart("file_message", "request.pdf", "application/pdf", 21),
+            ),
+            reply_to_message_id=None,
+            run_id=lease.run.id,
+            client_message_id=None,
+            created_at=NOW,
+            completed_at=NOW,
+            metadata=MessageMetadata(),
+        )
+        execution = ExecutionMessage(
+            id="execution_result",
+            session_id=lease.run.session_id,
+            run_id=lease.run.id,
+            thread_id=lease.run.trigger_message_id,
+            sequence=2,
+            role=ExecutionRole.TOOL,
+            parts=(
+                ToolResultPart(
+                    tool_call_id="call_result",
+                    status=ToolResultStatus.SUCCESS,
+                    output="完整工具输出，包含关键事实",
+                    artifacts=(
+                        ArtifactFileRef(
+                            file_id="file_artifact",
+                            filename="result.csv",
+                            mime_type="text/csv",
+                            size_bytes=33,
+                            label="结果",
+                        ),
+                    ),
+                ),
+            ),
+            tool_call_id="call_result",
+            source_message_id="execution_call",
+            created_at=NOW,
+            metadata=MessageMetadata(),
+        )
+        state = replace(
+            _context_state(repository),
+            retry_context=(
+                ToolRetryContext(
+                    run_id="run_source",
+                    tool_name="lookup",
+                    safe_error_code="tool_failed",
+                ),
+            ),
+            input_files=(
+                RunInputFileContext(
+                    file_id="file_input",
+                    filename="input.xlsx",
+                    label="输入",
+                    mime_type=(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    ),
+                    size_bytes=44,
+                    source="session",
+                ),
+            ),
+        )
+
+        report_state = await executor._context_report_state(
+            state,
+            (conversation, execution),
+            skill_context=skill_context,
+        )
+
+        assert report_state["message_file_references"] == [
+            {
+                "type": "file_ref",
+                "file_id": "file_message",
+                "filename": "request.pdf",
+                "mime_type": "application/pdf",
+                "size_bytes": 21,
+            }
+        ]
+        assert cast(list[dict[str, object]], report_state["input_files"])[0]["file_id"] == (
+            "file_input"
+        )
+        loaded_skills = cast(dict[str, object], report_state["loaded_skills"])
+        active = cast(list[dict[str, object]], loaded_skills["active"])
+        assert active[0]["guide"] == "完整技能指南正文"
+        assert cast(list[dict[str, object]], report_state["retry_context"])[0] == {
+            "run_id": "run_source",
+            "tool_name": "lookup",
+            "safe_error_code": "tool_failed",
+        }
+        execution_state = cast(list[dict[str, object]], report_state["execution"])
+        execution_parts = cast(list[dict[str, object]], execution_state[0]["parts"])
+        assert execution_parts[0]["output"] == "完整工具输出，包含关键事实"
+        assert cast(list[dict[str, object]], report_state["artifacts"])[0]["file_id"] == (
+            "file_artifact"
+        )
+
+        system_report = _RunExecutor._system_context_report(
+            ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            report_state,
+        )
+        assert "file_message" in system_report
+        assert "file_input" in system_report
+        assert "skill_finance" in system_report
+        assert "run_source" in system_report
+        assert "file_artifact" in system_report
+        assert "完整技能指南正文" not in system_report
+        assert "完整工具输出，包含关键事实" not in system_report
+
+    asyncio.run(scenario())
+
+
+def test_execute_replays_same_context_report_command_after_uncertain_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """报告首事务抛错后，execute 用同一完整命令重放且不重复调用模型。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(
+            complete=AsyncMock(
+                return_value=LlmResponse(
+                    output=(LlmText("not a canonical report"),),
+                    status="completed",
+                    incomplete_reason=None,
+                    model="tools-model",
+                    response_id="report-response",
+                    request_id=None,
+                    usage=LlmUsage(input_tokens=10, output_tokens=3, total_tokens=13),
+                )
+            )
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            id_factory=lambda prefix: f"{prefix}-replayed-report",
+        )
+        original_fail = repository.fail
+        attempted_commands: list[FailRunCommand] = []
+
+        async def flaky_fail(command: FailRunCommand) -> Run:
+            attempted_commands.append(command)
+            if len(attempted_commands) == 1:
+                raise RuntimeError("transaction_result_uncertain")
+            return await original_fail(command)
+
+        usage_writes = AsyncMock()
+        monkeypatch.setattr(repository, "fail", flaky_fail)
+        monkeypatch.setattr(repository, "record_usage", usage_writes)
+        state = _context_state(repository)
+
+        async def forced_context_stop(_: _ExecutionState) -> None:
+            await executor._stop_for_context_safety(
+                state,
+                _runtime_profile(),
+                (),
+                ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+
+        monkeypatch.setattr(executor, "_prepare", AsyncMock(return_value=state))
+        monkeypatch.setattr(executor, "_run_loop", forced_context_stop)
+
+        await executor.execute(lease)
+
+        assert provider.complete.await_count == 1
+        assert len(attempted_commands) == 2
+        assert attempted_commands[1] is attempted_commands[0]
+        assert repository.failures == ["run_context_safety_stop"]
+        assert len(repository.fail_commands) == 1
+        command = repository.fail_commands[0]
+        assert command.report_message is not None
+        assert command.report_message.id == "msg-replayed-report"
+        assert command.context_stop_reason is ContextStopReason.NO_COMPRESSIBLE_HISTORY
+        assert command.usage.attempts[0].total_tokens == 13
+        usage_writes.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_execute_propagates_context_safety_commit_error_without_generic_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """持续报告事务失败穿透 execute，保留 usage 且不写入无报告普通失败。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(
+            complete=AsyncMock(
+                return_value=LlmResponse(
+                    output=(LlmText("not a canonical report"),),
+                    status="completed",
+                    incomplete_reason=None,
+                    model="tools-model",
+                    response_id="report-response",
+                    request_id=None,
+                    usage=LlmUsage(input_tokens=10, output_tokens=3, total_tokens=13),
+                )
+            )
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            id_factory=lambda prefix: f"{prefix}-lost-report",
+        )
+        attempted_commands: list[FailRunCommand] = []
+
+        async def permanently_failed(command: FailRunCommand) -> Run:
+            attempted_commands.append(command)
+            raise RuntimeError("report_transaction_unavailable")
+
+        usage_commands: list[RecordRunUsageCommand] = []
+
+        async def record_usage(command: RecordRunUsageCommand) -> Run:
+            usage_commands.append(command)
+            return repository.run
+
+        monkeypatch.setattr(
+            repository,
+            "fail",
+            permanently_failed,
+        )
+        monkeypatch.setattr(repository, "record_usage", record_usage)
+        state = _context_state(repository)
+
+        async def forced_context_stop(_: _ExecutionState) -> None:
+            await executor._stop_for_context_safety(
+                state,
+                _runtime_profile(),
+                (),
+                ContextStopReason.COMPRESSION_FAILED,
+            )
+
+        monkeypatch.setattr(executor, "_prepare", AsyncMock(return_value=state))
+        monkeypatch.setattr(executor, "_run_loop", forced_context_stop)
+
+        with pytest.raises(RunContextSafetyCommitError) as raised:
+            await executor.execute(lease)
+
+        assert raised.value.report_message_id == "msg-lost-report"
+        assert raised.value.reason == "commit_failed"
+        assert provider.complete.await_count == 1
+        assert len(attempted_commands) == 3
+        assert all(command is attempted_commands[0] for command in attempted_commands)
+        assert attempted_commands[0].report_message is not None
+        assert repository.failures == []
+        assert repository.fail_commands == []
+        assert len(usage_commands) == 1
+        assert usage_commands[0].total_tokens == 13
+        assert usage_commands[0].input_tokens == 10
+        assert usage_commands[0].output_tokens == 3
+        assert usage_commands[0].complete
+
+    asyncio.run(scenario())
+
+
+def test_execute_does_not_retry_or_generic_fail_after_lease_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """报告模型返回后失租时只保留 usage 审计，不重放报告或写普通失败。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(
+            complete=AsyncMock(
+                return_value=LlmResponse(
+                    output=(LlmText("not a canonical report"),),
+                    status="completed",
+                    incomplete_reason=None,
+                    model="tools-model",
+                    response_id="report-response",
+                    request_id=None,
+                    usage=LlmUsage(input_tokens=7, output_tokens=2, total_tokens=9),
+                )
+            )
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+        )
+        live_checks = 0
+
+        async def lose_lease_after_report(*_: object) -> bool:
+            nonlocal live_checks
+            live_checks += 1
+            return live_checks == 1
+
+        usage_commands: list[RecordRunUsageCommand] = []
+
+        async def record_usage(command: RecordRunUsageCommand) -> Run:
+            usage_commands.append(command)
+            return repository.run
+
+        monkeypatch.setattr(repository, "is_live_execution", lose_lease_after_report)
+        monkeypatch.setattr(repository, "record_usage", record_usage)
+        state = _context_state(repository)
+
+        async def forced_context_stop(_: _ExecutionState) -> None:
+            await executor._stop_for_context_safety(
+                state,
+                _runtime_profile(),
+                (),
+                ContextStopReason.COMPRESSION_INSUFFICIENT,
+            )
+
+        monkeypatch.setattr(executor, "_prepare", AsyncMock(return_value=state))
+        monkeypatch.setattr(executor, "_run_loop", forced_context_stop)
+
+        with pytest.raises(RunContextSafetyCommitError) as raised:
+            await executor.execute(lease)
+
+        assert raised.value.reason == "lease_lost"
+        assert provider.complete.await_count == 1
+        assert repository.fail_commands == []
+        assert repository.failures == []
+        assert len(usage_commands) == 1
+        assert usage_commands[0].total_tokens == 9
+
+    asyncio.run(scenario())
+
+
+def test_execute_stops_context_report_replay_when_repository_loses_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """仓储在提交时发现失租后只做 usage 审计，不再重放报告命令。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        provider = SimpleNamespace(
+            complete=AsyncMock(
+                return_value=LlmResponse(
+                    output=(LlmText("not a canonical report"),),
+                    status="completed",
+                    incomplete_reason=None,
+                    model="tools-model",
+                    response_id="report-response",
+                    request_id=None,
+                    usage=LlmUsage(input_tokens=8, output_tokens=1, total_tokens=9),
+                )
+            )
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+        )
+        failed = AsyncMock(side_effect=RunStateError("run_execution_lease_lost"))
+        usage_commands: list[RecordRunUsageCommand] = []
+
+        async def record_usage(command: RecordRunUsageCommand) -> Run:
+            usage_commands.append(command)
+            return repository.run
+
+        monkeypatch.setattr(repository, "fail", failed)
+        monkeypatch.setattr(repository, "record_usage", record_usage)
+        state = _context_state(repository)
+
+        async def forced_context_stop(_: _ExecutionState) -> None:
+            await executor._stop_for_context_safety(
+                state,
+                _runtime_profile(),
+                (),
+                ContextStopReason.COMPRESSION_FAILED,
+            )
+
+        monkeypatch.setattr(executor, "_prepare", AsyncMock(return_value=state))
+        monkeypatch.setattr(executor, "_run_loop", forced_context_stop)
+
+        with pytest.raises(RunContextSafetyCommitError) as raised:
+            await executor.execute(lease)
+
+        assert raised.value.reason == "command_rejected"
+        assert failed.await_count == 1
+        assert provider.complete.await_count == 1
+        assert len(usage_commands) == 1
+        assert usage_commands[0].total_tokens == 9
+        assert repository.failures == []
 
     asyncio.run(scenario())

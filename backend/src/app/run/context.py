@@ -442,6 +442,64 @@ async def build_llm_request(
     )
 
 
+async def measure_llm_request(
+    run: Run,
+    messages: Sequence[ConversationMessage | ExecutionMessage],
+    profile: ModelProfileVersion,
+    *,
+    main_prompt: str,
+    timeout_seconds: float,
+    summary_text: str | None = None,
+    tools: Sequence[LlmTool] | None = None,
+    retry_context: Sequence[ToolRetryContext] = (),
+    skill_context: RunSkillPromptContext | None = None,
+    input_files: Sequence[RunInputFileContext] = (),
+) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
+    """生成完整请求并返回输入/输出预算，不在调用方裁决前拒绝超窗。"""
+    llm_messages, selected_tools, input_tokens, output_tokens = await _run_context_work(
+        lambda: _measure_request(
+            run,
+            messages,
+            profile,
+            main_prompt,
+            summary_text,
+            tools,
+            retry_context,
+            skill_context,
+            input_files,
+        ),
+        timeout_seconds=timeout_seconds,
+    )
+    return llm_messages, selected_tools, input_tokens, output_tokens
+
+
+def _measure_request(
+    run: Run,
+    messages: Sequence[ConversationMessage | ExecutionMessage],
+    profile: ModelProfileVersion,
+    main_prompt: str,
+    summary_text: str | None,
+    tools: Sequence[LlmTool] | None,
+    retry_context: Sequence[ToolRetryContext],
+    skill_context: RunSkillPromptContext | None,
+    input_files: Sequence[RunInputFileContext],
+) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
+    """同步完成完整请求计数，供有界线程边界调用。"""
+    selected_tools = (REQUEST_USER_INPUT,) if tools is None else tuple(tools)
+    llm_messages, input_tokens, output_tokens = _estimate_request(
+        run,
+        messages,
+        profile,
+        main_prompt,
+        summary_text,
+        tools=selected_tools,
+        retry_context=retry_context,
+        skill_context=skill_context,
+        input_files=input_files,
+    )
+    return llm_messages, selected_tools, input_tokens, output_tokens
+
+
 async def estimate_llm_input_tokens(
     run: Run,
     messages: Sequence[ConversationMessage | ExecutionMessage],
@@ -503,12 +561,14 @@ def _count_text_with_encoding(text: str, encoding_name: str) -> int:
 
 
 __all__ = [
+    "PROTOCOL_TOKEN_RESERVE",
     "REQUEST_USER_INPUT",
     "RunInputFileContext",
     "RunContextError",
     "build_llm_request",
     "count_plain_text_tokens_async",
     "estimate_llm_input_tokens",
+    "measure_llm_request",
     "messages_to_llm",
     "prepare_run_tokenizers",
 ]

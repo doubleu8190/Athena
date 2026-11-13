@@ -232,8 +232,11 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                         id="cmpol_compression_pg",
                         compression_model_profile_id="llmprof_compression_pg",
                         trigger_ratio=0.8,
+                        trigger_tokens=262_144,
                         recent_ratio=0.2,
+                        recent_token_cap=32_768,
                         summary_ratio=0.1,
+                        summary_token_cap=8_192,
                         prompt_template_version="context-summary-v1",
                         created_at=now,
                     )

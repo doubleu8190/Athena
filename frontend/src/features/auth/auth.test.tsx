@@ -878,8 +878,10 @@ describe("认证流程", () => {
             id: null,
             prompt_template_version: null,
             recent_ratio: null,
+            recent_token_cap: null,
             summary_ratio: null,
-            trigger_ratio: null,
+            summary_token_cap: null,
+            trigger_tokens: null,
           });
         }
         throw new Error(`Unexpected request: ${url}`);

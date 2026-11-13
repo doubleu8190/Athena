@@ -10,6 +10,11 @@ import pytest
 
 from app.llm.profile_service import ModelProfileService
 from domain.auth import AuthContext, User, UserRole, UserStatus
+from domain.llm.model.compression_policy import (
+    MAX_COMPRESSION_TOKEN_BUDGET,
+    CompressionPolicyInput,
+    CompressionPolicyVersion,
+)
 from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, RuntimeModelProfile
 from domain.llm.model.profile_errors import ModelProfileAuthorizationError, ModelProfileError
 
@@ -77,6 +82,38 @@ class _ProfileRepository:
         return None
 
 
+class _CompressionPolicyRepository(_ProfileRepository):
+    """记录通过用例校验的不可变压缩策略。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.policy_values: list[CompressionPolicyInput] = []
+
+    async def get_current_compression_policy(self) -> CompressionPolicyVersion | None:
+        return None
+
+    async def get_compression_policy(self, policy_id: str) -> CompressionPolicyVersion | None:
+        return None
+
+    async def set_compression_policy(
+        self,
+        actor_context: AuthContext,
+        value: CompressionPolicyInput,
+    ) -> CompressionPolicyVersion:
+        self.policy_values.append(value)
+        return CompressionPolicyVersion(
+            id="cmpol_service_test",
+            compression_model_profile_id=value.compression_model_profile_id,
+            trigger_tokens=value.trigger_tokens,
+            recent_ratio=value.recent_ratio,
+            recent_token_cap=value.recent_token_cap,
+            summary_ratio=value.summary_ratio,
+            summary_token_cap=value.summary_token_cap,
+            prompt_template_version="context-summary-v1",
+            created_at=datetime.now(UTC),
+        )
+
+
 def actor(role: UserRole = UserRole.ADMIN) -> AuthContext:
     """创建测试身份。"""
     timestamp = datetime.now(UTC)
@@ -104,6 +141,18 @@ def profile_input(api_key: str = "test-secret") -> ModelProfileInput:
         api_key=api_key,
         context_window_tokens=8192,
         max_output_tokens=512,
+    )
+
+
+def compression_policy_input() -> CompressionPolicyInput:
+    """创建合法压缩策略输入。"""
+    return CompressionPolicyInput(
+        compression_model_profile_id="llmprof_test",
+        trigger_tokens=262_144,
+        recent_ratio=0.2,
+        recent_token_cap=32_768,
+        summary_ratio=0.1,
+        summary_token_cap=8_192,
     )
 
 
@@ -194,17 +243,19 @@ def test_model_profile_api_dto_context_boundary() -> None:
 
     from api.dto.llm import ModelProfileCreateRequest
 
-    body = {
-        "name": "Large context",
-        "base_url": "https://llm.example/v1",
-        "model": "large-context",
-        "api_key": "test-key",
-        "context_window_tokens": 1_048_576,
-        "max_output_tokens": 1_000_000,
-    }
-    assert ModelProfileCreateRequest(**body).context_window_tokens == 1_048_576
+    request = ModelProfileCreateRequest(
+        name="Large context",
+        base_url="https://llm.example/v1",
+        model="large-context",
+        api_key="test-key",
+        context_window_tokens=1_048_576,
+        max_output_tokens=1_000_000,
+    )
+    assert request.context_window_tokens == 1_048_576
     with pytest.raises(ValidationError):
-        ModelProfileCreateRequest(**{**body, "context_window_tokens": 1_048_577})
+        ModelProfileCreateRequest.model_validate(
+            {**request.model_dump(), "context_window_tokens": 1_048_577}
+        )
 
 
 def test_parallel_tool_capability_requires_tools_and_round_trips() -> None:
@@ -221,6 +272,110 @@ def test_parallel_tool_capability_requires_tools_and_round_trips() -> None:
     valid = replace(profile_input(), supports_parallel_tool_calls=True)
     created = asyncio.run(service.create(actor(), valid))
     assert created.supports_parallel_tool_calls is True
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("trigger_tokens", "recent_token_cap", "summary_token_cap"),
+)
+def test_compression_policy_dto_enforces_javascript_safe_integer(field: str) -> None:
+    """三个 Token 预算统一接受 JS 安全整数上限并拒绝上限加一。"""
+    from pydantic import ValidationError
+
+    from api.dto.llm import CompressionPolicyRequest
+
+    body = {
+        "compression_model_profile_id": "llmprof_test",
+        "trigger_tokens": 262_144,
+        "recent_ratio": 0.2,
+        "recent_token_cap": 32_768,
+        "summary_ratio": 0.1,
+        "summary_token_cap": 8_192,
+    }
+    body[field] = MAX_COMPRESSION_TOKEN_BUDGET
+    request = CompressionPolicyRequest.model_validate(body)
+    assert getattr(request, field) == MAX_COMPRESSION_TOKEN_BUDGET
+
+    for invalid in (MAX_COMPRESSION_TOKEN_BUDGET + 1, 2**80):
+        with pytest.raises(ValidationError):
+            CompressionPolicyRequest.model_validate({**body, field: invalid})
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("trigger_tokens", "recent_token_cap", "summary_token_cap"),
+)
+def test_compression_policy_api_rejects_unsafe_token_values_with_422(field: str) -> None:
+    """越界 Token 必须在 DTO 边界返回 422，不能进入仓储并形成 500。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.llm import build_llm_admin_router
+
+    class _Authenticator:
+        async def authenticate(self, token: str) -> AuthContext | None:
+            return actor() if token == "admin" else None
+
+    repository = _CompressionPolicyRepository()
+    service = ModelProfileService(repository, _AuthReader(actor().user))
+    app = FastAPI()
+    app.state.authenticator = _Authenticator()
+    app.include_router(build_llm_admin_router(service))
+    body = {
+        "compression_model_profile_id": "llmprof_test",
+        "trigger_tokens": 262_144,
+        "recent_ratio": 0.2,
+        "recent_token_cap": 32_768,
+        "summary_ratio": 0.1,
+        "summary_token_cap": 8_192,
+    }
+    with TestClient(app) as client:
+        client.cookies.set("athena_session", "admin")
+        for invalid in (MAX_COMPRESSION_TOKEN_BUDGET + 1, 2**80):
+            response = client.put(
+                "/api/v1/admin/llm/compression-policy",
+                json={**body, field: invalid},
+            )
+            assert response.status_code == 422
+    assert repository.policy_values == []
+
+
+def test_compression_policy_service_accepts_safe_integer_max() -> None:
+    """service 直连输入也接受三个字段的安全整数上限。"""
+    repository = _CompressionPolicyRepository()
+    service = ModelProfileService(repository, _AuthReader(actor().user))
+    value = replace(
+        compression_policy_input(),
+        trigger_tokens=MAX_COMPRESSION_TOKEN_BUDGET,
+        recent_token_cap=MAX_COMPRESSION_TOKEN_BUDGET,
+        summary_token_cap=MAX_COMPRESSION_TOKEN_BUDGET,
+    )
+    created = asyncio.run(service.set_compression_policy(actor(), value))
+    assert created.trigger_tokens == MAX_COMPRESSION_TOKEN_BUDGET
+    assert created.recent_token_cap == MAX_COMPRESSION_TOKEN_BUDGET
+    assert created.summary_token_cap == MAX_COMPRESSION_TOKEN_BUDGET
+    assert repository.policy_values == [value]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("trigger_tokens", "recent_token_cap", "summary_token_cap"),
+)
+def test_compression_policy_service_rejects_unsafe_token_values(field: str) -> None:
+    """service 直连输入不能绕过 DTO 写入越界 Token 预算。"""
+    repository = _CompressionPolicyRepository()
+    service = ModelProfileService(repository, _AuthReader(actor().user))
+    for invalid in (MAX_COMPRESSION_TOKEN_BUDGET + 1, 2**80):
+        if field == "trigger_tokens":
+            value = replace(compression_policy_input(), trigger_tokens=invalid)
+        elif field == "recent_token_cap":
+            value = replace(compression_policy_input(), recent_token_cap=invalid)
+        else:
+            value = replace(compression_policy_input(), summary_token_cap=invalid)
+        with pytest.raises(ModelProfileError) as error:
+            asyncio.run(service.set_compression_policy(actor(), value))
+        assert error.value.code == "llm_compression_policy_invalid"
+    assert repository.policy_values == []
 
 
 def test_model_profile_admin_api_requires_auth_and_never_returns_secret(
@@ -278,9 +433,11 @@ def test_compression_policy_admin_api_and_user_denial() -> None:
             self.current = CompressionPolicyVersion(
                 id="cmpol_api_test",
                 compression_model_profile_id="llmprof_test",
-                trigger_ratio=0.8,
+                trigger_tokens=262_144,
                 recent_ratio=0.2,
+                recent_token_cap=32_768,
                 summary_ratio=0.1,
+                summary_token_cap=8_192,
                 prompt_template_version="context-summary-v1",
                 created_at=datetime.now(UTC),
             )
@@ -301,9 +458,11 @@ def test_compression_policy_admin_api_and_user_denial() -> None:
     app.include_router(build_llm_admin_router(service))
     body = {
         "compression_model_profile_id": "llmprof_test",
-        "trigger_ratio": 0.8,
+        "trigger_tokens": 262_144,
         "recent_ratio": 0.2,
+        "recent_token_cap": 32_768,
         "summary_ratio": 0.1,
+        "summary_token_cap": 8_192,
     }
     with TestClient(app) as client:
         assert client.get("/api/v1/admin/llm/compression-policy").status_code == 401
@@ -315,4 +474,7 @@ def test_compression_policy_admin_api_and_user_denial() -> None:
         loaded = client.get("/api/v1/admin/llm/compression-policy")
     assert updated.status_code == loaded.status_code == 200
     assert loaded.json()["id"] == "cmpol_api_test"
+    assert loaded.json()["trigger_tokens"] == 262_144
+    assert loaded.json()["recent_token_cap"] == 32_768
     assert loaded.json()["summary_ratio"] == 0.1
+    assert loaded.json()["summary_token_cap"] == 8_192

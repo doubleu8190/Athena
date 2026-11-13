@@ -1,6 +1,10 @@
 """LLM 领域模型公开接口。"""
 
-from domain.llm.model.compression_policy import CompressionPolicyInput, CompressionPolicyVersion
+from domain.llm.model.compression_policy import (
+    MAX_COMPRESSION_TOKEN_BUDGET,
+    CompressionPolicyInput,
+    CompressionPolicyVersion,
+)
 from domain.llm.model.errors import (
     LlmCapabilityError,
     LlmConfigurationError,
@@ -65,6 +69,7 @@ __all__ = [
     "ModelProfileInput",
     "CompressionPolicyInput",
     "CompressionPolicyVersion",
+    "MAX_COMPRESSION_TOKEN_BUDGET",
     "ModelProfileVersion",
     "RuntimeModelProfile",
     "ModelProfileAuthorizationError",

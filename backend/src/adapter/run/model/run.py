@@ -58,6 +58,14 @@ class RunModel(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
+            ["report_message_id", "session_id"],
+            ["conversation_messages.id", "conversation_messages.session_id"],
+            name="fk_runs_report_message_session",
+            deferrable=True,
+            initially="DEFERRED",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
             ["retry_of_run_id", "session_id"],
             ["runs.id", "runs.session_id"],
             name="fk_runs_retry_session",
@@ -144,6 +152,7 @@ class RunModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    report_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     usage: Mapped[dict[str, object]] = mapped_column(_json_type(), nullable=False, default=dict)
 
 

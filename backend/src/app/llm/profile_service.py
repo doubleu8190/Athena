@@ -10,7 +10,11 @@ from urllib.parse import urlsplit
 
 from common.ids import now_utc
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
-from domain.llm.model.compression_policy import CompressionPolicyInput, CompressionPolicyVersion
+from domain.llm.model.compression_policy import (
+    MAX_COMPRESSION_TOKEN_BUDGET,
+    CompressionPolicyInput,
+    CompressionPolicyVersion,
+)
 from domain.llm.model.profile import (
     MAX_CONTEXT_WINDOW_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -66,6 +70,7 @@ class ModelProfileService:
     ) -> CompressionPolicyVersion:
         """验证管理员身份并创建新的压缩策略版本。"""
         await self._authorize(actor)
+        _validate_compression_policy(value)
         try:
             return await cast(CompressionPolicyRepository, self._repository).set_compression_policy(
                 actor, value
@@ -132,6 +137,25 @@ def _validate_input(value: ModelProfileInput) -> None:
         or (value.temperature is not None and not 0 <= value.temperature <= 2)
     ):
         raise ModelProfileError()
+
+
+def _validate_compression_policy(value: CompressionPolicyInput) -> None:
+    """校验绝对阈值、Token 上限和两个仍由管理员配置的比例。"""
+    if (
+        not value.compression_model_profile_id
+        or type(value.trigger_tokens) is not int
+        or not 1 <= value.trigger_tokens <= MAX_COMPRESSION_TOKEN_BUDGET
+        or type(value.recent_ratio) is not float
+        or not 0 < value.recent_ratio < 1
+        or type(value.recent_token_cap) is not int
+        or not 1 <= value.recent_token_cap <= MAX_COMPRESSION_TOKEN_BUDGET
+        or type(value.summary_ratio) is not float
+        or not 0 < value.summary_ratio < 1
+        or type(value.summary_token_cap) is not int
+        or not 1 <= value.summary_token_cap <= MAX_COMPRESSION_TOKEN_BUDGET
+        or value.recent_ratio + value.summary_ratio >= 1
+    ):
+        raise ModelProfileError("llm_compression_policy_invalid")
 
 
 def _validate_api_key(value: str) -> None:

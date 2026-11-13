@@ -198,6 +198,7 @@ export function makeRun(
     replayed: false,
     retry_of_run_id: null,
     retry_warning: null,
+    report_message_id: null,
     safe_error_code: null,
     session_id,
     skill_snapshot: null,

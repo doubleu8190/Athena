@@ -27,6 +27,14 @@ export function formatRatio(value: number | null): string {
   return value === null ? "—" : `${(value * 100).toFixed(2)}%`;
 }
 
+export function formatTokenCount(value: number | null): string {
+  return value === null
+    ? "—"
+    : `${value.toLocaleString("zh-CN", {
+        maximumFractionDigits: 2,
+      })} Token`;
+}
+
 export function mcpConfigSummary(server: McpServer): string {
   if (server.transport === "streamable_http") {
     return (server.config as McpHttpConfig).url;

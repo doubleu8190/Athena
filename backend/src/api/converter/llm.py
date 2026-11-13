@@ -38,9 +38,11 @@ def compression_policy_to_response(
         compression_model_profile_id=(
             None if value is None else value.compression_model_profile_id
         ),
-        trigger_ratio=None if value is None else value.trigger_ratio,
+        trigger_tokens=None if value is None else value.trigger_tokens,
         recent_ratio=None if value is None else value.recent_ratio,
+        recent_token_cap=None if value is None else value.recent_token_cap,
         summary_ratio=None if value is None else value.summary_ratio,
+        summary_token_cap=None if value is None else value.summary_token_cap,
         prompt_template_version=None if value is None else value.prompt_template_version,
         created_at=None if value is None else value.created_at,
     )

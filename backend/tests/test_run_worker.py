@@ -29,7 +29,14 @@ from domain.llm.model import LlmRequest, LlmStreamEvent, TextDelta
 from domain.llm.model.profile import ModelProfileVersion, RuntimeModelProfile
 from domain.llm.ports import LlmStreamProvider
 from domain.llm.profile_ports import ModelProfileRepository
-from domain.run.model import FailRunCommand, Run, RunLease, RunStatus, RunUsage
+from domain.run.model import (
+    FailRunCommand,
+    Run,
+    RunContextSafetyCommitError,
+    RunLease,
+    RunStatus,
+    RunUsage,
+)
 from domain.run.ports import RunRepository
 
 
@@ -221,6 +228,49 @@ def test_worker_continues_claiming_after_one_execution_task_raises() -> None:
             await asyncio.wait_for(task, timeout=2)
         assert repository.claim_count >= 2
         assert repository.failed_runs == [first.run.id]
+
+    asyncio.run(scenario())
+
+
+def test_worker_finalize_preserves_running_run_after_context_safety_commit_error() -> None:
+    """专用安全收尾异常不能触发 Worker 的无报告 generic failed 兜底。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+
+        class Repository:
+            def __init__(self) -> None:
+                self.fail_calls = 0
+
+            async def get(self, *args: object, **kwargs: object) -> Run:
+                return lease.run
+
+            async def fail(self, command: FailRunCommand) -> Run:
+                self.fail_calls += 1
+                return replace(lease.run, status=RunStatus.FAILED)
+
+        repository = Repository()
+        worker = RunWorker(
+            cast(RunRepository, repository),
+            cast(_RunExecutor, _FinishedExecutor()),
+            RunWorkerConfig(
+                concurrency=1,
+                lease_seconds=3,
+                heartbeat_seconds=1,
+                execution_seconds=30,
+                cancel_poll_seconds=0.05,
+                queue_poll_seconds=0.05,
+                reclaim_seconds=5,
+            ),
+        )
+
+        async def fail_with_context_safety_commit_error() -> None:
+            raise RunContextSafetyCommitError("msg-safety-report", "commit_failed")
+
+        execution = asyncio.create_task(fail_with_context_safety_commit_error())
+        await worker._finalize_execution(lease, execution)
+
+        assert repository.fail_calls == 0
 
     asyncio.run(scenario())
 
@@ -705,9 +755,9 @@ def test_executor_does_not_start_provider_after_context_work_deadline() -> None:
 
         async def slow_context_count(*_args: object, **_kwargs: object) -> object:
             await asyncio.sleep(1)
-            return (), (), 1
+            return (), (), 1, 1
 
-        with patch("app.run.executor.build_llm_request", slow_context_count):
+        with patch("app.run.executor.measure_llm_request", slow_context_count):
             lease = _lease()
             deadline = datetime.now(UTC) + timedelta(milliseconds=30)
             await RunExecutor(

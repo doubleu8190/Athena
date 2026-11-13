@@ -29,9 +29,11 @@ from app.run.stream import RunStreamService
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.auth.ports import Authenticator
 from domain.run.model import (
+    ContextStopReason,
     Run,
     RunCompressionCompletedPayload,
     RunEvent,
+    RunFailedPayload,
     RunInterruptedEvent,
     RunQueuedPayload,
     RunSnapshotEvent,
@@ -224,6 +226,78 @@ def test_stream_subscribes_before_snapshot_and_reconciles_epoch_from_database() 
     assert events[1].execution_epoch == 2
     assert events[1].payload.text == "current"
     assert repository.subscribed
+
+
+def test_failed_reconnect_snapshot_carries_persisted_report_reference() -> None:
+    """断线重连进入失败终态时，快照和 failed 事件都指向持久化报告。"""
+    now = datetime.now(UTC)
+    report_id = "message_context_safety_report"
+
+    class FailedRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.FAILED, epoch=1)
+
+        async def get_stream_snapshot(
+            self, session_id: str, owner_id: str, run_id: str
+        ) -> RunStreamSnapshot:
+            assert self.subscribed
+            failed_run = replace(
+                _run(RunStatus.FAILED, 1),
+                event_sequence=2,
+                safe_error_code="run_context_safety_stop",
+                report_message_id=report_id,
+            )
+            report_message = RunStreamMessage(
+                id=report_id,
+                role="assistant",
+                status="completed",
+                text="上下文安全停止。任务未标记为完成。",
+                sequence=2,
+                created_at=now,
+            )
+            failed_event = RunEvent(
+                id="event_context_safety_failed",
+                run_id="run_stream_test",
+                sequence=2,
+                type="failed",
+                created_at=now,
+                payload=RunFailedPayload(
+                    safe_error_code="run_context_safety_stop",
+                    report_message_id=report_id,
+                    context_stop_reason=ContextStopReason.COMPRESSION_INSUFFICIENT,
+                ),
+            )
+            return RunStreamSnapshot(
+                failed_run,
+                (report_message,),
+                (failed_event,),
+            )
+
+    repository = FailedRepository()
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository)),
+    )
+
+    async def collect() -> RunSnapshotEvent:
+        iterator = service.events(
+            "session_stream_test", "user_stream_test", "run_stream_test", "token"
+        )
+        first = await anext(iterator)
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+        await iterator.aclose()
+        assert isinstance(first, RunSnapshotEvent)
+        return first
+
+    snapshot = asyncio.run(collect())
+    assert snapshot.payload.report_message_id == report_id
+    assert snapshot.payload.messages[0].id == report_id
+    failed_event = snapshot.payload.events[0]
+    assert isinstance(failed_event.payload, RunFailedPayload)
+    assert failed_event.payload.report_message_id == report_id
+    assert failed_event.payload.context_stop_reason is ContextStopReason.COMPRESSION_INSUFFICIENT
 
 
 def test_stream_stops_after_snapshot_while_waiting_for_tool_approval() -> None:

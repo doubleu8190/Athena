@@ -109,8 +109,10 @@ describe("管理模型页", () => {
             id: null,
             prompt_template_version: null,
             recent_ratio: null,
+            recent_token_cap: null,
             summary_ratio: null,
-            trigger_ratio: null,
+            summary_token_cap: null,
+            trigger_tokens: null,
           }),
         );
       }
@@ -328,8 +330,10 @@ describe("管理模型页", () => {
             id: null,
             prompt_template_version: null,
             recent_ratio: null,
+            recent_token_cap: null,
             summary_ratio: null,
-            trigger_ratio: null,
+            summary_token_cap: null,
+            trigger_tokens: null,
           }),
         );
       }
@@ -447,17 +451,23 @@ describe("管理模型页", () => {
     });
   });
 
-  it("压缩策略只列出已启用模型，校验比例并保存真实请求", async () => {
+  it("压缩策略只列出已启用模型，校验五字段并保存真实请求", async () => {
     const unconfigured = makeCompressionPolicy({
       compression_model_profile_id: null,
       created_at: null,
       id: null,
       prompt_template_version: null,
       recent_ratio: null,
+      recent_token_cap: null,
       summary_ratio: null,
-      trigger_ratio: null,
+      summary_token_cap: null,
+      trigger_tokens: null,
     });
-    const saved = makeCompressionPolicy();
+    const saved = makeCompressionPolicy({
+      recent_token_cap: 70000,
+      summary_token_cap: 50000,
+      trigger_tokens: 300000,
+    });
     const fetchMock = baseFetch((url, init) => {
       if (
         url.pathname === "/api/v1/admin/llm/model-profiles" &&
@@ -515,8 +525,19 @@ describe("管理模型页", () => {
     ).not.toBeInTheDocument();
     await user.selectOptions(modelSelect, PRIMARY.id);
 
+    const triggerTokens = within(dialog).getByLabelText("触发 Token");
     const recent = within(dialog).getByLabelText("近期原文比例");
+    const recentTokenCap =
+      within(dialog).getByLabelText("近期原文 Token 上限");
     const summary = within(dialog).getByLabelText("摘要比例");
+    const summaryTokenCap =
+      within(dialog).getByLabelText("摘要 Token 上限");
+    await user.clear(triggerTokens);
+    await user.type(triggerTokens, "300000");
+    await user.clear(recentTokenCap);
+    await user.type(recentTokenCap, "70000");
+    await user.clear(summaryTokenCap);
+    await user.type(summaryTokenCap, "50000");
     await user.clear(recent);
     await user.type(recent, "0.6");
     await user.clear(summary);
@@ -544,6 +565,11 @@ describe("管理模型页", () => {
     await user.type(recent, "0.2");
     await user.clear(summary);
     await user.type(summary, "0.1");
+    expect(
+      within(dialog).getByText(
+        "派生近期原文预算：60,000 Token · 派生摘要预算：30,000 Token",
+      ),
+    ).toBeInTheDocument();
     await user.click(
       within(dialog).getByRole("button", {
         name: "保存压缩策略",
@@ -566,9 +592,18 @@ describe("管理模型页", () => {
     expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
       compression_model_profile_id: PRIMARY.id,
       recent_ratio: 0.2,
+      recent_token_cap: 70000,
       summary_ratio: 0.1,
-      trigger_ratio: 0.8,
+      summary_token_cap: 50000,
+      trigger_tokens: 300000,
     });
+    const policyStats = screen.getByLabelText(
+      "压缩策略 Token 与派生预算",
+    );
+    expect(within(policyStats).getByText("300,000 Token")).toBeInTheDocument();
+    expect(within(policyStats).getByText("70,000 Token")).toBeInTheDocument();
+    expect(within(policyStats).getByText("60,000 Token")).toBeInTheDocument();
+    expect(within(policyStats).getByText("30,000 Token")).toBeInTheDocument();
   });
 
   it("403 admin_required 会清空管理缓存并重新核验为无权限", async () => {

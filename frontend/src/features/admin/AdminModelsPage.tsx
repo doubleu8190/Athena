@@ -11,6 +11,7 @@ import {
 } from "./ModelProfileDialogs";
 import {
   formatRatio,
+  formatTokenCount,
   modelCapabilities,
 } from "./display";
 import { adminErrorMessage } from "./errorMessages";
@@ -21,6 +22,7 @@ import {
   useSetModelProfileEnabledMutation,
 } from "./hooks";
 import {
+  compressionPolicyBudgets,
   modelCanBeDefault,
   type ModelProfile,
 } from "./model";
@@ -58,6 +60,9 @@ export function AdminModelsPage() {
     ) ?? null;
   const actionPending =
     enabledMutation.isPending || defaultMutation.isPending;
+  const policyBudgets = policy.data
+    ? compressionPolicyBudgets(policy.data)
+    : null;
 
   const handleEnabledChange = async (profile: ModelProfile) => {
     setActionError(null);
@@ -367,18 +372,37 @@ export function AdminModelsPage() {
                   ) : null;
               })()}
             </div>
-            <dl className="admin-policy-ratios">
+            <dl
+              aria-label="压缩策略 Token 与派生预算"
+              className="admin-policy-ratios"
+            >
               <div>
-                <dt>触发</dt>
-                <dd>{formatRatio(policy.data.trigger_ratio)}</dd>
+                <dt>触发阈值</dt>
+                <dd>{formatTokenCount(policy.data.trigger_tokens)}</dd>
               </div>
               <div>
-                <dt>近期原文</dt>
+                <dt>近期比例</dt>
                 <dd>{formatRatio(policy.data.recent_ratio)}</dd>
               </div>
               <div>
-                <dt>摘要</dt>
+                <dt>近期上限</dt>
+                <dd>{formatTokenCount(policy.data.recent_token_cap)}</dd>
+              </div>
+              <div>
+                <dt>摘要比例</dt>
                 <dd>{formatRatio(policy.data.summary_ratio)}</dd>
+              </div>
+              <div>
+                <dt>摘要上限</dt>
+                <dd>{formatTokenCount(policy.data.summary_token_cap)}</dd>
+              </div>
+              <div>
+                <dt>近期派生预算</dt>
+                <dd>{formatTokenCount(policyBudgets?.recent ?? null)}</dd>
+              </div>
+              <div>
+                <dt>摘要派生预算</dt>
+                <dd>{formatTokenCount(policyBudgets?.summary ?? null)}</dd>
               </div>
             </dl>
             <div className="admin-policy-footer">

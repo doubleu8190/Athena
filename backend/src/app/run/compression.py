@@ -1,4 +1,4 @@
-"""在主模型调用前组织会话历史压缩。"""
+"""在主模型调用前组织单次、连续边界的会话历史压缩。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -13,15 +14,13 @@ from app.run.budget import RunLlmBudget
 from app.run.context import (
     RunContextError,
     RunInputFileContext,
-    build_llm_request,
     count_plain_text_tokens_async,
     estimate_llm_input_tokens,
+    measure_llm_request,
 )
 from common.ids import new_id
 from domain.llm.model import (
-    LlmError,
     LlmMessage,
-    LlmProviderError,
     LlmRequest,
     LlmRole,
     LlmText,
@@ -39,6 +38,7 @@ from domain.message import (
     TextPart,
 )
 from domain.run.model import (
+    ContextStopReason,
     ContextSummary,
     RecordRunUsageCommand,
     Run,
@@ -53,19 +53,42 @@ from domain.skill import RunSkillPromptContext
 from domain.tool import ToolRetryContext
 
 
-class CompressionBatchError(RunContextError):
-    """保存失败操作已经处理过的分批数量。"""
-
-    def __init__(self, code: str, batch_count: int) -> None:
-        super().__init__(code)
-        self.batch_count = batch_count
-
-
 class CompressionPublisher(Protocol):
     """已提交压缩事件的实时发布端口。"""
 
     async def publish_persisted(self, run_id: str, execution_epoch: int, event: RunEvent) -> None:
         """通知订阅者读取已提交的状态事件。"""
+
+
+class _CompressionCallError(RunContextError):
+    """区分供应商调用前失败与其唯一一次调用后的失败。"""
+
+    def __init__(self, code: str, *, dispatched: bool) -> None:
+        super().__init__(code)
+        self.dispatched = dispatched
+
+
+@dataclass(frozen=True, slots=True)
+class _CompressionCandidate:
+    """标识一次 prepare 中实际可送入压缩模型的旧历史范围。"""
+
+    base_summary_id: str | None
+    covered_through_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPreparation:
+    """一次主调用前的完整请求、计数和压缩结论。"""
+
+    messages: tuple[LlmMessage, ...]
+    tools: tuple[LlmTool, ...]
+    input_tokens: int
+    output_tokens: int
+    event: RunEvent | None = None
+    had_new_history: bool = False
+    compression_called: bool = False
+    compression_completed: bool = False
+    stop_reason_hint: ContextStopReason | None = None
 
 
 def _turn_groups(
@@ -100,8 +123,9 @@ async def _split_recent_suffix(
     tools: Sequence[LlmTool] | None = None,
     retry_context: Sequence[ToolRetryContext] = (),
     input_files: Sequence[RunInputFileContext] = (),
+    summary_text: str | None = None,
 ) -> tuple[list[tuple[ConversationMessage, ...]], tuple[ConversationMessage, ...]]:
-    """按主模型完整请求的计数口径保留不超预算的连续近期轮次。"""
+    """按完整主请求计数保留不超过近期预算的连续轮次后缀。"""
     remaining_groups = list(groups)
     recent_groups: list[tuple[ConversationMessage, ...]] = []
     while remaining_groups:
@@ -114,6 +138,7 @@ async def _split_recent_suffix(
             profile.version,
             main_prompt=main_prompt,
             timeout_seconds=timeout_seconds,
+            summary_text=summary_text,
             tools=tools,
             retry_context=retry_context,
             skill_context=skill_context,
@@ -129,7 +154,7 @@ async def _split_recent_suffix(
 
 
 def _render_messages(messages: Sequence[ConversationMessage]) -> str:
-    """把消息转换为带明确角色边界的 JSON 历史文本。"""
+    """把旧历史转换为带明确角色和顺序边界的 JSON 文本。"""
     return json.dumps(
         [
             {
@@ -153,7 +178,7 @@ def _compression_prompt(
     messages: Sequence[ConversationMessage],
     target_characters: int,
 ) -> str:
-    """构造与供应商请求相同的摘要和新增历史封装。"""
+    """构造既有摘要与全部新增历史的单次摘要输入。"""
     return (
         f"目标摘要不超过 {target_characters} 个 Unicode 字符。按 UTF-8 最坏情况每字符 4 字节估算；"
         "字符数只是保守生成指导，最终仍以主模型 tokenizer 的实际 Token 校验为准。\n"
@@ -186,7 +211,7 @@ def _compression_token_limits(
     max_output_tokens: int,
     main_summary_budget: int,
 ) -> tuple[int, int]:
-    """为压缩请求预留窗口，并按主模型摘要预算保守限制输出额度。"""
+    """为压缩请求预留协议和输出后返回可发送输入上限。"""
     protocol_reserve = min(128, max(1, context_window // 16))
     usable_window = context_window - protocol_reserve
     summary_output_limit = main_summary_budget
@@ -199,8 +224,13 @@ def _compression_token_limits(
     return input_limit, output_limit
 
 
+def _bounded_budget(base: int, ratio: float, cap: int, feasible: int) -> int:
+    """统一计算比例与绝对上限共同约束后的有效 Token 预算。"""
+    return max(0, min(int(base * ratio), cap, feasible))
+
+
 class ContextCompressor:
-    """按 Run 固定策略压缩较早会话历史并提交摘要版本。"""
+    """按 Run 固定策略生成单次摘要版本，不拆批且不做应用层重试。"""
 
     def __init__(
         self,
@@ -229,10 +259,10 @@ class ContextCompressor:
         skill_context: RunSkillPromptContext | None = None,
         input_files: Sequence[RunInputFileContext] = (),
         budget: RunLlmBudget | None = None,
-    ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, RunEvent | None]:
-        """压缩需要的历史并返回可直接调用主模型的完整上下文。"""
+        allow_compression: bool = True,
+    ) -> ContextPreparation:
+        """压缩一次新增旧历史，并在失败时只使用兼容摘要快照回退。"""
         run = lease.run
-        # 读取当前可见的摘要版本；同时定位触发消息，压缩范围不能覆盖当前问题。
         summaries = await self._repository.list_context_summaries(
             run.session_id, run.owner_id, run.id
         )
@@ -242,7 +272,23 @@ class ContextCompressor:
         trigger = next((item for item in conversations if item.id == run.trigger_message_id), None)
         if trigger is None:
             raise RunContextError("run_context_trigger_missing")
-        # 先估算 system/tools/重试上下文占用的基础 token，剩余部分才是历史预算。
+
+        # 旧摘要即使超过当前 cap 仍是唯一权威历史边界，必须原样复用且不得自动重整。
+        eligible_summaries = tuple(
+            item for item in summaries if item.covered_through_sequence < trigger.sequence
+        )
+        summary = max(
+            eligible_summaries,
+            key=lambda item: (
+                item.covered_through_sequence,
+                item.created_at,
+                item.id,
+            ),
+            default=None,
+        )
+        active_messages = self._messages_after_summary(messages, summary)
+        summary_text = None if summary is None else summary.text
+
         base_tokens, output_tokens = await estimate_llm_input_tokens(
             run,
             (),
@@ -254,81 +300,23 @@ class ContextCompressor:
             skill_context=skill_context,
             input_files=input_files,
         )
-        input_budget = main_runtime.version.context_window_tokens - output_tokens - base_tokens
-        if input_budget <= 0:
-            raise RunContextError("run_context_budget_unavailable")
-        summary_limit = int(input_budget * policy.summary_ratio)
-        if summary_limit <= 0:
-            raise RunContextError("run_context_budget_unavailable")
-        # 只考虑覆盖到触发消息之前的摘要；在预算内选择覆盖范围最长的版本。
-        candidates: list[ContextSummary] = []
-        eligible_summaries: list[tuple[ContextSummary, int]] = []
-        for item in summaries:
-            if item.covered_through_sequence >= trigger.sequence:
-                continue
-            summary_tokens = await count_plain_text_tokens_async(
-                item.text, main_runtime.version, timeout_seconds=timeout_seconds
-            )
-            eligible_summaries.append((item, summary_tokens))
-            if summary_tokens <= summary_limit:
-                candidates.append(item)
-        summary = max(candidates, key=lambda item: item.covered_through_sequence, default=None)
-        latest_summary = max(
-            (item for item, _ in eligible_summaries),
-            key=lambda item: item.covered_through_sequence,
-            default=None,
+        feasible_history = max(
+            0,
+            main_runtime.version.context_window_tokens - output_tokens - base_tokens,
         )
-        # 最新摘要超出预算时触发一次重压缩（不直接使用其正文）。
-        refresh_oversized_summary = summary is None and latest_summary is not None
-        if refresh_oversized_summary:
-            summary = latest_summary
-        # 有可用摘要时只保留摘要覆盖点之后的消息与本 Run 执行消息。
-        if summary is None:
-            active_messages = messages
-            summary_text = None
-        else:
-            active_messages = tuple(
-                item
-                for item in messages
-                if isinstance(item, ExecutionMessage)
-                or item.sequence > summary.covered_through_sequence
-            )
-            summary_text = None if refresh_oversized_summary else summary.text
-        fallback_messages = (
-            messages if refresh_oversized_summary or summary is None else active_messages
+        recent_limit = _bounded_budget(
+            policy.trigger_tokens,
+            policy.recent_ratio,
+            policy.recent_token_cap,
+            feasible_history,
         )
-        fallback_summary_text = None if refresh_oversized_summary else summary_text
-        used_tokens, output_tokens = await estimate_llm_input_tokens(
-            run,
-            active_messages,
-            main_runtime.version,
-            timeout_seconds=timeout_seconds,
-            main_prompt=main_prompt,
-            summary_text=summary_text,
-            tools=tools,
-            retry_context=retry_context,
-            skill_context=skill_context,
-            input_files=input_files,
+        summary_limit = _bounded_budget(
+            policy.trigger_tokens,
+            policy.summary_ratio,
+            policy.summary_token_cap,
+            feasible_history,
         )
-        # 指南与目录已计入 base_tokens，只对扣除后历史用量应用触发比例。
-        history_tokens = max(0, used_tokens - base_tokens)
-        threshold = int(input_budget * policy.trigger_ratio)
-        if history_tokens < threshold and not refresh_oversized_summary:
-            built, tools, output = await build_llm_request(
-                run,
-                active_messages,
-                main_runtime.version,
-                timeout_seconds=timeout_seconds,
-                main_prompt=main_prompt,
-                summary_text=summary_text,
-                tools=tools,
-                retry_context=retry_context,
-                skill_context=skill_context,
-                input_files=input_files,
-            )
-            return built, tools, output, None
 
-        # 待压缩范围：触发消息之前、摘要覆盖点之后的完整对话轮次。
         trigger_prefix = tuple(
             item
             for item in conversations
@@ -336,27 +324,49 @@ class ContextCompressor:
             and (summary is None or item.sequence > summary.covered_through_sequence)
         )
         groups = list(_turn_groups(trigger_prefix))
-        if not groups and not refresh_oversized_summary:
-            built, tools, output = await build_llm_request(
+        if not groups:
+            current = await self._measure_context(
                 run,
                 active_messages,
-                main_runtime.version,
-                timeout_seconds=timeout_seconds,
+                main_runtime,
                 main_prompt=main_prompt,
+                timeout_seconds=timeout_seconds,
                 summary_text=summary_text,
                 tools=tools,
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
             )
-            return built, tools, output, None
-        # 从尾部保留完整轮次，并将超出 20% 预算的连续前缀送入摘要。
-        recent_limit = int(input_budget * policy.recent_ratio)
-        groups, recent = await _split_recent_suffix(
+            return ContextPreparation(
+                messages=current.messages,
+                tools=current.tools,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
+                had_new_history=False,
+                stop_reason_hint=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+
+        group_message_ids = {message.id for group in groups for message in group}
+        protected_messages = tuple(
+            item for item in active_messages if item.id not in group_message_ids
+        )
+        protected_tokens, _ = await estimate_llm_input_tokens(
+            run,
+            protected_messages,
+            main_runtime.version,
+            main_prompt=main_prompt,
+            timeout_seconds=timeout_seconds,
+            summary_text=summary_text,
+            tools=tools,
+            retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
+        )
+        remaining_groups, _ = await _split_recent_suffix(
             run,
             groups,
             main_runtime,
-            base_tokens,
+            protected_tokens,
             recent_limit,
             timeout_seconds,
             main_prompt,
@@ -364,23 +374,80 @@ class ContextCompressor:
             tools,
             retry_context,
             input_files,
+            summary_text,
         )
-        if not groups and not refresh_oversized_summary:
-            built, tools, output = await build_llm_request(
+        current = await self._measure_context(
+            run,
+            active_messages,
+            main_runtime,
+            main_prompt=main_prompt,
+            timeout_seconds=timeout_seconds,
+            summary_text=summary_text,
+            tools=tools,
+            retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
+        )
+        if not remaining_groups:
+            return ContextPreparation(
+                messages=current.messages,
+                tools=current.tools,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
+                had_new_history=True,
+                stop_reason_hint=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+
+        # 常规触发使用绝对阈值；达到硬窗口 90% 时也允许一次提前救援，
+        # 最终是否停止仍由执行器按原业务 tools 的完整输入统一裁决。
+        safety_threshold = (main_runtime.version.context_window_tokens * 9 + 9) // 10
+        if current.input_tokens < policy.trigger_tokens and current.input_tokens < safety_threshold:
+            return current
+        candidate_messages = tuple(message for group in remaining_groups for message in group)
+        candidate = _CompressionCandidate(
+            base_summary_id=None if summary is None else summary.id,
+            covered_through_sequence=candidate_messages[-1].sequence,
+        )
+        previous_failure = await self._latest_compression_failure(run)
+        if (
+            previous_failure is not None
+            and previous_failure.candidate_covered_through_sequence is not None
+            and candidate.covered_through_sequence
+            <= previous_failure.candidate_covered_through_sequence
+        ):
+            # 同一或收缩后的失败范围不能借下一次 prepare 隐式重试；仍返回兼容快照，
+            # 由 executor 继续执行 90% 与硬窗口裁决。
+            fallback = await self._measure_context(
                 run,
                 active_messages,
-                main_runtime.version,
-                timeout_seconds=timeout_seconds,
+                main_runtime,
                 main_prompt=main_prompt,
+                timeout_seconds=timeout_seconds,
                 summary_text=summary_text,
                 tools=tools,
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
             )
-            return built, tools, output, None
+            return ContextPreparation(
+                messages=fallback.messages,
+                tools=fallback.tools,
+                input_tokens=fallback.input_tokens,
+                output_tokens=fallback.output_tokens,
+                had_new_history=True,
+                stop_reason_hint=self._compression_failure_hint(previous_failure.safe_error_code),
+            )
+        if not allow_compression:
+            return ContextPreparation(
+                messages=current.messages,
+                tools=current.tools,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
+                had_new_history=True,
+                stop_reason_hint=ContextStopReason.COMPRESSION_BUDGET_EXHAUSTED,
+            )
 
-        # 记录压缩开始事件；事件写入失败说明失租，必须终止。
+        runtime = await self._profiles.get_runtime(policy.compression_model_profile_id)
         operation_id = new_id("cmpop")
         started = await self._repository.append_compression_event(
             run.id,
@@ -390,115 +457,121 @@ class ContextCompressor:
         )
         if started is None:
             raise RunContextError("run_execution_lease_lost")
-        try:
-            await self._publisher.publish_persisted(run.id, run.execution_epoch, started)
-        except Exception:
-            pass
-        try:
-            # 分批顺序压缩；中间摘要只驻内存，最终结果统一提交。
-            chunks = await self._compress_groups(
-                run,
+        await self._publish(started, run)
+
+        if runtime is None or summary_limit <= 0:
+            failed = await self._append_failure(
                 lease,
-                groups,
-                None if summary is None else summary.text,
-                0 if summary is None else summary.covered_through_sequence,
-                policy,
-                main_runtime,
                 operation_id,
-                timeout_seconds,
-                main_prompt,
-                compression_prompt,
-                skill_context,
-                tools,
-                retry_context,
-                input_files,
-                budget,
+                0,
+                "run_compression_model_unavailable"
+                if runtime is None
+                else "run_context_budget_unavailable",
+                candidate,
             )
-        except RunContextError as error:
-            if error.args and error.args[0] == "run_execution_lease_lost":
-                raise
-            failed = await self._repository.append_compression_event(
-                run.id,
-                lease.run.worker_id or "",
-                run.execution_epoch,
-                RunCompressionFailedPayload(
-                    operation_id=operation_id,
-                    safe_error_code=str(error),
-                    batch_count=(
-                        error.batch_count if isinstance(error, CompressionBatchError) else 0
-                    ),
-                ),
-            )
-            if failed is not None:
-                try:
-                    await self._publisher.publish_persisted(run.id, run.execution_epoch, failed)
-                except Exception:
-                    pass
-            fallback = await build_llm_request(
+            fallback = await self._measure_context(
                 run,
-                fallback_messages,
-                main_runtime.version,
-                timeout_seconds=timeout_seconds,
+                active_messages,
+                main_runtime,
                 main_prompt=main_prompt,
-                summary_text=fallback_summary_text,
+                timeout_seconds=timeout_seconds,
+                summary_text=summary_text,
                 tools=tools,
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
             )
-            return *fallback, failed
-        if not chunks:
-            raise RunContextError("run_context_compression_failed")
-        # 压缩成功：用最终摘要 + 覆盖点之后的消息重建完整主请求。
-        final_summary, covered_sequence, batch_count, compression_runtime = chunks
-        retained = tuple(
-            item
-            for item in active_messages
-            if isinstance(item, ExecutionMessage) or item.sequence > covered_sequence
+            return ContextPreparation(
+                messages=fallback.messages,
+                tools=fallback.tools,
+                input_tokens=fallback.input_tokens,
+                output_tokens=fallback.output_tokens,
+                event=failed,
+                had_new_history=True,
+                stop_reason_hint=(
+                    ContextStopReason.COMPRESSION_MODEL_UNAVAILABLE
+                    if runtime is None
+                    else ContextStopReason.COMPRESSION_INPUT_TOO_LARGE
+                ),
+            )
+
+        retained = self._retain_after_compression(
+            active_messages,
+            candidate_messages,
         )
+        provider_dispatched = False
         try:
-            built, tools, output = await build_llm_request(
+            final_summary, compression_runtime = await self._compress_single(
+                run,
+                lease,
+                runtime,
+                main_runtime,
+                summary_text,
+                candidate_messages,
+                summary_limit,
+                operation_id,
+                timeout_seconds,
+                compression_prompt,
+                budget,
+            )
+            # _compress_single 成功返回即表示摘要供应商调用已经发生。
+            provider_dispatched = True
+            final_context = await self._measure_context(
                 run,
                 retained,
-                main_runtime.version,
-                timeout_seconds=timeout_seconds,
+                main_runtime,
                 main_prompt=main_prompt,
+                timeout_seconds=timeout_seconds,
                 summary_text=final_summary,
                 tools=tools,
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
             )
+            if (
+                final_context.input_tokens + final_context.output_tokens
+                > main_runtime.version.context_window_tokens
+            ):
+                raise _CompressionCallError(
+                    "run_context_window_exceeded",
+                    dispatched=True,
+                )
         except RunContextError as error:
-            failed = await self._repository.append_compression_event(
-                run.id,
-                lease.run.worker_id or "",
-                run.execution_epoch,
-                RunCompressionFailedPayload(
-                    operation_id=operation_id,
-                    safe_error_code=str(error),
-                    batch_count=batch_count,
-                ),
+            if error.args and error.args[0] == "run_execution_lease_lost":
+                raise
+            dispatched = provider_dispatched or (
+                isinstance(error, _CompressionCallError) and error.dispatched
             )
-            if failed is not None:
-                try:
-                    await self._publisher.publish_persisted(run.id, run.execution_epoch, failed)
-                except Exception:
-                    pass
-            fallback = await build_llm_request(
+            failed = await self._append_failure(
+                lease,
+                operation_id,
+                1 if dispatched else 0,
+                str(error),
+                candidate,
+            )
+            fallback = await self._measure_context(
                 run,
-                fallback_messages,
-                main_runtime.version,
-                timeout_seconds=timeout_seconds,
+                active_messages,
+                main_runtime,
                 main_prompt=main_prompt,
-                summary_text=fallback_summary_text,
+                timeout_seconds=timeout_seconds,
+                summary_text=summary_text,
                 tools=tools,
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
             )
-            return *fallback, failed
-        # 完整请求校验失败时仍保留完整原文供回退判断，不保存摘要。
+            return ContextPreparation(
+                messages=fallback.messages,
+                tools=fallback.tools,
+                input_tokens=fallback.input_tokens,
+                output_tokens=fallback.output_tokens,
+                event=failed,
+                had_new_history=True,
+                compression_called=dispatched,
+                stop_reason_hint=self._compression_failure_hint(str(error)),
+            )
+
         saved = await self._repository.save_context_summary(
             SaveContextSummaryCommand(
                 run_id=run.id,
@@ -506,275 +579,122 @@ class ContextCompressor:
                 execution_epoch=run.execution_epoch,
                 operation_id=operation_id,
                 summary_id=new_id("csum"),
-                covered_through_sequence=covered_sequence,
+                covered_through_sequence=candidate.covered_through_sequence,
                 parent_summary_id=None if summary is None else summary.id,
                 text=final_summary,
                 policy_version_id=policy.id,
                 compression_model_version_id=compression_runtime.version.id,
                 prompt_version=policy.prompt_template_version,
                 created_at=datetime.now(UTC),
-                batch_count=batch_count,
+                batch_count=1,
             )
         )
-        # 保存摘要版本失败（失租/冲突）时终止，避免使用未提交的摘要。
         if saved is None:
             raise RunContextError("run_execution_lease_lost")
-        try:
-            await self._publisher.publish_persisted(run.id, run.execution_epoch, saved[1])
-        except Exception:
-            pass
-        return built, tools, output, saved[1]
+        completed = saved[1]
+        await self._publish(completed, run)
+        return ContextPreparation(
+            messages=final_context.messages,
+            tools=final_context.tools,
+            input_tokens=final_context.input_tokens,
+            output_tokens=final_context.output_tokens,
+            event=completed,
+            had_new_history=True,
+            compression_called=True,
+            compression_completed=True,
+        )
 
-    async def _compress_groups(
+    async def _compress_single(
         self,
         run: Run,
         lease: RunLease,
-        groups: list[tuple[ConversationMessage, ...]],
-        prior_summary: str | None,
-        prior_covered_sequence: int,
-        policy: CompressionPolicyVersion,
-        main_runtime: RuntimeModelProfile,
-        operation_id: str,
-        timeout_seconds: float,
-        main_prompt: str,
-        compression_prompt: str,
-        skill_context: RunSkillPromptContext | None,
-        tools: Sequence[LlmTool] | None,
-        retry_context: Sequence[ToolRetryContext],
-        input_files: Sequence[RunInputFileContext],
-        budget: RunLlmBudget | None = None,
-    ) -> tuple[str, int, int, RuntimeModelProfile]:
-        """顺序压缩完整轮次；中间摘要仅驻内存。"""
-        # 压缩模型按策略固定；配置不可用则无法压缩。
-        runtime = await self._profiles.get_runtime(policy.compression_model_profile_id)
-        if runtime is None:
-            raise RunContextError("run_compression_model_unavailable")
-        main_base_tokens, main_output_tokens = await estimate_llm_input_tokens(
-            run,
-            (),
-            main_runtime.version,
-            main_prompt=main_prompt,
-            timeout_seconds=timeout_seconds,
-            tools=tools,
-            retry_context=retry_context,
-            skill_context=skill_context,
-            input_files=input_files,
-        )
-        # 摘要可占用的 token 预算 = 主模型剩余窗口 × 摘要比例。
-        summary_budget = int(
-            (main_runtime.version.context_window_tokens - main_output_tokens - main_base_tokens)
-            * policy.summary_ratio
-        )
-        if summary_budget <= 0:
-            raise RunContextError("run_context_budget_unavailable")
-        compression_window = runtime.version.context_window_tokens
-        available, output_limit = _compression_token_limits(
-            compression_window, runtime.version.max_output_tokens, summary_budget
-        )
-        target_characters = min(summary_budget, output_limit) // 4
-        if target_characters <= 0:
-            raise RunContextError("run_context_budget_unavailable")
-        summary = prior_summary
-        batch_count = 0
-        covered = 0
-        pending: list[ConversationMessage] = []
-        provider = self._provider
-        # 逐轮拼接：超出压缩模型窗口时先摘要已累积的轮次，再继续。
-        for group in groups:
-            candidate = [*pending, *group]
-            input_text = _render_compression_request(
-                compression_prompt,
-                summary,
-                candidate,
-                target_characters,
-            )
-            input_tokens = await count_plain_text_tokens_async(
-                input_text,
-                runtime.version,
-                timeout_seconds=timeout_seconds,
-            )
-            if input_tokens > available and pending:
-                try:
-                    summary, covered = await self._summarize_batch(
-                        provider,
-                        runtime,
-                        summary,
-                        pending,
-                        output_limit,
-                        run,
-                        lease,
-                        operation_id,
-                        batch_count,
-                        target_characters,
-                        timeout_seconds,
-                        compression_prompt,
-                        budget,
-                    )
-                except RunContextError as error:
-                    raise CompressionBatchError(str(error), batch_count + 1) from error
-                batch_count += 1
-                if (
-                    await count_plain_text_tokens_async(
-                        summary, main_runtime.version, timeout_seconds=timeout_seconds
-                    )
-                    > summary_budget
-                ):
-                    raise CompressionBatchError("run_context_summary_too_large", batch_count)
-                pending = []
-                input_text = _render_compression_request(
-                    compression_prompt,
-                    summary,
-                    group,
-                    target_characters,
-                )
-                input_tokens = await count_plain_text_tokens_async(
-                    input_text,
-                    runtime.version,
-                    timeout_seconds=timeout_seconds,
-                )
-            if input_tokens > available:
-                raise RunContextError("run_compression_turn_too_large")
-            pending.extend(group)
-        # 收尾：把最后一批待压缩轮次提交给压缩模型。
-        if pending:
-            try:
-                summary, covered = await self._summarize_batch(
-                    provider,
-                    runtime,
-                    summary,
-                    pending,
-                    output_limit,
-                    run,
-                    lease,
-                    operation_id,
-                    batch_count,
-                    target_characters,
-                    timeout_seconds,
-                    compression_prompt,
-                    budget,
-                )
-            except RunContextError as error:
-                raise CompressionBatchError(str(error), batch_count + 1) from error
-            batch_count += 1
-            if (
-                await count_plain_text_tokens_async(
-                    summary, main_runtime.version, timeout_seconds=timeout_seconds
-                )
-                > summary_budget
-            ):
-                raise CompressionBatchError("run_context_summary_too_large", batch_count)
-        # 没有新增轮次但已有摘要（重压缩场景）：对原摘要再压缩一次。
-        elif prior_summary is not None:
-            encoded_input = _render_compression_request(
-                compression_prompt,
-                prior_summary,
-                (),
-                target_characters,
-            )
-            input_tokens = await count_plain_text_tokens_async(
-                encoded_input, runtime.version, timeout_seconds=timeout_seconds
-            )
-            if input_tokens > available:
-                raise RunContextError("run_compression_context_window_exceeded")
-            try:
-                summary, _ = await self._summarize_batch(
-                    provider,
-                    runtime,
-                    prior_summary,
-                    (),
-                    output_limit,
-                    run,
-                    lease,
-                    operation_id,
-                    batch_count,
-                    target_characters,
-                    timeout_seconds,
-                    compression_prompt,
-                    budget,
-                )
-            except RunContextError as error:
-                raise CompressionBatchError(str(error), batch_count + 1) from error
-            batch_count += 1
-            covered = prior_covered_sequence
-            if (
-                await count_plain_text_tokens_async(
-                    summary, main_runtime.version, timeout_seconds=timeout_seconds
-                )
-                > summary_budget
-            ):
-                raise CompressionBatchError("run_context_summary_too_large", batch_count)
-        # 最终摘要必须非空且不超过主模型的摘要预算。
-        if summary is None or not summary.strip():
-            raise CompressionBatchError("run_context_compression_failed", batch_count)
-        if (
-            await count_plain_text_tokens_async(
-                summary, main_runtime.version, timeout_seconds=timeout_seconds
-            )
-            > summary_budget
-        ):
-            raise CompressionBatchError("run_context_summary_too_large", batch_count)
-        return summary, covered, batch_count, runtime
-
-    async def _summarize_batch(
-        self,
-        provider: LlmRuntimeTextProvider,
         runtime: RuntimeModelProfile,
-        summary: str | None,
+        main_runtime: RuntimeModelProfile,
+        prior_summary: str | None,
         messages: Sequence[ConversationMessage],
-        output_limit: int,
-        run: Run,
-        lease: RunLease,
+        summary_limit: int,
         operation_id: str,
-        batch_index: int,
-        target_characters: int,
         timeout_seconds: float,
         compression_prompt: str,
-        budget: RunLlmBudget | None = None,
-    ) -> tuple[str, int]:
-        """调用压缩模型并确认输出完整的纯文本摘要。"""
-        # 每次调用前重新读取压缩模型配置，配置可能已被禁用。
-        current_runtime = await self._profiles.get_runtime(runtime.version.id)
-        if current_runtime is None:
-            raise RunContextError("run_compression_model_unavailable")
-        runtime = current_runtime
-        prompt = _compression_prompt(summary, messages, target_characters)
+        budget: RunLlmBudget | None,
+    ) -> tuple[str, RuntimeModelProfile]:
+        """把旧摘要与全部候选历史一次装入并最多发起一次供应商调用。"""
+        input_limit, output_limit = _compression_token_limits(
+            runtime.version.context_window_tokens,
+            runtime.version.max_output_tokens,
+            summary_limit,
+        )
+        target_characters = min(summary_limit, output_limit) // 4
+        if target_characters <= 0:
+            raise _CompressionCallError(
+                "run_context_budget_unavailable",
+                dispatched=False,
+            )
+        rendered = _render_compression_request(
+            compression_prompt,
+            prior_summary,
+            messages,
+            target_characters,
+        )
+        input_tokens = await count_plain_text_tokens_async(
+            rendered,
+            runtime.version,
+            timeout_seconds=timeout_seconds,
+        )
+        if input_tokens > input_limit:
+            # 预检失败发生在预算预占之前，不能用伪 usage=0 记录供应商调用。
+            raise _CompressionCallError(
+                "run_compression_context_window_exceeded",
+                dispatched=False,
+            )
+        if not await self._repository.is_live_execution(run.id, run.execution_epoch):
+            raise RunContextError("run_execution_lease_lost")
+        if budget is not None:
+            if not budget.can_compress:
+                raise _CompressionCallError(
+                    "run_context_compression_budget_exhausted",
+                    dispatched=False,
+                )
+            await budget.reserve()
+
         request = LlmRequest(
             model_profile=runtime.version.id,
             messages=(
                 LlmMessage(LlmRole.SYSTEM, compression_prompt),
-                LlmMessage(LlmRole.USER, prompt),
+                LlmMessage(
+                    LlmRole.USER,
+                    _compression_prompt(
+                        prior_summary,
+                        messages,
+                        target_characters,
+                    ),
+                ),
             ),
             tool_choice="none",
             max_output_tokens=output_limit,
             timeout_seconds=min(timeout_seconds, runtime.version.request_timeout_seconds),
         )
-        # 压缩调用最多重试 3 次；每次都必须先确认租约并预占预算。
-        for attempt in range(1, 4):
-            if not await self._repository.is_live_execution(run.id, run.execution_epoch):
-                raise RunContextError("run_execution_lease_lost")
-            if budget is not None:
-                if not budget.can_compress:
-                    raise RunContextError("run_context_compression_budget_exhausted")
-                await budget.reserve()
-            started = time.monotonic()
-            response = None
-            provider_error: LlmProviderError | None = None
-            fatal_llm_error: LlmError | None = None
-            try:
-                response = await provider.complete(runtime, request)
-            except LlmProviderError as error:
-                provider_error = error
-            except LlmError as error:
-                fatal_llm_error = error
-            # 与主回答一致：无论成败都记录用量，用于审计与预算核对。
+        started = time.monotonic()
+        response = None
+        failure: Exception | None = None
+        provider_dispatched = False
+        try:
+            # 从这里开始供应商调用可能已经发生，之后任何非终止性校验异常都必须按
+            # “已派发一次”记录，不能因后置 tokenizer 错误退化成零调用。
+            provider_dispatched = True
+            # SDK 客户端已固定 max_retries=0；这里也只调用 complete 一次。
+            response = await self._provider.complete(runtime, request)
+        except Exception as error:
+            failure = error
+        try:
             elapsed = max(0, int((time.monotonic() - started) * 1000))
             usage = None if response is None else response.usage
-            usage_recorded = await self._repository.record_usage(
+            recorded = await self._repository.record_usage(
                 RecordRunUsageCommand(
                     run_id=run.id,
                     worker_id=lease.run.worker_id or "",
                     execution_epoch=run.execution_epoch,
-                    attempt=attempt,
+                    attempt=1,
                     input_tokens=None if usage is None else usage.input_tokens,
                     output_tokens=None if usage is None else usage.output_tokens,
                     total_tokens=None if usage is None else usage.total_tokens,
@@ -787,30 +707,213 @@ class ContextCompressor:
                     recorded_at=datetime.now(UTC),
                     purpose="compression",
                     operation_id=operation_id,
-                    batch_index=batch_index,
+                    batch_index=0,
                     model_profile_id=runtime.version.id,
                     duration_ms=elapsed,
                 )
             )
-            if usage_recorded is None:
+            if recorded is None:
                 raise RunContextError("run_execution_lease_lost")
-            if fatal_llm_error is not None:
-                raise RunContextError("run_context_compression_failed") from fatal_llm_error
-            if provider_error is None:
+            if failure is not None or response is None:
+                raise _CompressionCallError(
+                    "run_context_compression_failed",
+                    dispatched=True,
+                )
+            if response.status != "completed" or response.incomplete_reason is not None:
+                raise _CompressionCallError(
+                    "run_context_compression_incomplete",
+                    dispatched=True,
+                )
+            if len(response.output) != 1 or not isinstance(response.output[0], LlmText):
+                raise _CompressionCallError(
+                    "run_context_compression_invalid",
+                    dispatched=True,
+                )
+            text = response.output[0].text.strip()
+            if not text:
+                raise _CompressionCallError(
+                    "run_context_compression_empty",
+                    dispatched=True,
+                )
+            if (
+                await count_plain_text_tokens_async(
+                    text,
+                    runtime.version,
+                    timeout_seconds=timeout_seconds,
+                )
+                > output_limit
+            ):
+                raise _CompressionCallError(
+                    "run_context_compression_output_too_large",
+                    dispatched=True,
+                )
+            if (
+                await count_plain_text_tokens_async(
+                    text,
+                    main_runtime.version,
+                    timeout_seconds=timeout_seconds,
+                )
+                > summary_limit
+            ):
+                raise _CompressionCallError(
+                    "run_context_summary_too_large",
+                    dispatched=True,
+                )
+            return text, runtime
+        except asyncio.CancelledError:
+            raise
+        except RunContextError as error:
+            if error.args and error.args[0] == "run_execution_lease_lost":
+                raise
+            if isinstance(error, _CompressionCallError):
+                raise
+            raise _CompressionCallError(
+                str(error),
+                dispatched=provider_dispatched,
+            ) from error
+
+    async def _measure_context(
+        self,
+        run: Run,
+        messages: Sequence[ConversationMessage | ExecutionMessage],
+        runtime: RuntimeModelProfile,
+        *,
+        main_prompt: str,
+        timeout_seconds: float,
+        summary_text: str | None,
+        tools: Sequence[LlmTool] | None,
+        retry_context: Sequence[ToolRetryContext],
+        skill_context: RunSkillPromptContext | None,
+        input_files: Sequence[RunInputFileContext],
+    ) -> ContextPreparation:
+        """按完整主请求口径测量当前候选上下文。"""
+        llm_messages, selected_tools, input_tokens, output_tokens = await measure_llm_request(
+            run,
+            messages,
+            runtime.version,
+            main_prompt=main_prompt,
+            timeout_seconds=timeout_seconds,
+            summary_text=summary_text,
+            tools=tools,
+            retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
+        )
+        return ContextPreparation(
+            messages=llm_messages,
+            tools=selected_tools,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    async def _append_failure(
+        self,
+        lease: RunLease,
+        operation_id: str,
+        batch_count: int,
+        safe_error_code: str,
+        candidate: _CompressionCandidate,
+    ) -> RunEvent | None:
+        """提交固定的 0/1 批次结论并区分预检失败与真实调用。"""
+        failed = await self._repository.append_compression_event(
+            lease.run.id,
+            lease.run.worker_id or "",
+            lease.run.execution_epoch,
+            RunCompressionFailedPayload(
+                operation_id=operation_id,
+                safe_error_code=safe_error_code,
+                batch_count=batch_count,
+                candidate_base_summary_id=candidate.base_summary_id,
+                candidate_covered_through_sequence=candidate.covered_through_sequence,
+            ),
+        )
+        if failed is not None:
+            await self._publish(failed, lease.run)
+        return failed
+
+    async def _latest_compression_failure(
+        self,
+        run: Run,
+    ) -> RunCompressionFailedPayload | None:
+        """分页读取本 Run 最近一次压缩失败，供 Worker 恢复后去重。"""
+        after_sequence = 0
+        latest: RunCompressionFailedPayload | None = None
+        while True:
+            events = await self._repository.list_events(
+                run.session_id,
+                run.owner_id,
+                run.id,
+                after_sequence=after_sequence,
+                limit=100,
+            )
+            if not events:
                 break
-            # 只有标记为可安全重试的供应商错误才退避重试。
-            if not provider_error.retry_safe or attempt == 3:
-                raise RunContextError("run_context_compression_failed") from provider_error
-            delay = max(provider_error.retry_after_seconds or 0.0, 0.25 * 2 ** (attempt - 1))
-            await asyncio.sleep(delay)
-        # 压缩输出必须是完整结束的纯文本，否则视为压缩失败。
-        if response is None:
-            raise RunContextError("run_context_compression_failed")
-        if response.status != "completed" or response.incomplete_reason is not None:
-            raise RunContextError("run_context_compression_incomplete")
-        if len(response.output) != 1 or not isinstance(response.output[0], LlmText):
-            raise RunContextError("run_context_compression_invalid")
-        text = response.output[0].text.strip()
-        if not text:
-            raise RunContextError("run_context_compression_empty")
-        return text, messages[-1].sequence if messages else 0
+            for event in events:
+                if isinstance(event.payload, RunCompressionFailedPayload):
+                    latest = event.payload
+            next_sequence = events[-1].sequence
+            if next_sequence <= after_sequence:
+                break
+            after_sequence = next_sequence
+            if len(events) < 100:
+                break
+        return latest
+
+    @staticmethod
+    def _compression_failure_hint(safe_error_code: str) -> ContextStopReason:
+        """把最近一次真实失败类别映射为安全停止原因。"""
+        if safe_error_code in {
+            "run_compression_context_window_exceeded",
+            "run_context_budget_unavailable",
+        }:
+            return ContextStopReason.COMPRESSION_INPUT_TOO_LARGE
+        if safe_error_code == "run_context_compression_budget_exhausted":
+            return ContextStopReason.COMPRESSION_BUDGET_EXHAUSTED
+        if safe_error_code == "run_compression_model_unavailable":
+            return ContextStopReason.COMPRESSION_MODEL_UNAVAILABLE
+        return ContextStopReason.COMPRESSION_FAILED
+
+    async def _publish(self, event: RunEvent, run: Run) -> None:
+        try:
+            await self._publisher.publish_persisted(run.id, run.execution_epoch, event)
+        except Exception:
+            # SSE 会从 PostgreSQL 对账，发布实时性失败不能改写已提交事实。
+            return
+
+    @staticmethod
+    def _messages_after_summary(
+        messages: tuple[ConversationMessage | ExecutionMessage, ...],
+        summary: ContextSummary | None,
+    ) -> tuple[ConversationMessage | ExecutionMessage, ...]:
+        """保留全部当前 Run 执行协议和摘要边界之后的正式历史。"""
+        if summary is None:
+            return messages
+        return tuple(
+            item
+            for item in messages
+            if isinstance(item, ExecutionMessage)
+            or item.sequence > summary.covered_through_sequence
+        )
+
+    @staticmethod
+    def _retain_after_compression(
+        active_messages: tuple[ConversationMessage | ExecutionMessage, ...],
+        compressed_messages: Sequence[ConversationMessage],
+    ) -> tuple[ConversationMessage | ExecutionMessage, ...]:
+        """按原顺序移除本次一次性摘要覆盖的正式历史。"""
+        compressed_ids = {message.id for message in compressed_messages}
+        return tuple(
+            item
+            for item in active_messages
+            if isinstance(item, ExecutionMessage) or item.id not in compressed_ids
+        )
+
+
+__all__ = [
+    "ContextCompressor",
+    "ContextPreparation",
+    "_compression_token_limits",
+    "_render_messages",
+    "_split_recent_suffix",
+    "_turn_groups",
+]

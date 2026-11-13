@@ -55,8 +55,10 @@ export function makeCompressionPolicy(
     id: "policy-1",
     prompt_template_version: "compression_prompt_v1",
     recent_ratio: 0.2,
+    recent_token_cap: 32_768,
     summary_ratio: 0.1,
-    trigger_ratio: 0.8,
+    summary_token_cap: 8_192,
+    trigger_tokens: 262_144,
     ...overrides,
   };
 }

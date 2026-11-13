@@ -37,6 +37,7 @@ from domain.run.model import (
 )
 from domain.run.model.errors import (
     RunConflictError,
+    RunContextSafetyCommitError,
     RunError,
     RunNotFoundError,
     RunStateError,
@@ -59,6 +60,7 @@ __all__ = [
     "RunCancelRequestedPayload",
     "RunCompletedPayload",
     "RunConflictError",
+    "RunContextSafetyCommitError",
     "RunEvent",
     "RunEventPayload",
     "RunEventTransportError",

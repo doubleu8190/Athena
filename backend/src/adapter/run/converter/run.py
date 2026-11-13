@@ -112,6 +112,7 @@ def run_to_domain(row: RunModel) -> Run:
         llm_request_count=row.llm_request_count,
         skill_snapshot=skill_snapshot,
         input_files=RunInputFiles(file_ids=tuple(row.input_file_ids)),
+        report_message_id=row.report_message_id,
     )
 
 

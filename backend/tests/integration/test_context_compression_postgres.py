@@ -14,6 +14,7 @@ from alembic import command
 from alembic.config import Config
 from integration.llm_fixtures import encrypted_llm_key_fields
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -24,6 +25,7 @@ from adapter.llm.model.profile import (
     DefaultModelProfileModel,
     ModelProfileVersionModel,
 )
+from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.model import RunEventModel, RunModel, SessionContextSummaryModel
@@ -39,13 +41,20 @@ from domain.message import (
     TextPart,
 )
 from domain.run.model import (
+    ContextStopReason,
+    FailRunCommand,
     RecordRunUsageCommand,
+    RunAttemptUsage,
     RunCompressionCompletedPayload,
+    RunFailedPayload,
+    RunStatus,
+    RunUsage,
     SaveContextSummaryCommand,
     SubmitRunCommand,
 )
 from domain.run.model.errors import RunStateError
 from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
+from infrastructure.security.mcp_secrets import McpSecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
@@ -200,8 +209,11 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                         id="cmpol_compression_pg",
                         compression_model_profile_id="llmprof_compression_pg",
                         trigger_ratio=0.8,
+                        trigger_tokens=262_144,
                         recent_ratio=0.2,
+                        recent_token_cap=32_768,
                         summary_ratio=0.1,
+                        summary_token_cap=8_192,
                         prompt_template_version="context-summary-v1",
                         created_at=now,
                     )
@@ -458,6 +470,734 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
             async with admin_engine.begin() as connection:
                 await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
             await engine.dispose()
+            await admin_engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware() -> None:
+    """真实 PostgreSQL 下验证报告、FAILED、usage、事件和取消优先的原子语义。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is required")
+
+    async def scenario() -> None:
+        schema = f"athena_context_report_{token_hex(8)}"
+        admin_engine = create_async_engine(database_url, poolclass=NullPool)
+        engine = create_async_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
+        )
+        try:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            config = Config(str(ALEMBIC_INI))
+            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+            config.attributes["connect_args"] = {
+                "server_settings": {"search_path": f"{schema},public"}
+            }
+            config.attributes["version_table_schema"] = schema
+            await asyncio.to_thread(command.upgrade, config, "head")
+
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            now = datetime.now(UTC)
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="usr_context_report",
+                        email="context-report@example.test",
+                        password_hash="unused",
+                        display_name=None,
+                        status="active",
+                        role="user",
+                        created_at=now,
+                        updated_at=now,
+                        deleted_time=None,
+                    )
+                )
+                session.add(
+                    ModelProfileVersionModel(
+                        id="llmprof_context_report",
+                        name="context report",
+                        protocol="chat_completions",
+                        base_url="https://llm.example.test/v1",
+                        model="report-model",
+                        **encrypted_llm_key_fields("llmprof_context_report"),
+                        context_window_tokens=8192,
+                        tokenizer_encoding="o200k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        max_output_tokens=256,
+                        request_timeout_seconds=10,
+                        execution_timeout_seconds=30,
+                        max_concurrency=1,
+                        temperature=None,
+                        enabled=True,
+                        created_at=now,
+                    )
+                )
+                session.add(
+                    SessionModel(
+                        id="ses_context_report",
+                        owner_id="usr_context_report",
+                        title=None,
+                        project_id=None,
+                        last_message_sequence=1,
+                        created_at=now,
+                        updated_at=now,
+                        deleted_time=None,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    ConversationMessageModel(
+                        id="msg_context_report_trigger",
+                        session_id="ses_context_report",
+                        role="user",
+                        status="completed",
+                        sequence=1,
+                        parts=[{"type": "text", "text": "trigger"}],
+                        reply_to_message_id=None,
+                        run_id="run_context_report",
+                        managed_run_id="run_context_report",
+                        context_turn_id=None,
+                        client_message_id=None,
+                        created_at=now,
+                        completed_at=now,
+                        metadata_json={},
+                    )
+                )
+                session.add(
+                    RunModel(
+                        id="run_context_report",
+                        session_id="ses_context_report",
+                        owner_id="usr_context_report",
+                        status="running",
+                        trigger_message_id="msg_context_report_trigger",
+                        context_cutoff_sequence=1,
+                        retry_of_run_id=None,
+                        model_config_version_id="llmprof_context_report",
+                        compression_policy_version_id=None,
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                        prompt_template_version="run-v2",
+                        event_sequence=0,
+                        execution_epoch=1,
+                        worker_id="worker_context_report",
+                        lease_expires_at=now + timedelta(minutes=2),
+                        execution_started_at=now,
+                        execution_deadline_at=now + timedelta(minutes=2),
+                        queued_at=now,
+                        first_started_at=now,
+                        finished_at=None,
+                        created_at=now,
+                        updated_at=now,
+                        cancel_requested_at=None,
+                        safe_error_code=None,
+                        usage={},
+                    )
+                )
+
+            repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            failed_at = now + timedelta(seconds=1)
+            usage_attempt = RunAttemptUsage(
+                execution_epoch=1,
+                attempt=1,
+                purpose="answer",
+                operation_id="reportop_atomic",
+                batch_index=0,
+                model_profile_id="llmprof_context_report",
+                duration_ms=5,
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                complete=True,
+            )
+            report = ConversationMessageDraft(
+                id="msg_context_report_result",
+                session_id="ses_context_report",
+                owner_id="usr_context_report",
+                role=ConversationRole.ASSISTANT,
+                status=MessageStatus.COMPLETED,
+                parts=(TextPart("上下文安全停止。任务未标记为完成。"),),
+                reply_to_message_id="msg_context_report_trigger",
+                run_id="run_context_report",
+                client_message_id=None,
+                created_at=failed_at,
+                completed_at=failed_at,
+                metadata=MessageMetadata(provider="system_context_safety"),
+                context_turn_id="msg_context_report_trigger",
+            )
+            fail_command = FailRunCommand(
+                run_id="run_context_report",
+                worker_id="worker_context_report",
+                execution_epoch=1,
+                safe_error_code="run_context_safety_stop",
+                failed_at=failed_at,
+                report_message=report,
+                usage=RunUsage(attempts=(usage_attempt,)),
+                context_stop_reason=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+            barrier = asyncio.Barrier(3)
+
+            async def replay() -> object:
+                await barrier.wait()
+                return await repository.fail(fail_command)
+
+            tasks = [asyncio.create_task(replay()) for _ in range(2)]
+            await barrier.wait()
+            results = await asyncio.gather(*tasks)
+            assert all(item is not None for item in results)
+            assert results[0] == results[1]
+
+            async with factory() as session:
+                run_row = await session.get(RunModel, "run_context_report")
+                assert run_row is not None
+                assert run_row.status == RunStatus.FAILED.value
+                assert run_row.safe_error_code == "run_context_safety_stop"
+                assert run_row.report_message_id == report.id
+                assert run_row.usage["total_tokens"] == 120
+                persisted_report = await session.get(ConversationMessageModel, report.id)
+                assert persisted_report is not None
+                assert persisted_report.sequence > 1
+                failed_events = list(
+                    (
+                        await session.scalars(
+                            select(RunEventModel).where(
+                                RunEventModel.run_id == run_row.id,
+                                RunEventModel.type == "failed",
+                            )
+                        )
+                    ).all()
+                )
+                assert len(failed_events) == 1
+                failed_payload = RunFailedPayload.model_validate(failed_events[0].payload)
+                assert failed_payload.report_message_id == report.id
+                assert (
+                    failed_payload.context_stop_reason
+                    is ContextStopReason.NO_COMPRESSIBLE_HISTORY
+                )
+
+            async with factory() as session, session.begin():
+                session.add(
+                    ConversationMessageModel(
+                        id="msg_context_report_cancel_trigger",
+                        session_id="ses_context_report",
+                        role="user",
+                        status="completed",
+                        sequence=3,
+                        parts=[{"type": "text", "text": "cancel race"}],
+                        reply_to_message_id=None,
+                        run_id="run_context_report_cancel",
+                        managed_run_id="run_context_report_cancel",
+                        context_turn_id=None,
+                        client_message_id=None,
+                        created_at=now + timedelta(seconds=2),
+                        completed_at=now + timedelta(seconds=2),
+                        metadata_json={},
+                    )
+                )
+                session_row = await session.get(SessionModel, "ses_context_report")
+                assert session_row is not None
+                session_row.last_message_sequence = 3
+                session.add(
+                    RunModel(
+                        id="run_context_report_cancel",
+                        session_id="ses_context_report",
+                        owner_id="usr_context_report",
+                        status="running",
+                        trigger_message_id="msg_context_report_cancel_trigger",
+                        context_cutoff_sequence=3,
+                        retry_of_run_id=None,
+                        model_config_version_id="llmprof_context_report",
+                        compression_policy_version_id=None,
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                        prompt_template_version="run-v2",
+                        event_sequence=0,
+                        execution_epoch=1,
+                        worker_id="worker_context_report_cancel",
+                        lease_expires_at=now + timedelta(minutes=2),
+                        execution_started_at=now,
+                        execution_deadline_at=now + timedelta(minutes=2),
+                        queued_at=now,
+                        first_started_at=now,
+                        finished_at=None,
+                        created_at=now,
+                        updated_at=now,
+                        cancel_requested_at=None,
+                        safe_error_code=None,
+                        usage={},
+                    )
+                )
+
+            race_report = replace(
+                report,
+                id="msg_context_report_cancel_result",
+                reply_to_message_id="msg_context_report_cancel_trigger",
+                run_id="run_context_report_cancel",
+                created_at=now + timedelta(seconds=3),
+                completed_at=now + timedelta(seconds=3),
+                context_turn_id="msg_context_report_cancel_trigger",
+            )
+            cancel_command = FailRunCommand(
+                run_id="run_context_report_cancel",
+                worker_id="worker_context_report_cancel",
+                execution_epoch=1,
+                safe_error_code="run_context_safety_stop",
+                failed_at=now + timedelta(seconds=3),
+                report_message=race_report,
+                usage=RunUsage(),
+                context_stop_reason=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+            race_barrier = asyncio.Barrier(3)
+
+            async def cancel_run() -> object:
+                await race_barrier.wait()
+                return await repository.cancel(
+                    "ses_context_report",
+                    "usr_context_report",
+                    "run_context_report_cancel",
+                    now + timedelta(seconds=3),
+                )
+
+            async def fail_run() -> object:
+                await race_barrier.wait()
+                return await repository.fail(cancel_command)
+
+            race_tasks = [asyncio.create_task(cancel_run()), asyncio.create_task(fail_run())]
+            await race_barrier.wait()
+            await asyncio.gather(*race_tasks)
+
+            async with factory() as session:
+                race_row = await session.get(RunModel, "run_context_report_cancel")
+                assert race_row is not None
+                race_report_row = await session.get(ConversationMessageModel, race_report.id)
+                if race_row.status == RunStatus.FAILED.value:
+                    assert race_report_row is not None
+                    assert race_row.report_message_id == race_report.id
+                else:
+                    assert race_row.cancel_requested_at is not None
+                    assert race_report_row is None
+                    assert race_row.report_message_id is None
+        finally:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            await engine.dispose()
+            await admin_engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_0024_upgrades_old_policy_and_run_references_without_rewriting() -> None:
+    """既有浮点策略及其 Run/current 引用保留，新格式字段为空且不被静默换算。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is required")
+
+    async def scenario() -> None:
+        schema = f"athena_context_policy_upgrade_{token_hex(8)}"
+        admin_engine = create_async_engine(database_url, poolclass=NullPool)
+        engine = create_async_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
+        )
+        try:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            config = Config(str(ALEMBIC_INI))
+            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+            config.attributes["connect_args"] = {
+                "server_settings": {"search_path": f"{schema},public"}
+            }
+            config.attributes["version_table_schema"] = schema
+            await asyncio.to_thread(command.upgrade, config, "20261122_0023")
+
+            now = datetime.now(UTC)
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO users (
+                            id, email, password_hash, display_name, status, role,
+                            created_at, updated_at, deleted_time
+                        ) VALUES (
+                            'usr_policy_upgrade', 'policy-upgrade@example.test', 'unused',
+                            NULL, 'active', 'user', :now, :now, NULL
+                        )
+                        """
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO llm_model_profile_versions (
+                            id, name, protocol, base_url, model, api_key_ciphertext,
+                            api_key_nonce, api_key_key_version, context_window_tokens,
+                            tokenizer_encoding, supports_stream, supports_tools,
+                            supports_parallel_tool_calls, max_output_tokens,
+                            request_timeout_seconds, execution_timeout_seconds,
+                            max_concurrency, temperature, enabled, created_at
+                        ) VALUES (
+                            'llmprof_policy_upgrade', 'legacy model', 'chat_completions',
+                            'https://llm.example.test/v1', 'legacy-model', NULL, NULL, NULL,
+                            8192, 'o200k_base', true, true, false, 256, 10, 30, 1,
+                            NULL, true, :now
+                        )
+                        """
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO sessions (
+                            id, owner_id, title, project_id, last_message_sequence,
+                            created_at, updated_at, deleted_time
+                        ) VALUES (
+                            'ses_policy_upgrade', 'usr_policy_upgrade', NULL, NULL, 1,
+                            :now, :now, NULL
+                        )
+                        """
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO conversation_messages (
+                            id, session_id, role, status, sequence, parts,
+                            reply_to_message_id, run_id, managed_run_id, context_turn_id,
+                            client_message_id, created_at, completed_at, metadata
+                        ) VALUES (
+                            'msg_policy_upgrade_trigger', 'ses_policy_upgrade', 'user',
+                            'completed', 1, '[{"type":"text","text":"trigger"}]'::jsonb,
+                            NULL, NULL, NULL, NULL, NULL, :now, :now, '{}'::jsonb
+                        )
+                        """
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO llm_compression_policy_versions (
+                            id, compression_model_profile_id, trigger_ratio,
+                            recent_ratio, summary_ratio, prompt_template_version, created_at
+                        ) VALUES (
+                            'cmpol_legacy_upgrade', 'llmprof_policy_upgrade', 0.75,
+                            0.2, 0.1, 'context-summary-v1', :now
+                        )
+                        """
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO llm_current_compression_policy (
+                            singleton_id, policy_version_id
+                        ) VALUES (1, 'cmpol_legacy_upgrade')
+                        """
+                    )
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO runs (
+                            id, session_id, owner_id, status, trigger_message_id,
+                            context_cutoff_sequence, retry_of_run_id,
+                            model_config_version_id, main_prompt_version_id,
+                            compression_prompt_version_id, compression_policy_version_id,
+                            prompt_template_version, event_sequence, execution_epoch,
+                            queued_at, created_at, updated_at, usage
+                        ) VALUES (
+                            'run_policy_upgrade', 'ses_policy_upgrade',
+                            'usr_policy_upgrade', 'failed', 'msg_policy_upgrade_trigger',
+                            1, NULL, 'llmprof_policy_upgrade', :main_prompt_id,
+                            :compression_prompt_id, 'cmpol_legacy_upgrade', 'run-v2',
+                            1, 1, :now, :now, :now, '{}'::jsonb
+                        )
+                        """
+                    ),
+                    {
+                        "now": now,
+                        "main_prompt_id": INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        "compression_prompt_id": INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                    },
+                )
+
+            await asyncio.to_thread(command.upgrade, config, "head")
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.connect() as connection:
+                policy_row = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT trigger_ratio, trigger_tokens, recent_ratio,
+                                   recent_token_cap, summary_ratio, summary_token_cap
+                            FROM llm_compression_policy_versions
+                            WHERE id = 'cmpol_legacy_upgrade'
+                            """
+                        )
+                    )
+                ).mappings().one()
+                current_policy_id = await connection.scalar(
+                    text(
+                        """
+                        SELECT policy_version_id
+                        FROM llm_current_compression_policy
+                        WHERE singleton_id = 1
+                        """
+                    )
+                )
+                run_policy_id, report_message_id = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT compression_policy_version_id, report_message_id
+                            FROM runs
+                            WHERE id = 'run_policy_upgrade'
+                            """
+                        )
+                    )
+                ).one()
+            assert policy_row["trigger_ratio"] == pytest.approx(0.75)
+            assert policy_row["trigger_tokens"] is None
+            assert policy_row["recent_ratio"] == pytest.approx(0.2)
+            assert policy_row["recent_token_cap"] is None
+            assert policy_row["summary_ratio"] == pytest.approx(0.1)
+            assert policy_row["summary_token_cap"] is None
+            assert current_policy_id == "cmpol_legacy_upgrade"
+            assert run_policy_id == "cmpol_legacy_upgrade"
+            assert report_message_id is None
+            repository = SqlAlchemyModelProfileRepository(
+                factory,
+                McpSecretCipher(bytes(range(32))),
+            )
+            assert await repository.get_current_compression_policy() is None
+            assert await repository.get_compression_policy("cmpol_legacy_upgrade") is None
+        finally:
+            await engine.dispose()
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            await admin_engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
+    """报告消息写入失败时，Run 保持 running，usage 和 failed 事件均无部分提交。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is required")
+
+    async def scenario() -> None:
+        schema = f"athena_context_report_rollback_{token_hex(8)}"
+        admin_engine = create_async_engine(database_url, poolclass=NullPool)
+        engine = create_async_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
+        )
+        try:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            config = Config(str(ALEMBIC_INI))
+            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+            config.attributes["connect_args"] = {
+                "server_settings": {"search_path": f"{schema},public"}
+            }
+            config.attributes["version_table_schema"] = schema
+            await asyncio.to_thread(command.upgrade, config, "head")
+
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            now = datetime.now(UTC)
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="usr_report_rollback",
+                        email="report-rollback@example.test",
+                        password_hash="unused",
+                        display_name=None,
+                        status="active",
+                        role="user",
+                        created_at=now,
+                        updated_at=now,
+                        deleted_time=None,
+                    )
+                )
+                session.add(
+                    ModelProfileVersionModel(
+                        id="llmprof_report_rollback",
+                        name="report rollback",
+                        protocol="chat_completions",
+                        base_url="https://llm.example.test/v1",
+                        model="report-model",
+                        **encrypted_llm_key_fields("llmprof_report_rollback"),
+                        context_window_tokens=8192,
+                        tokenizer_encoding="o200k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        max_output_tokens=256,
+                        request_timeout_seconds=10,
+                        execution_timeout_seconds=30,
+                        max_concurrency=1,
+                        temperature=None,
+                        enabled=True,
+                        created_at=now,
+                    )
+                )
+                session.add(
+                    SessionModel(
+                        id="ses_report_rollback",
+                        owner_id="usr_report_rollback",
+                        title=None,
+                        project_id=None,
+                        last_message_sequence=2,
+                        created_at=now,
+                        updated_at=now,
+                        deleted_time=None,
+                    )
+                )
+                await session.flush()
+                session.add_all(
+                    [
+                        ConversationMessageModel(
+                            id="msg_report_rollback_trigger",
+                            session_id="ses_report_rollback",
+                            role="user",
+                            status="completed",
+                            sequence=1,
+                            parts=[{"type": "text", "text": "trigger"}],
+                            reply_to_message_id=None,
+                            run_id="run_report_rollback",
+                            managed_run_id="run_report_rollback",
+                            context_turn_id=None,
+                            client_message_id=None,
+                            created_at=now,
+                            completed_at=now,
+                            metadata_json={},
+                        ),
+                        ConversationMessageModel(
+                            id="msg_report_rollback_duplicate",
+                            session_id="ses_report_rollback",
+                            role="assistant",
+                            status="completed",
+                            sequence=2,
+                            parts=[{"type": "text", "text": "already present"}],
+                            reply_to_message_id="msg_report_rollback_trigger",
+                            run_id=None,
+                            managed_run_id=None,
+                            context_turn_id=None,
+                            client_message_id=None,
+                            created_at=now,
+                            completed_at=now,
+                            metadata_json={},
+                        ),
+                        RunModel(
+                            id="run_report_rollback",
+                            session_id="ses_report_rollback",
+                            owner_id="usr_report_rollback",
+                            status="running",
+                            trigger_message_id="msg_report_rollback_trigger",
+                            context_cutoff_sequence=1,
+                            retry_of_run_id=None,
+                            model_config_version_id="llmprof_report_rollback",
+                            compression_policy_version_id=None,
+                            main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                            compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                                "compression"
+                            ],
+                            prompt_template_version="run-v2",
+                            event_sequence=0,
+                            execution_epoch=1,
+                            worker_id="worker_report_rollback",
+                            lease_expires_at=now + timedelta(minutes=2),
+                            execution_started_at=now,
+                            execution_deadline_at=now + timedelta(minutes=2),
+                            queued_at=now,
+                            first_started_at=now,
+                            finished_at=None,
+                            created_at=now,
+                            updated_at=now,
+                            cancel_requested_at=None,
+                            safe_error_code=None,
+                            usage={},
+                        ),
+                    ]
+                )
+
+            repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            report = ConversationMessageDraft(
+                id="msg_report_rollback_duplicate",
+                session_id="ses_report_rollback",
+                owner_id="usr_report_rollback",
+                role=ConversationRole.ASSISTANT,
+                status=MessageStatus.COMPLETED,
+                parts=(TextPart("context safety report"),),
+                reply_to_message_id="msg_report_rollback_trigger",
+                run_id="run_report_rollback",
+                client_message_id=None,
+                created_at=now + timedelta(seconds=1),
+                completed_at=now + timedelta(seconds=1),
+                metadata=MessageMetadata(provider="system_context_safety"),
+                context_turn_id="msg_report_rollback_trigger",
+            )
+            usage_attempt = RunAttemptUsage(
+                execution_epoch=1,
+                attempt=1,
+                purpose="answer",
+                operation_id="reportop_rollback",
+                batch_index=0,
+                model_profile_id="llmprof_report_rollback",
+                duration_ms=5,
+                input_tokens=100,
+                output_tokens=20,
+                total_tokens=120,
+                complete=True,
+            )
+            with pytest.raises(IntegrityError):
+                await repository.fail(
+                    FailRunCommand(
+                        run_id="run_report_rollback",
+                        worker_id="worker_report_rollback",
+                        execution_epoch=1,
+                        safe_error_code="run_context_safety_stop",
+                        failed_at=now + timedelta(seconds=1),
+                        report_message=report,
+                        usage=RunUsage(attempts=(usage_attempt,)),
+                        context_stop_reason=(
+                            ContextStopReason.NO_COMPRESSIBLE_HISTORY
+                        ),
+                    )
+                )
+
+            async with factory() as session:
+                run_row = await session.get(RunModel, "run_report_rollback")
+                session_row = await session.get(SessionModel, "ses_report_rollback")
+                assert run_row is not None
+                assert session_row is not None
+                assert run_row.status == RunStatus.RUNNING.value
+                assert run_row.report_message_id is None
+                assert run_row.usage == {}
+                assert session_row.last_message_sequence == 2
+                failed_event_count = await session.scalar(
+                    select(RunEventModel)
+                    .where(
+                        RunEventModel.run_id == run_row.id,
+                        RunEventModel.type == "failed",
+                    )
+                    .with_only_columns(RunEventModel.id)
+                )
+                assert failed_event_count is None
+        finally:
+            await engine.dispose()
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
             await admin_engine.dispose()
 
     asyncio.run(scenario())

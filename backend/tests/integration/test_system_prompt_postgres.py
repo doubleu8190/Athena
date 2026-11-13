@@ -323,8 +323,11 @@ async def _seed_prompt_closure_context(
                 id=policy_id,
                 compression_model_profile_id=compression_profile_id,
                 trigger_ratio=0.4,
+                trigger_tokens=1_024,
                 recent_ratio=0.2,
+                recent_token_cap=2_048,
                 summary_ratio=0.1,
+                summary_token_cap=1_024,
                 prompt_template_version="context-summary-v1",
                 created_at=now,
             )

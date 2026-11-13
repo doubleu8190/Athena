@@ -108,6 +108,11 @@ function parseSnapshotPayload(value: unknown): RunSnapshotPayload | null {
         ? value.messages_before_sequence
         : null,
     messages_complete: Boolean(value.messages_complete),
+    report_message_id:
+      typeof value.report_message_id === "string" &&
+      value.report_message_id
+        ? value.report_message_id
+        : null,
     status,
   };
 }

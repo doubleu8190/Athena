@@ -163,6 +163,7 @@ def run_to_response(
         updated_at=run.updated_at,
         cancel_requested_at=run.cancel_requested_at,
         safe_error_code=run.safe_error_code,
+        report_message_id=run.report_message_id,
         usage=_usage_to_response(run.usage),
         skill_snapshot=(
             None

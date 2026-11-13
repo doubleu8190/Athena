@@ -10,7 +10,12 @@ from datetime import UTC, datetime
 from app.run.config import RunWorkerConfig
 from app.run.executor import RunExecutor, RunProgressPublisher
 from common.ids import new_id, now_utc
-from domain.run.model import FailRunCommand, RunLease, RunStatus
+from domain.run.model import (
+    FailRunCommand,
+    RunContextSafetyCommitError,
+    RunLease,
+    RunStatus,
+)
 from domain.run.ports import RunRepository
 
 logger = logging.getLogger(__name__)
@@ -203,10 +208,20 @@ class RunWorker:
 
     async def _finalize_execution(self, lease: RunLease, execution: asyncio.Task[None]) -> None:
         """收敛已清理协程与取消并发，避免迟到状态提交挂起 Run。"""
+        safety_commit_failed = False
         try:
             await execution
         except asyncio.CancelledError:
             pass
+        except RunContextSafetyCommitError as error:
+            # 专用类型表示已有稳定安全收尾命令但结果不确定；禁用普通失败覆盖。
+            safety_commit_failed = True
+            logger.error(
+                "run_context_safety_commit_failed run_id=%s report_message_id=%s reason=%s",
+                lease.run.id,
+                error.report_message_id,
+                error.reason,
+            )
         except Exception as error:
             logger.error(
                 "run_execution_task_failed run_id=%s exception_type=%s",
@@ -229,6 +244,7 @@ class RunWorker:
                 and current.worker_id == lease.run.worker_id
                 and current.execution_epoch == lease.run.execution_epoch
                 and current.status is RunStatus.RUNNING
+                and not safety_commit_failed
             ):
                 worker_id = lease.run.worker_id
                 if worker_id is not None:

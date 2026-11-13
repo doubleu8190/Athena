@@ -643,6 +643,41 @@ def test_run_http_auth_idempotency_clarification_and_control() -> None:
         assert retried.json()["retry_warning"]
 
 
+def test_run_details_projects_persisted_context_safety_report_reference() -> None:
+    """失败终态详情返回报告消息 ID，客户端不依赖瞬时 SSE 文本定位报告。"""
+    repository = InMemoryRunRepository()
+    from app.run.service import RunService
+
+    app = create_app(
+        auth_service=make_auth_service(),
+        run_service=RunService(cast(RunRepository, repository)),
+        public_origin="https://app.example.com",
+    )
+    auth_client = AuthTestClient(app, email="context-stop@example.com")
+    with auth_client as client:
+        session_id = "session-context-stop"
+        owner_id = auth_client.user_id or ""
+        repository.sessions.add((owner_id, session_id))
+        submitted = client.post(
+            f"/api/v1/sessions/{session_id}/runs",
+            json={"request_id": "request-context-stop", "text": "large context"},
+        )
+        assert submitted.status_code == 201
+        run_id = submitted.json()["id"]
+        key = (owner_id, session_id, run_id)
+        repository.runs[key] = replace(
+            repository.runs[key],
+            status=RunStatus.FAILED,
+            safe_error_code="run_context_safety_stop",
+            report_message_id="msg_context_safety_report",
+        )
+
+        details = client.get(f"/api/v1/sessions/{session_id}/runs/{run_id}")
+
+    assert details.status_code == 200
+    assert details.json()["report_message_id"] == "msg_context_safety_report"
+
+
 def test_run_http_cross_owner_is_hidden_and_auth_is_real() -> None:
     repository = InMemoryRunRepository()
     from app.run.service import RunService

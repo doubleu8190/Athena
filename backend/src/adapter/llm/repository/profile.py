@@ -20,7 +20,11 @@ from adapter.llm.model.profile import (
 )
 from common.ids import new_id, now_utc
 from domain.auth import AuthContext, UserRole
-from domain.llm.model.compression_policy import CompressionPolicyInput, CompressionPolicyVersion
+from domain.llm.model.compression_policy import (
+    MAX_COMPRESSION_TOKEN_BUDGET,
+    CompressionPolicyInput,
+    CompressionPolicyVersion,
+)
 from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, RuntimeModelProfile
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
@@ -190,7 +194,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
             return None if row is None else _compression_policy_to_domain(row)
 
     async def get_compression_policy(self, policy_id: str) -> CompressionPolicyVersion | None:
-        """读取 Run 已固定的压缩策略快照。"""
+        """读取 Run 已固定的新格式压缩策略快照。"""
         async with self._session_factory() as session:
             row = await session.get(CompressionPolicyVersionModel, policy_id)
             return None if row is None else _compression_policy_to_domain(row)
@@ -201,7 +205,12 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
         """创建不可变压缩策略版本并切换当前指向。"""
         if (
             not value.compression_model_profile_id
-            or not 0 < value.trigger_ratio < 1
+            or type(value.trigger_tokens) is not int
+            or not 1 <= value.trigger_tokens <= MAX_COMPRESSION_TOKEN_BUDGET
+            or type(value.recent_token_cap) is not int
+            or not 1 <= value.recent_token_cap <= MAX_COMPRESSION_TOKEN_BUDGET
+            or type(value.summary_token_cap) is not int
+            or not 1 <= value.summary_token_cap <= MAX_COMPRESSION_TOKEN_BUDGET
             or not 0 < value.recent_ratio < 1
             or not 0 < value.summary_ratio < 1
             or value.recent_ratio + value.summary_ratio >= 1
@@ -224,9 +233,13 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                 row = CompressionPolicyVersionModel(
                     id=new_id("cmpol"),
                     compression_model_profile_id=profile.id,
-                    trigger_ratio=value.trigger_ratio,
+                    # 历史列只用于滚动升级兼容，新实例只读取绝对 Token 阈值。
+                    trigger_ratio=0.8,
+                    trigger_tokens=value.trigger_tokens,
                     recent_ratio=value.recent_ratio,
+                    recent_token_cap=value.recent_token_cap,
                     summary_ratio=value.summary_ratio,
+                    summary_token_cap=value.summary_token_cap,
                     prompt_template_version="context-summary-v1",
                     created_at=now,
                 )
@@ -236,7 +249,10 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                     CurrentCompressionPolicyModel(singleton_id=1, policy_version_id=row.id)
                 )
                 await session.flush()
-                return _compression_policy_to_domain(row)
+                result = _compression_policy_to_domain(row)
+                if result is None:
+                    raise RuntimeError("llm_compression_policy_projection_invalid")
+                return result
 
     async def get_default_id(self, actor: AuthContext) -> str | None:
         """复核管理员后返回当前默认版本标识。"""
@@ -295,14 +311,18 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
 
 def _compression_policy_to_domain(
     row: CompressionPolicyVersionModel,
-) -> CompressionPolicyVersion:
-    """将压缩策略 ORM 行转换为不可变领域版本。"""
+) -> CompressionPolicyVersion | None:
+    """只投影完整的新格式策略，旧浮点策略安全视为未配置。"""
+    if row.trigger_tokens is None or row.recent_token_cap is None or row.summary_token_cap is None:
+        return None
     return CompressionPolicyVersion(
         id=row.id,
         compression_model_profile_id=row.compression_model_profile_id,
-        trigger_ratio=row.trigger_ratio,
+        trigger_tokens=row.trigger_tokens,
         recent_ratio=row.recent_ratio,
+        recent_token_cap=row.recent_token_cap,
         summary_ratio=row.summary_ratio,
+        summary_token_cap=row.summary_token_cap,
         prompt_template_version=row.prompt_template_version,
         created_at=row.created_at,
     )

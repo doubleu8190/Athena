@@ -123,9 +123,11 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
                 actor,
                 CompressionPolicyInput(
                     compression_model_profile_id=request.compression_model_profile_id,
-                    trigger_ratio=request.trigger_ratio,
+                    trigger_tokens=request.trigger_tokens,
                     recent_ratio=request.recent_ratio,
+                    recent_token_cap=request.recent_token_cap,
                     summary_ratio=request.summary_ratio,
+                    summary_token_cap=request.summary_token_cap,
                 ),
             )
         except ModelProfileAuthorizationError as error:

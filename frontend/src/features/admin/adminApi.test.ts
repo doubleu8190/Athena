@@ -105,8 +105,10 @@ describe("管理 API 契约", () => {
       id: null,
       prompt_template_version: null,
       recent_ratio: null,
+      recent_token_cap: null,
       summary_ratio: null,
-      trigger_ratio: null,
+      summary_token_cap: null,
+      trigger_tokens: null,
     });
     const configured = makeCompressionPolicy();
     const fetchMock = vi
@@ -117,8 +119,10 @@ describe("管理 API 契约", () => {
     const input = {
       compression_model_profile_id: "model-primary",
       recent_ratio: 0.2,
+      recent_token_cap: 32768,
       summary_ratio: 0.1,
-      trigger_ratio: 0.8,
+      summary_token_cap: 8192,
+      trigger_tokens: 262144,
     };
 
     await expect(getCompressionPolicy()).resolves.toEqual(unconfigured);

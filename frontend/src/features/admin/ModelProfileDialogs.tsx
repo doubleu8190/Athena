@@ -9,6 +9,7 @@ import {
   useUpdateCompressionPolicyMutation,
 } from "./hooks";
 import {
+  compressionPolicyFormBudgets,
   compressionPolicyForm,
   CONTEXT_WINDOW_TOKEN_LIMIT_MAX,
   defaultModelProfileForm,
@@ -24,6 +25,7 @@ import {
   type ModelProfileFormValues,
   type CompressionPolicyFormValues,
 } from "./model";
+import { formatTokenCount } from "./display";
 
 function FieldError({
   error,
@@ -627,6 +629,7 @@ export function CompressionPolicyDialog({
       setRequestError(adminErrorMessage(failure));
     }
   };
+  const derivedBudgets = compressionPolicyFormBudgets(values);
 
   return (
     <Modal
@@ -714,21 +717,20 @@ export function CompressionPolicyDialog({
         <div className="admin-form-grid admin-form-grid--three">
           <label
             className="workspace-field"
-            htmlFor={`${formId}-trigger-ratio`}
+            htmlFor={`${formId}-trigger-tokens`}
           >
-            <span>触发比例</span>
+            <span>触发 Token</span>
             <input
-              aria-invalid={Boolean(errors.trigger_ratio)}
+              aria-invalid={Boolean(errors.trigger_tokens)}
               disabled={mutation.isPending}
-              id={`${formId}-trigger-ratio`}
-              max={0.999}
-              min={0.001}
+              id={`${formId}-trigger-tokens`}
+              min={1}
               onChange={(event) =>
-                update("trigger_ratio", event.target.value)
+                update("trigger_tokens", event.target.value)
               }
-              step="0.01"
+              step="1"
               type="number"
-              value={values.trigger_ratio}
+              value={values.trigger_tokens}
             />
           </label>
           <label
@@ -752,6 +754,24 @@ export function CompressionPolicyDialog({
           </label>
           <label
             className="workspace-field"
+            htmlFor={`${formId}-recent-token-cap`}
+          >
+            <span>近期原文 Token 上限</span>
+            <input
+              aria-invalid={Boolean(errors.recent_token_cap)}
+              disabled={mutation.isPending}
+              id={`${formId}-recent-token-cap`}
+              min={1}
+              onChange={(event) =>
+                update("recent_token_cap", event.target.value)
+              }
+              step="1"
+              type="number"
+              value={values.recent_token_cap}
+            />
+          </label>
+          <label
+            className="workspace-field"
             htmlFor={`${formId}-summary-ratio`}
           >
             <span>摘要比例</span>
@@ -769,15 +789,41 @@ export function CompressionPolicyDialog({
               value={values.summary_ratio}
             />
           </label>
+          <label
+            className="workspace-field"
+            htmlFor={`${formId}-summary-token-cap`}
+          >
+            <span>摘要 Token 上限</span>
+            <input
+              aria-invalid={Boolean(errors.summary_token_cap)}
+              disabled={mutation.isPending}
+              id={`${formId}-summary-token-cap`}
+              min={1}
+              onChange={(event) =>
+                update("summary_token_cap", event.target.value)
+              }
+              step="1"
+              type="number"
+              value={values.summary_token_cap}
+            />
+          </label>
         </div>
         <p className="admin-form-help">
-          三个比例都必须大于 0 且小于 1；近期原文与摘要比例之和必须小于 1。
+          触发 Token 与两个上限必须为正整数；两个比例都必须大于 0
+          且小于 1，并且比例之和必须小于 1。
+        </p>
+        <p className="admin-form-help">
+          派生近期原文预算：{formatTokenCount(derivedBudgets.recent)}
+          {" · "}
+          派生摘要预算：{formatTokenCount(derivedBudgets.summary)}
         </p>
         <FieldError
           error={
-            errors.trigger_ratio ??
+            errors.trigger_tokens ??
             errors.recent_ratio ??
-            errors.summary_ratio
+            errors.recent_token_cap ??
+            errors.summary_ratio ??
+            errors.summary_token_cap
           }
           id={`${formId}-ratios-error`}
         />

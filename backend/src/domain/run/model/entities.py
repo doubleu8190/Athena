@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -29,6 +29,19 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ContextStopReason(StrEnum):
+    """上下文超过安全线时允许向客户端公开的稳定原因。"""
+
+    NO_COMPRESSIBLE_HISTORY = "no_compressible_history"
+    COMPRESSION_NOT_CONFIGURED = "compression_not_configured"
+    COMPRESSION_MODEL_UNAVAILABLE = "compression_model_unavailable"
+    COMPRESSION_BUDGET_EXHAUSTED = "compression_budget_exhausted"
+    COMPRESSION_INPUT_TOO_LARGE = "compression_input_too_large"
+    COMPRESSION_FAILED = "compression_failed"
+    COMPRESSION_INSUFFICIENT = "compression_insufficient"
+    HARD_WINDOW_EXCEEDED = "hard_window_exceeded"
 
 
 class InputRequestStatus(StrEnum):
@@ -195,6 +208,8 @@ class RunCompletedPayload(_RunEventPayload):
 class RunFailedPayload(_RunEventPayload):
     type: Literal["failed"] = "failed"
     safe_error_code: str
+    report_message_id: str | None = None
+    context_stop_reason: ContextStopReason | None = None
 
 
 class RunCancelledPayload(_RunEventPayload):
@@ -219,6 +234,8 @@ class RunCompressionFailedPayload(_RunEventPayload):
     operation_id: str
     safe_error_code: str
     batch_count: int
+    candidate_base_summary_id: str | None = None
+    candidate_covered_through_sequence: int | None = None
 
 
 class RunToolCallStartedPayload(_RunEventPayload):
@@ -303,6 +320,7 @@ class Run:
     llm_request_count: int = 0
     skill_snapshot: RunSkillSnapshot | None = None
     input_files: RunInputFiles = RunInputFiles()
+    report_message_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,6 +446,9 @@ class FailRunCommand:
     execution_epoch: int
     safe_error_code: str
     failed_at: datetime
+    report_message: ConversationMessageDraft | None = None
+    usage: RunUsage = field(default_factory=RunUsage)
+    context_stop_reason: ContextStopReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,6 +462,7 @@ class RunLease:
 
 __all__ = [
     "AnswerRunCommand",
+    "ContextStopReason",
     "InputRequestStatus",
     "FailRunCommand",
     "FinishRunCommand",

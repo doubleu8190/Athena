@@ -65,6 +65,7 @@ import { newRequestId } from "./requestId";
 import {
   projectRunStatus,
   reconcileCompletedRun,
+  reconcileFailedRun,
 } from "./runStream";
 import { RunExecutionTrace } from "./RunExecutionTrace";
 import { RunStatusBadge } from "./RunStatusBadge";
@@ -397,6 +398,10 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   });
   const streamMatchesRun = stream.state.runId === currentRunId;
   const streamMessages = streamMatchesRun ? stream.state.messages : [];
+  const streamEvents = stream.state.events;
+  const streamReportMessageId = streamMatchesRun
+    ? stream.state.reportMessageId
+    : null;
   const transientText = streamMatchesRun
     ? stream.state.transientText
     : "";
@@ -439,8 +444,8 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     void queryClient.invalidateQueries({
       queryKey: sessionFileKeys.list(sessionId),
     });
-    // 失败和取消没有权威最终回答；旧工具/文件交付消息不能用于清除临时文本。
-    if (terminalStatus === "failed" || terminalStatus === "cancelled") {
+    // 取消终态没有权威回答；旧工具/文件交付消息不能用于清除临时文本。
+    if (terminalStatus === "cancelled") {
       return;
     }
     if (!triggerMessageId) {
@@ -456,13 +461,34 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     }
     let active = true;
     setTerminalMessageFailure(null);
-    void reconcileCompletedRun(
-      sessionId,
-      terminalRunId,
-      triggerMessageId,
-    )
+    const projectedReportMessageId =
+      terminalStatus === "failed"
+        ? (run?.report_message_id ?? streamReportMessageId)
+        : null;
+    const reconciliation =
+      terminalStatus === "failed"
+        ? reconcileFailedRun(
+            sessionId,
+            terminalRunId,
+            triggerMessageId,
+            projectedReportMessageId,
+            streamEvents,
+          )
+        : reconcileCompletedRun(
+            sessionId,
+            terminalRunId,
+            triggerMessageId,
+          );
+    void reconciliation
       .then((result) => {
         if (result.kind === "not_found") {
+          // 普通 failed 没有报告时维持原行为；只有显式报告未能对账才提示失败。
+          if (
+            terminalStatus === "failed" &&
+            result.reason === "failed_event"
+          ) {
+            return;
+          }
           if (active) {
             setTerminalMessageFailure({
               kind: "not_found",
@@ -495,10 +521,13 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   }, [
     currentRunId,
     queryClient,
+    run?.report_message_id,
     run?.trigger_message_id,
     sessionId,
     status,
     stream.closeTerminal,
+    streamEvents,
+    streamReportMessageId,
     stream.settleTerminal,
     terminalMessageRetry,
   ]);
@@ -956,14 +985,22 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
           {terminalMessageFailure?.runId === currentRunId ? (
             <ErrorBanner
               message={
-                terminalMessageFailure.kind === "not_found"
-                  ? "运行已完成，但未找到完成事件所指的最终消息。清空草稿前请重试对账。"
-                  : "运行已完成，但最终消息同步失败。请重试加载最终回答。"
+                status === "failed"
+                  ? terminalMessageFailure.kind === "not_found"
+                    ? "运行失败，但未找到失败事件所指的权威报告。清空状态前请重试对账。"
+                    : "失败报告同步失败，不会使用其他 Run 或工具交付消息替代。请重试加载失败报告。"
+                  : terminalMessageFailure.kind === "not_found"
+                    ? "运行已完成，但未找到完成事件所指的最终消息。清空草稿前请重试对账。"
+                    : "运行已完成，但最终消息同步失败。请重试加载最终回答。"
               }
               onRetry={() =>
                 setTerminalMessageRetry((attempt) => attempt + 1)
               }
-              retryLabel="重试加载最终消息"
+              retryLabel={
+                status === "failed"
+                  ? "重试加载失败报告"
+                  : "重试加载最终消息"
+              }
             />
           ) : null}
 

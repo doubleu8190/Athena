@@ -145,6 +145,7 @@ class RunResponse(BaseModel):
     updated_at: datetime
     cancel_requested_at: datetime | None
     safe_error_code: str | None
+    report_message_id: str | None
     usage: RunUsageResponse
     skill_snapshot: RunSkillSnapshotResponse | None
     input_file_ids: list[str]

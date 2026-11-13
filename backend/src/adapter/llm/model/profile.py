@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -86,9 +87,13 @@ class CompressionPolicyVersionModel(Base):
     compression_model_profile_id: Mapped[str] = mapped_column(
         ForeignKey("llm_model_profile_versions.id", ondelete="RESTRICT"), nullable=False
     )
+    # 旧版本保留 trigger_ratio 历史列；新版本只读取绝对 trigger_tokens。
     trigger_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    trigger_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     recent_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    recent_token_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     summary_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    summary_token_cap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     prompt_template_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

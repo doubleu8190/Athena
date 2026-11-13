@@ -235,8 +235,11 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                         id="cmpol_run_e2e",
                         compression_model_profile_id="llmprof_compression_e2e",
                         trigger_ratio=0.4,
+                        trigger_tokens=1_024,
                         recent_ratio=0.2,
+                        recent_token_cap=2_048,
                         summary_ratio=0.1,
+                        summary_token_cap=1_024,
                         prompt_template_version="context-summary-v1",
                         created_at=now,
                     )

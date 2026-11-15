@@ -421,6 +421,72 @@ def test_tool_call_diagnostic_caps_fragments_without_changing_stream(
     assert completed.tool_call.arguments == {"value": "still-complete"}
 
 
+def test_tool_call_diagnostic_records_cancelled_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """流式消费被取消时记录 outcome=cancelled，且不把取消误报为错误。"""
+
+    # 首个分片声明工具身份后永久阻塞，让测试能在消费端停在上游读取时取消。
+    class _BlockedToolCallStream(_ClosableStream):
+        def __init__(self) -> None:
+            super().__init__(
+                (
+                    chunk(
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_cancel",
+                                function=SimpleNamespace(name="tool", arguments=None),
+                            )
+                        ]
+                    ),
+                )
+            )
+            self.blocked = asyncio.Event()
+            self._next_index = 0
+
+        def __aiter__(self) -> AsyncIterator[object]:
+            return self
+
+        async def __anext__(self) -> object:
+            # values 是 Sequence，按游标逐个投递，避免修改共享切片序列。
+            if self._next_index < len(self.values):
+                value = self.values[self._next_index]
+                self._next_index += 1
+                return value
+            # 告知测试消费任务已阻塞在上游读取，随后保持挂起等待取消。
+            self.blocked.set()
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    stream = _BlockedToolCallStream()
+    adapter = _public_adapter(stream)
+    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "hi"),))
+
+    async def cancel() -> None:
+        async with adapter.stream(runtime_profile(), request) as events:
+            first = await anext(events)
+            assert isinstance(first, ToolCallStarted)
+            task = asyncio.ensure_future(anext(events))
+            await stream.blocked.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    # DEBUG 必须在诊断对象构造前开启，否则取消结果不会输出诊断日志。
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(cancel())
+
+    payload = diagnostic_payload(caplog)
+    assert payload["outcome"] == "cancelled"
+    assert payload["error_code"] is None
+    assert payload["chunks_observed"] == 1
+    assert cast(dict[str, Any], payload["totals"])["fragment_count"] == 1
+    # 取消路径同样必须关闭上游流并归还并发名额。
+    assert stream.closed
+    assert adapter._semaphores["llmprof_test"]._value == 1
+
+
 def test_stream_preserves_repeated_tool_identity_without_concatenation() -> None:
     """跨分片重复声明同一 ID/名称时保留原值，冲突身份按协议错误拒绝。"""
     adapter = OpenAIChatCompletionsAdapter()
@@ -736,9 +802,7 @@ def test_public_stream_passes_profile_timeout_on_each_sdk_request() -> None:
     adapter._client = lambda runtime: cast(  # type: ignore[method-assign]
         AsyncOpenAI,
         SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=_CapturingCreate())
-            )
+            chat=SimpleNamespace(completions=SimpleNamespace(create=_CapturingCreate()))
         ),
     )
     base = runtime_profile()

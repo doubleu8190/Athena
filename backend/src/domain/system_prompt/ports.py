@@ -27,6 +27,7 @@ class SystemPromptRepository(Protocol):
         page_size: int,
     ) -> SystemPromptVersionPage:
         """按创建时间和版本标识稳定倒序读取版本分页。"""
+        ...
 
     async def get_version(
         self, kind: SystemPromptKind, version_id: str
@@ -43,6 +44,7 @@ class SystemPromptRepository(Protocol):
         created_at: datetime,
     ) -> SystemPromptVersion:
         """比较当前指针后原子创建并切换新版本。"""
+        ...
 
     async def restore(
         self,
@@ -54,6 +56,7 @@ class SystemPromptRepository(Protocol):
         created_at: datetime,
     ) -> SystemPromptVersion:
         """从同类别历史正文创建新版本并原子切换当前指针。"""
+        ...
 
     async def get_by_id(self, version_id: str) -> SystemPromptVersion | None:
         """按不可变版本标识解析正文，供 Run 执行使用。"""

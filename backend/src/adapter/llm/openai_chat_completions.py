@@ -7,8 +7,8 @@ import hashlib
 import json
 import logging
 import math
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -213,6 +213,32 @@ class _ToolCallDiagnostics:
             json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
         )
 
+    def record_completed(self) -> None:
+        """标记本次流式调用已完整成功结束。"""
+        self.outcome = "completed"
+
+    def record_cancelled(self) -> None:
+        """标记本次流式调用被取消或超时中断。"""
+        self.outcome = "cancelled"
+
+    def record_rejected(self, error: Exception) -> None:
+        """记录流式调用被拒绝的结果，并将错误码清洗为固定安全格式。"""
+        self.outcome = "rejected"
+        if isinstance(error, LlmError):
+            code = error.code
+            self.error_code = (
+                code
+                if code.isascii()
+                and 1 <= len(code) <= 80
+                and all(
+                    character.islower() or character.isdigit() or character == "_"
+                    for character in code
+                )
+                else "llm_error"
+            )
+        else:
+            self.error_code = "llm_provider_error"
+
 
 def _retry_after_seconds(value: str | None, now: datetime | None = None) -> float | None:
     """解析 Retry-After 秒数或 HTTP 日期；无效值不提供重试建议。"""
@@ -270,12 +296,6 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         """取得指定模型版本共享的并发配额。"""
         return self._semaphores.setdefault(config.id, asyncio.Semaphore(config.max_concurrency))
 
-    def stream(
-        self, runtime: RuntimeModelProfile, request: LlmRequest
-    ) -> AbstractAsyncContextManager[AsyncIterator[LlmStreamEvent]]:
-        """使用 Run 固定的配置版本发起调用。"""
-        return self._stream(runtime, request)
-
     async def complete(self, runtime: RuntimeModelProfile, request: LlmRequest) -> LlmResponse:
         """使用 runtime 配置执行无工具的单次文本请求。"""
         config = runtime.version
@@ -325,10 +345,10 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 semaphore.release()
 
     @asynccontextmanager
-    async def _stream(
+    async def stream(
         self, runtime: RuntimeModelProfile, request: LlmRequest
     ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
-        """持有并发名额直到流结束、失败或调用方退出。"""
+        """使用 Run 固定的配置版本发起流式调用，并持有并发名额直到流结束、失败或调用方退出。"""
         config = runtime.version
         # 先确认绑定版本支持流式与工具，再申请该版本的并发名额。
         self._validate_capabilities(runtime)
@@ -342,7 +362,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 async with timeout_scope:
                     await semaphore.acquire()
                     acquired = True
-                    create = cast(Any, self._client(runtime).chat.completions.create)
+                    async_client = self._client(runtime)
                     try:
                         # 只发起一次流式请求（SDK 重试已禁用），重试策略由执行器负责。
                         request_parameters = self._stream_request_parameters(
@@ -350,7 +370,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                             request,
                             timeout=timeout,
                         )
-                        stream = await create(**request_parameters)
+                        stream = await async_client.chat.completions.create(**request_parameters)
                     except asyncio.CancelledError:
                         raise
                     except LlmError:
@@ -644,11 +664,26 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
             raise LlmProtocolError("llm_stream_too_large")
         return chunk_count, total_raw_bytes
 
-    async def _tool_fragment_events(
+    async def _iter_chunks(self, stream: Any) -> AsyncIterator[Any]:
+        """安全迭代上游异步流，并将供应商异常映射为固定安全错误码。"""
+        iterator = aiter(stream)
+        while True:
+            try:
+                yield await anext(iterator)
+            except StopAsyncIteration:
+                break
+            except asyncio.CancelledError:
+                raise
+            except LlmError:
+                raise
+            except Exception as error:
+                self._raise_provider_error(error)
+
+    def _tool_fragment_events(
         self,
         calls: dict[int, _ToolCallAccumulator],
         fragment: Any,
-    ) -> AsyncIterator[LlmStreamEvent]:
+    ) -> Iterator[LlmStreamEvent]:
         """累积一个工具调用分片，并按现有顺序产出开始与参数增量事件。"""
         index = fragment.index
         state = calls.get(index)
@@ -680,6 +715,54 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
             state.arguments += arguments
             yield ToolArgumentsDelta(output_index=index, call_id=state.call_id, delta=arguments)
 
+    @staticmethod
+    def _finalize_stream_events(
+        *,
+        finish_reason: str | None,
+        text_parts: list[str],
+        calls: dict[int, _ToolCallAccumulator],
+        model: str,
+        response_id: str | None,
+        usage: LlmUsage | None,
+    ) -> Iterator[LlmStreamEvent]:
+        """校验流结束状态、重组完整工具调用并产出收尾事件。"""
+        # 只接受正常停止或工具调用结束；长度截断等其他原因都视为不完整。
+        if finish_reason not in {"stop", "tool_calls"}:
+            raise LlmIncompleteError("llm_incomplete")
+        output: list[LlmText | LlmToolCall] = []
+        if text_parts:
+            output.append(LlmText("".join(text_parts)))
+        if calls and finish_reason != "tool_calls":
+            raise LlmProtocolError()
+        if finish_reason == "tool_calls" and not calls:
+            raise LlmProtocolError("llm_tool_calls_missing")
+        # 最终校验：调用 id 唯一、参数是合法 JSON 对象，才生成完整的 LlmToolCall。
+        call_ids = [state.call_id for state in calls.values()]
+        if len(set(call_ids)) != len(call_ids):
+            raise LlmProtocolError("llm_tool_call_identity_invalid")
+        for index in sorted(calls):
+            state = calls[index]
+            try:
+                arguments = json.loads(state.arguments)
+            except (TypeError, ValueError):
+                raise LlmProtocolError("llm_tool_arguments_invalid") from None
+            if not state.call_id or not state.name or not isinstance(arguments, dict):
+                raise LlmProtocolError("llm_tool_arguments_invalid")
+            call = LlmToolCall(state.call_id, state.name, arguments)
+            output.append(call)
+            yield ToolCallCompleted(output_index=index, tool_call=call)
+        # 只有完整重组成功后才发出 ResponseCompleted，执行器据此确认调用成功。
+        result = LlmResponse(
+            output=tuple(output),
+            status="completed",
+            incomplete_reason=None,
+            model=model,
+            response_id=response_id,
+            request_id=None,
+            usage=usage,
+        )
+        yield ResponseCompleted(result)
+
     async def _events(
         self, stream: Any, runtime: RuntimeModelProfile
     ) -> AsyncIterator[LlmStreamEvent]:
@@ -694,19 +777,8 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         text_bytes = 0
         chunk_count = 0
         diagnostics = _ToolCallDiagnostics()
-        iterator = aiter(stream)
         try:
-            while True:
-                try:
-                    chunk = await anext(iterator)
-                except StopAsyncIteration:
-                    break
-                except asyncio.CancelledError:
-                    raise
-                except LlmError:
-                    raise
-                except Exception as error:
-                    self._raise_provider_error(error)
+            async for chunk in self._iter_chunks(stream):
                 diagnostics.observe_chunk()
                 # 对分片数量、单片体积与累计体积设上限，防止异常流耗尽资源。
                 chunk_count, total_raw_bytes = self._measure_stream_chunk(
@@ -726,103 +798,62 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 # 文本/工具累积位置和最终响应语义，必须整体拒绝。
                 if len(choices) > 1:
                     raise LlmProtocolError("llm_stream_choice_invalid")
-                if choices:
-                    choice = choices[0]
-                    choice_index = getattr(choice, "index", None)
-                    if (
-                        not isinstance(choice_index, int)
-                        or isinstance(choice_index, bool)
-                        or choice_index != 0
-                    ):
-                        raise LlmProtocolError("llm_stream_choice_invalid")
-                for choice in choices:
-                    if choice.finish_reason is not None:
-                        diagnostics.observe_finish_reason(choice.finish_reason)
-                        if finish_reason is not None and finish_reason != choice.finish_reason:
-                            raise LlmProtocolError()
-                        finish_reason = choice.finish_reason
-                    delta = choice.delta
-                    refusal = getattr(delta, "refusal", None)
-                    if refusal:
-                        raise LlmRefusalError("llm_refusal")
-                    content = getattr(delta, "content", None)
-                    if content:
-                        if not isinstance(content, str):
-                            raise LlmProtocolError()
-                        # 文本累计体积受上限约束，防止超长响应进入持久化。
-                        text_bytes += len(content.encode("utf-8"))
-                        if text_bytes > MAX_TEXT_BYTES:
-                            raise LlmProtocolError("llm_response_too_large")
-                        text_parts.append(content)
-                        yield TextDelta(output_index=0, content_index=0, text=content)
-                    # 工具诊断只旁路观察原始分片，不参与重组合法性判定。
-                    tool_fragments = getattr(delta, "tool_calls", None) or ()
-                    for position, fragment in enumerate(tool_fragments):
-                        diagnostics.observe_fragment(
-                            choice_index=getattr(choice, "index", None),
-                            fragment_position=position,
-                            fragment=fragment,
-                        )
-                        # 工具调用按 index 累积：id/name 只出现一次，arguments 分片拼接。
-                        async for tool_event in self._tool_fragment_events(calls, fragment):
-                            yield tool_event
-            # 只接受正常停止或工具调用结束；长度截断等其他原因都视为不完整。
-            if finish_reason not in {"stop", "tool_calls"}:
-                raise LlmIncompleteError("llm_incomplete")
-            output: list[LlmText | LlmToolCall] = []
-            if text_parts:
-                output.append(LlmText("".join(text_parts)))
-            if calls and finish_reason != "tool_calls":
-                raise LlmProtocolError()
-            if finish_reason == "tool_calls" and not calls:
-                raise LlmProtocolError("llm_tool_calls_missing")
-            # 最终校验：调用 id 唯一、参数是合法 JSON 对象，才生成完整的 LlmToolCall。
-            call_ids = [state.call_id for state in calls.values()]
-            if len(set(call_ids)) != len(call_ids):
-                raise LlmProtocolError("llm_tool_call_identity_invalid")
-            for index in sorted(calls):
-                state = calls[index]
-                try:
-                    arguments = json.loads(state.arguments)
-                except (TypeError, ValueError):
-                    raise LlmProtocolError("llm_tool_arguments_invalid") from None
-                if not state.call_id or not state.name or not isinstance(arguments, dict):
-                    raise LlmProtocolError("llm_tool_arguments_invalid")
-                call = LlmToolCall(state.call_id, state.name, arguments)
-                output.append(call)
-                yield ToolCallCompleted(output_index=index, tool_call=call)
-            # 只有完整重组成功后才发出 ResponseCompleted，执行器据此确认调用成功。
-            result = LlmResponse(
-                output=tuple(output),
-                status="completed",
-                incomplete_reason=None,
+                if not choices:
+                    continue
+                choice = choices[0]
+                choice_index = getattr(choice, "index", None)
+                if (
+                    not isinstance(choice_index, int)
+                    or isinstance(choice_index, bool)
+                    or choice_index != 0
+                ):
+                    raise LlmProtocolError("llm_stream_choice_invalid")
+                if choice.finish_reason is not None:
+                    diagnostics.observe_finish_reason(choice.finish_reason)
+                    if finish_reason is not None and finish_reason != choice.finish_reason:
+                        raise LlmProtocolError()
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
+                refusal = getattr(delta, "refusal", None)
+                if refusal:
+                    raise LlmRefusalError("llm_refusal")
+                content = getattr(delta, "content", None)
+                if content:
+                    if not isinstance(content, str):
+                        raise LlmProtocolError()
+                    # 文本累计体积受上限约束，防止超长响应进入持久化。
+                    text_bytes += len(content.encode("utf-8"))
+                    if text_bytes > MAX_TEXT_BYTES:
+                        raise LlmProtocolError("llm_response_too_large")
+                    text_parts.append(content)
+                    yield TextDelta(output_index=0, content_index=0, text=content)
+                # 工具诊断只旁路观察原始分片，不参与重组合法性判定。
+                tool_fragments = getattr(delta, "tool_calls", None) or ()
+                for position, fragment in enumerate(tool_fragments):
+                    diagnostics.observe_fragment(
+                        choice_index=choice_index,
+                        fragment_position=position,
+                        fragment=fragment,
+                    )
+                    # 工具调用按 index 累积：id/name 只出现一次，arguments 分片拼接。
+                    for tool_event in self._tool_fragment_events(calls, fragment):
+                        yield tool_event
+            for final_event in self._finalize_stream_events(
+                finish_reason=finish_reason,
+                text_parts=text_parts,
+                calls=calls,
                 model=runtime.version.model,
                 response_id=response_id,
-                request_id=None,
                 usage=usage,
-            )
-            diagnostics.outcome = "completed"
-            yield ResponseCompleted(result)
+            ):
+                if isinstance(final_event, ResponseCompleted):
+                    diagnostics.record_completed()
+                yield final_event
         except asyncio.CancelledError:
-            diagnostics.outcome = "cancelled"
+            diagnostics.record_cancelled()
             raise
-        except LlmError as error:
-            code = error.code
-            diagnostics.outcome = "rejected"
-            diagnostics.error_code = (
-                code
-                if code.isascii()
-                and 1 <= len(code) <= 80
-                and all(
-                    character.islower() or character.isdigit() or character == "_"
-                    for character in code
-                )
-                else "llm_error"
-            )
-            raise
-        except Exception:
-            diagnostics.outcome = "rejected"
-            diagnostics.error_code = "llm_provider_error"
+        except Exception as error:
+            diagnostics.record_rejected(error)
             raise
         finally:
             diagnostics.emit()

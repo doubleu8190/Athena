@@ -19,16 +19,15 @@ from app.tool import ToolManager
 from bootstrap.tool import QueryServiceBundle, build_query_services
 from domain.knowledge.model import OriginalStorageConfigurationError
 from domain.llm.ports import EmbeddingPort, TokenCounterPort
-from domain.memory.model import MemoryRepositoryPort, RerankerPort
-from domain.memory.ports import MemoryLifecycleRepositoryPort
+from domain.memory.model import RerankerPort
+from domain.memory.ports import MemoryLifecycleRepositoryPort, MemoryRepositoryPort
 from main import create_app
 
 
 class _TrackingMemoryService(MemoryService):
-    """记录生命周期端口读取次数，同时保持真实 MemoryService 契约。"""
+    """使用未调用的明确端口替身构造真实记忆服务。"""
 
     def __init__(self, lifecycle: MemoryLifecycleRepositoryPort | None) -> None:
-        """用未调用的明确端口替身构造真实记忆服务。"""
         super().__init__(
             cast(MemoryRepositoryPort, object()),
             cast(EmbeddingPort, object()),
@@ -36,13 +35,6 @@ class _TrackingMemoryService(MemoryService):
             cast(TokenCounterPort, object()),
             lifecycle=lifecycle,
         )
-        self.lifecycle_accesses = 0
-
-    @property
-    def lifecycle_repository(self) -> MemoryLifecycleRepositoryPort | None:
-        """记录组合根是否在生命周期关闭时误读端口。"""
-        self.lifecycle_accesses += 1
-        return super().lifecycle_repository
 
 
 def test_health() -> None:
@@ -101,7 +93,6 @@ def test_memory_is_disabled_by_default_and_can_be_injected(
 
     injected_app = create_app(memory_service=service)
     assert injected_app.state.memory_service is service
-    assert service.lifecycle_accesses == 0
 
     monkeypatch.setenv("ATHENA_MEMORY_LIFECYCLE_ENABLED", "true")
     enabled_service = _TrackingMemoryService(lifecycle)
@@ -110,8 +101,8 @@ def test_memory_is_disabled_by_default_and_can_be_injected(
         projects=cast(ProjectService, object()),
         memory_service=enabled_service,
     )
-    assert bundle.memory_lifecycle is lifecycle
-    assert enabled_service.lifecycle_accesses == 1
+    assert bundle.memory is enabled_service
+    assert bundle.memory_lifecycle is None
 
 
 def test_disabled_knowledge_does_not_parse_minio_configuration(

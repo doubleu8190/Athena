@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, BinaryIO, Protocol, Self, TypeVar, cast
+from urllib.parse import urlsplit
 
 from common.date import as_utc, utc_now
 from domain.knowledge.model import (
@@ -37,7 +38,6 @@ _KEY = re.compile(
 )
 _BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
-_PORT = re.compile(r"^[0-9]+$")
 _MAX_WORKERS = 4
 _ResultT = TypeVar("_ResultT")
 
@@ -478,64 +478,38 @@ def _strict_flag(environ: Mapping[str, str], name: str, *, default: bool) -> boo
 
 
 def _validate_endpoint(endpoint: str) -> None:
+    """使用标准库 urllib.parse + ipaddress 解析 host[:port]，拒绝路径、凭据和非法端口。"""
     if (
         not endpoint
         or any(character.isspace() or ord(character) < 32 for character in endpoint)
         or any(character in "/\\?#@%" for character in endpoint)
     ):
         raise OriginalStorageConfigurationError() from None
-    if endpoint.startswith("["):
-        closing = endpoint.find("]")
-        if closing < 0:
-            raise OriginalStorageConfigurationError()
-        host = endpoint[1:closing]
-        remainder = endpoint[closing + 1 :]
-        try:
-            ipaddress.IPv6Address(host)
-        except ValueError:
+    try:
+        parsed = urlsplit(f"//{endpoint}")
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise OriginalStorageConfigurationError() from None
+    if (
+        not host
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+    ):
+        raise OriginalStorageConfigurationError()
+    trailing = endpoint.rsplit("]", 1)[-1] if endpoint.startswith("[") else endpoint
+    if (":" in trailing and port is None) or (port is not None and not 1 <= port <= 65535):
+        raise OriginalStorageConfigurationError()
+    try:
+        ipaddress.ip_address(host)
+        return
+    except ValueError:
+        if host.replace(".", "").isdigit() and "." in host:
             raise OriginalStorageConfigurationError() from None
-        _parse_endpoint_port(remainder)
-        return
-    if endpoint.count(":") > 1:
-        raise OriginalStorageConfigurationError()
-    if ":" in endpoint:
-        host, port_text = endpoint.split(":", 1)
-        if not host or not port_text:
-            raise OriginalStorageConfigurationError()
-        _validate_host(host)
-        _validate_port(port_text)
-        return
-    _validate_host(endpoint)
-
-
-def _parse_endpoint_port(remainder: str) -> int | None:
-    if not remainder:
-        return None
-    if not remainder.startswith(":") or len(remainder) == 1:
-        raise OriginalStorageConfigurationError()
-    return _validate_port(remainder[1:])
-
-
-def _validate_port(value: str) -> int:
-    if _PORT.fullmatch(value) is None:
-        raise OriginalStorageConfigurationError()
-    port = int(value)
-    if not 1 <= port <= 65535:
-        raise OriginalStorageConfigurationError()
-    return port
-
-
-def _validate_host(host: str) -> None:
-    if not host or len(host) > 253:
-        raise OriginalStorageConfigurationError()
-    if host.replace(".", "").isdigit() and "." in host:
-        try:
-            ipaddress.IPv4Address(host)
-        except ValueError:
-            raise OriginalStorageConfigurationError() from None
-        return
-    labels = host.split(".")
-    if any(_HOST_LABEL.fullmatch(label) is None for label in labels):
+    if len(host) > 253 or any(_HOST_LABEL.fullmatch(label) is None for label in host.split(".")):
         raise OriginalStorageConfigurationError()
 
 

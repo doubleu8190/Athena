@@ -96,8 +96,8 @@ async def run_worker() -> None:
         await worker.validate_runtime()
         # 单 Worker 启动时先恢复遗留 running；仓储明确排除 control 回执。
         await worker.recover_running_jobs()
-        # 首次上线从当前时间建立扫描边界；已有固定扫描记录不会被重启推进。
-        await worker.ensure_scan_job(utc_now())
+        # 首次上线从当前时间建立扫描边界。
+        worker.set_scan_boundary(utc_now())
         # 直接复用组合根已校验的 idle_sleep_seconds，避免重复解析环境变量。
         await _consume(
             worker,

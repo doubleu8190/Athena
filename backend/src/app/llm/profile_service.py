@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import datetime
-from typing import cast
 from urllib.parse import urlsplit
 
 from common.ids import now_utc
@@ -22,7 +21,7 @@ from domain.llm.model.profile import (
     ModelProfileVersion,
 )
 from domain.llm.model.profile_errors import ModelProfileAuthorizationError, ModelProfileError
-from domain.llm.profile_ports import CompressionPolicyRepository, ModelProfileRepository
+from domain.llm.profile_ports import ModelProfileRepository
 from domain.mcp import MAX_MCP_SECRET_BYTES
 
 
@@ -53,6 +52,13 @@ class ModelProfileService:
         await self._authorize(actor)
         return await self._repository.list(actor)
 
+    async def list_with_default(
+        self, actor: AuthContext
+    ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
+        """单次查询读取管理员可见的安全配置投影与当前默认版本标识。"""
+        await self._authorize(actor)
+        return await self._repository.list_with_default(actor)
+
     async def get_default_id(self, actor: AuthContext) -> str | None:
         """读取当前默认配置版本标识。"""
         await self._authorize(actor)
@@ -61,9 +67,7 @@ class ModelProfileService:
     async def get_compression_policy(self, actor: AuthContext) -> CompressionPolicyVersion | None:
         """读取管理员可见的当前上下文压缩策略。"""
         await self._authorize(actor)
-        return await cast(
-            CompressionPolicyRepository, self._repository
-        ).get_current_compression_policy()
+        return await self._repository.get_current_compression_policy()
 
     async def set_compression_policy(
         self, actor: AuthContext, value: CompressionPolicyInput
@@ -72,9 +76,7 @@ class ModelProfileService:
         await self._authorize(actor)
         _validate_compression_policy(value)
         try:
-            return await cast(CompressionPolicyRepository, self._repository).set_compression_policy(
-                actor, value
-            )
+            return await self._repository.set_compression_policy(actor, value)
         except ValueError as error:
             raise ModelProfileError("llm_compression_policy_invalid") from error
 

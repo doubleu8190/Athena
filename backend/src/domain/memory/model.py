@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from builtins import list as List
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
@@ -114,45 +113,11 @@ class RerankerPort(Protocol):
     async def score(self, query: str, contents: list[str]) -> list[float]: ...
 
 
-class MemoryRepositoryPort(Protocol):
-    """记忆服务使用的持久化操作。"""
-
-    async def settings(self, namespace_id: str) -> tuple[bool, bool]: ...
-    async def search_keyword(
-        self, namespace: str, scopes: tuple[str, ...], query: str, limit: int
-    ) -> list[tuple[Memory, float]]: ...
-    async def search_vector(
-        self, namespace: str, scopes: tuple[str, ...], vector: list[float], profile: str, limit: int
-    ) -> list[tuple[Memory, float]]: ...
-    async def get_many(
-        self, ids: tuple[str, ...], namespace: str, scopes: tuple[str, ...]
-    ) -> RecallSnapshot: ...
-    async def list(
-        self, access: AccessContext, scope: str, limit: int, offset: int
-    ) -> tuple[Memory, ...]: ...
-    async def delete(
-        self, access: AccessContext, memory_id: str, expected_version: int
-    ) -> bool: ...
-    async def edit(
-        self,
-        access: AccessContext,
-        memory_id: str,
-        content: str,
-        embedding: List[float],
-        profile: str,
-        expected_version: int,
-    ) -> bool: ...
-    async def update_settings(
-        self, namespace: str, read_enabled: bool, auto_extract_enabled: bool
-    ) -> None: ...
-
-
 __all__ = [
     "AccessContext",
     "Memory",
     "MemoryHit",
     "MemorySource",
-    "MemoryRepositoryPort",
     "RecallRequest",
     "RecallResult",
     "RecallSnapshot",

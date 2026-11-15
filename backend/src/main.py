@@ -46,7 +46,7 @@ from app.tool import ToolManager
 from bootstrap.api import ApiDependencies, build_api_dependencies
 from bootstrap.config import env_flag, env_int
 from common.ids import new_id
-from domain.knowledge.ports import KnowledgeRepositoryPort
+from domain.knowledge.ports import KnowledgeUploadSlotRepository
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class _KnowledgeUploadLimitMiddleware:
     def __init__(
         self,
         app: object,
-        repository: KnowledgeRepositoryPort | None = None,
+        repository: KnowledgeUploadSlotRepository | None = None,
     ) -> None:
         self.app = app
         self._repository = repository
@@ -320,7 +320,7 @@ def create_app(
     app = FastAPI(title="Athena", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         _KnowledgeUploadLimitMiddleware,
-        repository=deps.knowledge_repository,
+        repository=deps.knowledge_upload_slots,
     )
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
     app.add_exception_handler(OSError, _handle_os_error)

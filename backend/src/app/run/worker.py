@@ -8,7 +8,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from app.run.config import RunWorkerConfig
-from app.run.executor import RunExecutor, RunProgressPublisher
+from app.run.events import publish_pending_events
+from app.run.executor import RunExecutor
 from common.ids import new_id, now_utc
 from domain.run.model import (
     FailRunCommand,
@@ -16,7 +17,7 @@ from domain.run.model import (
     RunLease,
     RunStatus,
 )
-from domain.run.ports import RunRepository
+from domain.run.ports import RunEventTransport, RunRepository
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class RunWorker:
         worker_id: str | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = now_utc,
-        publisher: RunProgressPublisher | None = None,
+        publisher: RunEventTransport | None = None,
     ) -> None:
         """保存持久化命令、执行器及有界轮询设置。"""
         self._repository = repository
@@ -268,26 +269,16 @@ class RunWorker:
 
     async def _publish_new_events(self, lease: RunLease, event_sequence: int) -> None:
         """在状态事务提交后尽力发布正式事件，丢通知由 SSE 对账补齐。"""
-        if self._publisher is None or event_sequence <= lease.run.event_sequence:
-            return
-        try:
-            events = await self._repository.list_events(
-                lease.run.session_id,
-                lease.run.owner_id,
-                lease.run.id,
-                after_sequence=lease.run.event_sequence,
-                limit=min(100, event_sequence - lease.run.event_sequence),
-            )
-            for event in events:
-                await self._publisher.publish_persisted(
-                    lease.run.id, lease.run.execution_epoch, event
-                )
-        except Exception as error:
-            logger.warning(
-                "run_event_publish_failed run_id=%s exception_type=%s",
-                lease.run.id,
-                type(error).__name__,
-            )
+        await publish_pending_events(
+            self._repository,
+            self._publisher,
+            session_id=lease.run.session_id,
+            owner_id=lease.run.owner_id,
+            run_id=lease.run.id,
+            execution_epoch=lease.run.execution_epoch,
+            after_sequence=lease.run.event_sequence,
+            target_sequence=event_sequence,
+        )
 
     async def _settle_cancellation(self, lease: RunLease) -> None:
         """尽力完成已清理执行的取消状态，竞争终态不结束 Worker。"""

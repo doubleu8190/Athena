@@ -157,8 +157,6 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             public_tools = await repository.list_public(offset=0, limit=10)
             assert not hasattr(public_tools.items[0], "server_id")
             assert not hasattr(public_tools.items[0], "remote_name")
-            internal_tools = await repository.list_internal(offset=0, limit=10)
-            assert {tool.remote_name for tool in internal_tools.items} == {"alpha", "gamma"}
             server_tools = await repository.list_server_admin("mcp_1", offset=0, limit=10)
             assert server_tools.total == 2
             assert (await repository.get_public_tool(before_alpha.tool_id)) == next(
@@ -176,10 +174,6 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             assert stored_secret is not None
             assert b"secret-value-one" not in stored_secret
             assert b"API_TOKEN" not in stored_secret
-            runtime = await repository.get_runtime_config("mcp_1")
-            assert runtime is not None
-            assert runtime.secrets["API_TOKEN"] == "secret-value-one"
-            assert "secret-value-one" not in repr(runtime)
 
             replacement = McpServerWrite(
                 id="mcp_1",

@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Coroutine, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -117,9 +117,6 @@ class FakeServers:
         self.read_count += 1
         return self.server if self.server is not None and self.server.id == server_id else None
 
-    async def get_runtime_config(self, server_id: str) -> Any:
-        raise AssertionError("ToolManager must not load runtime config for reads")
-
     async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
         self.read_count += 1
         return McpServerPage(
@@ -159,14 +156,6 @@ class FakeTools:
             "d",
             {},
         )
-        self.internal = ToolDefinition(
-            "tool_00000000000040008000000000000000",
-            "mcp_a",
-            "remote",
-            "mcp__00000000000040008000000000000000",
-            "d",
-            {},
-        )
 
     async def list_public(self, *, offset: int, limit: int) -> ToolPage[PublicToolDefinition]:
         self.reads.append("public")
@@ -175,10 +164,6 @@ class FakeTools:
     async def list_admin(self, *, offset: int, limit: int) -> ToolPage[AdminToolDefinition]:
         self.reads.append("admin")
         return ToolPage((self.admin,), 1)
-
-    async def list_internal(self, *, offset: int, limit: int) -> ToolPage[ToolDefinition]:
-        self.reads.append("internal")
-        return ToolPage((self.internal,), 1)
 
     async def list_server_admin(
         self, server_id: str, *, offset: int, limit: int
@@ -230,9 +215,13 @@ def _manager(
     def create_id(prefix: str) -> str:
         return "mcp_" + "a" * 32 if prefix == "mcp" else next(tool_ids)
 
+    servers.list_public = tools.list_public  # type: ignore[attr-defined]
+    servers.list_admin = tools.list_admin  # type: ignore[attr-defined]
+    servers.list_server_admin = tools.list_server_admin  # type: ignore[attr-defined]
+    servers.get_public_tool = tools.get_public_tool  # type: ignore[attr-defined]
+    servers.get_admin_tool = tools.get_admin_tool  # type: ignore[attr-defined]
     manager = ToolManager(
-        servers,
-        tools,
+        cast(Any, servers),
         found,
         auth,
         id_factory=create_id,
@@ -302,7 +291,7 @@ def test_reads_authorize_first_and_user_tool_lists_never_discover() -> None:
     assert discovery.calls == []
     assert tools.reads == ["public"]
     with pytest.raises(ValueError, match="mcp_page_invalid"):
-        _run(manager.list_tools(actor, limit=101))
+        _run(manager.list_public_tools(actor, limit=101))
 
     manager, _, servers, tools, _ = _manager(role=UserRole.USER)
     with pytest.raises(McpAdminRequiredError):

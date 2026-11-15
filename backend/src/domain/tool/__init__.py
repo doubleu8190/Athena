@@ -16,8 +16,6 @@ from domain.tool.model import (
     BeginToolCallBatchCommand,
     BeginToolCallBatchItem,
     BeginToolCallBatchResult,
-    BeginToolCallCommand,
-    BeginToolCallResult,
     BuiltinToolSource,
     ConvergeToolBatchCommand,
     DecideToolApprovalCommand,
@@ -50,17 +48,14 @@ from domain.tool.model import (
     persisted_status_for_outcome,
     protocol_status_for_outcome,
 )
-from domain.tool.ports import ToolCatalogReader
 
 __all__ = [
     "AdmitToolCallCommand",
     "AdminToolDefinition",
     "AuthorizedRunContext",
-    "BeginToolCallCommand",
     "BeginToolCallBatchCommand",
     "BeginToolCallBatchItem",
     "BeginToolCallBatchResult",
-    "BeginToolCallResult",
     "ConvergeToolBatchCommand",
     "DecideToolApprovalCommand",
     "BuiltinToolSource",
@@ -87,7 +82,6 @@ __all__ = [
     "RuntimeToolDefinition",
     "RuntimeToolSnapshot",
     "RuntimeToolSource",
-    "ToolCatalogReader",
     "ToolApprovalDecision",
     "ToolCallPreparation",
     "ToolCallStatus",

@@ -7,7 +7,7 @@ import hashlib
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
 from adapter.memory.model import (
@@ -19,12 +19,15 @@ from adapter.memory.repository._shared import (
     _job_payload,
     _job_result,
     _json_value,
-    _MemoryRepositoryHelpersMixin,
     _normalized_content_hash,
     _scope_key,
+    copy_evidence_sources,
+    insert_prepared_memory,
     lock_scope_state,
     lock_user_memory_setting,
+    preserve_replacement_evidence_time,
     read_user_memory_generation,
+    tombstone_memory,
 )
 from adapter.message.model import ConversationMessageModel
 from adapter.project.model import ProjectModel
@@ -44,7 +47,9 @@ from domain.memory.lifecycle import (
 from domain.message import ConversationRole
 
 
-class MemoryControlRepositoryMixin(_MemoryRepositoryHelpersMixin):
+class MemoryControlRepository:
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
     """负责同步控制写入、无正文幂等回执以及 scope/generation 查询。"""
 
     async def apply_control(self, command: ControlCommand) -> ControlReceiptResult:
@@ -91,7 +96,7 @@ class MemoryControlRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     create = self._control_create(command)
                     if create is None:
                         raise ValueError("memory_control_create_invalid")
-                    if not await self._insert_prepared(session, create, now):
+                    if not await insert_prepared_memory(session, create, now):
                         raise ValueError("memory_control_create_conflict")
                     result = result.model_copy(update={"memory_id": create.memory_id})
                 elif command.operation == "correct":
@@ -107,14 +112,14 @@ class MemoryControlRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     create = self._control_create(command)
                     if create is None:
                         raise ValueError("memory_control_create_invalid")
-                    if not await self._insert_prepared(session, create, now):
+                    if not await insert_prepared_memory(session, create, now):
                         raise ValueError("memory_control_create_conflict")
-                    await self._copy_evidence_sources(
+                    await copy_evidence_sources(
                         session,
                         source_memory_id=target.id,
                         target_memory_id=create.memory_id,
                     )
-                    await self._preserve_replacement_evidence_time(
+                    await preserve_replacement_evidence_time(
                         session,
                         memory_id=create.memory_id,
                         create=create,
@@ -145,7 +150,7 @@ class MemoryControlRepositoryMixin(_MemoryRepositoryHelpersMixin):
                             )
                         ).all()
                         for row in rows:
-                            await self._tombstone(session, row, now)
+                            await tombstone_memory(session, row, now)
                     else:
                         if command.target_memory_id is None:
                             raise ValueError("memory_control_target_invalid")
@@ -156,7 +161,7 @@ class MemoryControlRepositoryMixin(_MemoryRepositoryHelpersMixin):
                             command.target_memory_id,
                             command.expected_version,
                         )
-                        await self._tombstone(session, target, now)
+                        await tombstone_memory(session, target, now)
                         result = result.model_copy(update={"memory_id": target.id})
                 else:
                     raise ValueError("memory_control_operation_invalid")

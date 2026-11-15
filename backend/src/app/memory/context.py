@@ -8,6 +8,8 @@ from datetime import datetime
 from html import escape
 from typing import Literal
 
+import tiktoken
+
 from common.date import as_utc, utc_now
 from domain.llm.ports import TokenCounterPort
 from domain.memory.lifecycle import (
@@ -15,9 +17,13 @@ from domain.memory.lifecycle import (
     MemoryContextItem,
     MemoryContextSnapshot,
     MemoryKind,
+    MemoryReferenceKey,
 )
 from domain.memory.model import AccessContext, Memory
 from domain.memory.ports import MemoryLifecycleRepositoryPort
+from domain.message import ConversationMessage, ExecutionMessage
+
+type RunContextMessage = ConversationMessage | ExecutionMessage
 
 PERSONAL_SCOPE_KEY = "personal"
 DEFAULT_PERSONAL_TOKEN_BUDGET = 1_000
@@ -83,33 +89,44 @@ class MemoryContextBundle:
         return tuple(item for scope in self.scopes for item in scope.items)
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedRunMemoryContext:
+    """Run 请求发送前装配的 always 记忆包装。"""
+
+    content: str
+    messages: tuple[RunContextMessage, ...]
+    items: tuple[MemoryContextItem, ...]
+    contains_memory: bool
+
+
+class RuntimeTokenCounter:
+    """使用当前 Run 固定模型版本的 tokenizer 计算记忆预算。"""
+
+    def __init__(self, encoding_name: str) -> None:
+        """加载不可变的 tokenizer 编码名称。"""
+        try:
+            self._encoding = tiktoken.get_encoding(encoding_name)
+        except (KeyError, ValueError) as error:
+            raise ValueError("run_tokenizer_unsupported") from error
+
+    def count(self, text: str) -> int:
+        """返回与 Run 总窗口测量一致的普通文本 token 数。"""
+        return len(self._encoding.encode_ordinary(text))
+
+
 class MemoryContextService:
     """读取 always 记忆，按 scope 预算装配并复核不可信历史上下文。"""
 
     def __init__(
         self,
         repository: MemoryLifecycleRepositoryPort,
-        counter: TokenCounterPort,
+        counter: TokenCounterPort | None = None,
         *,
         personal_token_budget: int = DEFAULT_PERSONAL_TOKEN_BUDGET,
         project_token_budget: int = DEFAULT_PROJECT_TOKEN_BUDGET,
         per_scope_limit: int = DEFAULT_PER_SCOPE_LIMIT,
     ) -> None:
-        """保存仓储、模型 tokenizer 与每 scope 固定预算。
-
-        参数：
-        - `repository`：提供 always 候选读取和固定 ID/version 复核的生命周期仓储。
-        - `counter`：当前 Run 所用模型对应的 token 计数端口。
-        - `personal_token_budget`：personal 完整包装预算，默认 1,000 tokens。
-        - `project_token_budget`：单个当前项目完整包装预算，默认 2,000 tokens。
-        - `per_scope_limit`：每个 scope 最多读取的候选数，必须在 1 至 200 之间。
-
-        返回：
-        - None：构造后不提供额外返回值。
-
-        异常：
-        - ValueError：预算不是正数，或每 scope 候选上限超出允许范围。
-        """
+        """保存仓储、模型 tokenizer 与每 scope 固定预算。"""
         if personal_token_budget <= 0 or project_token_budget <= 0:
             raise ValueError("memory_context_budget_invalid")
         if not 1 <= per_scope_limit <= DEFAULT_PER_SCOPE_LIMIT:
@@ -119,6 +136,102 @@ class MemoryContextService:
         self._personal_token_budget = personal_token_budget
         self._project_token_budget = project_token_budget
         self._per_scope_limit = per_scope_limit
+
+    def _require_counter(self) -> TokenCounterPort:
+        if self._counter is None:
+            raise ValueError("memory_context_counter_required")
+        return self._counter
+
+    def _for_encoding(self, tokenizer_encoding: str) -> MemoryContextService:
+        return MemoryContextService(
+            self._repository,
+            RuntimeTokenCounter(tokenizer_encoding),
+            personal_token_budget=self._personal_token_budget,
+            project_token_budget=self._project_token_budget,
+            per_scope_limit=self._per_scope_limit,
+        )
+
+    async def build_run_items(
+        self,
+        access: AccessContext,
+        *,
+        project_scope_key: str | None,
+        tokenizer_encoding: str,
+    ) -> tuple[MemoryContextItem, ...]:
+        """首次读取当前 Run 固定的 always 记忆集合，后续不再补位。"""
+        bundle = await self._for_encoding(tokenizer_encoding).build(
+            access, project_scope_key=project_scope_key
+        )
+        return bundle.items
+
+    async def prepare_run_context(
+        self,
+        access: AccessContext,
+        *,
+        items: tuple[MemoryContextItem, ...],
+        references: tuple[MemoryReferenceKey, ...] = (),
+        tokenizer_encoding: str,
+        messages: tuple[RunContextMessage, ...],
+        project_id: str | None = None,
+        force_revalidate: bool = False,
+    ) -> PreparedRunMemoryContext:
+        """首轮或 resume 时做全量有效性复核；日常轮次仅检查 read_enabled 开关。"""
+        del project_id
+        restored_items = items
+        is_resume = not restored_items and bool(references)
+        if is_resume:
+            restored_items = await self._restore_items(access, references)
+        try:
+            service = self._for_encoding(tokenizer_encoding)
+            if is_resume or force_revalidate:
+                bundle = await service.revalidate(access, restored_items)
+            elif not restored_items:
+                return PreparedRunMemoryContext(
+                    content="",
+                    messages=messages,
+                    items=(),
+                    contains_memory=False,
+                )
+            else:
+                # 日常轮次已持有首轮/resume 复核后的条目，仅检查全局 read_enabled 开关。
+                read_enabled, _ = await self._repository.settings(access.namespace_id)
+                if not read_enabled:
+                    return PreparedRunMemoryContext(
+                        content="",
+                        messages=messages,
+                        items=(),
+                        contains_memory=False,
+                    )
+                bundle = service._assemble(access, restored_items, now=utc_now())
+            content = bundle.content
+            current_items = tuple(bundle.snapshot.items.values())
+        except Exception:
+            content = ""
+            current_items = ()
+        return PreparedRunMemoryContext(
+            content=content,
+            messages=messages,
+            items=current_items,
+            contains_memory=bool(content),
+        )
+
+    async def _restore_items(
+        self,
+        access: AccessContext,
+        references: tuple[MemoryReferenceKey, ...],
+    ) -> tuple[MemoryContextItem, ...]:
+        """恢复执行只按 Run 固定引用读取正文，不再重新选择 always 候选。"""
+        try:
+            snapshot = await self._repository.revalidate_references(access, references)
+        except Exception:
+            return ()
+        if not snapshot.read_enabled:
+            return ()
+        return tuple(
+            item
+            for reference in references
+            if (item := snapshot.items.get(reference)) is not None
+        )
 
     async def build(
         self,
@@ -257,20 +370,21 @@ class MemoryContextService:
         )[: self._per_scope_limit]
         selected: list[MemoryContextItem] = []
         budget = self._scope_budget(scope_key)
+        # 先统计空 scope 包装开销，再按单条 <memory> 块增量累加，将 O(N^2) 重拼分词降为 O(N)。
+        counter = self._require_counter()
+        running_tokens = counter.count(
+            _render_scope_context(scope_key, (), token_budget=budget)
+        )
+        if running_tokens < 0:
+            raise ValueError("memory_context_token_count_invalid")
         for memory in valid:
             candidate = _memory_context_item(memory)
-            proposed = (*selected, candidate)
-            token_count = self._counter.count(
-                _render_scope_context(
-                    scope_key,
-                    proposed,
-                    token_budget=budget,
-                )
-            )
-            if token_count < 0:
+            item_tokens = counter.count("\n" + _render_memory_item_block(candidate))
+            if item_tokens < 0:
                 raise ValueError("memory_context_token_count_invalid")
-            if token_count <= budget:
+            if running_tokens + item_tokens <= budget:
                 selected.append(candidate)
+                running_tokens += item_tokens
         return tuple(selected)
 
     def _assemble(
@@ -290,39 +404,32 @@ class MemoryContextService:
                 continue
             items_by_scope.setdefault(item.scope_key, []).append(item)
 
+        counter = self._require_counter()
         scopes: list[MemoryContextScope] = []
         for scope_key in _ordered_scope_keys(items_by_scope):
             budget = self._scope_budget(scope_key)
             selected: list[MemoryContextItem] = []
+            running_tokens = counter.count(
+                _render_scope_context(scope_key, (), token_budget=budget)
+            )
+            if running_tokens < 0:
+                raise ValueError("memory_context_token_count_invalid")
             for item in items_by_scope[scope_key]:
-                proposed = (*selected, item)
-                token_count = self._counter.count(
-                    _render_scope_context(
-                        scope_key,
-                        proposed,
-                        token_budget=budget,
-                    )
-                )
-                if token_count < 0:
+                item_tokens = counter.count("\n" + _render_memory_item_block(item))
+                if item_tokens < 0:
                     raise ValueError("memory_context_token_count_invalid")
-                if token_count <= budget:
+                if running_tokens + item_tokens <= budget:
                     selected.append(item)
+                    running_tokens += item_tokens
             if not selected:
                 continue
             scope_items = tuple(selected)
-            used_tokens = self._counter.count(
-                _render_scope_context(
-                    scope_key,
-                    scope_items,
-                    token_budget=budget,
-                )
-            )
             scopes.append(
                 MemoryContextScope(
                     scope_key=scope_key,
                     token_budget=budget,
                     items=scope_items,
-                    used_tokens=used_tokens,
+                    used_tokens=running_tokens,
                 )
             )
 
@@ -332,7 +439,7 @@ class MemoryContextService:
                 snapshot=MemoryContextSnapshot(True, {}),
             )
         content = _render_context(tuple(scopes))
-        used_tokens = self._counter.count(content)
+        used_tokens = counter.count(content)
         if used_tokens < 0:
             raise ValueError("memory_context_token_count_invalid")
         ordered_items = tuple(item for scope in scopes for item in scope.items)
@@ -494,6 +601,23 @@ def _not_expired(expires_at: datetime | None, now: datetime) -> bool:
     return expires_at is None or as_utc(expires_at) > now
 
 
+def _render_memory_item_block(item: MemoryContextItem) -> str:
+    """渲染单条 <memory> XML 块，供增量计费与整块拼接复用。"""
+    expires_at = "" if item.expires_at is None else item.expires_at.isoformat()
+    return "\n".join(
+        (
+            (
+                f'<memory id="{escape(item.memory_id, quote=True)}" '
+                f'version="{item.version}" kind="{item.kind.value}" '
+                'load_policy="always" '
+                f'expires_at="{escape(expires_at, quote=True)}">'
+            ),
+            escape(item.content, quote=False),
+            "</memory>",
+        )
+    )
+
+
 def _render_scope_block(
     scope_key: str,
     items: tuple[MemoryContextItem, ...],
@@ -508,19 +632,7 @@ def _render_scope_block(
         )
     ]
     for item in items:
-        expires_at = "" if item.expires_at is None else item.expires_at.isoformat()
-        lines.extend(
-            (
-                (
-                    f'<memory id="{escape(item.memory_id, quote=True)}" '
-                    f'version="{item.version}" kind="{item.kind.value}" '
-                    'load_policy="always" '
-                    f'expires_at="{escape(expires_at, quote=True)}">'
-                ),
-                escape(item.content, quote=False),
-                "</memory>",
-            )
-        )
+        lines.append(_render_memory_item_block(item))
     lines.append("</memory_scope>")
     return "\n".join(lines)
 

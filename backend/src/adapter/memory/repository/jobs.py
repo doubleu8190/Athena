@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.memory.model import (
     MemoryJobModel,
@@ -19,11 +19,9 @@ from adapter.memory.repository._shared import (
     _job_payload,
     _job_to_domain,
     _json_value,
-    _MemoryRepositoryHelpersMixin,
-    enqueue_cleanup_job,
-    ensure_scan_job_locked,
     lock_scope_state,
     lock_user_memory_setting,
+    tombstone_memory,
 )
 from adapter.run.model import RunModel
 from common.date import as_utc, utc_now
@@ -35,24 +33,22 @@ from domain.memory.lifecycle import (
     JobKind,
     JobStatus,
     MaintainResult,
-    MaintainScopePayload,
     MemoryJob,
-    ScanJobResult,
     ScanResult,
-    ScanRunsPayload,
 )
 
 _BACKGROUND_KINDS = (
     JobKind.EXTRACT_PENDING,
-    JobKind.MAINTAIN_SCOPE,
     JobKind.CLEANUP_SCOPE,
-    JobKind.SCAN_RUNS,
 )
 _MAX_EXTRACT_ATTEMPTS = 5
 
 
-class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
+class MemoryJobsRepository:
     """负责后台任务的唤醒、领取、完成、扫描、每日归档和 scope 清理。"""
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
 
     async def wake_user(self, owner_id: str) -> None:
         """刷新用户级提取任务；单 Worker 顺序消费。"""
@@ -93,12 +89,6 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
                 row.status = JobStatus.QUEUED.value
                 row.result = None
 
-    async def ensure_scan_job(self, enabled_boundary_at: datetime) -> MemoryJob:
-        """创建固定扫描记录，后续唤醒只刷新可用时间。"""
-        async with self._factory() as session, session.begin():
-            row = await ensure_scan_job_locked(session, enabled_boundary_at)
-            return _job_to_domain(row)
-
     async def recover_running_jobs(self) -> int:
         """启动时把遗留 running 后台任务恢复为 queued。"""
         now = utc_now()
@@ -115,7 +105,7 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     updated_at=now,
                 )
             )
-            return int(result.rowcount or 0)
+            return int(getattr(result, "rowcount", 0) or 0)
 
     async def claim_job(
         self,
@@ -177,31 +167,6 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
                 row.status = JobStatus.DONE.value
             row.result = None if command.result is None else _json_value(command.result)
             if (
-                isinstance(payload, ScanRunsPayload)
-                and command.result is not None
-                and isinstance(command.result, ScanJobResult)
-            ):
-                result = command.result.result
-                row.payload = _json_value(
-                    payload.model_copy(
-                        update={
-                            "cursor_finished_at": (
-                                None if result.round_complete else result.next_cursor_finished_at
-                            ),
-                            "cursor_run_id": (
-                                None if result.round_complete else result.next_cursor_run_id
-                            ),
-                            "scan_round": payload.scan_round + (1 if result.round_complete else 0),
-                        }
-                    )
-                )
-                if row.status == JobStatus.DONE.value:
-                    # 每轮扫描成功即结束一段连续失败计数，周期任务才能长期存活。
-                    row.attempt_count = 0
-                    row.schema_retry_count = 0
-                    row.status = JobStatus.QUEUED.value
-                    row.available_at = now + timedelta(seconds=60)
-            if (
                 isinstance(payload, ExtractPendingPayload)
                 and row.status == JobStatus.FAILED.value
                 and command.failed_run_ids
@@ -214,7 +179,7 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     command.safe_error_code or "memory_worker_job_failed",
                     now,
                 )
-            if row.status == JobStatus.DONE.value and not isinstance(payload, ScanRunsPayload):
+            if row.status == JobStatus.DONE.value:
                 row.attempt_count = 0
                 row.schema_retry_count = 0
             row.updated_at = now
@@ -251,19 +216,21 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
 
     async def scan_missing_runs(
         self,
-        payload: ScanRunsPayload,
         *,
+        enabled_boundary_at: datetime,
+        cursor_finished_at: datetime | None = None,
+        cursor_run_id: str | None = None,
         page_limit: int = 100,
     ) -> ScanResult:
         """有界扫描 pending Run，并只唤醒去重后的用户。"""
         if not 1 <= page_limit <= 500:
             raise ValueError("memory_scan_page_limit_invalid")
-        after_time = payload.cursor_finished_at
-        after_id = payload.cursor_run_id
+        after_time = cursor_finished_at
+        after_id = cursor_run_id
         conditions: list[Any] = [
             RunModel.memory_extraction_status == ExtractionStatus.PENDING.value,
             RunModel.finished_at.is_not(None),
-            RunModel.finished_at >= payload.enabled_boundary_at,
+            RunModel.finished_at >= enabled_boundary_at,
         ]
         if after_time is not None:
             conditions.append(
@@ -298,53 +265,43 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
             round_complete=not has_more,
         )
 
-    async def enqueue_maintenance(self, day: str) -> int:
-        """为所有启用 scope 创建按日幂等维护任务。"""
+    async def maintain_due_scopes(
+        self,
+        day: str,
+        *,
+        fact_max_age_days: int,
+        other_max_age_days: int,
+    ) -> int:
+        """直接查询当日尚未维护的启用 scope 并逐个执行归档，不再写入大量维护任务行。"""
         datetime.strptime(day, "%Y-%m-%d")
-        now = utc_now()
-        created = 0
-        async with self._factory() as session, session.begin():
+        async with self._factory() as session:
             states = (
                 await session.scalars(
                     select(MemoryScopeStateModel)
-                    .where(MemoryScopeStateModel.enabled.is_(True))
+                    .where(
+                        MemoryScopeStateModel.enabled.is_(True),
+                        or_(
+                            MemoryScopeStateModel.last_maintained_day.is_(None),
+                            MemoryScopeStateModel.last_maintained_day != day,
+                        ),
+                    )
                     .order_by(
                         MemoryScopeStateModel.namespace_id,
                         MemoryScopeStateModel.scope_key,
                     )
                 )
             ).all()
-            for state in states:
-                dedupe_key = f"maintain_scope:{state.namespace_id}:{state.scope_key}:{day}"
-                result = await session.execute(
-                    insert(MemoryJobModel)
-                    .values(
-                        id=f"mjob_{hashlib.sha256(dedupe_key.encode()).hexdigest()[:24]}",
-                        dedupe_key=dedupe_key,
-                        kind=JobKind.MAINTAIN_SCOPE.value,
-                        status=JobStatus.QUEUED.value,
-                        payload=_json_value(
-                            MaintainScopePayload(
-                                namespace_id=state.namespace_id,
-                                scope_key=state.scope_key,
-                                day=day,
-                            )
-                        ),
-                        result=None,
-                        namespace_id=state.namespace_id,
-                        scope_key=state.scope_key,
-                        attempt_count=0,
-                        schema_retry_count=0,
-                        available_at=now,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    .on_conflict_do_nothing(index_elements=["dedupe_key"])
-                    .returning(MemoryJobModel.id)
-                )
-                if result.scalar_one_or_none() is not None:
-                    created += 1
-        return created
+        maintained = 0
+        for state in states:
+            await self.maintain_scope(
+                state.namespace_id,
+                state.scope_key,
+                day,
+                fact_max_age_days=fact_max_age_days,
+                other_max_age_days=other_max_age_days,
+            )
+            maintained += 1
+        return maintained
 
     async def maintain_scope(
         self,
@@ -444,7 +401,7 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
                 )
             ).all()
             for row in rows:
-                await self._tombstone(session, row, now)
+                await tombstone_memory(session, row, now)
                 cleared_memories += 1
             project_id = (
                 scope_key.removeprefix("project:") if scope_key.startswith("project:") else None
@@ -492,36 +449,3 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
             if row.finished_at is not None:
                 row.memory_extracted_at = now
             row.updated_at = now
-
-    async def disable_scope_and_enqueue_cleanup(
-        self,
-        namespace_id: str,
-        scope_key: str,
-        *,
-        disabled_at: datetime | None = None,
-    ) -> int:
-        """禁用 scope、推进 generation 并创建幂等清理任务。"""
-        now = disabled_at or utc_now()
-        async with self._factory() as session, session.begin():
-            setting = await lock_user_memory_setting(session, namespace_id)
-            state = await lock_scope_state(session, namespace_id, scope_key)
-            state.enabled = False
-            state.updated_at = now
-            setting.generation += 1
-            project_id = (
-                scope_key.removeprefix("project:") if scope_key.startswith("project:") else None
-            )
-            await self._mark_project_runs_skipped_locked(
-                session,
-                namespace_id,
-                project_id,
-                "memory_scope_disabled",
-                now,
-            )
-            await enqueue_cleanup_job(
-                session,
-                namespace_id=namespace_id,
-                scope_key=scope_key,
-                now=now,
-            )
-            return setting.generation

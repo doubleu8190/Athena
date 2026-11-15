@@ -3,51 +3,80 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
+
+from domain.mcp import StdioConfig, StreamableHttpConfig
 
 
-class _McpServerConfigurationRequest(BaseModel):
-    """MCP Server 的严格 transport 配置字段。"""
+class _HttpServerBase(BaseModel):
+    """Streamable HTTP 类型 MCP Server 配置。"""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     name: str
-    transport: Literal["streamable_http", "stdio"]
-    url: str | None = None
-    command: str | None = None
-    args: list[str] | None = None
+    transport: Literal["streamable_http"]
+    url: str
+    secrets: dict[str, str] = Field(default_factory=dict)
+
+    def to_domain_config(self) -> StreamableHttpConfig:
+        """转换为领域 Streamable HTTP 连接配置。"""
+        return StreamableHttpConfig(transport="streamable_http", url=self.url)
+
+
+class _StdioServerBase(BaseModel):
+    """Stdio 子进程类型 MCP Server 配置。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str
+    transport: Literal["stdio"]
+    command: str
+    args: list[str]
     cwd: str | None = None
     secrets: dict[str, str] = Field(default_factory=dict)
 
-    @model_validator(mode="before")
-    @classmethod
-    def reject_foreign_transport_fields(cls, value: object) -> object:
-        """按输入键是否出现校验 transport 联合，包括显式 null。"""
-        if not isinstance(value, dict):
-            return value
-        transport = value.get("transport")
-        if transport == "streamable_http" and any(
-            key in value for key in ("command", "args", "cwd")
-        ):
-            raise ValueError("mcp_config_invalid")
-        if transport == "stdio" and "url" in value:
-            raise ValueError("mcp_config_invalid")
-        if transport == "stdio" and ("args" not in value or value.get("args") is None):
-            raise ValueError("mcp_config_invalid")
-        return value
+    def to_domain_config(self) -> StdioConfig:
+        """转换为领域 Stdio 连接配置。"""
+        return StdioConfig(
+            transport="stdio",
+            command=self.command,
+            args=tuple(self.args),
+            cwd=self.cwd,
+        )
 
 
-class McpServerCreateRequest(_McpServerConfigurationRequest):
-    """创建 MCP Server 的请求。"""
+class HttpServerCreateRequest(_HttpServerBase):
+    """创建 Streamable HTTP MCP Server 的请求。"""
 
 
-class McpServerUpdateRequest(_McpServerConfigurationRequest):
-    """完整替换 MCP Server 的请求。"""
+class StdioServerCreateRequest(_StdioServerBase):
+    """创建 Stdio MCP Server 的请求。"""
+
+
+class HttpServerUpdateRequest(_HttpServerBase):
+    """替换 Streamable HTTP MCP Server 的请求。"""
 
     secrets: dict[str, str]
     expected_config_version: int = Field(ge=1)
+
+
+class StdioServerUpdateRequest(_StdioServerBase):
+    """替换 Stdio MCP Server 的请求。"""
+
+    secrets: dict[str, str]
+    expected_config_version: int = Field(ge=1)
+
+
+McpServerCreateRequest = Annotated[
+    HttpServerCreateRequest | StdioServerCreateRequest,
+    Field(discriminator="transport"),
+]
+McpServerUpdateRequest = Annotated[
+    HttpServerUpdateRequest | StdioServerUpdateRequest,
+    Field(discriminator="transport"),
+]
 
 
 class McpServerResponse(BaseModel):
@@ -74,12 +103,13 @@ class McpServerListResponse(BaseModel):
     page_size: int
 
 
-McpServerRequest = McpServerCreateRequest
-
 __all__ = [
+    "HttpServerCreateRequest",
+    "HttpServerUpdateRequest",
     "McpServerCreateRequest",
     "McpServerListResponse",
-    "McpServerRequest",
     "McpServerResponse",
     "McpServerUpdateRequest",
+    "StdioServerCreateRequest",
+    "StdioServerUpdateRequest",
 ]

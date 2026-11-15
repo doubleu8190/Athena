@@ -67,31 +67,28 @@ class KnowledgeWorker:
     def __init__(
         self,
         repository: KnowledgeJobRepository,
-        parser: DocumentParser,
+        parser_factory: DocumentParserFactory,
         originals: OriginalStore,
         embedding: EmbeddingPort,
         tokenizer: ChineseTokenizer,
         counter: TokenCounterPort,
         *,
         isolate_parsing: bool = True,
-        parser_factory: DocumentParserFactory | None = None,
         parse_timeout_seconds: int = 600,
         parse_memory_mb: int = 4096,
         profile_id: str | None = None,
         owner_concurrency: int = 2,
     ) -> None:
-        """保存任务仓储及解析、磁盘、模型和文本处理端口。"""
+        """保存任务仓储及解析工厂、磁盘、模型和文本处理端口。"""
         self._repository = repository
-        self._parser = parser
+        self._parser_factory = parser_factory
+        # 非隔离模式下按需创建并缓存唯一解析器实例，避免重复初始化模型。
+        self._parser: DocumentParser | None = None
         self._originals = originals
         self._embedding = embedding
         self._tokenizer = tokenizer
         self._counter = counter
         self._isolate_parsing = isolate_parsing
-        # 隔离解析必须注入工厂：父进程只持有可序列化工厂，不直接依赖 infrastructure。
-        if isolate_parsing and parser_factory is None:
-            raise ValueError("knowledge_parser_factory_required")
-        self._parser_factory = parser_factory
         self._parse_timeout_seconds = parse_timeout_seconds
         if parse_memory_mb < 512 or parse_memory_mb > 16384:
             raise ValueError("knowledge_parse_memory_limit_invalid")
@@ -167,11 +164,9 @@ class KnowledgeWorker:
         return True
 
     async def _sweep_expired_uploads(self) -> None:
-        """先删 fenced 过期预留的原件，再释放配额并清理老孤儿。"""
+        """先删过期预留的原件并条件删除预留行，再清理老孤儿。"""
         try:
-            expired = await self._repository.claim_expired_upload_reservations(
-                limit=20, lease_seconds=300
-            )
+            expired = await self._repository.list_expired_upload_reservations(limit=20)
             for reservation in expired:
                 try:
                     await self._cleanup_expired_reservation(reservation)
@@ -214,21 +209,25 @@ class KnowledgeWorker:
             return
 
     async def _cleanup_expired_reservation(self, reservation: FileUploadReservation) -> None:
-        """Try one expired reservation without blocking the rest of the batch."""
+        """先原子删除过期预留行，确认无来源与有效预留引用后再删除对象（失败由孤儿扫描兜底）。"""
         if reservation.reservation_token is None or reservation.storage_key is None:
             return
-        can_delete = await self._repository.can_delete_expired_upload_reservation(
-            reservation.reservation_token, reservation.fencing_token
+        deleted = await self._repository.delete_expired_upload_reservation(
+            reservation.reservation_token
         )
-        if not can_delete:
+        if not deleted:
             return
         try:
             await self._originals.delete(reservation.storage_key)
         except OriginalStorageNotFoundError:
             pass
-        await self._repository.finish_expired_upload_reservation(
-            reservation.reservation_token, reservation.fencing_token
-        )
+        except OriginalStorageError as error:
+            logger.warning(
+                "knowledge_upload_cleanup_failed code=%s exception_type=%s reservation=%s",
+                error.code,
+                type(error).__name__,
+                reservation.reservation_token,
+            )
 
     async def _read_blocks(self, job: ClaimedKnowledgeJob) -> tuple[list[TextBlock], list[str]]:
         if job.source_text is not None:
@@ -237,17 +236,16 @@ class KnowledgeWorker:
             raise ValueError("document_source_missing")
         content = await self._originals.get(job.source_key)
         if self._isolate_parsing:
-            # 构造函数已保证隔离模式存在工厂；局部变量与断言仅用于让类型收窄。
-            parser_factory = self._parser_factory
-            assert parser_factory is not None
             parsed = await _parse_in_child(
                 job.source_filename,
                 content,
-                parser_factory,
+                self._parser_factory,
                 self._parse_timeout_seconds,
                 self._parse_memory_mb,
             )
         else:
+            if self._parser is None:
+                self._parser = self._parser_factory.create()
             parsed = await self._parser.parse(job.source_filename, content)
         return list(parsed.blocks), list(parsed.warnings)
 
@@ -301,10 +299,17 @@ def _largest_prefix(text: str, counter: TokenCounterPort, limit: int) -> int:
 
 
 def _largest_suffix_start(text: str, counter: TokenCounterPort, limit: int) -> int:
-    for start in range(len(text)):
-        if counter.count(text[start:]) <= limit:
-            return start
-    return len(text)
+    # 使用二分查找定位满足 token 上限的最长后缀起点（最小 start），将 O(N) 线性探测降为 O(log N)。
+    if not text or counter.count(text) <= limit:
+        return 0
+    low, high = 1, len(text)
+    while low < high:
+        middle = (low + high) // 2
+        if counter.count(text[middle:]) <= limit:
+            high = middle
+        else:
+            low = middle + 1
+    return low
 
 
 def _error_code(error: Exception) -> str:

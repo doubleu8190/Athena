@@ -79,18 +79,6 @@ class McpServer:
 
 
 @dataclass(frozen=True, slots=True)
-class McpServerRuntimeConfig:
-    """仅供 transport 组装使用的敏感连接配置，不可作为用户响应。"""
-
-    server: McpServer
-    secrets: Mapping[str, str] = field(repr=False)
-
-    def __post_init__(self) -> None:
-        """复制并冻结运行时秘密映射，避免调用方意外改写读取结果。"""
-        object.__setattr__(self, "secrets", MappingProxyType(dict(self.secrets)))
-
-
-@dataclass(frozen=True, slots=True)
 class McpServerWrite:
     """仅供受控应用/仓储写路径使用的 Server 输入，含未封装秘密。"""
 
@@ -199,7 +187,6 @@ __all__ = [
     "McpSecretMetadata",
     "McpSecretPurpose",
     "McpServer",
-    "McpServerRuntimeConfig",
     "McpServerWrite",
     "McpTransport",
 ]

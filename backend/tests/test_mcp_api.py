@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 from unittest.mock import ANY, AsyncMock
 
 import anyio
@@ -15,10 +15,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError  # type: ignore[import-untyped]
 from jsonschema.validators import Draft202012Validator  # type: ignore[import-untyped]
-from pydantic import BaseModel, ValidationError
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
-from api.dto.mcp import McpServerRequest, McpServerUpdateRequest
+from api.dto.mcp import (
+    HttpServerCreateRequest,
+    HttpServerUpdateRequest,
+    McpServerCreateRequest,
+    McpServerUpdateRequest,
+    StdioServerCreateRequest,
+    StdioServerUpdateRequest,
+)
 from api.mcp_errors import mcp_error_to_http
 from api.security import get_current_auth
 from app.tool import ToolManager
@@ -54,24 +61,30 @@ from main import create_app
     ],
 )
 def test_server_request_rejects_mixed_or_extra_fields(payload: dict[str, object]) -> None:
+    adapter: TypeAdapter[HttpServerCreateRequest | StdioServerCreateRequest] = TypeAdapter(
+        cast(Any, McpServerCreateRequest)
+    )
     with pytest.raises(ValidationError):
-        McpServerRequest.model_validate(payload)
+        adapter.validate_python(payload)
 
 
 def test_server_update_requires_config_version() -> None:
+    adapter: TypeAdapter[HttpServerUpdateRequest | StdioServerUpdateRequest] = TypeAdapter(
+        cast(Any, McpServerUpdateRequest)
+    )
     with pytest.raises(ValidationError):
-        McpServerUpdateRequest.model_validate(
+        adapter.validate_python(
             {"name": "x", "transport": "streamable_http", "url": "https://example.test"}
         )
 
 
 @pytest.mark.parametrize(
-    "request_model",
-    [McpServerRequest, McpServerUpdateRequest],
+    "request_type",
+    [McpServerCreateRequest, McpServerUpdateRequest],
 )
 @pytest.mark.parametrize("args", ["missing", None])
 def test_stdio_request_requires_explicit_args_array(
-    request_model: type[BaseModel], args: object
+    request_type: object, args: object
 ) -> None:
     payload: dict[str, object] = {
         "name": "x",
@@ -79,26 +92,33 @@ def test_stdio_request_requires_explicit_args_array(
         "command": "/bin/true",
         "secrets": {},
     }
-    if request_model is McpServerUpdateRequest:
+    if request_type is McpServerUpdateRequest:
         payload["expected_config_version"] = 1
     if args != "missing":
         payload["args"] = args
     with pytest.raises(ValidationError):
-        request_model.model_validate(payload)
+        TypeAdapter(cast(Any, request_type)).validate_python(payload)
 
 
 def test_stdio_empty_args_and_http_absent_args_are_valid() -> None:
-    stdio = McpServerRequest.model_validate(
+    adapter: TypeAdapter[HttpServerCreateRequest | StdioServerCreateRequest] = TypeAdapter(
+        cast(Any, McpServerCreateRequest)
+    )
+    stdio = adapter.validate_python(
         {"name": "x", "transport": "stdio", "command": "/bin/true", "args": []}
     )
-    http = McpServerRequest.model_validate(
+    http = adapter.validate_python(
         {"name": "x", "transport": "streamable_http", "url": "https://example.test"}
     )
+    assert isinstance(stdio, StdioServerCreateRequest)
     assert stdio.args == []
     assert http.transport == "streamable_http"
 
 
 def test_update_requires_secrets_but_empty_map_is_valid() -> None:
+    adapter: TypeAdapter[HttpServerUpdateRequest | StdioServerUpdateRequest] = TypeAdapter(
+        cast(Any, McpServerUpdateRequest)
+    )
     base = {
         "expected_config_version": 1,
         "name": "x",
@@ -106,8 +126,8 @@ def test_update_requires_secrets_but_empty_map_is_valid() -> None:
         "url": "https://example.test",
     }
     with pytest.raises(ValidationError):
-        McpServerUpdateRequest.model_validate(base)
-    request = McpServerUpdateRequest.model_validate({**base, "secrets": {}})
+        adapter.validate_python(base)
+    request = adapter.validate_python({**base, "secrets": {}})
     assert request.secrets == {}
 
 
@@ -407,25 +427,24 @@ def test_admin_write_openapi_declares_valid_transport_request_bodies() -> None:
     assert set(put_body["content"]) == {"application/json"}
     create_schema = post_body["content"]["application/json"]["schema"]
     update_schema = put_body["content"]["application/json"]["schema"]
-    assert {"name", "transport"} <= set(create_schema["required"])
-    assert {"expected_config_version", "secrets"} <= set(update_schema["required"])
     for schema in (create_schema, update_schema):
         Draft202012Validator.check_schema(schema)
         validator = Draft202012Validator(schema)
-        stdio_rule = next(
-            condition["then"]
-            for condition in schema["allOf"]
-            if condition["if"]["properties"]["transport"]["const"] == "stdio"
-        )
-        assert {"command", "args"} <= set(stdio_rule["required"])
-        assert stdio_rule["properties"]["command"] == {"type": "string"}
-        assert stdio_rule["properties"]["args"] == {"type": "array", "items": {"type": "string"}}
-        http_rule = next(
-            condition["then"]
-            for condition in schema["allOf"]
-            if condition["if"]["properties"]["transport"]["const"] == "streamable_http"
-        )
-        assert http_rule["properties"]["url"] == {"type": "string"}
+        assert schema["discriminator"]["propertyName"] == "transport"
+        assert len(schema["oneOf"]) == 2
+        defs = schema["$defs"]
+        stdio_ref = schema["discriminator"]["mapping"]["stdio"].rsplit("/", 1)[-1]
+        http_ref = schema["discriminator"]["mapping"]["streamable_http"].rsplit("/", 1)[-1]
+        stdio_rule = defs[stdio_ref]
+        http_rule = defs[http_ref]
+        assert {"name", "transport", "command", "args"} <= set(stdio_rule["required"])
+        assert stdio_rule["properties"]["command"] == {"title": "Command", "type": "string"}
+        assert stdio_rule["properties"]["args"] == {
+            "items": {"type": "string"},
+            "title": "Args",
+            "type": "array",
+        }
+        assert http_rule["properties"]["url"] == {"title": "Url", "type": "string"}
         http_valid: dict[str, object] = {
             "name": "server",
             "transport": "streamable_http",
@@ -437,7 +456,7 @@ def test_admin_write_openapi_declares_valid_transport_request_bodies() -> None:
             "command": "/bin/true",
             "args": [],
         }
-        if "expected_config_version" in schema["required"]:
+        if schema is update_schema:
             http_valid.update(expected_config_version=1, secrets={})
             stdio_valid.update(expected_config_version=1, secrets={})
         validator.validate(http_valid)

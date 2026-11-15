@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Self
+from typing import Any, Self, cast
 
 import pytest
 
@@ -14,18 +14,19 @@ from adapter.memory.model import (
     MemoryScopeStateModel,
     MemorySettingModel,
 )
-from adapter.memory.repository.lifecycle import MemoryLifecycleRepositoryMixin
+from adapter.memory.repository import MemoryRepository
+from adapter.memory.repository.batch_extract import MemoryBatchExtractRepository
 from domain.memory.lifecycle import (
     ApplyBatchCommand,
+    CleanupJobResult,
+    CleanupResult,
+    CleanupScopePayload,
     CompleteJobCommand,
     ExtractBatchMember,
     ExtractBatchPayload,
     ExtractPendingPayload,
     JobKind,
     JobStatus,
-    ScanJobResult,
-    ScanResult,
-    ScanRunsPayload,
 )
 
 NOW = datetime(2026, 11, 14, tzinfo=UTC)
@@ -71,11 +72,11 @@ class _Session:
         return self._row
 
 
-class _Repository(MemoryLifecycleRepositoryMixin):
+class _Repository(MemoryRepository):
     """把任务状态机连接到内存任务行。"""
 
     def __init__(self, row: MemoryJobModel) -> None:
-        self._factory = lambda: _Session(row)
+        super().__init__(cast(Any, lambda: _Session(row)))
 
 
 class _ApplySession:
@@ -111,11 +112,11 @@ class _ApplySession:
         return self._job
 
 
-class _ApplyRepository(MemoryLifecycleRepositoryMixin):
+class _ApplyRepository(MemoryBatchExtractRepository):
     """隔离正常批次提交所需的数据库上下文。"""
 
     def __init__(self, setting: MemorySettingModel, job: MemoryJobModel) -> None:
-        self._factory = lambda: _ApplySession(setting, job)
+        super().__init__(cast(Any, lambda: _ApplySession(setting, job)))
 
     async def _lock_batch_context(
         self,
@@ -140,17 +141,17 @@ class _ApplyRepository(MemoryLifecycleRepositoryMixin):
         return True
 
 
-def _scan_job() -> MemoryJobModel:
-    payload = ScanRunsPayload(enabled_boundary_at=NOW)
+def _cleanup_job() -> MemoryJobModel:
+    payload = CleanupScopePayload(namespace_id="owner_1", scope_key="project:p1")
     return MemoryJobModel(
-        id="memory-scan-job",
-        dedupe_key="scan_runs:global",
-        kind=JobKind.SCAN_RUNS.value,
+        id="memory-cleanup-job",
+        dedupe_key="cleanup_scope:owner_1:project:p1",
+        kind=JobKind.CLEANUP_SCOPE.value,
         status=JobStatus.RUNNING.value,
         payload=payload.model_dump(mode="json"),
         result=None,
-        namespace_id="__global__",
-        scope_key=None,
+        namespace_id="owner_1",
+        scope_key="project:p1",
         attempt_count=5,
         schema_retry_count=1,
         available_at=NOW,
@@ -159,24 +160,18 @@ def _scan_job() -> MemoryJobModel:
     )
 
 
-def test_successful_scan_resets_consecutive_failure_budget() -> None:
-    """扫描成功重排后，下一轮一次临时失败仍应进入重试。"""
+def test_successful_job_resets_consecutive_failure_budget() -> None:
+    """任务完成后重置连续失败与 schema 重试计数。"""
 
     async def scenario() -> None:
-        row = _scan_job()
+        row = _cleanup_job()
         repository = _Repository(row)
-        success = ScanJobResult(
-            result=ScanResult(
-                scanned=1,
-                awakened=1,
-                round_complete=True,
-            )
-        )
+        success = CleanupJobResult(result=CleanupResult(cleared_jobs=1, cleared_memories=2))
 
         assert await repository.complete_job(
             CompleteJobCommand(job_id=row.id, result=success)
         )
-        assert row.status == JobStatus.QUEUED.value
+        assert row.status == JobStatus.DONE.value
         assert row.attempt_count == 0
         assert row.schema_retry_count == 0
 

@@ -10,12 +10,11 @@ from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.memory.repository import MemoryRepository
 from app.memory.extraction import ExtractionLimits, MemoryExtractionService
 from app.memory.worker import MemoryWorker, MemoryWorkerConfig
-from bootstrap.config import env_flag
+from bootstrap.config import memory_enabled_from_env
 from bootstrap.database import build_database
 from infrastructure.database import Database
-from infrastructure.embedding import LocalEmbedding
+from infrastructure.embedding import LocalEmbedding, LocalTokenCounter
 from infrastructure.embedding.profile import embedding_profile_id
-from infrastructure.memory import LocalTokenCounter
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 
@@ -62,10 +61,8 @@ def build_memory_worker_dependencies(
     database_url: str | None = None,
 ) -> None:
     """按明确开关构造独立 Memory Worker，不加载 reranker。"""
-    if not env_flag("ATHENA_MEMORY_ENABLED", default=False):
+    if not memory_enabled_from_env():
         raise RuntimeError("memory_worker_memory_disabled")
-    if not env_flag("ATHENA_MEMORY_LIFECYCLE_ENABLED", default=False):
-        raise RuntimeError("memory_worker_lifecycle_disabled")
     configured_url = database_url or os.getenv("ATHENA_DATABASE_URL", "").strip()
     if not configured_url:
         raise RuntimeError("memory_worker_database_required")

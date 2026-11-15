@@ -96,24 +96,6 @@ class _Repository:
         del namespace_id
         return self.generation
 
-    async def retrieve_similar(
-        self,
-        access: AccessContext,
-        scope_key: str,
-        query: str,
-        embedding: tuple[float, ...],
-        embedding_profile_id: str,
-        limit: int = 5,
-    ) -> tuple[RetrievedMemory, ...]:
-        """记录候选级检索并返回预设结果。"""
-        assert access.namespace_id == "owner_test"
-        assert scope_key in access.readable_scopes
-        assert len(embedding) == 1024
-        assert embedding_profile_id == "embedding-test"
-        assert limit == 5
-        self.retrieval_calls.append((scope_key, query, limit))
-        return self.retrieval.get(query, ())
-
     async def retrieve_similar_batch(
         self,
         access: AccessContext,
@@ -122,18 +104,15 @@ class _Repository:
         limit: int = 5,
     ) -> tuple[tuple[RetrievedMemory, ...], ...]:
         """在单次批量调用中依次返回各候选的预设检索结果。"""
+        assert access.namespace_id == "owner_test"
+        assert embedding_profile_id == "embedding-test"
+        assert limit == 5
         results: list[tuple[RetrievedMemory, ...]] = []
         for scope_key, query, embedding in queries:
-            results.append(
-                await self.retrieve_similar(
-                    access,
-                    scope_key,
-                    query,
-                    embedding,
-                    embedding_profile_id,
-                    limit,
-                )
-            )
+            assert scope_key in access.readable_scopes
+            assert len(embedding) == 1024
+            self.retrieval_calls.append((scope_key, query, limit))
+            results.append(self.retrieval.get(query, ()))
         return tuple(results)
 
 

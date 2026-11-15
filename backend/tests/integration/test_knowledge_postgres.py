@@ -585,14 +585,6 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     warnings=[],
                 )
 
-            own_hits = await repository.search(
-                "kb_owner_a", ["kb_a"], "PostgreSQL", ("PostgreSQL",), 10, [0.1] * 1024
-            )
-            assert len(own_hits.hits) == 1
-            assert own_hits.hits[0].document_id == doc_a.id
-            assert set(own_hits.hits[0].channels) == {"keyword", "semantic"}
-            with pytest.raises(LookupError, match="knowledge_base_not_found"):
-                await repository.search("kb_owner_a", ["kb_b"], "PostgreSQL", ("PostgreSQL",), 10)
             await repository.validate_search_scope("kb_owner_a", ["kb_a"])
             with pytest.raises(LookupError, match="knowledge_base_not_found"):
                 await repository.validate_search_scope("kb_owner_a", ["kb_b"])
@@ -667,10 +659,10 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             assert after_failure is not None
             assert after_failure.active_version_id == ver_a
             assert after_failure.pending_version_id is None
-            after_failure_hits = await repository.search(
-                "kb_owner_a", ["kb_a"], "PostgreSQL", ("PostgreSQL",), 10
+            after_failure_hits = await repository.search_keyword(
+                "kb_owner_a", ["kb_a"], ("PostgreSQL",), 10
             )
-            assert after_failure_hits.hits[0].version_id == ver_a
+            assert after_failure_hits[0].version_id == ver_a
 
             replacement, replacement_version = await repository.replace_text_document(
                 owner_id="kb_owner_a",
@@ -723,14 +715,14 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     "old_retry_job",
                     now + timedelta(seconds=4),
                 )
-            after_success_hits = await repository.search(
-                "kb_owner_a", ["kb_a"], "replacement", ("replacement",), 10
+            after_success_hits = await repository.search_keyword(
+                "kb_owner_a", ["kb_a"], ("replacement",), 10
             )
-            assert after_success_hits.hits
-            assert all(hit.version_id == replacement_version for hit in after_success_hits.hits)
-            assert all("replacement content" in hit.text for hit in after_success_hits.hits)
+            assert after_success_hits
+            assert all(hit.version_id == replacement_version for hit in after_success_hits)
+            assert all("replacement content" in hit.text for hit in after_success_hits)
             assert await repository.filter_active_hits("kb_owner_a", tuple(stale_hits)) == ()
-            assert await repository.filter_active_hits("kb_owner_a", tuple(own_hits.hits)) == ()
+            assert await repository.filter_active_hits("kb_owner_a", tuple(keyword_hits)) == ()
             source = await repository.get_source(
                 "kb_owner_a", "kb_a", doc_a.id, replacement_version
             )
@@ -739,7 +731,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 await repository.get_source("kb_owner_b", "kb_a", doc_a.id, replacement_version)
                 is None
             )
-            chunk_id = after_success_hits.hits[0].chunk_id
+            chunk_id = after_success_hits[0].chunk_id
             assert await repository.get_chunk("kb_owner_a", "kb_a", chunk_id) is not None
             assert await repository.get_chunk("kb_owner_b", "kb_a", chunk_id) is None
 
@@ -861,10 +853,10 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 is None
             )
             assert await repository.get_chunk("kb_owner_a", "kb_a", chunk_id) is None
-            deleted_hits = await repository.search(
-                "kb_owner_a", ["kb_a"], "PostgreSQL", ("PostgreSQL",), 10
+            deleted_hits = await repository.search_keyword(
+                "kb_owner_a", ["kb_a"], ("PostgreSQL",), 10
             )
-            assert deleted_hits.hits == ()
+            assert deleted_hits == ()
             async with session_factory() as session:
                 count = await session.scalar(
                     text("SELECT count(*) FROM knowledge_chunks WHERE document_id = 'doc_b'")
@@ -904,10 +896,10 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             assert isinstance(published, bool)
             assert deletion_keys == []
             assert await repository.get_document("kb_owner_b", "kb_b", "doc_b") is None
-            race_hits = await repository.search(
-                "kb_owner_b", ["kb_b"], "replacement", ("replacement",), 10
+            race_hits = await repository.search_keyword(
+                "kb_owner_b", ["kb_b"], ("replacement",), 10
             )
-            assert race_hits.hits == ()
+            assert race_hits == ()
             async with session_factory() as session:
                 race_rows_before_cleanup = await session.scalar(
                     text("SELECT count(*) FROM knowledge_chunks WHERE document_id = 'doc_b'")

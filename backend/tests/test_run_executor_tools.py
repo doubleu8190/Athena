@@ -49,7 +49,6 @@ from domain.mcp import (
     McpCallResult,
     McpCallStatus,
     McpConnectionInput,
-    McpRuntimeToolDefinition,
     McpRuntimeToolTarget,
     StdioConfig,
 )
@@ -94,8 +93,6 @@ from domain.tool import (
     AuthorizedRunContext,
     BeginToolCallBatchCommand,
     BeginToolCallBatchResult,
-    BeginToolCallCommand,
-    BeginToolCallResult,
     BuiltinToolSource,
     FinishToolCallCommand,
     McpToolSource,
@@ -273,6 +270,48 @@ class _ToolRuntime:
     ) -> RuntimeToolSnapshot:
         return _snapshot()
 
+    def validate_call(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolOutcome | None:
+        del model_name, arguments
+        if definition is None:
+            return ToolOutcome(
+                status=ToolOutcomeStatus.ERROR,
+                code="tool_unknown",
+                message="模型请求了冻结目录中不存在的工具。",
+            )
+        return None
+
+    async def prepare_call(
+        self,
+        definition: RuntimeToolDefinition | None,
+        model_name: str,
+        arguments: dict[str, Any],
+        run: Any,
+        context: AuthorizedRunContext | None,
+        *,
+        call_id: str,
+    ) -> ToolCallPreparation:
+        del run, context, call_id
+        outcome = self.validate_call(definition, model_name, arguments)
+        return ToolCallPreparation(
+            requires_approval=False if definition is None else definition.requires_approval,
+            outcome=outcome,
+        )
+
+    async def build_skill_context(
+        self, run: Any, loaded_skill_ids: tuple[str, ...]
+    ) -> RunSkillPromptContext:
+        del run, loaded_skill_ids
+        return RunSkillPromptContext()
+
+    async def build_run_input_file_context(self, run: Any) -> tuple[Any, ...]:
+        del run
+        return ()
+
     async def execute(
         self,
         definition: RuntimeToolDefinition | None,
@@ -311,6 +350,22 @@ class _Repository:
     async def list_context_messages(self, *args: object) -> tuple[object, ...]:
         return ()
 
+    async def list_successfully_loaded_skill_ids(self, run_id: str) -> tuple[str, ...]:
+        del run_id
+        return ()
+
+    async def list_tool_calls(
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        *,
+        after_ordinal: int = 0,
+        limit: int = 100,
+    ) -> Any:
+        del session_id, owner_id, run_id, after_ordinal, limit
+        return None
+
     async def reserve_llm_request(self, command: Any) -> int:
         self.run = replace(self.run, llm_request_count=self.run.llm_request_count + 1)
         return self.run.llm_request_count
@@ -321,29 +376,6 @@ class _Repository:
 
     async def record_usage(self, command: object) -> Run:
         return self.run
-
-    async def begin_tool_call(self, command: BeginToolCallCommand) -> BeginToolCallResult:
-        self.begin_tool_calls += 1
-        self.last_begin_command = command
-        record = RunToolCallRecord(
-            id=command.record_id,
-            run_id=command.run_id,
-            session_id=command.call_message.session_id,
-            tool_call_id=command.tool_call_id,
-            ordinal=1,
-            tool_id=command.tool_id,
-            tool_kind=command.tool_kind,
-            model_name=command.model_name,
-            execution_epoch=command.execution_epoch,
-            status=ToolCallStatus.EXECUTING,
-            call_message_id=command.call_message.id,
-            result_message_id=None,
-            started_at=command.started_at,
-            finished_at=None,
-            safe_error_code=None,
-            outcome=None,
-        )
-        return BeginToolCallResult(record, True)
 
     async def begin_tool_call_batch(
         self, command: BeginToolCallBatchCommand
@@ -668,7 +700,7 @@ class _DeliverySessions:
 
 
 class _DeliveryMcpCatalog:
-    async def list_runtime_tools(self, *, limit: int) -> tuple[McpRuntimeToolDefinition, ...]:
+    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         del limit
         return ()
 
@@ -911,6 +943,7 @@ class _ValidatingToolRuntime(_ToolRuntime):
                 code="tool_arguments_invalid",
                 message="schema mismatch",
             )
+        return None
 
 
 class _InputFileRuntime(_ToolRuntime):
@@ -2248,7 +2281,10 @@ def test_context_safety_gate_covers_final_only_without_compression_policy(
             cast(RunRepository, repository),
             cast(ModelProfileRepository, _Profiles()),
             cast(LlmStreamProvider, SimpleNamespace()),
-            tool_runtime=cast(RunToolRuntime, SimpleNamespace()),
+            tool_runtime=cast(
+                RunToolRuntime,
+                SimpleNamespace(build_skill_context=AsyncMock(return_value=RunSkillPromptContext())),
+            ),
         )
         stop = AsyncMock()
         monkeypatch.setattr(executor, "_stop_for_context_safety", stop)
@@ -2295,7 +2331,10 @@ def test_hard_window_stop_preserves_compression_failure_reason(
             cast(RunRepository, repository),
             cast(ModelProfileRepository, _Profiles(compression_policy=policy)),
             cast(LlmStreamProvider, SimpleNamespace()),
-            tool_runtime=cast(RunToolRuntime, SimpleNamespace()),
+            tool_runtime=cast(
+                RunToolRuntime,
+                SimpleNamespace(build_skill_context=AsyncMock(return_value=RunSkillPromptContext())),
+            ),
         )
         monkeypatch.setattr(
             executor,
@@ -2440,7 +2479,10 @@ def test_resumable_batch_is_blocked_before_side_effect_at_safety_line(
             cast(RunRepository, repository),
             cast(ModelProfileRepository, _Profiles()),
             cast(LlmStreamProvider, SimpleNamespace()),
-            tool_runtime=cast(RunToolRuntime, SimpleNamespace()),
+            tool_runtime=cast(
+                RunToolRuntime,
+                SimpleNamespace(build_skill_context=AsyncMock(return_value=RunSkillPromptContext())),
+            ),
         )
         stop = AsyncMock()
         execute_batch = AsyncMock(return_value=True)
@@ -2565,8 +2607,10 @@ def test_report_window_allows_ninety_percent_input_when_output_still_fits(
             cast(ModelProfileRepository, _Profiles()),
             cast(LlmStreamProvider, provider),
         )
+        from app.run import safe_stop as safe_stop_module
+
         monkeypatch.setattr(
-            executor_module,
+            safe_stop_module,
             "count_plain_text_tokens_async",
             AsyncMock(return_value=644),
         )
@@ -2613,8 +2657,10 @@ def test_context_report_overflow_skips_provider_and_uses_system_report(
             cast(ModelProfileRepository, _Profiles()),
             cast(LlmStreamProvider, provider),
         )
+        from app.run import safe_stop as safe_stop_module
+
         monkeypatch.setattr(
-            executor_module,
+            safe_stop_module,
             "count_plain_text_tokens_async",
             AsyncMock(return_value=901),
         )

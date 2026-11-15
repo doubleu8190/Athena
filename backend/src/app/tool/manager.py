@@ -25,7 +25,6 @@ from domain.mcp import (
 from domain.tool import (
     AdminToolDefinition,
     PublicToolDefinition,
-    ToolCatalogReader,
     ToolDefinition,
     ToolPage,
 )
@@ -38,24 +37,16 @@ class ToolManager:
 
     def __init__(
         self,
-        server_repository: McpServerRepository,
-        tool_reader: ToolCatalogReader,
+        repository: McpServerRepository,
         discovery: McpDiscovery,
         auth_repository: CurrentSessionReader,
         *,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
-        """显式注入目录、认证、发现、ID 与时钟依赖。
-
-        参数：server_repository 管理 Server 原子写入；tool_reader 读取安全工具投影；
-        discovery 读取远端工具；auth_repository 重新验证当前 session；id_factory 生成带前缀 ID；
-        clock 返回当前 UTC 时间。
-        返回：可供应用层调用的用例服务。
-        异常：不在构造时检查外部资源。
-        """
-        self._servers = server_repository
-        self._tools = tool_reader
+        """显式注入目录、认证、发现、ID 与时钟依赖。"""
+        self._servers = repository
+        self._tools = repository
         self._discovery = discovery
         self._auth = auth_repository
         self._id_factory = id_factory
@@ -173,14 +164,6 @@ class ToolManager:
         if not tool_id or len(tool_id) > 64 or type(requires_approval) is not bool:
             raise ValueError("mcp_tool_policy_invalid")
         return await self._servers.set_requires_approval(actor, tool_id, requires_approval)
-
-    async def list_tools(
-        self, actor: AuthContext, *, offset: int = 0, limit: int = 20
-    ) -> ToolPage[ToolDefinition]:
-        """授权有效用户后读取受信内部完整工具目录。"""
-        await self._authorize(actor, admin=False)
-        self._validate_page(offset, limit)
-        return await self._tools.list_internal(offset=offset, limit=limit)
 
     async def list_public_tools(
         self, actor: AuthContext, *, offset: int = 0, limit: int = 20

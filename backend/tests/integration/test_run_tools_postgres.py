@@ -89,7 +89,6 @@ from domain.tool import (
     AdmitToolCallCommand,
     BeginToolCallBatchCommand,
     BeginToolCallBatchItem,
-    BeginToolCallCommand,
     BuiltinToolSource,
     ConvergeToolBatchCommand,
     DecideToolApprovalCommand,
@@ -361,7 +360,8 @@ async def _running_run(
     return leases[0]
 
 
-def _begin_command(
+async def _begin_executing_call(
+    repository: SqlAlchemyRunRepository,
     lease: RunLease,
     *,
     suffix: str,
@@ -370,41 +370,61 @@ def _begin_command(
     model_name: str = "safe_tool",
     tool_id: str = "builtin_safe_tool",
     arguments: dict[str, object] | None = None,
-) -> BeginToolCallCommand:
+) -> RunToolCallRecord:
     now = datetime.now(UTC)
     run = lease.run
-    return BeginToolCallCommand(
-        run_id=run.id,
-        worker_id=run.worker_id or "",
-        execution_epoch=run.execution_epoch,
-        record_id=f"record_{suffix}_{ordinal_label}",
-        tool_call_id=tool_call_id,
-        model_name=model_name,
-        tool_id=tool_id,
-        tool_kind=ToolKind.BUILTIN,
-        call_message=ExecutionMessageDraft(
-            id=f"exec_call_{suffix}_{ordinal_label}",
-            session_id=run.session_id,
-            owner_id=run.owner_id,
+    record_id = f"record_{suffix}_{ordinal_label}"
+    await repository.begin_tool_call_batch(
+        BeginToolCallBatchCommand(
             run_id=run.id,
-            thread_id=run.id,
-            role=ExecutionRole.ASSISTANT,
-            parts=(
-                ToolCallPart(
-                    tool_call_id,
-                    model_name,
-                    arguments
-                    or {"query": f"value-{suffix}-{ordinal_label}"},
+            worker_id=run.worker_id or "",
+            execution_epoch=run.execution_epoch,
+            call_message=ExecutionMessageDraft(
+                id=f"exec_call_{suffix}_{ordinal_label}",
+                session_id=run.session_id,
+                owner_id=run.owner_id,
+                run_id=run.id,
+                thread_id=run.id,
+                role=ExecutionRole.ASSISTANT,
+                parts=(
+                    ToolCallPart(
+                        tool_call_id,
+                        model_name,
+                        arguments or {"query": f"value-{suffix}-{ordinal_label}"},
+                    ),
+                ),
+                tool_call_id=None,
+                source_message_id=None,
+                created_at=now,
+                metadata=MessageMetadata(
+                    provider="chat_completions", model="tool-integration-model"
                 ),
             ),
-            tool_call_id=None,
-            source_message_id=None,
-            created_at=now,
-            metadata=MessageMetadata(provider="chat_completions", model="tool-integration-model"),
-        ),
-        started_at=now,
-        round=1,
+            calls=(
+                BeginToolCallBatchItem(
+                    record_id=record_id,
+                    tool_call_id=tool_call_id,
+                    model_name=model_name,
+                    tool_id=tool_id,
+                    tool_kind=ToolKind.BUILTIN,
+                    requires_approval=False,
+                ),
+            ),
+            round=1,
+            requested_at=now,
+        )
     )
+    admitted = await repository.admit_tool_call(
+        AdmitToolCallCommand(
+            run_id=run.id,
+            worker_id=run.worker_id or "",
+            execution_epoch=run.execution_epoch,
+            record_id=record_id,
+            admitted_at=now,
+        )
+    )
+    assert admitted is not None
+    return admitted
 
 
 def _finish_command(
@@ -849,18 +869,13 @@ def test_tool_snapshot_llm_quota_begin_finish_and_query_are_atomic() -> None:
                 is None
             )
 
-            first_call = _begin_command(
+            begun = await _begin_executing_call(
+                repository,
                 lease,
                 suffix="atomic",
                 tool_call_id="call_atomic_1",
                 ordinal_label="1",
             )
-            first_admissions = await asyncio.gather(
-                repository.begin_tool_call(first_call),
-                repository.begin_tool_call(first_call),
-            )
-            assert sorted(result.execute for result in first_admissions) == [False, True]
-            begun = next(result.item for result in first_admissions if result.execute)
             first_finish = _finish_command(
                 lease,
                 begun,
@@ -871,16 +886,16 @@ def test_tool_snapshot_llm_quota_begin_finish_and_query_are_atomic() -> None:
             repeated_finish = await repository.finish_tool_call(first_finish)
             assert repeated_finish is not None
 
-            second_begin = _begin_command(
+            second_begun = await _begin_executing_call(
+                repository,
                 lease,
                 suffix="atomic",
                 tool_call_id="call_atomic_2",
                 ordinal_label="2",
             )
-            second_admission = await repository.begin_tool_call(second_begin)
             second_finish = _finish_command(
                 lease,
-                second_admission.item,
+                second_begun,
                 suffix="atomic",
                 ordinal_label="2",
             )
@@ -972,32 +987,30 @@ def test_skill_artifacts_messages_and_execution_completion_are_one_transaction()
                 owner_id=owner_id,
                 suffix="skill-artifacts",
             )
-            begun = await repository.begin_tool_call(
-                _begin_command(
-                    lease,
-                    suffix="skill-artifacts",
-                    tool_call_id="call_skill_artifacts",
-                    model_name="skill_execute",
-                    tool_id=SKILL_EXECUTE_TOOL_ID,
-                    arguments={
-                        "skill_id": "skill_test",
-                        "script_path": "scripts/task.py",
-                        "parameters": {"api_token": "must-stay-server-side"},
-                        "input_file_ids": [],
-                    },
-                )
+            begun = await _begin_executing_call(
+                repository,
+                lease,
+                suffix="skill-artifacts",
+                tool_call_id="call_skill_artifacts",
+                model_name="skill_execute",
+                tool_id=SKILL_EXECUTE_TOOL_ID,
+                arguments={
+                    "skill_id": "skill_test",
+                    "script_path": "scripts/task.py",
+                    "parameters": {"api_token": "must-stay-server-side"},
+                    "input_file_ids": [],
+                },
             )
-            assert begun.execute is True
             skill_id, version_id, execution_id = await _start_skill_execution(
                 factory,
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-artifacts",
             )
             assert skill_id == "skill_skill-artifacts"
             assert version_id == "skillver_skill-artifacts"
             artifacts = _pending_artifacts(
-                begun.item.id,
+                begun.id,
                 count=2,
                 prefix="skill-artifacts",
             )
@@ -1005,7 +1018,7 @@ def test_skill_artifacts_messages_and_execution_completion_are_one_transaction()
             assert all(item.size_bytes > 50 * 1024 * 1024 for item in artifacts)
             command = _skill_finish_command(
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-artifacts",
                 execution_id=execution_id,
                 artifacts=artifacts,
@@ -1016,11 +1029,11 @@ def test_skill_artifacts_messages_and_execution_completion_are_one_transaction()
 
             assert completed is not None and replay is not None
             async with factory() as session:
-                call = await session.get(RunToolCallModel, begun.item.id)
+                call = await session.get(RunToolCallModel, begun.id)
                 files = (
                     await session.scalars(
                         select(SessionFileModel)
-                        .where(SessionFileModel.source_call_id == begun.item.id)
+                        .where(SessionFileModel.source_call_id == begun.id)
                         .order_by(SessionFileModel.output_index)
                     )
                 ).all()
@@ -1099,19 +1112,18 @@ def test_skill_start_unknown_without_completion_settles_running_audit_by_call_id
                 owner_id=owner_id,
                 suffix="skill-start-unknown",
             )
-            begun = await repository.begin_tool_call(
-                _begin_command(
-                    lease,
-                    suffix="skill-start-unknown",
-                    tool_call_id="call_skill_start_unknown",
-                    model_name="skill_execute",
-                    tool_id=SKILL_EXECUTE_TOOL_ID,
-                )
+            begun = await _begin_executing_call(
+                repository,
+                lease,
+                suffix="skill-start-unknown",
+                tool_call_id="call_skill_start_unknown",
+                model_name="skill_execute",
+                tool_id=SKILL_EXECUTE_TOOL_ID,
             )
             _skill_id, _version_id, execution_id = await _start_skill_execution(
                 factory,
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-start-unknown",
             )
             unknown = ToolOutcome(
@@ -1122,7 +1134,7 @@ def test_skill_start_unknown_without_completion_settles_running_audit_by_call_id
             finish = replace(
                 _finish_command(
                     lease,
-                    begun.item,
+                    begun,
                     suffix="skill-start-unknown",
                     outcome=unknown,
                 ),
@@ -1135,7 +1147,7 @@ def test_skill_start_unknown_without_completion_settles_running_audit_by_call_id
             replayed = await repository.finish_tool_call(finish)
 
             async with factory() as session:
-                call = await session.get(RunToolCallModel, begun.item.id)
+                call = await session.get(RunToolCallModel, begun.id)
                 execution = await session.get(SkillExecutionModel, execution_id)
             assert replayed is not None
             assert call is not None and call.status == ToolCallStatus.UNKNOWN.value
@@ -1149,7 +1161,7 @@ def test_skill_start_unknown_without_completion_settles_running_audit_by_call_id
                     run_id=lease.run.id,
                     worker_id=lease.run.worker_id or "",
                     execution_epoch=lease.run.execution_epoch,
-                    call_message_id=begun.item.call_message_id,
+                    call_message_id=begun.call_message_id,
                     safe_error_code="tool_outcome_unknown",
                     failed_at=datetime.now(UTC),
                 )
@@ -1179,27 +1191,27 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                 owner_id=owner_id,
                 suffix="failed",
             )
-            settled_begin = _begin_command(
+            settled = await _begin_executing_call(
+                repository,
                 failed_lease,
                 suffix="failed",
                 tool_call_id="call_failed_settled",
                 ordinal_label="1",
             )
-            settled = await repository.begin_tool_call(settled_begin)
             settled_finish = _finish_command(
                 failed_lease,
-                settled.item,
+                settled,
                 suffix="failed",
                 ordinal_label="1",
             )
             await repository.finish_tool_call(settled_finish)
-            executing_begin = _begin_command(
+            await _begin_executing_call(
+                repository,
                 failed_lease,
                 suffix="failed",
                 tool_call_id="call_failed_executing",
                 ordinal_label="2",
             )
-            await repository.begin_tool_call(executing_begin)
             failed = await repository.fail(
                 FailRunCommand(
                     failed_lease.run.id,
@@ -1229,13 +1241,13 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                 owner_id=owner_id,
                 suffix="finish",
             )
-            finish_begin = _begin_command(
+            await _begin_executing_call(
+                repository,
                 finish_lease,
                 suffix="finish",
                 tool_call_id="call_finish_executing",
                 ordinal_label="1",
             )
-            await repository.begin_tool_call(finish_begin)
             finished = await repository.finish(
                 FinishRunCommand(
                     finish_lease.run.id,
@@ -1267,13 +1279,13 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                 owner_id=owner_id,
                 suffix="cancel",
             )
-            cancel_begin = _begin_command(
+            await _begin_executing_call(
+                repository,
                 cancel_lease,
                 suffix="cancel",
                 tool_call_id="call_cancel_executing",
                 ordinal_label="1",
             )
-            await repository.begin_tool_call(cancel_begin)
             requested = await repository.cancel(
                 cancel_lease.run.session_id,
                 owner_id,
@@ -1296,13 +1308,13 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                 owner_id=owner_id,
                 suffix="reclaim",
             )
-            reclaim_command = _begin_command(
+            reclaimed_call = await _begin_executing_call(
+                repository,
                 reclaim_lease,
                 suffix="reclaim",
                 tool_call_id="call_reclaim_executing",
                 ordinal_label="1",
             )
-            reclaimed_call = await repository.begin_tool_call(reclaim_command)
             async with factory() as session, session.begin():
                 await session.execute(
                     update(RunModel)
@@ -1315,7 +1327,7 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
             await _assert_call_invariants(factory, reclaim_lease.run.id, expected_unknown=1)
             late_finish = _finish_command(
                 reclaim_lease,
-                reclaimed_call.item,
+                reclaimed_call,
                 suffix="reclaim",
                 ordinal_label="late",
             )
@@ -1329,16 +1341,16 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                 owner_id=owner_id,
                 suffix="mismatch",
             )
-            mismatch_begin = _begin_command(
+            mismatch_call = await _begin_executing_call(
+                repository,
                 mismatch_lease,
                 suffix="mismatch",
                 tool_call_id="call_mismatch",
                 ordinal_label="1",
             )
-            mismatch_call = await repository.begin_tool_call(mismatch_begin)
             mismatch_finish = _finish_command(
                 mismatch_lease,
-                mismatch_call.item,
+                mismatch_call,
                 suffix="mismatch",
                 ordinal_label="1",
             )
@@ -1374,17 +1386,17 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                 owner_id=owner_id,
                 suffix="unknown",
             )
-            unknown_begin = _begin_command(
+            unknown_call = await _begin_executing_call(
+                repository,
                 unknown_lease,
                 suffix="unknown",
                 tool_call_id="call_unknown",
                 ordinal_label="1",
             )
-            unknown_call = await repository.begin_tool_call(unknown_begin)
             unknown_result = await repository.finish_tool_call(
                 _finish_command(
                     unknown_lease,
-                    unknown_call.item,
+                    unknown_call,
                     suffix="unknown",
                     ordinal_label="1",
                     outcome=ToolOutcome(
@@ -2055,29 +2067,28 @@ def test_skill_artifact_quota_rejection_rolls_back_and_converges_running_record(
                 suffix="skill-quota",
             )
             await _seed_published_files(factory, lease, count=99)
-            begun = await repository.begin_tool_call(
-                _begin_command(
-                    lease,
-                    suffix="skill-quota",
-                    tool_call_id="call_skill_quota",
-                    model_name="skill_execute",
-                    tool_id=SKILL_EXECUTE_TOOL_ID,
-                )
+            begun = await _begin_executing_call(
+                repository,
+                lease,
+                suffix="skill-quota",
+                tool_call_id="call_skill_quota",
+                model_name="skill_execute",
+                tool_id=SKILL_EXECUTE_TOOL_ID,
             )
             _skill_id, _version_id, execution_id = await _start_skill_execution(
                 factory,
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-quota",
             )
             artifacts = _pending_artifacts(
-                begun.item.id,
+                begun.id,
                 count=2,
                 prefix="skill-quota",
             )
             command = _skill_finish_command(
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-quota",
                 execution_id=execution_id,
                 artifacts=artifacts,
@@ -2087,11 +2098,11 @@ def test_skill_artifact_quota_rejection_rolls_back_and_converges_running_record(
                 await repository.finish_tool_call(command)
 
             async with factory() as session:
-                call = await session.get(RunToolCallModel, begun.item.id)
+                call = await session.get(RunToolCallModel, begun.id)
                 execution = await session.get(SkillExecutionModel, execution_id)
                 artifact_count = await session.scalar(
                     select(func.count(SessionFileModel.id)).where(
-                        SessionFileModel.source_call_id == begun.item.id
+                        SessionFileModel.source_call_id == begun.id
                     )
                 )
                 result = await session.get(
@@ -2122,7 +2133,7 @@ def test_skill_artifact_quota_rejection_rolls_back_and_converges_running_record(
             )
             assert failed is not None and failed.status is RunStatus.FAILED
             async with factory() as session:
-                call = await session.get(RunToolCallModel, begun.item.id)
+                call = await session.get(RunToolCallModel, begun.id)
                 execution = await session.get(SkillExecutionModel, execution_id)
             assert call is not None
             assert call.status == ToolCallStatus.UNKNOWN.value
@@ -2156,29 +2167,28 @@ def test_upload_and_multi_artifact_publish_concurrency_never_exceeds_quota() -> 
                 suffix="skill-race",
             )
             await _seed_published_files(factory, lease, count=98)
-            begun = await repository.begin_tool_call(
-                _begin_command(
-                    lease,
-                    suffix="skill-race",
-                    tool_call_id="call_skill_race",
-                    model_name="skill_execute",
-                    tool_id=SKILL_EXECUTE_TOOL_ID,
-                )
+            begun = await _begin_executing_call(
+                repository,
+                lease,
+                suffix="skill-race",
+                tool_call_id="call_skill_race",
+                model_name="skill_execute",
+                tool_id=SKILL_EXECUTE_TOOL_ID,
             )
             _skill_id, _version_id, execution_id = await _start_skill_execution(
                 factory,
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-race",
             )
             artifacts = _pending_artifacts(
-                begun.item.id,
+                begun.id,
                 count=2,
                 prefix="skill-race",
             )
             finish = _skill_finish_command(
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-race",
                 execution_id=execution_id,
                 artifacts=artifacts,
@@ -2213,7 +2223,7 @@ def test_upload_and_multi_artifact_publish_concurrency_never_exceeds_quota() -> 
                         SessionFileModel.session_id == lease.run.session_id
                     )
                 )
-                call = await session.get(RunToolCallModel, begun.item.id)
+                call = await session.get(RunToolCallModel, begun.id)
                 execution = await session.get(SkillExecutionModel, execution_id)
             assert count is not None and count <= 100
             assert isinstance(finish_result, BaseException) != isinstance(
@@ -2274,23 +2284,22 @@ def test_upload_and_run_finish_both_wait_on_session_before_quota_lock() -> None:
                 owner_id=owner_id,
                 suffix="skill-lock-order",
             )
-            begun = await repository.begin_tool_call(
-                _begin_command(
-                    lease,
-                    suffix="skill-lock-order",
-                    tool_call_id="call_skill_lock_order",
-                    model_name="skill_execute",
-                    tool_id=SKILL_EXECUTE_TOOL_ID,
-                )
+            begun = await _begin_executing_call(
+                repository,
+                lease,
+                suffix="skill-lock-order",
+                tool_call_id="call_skill_lock_order",
+                model_name="skill_execute",
+                tool_id=SKILL_EXECUTE_TOOL_ID,
             )
             _skill_id, _version_id, execution_id = await _start_skill_execution(
                 factory,
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-lock-order",
             )
             artifacts = _pending_artifacts(
-                begun.item.id,
+                begun.id,
                 count=2,
                 prefix="skill-lock-order",
             )
@@ -2307,7 +2316,7 @@ def test_upload_and_run_finish_both_wait_on_session_before_quota_lock() -> None:
             )
             finish = _skill_finish_command(
                 lease,
-                begun.item,
+                begun,
                 suffix="skill-lock-order",
                 execution_id=execution_id,
                 artifacts=artifacts,

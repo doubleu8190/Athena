@@ -296,7 +296,7 @@ def build_run_router(
     ) -> RunResponse:
         """Approve or reject one persisted call without resubmitting arguments."""
         try:
-            await service.decide_tool_approval(
+            details = await service.decide_tool_approval(
                 session_id,
                 current_auth.user.id,
                 run_id,
@@ -305,7 +305,6 @@ def build_run_router(
                 ToolApprovalDecision(request.decision),
                 auth_session_id=current_auth.session_id,
             )
-            details = await service.get(session_id, current_auth.user.id, run_id)
             return run_details_to_response(details)
         except (RunNotFoundError, SessionNotFoundError) as error:
             raise _not_found(error) from error

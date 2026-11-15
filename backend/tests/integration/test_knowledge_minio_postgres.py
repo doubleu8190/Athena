@@ -39,7 +39,6 @@ from domain.knowledge.model import (
 )
 from domain.knowledge.ports import (
     ChineseTokenizer,
-    DocumentParser,
     KnowledgeRepositoryPort,
     ParsedDocument,
 )
@@ -79,6 +78,9 @@ class _WhitespaceCounter:
 
 
 class _UnusedParser:
+    def create(self) -> _UnusedParser:
+        return self
+
     async def parse(self, filename: str, content: bytes) -> ParsedDocument:
         del filename, content
         raise AssertionError("cleanup and orphan tests must not parse documents")
@@ -422,7 +424,7 @@ def test_joint_pg_minio_cleanup_survives_transient_delete_failure() -> None:
                 failing_store = _FailOnceDeleteStore(store)
                 worker = KnowledgeWorker(
                     repository,
-                    cast(DocumentParser, _UnusedParser()),
+                    cast(Any, _UnusedParser()),
                     failing_store,
                     cast(EmbeddingPort, _UnusedEmbedding()),
                     cast(ChineseTokenizer, _WhitespaceTokenizer()),
@@ -548,7 +550,7 @@ def test_joint_pg_minio_orphan_scan_preserves_source_and_reservation_references(
                 )
                 worker = KnowledgeWorker(
                     repository,
-                    cast(DocumentParser, _UnusedParser()),
+                    cast(Any, _UnusedParser()),
                     injected,
                     cast(EmbeddingPort, _UnusedEmbedding()),
                     cast(ChineseTokenizer, _WhitespaceTokenizer()),

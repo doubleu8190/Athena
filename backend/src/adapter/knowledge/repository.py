@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import random
-from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import cast
 
 from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
 from adapter.auth.model import UserModel
@@ -35,7 +35,6 @@ from domain.knowledge.model import (
     KnowledgeBase,
     ProjectKnowledgeLimitReachedError,
     SearchHit,
-    SearchResult,
     SourceReference,
 )
 from domain.knowledge.ports import ClaimedKnowledgeJob, FileUploadReservation
@@ -165,10 +164,13 @@ class KnowledgeRepository:
                 .with_for_update()
             )
             if reservation is not None:
+                db_now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
                 if reservation.request_hash != request_hash:
                     raise ValueError("idempotency_conflict")
                 if reservation.state != "reserved":
                     raise ValueError("upload_cleanup_in_progress")
+                if reservation.expires_at <= db_now:
+                    raise ValueError("knowledge_upload_reservation_stale")
                 reservation.expires_at = func.clock_timestamp() + text(
                     f"INTERVAL '{expires_after_seconds} seconds'"
                 )
@@ -271,82 +273,44 @@ class KnowledgeRepository:
                 .values(token=None, lease_until=None)
             )
 
-    async def claim_expired_upload_reservations(
-        self, *, limit: int = 20, lease_seconds: int = 300
+    async def list_expired_upload_reservations(
+        self, *, limit: int = 20
     ) -> tuple[FileUploadReservation, ...]:
-        if limit < 1 or lease_seconds < 30:
+        """读取仍处于 reserved 状态且已过期的上传预留（排除已被来源记录引用的对象）。"""
+        if limit < 1:
             raise ValueError("upload_reservation_cleanup_parameters_invalid")
-        claimed: list[FileUploadReservation] = []
-        async with self._sessions() as session, session.begin():
-            owner_ids = await session.scalars(
-                select(KnowledgeUploadReservationModel.owner_id)
-                .where(
-                    KnowledgeUploadReservationModel.expires_at <= func.clock_timestamp(),
-                    (
-                        (KnowledgeUploadReservationModel.state == "reserved")
-                        | (
-                            (KnowledgeUploadReservationModel.state == "cleaning")
-                            & (
-                                KnowledgeUploadReservationModel.lease_until.is_(None)
-                                | (
-                                    KnowledgeUploadReservationModel.lease_until
-                                    < func.clock_timestamp()
-                                )
-                            )
-                        )
-                    ),
-                )
-                .limit(limit * 4)
-            )
-            for owner_id in sorted(set(owner_ids)):
-                await self._lock_owner(session, owner_id)
-                rows = await session.scalars(
+        async with self._sessions() as session:
+            rows = (
+                await session.scalars(
                     select(KnowledgeUploadReservationModel)
                     .where(
-                        KnowledgeUploadReservationModel.owner_id == owner_id,
+                        KnowledgeUploadReservationModel.state == "reserved",
                         KnowledgeUploadReservationModel.expires_at <= func.clock_timestamp(),
-                        (
-                            (KnowledgeUploadReservationModel.state == "reserved")
-                            | (
-                                (KnowledgeUploadReservationModel.state == "cleaning")
-                                & (
-                                    KnowledgeUploadReservationModel.lease_until.is_(None)
-                                    | (
-                                        KnowledgeUploadReservationModel.lease_until
-                                        < func.clock_timestamp()
-                                    )
-                                )
-                            )
-                        ),
+                        ~select(KnowledgeSourceModel.id)
+                        .where(
+                            KnowledgeSourceModel.storage_key
+                            == KnowledgeUploadReservationModel.storage_key
+                        )
+                        .exists(),
                     )
                     .order_by(KnowledgeUploadReservationModel.expires_at)
-                    .with_for_update(skip_locked=True)
-                    .limit(limit - len(claimed))
+                    .limit(limit)
                 )
-                for item in rows:
-                    item.state = "cleaning"
-                    item.fencing_token += 1
-                    item.lease_until = func.clock_timestamp() + text(
-                        f"INTERVAL '{lease_seconds} seconds'"
-                    )
-                    claimed.append(
-                        FileUploadReservation(
-                            item.reservation_token,
-                            item.storage_key,
-                            item.source_id,
-                            item.document_id,
-                            item.version_id,
-                            item.job_id,
-                            fencing_token=item.fencing_token,
-                        )
-                    )
-                    if len(claimed) >= limit:
-                        return tuple(claimed)
-        return tuple(claimed)
+            ).all()
+        return tuple(
+            FileUploadReservation(
+                item.reservation_token,
+                item.storage_key,
+                item.source_id,
+                item.document_id,
+                item.version_id,
+                item.job_id,
+            )
+            for item in rows
+        )
 
-    async def finish_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool:
+    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool:
+        """在单事务内原子核验过期、无来源引用与无其他有效预留引用后删除预留行。"""
         async with self._sessions() as session, session.begin():
             owner_id = await session.scalar(
                 select(KnowledgeUploadReservationModel.owner_id).where(
@@ -356,47 +320,35 @@ class KnowledgeRepository:
             if owner_id is None:
                 return False
             await self._lock_owner(session, owner_id)
+            other_reservation = aliased(KnowledgeUploadReservationModel)
             item = await session.scalar(
                 select(KnowledgeUploadReservationModel)
                 .where(
                     KnowledgeUploadReservationModel.owner_id == owner_id,
                     KnowledgeUploadReservationModel.reservation_token == reservation_token,
+                    KnowledgeUploadReservationModel.state == "reserved",
+                    KnowledgeUploadReservationModel.expires_at <= func.clock_timestamp(),
+                    ~select(KnowledgeSourceModel.id)
+                    .where(
+                        KnowledgeSourceModel.storage_key
+                        == KnowledgeUploadReservationModel.storage_key
+                    )
+                    .exists(),
+                    ~select(other_reservation.reservation_token)
+                    .where(
+                        other_reservation.storage_key
+                        == KnowledgeUploadReservationModel.storage_key,
+                        other_reservation.reservation_token != reservation_token,
+                        other_reservation.expires_at > func.clock_timestamp(),
+                    )
+                    .exists(),
                 )
                 .with_for_update()
             )
-            now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
-            if (
-                item is None
-                or item.state != "cleaning"
-                or item.fencing_token != fencing_token
-                or item.lease_until is None
-                or item.lease_until <= now
-            ):
+            if item is None:
                 return False
             await session.delete(item)
             return True
-
-    async def can_delete_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool:
-        """确认清理租约仍有效且原件尚未被来源记录引用。"""
-        async with self._sessions() as session:
-            item = await session.scalar(
-                select(KnowledgeUploadReservationModel).where(
-                    KnowledgeUploadReservationModel.reservation_token == reservation_token,
-                    KnowledgeUploadReservationModel.state == "cleaning",
-                    KnowledgeUploadReservationModel.fencing_token == fencing_token,
-                    KnowledgeUploadReservationModel.lease_until > func.clock_timestamp(),
-                )
-            )
-            if item is None:
-                return False
-            source = await session.scalar(
-                select(KnowledgeSourceModel.id)
-                .where(KnowledgeSourceModel.storage_key == item.storage_key)
-                .limit(1)
-            )
-            return source is None
 
     async def claim_job(
         self, *, lease_seconds: int, owner_concurrency: int = 2
@@ -1157,31 +1109,6 @@ class KnowledgeRepository:
                 )
             return True
 
-    async def enqueue_document(
-        self,
-        *,
-        source: KnowledgeSourceModel | None,
-        document: KnowledgeDocumentModel,
-        version: KnowledgeVersionModel,
-        job: KnowledgeJobModel,
-        request: KnowledgeRequestModel,
-    ) -> None:
-        async with self._sessions() as session, session.begin():
-            visible = await session.scalar(
-                select(KnowledgeBaseModel.id)
-                .where(
-                    KnowledgeBaseModel.id == document.knowledge_base_id,
-                    KnowledgeBaseModel.owner_id == document.owner_id,
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
-            if visible is None:
-                raise LookupError("knowledge_base_not_found")
-            if source is not None:
-                session.add(source)
-            session.add_all([document, version, job, request])
-
     async def get_document(self, owner_id: str, base_id: str, document_id: str) -> Document | None:
         async with self._sessions() as session:
             model = await session.scalar(
@@ -1354,6 +1281,7 @@ class KnowledgeRepository:
                 )
                 .with_for_update()
             )
+            db_now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
             if reservation is None or (
                 reservation.request_hash != request_hash
                 or reservation.base_id != base_id
@@ -1364,6 +1292,7 @@ class KnowledgeRepository:
                 or reservation.storage_key != storage_key
                 or reservation.size_bytes != size_bytes
                 or reservation.state != "reserved"
+                or reservation.expires_at <= db_now
             ):
                 raise ValueError("knowledge_upload_reservation_stale")
             await session.delete(reservation)
@@ -1613,6 +1542,7 @@ class KnowledgeRepository:
                 )
                 .with_for_update()
             )
+            db_now = cast(datetime, await session.scalar(select(func.clock_timestamp())))
             if reservation is None or (
                 reservation.request_hash != request_hash
                 or reservation.base_id != base_id
@@ -1623,6 +1553,7 @@ class KnowledgeRepository:
                 or reservation.storage_key != storage_key
                 or reservation.size_bytes != size_bytes
                 or reservation.state != "reserved"
+                or reservation.expires_at <= db_now
             ):
                 raise ValueError("knowledge_upload_reservation_stale")
             await session.delete(reservation)
@@ -2009,21 +1940,6 @@ class KnowledgeRepository:
                 knowledge_base_id=base_id,
             )
 
-    async def search(
-        self,
-        owner_id: str,
-        base_ids: list[str],
-        query: str,
-        tokens: tuple[str, ...],
-        limit: int,
-        vector: list[float] | None = None,
-    ) -> SearchResult:
-        """兼容仓储直调，分开运行两路事务后用 RRF 合并。"""
-        await self.validate_search_scope(owner_id, base_ids)
-        keyword = await self.search_keyword(owner_id, base_ids, tokens, 40)
-        semantic = await self.search_semantic(owner_id, base_ids, vector, 40) if vector else ()
-        return _fuse_search_channels(keyword, semantic, limit)
-
     async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None:
         async with self._sessions() as session:
             visible = await session.scalars(
@@ -2252,34 +2168,6 @@ def _search_hit(
         chunk_ids=(chunk.id,),
         knowledge_base_id=base_id,
     )
-
-
-def _fuse_search_channels(
-    keyword: tuple[SearchHit, ...], semantic: tuple[SearchHit, ...], limit: int
-) -> SearchResult:
-    by_id: dict[str, SearchHit] = {}
-    scores: dict[str, float] = {}
-    for channel_hits in (keyword, semantic):
-        for hit in channel_hits:
-            by_id[hit.chunk_id] = (
-                replace(
-                    hit,
-                    channels=tuple(dict.fromkeys((*by_id[hit.chunk_id].channels, *hit.channels))),
-                )
-                if hit.chunk_id in by_id
-                else hit
-            )
-            scores[hit.chunk_id] = scores.get(hit.chunk_id, 0) + 1 / (60 + hit.rank)
-    hits = tuple(
-        replace(by_id[chunk_id], rank=score)
-        for chunk_id, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
-    )
-    channels = tuple(
-        channel
-        for channel, channel_hits in (("keyword", keyword), ("semantic", semantic))
-        if channel_hits or channel == "keyword"
-    )
-    return SearchResult(hits, channels)
 
 
 async def _next_version_time(

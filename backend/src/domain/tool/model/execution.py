@@ -189,32 +189,6 @@ class ReserveLlmRequestCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class BeginToolCallCommand:
-    """Persist a model call before any external business request is sent."""
-
-    run_id: str
-    worker_id: str
-    execution_epoch: int
-    record_id: str
-    tool_call_id: str
-    model_name: str
-    tool_id: str | None
-    tool_kind: ToolKind | None
-    call_message: ExecutionMessageDraft
-    started_at: datetime
-    round: int = 0
-    requires_approval: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class BeginToolCallResult:
-    """The sole execution admission for a call and its persisted record."""
-
-    item: RunToolCallRecord
-    execute: bool
-
-
-@dataclass(frozen=True, slots=True)
 class FinishToolCallCommand:
     """Persist one idempotent result, optionally terminating the whole Run."""
 
@@ -422,11 +396,9 @@ def bounded_outcome(
 __all__ = [
     "AuthorizedRunContext",
     "AdmitToolCallCommand",
-    "BeginToolCallCommand",
     "BeginToolCallBatchCommand",
     "BeginToolCallBatchItem",
     "BeginToolCallBatchResult",
-    "BeginToolCallResult",
     "ConvergeToolBatchCommand",
     "DecideToolApprovalCommand",
     "FinishToolCallCommand",

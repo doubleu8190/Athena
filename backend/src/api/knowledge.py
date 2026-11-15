@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -22,6 +21,12 @@ from fastapi import (
     status,
 )
 
+from api.converter.knowledge import (
+    knowledge_base_to_response,
+    knowledge_document_to_response,
+    knowledge_search_hit_to_response,
+    knowledge_version_to_response,
+)
 from api.dto.knowledge import (
     KnowledgeBaseListResponse,
     KnowledgeBasePatchRequest,
@@ -45,9 +50,6 @@ from app.knowledge.service import (
     KnowledgeService,
 )
 from domain.knowledge.model import (
-    ChunkLocator,
-    Document,
-    KnowledgeBase,
     OriginalStorageError,
 )
 from domain.knowledge.ports import DocumentFileValidator
@@ -316,19 +318,7 @@ def build_knowledge_router(
             versions = await service.list_versions(auth.user.id, base_id, document_id)
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
-        return [
-            KnowledgeVersionResponse(
-                id=item.id,
-                document_id=item.document_id,
-                state=item.state.value,
-                error_code=item.error_code,
-                warnings=list(item.warnings),
-                chunk_count=item.chunk_count,
-                created_at=item.created_at.isoformat(),
-                completed_at=item.completed_at.isoformat() if item.completed_at else None,
-            )
-            for item in versions
-        ]
+        return [knowledge_version_to_response(item) for item in versions]
 
     @router.post(
         "/{base_id}/documents/{document_id}/versions/{version_id}/retry",
@@ -346,16 +336,7 @@ def build_knowledge_router(
             if str(error) == "document_update_in_progress":
                 raise HTTPException(status_code=409, detail=str(error)) from error
             raise _bad_request(error) from error
-        return KnowledgeVersionResponse(
-            id=item.id,
-            document_id=item.document_id,
-            state=item.state.value,
-            error_code=item.error_code,
-            warnings=list(item.warnings),
-            chunk_count=item.chunk_count,
-            created_at=item.created_at.isoformat(),
-            completed_at=item.completed_at.isoformat() if item.completed_at else None,
-        )
+        return knowledge_version_to_response(item)
 
     @router.patch("/{base_id}/documents/{document_id}", response_model=KnowledgeDocumentResponse)
     async def patch_document(
@@ -397,19 +378,7 @@ def build_knowledge_router(
         except KnowledgeInputError as error:
             raise _bad_request(error) from error
         return KnowledgeSearchResponse(
-            hits=[
-                KnowledgeSearchHit(
-                    chunk_id=hit.chunk_id,
-                    chunk_ids=list(hit.chunk_ids or (hit.chunk_id,)),
-                    document_id=hit.document_id,
-                    version_id=hit.version_id,
-                    title=hit.title,
-                    text=hit.text,
-                    locators=[_locator_dict(loc) for loc in hit.locators],
-                    channels=list(hit.channels),
-                )
-                for hit in result.hits
-            ],
+            hits=[knowledge_search_hit_to_response(hit) for hit in result.hits],
             channels=list(result.channels),
             degraded_reasons=list(result.degraded_reasons),
         )
@@ -444,28 +413,13 @@ def build_knowledge_router(
             hit = await service.chunk(auth.user.id, base_id, chunk_id)
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
-        return KnowledgeSearchHit(
-            chunk_id=hit.chunk_id,
-            chunk_ids=list(hit.chunk_ids or (hit.chunk_id,)),
-            document_id=hit.document_id,
-            version_id=hit.version_id,
-            title=hit.title,
-            text=hit.text,
-            locators=[_locator_dict(locator) for locator in hit.locators],
-            channels=list(hit.channels),
-        )
+        return knowledge_search_hit_to_response(hit)
 
     return router
 
 
-def _base_response(item: KnowledgeBase) -> KnowledgeBaseResponse:
-    return KnowledgeBaseResponse(
-        id=item.id,
-        name=item.name,
-        description=item.description,
-        created_at=item.created_at.isoformat(),
-        updated_at=item.updated_at.isoformat(),
-    )
+_base_response = knowledge_base_to_response
+_document_response = knowledge_document_to_response
 
 
 async def _stage_upload(
@@ -475,14 +429,12 @@ async def _stage_upload(
     validator: DocumentFileValidator,
 ) -> bytes:
     """限制上传并先校验暂存文件，再读取受限大小内容供原件存储。"""
-    digest = hashlib.sha256()
     size = 0
     with tempfile.NamedTemporaryFile(mode="w+b", suffix=".upload", delete=True) as staged:
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
             if size > maximum:
                 raise HTTPException(status_code=413, detail="document_file_too_large")
-            digest.update(chunk)
             await asyncio.to_thread(staged.write, chunk)
         staged.flush()
         # 校验器由组合根注入，API 层不直接依赖 infrastructure 实现。
@@ -494,37 +446,6 @@ async def _stage_upload(
         )
         staged.seek(0)
         return await asyncio.to_thread(staged.read)
-
-
-def _document_response(item: Document) -> KnowledgeDocumentResponse:
-    return KnowledgeDocumentResponse(
-        id=item.id,
-        knowledge_base_id=item.knowledge_base_id,
-        title=item.title,
-        active_version_id=item.active_version_id,
-        pending_version_id=item.pending_version_id,
-        created_at=item.created_at.isoformat(),
-        updated_at=item.updated_at.isoformat(),
-    )
-
-
-def _locator_dict(locator: ChunkLocator) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in (
-            ("kind", locator.kind),
-            ("page", locator.page),
-            ("start_line", locator.start_line),
-            ("end_line", locator.end_line),
-            ("heading", locator.heading),
-            ("sheet", locator.sheet),
-            ("cell_range", locator.cell_range),
-            ("slide", locator.slide),
-            ("shape", locator.shape),
-            ("media_id", locator.media_id),
-        )
-        if value is not None
-    }
 
 
 def _bad_request(error: Exception) -> HTTPException:

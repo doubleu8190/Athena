@@ -27,6 +27,7 @@ from domain.run.model import (
     Run,
     RunEvent,
     RunInputFiles,
+    RunStatus,
     SubmitRunCommand,
     SubmitRunResult,
 )
@@ -370,7 +371,7 @@ class RunService:
         decision: ToolApprovalDecision,
         *,
         auth_session_id: str | None = None,
-    ) -> Run:
+    ) -> RunDetailsResult:
         """Apply one owner-scoped tool approval decision with an idempotency key."""
         request_id = _validate_request_id(request_id)
         if not call_id or len(call_id) > MAX_TOOL_CALL_ID_LENGTH:
@@ -400,7 +401,13 @@ class RunService:
         )
         if result is None:
             raise RunNotFoundError("run_not_found")
-        return result
+        # 仅在仍处于等待审批时读取剩余待审批列表，避免 API 层再发一次完整 service.get() 查询。
+        pending_approvals = (
+            await self._repository.list_pending_approvals(session_id, owner_id, run_id) or ()
+            if result.status is RunStatus.WAITING_FOR_APPROVAL
+            else ()
+        )
+        return RunDetailsResult(result, None, pending_approvals)
 
     async def list(
         self, session_id: str, owner_id: str, *, cursor: str | None, limit: int

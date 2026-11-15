@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.memory.model import (
     MemoryJobModel,
@@ -21,11 +21,13 @@ from adapter.memory.repository._shared import (
     _json_value,
     _mark_batch_runs_locked,
     _mark_user_runs_skipped_locked,
-    _MemoryRepositoryHelpersMixin,
     _message_text,
     _scope_key,
     _source_message,
+    copy_evidence_sources,
+    insert_prepared_memory,
     lock_scope_states,
+    preserve_replacement_evidence_time,
     read_user_memory_generation,
 )
 from adapter.message.model import ConversationMessageModel
@@ -49,7 +51,9 @@ from domain.memory.lifecycle import (
 from domain.message import ConversationRole
 
 
-class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
+class MemoryBatchExtractRepository:
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
     """负责待提取 Run 扫描、来源加载与批次原子提交。"""
 
     async def apply_batch(self, command: ApplyBatchCommand) -> ExtractBatchResult:
@@ -125,7 +129,7 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     create = change.create
                     if create is None:
                         raise ValueError("memory_batch_plan_invalid")
-                    if await self._insert_prepared(session, create, now) is False:
+                    if await insert_prepared_memory(session, create, now) is False:
                         raise ValueError("memory_batch_create_replayed")
                     created += 1
                 elif change.action is DecisionAction.UPDATE:
@@ -140,14 +144,14 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
                         change.target_memory_id,
                         change.target_version,
                     )
-                    if await self._insert_prepared(session, create, now) is False:
+                    if await insert_prepared_memory(session, create, now) is False:
                         raise ValueError("memory_batch_create_replayed")
-                    await self._copy_evidence_sources(
+                    await copy_evidence_sources(
                         session,
                         source_memory_id=target.id,
                         target_memory_id=create.memory_id,
                     )
-                    await self._preserve_replacement_evidence_time(
+                    await preserve_replacement_evidence_time(
                         session,
                         memory_id=create.memory_id,
                         create=create,

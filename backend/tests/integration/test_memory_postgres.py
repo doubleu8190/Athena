@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
 
@@ -56,6 +56,7 @@ async def _insert_memory(
     source_ref: str,
     updated_at: datetime,
     status: str = "active",
+    expires_at: datetime | None = None,
 ) -> None:
     """直接写入检索夹具，与公共新增接口的幂等场景保持隔离。"""
     content_hash = hashlib.sha256(" ".join(content.split()).encode()).hexdigest()
@@ -78,6 +79,7 @@ async def _insert_memory(
                 load_policy="on_demand",
                 content_hash=content_hash,
                 explicit_long_term=False,
+                expires_at=expires_at,
                 last_evidenced_at=updated_at,
                 created_at=updated_at,
                 updated_at=updated_at,
@@ -169,11 +171,20 @@ def test_memory_migration_and_hybrid_candidate_queries() -> None:
                 updated_at=now,
                 status="archived",
             )
+            await _insert_memory(
+                factory,
+                memory_id="memory_expired",
+                content="已过期的 PostgreSQL 17 记忆",
+                source_ref="source-expired",
+                updated_at=now,
+                expires_at=now - timedelta(minutes=5),
+            )
 
             keyword_hits = await repository.search_keyword(
                 "memory-test-user", ("personal",), "PostgreSQL 17", 10
             )
             assert keyword_hits and keyword_hits[0][0].id == "memory_main"
+            assert all(memory.id != "memory_expired" for memory, _score in keyword_hits)
             vector_hits = await repository.search_vector(
                 "memory-test-user",
                 ("personal",),
@@ -182,6 +193,7 @@ def test_memory_migration_and_hybrid_candidate_queries() -> None:
                 10,
             )
             assert any(memory.id == "memory_main" for memory, _score in vector_hits)
+            assert all(memory.id != "memory_expired" for memory, _score in vector_hits)
 
             async with factory() as session, session.begin():
                 await session.execute(
@@ -213,13 +225,13 @@ def test_memory_migration_and_hybrid_candidate_queries() -> None:
                 "source-dedupe-new",
             }
 
-            retrieved = await repository.retrieve_similar(
-                AccessContext("memory-test-user", ("personal",), ("personal",)),
-                "personal",
-                "乌龙茶",
-                (0.1,) * 1024,
-                "bge-m3-1024-v1",
-            )
+            retrieved = (
+                await repository.retrieve_similar_batch(
+                    AccessContext("memory-test-user", ("personal",), ("personal",)),
+                    (("personal", "乌龙茶", (0.1,) * 1024),),
+                    "bge-m3-1024-v1",
+                )
+            )[0]
             assert any(memory.id == "memory_archived" for memory in retrieved)
 
             await repository.update_settings("memory-test-user", False, False)
@@ -229,14 +241,6 @@ def test_memory_migration_and_hybrid_candidate_queries() -> None:
             assert not disabled_snapshot.read_enabled
             assert disabled_snapshot.memories == {}
             await repository.update_settings("memory-test-user", True, True)
-
-            access = AccessContext("memory-test-user", ("personal",), ("personal",))
-            changed = await asyncio.gather(
-                repository.edit(access, "memory_main", "版本 A", [0.2] * 1024, "bge-m3-1024-v1", 1),
-                repository.edit(access, "memory_main", "版本 B", [0.3] * 1024, "bge-m3-1024-v1", 1),
-            )
-            assert sorted(changed) == [False, True]
-            assert await repository.delete(access, "memory_main", 2)
 
             await asyncio.to_thread(command.downgrade, config, "20261106_0007")
             async with admin.connect() as connection:

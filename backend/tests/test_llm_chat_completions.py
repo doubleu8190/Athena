@@ -216,7 +216,7 @@ def test_tool_call_diagnostic_summarizes_same_index_continuation_without_sensiti
             )
         ]
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         events = asyncio.run(collect())
 
     payload = diagnostic_payload(caplog)
@@ -287,7 +287,7 @@ def test_tool_call_diagnostic_distinguishes_independent_calls(
             )
         ]
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         asyncio.run(collect())
 
     payload = diagnostic_payload(caplog)
@@ -337,7 +337,7 @@ def test_tool_call_diagnostic_records_duplicate_id_rejection(
         ):
             pass
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         with pytest.raises(LlmProtocolError, match="llm_tool_call_identity_invalid"):
             asyncio.run(collect())
 
@@ -408,7 +408,7 @@ def test_tool_call_diagnostic_caps_fragments_without_changing_stream(
             )
         ]
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         events = asyncio.run(collect())
 
     payload = diagnostic_payload(caplog)

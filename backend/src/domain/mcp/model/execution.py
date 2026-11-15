@@ -102,7 +102,6 @@ __all__ = [
     "McpCallResult",
     "McpCallStatus",
     "McpRuntimeToolTarget",
-    "McpRuntimeToolDefinition",
     "mcp_content_projection",
     "mcp_message_from_result",
 ]

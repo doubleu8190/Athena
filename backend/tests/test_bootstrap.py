@@ -132,7 +132,7 @@ def test_build_knowledge_models_uses_shared_environment(monkeypatch: pytest.Monk
             created.append(("tokenizer", ()))
 
     monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", FakeEmbedding)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalKnowledgeTokenCounter", FakeCounter)
+    monkeypatch.setattr(bootstrap_knowledge, "LocalTokenCounter", FakeCounter)
     monkeypatch.setattr(bootstrap_knowledge, "JiebaChineseTokenizer", FakeTokenizer)
     monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "custom/model")
     monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_REVISION", "revision-1")

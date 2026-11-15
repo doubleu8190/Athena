@@ -28,7 +28,6 @@ from domain.knowledge.model import ChunkLocator, KnowledgeBase, SearchHit, Searc
 from domain.mcp import (
     McpCallResult,
     McpCallStatus,
-    McpRuntimeToolDefinition,
     McpRuntimeToolTarget,
 )
 from domain.memory.lifecycle import ControlReceiptResult, LoadPolicy, MemoryKind
@@ -96,11 +95,11 @@ class _Sessions:
 
 
 class _McpCatalog:
-    def __init__(self, definitions: tuple[McpRuntimeToolDefinition, ...] = ()) -> None:
+    def __init__(self, definitions: tuple[RuntimeToolDefinition, ...] = ()) -> None:
         self.definitions = definitions
         self.target_requests: list[tuple[str, str, str, int]] = []
 
-    async def list_runtime_tools(self, *, limit: int) -> tuple[McpRuntimeToolDefinition, ...]:
+    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         assert limit == 201
         return self.definitions[:201]
 
@@ -377,11 +376,9 @@ def _mcp_definition() -> RuntimeToolDefinition:
     )
 
 
-def _mcp_snapshot_definition(*, requires_approval: bool = False) -> McpRuntimeToolDefinition:
-    return McpRuntimeToolDefinition(
+def _mcp_snapshot_definition(*, requires_approval: bool = False) -> RuntimeToolDefinition:
+    return RuntimeToolDefinition(
         tool_id="tool_lookup",
-        server_id="mcp_1",
-        remote_name="remote_lookup",
         model_name="lookup",
         description="Look up a value.",
         input_schema={
@@ -390,7 +387,11 @@ def _mcp_snapshot_definition(*, requires_approval: bool = False) -> McpRuntimeTo
             "required": ["query"],
             "additionalProperties": False,
         },
-        config_version=2,
+        source=McpToolSource(
+            server_id="mcp_1",
+            remote_name="remote_lookup",
+            config_version=2,
+        ),
         requires_approval=requires_approval,
     )
 

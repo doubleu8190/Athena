@@ -15,11 +15,9 @@ from domain.message import ConversationRole, TextPart
 
 
 class MemoryControlSourceRepository:
-    """从数据库可信范围读取当前 Run 的用户直接表达。"""
-
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
-        """保存共享数据库会话工厂。"""
         self._factory = factory
+    """从数据库可信范围读取当前 Run 的用户直接表达，混入 MemoryRepository。"""
 
     async def read_control_source(
         self,

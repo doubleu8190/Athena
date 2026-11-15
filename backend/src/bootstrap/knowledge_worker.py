@@ -15,7 +15,7 @@ from bootstrap.knowledge import (
     build_knowledge_original_store,
 )
 from infrastructure.database import Database
-from infrastructure.knowledge.parsers import LocalDocumentParser, LocalDocumentParserFactory
+from infrastructure.knowledge.parsers import LocalDocumentParserFactory
 
 # 隔离解析工厂与非隔离解析器共用同一 OCR 语言配置，避免两处配置漂移。
 OCR_LANGUAGES = "ch"
@@ -55,13 +55,11 @@ def build_knowledge_worker(bundle: KnowledgeWorkerBundle) -> int:
     assert database is not None and originals is not None and models is not None
     bundle.worker = KnowledgeWorker(
         KnowledgeRepository(database.session_factory),
-        LocalDocumentParser(ocr_languages=OCR_LANGUAGES),
+        LocalDocumentParserFactory(ocr_languages=OCR_LANGUAGES),
         originals,
         models.embedding,
         models.tokenizer,
         models.counter,
-        # 隔离解析在子进程用工厂创建解析器；位置参数 parser 供非隔离模式使用。
-        parser_factory=LocalDocumentParserFactory(ocr_languages=OCR_LANGUAGES),
         parse_memory_mb=int(os.getenv("ATHENA_KNOWLEDGE_PARSE_MEMORY_MB", "4096")),
         profile_id=models.profile_id,
         owner_concurrency=int(os.getenv("ATHENA_KNOWLEDGE_OWNER_CONCURRENCY", "2")),

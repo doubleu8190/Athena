@@ -25,13 +25,9 @@ from domain.memory.lifecycle import (
     ExtractBatchPayload,
     ExtractPendingPayload,
     JobKind,
-    MaintainJobResult,
-    MaintainScopePayload,
     MemoryJob,
     MemoryJobResult,
     MemoryPendingRun,
-    ScanJobResult,
-    ScanRunsPayload,
 )
 from domain.memory.ports import MemoryLifecycleRepositoryPort
 
@@ -39,9 +35,7 @@ logger = logging.getLogger(__name__)
 
 BACKGROUND_JOB_KINDS = (
     JobKind.EXTRACT_PENDING,
-    JobKind.MAINTAIN_SCOPE,
     JobKind.CLEANUP_SCOPE,
-    JobKind.SCAN_RUNS,
 )
 _SCAN_PAGE_LIMIT = 100
 _MAX_EXTRACT_ATTEMPTS = 5
@@ -111,6 +105,15 @@ class MemoryWorker:
         self._extraction = extraction
         self._config = config or MemoryWorkerConfig()
         self._maintenance_day: str | None = None
+        self._scan_boundary_at: datetime = utc_now()
+        self._scan_cursor_finished_at: datetime | None = None
+        self._scan_cursor_run_id: str | None = None
+
+    def set_scan_boundary(self, enabled_boundary_at: datetime) -> None:
+        """设置缺漏 Run 扫描的起始时间边界，避免全表历史回扫。"""
+        self._scan_boundary_at = enabled_boundary_at
+        self._scan_cursor_finished_at = None
+        self._scan_cursor_run_id = None
 
     async def validate_runtime(self) -> None:
         """启动前确认管理员默认文本模型可解析。"""
@@ -123,13 +126,10 @@ class MemoryWorker:
         """启动时恢复普通后台任务，control 回执不进入恢复范围。"""
         return await self._repository.recover_running_jobs()
 
-    async def ensure_scan_job(self, enabled_boundary_at: datetime) -> None:
-        """初始化固定扫描记录；后续重启不推进既有游标。"""
-        await self._repository.ensure_scan_job(enabled_boundary_at)
-
     async def run_once(self) -> bool:
-        """处理至多一个后台任务；返回本次是否领取到工作。"""
+        """执行定时维护与缺漏扫描，并处理至多一个异步后台任务。"""
         await self._ensure_daily_maintenance()
+        await self._scan_missing_runs()
         job = await self._repository.claim_job(
             kinds=BACKGROUND_JOB_KINDS,
             limit=1,
@@ -152,26 +152,6 @@ class MemoryWorker:
         payload = job.payload
         if isinstance(payload, ExtractPendingPayload):
             await self._process_extract(job, payload)
-            return
-        if isinstance(payload, ScanRunsPayload):
-            scan_result = await self._repository.scan_missing_runs(
-                payload,
-                page_limit=_SCAN_PAGE_LIMIT,
-            )
-            await self._complete(job, ScanJobResult(result=scan_result))
-            return
-        if isinstance(payload, MaintainScopePayload):
-            maintain_result = await self._repository.maintain_scope(
-                payload.namespace_id,
-                payload.scope_key,
-                payload.day,
-                fact_max_age_days=self._config.fact_max_age_days,
-                other_max_age_days=self._config.other_max_age_days,
-            )
-            await self._complete(
-                job,
-                MaintainJobResult(result=maintain_result),
-            )
             return
         if isinstance(payload, CleanupScopePayload):
             cleanup_result = await self._repository.cleanup_scope(
@@ -456,12 +436,31 @@ class MemoryWorker:
         )
 
     async def _ensure_daily_maintenance(self) -> None:
-        """每个 UTC 日幂等安排所有启用 scope 的维护任务。"""
+        """每个 UTC 日直接执行启用 scope 的过期与超龄归档，不再生成大量维护任务行。"""
         day = utc_now().astimezone(UTC).date().isoformat()
         if self._maintenance_day == day:
             return
-        await self._repository.enqueue_maintenance(day)
+        await self._repository.maintain_due_scopes(
+            day,
+            fact_max_age_days=self._config.fact_max_age_days,
+            other_max_age_days=self._config.other_max_age_days,
+        )
         self._maintenance_day = day
+
+    async def _scan_missing_runs(self) -> None:
+        """在 Worker 循环内有界扫描遗漏的 pending Run，无需持久化游标任务。"""
+        result = await self._repository.scan_missing_runs(
+            enabled_boundary_at=self._scan_boundary_at,
+            cursor_finished_at=self._scan_cursor_finished_at,
+            cursor_run_id=self._scan_cursor_run_id,
+            page_limit=_SCAN_PAGE_LIMIT,
+        )
+        if result.round_complete:
+            self._scan_cursor_finished_at = None
+            self._scan_cursor_run_id = None
+        else:
+            self._scan_cursor_finished_at = result.next_cursor_finished_at
+            self._scan_cursor_run_id = result.next_cursor_run_id
 
 
 __all__ = [

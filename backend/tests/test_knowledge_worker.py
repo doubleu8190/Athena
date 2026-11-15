@@ -95,19 +95,14 @@ class _Repository:
         del storage_key
         return False
 
-    async def claim_expired_upload_reservations(
-        self, *, limit: int = 20, lease_seconds: int = 300
+    async def list_expired_upload_reservations(
+        self, *, limit: int = 20
     ) -> tuple[FileUploadReservation, ...]:
+        del limit
         return ()
 
-    async def finish_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool:
-        return True
-
-    async def can_delete_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool:
+    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool:
+        del reservation_token
         return True
 
     async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
@@ -118,6 +113,9 @@ class _Repository:
 
 
 class _UnusedParser:
+    def create(self) -> _UnusedParser:
+        return self
+
     async def parse(self, filename: str, content: bytes) -> ParsedDocument:
         raise AssertionError("text source does not use parser")
 
@@ -218,13 +216,12 @@ async def _run_isolated_file_job() -> _FileRepository:
     repository = _FileRepository()
     worker = KnowledgeWorker(
         repository,
-        _UnusedParser(),
+        # 保持默认 isolate_parsing=True，让真实 spawn 子进程完成解析。
+        LocalDocumentParserFactory(),
         _BytesStore(),
         _Embedding(),
         _Tokenizer(),
         _Counter(),
-        # 保持默认 isolate_parsing=True，让真实 spawn 子进程完成解析。
-        parser_factory=LocalDocumentParserFactory(),
     )
     assert await worker.run_once()
     return repository
@@ -527,19 +524,6 @@ def test_parse_in_child_closes_queue_when_process_start_fails(
     assert reap_calls == []  # 未启动的进程不得被 terminate/join
     assert context.queue.closed
     assert context.queue.joined
-
-
-def test_isolated_parsing_requires_a_parser_factory() -> None:
-    """隔离模式必须注入工厂，应用层不能自行导入 infrastructure 解析器。"""
-    with pytest.raises(ValueError, match="knowledge_parser_factory_required"):
-        KnowledgeWorker(
-            _Repository(),
-            _UnusedParser(),
-            _UnusedStore(),
-            _Embedding(),
-            _Tokenizer(),
-            _Counter(),
-        )
 
 
 def test_storage_error_codes_and_retry_policies_are_distinct() -> None:

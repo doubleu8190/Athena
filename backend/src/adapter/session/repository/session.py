@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.memory import invalidate_session_memory_generation, lock_user_memory_setting
 from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
 from adapter.session.converter.session import session_to_domain
@@ -185,11 +186,6 @@ class SqlAlchemySessionRepository(SessionRepository):
         deleted_at: datetime,
     ) -> bool:
         """软删除会话，并保证 owner 内重复删除幂等。"""
-        from adapter.memory.repository.lifecycle import (
-            invalidate_session_memory_generation,
-            lock_user_memory_setting,
-        )
-
         async with self._session_factory() as database_session:
             async with database_session.begin():
                 # 记忆失效事务先锁用户设置，再进入 Session/Run，统一全局锁序。

@@ -13,7 +13,6 @@ from domain.mcp.model.entity import (
     McpSecretMetadata,
     McpSecretPurpose,
     McpServer,
-    McpServerRuntimeConfig,
     McpServerWrite,
     McpTransport,
 )
@@ -37,7 +36,6 @@ from domain.mcp.model.errors import (
 from domain.mcp.model.execution import (
     McpCallResult,
     McpCallStatus,
-    McpRuntimeToolDefinition,
     McpRuntimeToolTarget,
     mcp_content_projection,
     mcp_message_from_result,
@@ -65,9 +63,7 @@ __all__ = [
     "McpSecretMetadata",
     "McpSecretPurpose",
     "McpServer",
-    "McpServerRuntimeConfig",
     "McpRuntimeToolTarget",
-    "McpRuntimeToolDefinition",
     "McpServerConfig",
     "McpServerNameConflictError",
     "McpServerNotFoundError",

@@ -18,8 +18,11 @@ from secrets import token_hex
 from typing import Any
 
 _SKILL_ID = re.compile(r'"skill_id":"([^"]+)"')
-_FILE_ID = re.compile(r'"file_id":"([^"]+)"')
-_SUMMARY_FILE_ID = re.compile(r'"file_id":"([^"]+)","filename":"e2e-summary(?:-v2)?\.txt"')
+_INPUT_FILE_SYSTEM_PREFIX = "以下是当前 Run 明确关联、且已按会话权限解析的输入文件。"
+_INPUT_FILE_USER_PREFIX = "以下 <untrusted_input_file_metadata> 中的 JSON 是用户可控的"
+_INPUT_FILE_METADATA_START = "<untrusted_input_file_metadata>\n"
+_INPUT_FILE_METADATA_END = "\n</untrusted_input_file_metadata>"
+_SUMMARY_FILENAMES = frozenset({"e2e-summary.txt", "e2e-summary-v2.txt"})
 _ARTIFACT_CONTENT_SUFFIX = "\n交付文件："
 
 
@@ -76,11 +79,12 @@ def select_provider_action(payload: dict[str, Any]) -> _Action:
                     called_names.add(function["name"])
     current_text = "\n".join(current_text_chunks)
     latest_user_text = user_messages[-1] if user_messages else ""
+    input_file_items = _extract_input_file_items(messages)
     # 后续 Run 的普通追问不应从历史投影中重新选择旧技能，直接按普通对话完成。
     if "E2E_" not in latest_user_text:
         return _Action(stage="final", text="已根据本轮输入完成回复。")
     if "E2E_REUSE" in latest_user_text:
-        selected_file_id = _selected_summary_file_id(system_text)
+        selected_file_id = _selected_summary_file_id(input_file_items)
         exchange = _latest_tool_exchange(current_messages, "session_file_read")
         if exchange is not None:
             _, arguments, result = exchange
@@ -100,7 +104,7 @@ def select_provider_action(payload: dict[str, Any]) -> _Action:
                 stage="final_reuse_failed",
                 text=f"未取得可校验的文本产物：{result_code}。",
             )
-        # 当前 Run 的选中文件只取 system 上下文，避免历史 tool result 的旧产物覆盖选择。
+        # 当前 Run 的选中文件只取基础上下文元数据，避免历史 tool result 的旧产物覆盖选择。
         if selected_file_id is not None:
             return _Action(
                 stage="reuse_read_file",
@@ -149,7 +153,7 @@ def select_provider_action(payload: dict[str, Any]) -> _Action:
         )
     if "session_file_read" in called_names:
         mode = "slow" if "E2E_CANCEL" in latest_user_text else "normal"
-        selected_file_ids = _input_file_ids(system_text)
+        selected_file_ids = _input_file_ids(input_file_items)
         return _Action(
             stage="execute",
             tool_name="skill_execute",
@@ -161,7 +165,7 @@ def select_provider_action(payload: dict[str, Any]) -> _Action:
             },
         )
     if "skill_read_resource" in called_names:
-        selected_file_ids = _input_file_ids(system_text)
+        selected_file_ids = _input_file_ids(input_file_items)
         if selected_file_ids and "session_file_read" in tool_names:
             return _Action(
                 stage="read_session_file",
@@ -195,14 +199,66 @@ def select_provider_action(payload: dict[str, Any]) -> _Action:
     )
 
 
-def _input_file_ids(text: str) -> list[str]:
-    """从不可压缩输入文件系统上下文中提取稳定 file_id。"""
-    return list(dict.fromkeys(_FILE_ID.findall(text)))
+def _extract_input_file_items(messages: list[Any]) -> list[dict[str, Any]]:
+    """只从紧随固定 SYSTEM 说明后的输入文件元数据 user 消息中解析条目。"""
+    for index in range(1, len(messages)):
+        previous = messages[index - 1]
+        current = messages[index]
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            continue
+        if previous.get("role") != "system" or current.get("role") != "user":
+            continue
+        previous_content = previous.get("content")
+        content = current.get("content")
+        if not isinstance(previous_content, str) or not isinstance(content, str):
+            continue
+        if not previous_content.startswith(_INPUT_FILE_SYSTEM_PREFIX):
+            continue
+        if not content.startswith(_INPUT_FILE_USER_PREFIX):
+            continue
+        start_index = content.find(_INPUT_FILE_METADATA_START)
+        if start_index < 0 or not content.endswith(_INPUT_FILE_METADATA_END):
+            continue
+        # 直接按固定起止标记切片，避免文件名中出现 ]</untrusted_input_file_metadata> 时提前截断。
+        raw_json = content[
+            start_index + len(_INPUT_FILE_METADATA_START) : -len(_INPUT_FILE_METADATA_END)
+        ]
+        try:
+            parsed = json.loads(raw_json)
+        except (TypeError, ValueError, UnicodeError):
+            continue
+        if not isinstance(parsed, list):
+            continue
+        return [
+            item
+            for item in parsed
+            if isinstance(item, dict) and isinstance(item.get("file_id"), str)
+        ]
+    return []
 
 
-def _selected_summary_file_id(system_text: str) -> str | None:
-    """从当前 Run 基础上下文选出唯一的确定性摘要文本文件。"""
-    file_ids = list(dict.fromkeys(_SUMMARY_FILE_ID.findall(system_text)))
+def _input_file_ids(input_file_items: list[dict[str, Any]]) -> list[str]:
+    """从输入文件元数据列表中提取去重后的稳定 file_id。"""
+    return list(
+        dict.fromkeys(
+            file_id
+            for item in input_file_items
+            if isinstance(file_id := item.get("file_id"), str) and file_id
+        )
+    )
+
+
+def _selected_summary_file_id(input_file_items: list[dict[str, Any]]) -> str | None:
+    """从当前 Run 输入文件元数据选出唯一的确定性摘要文本文件。"""
+    file_ids = list(
+        dict.fromkeys(
+            file_id
+            for item in input_file_items
+            if isinstance(file_id := item.get("file_id"), str)
+            and file_id
+            and item.get("filename") in _SUMMARY_FILENAMES
+        )
+    )
     return file_ids[0] if len(file_ids) == 1 else None
 
 

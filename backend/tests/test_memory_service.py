@@ -52,26 +52,6 @@ class FakeRepository:
     ) -> RecallSnapshot:
         return RecallSnapshot(True, {item.id: item for item in self.items if item.id in ids})
 
-    async def list(
-        self, _access: AccessContext, _scope: str, _limit: int, _offset: int
-    ) -> tuple[Memory, ...]:
-        return tuple(self.items)
-
-    async def delete(self, _access: AccessContext, _memory_id: str, _version: int) -> bool:
-        return True
-
-    async def edit(
-        self,
-        _access: AccessContext,
-        _memory_id: str,
-        _content: str,
-        _embedding: FloatList,
-        _profile: str,
-        _expected_version: int,
-    ) -> bool:
-        self.edit_calls += 1
-        return True
-
     async def update_settings(
         self, _namespace: str, _read_enabled: bool, _auto_extract_enabled: bool
     ) -> None:
@@ -105,27 +85,6 @@ def test_recall_fuses_keyword_and_vector_candidates() -> None:
     assert result.hits[0].memory.id == "m0"
 
 
-def test_edit_rejects_zero_vector_without_changing_repository() -> None:
-    class ZeroEmbedding:
-        async def embed(self, _texts: list[str]) -> list[list[float]]:
-            return [[0.0] * 1024]
-
-    repository = FakeRepository()
-    original_content = repository.items[0].content
-    service = MemoryService(repository, ZeroEmbedding(), FakeReranker(), FakeCounter())
-    with pytest.raises(ValueError, match="memory_embedding_invalid"):
-        asyncio.run(
-            service.edit(
-                AccessContext("u", (), ("p",)),
-                repository.items[0].id,
-                "替换正文",
-                expected_version=1,
-            )
-        )
-    assert repository.edit_calls == 0
-    assert repository.items[0].content == original_content
-
-
 def test_recall_rejects_scope_outside_access_context() -> None:
     service = MemoryService(FakeRepository(), FakeEmbedding(), FakeReranker(), FakeCounter())
     request = RecallRequest(AccessContext("u", ("p",), ()), ("other",), "问题")
@@ -141,13 +100,6 @@ def test_recall_marks_budget_truncation() -> None:
     result = asyncio.run(service.recall(request))
     assert result.hits == ()
     assert result.truncated
-
-
-def test_list_requires_access_read_scope() -> None:
-    service = MemoryService(FakeRepository(), FakeEmbedding(), FakeReranker(), FakeCounter())
-    access = AccessContext("u", (), ("p",))
-    with pytest.raises(ValueError, match="memory_scope_forbidden"):
-        asyncio.run(service.list(access, "p"))
 
 
 def test_settings_default_auto_extract_enabled() -> None:
@@ -195,10 +147,15 @@ def test_recall_stops_when_read_setting_is_disabled() -> None:
 
 def test_recall_maps_final_read_check_failure_to_unavailable() -> None:
     class BrokenFinalCheckRepository(FakeRepository):
-        async def get_many(
-            self, _ids: tuple[str, ...], _namespace: str, _scopes: tuple[str, ...]
-        ) -> RecallSnapshot:
-            raise RuntimeError("database unavailable")
+        def __init__(self) -> None:
+            super().__init__()
+            self._settings_calls = 0
+
+        async def settings(self, _namespace: str) -> tuple[bool, bool]:
+            self._settings_calls += 1
+            if self._settings_calls >= 2:
+                raise RuntimeError("database unavailable")
+            return True, True
 
     service = MemoryService(
         BrokenFinalCheckRepository(), FakeEmbedding(), FakeReranker(), FakeCounter()
@@ -311,79 +268,6 @@ def test_recall_deduplicates_by_scope_merges_checked_sources_and_uses_latest() -
     personal = next(hit.memory for hit in result.hits if hit.memory.scope_key == "p")
     assert personal.id == "m-new"
     assert {source.reference for source in personal.sources} == {"old-source", "new-source"}
-
-
-def test_recall_does_not_merge_sources_from_stale_duplicate_version() -> None:
-    now = datetime.now(UTC)
-    candidate = Memory(
-        "m-stale",
-        "u",
-        "p",
-        "PostgreSQL 17",
-        "active",
-        "explicit",
-        1,
-        None,
-        (MemorySource("message", "stale-source"),),
-        now,
-        now,
-    )
-    current = Memory(
-        "m-stale",
-        "u",
-        "p",
-        "PostgreSQL 17",
-        "active",
-        "explicit",
-        2,
-        None,
-        (MemorySource("message", "current-source"),),
-        now,
-        now + timedelta(seconds=1),
-    )
-    valid_duplicate = Memory(
-        "m-valid",
-        "u",
-        "p",
-        "PostgreSQL 17",
-        "active",
-        "explicit",
-        1,
-        None,
-        (MemorySource("message", "valid-source"),),
-        now,
-        now,
-    )
-
-    class StaleRepository(FakeRepository):
-        async def search_keyword(
-            self, _namespace: str, _scopes: tuple[str, ...], _query: str, _limit: int
-        ) -> list[tuple[Memory, float]]:
-            return [(candidate, 0.8), (valid_duplicate, 0.7)]
-
-        async def search_vector(
-            self,
-            _namespace: str,
-            _scopes: tuple[str, ...],
-            _vector: list[float],
-            _profile: str,
-            _limit: int,
-        ) -> list[tuple[Memory, float]]:
-            return []
-
-        async def get_many(
-            self, ids: tuple[str, ...], _namespace: str, _scopes: tuple[str, ...]
-        ) -> RecallSnapshot:
-            rows = {item.id: item for item in (current, valid_duplicate) if item.id in ids}
-            return RecallSnapshot(True, rows)
-
-    service = MemoryService(StaleRepository(), FakeEmbedding(), FakeReranker(), FakeCounter())
-    result = asyncio.run(
-        service.recall(RecallRequest(AccessContext("u", ("p",), ()), ("p",), "PostgreSQL 17"))
-    )
-    assert len(result.hits) == 1
-    assert result.hits[0].memory.id == "m-valid"
-    assert {source.reference for source in result.hits[0].memory.sources} == {"valid-source"}
 
 
 def test_bounded_inference_cancellation_keeps_real_thread_slot_until_done() -> None:

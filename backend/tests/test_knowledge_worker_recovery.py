@@ -81,6 +81,9 @@ def test_same_worker_recovers_from_claim_and_fail_job_database_errors() -> None:
                 raise OSError("database unavailable while recording failure")
 
         class EmptyParser:
+            def create(self) -> EmptyParser:
+                return self
+
             async def parse(self, filename: str, content: bytes) -> ParsedDocument:
                 raise AssertionError("source data is intentionally missing")
 

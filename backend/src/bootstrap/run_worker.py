@@ -23,14 +23,13 @@ from adapter.system_prompt import SqlAlchemySystemPromptRepository
 from app.file import SessionFileService
 from app.project.service import ProjectService
 from app.run import (
-    NullRunProgressPublisher,
     RunExecutor,
     RunWorker,
     worker_config_from_environment,
 )
 from app.skill import DependencyChecker, SkillService
 from app.skill.execution_service import SkillExecutionService
-from bootstrap.config import env_flag
+from bootstrap.config import env_flag, memory_enabled_from_env
 from bootstrap.database import build_database
 from bootstrap.redis import build_run_transport
 from bootstrap.tool import (
@@ -119,12 +118,7 @@ def build_run_worker_dependencies(
         projects=projects,
     )
     bundle.query_services = query_services
-    memory_lifecycle_enabled = env_flag(
-        "ATHENA_MEMORY_LIFECYCLE_ENABLED",
-        default=False,
-    )
-    if memory_lifecycle_enabled and not query_services.memory_enabled:
-        raise ValueError("memory_lifecycle_requires_memory")
+    memory_lifecycle_enabled = memory_enabled_from_env()
     repository = (
         SqlAlchemyRunRepository(
             database.session_factory,
@@ -195,28 +189,10 @@ def build_run_worker_dependencies(
         profiles,
         provider,
         system_prompts=system_prompts,
-        publisher=run_transport or NullRunProgressPublisher(),
+        publisher=run_transport,
         config=config,
         tool_runtime=tool_runtime,
         memory_lifecycle=query_services.memory_lifecycle,
-        memory_personal_token_budget=_bounded_env_int(
-            "ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS",
-            1_000,
-            minimum=1,
-            maximum=100_000,
-        ),
-        memory_project_token_budget=_bounded_env_int(
-            "ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS",
-            2_000,
-            minimum=1,
-            maximum=100_000,
-        ),
-        memory_per_scope_limit=_bounded_env_int(
-            "ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT",
-            200,
-            minimum=1,
-            maximum=200,
-        ),
     )
     bundle.worker = RunWorker(repository, executor, config, publisher=run_transport)
 

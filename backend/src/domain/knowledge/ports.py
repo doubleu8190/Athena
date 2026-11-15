@@ -13,7 +13,6 @@ from domain.knowledge.model import (
     DocumentVersion,
     KnowledgeBase,
     SearchHit,
-    SearchResult,
     SourceReference,
     TextBlock,
 )
@@ -106,22 +105,6 @@ class KnowledgeRepositoryPort(Protocol):
         at: datetime,
         expires_after_seconds: int = 86400,
     ) -> FileUploadReservation: ...
-
-    async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool: ...
-
-    async def release_upload_slot(self, token: str) -> None: ...
-
-    async def claim_expired_upload_reservations(
-        self, *, limit: int = 20, lease_seconds: int = 300
-    ) -> tuple[FileUploadReservation, ...]: ...
-
-    async def finish_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool: ...
-
-    async def can_delete_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool: ...
 
     async def list_bases(
         self, owner_id: str, *, offset: int, limit: int
@@ -246,16 +229,6 @@ class KnowledgeRepositoryPort(Protocol):
         self, owner_id: str, base_id: str, document_id: str
     ) -> Document | None: ...
 
-    async def search(
-        self,
-        owner_id: str,
-        base_ids: list[str],
-        query: str,
-        tokens: tuple[str, ...],
-        limit: int,
-        vector: list[float] | None = None,
-    ) -> SearchResult: ...
-
     async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None: ...
 
     async def search_keyword(
@@ -326,18 +299,20 @@ class KnowledgeJobRepository(Protocol):
 
     async def is_storage_key_referenced(self, storage_key: str) -> bool: ...
 
-    async def claim_expired_upload_reservations(
-        self, *, limit: int = 20, lease_seconds: int = 300
+    async def list_expired_upload_reservations(
+        self, *, limit: int = 20
     ) -> tuple[FileUploadReservation, ...]: ...
 
-    async def finish_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool: ...
-
-    async def can_delete_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool: ...
+    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool: ...
 
     async def release_upload_slot(self, token: str) -> None: ...
 
     async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool: ...
+
+
+class KnowledgeUploadSlotRepository(Protocol):
+    """上传入口中间件使用的轻量并发槽位控制端口。"""
+
+    async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool: ...
+
+    async def release_upload_slot(self, token: str) -> None: ...

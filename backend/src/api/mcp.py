@@ -2,96 +2,55 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
-from pydantic import BaseModel, ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from api.converter.mcp import mcp_server_page_to_response, mcp_server_to_response
 from api.converter.tool import admin_tool_page_to_response
 from api.dto.mcp import (
+    HttpServerCreateRequest,
+    HttpServerUpdateRequest,
     McpServerCreateRequest,
     McpServerListResponse,
     McpServerResponse,
     McpServerUpdateRequest,
+    StdioServerCreateRequest,
+    StdioServerUpdateRequest,
 )
 from api.dto.tool import AdminToolListResponse
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
 from api.security import AdminAuth, verify_request_origin
 from app.tool import ToolManager
-from domain.mcp import StdioConfig, StreamableHttpConfig
+
+_CREATE_ADAPTER: TypeAdapter[
+    HttpServerCreateRequest | StdioServerCreateRequest
+] = TypeAdapter(cast(Any, McpServerCreateRequest))
+_UPDATE_ADAPTER: TypeAdapter[
+    HttpServerUpdateRequest | StdioServerUpdateRequest
+] = TypeAdapter(cast(Any, McpServerUpdateRequest))
 
 
-def _request_body_schema(model: type[BaseModel]) -> dict[str, Any]:
-    """生成完整 JSON 请求契约，同时表达 transport 条件字段要求。"""
-    schema = model.model_json_schema()
-    schema["allOf"] = [
-        {
-            "if": {
-                "properties": {"transport": {"const": "streamable_http"}},
-                "required": ["transport"],
-            },
-            "then": {
-                "required": ["url"],
-                "properties": {"url": {"type": "string"}},
-                "not": {
-                    "anyOf": [
-                        {"required": ["command"]},
-                        {"required": ["args"]},
-                        {"required": ["cwd"]},
-                    ]
-                },
-            },
-        },
-        {
-            "if": {
-                "properties": {"transport": {"const": "stdio"}},
-                "required": ["transport"],
-            },
-            "then": {
-                "required": ["command", "args"],
-                "properties": {
-                    "command": {"type": "string"},
-                    "args": {"type": "array", "items": {"type": "string"}},
-                },
-                "not": {"required": ["url"]},
-            },
-        },
-    ]
+def _openapi_request_body(adapter: TypeAdapter[Any]) -> dict[str, Any]:
+    """基于 Pydantic 判别联合直接生成 OpenAPI requestBody 契约。"""
     return {
         "requestBody": {
             "required": True,
-            "content": {"application/json": {"schema": schema}},
+            "content": {"application/json": {"schema": adapter.json_schema()}},
         }
     }
 
 
-async def _read_request_model[RequestModel: BaseModel](
-    request: Request, model: type[RequestModel]
-) -> RequestModel:
-    """在认证依赖执行之后解析请求体，并只返回固定校验错误。"""
+async def _read_request_model[RequestT](
+    request: Request, adapter: TypeAdapter[RequestT]
+) -> RequestT:
+    """在认证依赖执行之后解析请求体，并只返回脱敏后的固定校验错误。"""
     try:
         body = await request.json()
-        return model.model_validate(body)
+        return adapter.validate_python(body)
     except (ValueError, UnicodeError, ValidationError):
         raise HTTPException(422, "mcp_request_invalid") from None
-
-
-def _config(
-    request: McpServerCreateRequest | McpServerUpdateRequest,
-) -> StreamableHttpConfig | StdioConfig:
-    if request.transport == "streamable_http":
-        if request.url is None:
-            raise ValueError("mcp_config_invalid")
-        return StreamableHttpConfig(transport="streamable_http", url=request.url)
-    if request.command is None:
-        raise ValueError("mcp_config_invalid")
-    return StdioConfig(
-        transport="stdio",
-        command=request.command,
-        args=tuple(request.args or ()),
-        cwd=request.cwd,
-    )
 
 
 def build_mcp_router(manager: ToolManager) -> APIRouter:
@@ -106,7 +65,7 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         "",
         status_code=status.HTTP_201_CREATED,
         response_model=McpServerResponse,
-        openapi_extra=_request_body_schema(McpServerCreateRequest),
+        openapi_extra=_openapi_request_body(_CREATE_ADAPTER),
     )
     async def register_server(
         http_request: Request,
@@ -114,10 +73,10 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
         _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
-        request = await _read_request_model(http_request, McpServerCreateRequest)
+        request = await _read_request_model(http_request, _CREATE_ADAPTER)
         try:
             server = await manager.register_mcp(
-                actor, request.name, _config(request), request.secrets
+                actor, request.name, request.to_domain_config(), request.secrets
             )
         except Exception as error:
             raise mcp_error_to_http(error) from error
@@ -157,7 +116,7 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
     @router.put(
         "/{server_id}",
         response_model=McpServerResponse,
-        openapi_extra=_request_body_schema(McpServerUpdateRequest),
+        openapi_extra=_openapi_request_body(_UPDATE_ADAPTER),
     )
     async def update_server(
         http_request: Request,
@@ -166,14 +125,14 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         response: Response,
         _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
-        request = await _read_request_model(http_request, McpServerUpdateRequest)
+        request = await _read_request_model(http_request, _UPDATE_ADAPTER)
         try:
             result = await manager.update_mcp(
                 actor,
                 server_id,
                 request.expected_config_version,
                 request.name,
-                _config(request),
+                request.to_domain_config(),
                 request.secrets,
             )
         except Exception as error:

@@ -40,8 +40,7 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
     async def list_profiles(actor: AdminAuth) -> ModelProfileListResponse:
         """列出安全配置投影。"""
         try:
-            profiles = await service.list(actor)
-            default_profile_id = await service.get_default_id(actor)
+            profiles, default_profile_id = await service.list_with_default(actor)
         except ModelProfileAuthorizationError as error:
             raise _authorization_error(error) from error
         return ModelProfileListResponse(
@@ -116,8 +115,6 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
         request: CompressionPolicyRequest, actor: AdminAuth
     ) -> CompressionPolicyResponse:
         """创建并启用新的不可变压缩策略版本。"""
-        if request.recent_ratio + request.summary_ratio >= 1:
-            raise HTTPException(422, "llm_compression_policy_invalid")
         try:
             value = await service.set_compression_policy(
                 actor,

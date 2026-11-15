@@ -47,7 +47,7 @@ from domain.llm.model import (
     ToolCallStarted,
 )
 from domain.llm.model.profile import RuntimeModelProfile
-from domain.llm.ports import LlmStreamProvider
+from domain.llm.ports import LlmRuntimeTextProvider, LlmStreamProvider
 
 logger = logging.getLogger(__name__)
 MAX_STREAM_CHUNKS = 8192
@@ -83,6 +83,8 @@ class _ToolCallDiagnostics:
 
     def __init__(self) -> None:
         """初始化请求级计数、最多八个 index 的 id 摘要和少量位置样本。"""
+        # 仅在 DEBUG 开启时采集分片 SHA-256 与位置样本，避免生产流式热路径额外开销。
+        self._enabled = logger.isEnabledFor(logging.DEBUG)
         self.chunk_count = 0
         self.fragment_count = 0
         self.dropped_positions = 0
@@ -97,10 +99,14 @@ class _ToolCallDiagnostics:
 
     def observe_chunk(self) -> None:
         """在任何解析前记录本次请求已尝试读取的分片序号。"""
+        if not self._enabled:
+            return
         self.chunk_count += 1
 
     def observe_finish_reason(self, value: Any) -> None:
         """记录归一化的 choice 完成原因。"""
+        if not self._enabled:
+            return
         self.finish_reasons.add(
             value if isinstance(value, str) and value in _SAFE_FINISH_REASONS else "other"
         )
@@ -113,6 +119,8 @@ class _ToolCallDiagnostics:
         fragment: Any,
     ) -> None:
         """旁路记录工具 index/id 关系，不复用 parser 的调用内容状态。"""
+        if not self._enabled:
+            return
         self.fragment_count += 1
         raw_index = getattr(fragment, "index", None)
         index = (
@@ -176,7 +184,7 @@ class _ToolCallDiagnostics:
 
     def emit(self) -> None:
         """在请求结束时最多写一条不含正文、身份原值或连接配置的日志。"""
-        if self._emitted or self.fragment_count == 0:
+        if not self._enabled or self._emitted or self.fragment_count == 0:
             return
         self._emitted = True
         payload = {
@@ -241,7 +249,7 @@ def _json_value(value: Any) -> Any:
     raise LlmProtocolError("llm_stream_event_invalid")
 
 
-class OpenAIChatCompletionsAdapter(LlmStreamProvider):
+class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
     """实现受限、单次流式 Chat Completions 调用。"""
 
     def __init__(self) -> None:
@@ -535,8 +543,6 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider):
         result: list[dict[str, Any]] = []
         pending_call_ids: set[str] = set()
         for message in messages:
-            if message.continuation_items:
-                raise LlmProtocolError("llm_chat_continuation_unsupported")
             role = message.role.value
             if message.tool_calls and role != LlmRole.ASSISTANT.value:
                 raise LlmProtocolError("llm_chat_tool_calls_role_invalid")

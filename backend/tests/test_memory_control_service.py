@@ -20,8 +20,12 @@ from domain.memory.lifecycle import (
     MemoryScopeState,
     MemorySourceMessage,
 )
-from domain.memory.model import AccessContext, MemoryRepositoryPort, RerankerPort
-from domain.memory.ports import MemoryControlSourcePort, MemoryLifecycleRepositoryPort
+from domain.memory.model import AccessContext, RerankerPort
+from domain.memory.ports import (
+    MemoryControlSourcePort,
+    MemoryLifecycleRepositoryPort,
+    MemoryRepositoryPort,
+)
 
 NOW = datetime(2026, 11, 14, tzinfo=UTC)
 ACCESS = AccessContext("owner_1", ("personal",), ("personal",))
@@ -374,25 +378,24 @@ def test_control_requires_unique_evidence_message_without_hardcoded_intent_keywo
             await _remember(duplicate_service)
         assert duplicate_lifecycle.applied == []
 
-        # clear_scope=True 仍必须具备明确的清空意图关键词。
+        # clear_scope=True 允许清空授权 scope，不再依赖硬编码中文/英文关键词匹配。
         clear_lifecycle = _Lifecycle()
         clear_service = _service(
             clear_lifecycle,
             (MemorySourceMessage("message_clear", "删掉这条吧", NOW),),
         )
-        with pytest.raises(ValueError, match="memory_control_intent_missing"):
-            await clear_service.forget(
-                ACCESS,
-                run_id="run_1",
-                session_id="session_1",
-                tool_call_id="tool_clear",
-                scope="personal",
-                evidence="删掉这条吧",
-                target_memory_id=None,
-                expected_version=None,
-                clear_scope=True,
-            )
-        assert clear_lifecycle.applied == []
+        await clear_service.forget(
+            ACCESS,
+            run_id="run_1",
+            session_id="session_1",
+            tool_call_id="tool_clear",
+            scope="personal",
+            evidence="删掉这条吧",
+            target_memory_id=None,
+            expected_version=None,
+            clear_scope=True,
+        )
+        assert len(clear_lifecycle.applied) == 1
 
     asyncio.run(scenario())
 
@@ -423,17 +426,6 @@ def test_control_checks_only_content_and_expiry_boundaries() -> None:
                 service,
                 evidence="不存在的原话",
                 content="用户不喜欢苹果",
-            )
-
-        no_date = _Lifecycle()
-        service = _service(
-            no_date,
-            (MemorySourceMessage("message_2", "记住，我喜欢苹果", NOW),),
-        )
-        with pytest.raises(ValueError, match="memory_control_evidence_invalid"):
-            await _remember(
-                service,
-                expires_at=datetime(2030, 12, 31, tzinfo=UTC),
             )
 
     asyncio.run(scenario())

@@ -49,6 +49,8 @@ class _UploadRepository:
         if previous is not None:
             if self.reservation_hashes[request] != values["request_hash"]:
                 raise ValueError("upload_reservation_fenced")
+            if previous.reservation_token in self._expired_reservations:
+                raise ValueError("knowledge_upload_reservation_stale")
             return previous
         used_bytes = sum(self.committed_sizes.values()) + sum(self._reserved_sizes.values())
         if used_bytes + values["size_bytes"] > self.quota_limit_bytes:
@@ -79,26 +81,21 @@ class _UploadRepository:
             if request in self.reservations
         }
 
-    async def claim_expired_upload_reservations(
-        self, *, limit: int = 20, lease_seconds: int = 300
+    async def list_expired_upload_reservations(
+        self, *, limit: int = 20
     ) -> tuple[FileUploadReservation, ...]:
-        del lease_seconds
-        claimed: list[FileUploadReservation] = []
+        expired: list[FileUploadReservation] = []
         for reservation in self.reservations.values():
             token = reservation.reservation_token
             if token is None or token not in self._expired_reservations:
                 continue
-            fence = self._reservation_fences.get(token, 0) + 1
-            self._reservation_fences[token] = fence
-            claimed.append(replace(reservation, fencing_token=fence))
-            if len(claimed) >= limit:
+            expired.append(reservation)
+            if len(expired) >= limit:
                 break
-        return tuple(claimed)
+        return tuple(expired)
 
-    async def finish_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool:
-        if self._reservation_fences.get(reservation_token) != fencing_token:
+    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool:
+        if reservation_token not in self._expired_reservations:
             return False
         await self.release_file_upload_reservation(reservation_token)
         self._expired_reservations.discard(reservation_token)
@@ -130,6 +127,8 @@ class _UploadRepository:
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("simulated_database_failure")
+        if values["reservation_token"] in self._expired_reservations:
+            raise ValueError("knowledge_upload_reservation_stale")
         document = Document(
             values["document_id"],
             values["owner_id"],
@@ -334,23 +333,34 @@ def test_finalize_failure_keeps_reservation_original_and_quota() -> None:
 
         token = next(iter(repository._reserved_sizes))
         repository._expired_reservations.add(token)
-        claimed = await repository.claim_expired_upload_reservations()
-        assert len(claimed) == 1
-        reservation = claimed[0]
+        expired = await repository.list_expired_upload_reservations()
+        assert len(expired) == 1
+        reservation = expired[0]
         assert reservation.storage_key is not None
         assert not await repository.is_storage_key_referenced(reservation.storage_key)
         await originals.delete(reservation.storage_key)
-        assert (
-            await repository.finish_expired_upload_reservation(token, reservation.fencing_token - 1)
-            is False
-        )
-        assert token in repository._reserved_sizes
-        assert (
-            await repository.finish_expired_upload_reservation(token, reservation.fencing_token)
-            is True
-        )
+        assert await repository.delete_expired_upload_reservation(token) is True
         assert not originals.contains(orphan)
         assert token not in repository._reserved_sizes
+
+    asyncio.run(scenario())
+
+
+def test_expired_reservation_cannot_be_committed_or_renewed() -> None:
+    async def scenario() -> None:
+        service, repository = _make()
+        base = await service.create_base("alice", "private", None)
+        repository.fail_next = True
+        with pytest.raises(RuntimeError, match="simulated_database_failure"):
+            await service.create_file_document(
+                "alice", base.id, "notes", "notes.txt", b"orphan", "request-expired"
+            )
+        token = next(iter(repository._reserved_sizes))
+        repository._expired_reservations.add(token)
+        with pytest.raises(ValueError, match="knowledge_upload_reservation_stale"):
+            await service.create_file_document(
+                "alice", base.id, "notes", "notes.txt", b"orphan", "request-expired"
+            )
 
     asyncio.run(scenario())
 

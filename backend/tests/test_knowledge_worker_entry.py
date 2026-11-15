@@ -107,7 +107,7 @@ def test_model_start_failure_closes_all_created_resources(
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr(bootstrap_knowledge, "MinioOriginalStore", FakeStore)
     monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", FakeEmbedding)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalKnowledgeTokenCounter", FakeCounter)
+    monkeypatch.setattr(bootstrap_knowledge, "LocalTokenCounter", FakeCounter)
 
     with pytest.raises(RuntimeError, match="model unavailable"):
         asyncio.run(knowledge_worker.run_worker())

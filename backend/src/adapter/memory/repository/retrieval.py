@@ -6,12 +6,15 @@ from typing import Literal, cast
 
 from sqlalchemy import Text, case, func, select
 from sqlalchemy.dialects.postgresql import TSQUERY
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from adapter.memory.converter import memory_to_domain
 from adapter.memory.model import MemoryModel, MemorySettingModel
-from adapter.memory.repository._shared import _MemoryRepositoryHelpersMixin
+from adapter.memory.repository._shared import (
+    enabled_memory_scope,
+    enabled_scope_exists,
+)
 from common.date import as_utc
 from domain.memory.lifecycle import (
     MemoryContextItem,
@@ -58,7 +61,9 @@ def _retrieved_memory(row: MemoryModel) -> RetrievedMemory:
     )
 
 
-class MemoryRetrievalRepositoryMixin(_MemoryRepositoryHelpersMixin):
+class MemoryRetrievalRepository:
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
     """负责首轮上下文装配、发送前复核以及候选混合检索。"""
 
     async def list_context(
@@ -85,7 +90,7 @@ class MemoryRetrievalRepositoryMixin(_MemoryRepositoryHelpersMixin):
                         MemoryModel.load_policy == "always",
                         MemoryModel.deleted_time.is_(None),
                         MemoryModel.expires_at.is_(None) | (MemoryModel.expires_at > func.now()),
-                        self._enabled_scope_exists(
+                        enabled_scope_exists(
                             access.namespace_id,
                             scope_key,
                         ),
@@ -132,7 +137,7 @@ class MemoryRetrievalRepositoryMixin(_MemoryRepositoryHelpersMixin):
                         MemoryModel.status == "active",
                         MemoryModel.deleted_time.is_(None),
                         MemoryModel.expires_at.is_(None) | (MemoryModel.expires_at > func.now()),
-                        self._enabled_memory_scope(),
+                        enabled_memory_scope(),
                     )
                 )
             ).all()
@@ -176,7 +181,7 @@ class MemoryRetrievalRepositoryMixin(_MemoryRepositoryHelpersMixin):
                         MemoryModel.status == "active",
                         MemoryModel.deleted_time.is_(None),
                         MemoryModel.expires_at.is_(None) | (MemoryModel.expires_at > func.now()),
-                        self._enabled_memory_scope(),
+                        enabled_memory_scope(),
                     )
                 )
             ).all()
@@ -196,24 +201,6 @@ class MemoryRetrievalRepositoryMixin(_MemoryRepositoryHelpersMixin):
                 expires_at=memory.expires_at,
             )
         return MemoryReferenceSnapshot(enabled, items)
-
-    async def retrieve_similar(
-        self,
-        access: AccessContext,
-        scope_key: str,
-        query: str,
-        embedding: tuple[float, ...],
-        embedding_profile_id: str,
-        limit: int = 5,
-    ) -> tuple[RetrievedMemory, ...]:
-        """在单一授权 scope 内融合全文与向量候选，供批量决策使用。"""
-        results = await self.retrieve_similar_batch(
-            access,
-            ((scope_key, query, embedding),),
-            embedding_profile_id,
-            limit,
-        )
-        return results[0]
 
     async def retrieve_similar_batch(
         self,
@@ -293,7 +280,7 @@ class MemoryRetrievalRepositoryMixin(_MemoryRepositoryHelpersMixin):
             MemoryModel.status.in_(("active", "archived")),
             MemoryModel.deleted_time.is_(None),
             MemoryModel.expires_at.is_(None) | (MemoryModel.expires_at > func.now()),
-            self._enabled_memory_scope(),
+            enabled_memory_scope(),
         )
         keyword_rows = (
             await session.execute(

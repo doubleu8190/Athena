@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any, Literal, cast
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
@@ -453,23 +455,8 @@ class RunToolRuntimeService(RunToolRuntime):
                     SESSION_FILE_READ_DEFINITION,
                 )
             )
-        # 合并 MCP 目录中的工具定义。
-        mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
-        for item in mcp_tools:
-            definitions.append(
-                RuntimeToolDefinition(
-                    tool_id=item.tool_id,
-                    model_name=item.model_name,
-                    description=item.description,
-                    input_schema=dict(item.input_schema),
-                    source=McpToolSource(
-                        server_id=item.server_id,
-                        remote_name=item.remote_name,
-                        config_version=item.config_version,
-                    ),
-                    requires_approval=item.requires_approval,
-                )
-            )
+        # 合并 MCP 目录中的工具定义（仓储已直接构造不可变 RuntimeToolDefinition，无需二次拷贝）。
+        definitions.extend(await self._mcp_catalog.list_runtime_tools(limit=201))
         return RuntimeToolSnapshot(tools=tuple(definitions))
 
     async def prepare_call(
@@ -1523,16 +1510,28 @@ def _bounded_integer(
     return value
 
 
+@lru_cache(maxsize=512)
+def _compiled_validator(schema_json: str) -> Draft202012Validator:
+    """缓存已校验的 JSON Schema 编译结果，避免每次工具调用重复执行 check_schema。"""
+    schema = json.loads(schema_json)
+    if _contains_external_ref(schema):
+        raise ValueError("tool_schema_external_ref")
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
+
+
 def _validate_arguments(schema: Mapping[str, Any], arguments: Mapping[str, Any]) -> str | None:
     """Validate an object locally and reject any external schema reference."""
     if not isinstance(arguments, dict):
         return "工具参数必须是 JSON 对象。"
     try:
-        if _contains_external_ref(schema):
-            return "工具参数的 Schema 包含不允许的外部引用。"
-        Draft202012Validator.check_schema(dict(schema))
-        validator = Draft202012Validator(dict(schema))
+        schema_json = json.dumps(dict(schema), ensure_ascii=False, sort_keys=True)
+        validator = _compiled_validator(schema_json)
         error = next(iter(validator.iter_errors(dict(arguments))), None)
+    except ValueError as error:
+        if str(error) == "tool_schema_external_ref":
+            return "工具参数的 Schema 包含不允许的外部引用。"
+        return "工具参数的 Schema 无法安全校验。"
     except Exception:
         return "工具参数的 Schema 无法安全校验。"
     if error is None:

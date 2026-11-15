@@ -55,13 +55,18 @@ from domain.mcp import (
     McpCallResult,
     McpCallStatus,
     McpConnectionInput,
-    McpRuntimeToolDefinition,
     McpRuntimeToolTarget,
     StreamableHttpConfig,
 )
 from domain.memory.model import Memory, MemoryHit, RecallRequest, RecallResult
 from domain.run.model import RunStatus
-from domain.tool import ToolCallStatus, ToolOutcomeStatus, ToolRetryContext
+from domain.tool import (
+    McpToolSource,
+    RuntimeToolDefinition,
+    ToolCallStatus,
+    ToolOutcomeStatus,
+    ToolRetryContext,
+)
 from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -192,19 +197,21 @@ class _McpCatalog:
             "required": ["query"],
             "additionalProperties": False,
         }
-        self.definition = McpRuntimeToolDefinition(
+        self.definition = RuntimeToolDefinition(
             tool_id="tool_e2e_probe",
-            server_id="server_e2e",
-            remote_name="remote_probe",
             model_name="mcp_probe",
             description="Read the remote E2E marker.",
             input_schema=self.schema,
-            config_version=1,
+            source=McpToolSource(
+                server_id="server_e2e",
+                remote_name="remote_probe",
+                config_version=1,
+            ),
         )
         self.target = McpRuntimeToolTarget(
             tool_id=self.definition.tool_id,
-            server_id=self.definition.server_id,
-            remote_name=self.definition.remote_name,
+            server_id="server_e2e",
+            remote_name="remote_probe",
             config_version=1,
             connection=McpConnectionInput(
                 StreamableHttpConfig(
@@ -215,7 +222,7 @@ class _McpCatalog:
             ),
         )
 
-    async def list_runtime_tools(self, *, limit: int) -> tuple[McpRuntimeToolDefinition, ...]:
+    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         assert limit == 201
         return (self.definition,)
 
@@ -288,6 +295,10 @@ class _ScriptedProvider:
             yield ResponseCompleted(response)
 
         yield events()
+
+    async def complete(self, runtime: RuntimeModelProfile, request: LlmRequest) -> LlmResponse:
+        del runtime, request
+        raise AssertionError("complete is not expected in this test")
 
 
 def _response(

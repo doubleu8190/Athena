@@ -24,13 +24,30 @@ from domain.memory.lifecycle import (
     MemoryScopeState,
     MemorySourceMessage,
     ScanResult,
-    ScanRunsPayload,
 )
-from domain.memory.model import AccessContext, Memory, RetrievedMemory
+from domain.memory.model import AccessContext, Memory, RecallSnapshot, RetrievedMemory
 
 
-class MemoryLifecycleRepositoryPort(Protocol):
-    """连接记忆核心与事务边界的具体 PostgreSQL 能力。"""
+class MemoryRepositoryPort(Protocol):
+    """统一的长期记忆召回与生命周期持久化端口。"""
+
+    async def settings(self, namespace_id: str) -> tuple[bool, bool]: ...
+
+    async def search_keyword(
+        self, namespace: str, scopes: tuple[str, ...], query: str, limit: int
+    ) -> list[tuple[Memory, float]]: ...
+
+    async def search_vector(
+        self, namespace: str, scopes: tuple[str, ...], vector: list[float], profile: str, limit: int
+    ) -> list[tuple[Memory, float]]: ...
+
+    async def get_many(
+        self, ids: tuple[str, ...], namespace: str, scopes: tuple[str, ...]
+    ) -> RecallSnapshot: ...
+
+    async def update_settings(
+        self, namespace: str, read_enabled: bool, auto_extract_enabled: bool
+    ) -> None: ...
 
     async def list_context(
         self,
@@ -51,16 +68,6 @@ class MemoryLifecycleRepositoryPort(Protocol):
         access: AccessContext,
         references: tuple[MemoryReferenceKey, ...],
     ) -> MemoryReferenceSnapshot: ...
-
-    async def retrieve_similar(
-        self,
-        access: AccessContext,
-        scope_key: str,
-        query: str,
-        embedding: tuple[float, ...],
-        embedding_profile_id: str,
-        limit: int = 5,
-    ) -> tuple[RetrievedMemory, ...]: ...
 
     async def retrieve_similar_batch(
         self,
@@ -91,8 +98,6 @@ class MemoryLifecycleRepositoryPort(Protocol):
     async def wake_user(self, owner_id: str) -> None: ...
 
     async def user_generation(self, owner_id: str) -> int: ...
-
-    async def ensure_scan_job(self, enabled_boundary_at: datetime) -> MemoryJob: ...
 
     async def recover_running_jobs(self) -> int: ...
 
@@ -135,12 +140,20 @@ class MemoryLifecycleRepositoryPort(Protocol):
 
     async def scan_missing_runs(
         self,
-        payload: ScanRunsPayload,
         *,
+        enabled_boundary_at: datetime,
+        cursor_finished_at: datetime | None = None,
+        cursor_run_id: str | None = None,
         page_limit: int = 100,
     ) -> ScanResult: ...
 
-    async def enqueue_maintenance(self, day: str) -> int: ...
+    async def maintain_due_scopes(
+        self,
+        day: str,
+        *,
+        fact_max_age_days: int,
+        other_max_age_days: int,
+    ) -> int: ...
 
     async def maintain_scope(
         self,
@@ -171,4 +184,6 @@ class MemoryControlSourcePort(Protocol):
     ) -> ControlSourceSnapshot | None: ...
 
 
-__all__ = ["MemoryControlSourcePort", "MemoryLifecycleRepositoryPort"]
+MemoryLifecycleRepositoryPort = MemoryRepositoryPort
+
+__all__ = ["MemoryControlSourcePort", "MemoryLifecycleRepositoryPort", "MemoryRepositoryPort"]

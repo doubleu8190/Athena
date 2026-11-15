@@ -3,27 +3,29 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, cast
 
 from pydantic import ValidationError
 
+from app.memory.context import MemoryContextService, RunContextMessage
 from app.run.budget import RunLlmBudget
 from app.run.compression import ContextCompressor, ContextPreparation
 from app.run.config import RunWorkerConfig
 from app.run.context import (
-    PROTOCOL_TOKEN_RESERVE,
     RunContextError,
     RunInputFileContext,
-    count_plain_text_tokens_async,
     measure_llm_request,
 )
-from app.run.memory_context import RunContextMessage, RunMemoryContextManager
+from app.run.events import publish_pending_events
+from app.run.safe_stop import (
+    SafeStopReporter,
+    is_context_report_text_valid,
+    system_context_report,
+)
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import (
     MCP_DELIVERY_AUTH_TIMEOUT_SECONDS,
@@ -34,11 +36,9 @@ from common.ids import new_id, now_utc
 from common.json import utf8_size
 from domain.llm.model import (
     LlmError,
-    LlmMessage,
     LlmProviderError,
     LlmRequest,
     LlmResponse,
-    LlmRole,
     LlmText,
     LlmTool,
     LlmToolCall,
@@ -49,8 +49,8 @@ from domain.llm.model import (
     ToolCallStarted,
 )
 from domain.llm.model.profile import RuntimeModelProfile
-from domain.llm.ports import LlmRuntimeTextProvider, LlmStreamProvider
-from domain.llm.profile_ports import CompressionPolicyRepository, ModelProfileRepository
+from domain.llm.ports import LlmStreamProvider
+from domain.llm.profile_ports import ModelProfileRepository
 from domain.memory.lifecycle import (
     MemoryContextItem,
     RunMemoryContextReference,
@@ -68,7 +68,6 @@ from domain.message import (
     ExecutionRole,
     FileRefPart,
     MessageMetadata,
-    MessagePart,
     MessageStatus,
     TextPart,
     ToolCallPart,
@@ -82,15 +81,11 @@ from domain.run.model import (
     RecordRunUsageCommand,
     RequestRunInputCommand,
     Run,
-    RunAttemptUsage,
     RunContextSafetyCommitError,
-    RunEvent,
     RunLease,
     RunUsage,
 )
-from domain.run.model.errors import RunError, RunNotFoundError
-from domain.run.ports import RunRepository
-from domain.session.model.errors import SessionNotFoundError
+from domain.run.ports import RunEventTransport, RunRepository
 from domain.skill import SKILL_EXECUTE_TOOL_ID, RunSkillPromptContext
 from domain.system_prompt import SystemPromptRepository
 from domain.tool import (
@@ -105,7 +100,6 @@ from domain.tool import (
     RuntimeToolSnapshot,
     RunToolBatch,
     RunToolBatchCall,
-    RunToolCallPage,
     ToolCallPreparation,
     ToolCallStatus,
     ToolExecutionContext,
@@ -120,60 +114,12 @@ from domain.tool import (
 
 logger = logging.getLogger(__name__)
 MAX_MODEL_ATTEMPTS = 3
-CONTEXT_SAFETY_STOP_ERROR_CODE = "run_context_safety_stop"
 CONTEXT_SAFETY_NUMERATOR = 9
 CONTEXT_SAFETY_DENOMINATOR = 10
-CONTEXT_REPORT_MAX_OUTPUT_TOKENS = 1_024
-CONTEXT_REPORT_MIN_REMAINING_SECONDS = 0.5
-CONTEXT_SAFETY_COMMIT_MAX_ATTEMPTS = 3
-CONTEXT_STOP_REASON_TEXT = {
-    ContextStopReason.NO_COMPRESSIBLE_HISTORY: "没有新的可压缩旧历史",
-    ContextStopReason.COMPRESSION_NOT_CONFIGURED: "未启用新格式压缩策略",
-    ContextStopReason.COMPRESSION_MODEL_UNAVAILABLE: "压缩模型不可用",
-    ContextStopReason.COMPRESSION_BUDGET_EXHAUSTED: "没有可用压缩调用额度",
-    ContextStopReason.COMPRESSION_INPUT_TOO_LARGE: "压缩输入无法一次装入模型窗口",
-    ContextStopReason.COMPRESSION_FAILED: "唯一一次压缩调用失败",
-    ContextStopReason.COMPRESSION_INSUFFICIENT: "压缩后完整输入仍超过安全线",
-    ContextStopReason.HARD_WINDOW_EXCEEDED: "完整输入与输出预留超过模型硬窗",
-}
 
 
 class _UseFinalAnswerSlot(Exception):
     """A retryable normal request exhausted its safe retry window."""
-
-
-class RunProgressPublisher(Protocol):
-    """发布临时文本增量的可选传输端口。"""
-
-    async def publish_text(
-        self,
-        run_id: str,
-        execution_epoch: int,
-        text: str,
-        *,
-        round: int = 0,
-    ) -> None:
-        """发送临时文本，不负责保存正式消息。"""
-
-    async def publish_persisted(self, run_id: str, execution_epoch: int, event: RunEvent) -> None:
-        """通知客户端数据库已提交的状态事件。"""
-
-
-class NullRunProgressPublisher:
-    """无实时传输时的空发布端口。"""
-
-    async def publish_text(
-        self,
-        run_id: str,
-        execution_epoch: int,
-        text: str,
-        *,
-        round: int = 0,
-    ) -> None:
-        return None
-
-    async def publish_persisted(self, run_id: str, execution_epoch: int, event: RunEvent) -> None:
-        return None
 
 
 @dataclass(slots=True)
@@ -193,6 +139,7 @@ class _ExecutionState:
     event_cursor: int
     memory_items: tuple[MemoryContextItem, ...] = ()
     memory_context_state: RunMemoryContextState | None = None
+    memory_revalidated: bool = False
     memory_retry_blocked: bool = False
     round: int = 0
     publish_disabled: bool = False
@@ -219,7 +166,7 @@ class RunExecutor:
         *,
         system_prompts: SystemPromptRepository,
         tool_runtime: RunToolRuntime | None = None,
-        publisher: RunProgressPublisher | None = None,
+        publisher: RunEventTransport | None = None,
         config: RunWorkerConfig | None = None,
         memory_lifecycle: MemoryLifecycleRepositoryPort | None = None,
         memory_personal_token_budget: int = 1_000,
@@ -235,12 +182,12 @@ class RunExecutor:
         self._provider = provider
         self._system_prompts = system_prompts
         self._tool_runtime = tool_runtime
-        self._publisher = publisher or NullRunProgressPublisher()
+        self._publisher = publisher
         self._config = config or RunWorkerConfig()
         self._memory_context = (
             None
             if memory_lifecycle is None
-            else RunMemoryContextManager(
+            else MemoryContextService(
                 memory_lifecycle,
                 personal_token_budget=memory_personal_token_budget,
                 project_token_budget=memory_project_token_budget,
@@ -253,8 +200,14 @@ class RunExecutor:
         self._compressor = ContextCompressor(
             repository,
             profiles,
-            cast(LlmRuntimeTextProvider, provider),
+            provider,
             self._publisher,
+        )
+        self._safe_stop = SafeStopReporter(
+            repository,
+            provider,
+            id_factory=id_factory,
+            now=self._now,
         )
 
     async def execute(self, lease: RunLease) -> None:
@@ -350,14 +303,9 @@ class RunExecutor:
         input_files: tuple[RunInputFileContext, ...] = ()
         if run.input_files.file_ids:
             # 解析必须发生在授权成功之后；解析结果只保留安全元数据。
-            resolver = (
-                None
-                if self._tool_runtime is None
-                else getattr(self._tool_runtime, "build_run_input_file_context", None)
-            )
-            if resolver is None:
+            if self._tool_runtime is None:
                 raise LlmError("run_input_file_context_unavailable")
-            input_files = await resolver(run)
+            input_files = await self._tool_runtime.build_run_input_file_context(run)
         # event_cursor 记录已推送事件位置，执行期间只增量发布新事件。
         return _ExecutionState(
             lease=lease,
@@ -516,25 +464,11 @@ class RunExecutor:
         )
         if messages is None:
             raise LlmError("run_context_unavailable")
-        loaded_skill_reader = getattr(
-            self._repository,
-            "list_successfully_loaded_skill_ids",
-            None,
-        )
-        loaded_skill_ids = (
-            ()
-            if loaded_skill_reader is None
-            else await loaded_skill_reader(run.id)
-        )
-        build_skill_context = (
-            None
-            if self._tool_runtime is None
-            else getattr(self._tool_runtime, "build_skill_context", None)
-        )
+        loaded_skill_ids = await self._repository.list_successfully_loaded_skill_ids(run.id)
         skill_context = (
             None
-            if build_skill_context is None
-            else await build_skill_context(run, loaded_skill_ids)
+            if self._tool_runtime is None
+            else await self._tool_runtime.build_skill_context(run, loaded_skill_ids)
         )
         memory_content, messages, memory_retry_blocked = await self._prepare_memory_context(
             state,
@@ -551,9 +485,7 @@ class RunExecutor:
         policy_id = run.compression_policy_version_id
         prepared: ContextPreparation
         if policy_id is not None:
-            policy = await cast(
-                CompressionPolicyRepository, self._profiles
-            ).get_compression_policy(policy_id)
+            policy = await self._profiles.get_compression_policy(policy_id)
             if policy is None:
                 # 旧浮点策略或已不存在的引用不会被静默换算；本轮按未配置压缩继续安全判断。
                 prepared = await self._measure_complete_context(
@@ -728,11 +660,12 @@ class RunExecutor:
             if state.run.memory_project_id is None
             else f"project:{state.run.memory_project_id}"
         )
+        force_revalidate = not state.memory_revalidated
         if not state.memory_context_state.initialized:
             built_items: tuple[MemoryContextItem, ...] = ()
             if access is not None:
                 try:
-                    built_items = await manager.build(
+                    built_items = await manager.build_run_items(
                         access,
                         project_scope_key=project_scope_key,
                         tokenizer_encoding=runtime.version.tokenizer_encoding,
@@ -752,7 +685,8 @@ class RunExecutor:
                 raise LlmError("run_execution_lease_lost")
             state.memory_context_state = fixed
             state.memory_items = built_items if fixed == proposed else ()
-        prepared = await manager.prepare(
+            force_revalidate = True
+        prepared = await manager.prepare_run_context(
             prepare_access,
             items=state.memory_items,
             references=tuple(
@@ -762,7 +696,9 @@ class RunExecutor:
             tokenizer_encoding=runtime.version.tokenizer_encoding,
             messages=messages,
             project_id=state.run.memory_project_id,
+            force_revalidate=force_revalidate,
         )
+        state.memory_revalidated = True
         state.memory_items = prepared.items
         return prepared.content, prepared.messages, prepared.contains_memory
 
@@ -840,15 +776,16 @@ class RunExecutor:
                         # 文本增量尽力实时推送；推送失败只影响实时性，不中断模型调用。
                         if isinstance(event, TextDelta):
                             emitted_output = True
-                            try:
-                                await self._publisher.publish_text(
-                                    run.id,
-                                    run.execution_epoch,
-                                    event.text,
-                                    round=state.round,
-                                )
-                            except Exception:
-                                logger.warning("run_progress_publish_failed run_id=%s", run.id)
+                            if self._publisher is not None:
+                                try:
+                                    await self._publisher.publish_text(
+                                        run.id,
+                                        run.execution_epoch,
+                                        event.text,
+                                        round=state.round,
+                                    )
+                                except Exception:
+                                    logger.warning("run_progress_publish_failed run_id=%s", run.id)
                         # 工具调用分片同样视为已产生输出，禁止后续重试。
                         elif isinstance(
                             event, (ToolCallStarted, ToolArgumentsDelta, ToolCallCompleted)
@@ -976,19 +913,7 @@ class RunExecutor:
                 message="当前 Run 未启用业务工具执行。",
             )
         # 运行时校验器负责参数级本地校验，不发起任何网络调用。
-        validator = getattr(self._tool_runtime, "validate_call", None)
-        if validator is None:
-            if definition is None:
-                return ToolOutcome(
-                    status=ToolOutcomeStatus.ERROR,
-                    code="tool_unknown",
-                    message="模型请求了冻结目录中不存在的工具。",
-                )
-            return None
-        return cast(
-            ToolOutcome | None,
-            validator(definition, call.name, dict(call.arguments)),
-        )
+        return self._tool_runtime.validate_call(definition, call.name, dict(call.arguments))
 
     async def _prepare_business_call(
         self,
@@ -999,22 +924,14 @@ class RunExecutor:
         record_id: str,
     ) -> ToolCallPreparation:
         """先做本地和 Run 固定 Skill 预校验，再决定是否进入审批。"""
-        prepare = (
-            None
-            if self._tool_runtime is None
-            else getattr(self._tool_runtime, "prepare_call", None)
-        )
-        if prepare is not None:
-            return cast(
-                ToolCallPreparation,
-                await prepare(
-                    definition,
-                    call.name,
-                    dict(call.arguments),
-                    state.run,
-                    state.authorized,
-                    call_id=record_id,
-                ),
+        if self._tool_runtime is not None:
+            return await self._tool_runtime.prepare_call(
+                definition,
+                call.name,
+                dict(call.arguments),
+                state.run,
+                state.authorized,
+                call_id=record_id,
             )
         outcome = self._validate_business_call(definition, call)
         return ToolCallPreparation(
@@ -1664,234 +1581,18 @@ class RunExecutor:
         skill_context: RunSkillPromptContext | None = None,
         compression_stop_reason: ContextStopReason | None = None,
     ) -> None:
-        """无工具生成持久化报告，并把报告与 FAILED 终态原子提交。"""
-        run = state.run
-        worker_id = run.worker_id
-        if worker_id is None:
-            raise RunContextSafetyCommitError(None, "worker_owner_missing")
-        # 取消、失租和鉴权高于报告生成；任一失败都不能越权写入报告。
-        try:
-            is_live = await self._repository.is_live_execution(
-                run.id, run.execution_epoch
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            raise RunContextSafetyCommitError(None, "liveness_check_failed") from error
-        if not is_live:
-            raise RunContextSafetyCommitError(None, "lease_lost")
-        if self._tool_runtime is not None:
-            try:
-                authorized = await self._authorize(run)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                raise RunContextSafetyCommitError(
-                    None, "authorization_check_failed"
-                ) from error
-            if authorized is None:
-                await self._commit_context_authorization_failure(state, RunUsage())
-                await self._publish_pending_events(state)
-                return
-
-        persisted_state = await self._context_report_state(
+        """委托 SafeStopReporter 生成持久化报告并原子提交 FAILED 终态。"""
+        await self._safe_stop.stop_for_context_safety(
             state,
+            runtime,
             messages,
+            reason,
+            remaining_seconds=lambda: self._remaining_seconds(state),
+            authorize=self._authorize if self._tool_runtime is not None else None,
+            publish_events=lambda: self._publish_pending_events(state),
             skill_context=skill_context,
             compression_stop_reason=compression_stop_reason,
         )
-        system_report = self._system_context_report(reason, persisted_state)
-        report_text = system_report
-        report_provider = "system_context_safety"
-        report_model: str | None = None
-        report_usage = RunUsage()
-
-        # deadline 已耗尽时只落系统报告；报告调用不延长 Run deadline。
-        if (
-            self._remaining_seconds(state) >= CONTEXT_REPORT_MIN_REMAINING_SECONDS
-            and state.budget.remaining > 0
-        ):
-            report_text, used_model, report_usage = await self._try_model_context_report(
-                state,
-                runtime,
-                persisted_state,
-                system_report,
-            )
-            if used_model:
-                report_provider = "chat_completions"
-                report_model = runtime.version.model
-
-        # 报告调用完成后再次校验取消、失租与授权，避免把已失去提交权的文本写入终态。
-        try:
-            is_live = await self._repository.is_live_execution(
-                run.id, run.execution_epoch
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            await self._record_context_report_usage_best_effort(state, report_usage)
-            raise RunContextSafetyCommitError(None, "liveness_check_failed") from error
-        if not is_live:
-            await self._record_context_report_usage_best_effort(state, report_usage)
-            raise RunContextSafetyCommitError(None, "lease_lost")
-        if self._tool_runtime is not None:
-            try:
-                authorized = await self._authorize(run)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                await self._record_context_report_usage_best_effort(state, report_usage)
-                raise RunContextSafetyCommitError(
-                    None, "authorization_check_failed"
-                ) from error
-            if authorized is None:
-                # 授权撤销时仍按普通鉴权失败收敛，但保留报告模型已经产生的调用用量。
-                await self._commit_context_authorization_failure(state, report_usage)
-                await self._publish_pending_events(state)
-                return
-        finished_at = self._now()
-        report_message = ConversationMessageDraft(
-            id=self._id_factory("msg"),
-            session_id=run.session_id,
-            owner_id=run.owner_id,
-            role=ConversationRole.ASSISTANT,
-            status=MessageStatus.COMPLETED,
-            parts=(TextPart(report_text),),
-            reply_to_message_id=run.trigger_message_id,
-            run_id=run.id,
-            client_message_id=None,
-            created_at=finished_at,
-            completed_at=finished_at,
-            metadata=MessageMetadata(provider=report_provider, model=report_model),
-            context_turn_id=run.trigger_message_id,
-        )
-        report_command = FailRunCommand(
-            run_id=run.id,
-            worker_id=worker_id,
-            execution_epoch=run.execution_epoch,
-            safe_error_code=CONTEXT_SAFETY_STOP_ERROR_CODE,
-            failed_at=finished_at,
-            report_message=report_message,
-            usage=report_usage,
-            context_stop_reason=reason,
-        )
-        await self._commit_context_safety_failure(
-            state,
-            report_command,
-            require_authorization=True,
-        )
-        await self._publish_pending_events(state)
-
-    async def _commit_context_authorization_failure(
-        self,
-        state: _ExecutionState,
-        usage: RunUsage,
-    ) -> Run:
-        """用稳定命令记录安全收尾阶段的鉴权失效并保留已有调用用量。"""
-        run = state.run
-        if run.worker_id is None:
-            raise RunContextSafetyCommitError(None, "worker_owner_missing")
-        command = FailRunCommand(
-            run_id=run.id,
-            worker_id=run.worker_id,
-            execution_epoch=run.execution_epoch,
-            safe_error_code="run_auth_session_invalid",
-            failed_at=self._now(),
-            usage=usage,
-        )
-        # 鉴权失效本身就是终态原因；只复核生命周期，不再要求已被撤销的鉴权恢复。
-        return await self._commit_context_safety_failure(
-            state,
-            command,
-            require_authorization=False,
-        )
-
-    async def _commit_context_safety_failure(
-        self,
-        state: _ExecutionState,
-        command: FailRunCommand,
-        *,
-        require_authorization: bool,
-    ) -> Run:
-        """在有效执行权内有限重放同一安全收尾命令，并保留已知 usage。"""
-        run = state.run
-        last_error: Exception | None = None
-        failure_reason = "commit_failed"
-        for _ in range(CONTEXT_SAFETY_COMMIT_MAX_ATTEMPTS):
-            if self._remaining_seconds(state) <= 0:
-                failure_reason = "deadline_expired"
-                break
-            try:
-                if not await self._repository.is_live_execution(run.id, run.execution_epoch):
-                    failure_reason = "lease_lost"
-                    break
-                if (
-                    require_authorization
-                    and self._tool_runtime is not None
-                    and await self._authorize(run) is None
-                ):
-                    failure_reason = "authorization_lost"
-                    break
-                failed = await self._repository.fail(command)
-            except asyncio.CancelledError:
-                raise
-            except (RunError, RunNotFoundError, SessionNotFoundError) as error:
-                # 取消、失租、删除或状态冲突不是瞬态写失败，不能靠重放越过。
-                last_error = error
-                failure_reason = "command_rejected"
-                break
-            except Exception as error:
-                # 事务结果可能不确定；同命令幂等重放可从仓储得到已提交终态。
-                last_error = error
-                continue
-            if failed is not None:
-                return failed
-            # None 表示取消、失租、deadline 或状态竞争已拒绝命令，不能继续补写。
-            failure_reason = "command_rejected"
-            break
-
-        report_message_id = None if command.report_message is None else command.report_message.id
-        await self._record_context_report_usage_best_effort(state, command.usage)
-        raise RunContextSafetyCommitError(report_message_id, failure_reason) from last_error
-
-    async def _record_context_report_usage_best_effort(
-        self,
-        state: _ExecutionState,
-        usage: RunUsage,
-    ) -> None:
-        """终态不可写时按既有幂等 usage 契约尽力保存报告调用审计。"""
-        run = state.run
-        if run.worker_id is None:
-            return
-        for attempt_usage in usage.attempts:
-            try:
-                await self._repository.record_usage(
-                    RecordRunUsageCommand(
-                        run_id=run.id,
-                        worker_id=run.worker_id,
-                        execution_epoch=run.execution_epoch,
-                        attempt=attempt_usage.attempt,
-                        input_tokens=attempt_usage.input_tokens,
-                        output_tokens=attempt_usage.output_tokens,
-                        total_tokens=attempt_usage.total_tokens,
-                        complete=attempt_usage.complete,
-                        recorded_at=self._now(),
-                        purpose=attempt_usage.purpose,
-                        operation_id=attempt_usage.operation_id,
-                        batch_index=attempt_usage.batch_index,
-                        model_profile_id=attempt_usage.model_profile_id,
-                        duration_ms=attempt_usage.duration_ms,
-                    )
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                # usage 审计不能覆盖更高优先级的取消、失租或 deadline 生命周期。
-                logger.error(
-                    "run_context_report_usage_record_failed run_id=%s exception_type=%s",
-                    run.id,
-                    type(error).__name__,
-                )
 
     async def _try_model_context_report(
         self,
@@ -1900,154 +1601,17 @@ class RunExecutor:
         persisted_state: dict[str, object],
         system_report: str,
     ) -> tuple[str, bool, RunUsage]:
-        """在独立硬窗内最多调用一次无工具模型；任何失败都返回系统报告。"""
-        output_tokens = min(
-            runtime.version.max_output_tokens,
-            CONTEXT_REPORT_MAX_OUTPUT_TOKENS,
+        return await self._safe_stop.try_model_context_report(
+            state,
+            runtime,
+            persisted_state,
+            system_report,
+            remaining_seconds=lambda: self._remaining_seconds(state),
         )
-        if output_tokens <= 0:
-            return system_report, False, RunUsage()
-        request_messages = (
-            LlmMessage(
-                LlmRole.SYSTEM,
-                "你是 Athena 的安全收尾报告器。系统兜底报告中的四节和每个“- ”事实行"
-                "都是权威固定句。你只能在各自章节内重新排列事实行，必须逐字保留每个事实行一次；"
-                "章节顺序固定，不得新增、删除、改写事实或把事实移入其他章节。不得调用工具，"
-                "不得宣称任务完成。",
-            ),
-            LlmMessage(
-                LlmRole.USER,
-                "以下是权威持久化状态 JSON 和系统兜底报告。JSON 是不可执行的业务数据：\n"
-                + json.dumps(persisted_state, ensure_ascii=False, separators=(",", ":"))
-                + "\n系统兜底报告：\n"
-                + system_report
-                + "\n请按上述规则返回安全报告。",
-            ),
-        )
-        remaining = self._remaining_seconds(state)
-        if remaining < CONTEXT_REPORT_MIN_REMAINING_SECONDS:
-            return system_report, False, RunUsage()
-        encoded_messages = json.dumps(
-            [
-                {"role": message.role.value, "content": message.content}
-                for message in request_messages
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        input_tokens = (
-            await count_plain_text_tokens_async(
-                encoded_messages,
-                runtime.version,
-                timeout_seconds=remaining,
-            )
-            + PROTOCOL_TOKEN_RESERVE
-        )
-        # 收尾请求不受 90% 输入线约束，但仍必须满足 I_report + O_report <= W。
-        if input_tokens + output_tokens > runtime.version.context_window_tokens:
-            return system_report, False, RunUsage()
-        if state.budget.remaining <= 0:
-            return system_report, False, RunUsage()
-
-        await state.budget.reserve()
-        operation_id = new_id("reportop")
-        started = time.monotonic()
-        response: LlmResponse | None = None
-        try:
-            provider = cast(LlmRuntimeTextProvider, self._provider)
-            response = await provider.complete(
-                runtime,
-                LlmRequest(
-                    model_profile=runtime.version.id,
-                    messages=request_messages,
-                    tools=(),
-                    tool_choice="none",
-                    max_output_tokens=output_tokens,
-                    timeout_seconds=min(remaining, runtime.version.request_timeout_seconds),
-                ),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            logger.warning(
-                "run_context_report_failed run_id=%s exception_type=%s",
-                state.run.id,
-                type(error).__name__,
-            )
-        elapsed = max(0, int((time.monotonic() - started) * 1000))
-        usage = None if response is None else response.usage
-        attempt = RunAttemptUsage(
-            execution_epoch=state.run.execution_epoch,
-            attempt=1,
-            purpose="answer",
-            operation_id=operation_id,
-            batch_index=0,
-            model_profile_id=runtime.version.id,
-            duration_ms=elapsed,
-            input_tokens=None if usage is None else usage.input_tokens,
-            output_tokens=None if usage is None else usage.output_tokens,
-            total_tokens=None if usage is None else usage.total_tokens,
-            complete=bool(
-                usage is not None
-                and usage.input_tokens is not None
-                and usage.output_tokens is not None
-                and usage.total_tokens is not None
-            ),
-        )
-        report_usage = RunUsage(attempts=(attempt,))
-        if response is None:
-            return system_report, False, report_usage
-        if response.status != "completed" or response.incomplete_reason is not None:
-            return system_report, False, report_usage
-        if len(response.output) != 1 or not isinstance(response.output[0], LlmText):
-            return system_report, False, report_usage
-        text = response.output[0].text.strip()
-        if not self._is_context_report_text_valid(text, system_report):
-            return system_report, False, report_usage
-        return text, True, report_usage
 
     @staticmethod
     def _is_context_report_text_valid(text: str, system_report: str) -> bool:
-        """只接受保留全部 canonical 事实行且不允许越权增删的模型报告。"""
-        actual = RunExecutor._parse_context_report(text)
-        expected = RunExecutor._parse_context_report(system_report)
-        if actual is None or expected is None:
-            return False
-        return all(
-            sorted(actual[section]) == sorted(expected[section])
-            for section in ("已完成：", "产出：", "未完成：", "停止原因：")
-        )
-
-    @staticmethod
-    def _parse_context_report(
-        text: str,
-    ) -> dict[str, tuple[str, ...]] | None:
-        """解析固定四节报告；章节顺序固定，节内事实行允许重排。"""
-        lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-        if not lines or lines[0] != "上下文安全停止。任务未标记为完成。":
-            return None
-        section_names = ("已完成：", "产出：", "未完成：", "停止原因：")
-        sections: dict[str, list[str]] = {}
-        current: str | None = None
-        next_section = 0
-        for line in lines[1:]:
-            if line in section_names:
-                if (
-                    next_section >= len(section_names)
-                    or line != section_names[next_section]
-                    or line in sections
-                ):
-                    return None
-                current = line
-                sections[current] = []
-                next_section += 1
-                continue
-            if current is None or not line.startswith("- "):
-                return None
-            sections[current].append(line)
-        if next_section != len(section_names) or any(not sections[name] for name in section_names):
-            return None
-        return {name: tuple(sections[name]) for name in section_names}
+        return is_context_report_text_valid(text, system_report)
 
     async def _context_report_state(
         self,
@@ -2057,294 +1621,19 @@ class RunExecutor:
         skill_context: RunSkillPromptContext | None = None,
         compression_stop_reason: ContextStopReason | None = None,
     ) -> dict[str, object]:
-        """构造当前 Run 的完整持久化报告状态，不截断文本或工具结果。"""
-        run = state.run
-        conversation: list[dict[str, object]] = []
-        execution: list[dict[str, object]] = []
-        artifacts: list[dict[str, object]] = []
-        message_file_references: list[dict[str, object]] = []
-
-        def encode_artifact(artifact: ArtifactFileRef) -> dict[str, object]:
-            value: dict[str, object] = {
-                "file_id": artifact.file_id,
-                "filename": artifact.filename,
-                "label": artifact.label,
-                "mime_type": artifact.mime_type,
-                "size_bytes": artifact.size_bytes,
-            }
-            artifacts.append(value)
-            return value
-
-        def encode_part(part: MessagePart) -> dict[str, object]:
-            if isinstance(part, TextPart):
-                return {"type": "text", "text": part.text}
-            if isinstance(part, FileRefPart):
-                value: dict[str, object] = {
-                    "type": "file_ref",
-                    "file_id": part.file_id,
-                    "filename": part.filename,
-                    "mime_type": part.mime_type,
-                    "size_bytes": part.size_bytes,
-                }
-                message_file_references.append(value)
-                return value
-            if isinstance(part, ToolCallPart):
-                return {
-                    "type": "tool_call",
-                    "tool_call_id": part.tool_call_id,
-                    "name": part.name,
-                    "arguments": dict(part.arguments),
-                }
-            if isinstance(part, ToolResultPart):
-                part_artifacts = [encode_artifact(item) for item in part.artifacts]
-                return {
-                    "type": "tool_result",
-                    "tool_call_id": part.tool_call_id,
-                    "status": part.status.value,
-                    "output": part.output,
-                    "artifact_id": part.artifact_id,
-                    "artifacts": part_artifacts,
-                }
-            raise AssertionError("run_context_report_part_unsupported")
-
-        for message in messages:
-            if isinstance(message, ConversationMessage):
-                if message.id != run.trigger_message_id and message.run_id != run.id:
-                    continue
-                conversation.append(
-                    {
-                        "sequence": message.sequence,
-                        "role": message.role.value,
-                        "status": message.status.value,
-                        "parts": [encode_part(part) for part in message.parts],
-                    }
-                )
-                continue
-            execution.append(
-                {
-                    "sequence": message.sequence,
-                    "role": message.role.value,
-                    "parts": [encode_part(part) for part in message.parts],
-                }
-            )
-
-        tool_calls: list[dict[str, object]] = []
-        tool_page_reader = getattr(self._repository, "list_tool_calls", None)
-        if tool_page_reader is not None:
-            cursor = 0
-            while True:
-                page = cast(
-                    RunToolCallPage | None,
-                    await tool_page_reader(
-                        run.session_id,
-                        run.owner_id,
-                        run.id,
-                        after_ordinal=cursor,
-                        limit=100,
-                    ),
-                )
-                if page is None:
-                    break
-                for item in page.items:
-                    tool_calls.append(
-                        {
-                            "ordinal": item.ordinal,
-                            "model_name": item.model_name,
-                            "status": item.status.value,
-                            "safe_error_code": item.safe_error_code,
-                            "outcome_status": (
-                                None
-                                if item.outcome is None
-                                else item.outcome.status.value
-                            ),
-                            "outcome": (
-                                None
-                                if item.outcome is None
-                                else {
-                                    "status": item.outcome.status.value,
-                                    "code": item.outcome.code,
-                                    "message": item.outcome.message,
-                                    "data": dict(item.outcome.data),
-                                }
-                            ),
-                        }
-                    )
-                if page.next_after_ordinal is None:
-                    break
-                cursor = page.next_after_ordinal
-        return {
-            "run_id": run.id,
-            "trigger_message_id": run.trigger_message_id,
-            "conversation": conversation,
-            "execution": execution,
-            "message_file_references": message_file_references,
-            "input_files": [
-                {
-                    "file_id": item.file_id,
-                    "filename": item.filename,
-                    "label": item.label,
-                    "mime_type": item.mime_type,
-                    "size_bytes": item.size_bytes,
-                    "source": item.source,
-                }
-                for item in state.input_files
-            ],
-            "loaded_skills": {
-                "catalog": (
-                    []
-                    if skill_context is None
-                    else [
-                        {
-                            "skill_id": item.skill_id,
-                            "name": item.name,
-                            "description": item.description,
-                            "version_id": item.version_id,
-                            "version_label": item.version_label,
-                        }
-                        for item in skill_context.catalog
-                    ]
-                ),
-                "active": (
-                    []
-                    if skill_context is None
-                    else [
-                        {
-                            "skill_id": item.skill_id,
-                            "name": item.name,
-                            "version_id": item.version_id,
-                            "version_label": item.version_label,
-                            "guide": item.guide,
-                        }
-                        for item in skill_context.active
-                    ]
-                ),
-            },
-            "retry_context": [
-                {
-                    "run_id": item.run_id,
-                    "tool_name": item.tool_name,
-                    "safe_error_code": item.safe_error_code,
-                }
-                for item in state.retry_context
-            ],
-            "tool_calls": tool_calls,
-            "artifacts": artifacts,
-            "compression_stop_reason": (
-                None
-                if compression_stop_reason is None
-                else {
-                    "code": compression_stop_reason.value,
-                    "text": CONTEXT_STOP_REASON_TEXT[compression_stop_reason],
-                }
-            ),
-        }
+        return await self._safe_stop.build_context_report_state(
+            state,
+            messages,
+            skill_context=skill_context,
+            compression_stop_reason=compression_stop_reason,
+        )
 
     @staticmethod
     def _system_context_report(
         reason: ContextStopReason,
         persisted_state: dict[str, object],
     ) -> str:
-        """即使报告模型不可用，也给出不宣称任务完成的权威状态报告。"""
-        reason_text = CONTEXT_STOP_REASON_TEXT[reason]
-        tool_calls = cast(list[dict[str, object]], persisted_state.get("tool_calls", []))
-        completed: list[str] = [
-            f"- 工具 {item.get('model_name')} 已完成（调用状态 {item.get('status')}）"
-            for item in tool_calls
-            if item.get("status") == "completed"
-        ]
-        loaded_skills = cast(dict[str, object], persisted_state.get("loaded_skills", {}))
-        active_skills = cast(list[dict[str, object]], loaded_skills.get("active", []))
-        completed.extend(
-            f"- Skill {item.get('name')} 已加载完整指南"
-            f"（skill_id: {item.get('skill_id')}，version_id: {item.get('version_id')}，"
-            f"version_label: {item.get('version_label')}）"
-            for item in active_skills
-        )
-        conversation = cast(list[dict[str, object]], persisted_state.get("conversation", []))
-        execution = cast(list[dict[str, object]], persisted_state.get("execution", []))
-        completed.append(
-            f"- 当前 Run 已持久化 {len(conversation)} 条会话消息、"
-            f"{len(execution)} 条执行消息、{len(tool_calls)} 条工具调用记录。"
-        )
-        unfinished_statuses = {
-            "pending_approval",
-            "approved",
-            "executing",
-            "unknown",
-            "failed",
-            "cancelled",
-        }
-        unfinished = [
-            f"- 工具 {item.get('model_name')} 未完成（调用状态 {item.get('status')}，"
-            f"安全码 {item.get('safe_error_code') or '无'}）。"
-            for item in tool_calls
-            if item.get("status") in unfinished_statuses
-        ]
-        retry_context = cast(
-            list[dict[str, object]],
-            persisted_state.get("retry_context", []),
-        )
-        unfinished.extend(
-            f"- 重试来源 Run {item.get('run_id')} 的工具 {item.get('tool_name')} 曾失败"
-            f"（安全码 {item.get('safe_error_code')}）。"
-            for item in retry_context
-        )
-        unfinished.append("- 业务循环已安全停止，尚未形成可安全提交的最终回答。")
-        artifacts = cast(list[dict[str, object]], persisted_state.get("artifacts", []))
-        artifact_lines = [
-            f"- 交付文件 {item.get('filename')}（file_id: {item.get('file_id')}，"
-            f"mime_type: {item.get('mime_type')}，size_bytes: {item.get('size_bytes')}）"
-            for item in artifacts
-        ]
-        input_files = cast(list[dict[str, object]], persisted_state.get("input_files", []))
-        input_file_lines = [
-            f"- 输入文件 {item.get('filename')}（file_id: {item.get('file_id')}，"
-            f"mime_type: {item.get('mime_type')}，size_bytes: {item.get('size_bytes')}；"
-            "该引用不是交付产物）"
-            for item in input_files
-        ]
-        file_references = cast(
-            list[dict[str, object]],
-            persisted_state.get("message_file_references", []),
-        )
-        file_reference_lines = [
-            f"- 消息文件引用 {item.get('filename')}（file_id: {item.get('file_id')}，"
-            f"mime_type: {item.get('mime_type')}，size_bytes: {item.get('size_bytes')}；"
-            "该引用不是交付产物）"
-            for item in file_references
-        ]
-        produced = artifact_lines + input_file_lines + file_reference_lines
-        compression_reason = cast(
-            dict[str, object] | None,
-            persisted_state.get("compression_stop_reason"),
-        )
-        compression_stop_line = (
-            ()
-            if compression_reason is None
-            else (
-                "- 压缩尝试结论："
-                f"{compression_reason.get('text')}"
-                f"（code: {compression_reason.get('code')}）。",
-            )
-        )
-        return "\n".join(
-            (
-                "上下文安全停止。任务未标记为完成。",
-                "",
-                "已完成：",
-                *(completed),
-                "",
-                "产出：",
-                *(produced or ["- 没有已持久化的交付文件或当前 Run 文件引用。"]),
-                "",
-                "未完成：",
-                *unfinished,
-                "",
-                "停止原因：",
-                f"- {reason_text}；完整业务输入达到 90% 安全线或无法满足 I+O<=W。",
-                *compression_stop_line,
-            )
-        )
+        return system_context_report(reason, persisted_state)
 
     async def _authorize(self, run: Run) -> AuthorizedRunContext | None:
         if self._tool_runtime is None:
@@ -2359,46 +1648,19 @@ class RunExecutor:
     async def _publish_pending_events(self, state: _ExecutionState) -> None:
         """Best-effort publish committed events; SSE reconciles from PostgreSQL."""
         # 无实时传输时直接跳过；客户端 SSE 会从 PostgreSQL 对账补齐。
-        if state.publish_disabled or isinstance(self._publisher, NullRunProgressPublisher):
+        if state.publish_disabled or self._publisher is None:
             return
-        try:
-            # 从 event_cursor 起增量推送已提交事件，游标随成功/失败推进。
-            while True:
-                current = await self._repository.get(
-                    state.run.session_id, state.run.owner_id, state.run.id
-                )
-                if current is None or current.event_sequence <= state.event_cursor:
-                    return
-                events = await self._repository.list_events(
-                    state.run.session_id,
-                    state.run.owner_id,
-                    state.run.id,
-                    after_sequence=state.event_cursor,
-                    limit=min(100, current.event_sequence - state.event_cursor),
-                )
-                if not events:
-                    return
-                for event in events:
-                    try:
-                        await self._publisher.publish_persisted(
-                            state.run.id, state.run.execution_epoch, event
-                        )
-                    except Exception as error:
-                        # 单条推送失败只影响实时性，不阻断执行；游标仍推进到该事件。
-                        logger.warning(
-                            "run_event_publish_failed run_id=%s exception_type=%s",
-                            state.run.id,
-                            type(error).__name__,
-                        )
-                    state.event_cursor = event.sequence
-        except Exception as error:
-            # 查询事件失败：本次执行内禁用发布，避免重复告警与无谓开销。
+        state.event_cursor, lookup_failed = await publish_pending_events(
+            self._repository,
+            self._publisher,
+            session_id=state.run.session_id,
+            owner_id=state.run.owner_id,
+            run_id=state.run.id,
+            execution_epoch=state.run.execution_epoch,
+            after_sequence=state.event_cursor,
+        )
+        if lookup_failed:
             state.publish_disabled = True
-            logger.warning(
-                "run_event_lookup_failed run_id=%s exception_type=%s",
-                state.run.id,
-                type(error).__name__,
-            )
 
     async def _fail(
         self,
@@ -2454,4 +1716,4 @@ class RunExecutor:
         }
 
 
-__all__ = ["NullRunProgressPublisher", "RunExecutor", "RunProgressPublisher"]
+__all__ = ["RunExecutor"]

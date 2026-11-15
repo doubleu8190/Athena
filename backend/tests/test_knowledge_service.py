@@ -15,7 +15,7 @@ from domain.knowledge.model import (
     Document,
     KnowledgeBase,
     OriginalStorageUnavailableError,
-    SearchResult,
+    SearchHit,
     SourceReference,
 )
 from domain.knowledge.ports import KnowledgeRepositoryPort
@@ -26,9 +26,9 @@ class MemoryKnowledgeRepository:
         self.bases: dict[str, KnowledgeBase] = {}
         self.requests: dict[tuple[str, str], tuple[str, str, str]] = {}
         self.content_hashes: dict[tuple[str, str], str] = {}
-        self.search_calls: list[
-            tuple[str, list[str], str, tuple[str, ...], int, list[float] | None]
-        ] = []
+        self.scope_calls: list[tuple[str, list[str]]] = []
+        self.keyword_calls: list[tuple[str, list[str], tuple[str, ...], int]] = []
+        self.semantic_calls: list[tuple[str, list[str], list[float], int, str | None]] = []
         self.deleted_documents: list[str] = []
         self.source_reference: SourceReference | None = None
 
@@ -131,17 +131,25 @@ class MemoryKnowledgeRepository:
         del owner_id, base_id, document_id
         return None
 
-    async def search(
+    async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None:
+        self.scope_calls.append((owner_id, list(base_ids)))
+
+    async def search_keyword(
+        self, owner_id: str, base_ids: list[str], tokens: tuple[str, ...], limit: int
+    ) -> tuple[SearchHit, ...]:
+        self.keyword_calls.append((owner_id, list(base_ids), tokens, limit))
+        return ()
+
+    async def search_semantic(
         self,
         owner_id: str,
         base_ids: list[str],
-        query: str,
-        tokens: tuple[str, ...],
+        vector: list[float],
         limit: int,
-        vector: list[float] | None = None,
-    ) -> SearchResult:
-        self.search_calls.append((owner_id, base_ids, query, tokens, limit, vector))
-        return SearchResult((), ("keyword", "semantic") if vector is not None else ("keyword",))
+        profile_id: str | None = None,
+    ) -> tuple[SearchHit, ...]:
+        self.semantic_calls.append((owner_id, list(base_ids), vector, limit, profile_id))
+        return ()
 
     async def delete_document(
         self, owner_id: str, base_id: str, document_id: str
@@ -233,14 +241,10 @@ def test_search_passes_owner_scope_and_same_tokens_and_vector_to_repository() ->
     service = KnowledgeService(cast(KnowledgeRepositoryPort, repository), Tokenizer(), Embedding())
     result = asyncio.run(service.search("owner_a", ["kb_a"], "PostgreSQL 中文", limit=7))
 
-    owner, bases, query, tokens, limit, vector = repository.search_calls[0]
-    assert (owner, bases, query, tokens, limit) == (
-        "owner_a",
-        ["kb_a"],
-        "PostgreSQL 中文",
-        ("PostgreSQL", "中文"),
-        7,
-    )
+    assert repository.scope_calls == [("owner_a", ["kb_a"])]
+    assert repository.keyword_calls == [("owner_a", ["kb_a"], ("PostgreSQL", "中文"), 40)]
+    owner, bases, vector, limit, profile_id = repository.semantic_calls[0]
+    assert (owner, bases, limit, profile_id) == ("owner_a", ["kb_a"], 40, "bge-m3-default")
     assert vector == [0.25] * 1024
     assert result.channels == ("keyword", "semantic")
 

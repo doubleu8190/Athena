@@ -6,7 +6,6 @@ import asyncio
 import json
 import math
 import unicodedata
-from builtins import list as List
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Literal
@@ -19,6 +18,7 @@ from app.memory.write_core import (
     normalize_text,
     normalized_persisted_text,
     prepare_write_embeddings,
+    validate_embedding_vector,
     validate_write_target,
 )
 from common.ids import new_id
@@ -35,12 +35,11 @@ from domain.memory.model import (
     AccessContext,
     Memory,
     MemoryHit,
-    MemoryRepositoryPort,
     RecallRequest,
     RecallResult,
     RerankerPort,
 )
-from domain.memory.ports import MemoryControlSourcePort, MemoryLifecycleRepositoryPort
+from domain.memory.ports import MemoryControlSourcePort, MemoryRepositoryPort
 
 
 class MemoryService:
@@ -58,7 +57,7 @@ class MemoryService:
         timeout_seconds: float = 60.0,
         rerank_min_score: float = 0.30,
         keyword_fallback_min_score: float | None = None,
-        lifecycle: MemoryLifecycleRepositoryPort | None = None,
+        lifecycle: MemoryRepositoryPort | None = None,
         control_source: MemoryControlSourcePort | None = None,
     ) -> None:
         self._repository = repository
@@ -72,11 +71,6 @@ class MemoryService:
         self._keyword_fallback_min_score = keyword_fallback_min_score
         self._lifecycle = lifecycle
         self._control_source = control_source
-
-    @property
-    def lifecycle_repository(self) -> MemoryLifecycleRepositoryPort | None:
-        """向组合根暴露同一生命周期端口，便于 Run 终态唤醒。"""
-        return self._lifecycle
 
     async def recall(self, request: RecallRequest) -> RecallResult:
         try:
@@ -131,10 +125,10 @@ class MemoryService:
                     current_candidate[1].setdefault(channel, (rank, score))
         if not candidates:
             try:
-                snapshot = await self._repository.get_many((), request.access.namespace_id, scopes)
+                read_enabled, _ = await self._repository.settings(request.access.namespace_id)
             except Exception:
                 return RecallResult("unavailable", degradation_reasons=("final_check_failed",))
-            if not snapshot.read_enabled:
+            if not read_enabled:
                 return RecallResult("disabled")
             return RecallResult(
                 "unavailable" if len(failures) == 2 else ("degraded" if failures else "ok"),
@@ -183,21 +177,18 @@ class MemoryService:
                     for channel, (_, score) in candidates[item[0].id][1].items()
                 )
             ]
-        try:
-            snapshot = await self._repository.get_many(
-                tuple(item[0].id for item in fused), request.access.namespace_id, scopes
-            )
-        except Exception:
-            return RecallResult("unavailable", degradation_reasons=("final_check_failed",))
-        if not snapshot.read_enabled:
-            return RecallResult("disabled")
-        current_rows = snapshot.memories
+        if fused:
+            # 仅在重排后仍有命中时做轻量 read_enabled 校验，
+            # 避免二次 REPEATABLE READ get_many 全量重查。
+            try:
+                read_enabled, _ = await self._repository.settings(request.access.namespace_id)
+            except Exception:
+                return RecallResult("unavailable", degradation_reasons=("final_check_failed",))
+            if not read_enabled:
+                return RecallResult("disabled")
         grouped_hits: list[MemoryHit] = []
         group_index: dict[tuple[str, str, str], int] = {}
-        for memory, score, channels in fused:
-            current_memory = current_rows.get(memory.id)
-            if current_memory is None or current_memory.version != memory.version:
-                continue
+        for current_memory, score, channels in fused:
             group_key = (
                 current_memory.namespace_id,
                 current_memory.scope_key,
@@ -264,44 +255,13 @@ class MemoryService:
         vector = await asyncio.wait_for(self._embedder.embed([request.query]), self._timeout)
         if len(vector) != 1:
             raise ValueError("memory_query_embedding_invalid")
-        query_vector = self._validate_vector(vector[0], "memory_query_embedding_invalid")
+        try:
+            query_vector = list(validate_embedding_vector(vector[0]))
+        except MemoryEmbeddingError as error:
+            raise ValueError("memory_query_embedding_invalid") from error
         return await self._repository.search_vector(
             request.access.namespace_id, scopes, query_vector, self._profile, 40
         )
-
-    async def list(
-        self, access: AccessContext, scope_key: str, limit: int = 50, offset: int = 0
-    ) -> tuple[Memory, ...]:
-        if scope_key not in access.readable_scopes:
-            raise ValueError("memory_scope_forbidden")
-        if not 1 <= limit <= 100 or offset < 0:
-            raise ValueError("memory_pagination_invalid")
-        return await self._repository.list(access, scope_key, limit, offset)
-
-    async def edit(
-        self, access: AccessContext, memory_id: str, content: str, expected_version: int
-    ) -> bool:
-        if not access.namespace_id or not access.writable_scopes:
-            raise ValueError("memory_scope_forbidden")
-        if not 1 <= len(content.strip()) <= 2000:
-            raise ValueError("memory_content_invalid")
-        vectors = await asyncio.wait_for(self._embedder.embed([content]), self._timeout)
-        if len(vectors) != 1:
-            raise ValueError("memory_embedding_invalid")
-        embedding = self._validate_vector(vectors[0], "memory_embedding_invalid")
-        return await self._repository.edit(
-            access, memory_id, content, embedding, self._profile, expected_version
-        )
-
-    async def delete(self, access: AccessContext, memory_id: str, version: int) -> bool:
-        if not access.namespace_id or not access.writable_scopes:
-            raise ValueError("memory_scope_forbidden")
-        return await self._repository.delete(access, memory_id, version)
-
-    async def set_enabled(
-        self, namespace_id: str, read_enabled: bool, auto_extract_enabled: bool
-    ) -> None:
-        await self._repository.update_settings(namespace_id, read_enabled, auto_extract_enabled)
 
     async def remember(
         self,
@@ -466,11 +426,6 @@ class MemoryService:
         if clear_scope:
             if target_memory_id is not None or expected_version is not None:
                 raise ValueError("memory_control_arguments_invalid")
-            if not self._contains_any(
-                sources.messages[0].text,
-                ("清空", "全部删除", "clear all", "clear memory"),
-            ):
-                raise ValueError("memory_control_intent_missing")
         elif target_memory_id is None or expected_version is None:
             raise ValueError("memory_control_target_required")
         scope_key = self._control_scope_key(access, sources.project_id, scope)
@@ -884,7 +839,7 @@ class MemoryService:
         content: str | None = None,
         expires_at: datetime | None = None,
     ) -> tuple[
-        MemoryLifecycleRepositoryPort,
+        MemoryRepositoryPort,
         ControlSourceSnapshot,
     ]:
         """读取固定 Run 证据并复核实时访问范围。
@@ -929,37 +884,11 @@ class MemoryService:
             raise ValueError("memory_control_evidence_invalid")
         matched_source = matching_messages[0]
         if operation in {"remember", "correct"}:
-            # 保留 evidence 源于用户原话的校验，不再要求 content 是其连续子串。
+            # 保留 evidence 源于用户原话的校验，不再要求 content 是其连续子串，
+            # 也移除对日期字面格式的硬编码强匹配。
             if content is None:
                 raise ValueError("memory_control_evidence_invalid")
-            if expires_at is not None and not self._datetime_supported(
-                expires_at,
-                self._normalized_evidence(matched_source.text),
-            ):
-                raise ValueError("memory_control_evidence_invalid")
         return lifecycle, replace(sources, messages=(matched_source,))
-
-    @staticmethod
-    def _datetime_supported(value: datetime, normalized_evidence: str) -> bool:
-        """要求到期日期以常见中文或 ISO 形式出现在直接证据中。
-
-        参数：
-        - `value`：待保存到期时间。
-        - `normalized_evidence`：归一后的用户原话。
-
-        返回：
-        - bool：证据是否包含日期表示。
-
-        异常：
-        - 无预期业务异常。
-        """
-        date_value = value.date()
-        representations = (
-            date_value.isoformat(),
-            f"{date_value.year}/{date_value.month}/{date_value.day}",
-            f"{date_value.year}年{date_value.month}月{date_value.day}日",
-        )
-        return any(item.casefold() in normalized_evidence for item in representations)
 
     @staticmethod
     def _normalized_evidence(value: str) -> str:
@@ -975,23 +904,6 @@ class MemoryService:
         - 无预期业务异常。
         """
         return normalize_text(value)
-
-    @staticmethod
-    def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
-        """检查固定控制触发词，避免模型声明替代用户原话。
-
-        参数：
-        - `value`：用户原话。
-        - `needles`：固定触发词。
-
-        返回：
-        - bool：是否包含任一触发词。
-
-        异常：
-        - 无预期业务异常。
-        """
-        normalized = unicodedata.normalize("NFKC", value).casefold()
-        return any(needle.casefold() in normalized for needle in needles)
 
     @staticmethod
     def _control_scope_key(
@@ -1021,23 +933,3 @@ class MemoryService:
         if scope_key not in access.writable_scopes:
             raise ValueError("memory_scope_forbidden")
         return scope_key
-
-    @staticmethod
-    def _validate_vector(vector: List[float], error_code: str) -> List[float]:
-        """检查向量是否适用于 1024 维余弦检索。
-
-        参数：
-        - `vector`：模型返回向量。
-        - `error_code`：无效时稳定错误码。
-
-        返回：
-        - List[float]：原向量。
-
-        异常：
-        - ValueError：维度、有限值或零向量无效。
-        """
-        if len(vector) != 1024 or any(not math.isfinite(value) for value in vector):
-            raise ValueError(error_code)
-        if not any(vector):
-            raise ValueError(error_code)
-        return vector

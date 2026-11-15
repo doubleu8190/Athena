@@ -14,7 +14,6 @@ from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionG
 from adapter.mcp.converter.mcp import (
     server_to_domain,
     tool_to_admin,
-    tool_to_domain,
     tool_to_public,
 )
 from adapter.mcp.model import McpServerModel, McpToolModel
@@ -25,7 +24,6 @@ from domain.mcp import (
     McpCatalogPersistenceError,
     McpConfigVersionConflictError,
     McpConnectionInput,
-    McpRuntimeToolDefinition,
     McpRuntimeToolTarget,
     McpSecretPurpose,
     McpServer,
@@ -33,7 +31,6 @@ from domain.mcp import (
     McpServerNotFoundError,
     McpServerPage,
     McpServerRepository,
-    McpServerRuntimeConfig,
     McpServerWrite,
     McpToolConflictError,
     McpToolRuntimeReader,
@@ -41,15 +38,16 @@ from domain.mcp import (
 )
 from domain.tool import (
     AdminToolDefinition,
+    McpToolSource,
     PublicToolDefinition,
-    ToolCatalogReader,
+    RuntimeToolDefinition,
     ToolDefinition,
     ToolPage,
 )
 from infrastructure.security.mcp_secrets import McpSecretCipher, SealedMcpSecrets
 
 
-class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRuntimeReader):
+class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
     """在权限复核与资源更新间保持单一事务和统一锁顺序。"""
 
     def __init__(
@@ -106,7 +104,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
                     )
                     session.add(row)
                     await session.flush()
-                    self._insert_tools(session, server.id, tools, {}, now)
+                    self._insert_tools(session, server.id, tools, now)
                     await session.flush()
                     return self._server_projection(row)
         except IntegrityError as error:
@@ -241,22 +239,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
             row = await session.get(McpServerModel, server_id)
         return None if row is None else self._server_projection(row)
 
-    async def get_runtime_config(self, server_id: str) -> McpServerRuntimeConfig | None:
-        """读取连接配置并仅在内部 transport 边界解封秘密。
-
-        参数：server_id 是 Server 主键。
-        返回：供连接器使用的敏感连接配置；不存在时返回 None。
-        异常：密钥版本不匹配、密文损坏或认证标签失败时抛 McpSecretError。
-        """
-        async with self._session_factory() as session:
-            row = await session.get(McpServerModel, server_id)
-        if row is None:
-            return None
-        secrets = self._decrypt_secrets(row)
-        server = server_to_domain(row, tuple(sorted(secrets)))
-        return McpServerRuntimeConfig(server=server, secrets=secrets)
-
-    async def list_runtime_tools(self, *, limit: int) -> tuple[McpRuntimeToolDefinition, ...]:
+    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         """Read catalog rows and their Server config version in one DB snapshot."""
         if not 1 <= limit <= 201:
             raise ValueError("mcp_runtime_tool_limit_invalid")
@@ -270,14 +253,16 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
                 )
             ).all()
         return tuple(
-            McpRuntimeToolDefinition(
+            RuntimeToolDefinition(
                 tool_id=tool.id,
-                server_id=server.id,
-                remote_name=tool.remote_name,
                 model_name=tool.model_name,
                 description=tool.description,
                 input_schema=dict(tool.input_schema_json),
-                config_version=server.config_version,
+                source=McpToolSource(
+                    server_id=server.id,
+                    remote_name=tool.remote_name,
+                    config_version=server.config_version,
+                ),
                 requires_approval=tool.requires_approval,
             )
             for tool, server in rows
@@ -362,11 +347,6 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
         """读取包含来源映射但无连接配置和秘密的管理员工具分页。"""
         rows, total = await self._tool_page(offset, limit)
         return ToolPage(items=tuple(tool_to_admin(row) for row in rows), total=total)
-
-    async def list_internal(self, *, offset: int, limit: int) -> ToolPage[ToolDefinition]:
-        """读取供受信编排使用的完整工具定义分页。"""
-        rows, total = await self._tool_page(offset, limit)
-        return ToolPage(items=tuple(tool_to_domain(row) for row in rows), total=total)
 
     async def list_server_admin(
         self, server_id: str, *, offset: int, limit: int
@@ -483,21 +463,19 @@ class SqlAlchemyMcpRepository(McpServerRepository, ToolCatalogReader, McpToolRun
         session: AsyncSession,
         server_id: str,
         tools: Sequence[ToolDefinition],
-        existing_by_remote: dict[str, McpToolModel],
         created_at: datetime,
     ) -> None:
         for tool in tools:
-            existing = existing_by_remote.get(tool.remote_name)
             session.add(
                 McpToolModel(
-                    id=existing.id if existing else tool.tool_id,
+                    id=tool.tool_id,
                     server_id=server_id,
                     remote_name=tool.remote_name,
-                    model_name=(existing.model_name if existing else tool.model_name),
+                    model_name=tool.model_name,
                     description=tool.description,
                     input_schema_json=dict(tool.input_schema),
                     requires_approval=tool.requires_approval,
-                    created_at=existing.created_at if existing else created_at,
+                    created_at=created_at,
                 )
             )
 

@@ -32,13 +32,18 @@ from app.session.service import SessionService
 from app.skill import DependencyChecker, SkillService
 from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
-from bootstrap.config import env_csv_set, env_flag
+from bootstrap.config import env_csv_set, env_flag, memory_enabled_from_env
 from bootstrap.database import build_database
 from bootstrap.knowledge import validate_knowledge_storage_configuration
 from bootstrap.redis import build_run_transport
 from bootstrap.tool import QueryServiceBundle, build_query_services
 from domain.file.ports import FileObjectStore
-from domain.knowledge.ports import DocumentFileValidator, KnowledgeRepositoryPort, OriginalStore
+from domain.knowledge.ports import (
+    DocumentFileValidator,
+    KnowledgeRepositoryPort,
+    KnowledgeUploadSlotRepository,
+    OriginalStore,
+)
 from domain.mcp import McpSecretError
 from infrastructure.database import Database
 from infrastructure.knowledge.parsers import LocalDocumentParser
@@ -89,6 +94,7 @@ class ApiDependencies:
     file_object_store: FileObjectStore | None
     skill_service: SkillService | None
     session_file_service: SessionFileService | None
+    knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
 
     async def start(self) -> None:
         """在首个请求前启动共享查询资源。"""
@@ -161,17 +167,13 @@ def build_api_dependencies(
     model_profile_use_case = model_profile_service
     system_prompt_use_case = system_prompt_service
     memory_use_case = memory_service
-    memory_enabled = memory_service is not None or env_flag("ATHENA_MEMORY_ENABLED", default=False)
-    if (
-        env_flag("ATHENA_MEMORY_LIFECYCLE_ENABLED", default=False)
-        and not memory_enabled
-    ):
-        raise ValueError("memory_lifecycle_requires_memory")
+    memory_enabled = memory_service is not None or memory_enabled_from_env()
     knowledge_enabled = knowledge_service is not None or env_flag(
         "ATHENA_KNOWLEDGE_ENABLED", default=False
     )
     knowledge_use_case: KnowledgeService | None = knowledge_service
     knowledge_repository: KnowledgeRepositoryPort | None = None
+    knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
     knowledge_originals: OriginalStore | None = None
     query_services: QueryServiceBundle | None = None
     memory_owned = memory_service is None and memory_enabled
@@ -251,7 +253,6 @@ def build_api_dependencies(
             mcp_repository = SqlAlchemyMcpRepository(database.session_factory, secret_cipher)
             mcp_use_case = ToolManager(
                 mcp_repository,
-                mcp_repository,
                 mcp_discovery,
                 auth_repository,
             )
@@ -264,11 +265,9 @@ def build_api_dependencies(
         memory_use_case = query_services.memory
         knowledge_use_case = query_services.knowledge
         knowledge_repository = query_services.knowledge_repository
+        knowledge_upload_slots = query_services.knowledge_upload_slots
         knowledge_originals = query_services.knowledge_original_store
-        memory_lifecycle_enabled = env_flag(
-            "ATHENA_MEMORY_LIFECYCLE_ENABLED",
-            default=False,
-        )
+        memory_lifecycle_enabled = memory_enabled_from_env()
         run_repository = (
             SqlAlchemyRunRepository(
                 database.session_factory,
@@ -334,6 +333,7 @@ def build_api_dependencies(
         memory_service=memory_use_case,
         knowledge_service=knowledge_use_case,
         knowledge_repository=knowledge_repository,
+        knowledge_upload_slots=knowledge_upload_slots,
         knowledge_originals=knowledge_originals,
         run_stream_service=run_stream_service,
         document_validator=document_validator,

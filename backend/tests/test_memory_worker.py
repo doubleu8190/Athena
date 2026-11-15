@@ -28,9 +28,7 @@ from domain.memory.lifecycle import (
     MemorySourceMessage,
     PreparedBatchChange,
     RunMemoryContextState,
-    ScanJobResult,
     ScanResult,
-    ScanRunsPayload,
 )
 from domain.memory.ports import MemoryLifecycleRepositoryPort
 
@@ -150,8 +148,15 @@ class _Repository:
         self.skipped: list[tuple[str, tuple[str, ...], str]] = []
         self.wake_calls = 0
 
-    async def enqueue_maintenance(self, day: str) -> int:
-        """记录每日维护安排。"""
+    async def maintain_due_scopes(
+        self,
+        day: str,
+        *,
+        fact_max_age_days: int,
+        other_max_age_days: int,
+    ) -> int:
+        """记录每日维护执行。"""
+        del fact_max_age_days, other_max_age_days
         self.maintenance_days.append(day)
         return 0
 
@@ -171,11 +176,6 @@ class _Repository:
     async def recover_running_jobs(self) -> int:
         """返回测试恢复数量。"""
         return self.recovered
-
-    async def ensure_scan_job(self, enabled_boundary_at: datetime) -> MemoryJob:
-        """返回固定扫描任务，供启动边界测试使用。"""
-        del enabled_boundary_at
-        return _job(ScanRunsPayload(enabled_boundary_at=NOW))
 
     async def complete_job(self, command: CompleteJobCommand) -> bool:
         """记录非提取任务或真实失败收敛命令。"""
@@ -240,12 +240,14 @@ class _Repository:
 
     async def scan_missing_runs(
         self,
-        payload: ScanRunsPayload,
         *,
+        enabled_boundary_at: datetime,
+        cursor_finished_at: datetime | None = None,
+        cursor_run_id: str | None = None,
         page_limit: int = 100,
     ) -> ScanResult:
         """记录扫描页预算并返回完成页。"""
-        del payload
+        del enabled_boundary_at, cursor_finished_at, cursor_run_id
         self.scan_page_limit = page_limit
         return ScanResult(round_complete=True)
 
@@ -290,7 +292,7 @@ def _pending_run(
 
 
 def _job(
-    payload: ExtractPendingPayload | CleanupScopePayload | ScanRunsPayload,
+    payload: ExtractPendingPayload | CleanupScopePayload,
     *,
     attempt_count: int = 1,
     schema_retry_count: int = 0,
@@ -335,7 +337,7 @@ def test_claims_one_background_job_and_excludes_control() -> None:
 
     async def scenario() -> None:
         repository = _Repository(
-            _job(ScanRunsPayload(enabled_boundary_at=NOW))
+            _job(CleanupScopePayload(namespace_id="owner_worker", scope_key="project:p1"))
         )
         worker = _worker(repository)
 
@@ -346,7 +348,7 @@ def test_claims_one_background_job_and_excludes_control() -> None:
         assert repository.claim_kinds == BACKGROUND_JOB_KINDS
         assert JobKind.CONTROL not in repository.claim_kinds
         assert repository.scan_page_limit == 100
-        assert isinstance(repository.completed[-1].result, ScanJobResult)
+        assert len(repository.completed) == 1
         assert len(repository.maintenance_days) == 1
 
     asyncio.run(scenario())

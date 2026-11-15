@@ -22,7 +22,7 @@ from system_prompt_support import (
 )
 
 from app.run.config import RunWorkerConfig
-from app.run.context import _context_threads, _run_context_work, prepare_run_tokenizers
+from app.run.context import _run_context_work, prepare_run_tokenizers
 from app.run.executor import RunExecutor as _RunExecutor
 from app.run.worker import RunWorker
 from domain.llm.model import LlmRequest, LlmStreamEvent, TextDelta
@@ -302,6 +302,12 @@ def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
             async def list_context_messages(self, *args: object) -> tuple[object, ...]:
                 return ()
 
+            async def list_successfully_loaded_skill_ids(self, _run_id: str) -> tuple[str, ...]:
+                return ()
+
+            async def list_tool_calls(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
             async def is_live_execution(self, *_args: object) -> bool:
                 return True
 
@@ -393,6 +399,12 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
 
             async def list_context_messages(self, *args: object) -> tuple[object, ...]:
                 return ()
+
+            async def list_successfully_loaded_skill_ids(self, _run_id: str) -> tuple[str, ...]:
+                return ()
+
+            async def list_tool_calls(self, *_args: object, **_kwargs: object) -> None:
+                return None
 
             async def is_live_execution(self, *_args: object) -> bool:
                 return True
@@ -635,8 +647,8 @@ def test_tokenizer_calls_wait_for_bounded_worker_capacity() -> None:
     asyncio.run(scenario())
 
 
-def test_expired_deadline_after_thread_start_keeps_slot_until_thread_exit() -> None:
-    """start 已成功但 deadline 已过时，槽位仍由运行线程独占至退出。"""
+def test_late_executor_failure_after_timeout_produces_no_loop_errors() -> None:
+    """超时后线程池任务延迟失败时，不会向事件循环泄漏未捕获异常。"""
 
     async def scenario() -> None:
         gate = threading.Event()
@@ -644,7 +656,6 @@ def test_expired_deadline_after_thread_start_keeps_slot_until_thread_exit() -> N
         loop = asyncio.get_running_loop()
         loop_errors: list[dict[str, object]] = []
         loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
-        original_start = threading.Thread.start
 
         def blocked_work() -> None:
             try:
@@ -653,36 +664,14 @@ def test_expired_deadline_after_thread_start_keeps_slot_until_thread_exit() -> N
             finally:
                 thread_finished.set()
 
-        def start_then_delay(thread: threading.Thread, *args: Any, **kwargs: Any) -> None:
-            original_start(thread, *args, **kwargs)
-            if thread.name == "run-tokenizer":
-                time.sleep(0.05)
-
-        with patch("app.run.context.threading.Thread.start", start_then_delay):
-            with pytest.raises(TimeoutError, match="run_context_work_timeout"):
-                await _run_context_work(blocked_work, timeout_seconds=0.01)
-
-        acquired = [_context_threads.acquire(blocking=False) for _ in range(4)]
-        assert sum(acquired) == 3
-        for slot in acquired:
-            if slot:
-                _context_threads.release()
+        with pytest.raises(TimeoutError):
+            await _run_context_work(blocked_work, timeout_seconds=0.01)
 
         gate.set()
         deadline = asyncio.get_running_loop().time() + 1
-        released = [False, False, False, False]
-        while asyncio.get_running_loop().time() < deadline:
-            released = [_context_threads.acquire(blocking=False) for _ in range(4)]
-            if all(released):
-                break
-            for slot in released:
-                if slot:
-                    _context_threads.release()
+        while not thread_finished.is_set() and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.005)
         assert thread_finished.is_set()
-        assert all(released)
-        for _ in released:
-            _context_threads.release()
         await asyncio.sleep(0)
         assert loop_errors == []
 

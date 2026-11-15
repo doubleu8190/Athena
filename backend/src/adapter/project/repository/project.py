@@ -8,6 +8,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.knowledge.model import ProjectKnowledgeBaseModel
+from adapter.memory import disable_project_memory_scope, lock_user_memory_setting
 from adapter.project.converter.project import project_to_domain
 from adapter.project.model.project import ProjectModel
 from adapter.session.model import SessionModel
@@ -120,11 +121,6 @@ class SqlAlchemyProjectRepository(ProjectRepository):
         deleted_at: datetime,
     ) -> bool:
         """锁定项目并拒绝删除仍有有效会话的项目。"""
-        from adapter.memory.repository.lifecycle import (
-            disable_project_memory_scope,
-            lock_user_memory_setting,
-        )
-
         async with self._session_factory() as session:
             async with session.begin():
                 # 记忆 scope 失效必须先锁用户设置，避免与 control/extract 反锁。

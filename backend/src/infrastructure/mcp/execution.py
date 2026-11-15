@@ -16,13 +16,11 @@ from domain.mcp import (
     McpConnectionInput,
     McpRuntimeToolTarget,
     McpToolExecutor,
-    StdioConfig,
-    StreamableHttpConfig,
     mcp_content_projection,
     mcp_message_from_result,
 )
-from infrastructure.mcp.http import DEFAULT_MAX_RESPONSE_BYTES, pinned_streamable_http_transport
-from infrastructure.mcp.stdio import McpStdioTransport
+from infrastructure.mcp.http import DEFAULT_MAX_RESPONSE_BYTES
+from infrastructure.mcp.transport import build_controlled_mcp_transport
 
 logger = logging.getLogger(__name__)
 
@@ -280,27 +278,13 @@ class McpToolCallClient(McpToolExecutor):
         )
 
     def _make_transport(self, connection: McpConnectionInput) -> Transport:
-        if self._transport_factory is not None:
-            return self._transport_factory(connection)
-        config = connection.config
-        if isinstance(config, StreamableHttpConfig):
-            return pinned_streamable_http_transport(
-                config.url,
-                headers=dict(connection.secrets),
-                allowed_private_hosts=self._allowed_private_hosts,
-                maximum_response_bytes=self._maximum_response_bytes,
-            )
-        if isinstance(config, StdioConfig):
-            return McpStdioTransport(
-                config.command,
-                config.args,
-                cwd=config.cwd,
-                env=connection.secrets,
-                base_environment=self._stdio_base_environment,
-                maximum_line_bytes=self._maximum_response_bytes,
-                maximum_total_bytes=self._maximum_response_bytes,
-            )
-        raise ValueError("mcp_transport_unsupported")
+        return build_controlled_mcp_transport(
+            connection,
+            allowed_private_hosts=self._allowed_private_hosts,
+            maximum_response_bytes=self._maximum_response_bytes,
+            stdio_base_environment=self._stdio_base_environment,
+            transport_factory=self._transport_factory,
+        )
 
     async def _close_client(self, client: _CallClient) -> str | None:
         """Bound cleanup in the entering task, as required by anyio cancel scopes."""

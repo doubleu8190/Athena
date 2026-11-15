@@ -32,7 +32,6 @@ from domain.memory.model import (
     AccessContext,
     Memory,
     MemoryHit,
-    MemoryRepositoryPort,
     MemorySource,
     RecallRequest,
     RecallResult,
@@ -40,7 +39,11 @@ from domain.memory.model import (
     RerankerPort,
     RetrievedMemory,
 )
-from domain.memory.ports import MemoryControlSourcePort, MemoryLifecycleRepositoryPort
+from domain.memory.ports import (
+    MemoryControlSourcePort,
+    MemoryLifecycleRepositoryPort,
+    MemoryRepositoryPort,
+)
 
 __all__ = [
     "AccessContext",

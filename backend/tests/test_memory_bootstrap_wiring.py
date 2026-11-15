@@ -113,17 +113,7 @@ def test_query_service_bootstrap_injects_control_repository_and_source(
         "LocalReranker",
         lambda *args: _Resource(),
     )
-    monkeypatch.setattr(
-        tool_bootstrap_module,
-        "LocalTokenCounter",
-        lambda *args: _Resource(),
-    )
     monkeypatch.setattr(tool_bootstrap_module, "MemoryRepository", lambda *args: _Repository())
-    monkeypatch.setattr(
-        tool_bootstrap_module,
-        "MemoryControlSourceRepository",
-        _SourceRepository,
-    )
     monkeypatch.setattr(
         tool_bootstrap_module,
         "MemoryService",
@@ -362,7 +352,7 @@ def test_memory_worker_entry_recovers_before_single_consumer(
             events.append("worker.recover")
             return 1
 
-        async def ensure_scan_job(self, enabled_boundary_at: object) -> None:
+        def set_scan_boundary(self, enabled_boundary_at: object) -> None:
             del enabled_boundary_at
             events.append("worker.scan")
 

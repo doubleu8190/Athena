@@ -9,19 +9,23 @@ from domain.auth import AuthContext
 from domain.mcp.model import (
     DiscoveredMcpTool,
     McpConnectionInput,
-    McpRuntimeToolDefinition,
     McpRuntimeToolTarget,
     McpServer,
     McpServerPage,
-    McpServerRuntimeConfig,
     McpServerWrite,
 )
 from domain.mcp.model.execution import McpCallResult
-from domain.tool import AdminToolDefinition, ToolDefinition
+from domain.tool import (
+    AdminToolDefinition,
+    PublicToolDefinition,
+    RuntimeToolDefinition,
+    ToolDefinition,
+    ToolPage,
+)
 
 
 class McpServerRepository(Protocol):
-    """管理 MCP Server 和其发现工具快照的原子持久化端口。"""
+    """管理 MCP Server、工具目录投影与发现快照的统一持久化端口。"""
 
     async def create_with_tools(
         self,
@@ -47,9 +51,6 @@ class McpServerRepository(Protocol):
     async def get(self, server_id: str) -> McpServer | None:
         """读取不含秘密明文的 Server 投影。"""
 
-    async def get_runtime_config(self, server_id: str) -> McpServerRuntimeConfig | None:
-        """仅供 transport 的内部调用解封凭据，不用于用户可见输出。"""
-
     async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
         """分页读取 Server 安全投影。"""
 
@@ -57,6 +58,23 @@ class McpServerRepository(Protocol):
         self, actor: AuthContext, tool_id: str, requires_approval: bool
     ) -> AdminToolDefinition:
         """复核管理员后更新已注册工具的审批策略。"""
+
+    async def list_public(self, *, offset: int, limit: int) -> ToolPage[PublicToolDefinition]:
+        """读取供普通调用方使用的工具定义。"""
+
+    async def list_admin(self, *, offset: int, limit: int) -> ToolPage[AdminToolDefinition]:
+        """读取包含 Server 来源映射的管理员工具定义。"""
+
+    async def list_server_admin(
+        self, server_id: str, *, offset: int, limit: int
+    ) -> ToolPage[AdminToolDefinition]:
+        """读取指定 Server 的管理员工具定义。"""
+
+    async def get_public_tool(self, tool_id: str) -> PublicToolDefinition | None:
+        """按 ID 读取普通调用方安全投影。"""
+
+    async def get_admin_tool(self, tool_id: str) -> AdminToolDefinition | None:
+        """按 ID 读取管理员安全投影。"""
 
 
 class McpDiscovery(Protocol):
@@ -69,7 +87,7 @@ class McpDiscovery(Protocol):
 class McpToolRuntimeReader(Protocol):
     """Read one current routing target without exposing it to API callers."""
 
-    async def list_runtime_tools(self, *, limit: int) -> tuple[McpRuntimeToolDefinition, ...]:
+    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         """Read at most ``limit`` catalog rows with one config version per Server."""
 
     async def get_call_target(

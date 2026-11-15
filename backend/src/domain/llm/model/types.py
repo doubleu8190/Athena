@@ -25,7 +25,6 @@ class LlmMessage:
     content: str = ""
     tool_call_id: str | None = None
     name: str | None = None
-    continuation_items: tuple[Mapping[str, Any], ...] = ()
     tool_calls: tuple[LlmToolCall, ...] = ()
 
 
@@ -81,7 +80,7 @@ class LlmUsage:
 
 @dataclass(frozen=True, slots=True)
 class LlmResponse:
-    """单次调用的有序结果及可重放续接项。"""
+    """单次调用的有序结果。"""
 
     output: tuple[LlmOutput, ...]
     status: str
@@ -90,7 +89,6 @@ class LlmResponse:
     response_id: str | None
     request_id: str | None
     usage: LlmUsage | None
-    continuation_items: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

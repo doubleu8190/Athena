@@ -32,7 +32,6 @@ from adapter.memory.model import (
     MemorySourceModel,
 )
 from adapter.memory.repository import MemoryRepository
-from adapter.memory.repository.control_source import MemoryControlSourceRepository
 from adapter.message.model import ConversationMessageModel
 from adapter.run.model import RunModel
 from adapter.session.model import SessionModel
@@ -398,13 +397,13 @@ def test_retrieve_similar_fuses_channels_and_keeps_scope_and_settings() -> None:
                 ("personal", project_scope),
                 ("personal", project_scope),
             )
-            retrieved = await harness.memory.retrieve_similar(
-                access,
-                "personal",
-                "乌龙茶",
-                _EMBEDDING,
-                _EMBEDDING_PROFILE,
-            )
+            retrieved = (
+                await harness.memory.retrieve_similar_batch(
+                    access,
+                    (("personal", "乌龙茶", _EMBEDDING),),
+                    _EMBEDDING_PROFILE,
+                )
+            )[0]
             retrieved_by_id = {item.id: item for item in retrieved}
             assert {
                 "memory_active",
@@ -432,14 +431,12 @@ def test_retrieve_similar_fuses_channels_and_keeps_scope_and_settings() -> None:
 
             await harness.memory.update_settings(fixture.owner_id, False, True)
             assert (
-                await harness.memory.retrieve_similar(
+                await harness.memory.retrieve_similar_batch(
                     access,
-                    "personal",
-                    "乌龙茶",
-                    _EMBEDDING,
+                    (("personal", "乌龙茶", _EMBEDDING),),
                     _EMBEDDING_PROFILE,
                 )
-                == ()
+                == ((),)
             )
 
     asyncio.run(scenario())
@@ -1205,7 +1202,7 @@ def test_real_service_rechecks_revoked_auth_in_write_transaction() -> None:
                 _Reranker(),
                 _Counter(),
                 lifecycle=harness.memory,
-                control_source=MemoryControlSourceRepository(harness.database.factory),
+                control_source=harness.memory,
             )
             project_scope = f"project:{fixture.project_id}"
             control = asyncio.create_task(

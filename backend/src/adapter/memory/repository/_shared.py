@@ -18,12 +18,28 @@ from adapter.memory.model import (
     MemorySettingModel,
     MemorySourceModel,
 )
-from adapter.message.converter.message import deserialize_parts
+from adapter.memory.tx_helpers import (
+    disable_project_memory_scope as disable_project_memory_scope,
+)
+from adapter.memory.tx_helpers import (
+    enqueue_cleanup_job as enqueue_cleanup_job,
+)
+from adapter.memory.tx_helpers import (
+    invalidate_session_memory_generation as invalidate_session_memory_generation,
+)
+from adapter.memory.tx_helpers import (
+    lock_scope_state as lock_scope_state,
+)
+from adapter.memory.tx_helpers import (
+    lock_scope_states as lock_scope_states,
+)
+from adapter.memory.tx_helpers import (
+    lock_user_memory_setting as lock_user_memory_setting,
+)
 from adapter.message.model import ConversationMessageModel
 from adapter.run.model import RunModel
-from common.date import as_utc, utc_now
+from common.date import as_utc
 from domain.memory.lifecycle import (
-    CleanupScopePayload,
     ExtractBatchPayload,
     ExtractionStatus,
     JobKind,
@@ -33,7 +49,6 @@ from domain.memory.lifecycle import (
     MemoryJobResult,
     MemorySourceMessage,
     PreparedMemoryCreate,
-    ScanRunsPayload,
 )
 from domain.message import TextPart
 
@@ -108,6 +123,8 @@ def _normalized_content_hash(content: str) -> str:
 
 def _message_text(parts: list[dict[str, object]]) -> str:
     """只提取可信用户消息中的文本块。"""
+    from adapter.message.converter.message import deserialize_parts
+
     try:
         decoded = deserialize_parts(parts)
     except ValueError:
@@ -130,32 +147,6 @@ def _scope_key(project_id: str | None) -> str:
     return "personal" if project_id is None else f"project:{project_id}"
 
 
-async def lock_user_memory_setting(
-    session: AsyncSession,
-    namespace_id: str,
-) -> MemorySettingModel:
-    """创建并锁定用户级记忆设置行，作为用户设置与控制写事务的串行点。"""
-    if not namespace_id.strip():
-        raise ValueError("memory_owner_required")
-    await session.execute(
-        insert(MemorySettingModel)
-        .values(
-            namespace_id=namespace_id,
-            read_enabled=True,
-            auto_extract_enabled=True,
-            generation=1,
-        )
-        .on_conflict_do_nothing(index_elements=["namespace_id"])
-    )
-    row = await session.scalar(
-        select(MemorySettingModel)
-        .where(MemorySettingModel.namespace_id == namespace_id)
-        .with_for_update()
-    )
-    if row is None:
-        raise RuntimeError("memory_setting_missing")
-    return row
-
 
 async def read_user_memory_generation(
     session: AsyncSession,
@@ -168,140 +159,9 @@ async def read_user_memory_generation(
     return 1 if generation is None else generation
 
 
-async def ensure_scan_job_locked(
-    session: AsyncSession,
-    enabled_boundary_at: datetime,
-) -> MemoryJobModel:
-    """在调用方事务内固定全局扫描边界和游标。"""
-    now = utc_now()
-    dedupe_key = "scan_runs:global"
-    payload = ScanRunsPayload(enabled_boundary_at=enabled_boundary_at)
-    await session.execute(
-        insert(MemoryJobModel)
-        .values(
-            id=f"mjob_{hashlib.sha256(dedupe_key.encode()).hexdigest()[:24]}",
-            dedupe_key=dedupe_key,
-            kind=JobKind.SCAN_RUNS.value,
-            status=JobStatus.QUEUED.value,
-            payload=_json_value(payload),
-            result=None,
-            namespace_id="__global__",
-            scope_key=None,
-            attempt_count=0,
-            schema_retry_count=0,
-            available_at=now,
-            created_at=now,
-            updated_at=now,
-        )
-        .on_conflict_do_nothing(index_elements=["dedupe_key"])
-    )
-    row = await session.scalar(
-        select(MemoryJobModel).where(MemoryJobModel.dedupe_key == dedupe_key).with_for_update()
-    )
-    if row is None:
-        raise RuntimeError("memory_scan_job_missing")
-    return row
 
 
-async def lock_scope_states(
-    session: AsyncSession,
-    namespace_id: str,
-    scope_keys: tuple[str, ...] | list[str],
-) -> dict[str, MemoryScopeStateModel]:
-    """按 scope_key 字典序初始化并锁定多个 scope 状态行，避免多 scope 并发死锁。"""
-    ordered_keys = tuple(sorted(set(scope_keys)))
-    if not ordered_keys:
-        return {}
-    now = utc_now()
-    # 行不存在时先幂等插入默认启用状态，再按 (namespace_id, scope_key) 排序加锁。
-    await session.execute(
-        insert(MemoryScopeStateModel)
-        .values(
-            [
-                {
-                    "namespace_id": namespace_id,
-                    "scope_key": scope_key,
-                    "enabled": True,
-                    "last_maintained_day": None,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-                for scope_key in ordered_keys
-            ]
-        )
-        .on_conflict_do_nothing(index_elements=["namespace_id", "scope_key"])
-    )
-    rows = (
-        await session.scalars(
-            select(MemoryScopeStateModel)
-            .where(
-                MemoryScopeStateModel.namespace_id == namespace_id,
-                MemoryScopeStateModel.scope_key.in_(ordered_keys),
-            )
-            .order_by(
-                MemoryScopeStateModel.namespace_id,
-                MemoryScopeStateModel.scope_key,
-            )
-            .with_for_update()
-        )
-    ).all()
-    scopes = {row.scope_key: row for row in rows}
-    if len(scopes) != len(ordered_keys):
-        raise RuntimeError("memory_scope_state_missing")
-    return scopes
 
-
-async def lock_scope_state(
-    session: AsyncSession,
-    namespace_id: str,
-    scope_key: str,
-) -> MemoryScopeStateModel:
-    """创建并锁定单个 scope 状态行。"""
-    scopes = await lock_scope_states(session, namespace_id, (scope_key,))
-    return scopes[scope_key]
-
-
-async def enqueue_cleanup_job(
-    session: AsyncSession,
-    *,
-    namespace_id: str,
-    scope_key: str,
-    now: datetime,
-) -> None:
-    """幂等安排一个 scope 的内容清理任务。"""
-    dedupe_key = f"cleanup_scope:{namespace_id}:{scope_key}"
-    await session.execute(
-        insert(MemoryJobModel)
-        .values(
-            id=f"mjob_{hashlib.sha256(dedupe_key.encode()).hexdigest()[:24]}",
-            dedupe_key=dedupe_key,
-            kind=JobKind.CLEANUP_SCOPE.value,
-            status=JobStatus.QUEUED.value,
-            payload=_json_value(
-                CleanupScopePayload(
-                    namespace_id=namespace_id,
-                    scope_key=scope_key,
-                )
-            ),
-            result=None,
-            namespace_id=namespace_id,
-            scope_key=scope_key,
-            attempt_count=0,
-            schema_retry_count=0,
-            available_at=now,
-            created_at=now,
-            updated_at=now,
-        )
-        .on_conflict_do_update(
-            index_elements=["dedupe_key"],
-            set_={
-                "status": JobStatus.QUEUED.value,
-                "result": None,
-                "available_at": now,
-                "updated_at": now,
-            },
-        )
-    )
 
 
 async def _mark_user_runs_skipped_locked(
@@ -364,322 +224,207 @@ async def _mark_batch_runs_locked(
         row.updated_at = now
 
 
-async def invalidate_session_memory_generation(
-    session: AsyncSession,
-    *,
-    owner_id: str,
-    session_id: str,
-    invalidated_at: datetime,
-) -> int:
-    """在 Session 来源失效事务内推进 generation 并跳过该 Session 相关 Run。"""
-    setting = await lock_user_memory_setting(session, owner_id)
-    setting.generation += 1
-    rows = (
-        await session.scalars(
-            select(RunModel)
-            .where(
-                RunModel.owner_id == owner_id,
-                RunModel.session_id == session_id,
-                or_(
-                    RunModel.memory_extraction_status.is_(None),
-                    RunModel.memory_extraction_status == ExtractionStatus.PENDING.value,
-                    RunModel.finished_at.is_(None),
-                ),
-            )
-            .order_by(RunModel.id)
-            .with_for_update()
-        )
-    ).all()
-    for row in rows:
-        if row.memory_extraction_status in {
-            None,
-            ExtractionStatus.PENDING.value,
-        }:
-            row.memory_extraction_status = ExtractionStatus.SKIPPED.value
-            row.memory_extraction_safe_error_code = "memory_session_deleted"
-        if row.finished_at is not None:
-            row.memory_extracted_at = invalidated_at
-        row.updated_at = invalidated_at
-    return setting.generation
 
 
-async def disable_project_memory_scope(
+async def insert_prepared_memory(
     session: AsyncSession,
-    *,
-    owner_id: str,
-    project_id: str,
-    disabled_at: datetime,
-) -> int:
-    """在项目删除事务内禁用项目 scope 并安排幂等清理。"""
-    scope_key = _scope_key(project_id)
-    setting = await lock_user_memory_setting(session, owner_id)
-    state = await lock_scope_state(session, owner_id, scope_key)
-    if state.enabled:
-        state.enabled = False
-        state.updated_at = disabled_at
-        setting.generation += 1
-    rows = (
-        await session.scalars(
-            select(RunModel)
-            .where(
-                RunModel.owner_id == owner_id,
-                RunModel.memory_project_id == project_id,
-                or_(
-                    RunModel.memory_extraction_status.is_(None),
-                    RunModel.memory_extraction_status == ExtractionStatus.PENDING.value,
-                    RunModel.finished_at.is_(None),
-                ),
-            )
-            .order_by(RunModel.id)
-            .with_for_update()
+    create: PreparedMemoryCreate,
+    now: datetime,
+) -> bool:
+    """插入一条正文记忆；同请求重放返回 False 而不重复来源。"""
+    content_hash = _normalized_content_hash(create.content)
+    row_id = await session.scalar(
+        insert(MemoryModel)
+        .values(
+            id=create.memory_id,
+            namespace_id=create.namespace_id,
+            scope_key=create.scope_key,
+            content=create.content,
+            search_document=func.to_tsvector(
+                "athena_memory_chinese",
+                create.content,
+            ),
+            embedding=list(create.embedding),
+            embedding_profile_id=create.embedding_profile_id,
+            request_id=create.request_id,
+            request_hash=content_hash,
+            status="active",
+            origin=create.origin,
+            version=1,
+            expires_at=create.expires_at,
+            kind=create.kind.value,
+            load_policy=create.load_policy.value,
+            content_hash=content_hash,
+            explicit_long_term=create.explicit_long_term,
+            last_evidenced_at=create.last_evidenced_at,
+            created_at=now,
+            updated_at=now,
         )
-    ).all()
-    for run in rows:
-        if run.memory_extraction_status in {
-            None,
-            ExtractionStatus.PENDING.value,
-        }:
-            run.memory_extraction_status = ExtractionStatus.SKIPPED.value
-            run.memory_extraction_safe_error_code = "memory_scope_disabled"
-        if run.finished_at is not None:
-            run.memory_extracted_at = disabled_at
-        run.updated_at = disabled_at
-    await enqueue_cleanup_job(
-        session,
-        namespace_id=owner_id,
-        scope_key=scope_key,
-        now=disabled_at,
+        .on_conflict_do_nothing()
+        .returning(MemoryModel.id)
     )
-    return setting.generation
+    if row_id is None:
+        return False
+    await append_evidence_sources(
+        session,
+        create.memory_id,
+        create.source_evidence,
+    )
+    return True
 
-
-class _MemoryRepositoryHelpersMixin:
-    """供各生命周期子模块复用的记忆行写入、来源复制、墓碑和 scope 子查询辅助。"""
-
-    _factory: Any
-
-    async def _insert_prepared(
-        self,
-        session: AsyncSession,
-        create: PreparedMemoryCreate,
-        now: datetime,
-    ) -> bool:
-        """插入一条正文记忆；同请求重放返回 False 而不重复来源。"""
-        content_hash = _normalized_content_hash(create.content)
-        row_id = await session.scalar(
-            insert(MemoryModel)
-            .values(
-                id=create.memory_id,
-                namespace_id=create.namespace_id,
-                scope_key=create.scope_key,
-                content=create.content,
-                search_document=func.to_tsvector(
-                    "athena_memory_chinese",
-                    create.content,
-                ),
-                embedding=list(create.embedding),
-                embedding_profile_id=create.embedding_profile_id,
-                request_id=create.request_id,
-                request_hash=content_hash,
-                status="active",
-                origin=create.origin,
-                version=1,
-                expires_at=create.expires_at,
-                kind=create.kind.value,
-                load_policy=create.load_policy.value,
-                content_hash=content_hash,
-                explicit_long_term=create.explicit_long_term,
-                last_evidenced_at=create.last_evidenced_at,
-                created_at=now,
-                updated_at=now,
-            )
-            .on_conflict_do_nothing()
-            .returning(MemoryModel.id)
-        )
-        if row_id is None:
-            return False
-        await self._append_evidence_sources(
-            session,
-            create.memory_id,
-            create.source_evidence,
-        )
-        return True
-
-    async def _append_evidence_sources(
-        self,
-        session: AsyncSession,
-        memory_id: str,
-        evidence: tuple[MemorySourceMessage, ...],
-    ) -> None:
-        """按消息 ID 去重追加来源，不重复延长证据时间。"""
-        if not evidence:
-            return
-        existing = set(
-            (
-                await session.scalars(
-                    select(MemorySourceModel.source_ref).where(
-                        MemorySourceModel.memory_id == memory_id,
-                        MemorySourceModel.source_kind == "message",
-                    )
-                )
-            ).all()
-        )
-        for item in evidence:
-            if item.message_id in existing:
-                continue
-            session.add(
-                MemorySourceModel(
-                    id=f"msrc_{hashlib.sha256(f'{memory_id}:message:{item.message_id}'.encode()).hexdigest()[:24]}",
-                    memory_id=memory_id,
-                    source_kind="message",
-                    source_ref=item.message_id,
-                    source_at=item.source_at,
-                )
-            )
-            existing.add(item.message_id)
-
-    async def _copy_evidence_sources(
-        self,
-        session: AsyncSession,
-        *,
-        source_memory_id: str,
-        target_memory_id: str,
-    ) -> None:
-        """把旧行来源复制到替代行，保证新正文仍可追溯全部历史条件。"""
-        existing = {
-            (source_kind, source_ref)
-            for source_kind, source_ref in (
-                await session.execute(
-                    select(
-                        MemorySourceModel.source_kind,
-                        MemorySourceModel.source_ref,
-                    ).where(MemorySourceModel.memory_id == target_memory_id)
-                )
-            ).all()
-        }
-        sources = (
+async def append_evidence_sources(
+    session: AsyncSession,
+    memory_id: str,
+    evidence: tuple[MemorySourceMessage, ...],
+) -> None:
+    """按消息 ID 去重追加来源，不重复延长证据时间。"""
+    if not evidence:
+        return
+    existing = set(
+        (
             await session.scalars(
-                select(MemorySourceModel)
-                .where(MemorySourceModel.memory_id == source_memory_id)
-                .order_by(
-                    MemorySourceModel.source_kind,
-                    MemorySourceModel.source_ref,
+                select(MemorySourceModel.source_ref).where(
+                    MemorySourceModel.memory_id == memory_id,
+                    MemorySourceModel.source_kind == "message",
                 )
             )
         ).all()
-        for source in sources:
-            source_key = (source.source_kind, source.source_ref)
-            if source_key in existing:
-                continue
-            session.add(
-                MemorySourceModel(
-                    id=(
-                        "msrc_"
-                        + hashlib.sha256(
-                            (
-                                f"{target_memory_id}:{source.source_kind}:{source.source_ref}"
-                            ).encode()
-                        ).hexdigest()[:24]
-                    ),
-                    memory_id=target_memory_id,
-                    source_kind=source.source_kind,
-                    source_ref=source.source_ref,
-                    source_at=source.source_at,
-                )
-            )
-            existing.add(source_key)
-
-    async def _preserve_replacement_evidence_time(
-        self,
-        session: AsyncSession,
-        *,
-        memory_id: str,
-        create: PreparedMemoryCreate,
-        target: MemoryModel,
-    ) -> None:
-        """替代行的证据时间不得早于新证据、旧目标或已复制来源。"""
-        copied_source_at = await session.scalar(
-            select(func.max(MemorySourceModel.source_at)).where(
-                MemorySourceModel.memory_id == memory_id
+    )
+    for item in evidence:
+        if item.message_id in existing:
+            continue
+        session.add(
+            MemorySourceModel(
+                id=f"msrc_{hashlib.sha256(f'{memory_id}:message:{item.message_id}'.encode()).hexdigest()[:24]}",
+                memory_id=memory_id,
+                source_kind="message",
+                source_ref=item.message_id,
+                source_at=item.source_at,
             )
         )
-        evidence_times = [create.last_evidenced_at]
-        if target.last_evidenced_at is not None:
-            evidence_times.append(target.last_evidenced_at)
-        if copied_source_at is not None:
-            evidence_times.append(copied_source_at)
-        await session.execute(
-            update(MemoryModel)
-            .where(MemoryModel.id == memory_id)
-            .values(last_evidenced_at=max(evidence_times))
-        )
+        existing.add(item.message_id)
 
-    async def _tombstone(
-        self,
-        session: AsyncSession,
-        row: MemoryModel,
-        now: datetime,
-    ) -> None:
-        """按白名单清空正文、来源和全部内容派生字段。"""
-        row.content = ""
-        row.search_document = func.to_tsvector("athena_memory_chinese", "")
-        row.embedding = None
-        row.embedding_profile_id = None
-        row.origin = None
-        row.kind = None
-        row.load_policy = None
-        row.content_hash = None
-        row.explicit_long_term = None
-        row.last_evidenced_at = None
-        row.expires_at = None
-        row.superseded_by_id = None
-        row.version += 1
-        row.deleted_time = now
-        row.updated_at = now
-        await session.execute(
-            delete(MemorySourceModel).where(MemorySourceModel.memory_id == row.id)
-        )
-
-    async def _ensure_setting_locked(
-        self,
-        session: AsyncSession,
-        namespace_id: str,
-    ) -> MemorySettingModel:
-        """兼容仓储内部命名的用户设置行锁入口。"""
-        return await lock_user_memory_setting(session, namespace_id)
-
-    async def _lock_scope_state(
-        self,
-        session: AsyncSession,
-        namespace_id: str,
-        scope_key: str,
-    ) -> MemoryScopeStateModel:
-        """锁定用户设置后锁定单个 scope。"""
-        await lock_user_memory_setting(session, namespace_id)
-        return await lock_scope_state(session, namespace_id, scope_key)
-
-    @staticmethod
-    def _enabled_scope_exists(namespace_id: str, scope_key: str) -> Any:
-        """构造 scope 启用校验子查询。"""
-        return (
-            select(MemoryScopeStateModel.scope_key)
-            .where(
-                MemoryScopeStateModel.namespace_id == namespace_id,
-                MemoryScopeStateModel.scope_key == scope_key,
-                MemoryScopeStateModel.enabled.is_(True),
+async def copy_evidence_sources(
+    session: AsyncSession,
+    *,
+    source_memory_id: str,
+    target_memory_id: str,
+) -> None:
+    """把旧行来源复制到替代行，保证新正文仍可追溯全部历史条件。"""
+    existing = {
+        (source_kind, source_ref)
+        for source_kind, source_ref in (
+            await session.execute(
+                select(
+                    MemorySourceModel.source_kind,
+                    MemorySourceModel.source_ref,
+                ).where(MemorySourceModel.memory_id == target_memory_id)
             )
-            .exists()
-        )
-
-    @staticmethod
-    def _enabled_memory_scope() -> Any:
-        """为检索行关联同 namespace/scope 的启用状态。"""
-        return (
-            select(MemoryScopeStateModel.scope_key)
-            .where(
-                MemoryScopeStateModel.namespace_id == MemoryModel.namespace_id,
-                MemoryScopeStateModel.scope_key == MemoryModel.scope_key,
-                MemoryScopeStateModel.enabled.is_(True),
+        ).all()
+    }
+    sources = (
+        await session.scalars(
+            select(MemorySourceModel)
+            .where(MemorySourceModel.memory_id == source_memory_id)
+            .order_by(
+                MemorySourceModel.source_kind,
+                MemorySourceModel.source_ref,
             )
-            .exists()
         )
+    ).all()
+    for source in sources:
+        source_key = (source.source_kind, source.source_ref)
+        if source_key in existing:
+            continue
+        session.add(
+            MemorySourceModel(
+                id=(
+                    "msrc_"
+                    + hashlib.sha256(
+                        (
+                            f"{target_memory_id}:{source.source_kind}:{source.source_ref}"
+                        ).encode()
+                    ).hexdigest()[:24]
+                ),
+                memory_id=target_memory_id,
+                source_kind=source.source_kind,
+                source_ref=source.source_ref,
+                source_at=source.source_at,
+            )
+        )
+        existing.add(source_key)
+
+async def preserve_replacement_evidence_time(
+    session: AsyncSession,
+    *,
+    memory_id: str,
+    create: PreparedMemoryCreate,
+    target: MemoryModel,
+) -> None:
+    """替代行的证据时间不得早于新证据、旧目标或已复制来源。"""
+    copied_source_at = await session.scalar(
+        select(func.max(MemorySourceModel.source_at)).where(
+            MemorySourceModel.memory_id == memory_id
+        )
+    )
+    evidence_times = [create.last_evidenced_at]
+    if target.last_evidenced_at is not None:
+        evidence_times.append(target.last_evidenced_at)
+    if copied_source_at is not None:
+        evidence_times.append(copied_source_at)
+    await session.execute(
+        update(MemoryModel)
+        .where(MemoryModel.id == memory_id)
+        .values(last_evidenced_at=max(evidence_times))
+    )
+
+async def tombstone_memory(
+    session: AsyncSession,
+    row: MemoryModel,
+    now: datetime,
+) -> None:
+    """按白名单清空正文、来源和全部内容派生字段。"""
+    row.content = ""
+    row.search_document = func.to_tsvector("athena_memory_chinese", "")
+    row.embedding = None
+    row.embedding_profile_id = None
+    row.origin = None
+    row.kind = None
+    row.load_policy = None
+    row.content_hash = None
+    row.explicit_long_term = None
+    row.last_evidenced_at = None
+    row.expires_at = None
+    row.superseded_by_id = None
+    row.version += 1
+    row.deleted_time = now
+    row.updated_at = now
+    await session.execute(
+        delete(MemorySourceModel).where(MemorySourceModel.memory_id == row.id)
+    )
+
+
+
+def enabled_scope_exists(namespace_id: str, scope_key: str) -> Any:
+    """构造 scope 启用校验子查询。"""
+    return (
+        select(MemoryScopeStateModel.scope_key)
+        .where(
+            MemoryScopeStateModel.namespace_id == namespace_id,
+            MemoryScopeStateModel.scope_key == scope_key,
+            MemoryScopeStateModel.enabled.is_(True),
+        )
+        .exists()
+    )
+
+def enabled_memory_scope() -> Any:
+    """为检索行关联同 namespace/scope 的启用状态。"""
+    return (
+        select(MemoryScopeStateModel.scope_key)
+        .where(
+            MemoryScopeStateModel.namespace_id == MemoryModel.namespace_id,
+            MemoryScopeStateModel.scope_key == MemoryModel.scope_key,
+            MemoryScopeStateModel.enabled.is_(True),
+        )
+        .exists()
+    )

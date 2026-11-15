@@ -64,6 +64,11 @@ class _ProfileRepository:
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
         return ()
 
+    async def list_with_default(
+        self, actor: AuthContext
+    ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
+        return await self.list(actor), await self.get_default_id(actor)
+
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool
     ) -> ModelProfileVersion:
@@ -80,6 +85,19 @@ class _ProfileRepository:
 
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile | None:
         return None
+
+    async def get_current_compression_policy(self) -> CompressionPolicyVersion | None:
+        return None
+
+    async def get_compression_policy(self, policy_id: str) -> CompressionPolicyVersion | None:
+        del policy_id
+        return None
+
+    async def set_compression_policy(
+        self, actor: AuthContext, value: CompressionPolicyInput
+    ) -> CompressionPolicyVersion:
+        del actor, value
+        raise AssertionError("test_repository_compression_policy_not_configured")
 
 
 class _CompressionPolicyRepository(_ProfileRepository):

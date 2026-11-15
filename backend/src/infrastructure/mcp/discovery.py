@@ -27,11 +27,10 @@ from domain.mcp import (
     McpDiscoveryProtocolError,
     McpDiscoveryResultError,
     McpDiscoveryTimeoutError,
-    StdioConfig,
     StreamableHttpConfig,
 )
-from infrastructure.mcp.http import DEFAULT_MAX_RESPONSE_BYTES, pinned_streamable_http_transport
-from infrastructure.mcp.stdio import McpStdioTransport
+from infrastructure.mcp.http import DEFAULT_MAX_RESPONSE_BYTES
+from infrastructure.mcp.transport import build_controlled_mcp_transport
 
 logger = logging.getLogger(__name__)
 
@@ -236,28 +235,17 @@ class McpDiscoveryClient(McpDiscovery):
             raise McpDiscoveryResultError("mcp_discovery_tool_invalid") from None
 
     def _make_transport(self, connection: McpConnectionInput) -> Transport:
-        """只通过 Phase 0 已受控的 HTTP/stdio transport 建立连接。"""
-        if self._transport_factory is not None:
-            return self._transport_factory(connection)
-        config = connection.config
-        if isinstance(config, StreamableHttpConfig):
-            return pinned_streamable_http_transport(
-                config.url,
-                headers=dict(connection.secrets),
+        """只通过已受控的 HTTP/stdio transport 建立连接。"""
+        try:
+            return build_controlled_mcp_transport(
+                connection,
                 allowed_private_hosts=self._allowed_private_hosts,
                 maximum_response_bytes=self._maximum_response_bytes,
+                stdio_base_environment=self._stdio_base_environment,
+                transport_factory=self._transport_factory,
             )
-        if isinstance(config, StdioConfig):
-            return McpStdioTransport(
-                config.command,
-                config.args,
-                cwd=config.cwd,
-                env=connection.secrets,
-                base_environment=self._stdio_base_environment,
-                maximum_line_bytes=self._maximum_response_bytes,
-                maximum_total_bytes=self._maximum_response_bytes,
-            )
-        raise McpDiscoveryProtocolError("mcp_transport_unsupported")
+        except ValueError as error:
+            raise McpDiscoveryProtocolError("mcp_transport_unsupported") from error
 
 
 def _safe_log_name(value: object) -> str:

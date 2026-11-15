@@ -8,7 +8,6 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
 
 from app.run.budget import RunLlmBudget
 from app.run.context import (
@@ -18,6 +17,7 @@ from app.run.context import (
     estimate_llm_input_tokens,
     measure_llm_request,
 )
+from app.run.events import publish_persisted_event
 from common.ids import new_id
 from domain.llm.model import (
     LlmMessage,
@@ -48,16 +48,9 @@ from domain.run.model import (
     RunLease,
     SaveContextSummaryCommand,
 )
-from domain.run.ports import RunRepository
+from domain.run.ports import RunEventTransport, RunRepository
 from domain.skill import RunSkillPromptContext
 from domain.tool import ToolRetryContext
-
-
-class CompressionPublisher(Protocol):
-    """已提交压缩事件的实时发布端口。"""
-
-    async def publish_persisted(self, run_id: str, execution_epoch: int, event: RunEvent) -> None:
-        """通知订阅者读取已提交的状态事件。"""
 
 
 class _CompressionCallError(RunContextError):
@@ -125,17 +118,20 @@ async def _split_recent_suffix(
     input_files: Sequence[RunInputFileContext] = (),
     memory_context: str | None = None,
     summary_text: str | None = None,
+    *,
+    prefix_tokens: int | None = None,
 ) -> tuple[list[tuple[ConversationMessage, ...]], tuple[ConversationMessage, ...]]:
     """按完整主请求计数保留不超过近期预算的连续轮次后缀。"""
+    # 增量累加每组消息的 token 增量，避免每轮重拼接并重算固定前缀与已选后缀。
+    resolved_prefix = base_tokens if prefix_tokens is None else prefix_tokens
     remaining_groups = list(groups)
     recent_groups: list[tuple[ConversationMessage, ...]] = []
+    accumulated_recent_tokens = resolved_prefix
     while remaining_groups:
         group = remaining_groups[-1]
-        candidate_groups = [group, *reversed(recent_groups)]
-        candidate = tuple(message for item in candidate_groups for message in item)
-        candidate_tokens, _ = await estimate_llm_input_tokens(
+        group_with_prefix_tokens, _ = await estimate_llm_input_tokens(
             run,
-            candidate,
+            group,
             profile.version,
             main_prompt=main_prompt,
             timeout_seconds=timeout_seconds,
@@ -146,8 +142,12 @@ async def _split_recent_suffix(
             input_files=input_files,
             memory_context=memory_context,
         )
+        candidate_tokens = accumulated_recent_tokens + max(
+            0, group_with_prefix_tokens - resolved_prefix
+        )
         if max(0, candidate_tokens - base_tokens) > recent_limit:
             break
+        accumulated_recent_tokens = candidate_tokens
         recent_groups.append(group)
         remaining_groups.pop()
     return remaining_groups, tuple(
@@ -239,7 +239,7 @@ class ContextCompressor:
         repository: RunRepository,
         profiles: ModelProfileRepository,
         provider: LlmRuntimeTextProvider,
-        publisher: CompressionPublisher,
+        publisher: RunEventTransport | None = None,
     ) -> None:
         self._repository = repository
         self._profiles = profiles
@@ -355,9 +355,10 @@ class ContextCompressor:
         protected_messages = tuple(
             item for item in active_messages if item.id not in group_message_ids
         )
-        protected_tokens, _ = await estimate_llm_input_tokens(
+        # 缓存固定前缀 token 数，供 _split_recent_suffix 增量计算每组预算，避免重复测量前缀。
+        prefix_tokens, _ = await estimate_llm_input_tokens(
             run,
-            protected_messages,
+            (),
             main_runtime.version,
             main_prompt=main_prompt,
             timeout_seconds=timeout_seconds,
@@ -367,6 +368,25 @@ class ContextCompressor:
             skill_context=skill_context,
             input_files=input_files,
             memory_context=memory_context,
+        )
+        protected_tokens = (
+            prefix_tokens
+            if not protected_messages
+            else (
+                await estimate_llm_input_tokens(
+                    run,
+                    protected_messages,
+                    main_runtime.version,
+                    main_prompt=main_prompt,
+                    timeout_seconds=timeout_seconds,
+                    summary_text=summary_text,
+                    tools=tools,
+                    retry_context=retry_context,
+                    skill_context=skill_context,
+                    input_files=input_files,
+                    memory_context=memory_context,
+                )
+            )[0]
         )
         remaining_groups, _ = await _split_recent_suffix(
             run,
@@ -382,6 +402,7 @@ class ContextCompressor:
             input_files,
             memory_context,
             summary_text,
+            prefix_tokens=prefix_tokens,
         )
         current = await self._measure_context(
             run,
@@ -423,26 +444,13 @@ class ContextCompressor:
             and candidate.covered_through_sequence
             <= previous_failure.candidate_covered_through_sequence
         ):
-            # 同一或收缩后的失败范围不能借下一次 prepare 隐式重试；仍返回兼容快照，
+            # 同一或收缩后的失败范围不能借下一次 prepare 隐式重试；直接复用已测量的 current，
             # 由 executor 继续执行 90% 与硬窗口裁决。
-            fallback = await self._measure_context(
-                run,
-                active_messages,
-                main_runtime,
-                main_prompt=main_prompt,
-                timeout_seconds=timeout_seconds,
-                summary_text=summary_text,
-                tools=tools,
-                retry_context=retry_context,
-                skill_context=skill_context,
-                input_files=input_files,
-                memory_context=memory_context,
-            )
             return ContextPreparation(
-                messages=fallback.messages,
-                tools=fallback.tools,
-                input_tokens=fallback.input_tokens,
-                output_tokens=fallback.output_tokens,
+                messages=current.messages,
+                tools=current.tools,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
                 had_new_history=True,
                 stop_reason_hint=self._compression_failure_hint(previous_failure.safe_error_code),
             )
@@ -478,24 +486,11 @@ class ContextCompressor:
                 else "run_context_budget_unavailable",
                 candidate,
             )
-            fallback = await self._measure_context(
-                run,
-                active_messages,
-                main_runtime,
-                main_prompt=main_prompt,
-                timeout_seconds=timeout_seconds,
-                summary_text=summary_text,
-                tools=tools,
-                retry_context=retry_context,
-                skill_context=skill_context,
-                input_files=input_files,
-                memory_context=memory_context,
-            )
             return ContextPreparation(
-                messages=fallback.messages,
-                tools=fallback.tools,
-                input_tokens=fallback.input_tokens,
-                output_tokens=fallback.output_tokens,
+                messages=current.messages,
+                tools=current.tools,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
                 event=failed,
                 had_new_history=True,
                 stop_reason_hint=(
@@ -560,24 +555,11 @@ class ContextCompressor:
                 str(error),
                 candidate,
             )
-            fallback = await self._measure_context(
-                run,
-                active_messages,
-                main_runtime,
-                main_prompt=main_prompt,
-                timeout_seconds=timeout_seconds,
-                summary_text=summary_text,
-                tools=tools,
-                retry_context=retry_context,
-                skill_context=skill_context,
-                input_files=input_files,
-                memory_context=memory_context,
-            )
             return ContextPreparation(
-                messages=fallback.messages,
-                tools=fallback.tools,
-                input_tokens=fallback.input_tokens,
-                output_tokens=fallback.output_tokens,
+                messages=current.messages,
+                tools=current.tools,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
                 event=failed,
                 had_new_history=True,
                 compression_called=dispatched,
@@ -888,11 +870,9 @@ class ContextCompressor:
         return ContextStopReason.COMPRESSION_FAILED
 
     async def _publish(self, event: RunEvent, run: Run) -> None:
-        try:
-            await self._publisher.publish_persisted(run.id, run.execution_epoch, event)
-        except Exception:
-            # SSE 会从 PostgreSQL 对账，发布实时性失败不能改写已提交事实。
-            return
+        await publish_persisted_event(
+            self._publisher, run.id, run.execution_epoch, event
+        )
 
     @staticmethod
     def _messages_after_summary(

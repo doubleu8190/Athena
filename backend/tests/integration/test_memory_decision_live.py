@@ -117,28 +117,6 @@ class _ControlledRepository:
         assert namespace_id == _OWNER_ID
         return 1
 
-    async def retrieve_similar(
-        self,
-        access: AccessContext,
-        scope_key: str,
-        query: str,
-        embedding: tuple[float, ...],
-        embedding_profile_id: str,
-        limit: int = 5,
-    ) -> tuple[RetrievedMemory, ...]:
-        """只为明确 favorite/语言规则候选提供对应目标白名单。"""
-        assert access == _ACCESS
-        assert scope_key == "personal"
-        assert len(embedding) == 1024
-        assert embedding_profile_id == "embedding-memory-live"
-        assert limit == 5
-        self.retrieval_calls.append(query)
-        if "中文" in query or "英文" in query:
-            return (self._language_rule,)
-        if "香蕉" in query and ("最喜欢" in query or "纠正" in query):
-            return (self._favorite,)
-        return ()
-
     async def retrieve_similar_batch(
         self,
         access: AccessContext,
@@ -147,18 +125,20 @@ class _ControlledRepository:
         limit: int = 5,
     ) -> tuple[tuple[RetrievedMemory, ...], ...]:
         """在单次批量调用中依次返回各候选的预设检索结果。"""
+        assert access == _ACCESS
+        assert embedding_profile_id == "embedding-memory-live"
+        assert limit == 5
         results: list[tuple[RetrievedMemory, ...]] = []
         for scope_key, query, embedding in queries:
-            results.append(
-                await self.retrieve_similar(
-                    access,
-                    scope_key,
-                    query,
-                    embedding,
-                    embedding_profile_id,
-                    limit,
-                )
-            )
+            assert scope_key == "personal"
+            assert len(embedding) == 1024
+            self.retrieval_calls.append(query)
+            if "中文" in query or "英文" in query:
+                results.append((self._language_rule,))
+            elif "香蕉" in query and ("最喜欢" in query or "纠正" in query):
+                results.append((self._favorite,))
+            else:
+                results.append(())
         return tuple(results)
 
 

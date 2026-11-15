@@ -71,9 +71,9 @@ from domain.llm.model import (
 from domain.llm.model.profile import RuntimeModelProfile
 from domain.mcp import (
     McpCallResult,
-    McpRuntimeToolDefinition,
     McpRuntimeToolTarget,
 )
+from domain.tool import RuntimeToolDefinition
 from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -283,7 +283,7 @@ class _EmptyMcpCatalog:
         self,
         *,
         limit: int,
-    ) -> tuple[McpRuntimeToolDefinition, ...]:
+    ) -> tuple[RuntimeToolDefinition, ...]:
         del limit
         return ()
 
@@ -331,6 +331,10 @@ class _ScriptedProvider:
             yield ResponseCompleted(response)
 
         yield events()
+
+    async def complete(self, runtime: RuntimeModelProfile, request: LlmRequest) -> LlmResponse:
+        del runtime, request
+        raise AssertionError("complete is not expected in this test")
 
 
 def _response(

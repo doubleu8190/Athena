@@ -29,26 +29,24 @@ class _MaintenanceRepository:
         self.reference_error: Exception | None = None
         self.can_delete_error_tokens: set[str] = set()
 
-    async def claim_expired_upload_reservations(
-        self, *, limit: int = 20, lease_seconds: int = 300
+    async def list_expired_upload_reservations(
+        self, *, limit: int = 20
     ) -> tuple[FileUploadReservation, ...]:
-        del limit, lease_seconds
+        del limit
         return self.reservations
 
-    async def can_delete_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool:
+    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool:
         if reservation_token in self.can_delete_error_tokens:
-            raise RuntimeError("database unavailable while checking reservation")
-        return any(
-            item.reservation_token == reservation_token and item.fencing_token == fencing_token
-            for item in self.reservations
+            raise RuntimeError("database unavailable while deleting reservation")
+        match = next(
+            (item for item in self.reservations if item.reservation_token == reservation_token),
+            None,
         )
-
-    async def finish_expired_upload_reservation(
-        self, reservation_token: str, fencing_token: int
-    ) -> bool:
-        del fencing_token
+        if match is None or match.storage_key in self.referenced:
+            return False
+        self.reservations = tuple(
+            item for item in self.reservations if item.reservation_token != reservation_token
+        )
         self.finished.append(reservation_token)
         return True
 
@@ -56,7 +54,9 @@ class _MaintenanceRepository:
         self.queries.append(storage_key)
         if self.reference_error is not None:
             raise self.reference_error
-        return storage_key in self.referenced
+        return storage_key in self.referenced or any(
+            item.storage_key == storage_key for item in self.reservations
+        )
 
     async def claim_job(
         self, *, lease_seconds: int, owner_concurrency: int = 2
@@ -81,7 +81,7 @@ class _Unused:
 def _worker(store: MemoryOriginalStore, repository: _MaintenanceRepository) -> KnowledgeWorker:
     return KnowledgeWorker(
         cast(Any, repository),
-        _Unused(),
+        cast(Any, _Unused()),
         store,
         _Unused(),
         _Unused(),
@@ -207,7 +207,7 @@ def test_expired_reservation_failure_does_not_block_later_items() -> None:
 
         assert store.contains(first_key)
         assert not store.contains(second_key)
-        assert repository.finished == ["kres_2"]
+        assert repository.finished == ["kres_1", "kres_2"]
 
     asyncio.run(scenario())
 
@@ -248,6 +248,32 @@ def test_expired_reservation_database_failure_does_not_block_later_items() -> No
         assert store.contains(first_key)
         assert not store.contains(second_key)
         assert repository.finished == ["kres_2"]
+
+
+def test_referenced_expired_reservation_keeps_object_and_row() -> None:
+    async def scenario() -> None:
+        key = _key(b"referenced", "ksrc_referenced")
+        store = MemoryOriginalStore()
+        store.seed(key, b"referenced")
+        repository = _MaintenanceRepository()
+        repository.referenced = {key}
+        repository.reservations = (
+            FileUploadReservation(
+                "kres_ref",
+                key,
+                "ksrc_referenced",
+                "doc",
+                "ver",
+                "job",
+            ),
+        )
+
+        await _worker(store, repository)._sweep_expired_uploads()
+
+        assert store.contains(key)
+        assert repository.finished == []
+
+    asyncio.run(scenario())
 
     asyncio.run(scenario())
 

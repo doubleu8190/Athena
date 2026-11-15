@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 
 from api.converter.tool import (
     admin_tool_page_to_response,
@@ -24,21 +24,12 @@ from api.security import AdminAuth, CurrentAuth, verify_request_origin
 from app.tool import ToolManager
 
 
-def _pagination(request: Request) -> tuple[int, int]:
-    """在登录依赖之后严格解析分页参数，拒绝重复和扩展 query。"""
+def _ensure_pagination_query(request: Request) -> None:
+    """在认证依赖之后拒绝重复或未声明的扩展 query 参数。"""
     items = request.query_params.multi_items()
     names = [name for name, _ in items]
     if len(names) != len(set(names)) or not set(names) <= {"page", "page_size"}:
         raise HTTPException(422, "mcp_query_invalid")
-    values = dict(items)
-    try:
-        page = int(values.get("page", "1"))
-        page_size = int(values.get("page_size", "20"))
-    except ValueError:
-        raise HTTPException(422, "mcp_query_invalid") from None
-    if page < 1 or not 1 <= page_size <= 100:
-        raise HTTPException(422, "mcp_query_invalid")
-    return page, page_size
 
 
 def _no_query(request: Request) -> None:
@@ -56,8 +47,10 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         actor: CurrentAuth,
         request: Request,
         response: Response,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> PublicToolListResponse:
-        page, page_size = _pagination(request)
+        _ensure_pagination_query(request)
         try:
             result = await manager.list_public_tools(
                 actor, offset=(page - 1) * page_size, limit=page_size
@@ -84,8 +77,10 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
         request: Request,
         response: Response,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> AdminToolListResponse:
-        page, page_size = _pagination(request)
+        _ensure_pagination_query(request)
         response.headers["Cache-Control"] = "no-store"
         try:
             result = await manager.list_admin_tools(

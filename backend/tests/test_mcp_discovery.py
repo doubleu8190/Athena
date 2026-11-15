@@ -440,9 +440,9 @@ def test_http_transport_receives_only_current_operation_headers(
         captured.append(kwargs["headers"])
         return FakeTransport()
 
-    from infrastructure.mcp import discovery as discovery_module
+    from infrastructure.mcp import transport as transport_module
 
-    monkeypatch.setattr(discovery_module, "pinned_streamable_http_transport", pinned_transport)
+    monkeypatch.setattr(transport_module, "pinned_streamable_http_transport", pinned_transport)
     discovery = McpDiscoveryClient(
         client_factory=lambda _transport: FakeClient([_page([])]),
         allowed_private_hosts=frozenset({"mcp.example.test"}),

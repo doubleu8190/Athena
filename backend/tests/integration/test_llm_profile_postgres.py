@@ -21,6 +21,7 @@ from adapter.llm.model.profile import CompressionPolicyVersionModel, ModelProfil
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.repository.message import SqlAlchemyMessageRepository
 from adapter.run.repository import SqlAlchemyRunRepository
+from app.llm.profile_service import ModelProfileService
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.llm.model.compression_policy import (
     MAX_COMPRESSION_TOKEN_BUDGET,
@@ -29,6 +30,7 @@ from domain.llm.model.compression_policy import (
 from domain.llm.model.profile import ModelProfileInput
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
+    ModelProfileError,
     ModelProfileNotFoundError,
 )
 from domain.mcp import McpSecretError, McpSecretPurpose
@@ -139,7 +141,17 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                 summary_ratio=0.1,
                 summary_token_cap=8_192,
             )
-            await repository.set_compression_policy(actor, policy_input)
+            class _SessionReader:
+                async def get_current_session_user(
+                    self, user_id: str, session_id: str, now: datetime
+                ) -> User | None:
+                    del now
+                    if user_id == actor.user.id and session_id == actor.session_id:
+                        return actor.user
+                    return None
+
+            profile_service = ModelProfileService(repository, _SessionReader())
+            await profile_service.set_compression_policy(actor, policy_input)
             for field in ("trigger_tokens", "recent_token_cap", "summary_token_cap"):
                 for invalid in (MAX_COMPRESSION_TOKEN_BUDGET + 1, 2**80):
                     if field == "trigger_tokens":
@@ -148,8 +160,8 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                         invalid_policy = replace(policy_input, recent_token_cap=invalid)
                     else:
                         invalid_policy = replace(policy_input, summary_token_cap=invalid)
-                    with pytest.raises(ValueError, match="llm_compression_policy_invalid"):
-                        await repository.set_compression_policy(actor, invalid_policy)
+                    with pytest.raises(ModelProfileError, match="llm_compression_policy_invalid"):
+                        await profile_service.set_compression_policy(actor, invalid_policy)
             async with factory() as session:
                 policy_count = await session.scalar(
                     select(func.count()).select_from(CompressionPolicyVersionModel)

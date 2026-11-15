@@ -21,7 +21,6 @@ from adapter.llm.model.profile import (
 from common.ids import new_id, now_utc
 from domain.auth import AuthContext, UserRole
 from domain.llm.model.compression_policy import (
-    MAX_COMPRESSION_TOKEN_BUDGET,
     CompressionPolicyInput,
     CompressionPolicyVersion,
 )
@@ -32,12 +31,12 @@ from domain.llm.model.profile_errors import (
     ModelProfileError,
     ModelProfileNotFoundError,
 )
-from domain.llm.profile_ports import ModelProfileRepository
+from domain.llm.profile_ports import CompressionPolicyRepository, ModelProfileRepository
 from domain.mcp import McpSecretError, McpSecretPurpose
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 
-class SqlAlchemyModelProfileRepository(ModelProfileRepository):
+class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicyRepository):
     """模型版本写入时复核管理员，并在调用时解封数据库凭据。"""
 
     def __init__(
@@ -111,6 +110,28 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                     )
                 ).all()
                 return tuple(profile_to_domain(row) for row in rows)
+
+    async def list_with_default(
+        self, actor: AuthContext
+    ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
+        """同一事务内复核管理员并读取配置列表与当前默认版本标识，避免两次往返。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_admin(session, actor)
+                rows = (
+                    await session.scalars(
+                        select(ModelProfileVersionModel).order_by(
+                            ModelProfileVersionModel.created_at,
+                            ModelProfileVersionModel.id,
+                        )
+                    )
+                ).all()
+                default_id = await session.scalar(
+                    select(DefaultModelProfileModel.profile_id).where(
+                        DefaultModelProfileModel.singleton_id == 1
+                    )
+                )
+                return tuple(profile_to_domain(row) for row in rows), default_id
 
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool
@@ -203,19 +224,6 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
         self, actor: AuthContext, value: CompressionPolicyInput
     ) -> CompressionPolicyVersion:
         """创建不可变压缩策略版本并切换当前指向。"""
-        if (
-            not value.compression_model_profile_id
-            or type(value.trigger_tokens) is not int
-            or not 1 <= value.trigger_tokens <= MAX_COMPRESSION_TOKEN_BUDGET
-            or type(value.recent_token_cap) is not int
-            or not 1 <= value.recent_token_cap <= MAX_COMPRESSION_TOKEN_BUDGET
-            or type(value.summary_token_cap) is not int
-            or not 1 <= value.summary_token_cap <= MAX_COMPRESSION_TOKEN_BUDGET
-            or not 0 < value.recent_ratio < 1
-            or not 0 < value.summary_ratio < 1
-            or value.recent_ratio + value.summary_ratio >= 1
-        ):
-            raise ValueError("llm_compression_policy_invalid")
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)

@@ -512,7 +512,6 @@ class KnowledgeService:
         *,
         limit: int = 8,
         context_budget: int = DEFAULT_CONTEXT_BUDGET,
-        _visibility_retry: bool = False,
     ) -> SearchResult:
         """隔离运行两路检索、RRF合并邻接片段并限制上下文token预算。"""
         normalized = query.strip()
@@ -525,19 +524,6 @@ class KnowledgeService:
             raise KnowledgeInputError("search_request_invalid")
         if not base_ids or len(base_ids) > 20:
             raise KnowledgeInputError("knowledge_base_ids_invalid")
-        # 旧测试适配器只实现组合 search 端口；生产 SQL 仓储走下方独立事务通道。
-        if not hasattr(self._repository, "search_keyword"):
-            vector, _semantic_reason = await self._query_vector(normalized)
-            legacy = await self._repository.search(
-                owner_id, base_ids, normalized, self._tokenizer.tokenize(normalized), limit, vector
-            )
-            return SearchResult(
-                tuple(
-                    _apply_context_budget(list(legacy.hits), context_budget, self._counter)[:limit]
-                ),
-                legacy.channels,
-                legacy.degraded_reasons,
-            )
         await self._repository.validate_search_scope(owner_id, base_ids)
         tokens: tuple[str, ...] = ()
         keyword_reason: str | None = None
@@ -612,17 +598,8 @@ class KnowledgeService:
         merged = _merge_adjacent_hits(ordered, scores)
         bounded = _apply_context_budget(merged, context_budget, self._counter)
         if hasattr(self._repository, "filter_active_hits"):
-            visible = list(await self._repository.filter_active_hits(owner_id, tuple(bounded)))
-            if len(visible) != len(bounded) and not _visibility_retry:
-                return await self.search(
-                    owner_id,
-                    base_ids,
-                    normalized,
-                    limit=limit,
-                    context_budget=context_budget,
-                    _visibility_retry=True,
-                )
-            bounded = visible
+            # 单次过滤已失效/已删除文档命中的片段，避免可见性变化时递归整次重跑。
+            bounded = list(await self._repository.filter_active_hits(owner_id, tuple(bounded)))
         if profile_degraded:
             degraded.append("semantic_profile_incompatible")
         return SearchResult(tuple(bounded[:limit]), tuple(channels), tuple(dict.fromkeys(degraded)))

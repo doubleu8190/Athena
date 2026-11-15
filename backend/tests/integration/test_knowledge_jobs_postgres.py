@@ -496,7 +496,7 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
                 assert sibling_cleanup_state == "done"
             assert await repository.get_base("lease_owner", "lease_kb") is None
             with pytest.raises(LookupError, match="knowledge_base_not_found"):
-                await repository.search("lease_owner", ["lease_kb"], "lease", ("lease",), 10)
+                await repository.validate_search_scope("lease_owner", ["lease_kb"])
         finally:
             await engine.dispose()
             async with admin.begin() as connection:

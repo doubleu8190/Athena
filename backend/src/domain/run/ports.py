@@ -32,8 +32,6 @@ from domain.tool import (
     AdmitToolCallCommand,
     BeginToolCallBatchCommand,
     BeginToolCallBatchResult,
-    BeginToolCallCommand,
-    BeginToolCallResult,
     ConvergeToolBatchCommand,
     DecideToolApprovalCommand,
     FinishToolCallCommand,
@@ -96,10 +94,6 @@ class RunRepository(Protocol):
 
     async def reserve_llm_request(self, command: ReserveLlmRequestCommand) -> int | None:
         """原子预留一次模型请求并返回 1–maximum_count 的序号。"""
-
-    async def begin_tool_call(self, command: BeginToolCallCommand) -> BeginToolCallResult:
-        """原子保存调用协议、记录和开始事件，仅首次提交允许执行。"""
-        ...
 
     async def begin_tool_call_batch(
         self, command: BeginToolCallBatchCommand
@@ -295,4 +289,4 @@ class RunEventTransport(Protocol):
         ...
 
 
-__all__ = ["RunEventTransportError", "RunRepository"]
+__all__ = ["RunEventTransport", "RunEventTransportError", "RunRepository"]

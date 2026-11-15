@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from infrastructure.embedding.local import LocalEmbedding, _BoundedInference
 
-__all__ = ["LocalEmbedding", "LocalReranker", "LocalTokenCounter", "_BoundedInference"]
+__all__ = ["LocalEmbedding", "LocalReranker", "_BoundedInference"]
 
 if TYPE_CHECKING:
     from sentence_transformers import CrossEncoder
@@ -60,31 +60,3 @@ class LocalReranker:
     async def aclose(self) -> None:
         await self._inference.aclose()
         self._model = None
-
-
-class LocalTokenCounter:
-    """使用 BGE tokenizer 统计预算单位。"""
-
-    def __init__(self, model_name: str, revision: str) -> None:
-        self.model_name = model_name
-        self.revision = revision
-        self._tokenizer = None
-
-    def _load(self) -> None:
-        from transformers import AutoTokenizer
-
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name, revision=self.revision, local_files_only=True
-        )  # type: ignore[no-untyped-call]
-
-    async def start(self) -> None:
-        await asyncio.to_thread(self._load)
-
-    def close(self) -> None:
-        self._tokenizer = None
-
-    def count(self, text: str) -> int:
-        if self._tokenizer is None:
-            self._load()
-        assert self._tokenizer is not None
-        return len(self._tokenizer.encode(text, add_special_tokens=False))

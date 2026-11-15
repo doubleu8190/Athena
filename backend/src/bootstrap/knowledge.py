@@ -6,9 +6,9 @@ import os
 from dataclasses import dataclass
 
 from adapter.knowledge.storage import MinioOriginalStore, MinioStorageConfig
-from infrastructure.embedding import LocalEmbedding
+from infrastructure.embedding import LocalEmbedding, LocalTokenCounter
 from infrastructure.embedding.profile import embedding_profile_id
-from infrastructure.knowledge import JiebaChineseTokenizer, LocalKnowledgeTokenCounter
+from infrastructure.knowledge import JiebaChineseTokenizer
 
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_EMBEDDING_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
@@ -19,7 +19,7 @@ class KnowledgeModelResources:
     """API 与 Knowledge Worker 共用的知识库模型资源。"""
 
     embedding: LocalEmbedding
-    counter: LocalKnowledgeTokenCounter
+    counter: LocalTokenCounter
     tokenizer: JiebaChineseTokenizer
     profile_id: str
 
@@ -42,7 +42,7 @@ def build_knowledge_models() -> KnowledgeModelResources:
     )
     return KnowledgeModelResources(
         embedding=embedding,
-        counter=LocalKnowledgeTokenCounter(model, revision),
+        counter=LocalTokenCounter(model, revision),
         tokenizer=JiebaChineseTokenizer(),
         profile_id=embedding_profile_id(model, revision),
     )

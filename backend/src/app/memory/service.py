@@ -1,4 +1,4 @@
-"""记忆新增与混合召回用例。"""
+"""记忆新增、混合召回、显式控制与原子回执用例。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,31 @@ import math
 import unicodedata
 from builtins import list as List
 from dataclasses import replace
+from datetime import datetime
+from typing import Any, Literal
 
+from app.memory.sensitive import raise_for_sensitive_texts
+from app.memory.write_core import (
+    MemoryEmbeddingError,
+    control_arguments_digest,
+    normalize_memory_write,
+    normalize_text,
+    normalized_persisted_text,
+    prepare_write_embeddings,
+    validate_write_target,
+)
+from common.ids import new_id
 from domain.llm.ports import EmbeddingPort, TokenCounterPort
+from domain.memory.lifecycle import (
+    ControlCommand,
+    ControlPayload,
+    ControlReceiptResult,
+    ControlSourceSnapshot,
+    LoadPolicy,
+    MemoryKind,
+)
 from domain.memory.model import (
     AccessContext,
-    AddMemory,
     Memory,
     MemoryHit,
     MemoryRepositoryPort,
@@ -20,10 +40,11 @@ from domain.memory.model import (
     RecallResult,
     RerankerPort,
 )
+from domain.memory.ports import MemoryControlSourcePort, MemoryLifecycleRepositoryPort
 
 
 class MemoryService:
-    """提供记忆新增、列出、删除、设置和混合召回。"""
+    """提供记忆新增、列出、删除、设置、混合召回和显式控制。"""
 
     def __init__(
         self,
@@ -37,6 +58,8 @@ class MemoryService:
         timeout_seconds: float = 60.0,
         rerank_min_score: float = 0.30,
         keyword_fallback_min_score: float | None = None,
+        lifecycle: MemoryLifecycleRepositoryPort | None = None,
+        control_source: MemoryControlSourcePort | None = None,
     ) -> None:
         self._repository = repository
         self._embedder = embedder
@@ -47,42 +70,13 @@ class MemoryService:
         self._timeout = timeout_seconds
         self._rerank_min_score = rerank_min_score
         self._keyword_fallback_min_score = keyword_fallback_min_score
+        self._lifecycle = lifecycle
+        self._control_source = control_source
 
-    async def add(self, request: AddMemory) -> Memory:
-        if (
-            not request.access.namespace_id.strip()
-            or not request.scope_key.strip()
-            or request.scope_key not in request.access.writable_scopes
-        ):
-            raise ValueError("memory_scope_required")
-        request_id = request.request_id.strip()
-        if not 1 <= len(request.content.strip()) <= 2000 or not 1 <= len(request_id) <= 128:
-            raise ValueError("memory_request_invalid")
-        if request_id != request.request_id:
-            request = replace(request, request_id=request_id)
-        if (
-            request.status not in {"pending", "active"}
-            or request.origin
-            not in {
-                "manual",
-                "explicit",
-                "extracted",
-            }
-            or (request.origin == "extracted" and request.status != "pending")
-        ):
-            raise ValueError("memory_request_invalid")
-        existing = await self._repository.get_by_request(request)
-        if existing is not None:
-            return existing
-        if request.origin == "extracted":
-            _, auto_extract_enabled = await self._repository.settings(request.access.namespace_id)
-            if not auto_extract_enabled:
-                raise ValueError("memory_auto_extract_disabled")
-        vectors = await asyncio.wait_for(self._embedder.embed([request.content]), self._timeout)
-        if len(vectors) != 1:
-            raise ValueError("memory_embedding_invalid")
-        embedding = self._validate_vector(vectors[0], "memory_embedding_invalid")
-        return await self._repository.add(request, embedding, self._profile)
+    @property
+    def lifecycle_repository(self) -> MemoryLifecycleRepositoryPort | None:
+        """向组合根暴露同一生命周期端口，便于 Run 终态唤醒。"""
+        return self._lifecycle
 
     async def recall(self, request: RecallRequest) -> RecallResult:
         try:
@@ -299,11 +293,6 @@ class MemoryService:
             access, memory_id, content, embedding, self._profile, expected_version
         )
 
-    async def confirm(self, access: AccessContext, memory_id: str, expected_version: int) -> bool:
-        if not access.namespace_id or not access.writable_scopes:
-            raise ValueError("memory_scope_forbidden")
-        return await self._repository.confirm(access, memory_id, expected_version)
-
     async def delete(self, access: AccessContext, memory_id: str, version: int) -> bool:
         if not access.namespace_id or not access.writable_scopes:
             raise ValueError("memory_scope_forbidden")
@@ -314,9 +303,761 @@ class MemoryService:
     ) -> None:
         await self._repository.update_settings(namespace_id, read_enabled, auto_extract_enabled)
 
+    async def remember(
+        self,
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        content: str,
+        scope: str,
+        kind: MemoryKind,
+        load_policy: LoadPolicy,
+        evidence: str,
+        expires_at: datetime | None = None,
+    ) -> ControlReceiptResult:
+        """同步保存明确授权的正文，不执行额外模型或事实组裁决。
+
+        参数：
+        - `access`：当前用户和可写 scope。
+        - `run_id`、`session_id`、`tool_call_id`：固定控制来源与幂等身份。
+        - `content`：用户明确要求保存的正文。
+        - `scope`：personal 或 project。
+        - `kind`、`load_policy`：服务端接受的记忆分类和加载策略。
+        - `evidence`：当前 Run 中支持该操作的直接用户原话。
+        - `expires_at`：用户明确给出的到期时间。
+
+        返回：
+        - ControlReceiptResult：与业务变更同事务提交的无正文回执。
+
+        异常：
+        - ValueError：权限、证据、意图、正文或敏感边界无效。
+        """
+        return await self._apply_control(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            operation="remember",
+            content=content,
+            scope=scope,
+            kind=kind,
+            load_policy=load_policy,
+            evidence=evidence,
+            expires_at=expires_at,
+            target_memory_id=None,
+            expected_version=None,
+        )
+
+    async def correct(
+        self,
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        content: str,
+        scope: str,
+        kind: MemoryKind,
+        load_policy: LoadPolicy,
+        evidence: str,
+        target_memory_id: str,
+        expected_version: int,
+        expires_at: datetime | None = None,
+    ) -> ControlReceiptResult:
+        """同步纠正唯一显式目标，以新行和 superseded 链保留版本。
+
+        参数：
+        - `access`：当前用户和可写 scope。
+        - `run_id`、`session_id`、`tool_call_id`：固定控制来源与幂等身份。
+        - `content`：纠正后的完整正文。
+        - `scope`：personal 或 project。
+        - `kind`、`load_policy`：新记忆分类和加载策略。
+        - `evidence`：直接用户纠正原话。
+        - `target_memory_id`、`expected_version`：显式目标及并发版本。
+        - `expires_at`：用户明确给出的到期时间。
+
+        返回：
+        - ControlReceiptResult：新记忆 ID、被替代旧 ID 和 generation。
+
+        异常：
+        - ValueError：目标、版本、权限、证据或内容边界无效。
+        """
+        if not target_memory_id.strip() or expected_version < 1:
+            raise ValueError("memory_control_target_required")
+        return await self._apply_control(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            operation="correct",
+            content=content,
+            scope=scope,
+            kind=kind,
+            load_policy=load_policy,
+            evidence=evidence,
+            expires_at=expires_at,
+            target_memory_id=target_memory_id,
+            expected_version=expected_version,
+        )
+
+    async def forget(
+        self,
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        scope: str,
+        evidence: str,
+        target_memory_id: str | None,
+        expected_version: int | None,
+        clear_scope: bool,
+    ) -> ControlReceiptResult:
+        """同步删除唯一目标或明确清空当前 scope。
+
+        参数：
+        - `access`：当前用户和可写 scope。
+        - `run_id`、`session_id`、`tool_call_id`：固定控制来源与幂等身份。
+        - `scope`：personal 或 project。
+        - `evidence`：直接用户忘记原话。
+        - `target_memory_id`、`expected_version`：单目标删除的显式身份。
+        - `clear_scope`：是否清空整个授权 scope。
+
+        返回：
+        - ControlReceiptResult：与墓碑变更同事务提交的回执。
+
+        异常：
+        - ValueError：权限、意图、目标、版本或敏感边界无效。
+        """
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise ValueError("memory_control_unavailable")
+        arguments = self._forget_control_arguments(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            scope=scope,
+            evidence=evidence,
+            target_memory_id=target_memory_id,
+            expected_version=expected_version,
+            clear_scope=clear_scope,
+        )
+        evidence = str(arguments["evidence"])
+        raise_for_sensitive_texts((evidence,))
+        arguments_digest = control_arguments_digest(arguments)
+        replay = await lifecycle.control_receipt(
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            arguments_digest=arguments_digest,
+        )
+        if replay is not None:
+            return replay
+        lifecycle, sources = await self._control_context(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            scope=scope,
+            evidence=evidence,
+            operation="forget",
+        )
+        if clear_scope:
+            if target_memory_id is not None or expected_version is not None:
+                raise ValueError("memory_control_arguments_invalid")
+            if not self._contains_any(
+                sources.messages[0].text,
+                ("清空", "全部删除", "clear all", "clear memory"),
+            ):
+                raise ValueError("memory_control_intent_missing")
+        elif target_memory_id is None or expected_version is None:
+            raise ValueError("memory_control_target_required")
+        scope_key = self._control_scope_key(access, sources.project_id, scope)
+        state = await lifecycle.scope_state(access.namespace_id, scope_key)
+        if not state.enabled:
+            raise ValueError("memory_scope_disabled")
+        decision_generation = await lifecycle.user_generation(access.namespace_id)
+        receipt = ControlPayload(
+            owner_id=access.namespace_id,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            operation="clear_scope" if clear_scope else "forget",
+            arguments_digest=arguments_digest,
+            auth_session_id=sources.auth_session_id,
+            namespace_id=access.namespace_id,
+            scope_key=scope_key,
+        )
+        return await lifecycle.apply_control(
+            ControlCommand(
+                receipt=receipt,
+                decision_generation=decision_generation,
+                access_scope_key=scope_key,
+                operation="forget",
+                content=None,
+                kind=None,
+                load_policy=None,
+                evidence_sources=sources.messages,
+                evidenced_at=max(item.source_at for item in sources.messages),
+                expires_at=None,
+                target_memory_id=target_memory_id,
+                expected_version=expected_version,
+                clear_scope=clear_scope,
+                create_memory_id=None,
+                embedding=None,
+                embedding_profile_id=None,
+            )
+        )
+
+    async def recover_control(
+        self,
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        operation: Literal["remember", "correct"],
+        content: str,
+        scope: str,
+        kind: MemoryKind,
+        load_policy: LoadPolicy,
+        evidence: str,
+        expires_at: datetime | None,
+        target_memory_id: str | None,
+        expected_version: int | None,
+    ) -> ControlReceiptResult | None:
+        """只按原参数摘要查询 remember/correct 回执，不执行新写入。
+
+        参数：
+        - `access`：当前用户授权快照。
+        - `run_id`、`session_id`、`tool_call_id`：原始控制身份。
+        - `operation`：remember 或 correct。
+        - `content`、`scope`、`kind`、`load_policy`、`evidence`、`expires_at`：
+          原始可持久化参数。
+        - `target_memory_id`、`expected_version`：correct 的原始目标版本。
+
+        返回：
+        - ControlReceiptResult | None：已提交回执，或尚未找到确定结果。
+
+        异常：
+        - ValueError：控制依赖不可用。
+        """
+        arguments = self._control_arguments(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            operation=operation,
+            content=content,
+            scope=scope,
+            kind=kind,
+            load_policy=load_policy,
+            evidence=evidence,
+            expires_at=expires_at,
+            target_memory_id=target_memory_id,
+            expected_version=expected_version,
+        )
+        return await self._query_control_receipt(
+            arguments,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+        )
+
+    async def recover_forget_control(
+        self,
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        scope: str,
+        evidence: str,
+        target_memory_id: str | None,
+        expected_version: int | None,
+        clear_scope: bool,
+    ) -> ControlReceiptResult | None:
+        """只按原参数摘要查询忘记控制回执，不执行新写入。
+
+        参数：
+        - `access`：当前用户授权快照。
+        - `run_id`、`session_id`、`tool_call_id`：原始控制身份。
+        - `scope`、`evidence`：原始范围与证据。
+        - `target_memory_id`、`expected_version`：单目标删除身份。
+        - `clear_scope`：是否清空整个 scope。
+
+        返回：
+        - ControlReceiptResult | None：已提交回执，或尚未找到确定结果。
+
+        异常：
+        - ValueError：控制依赖不可用。
+        """
+        arguments = self._forget_control_arguments(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            scope=scope,
+            evidence=evidence,
+            target_memory_id=target_memory_id,
+            expected_version=expected_version,
+            clear_scope=clear_scope,
+        )
+        return await self._query_control_receipt(
+            arguments,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+        )
+
+    async def _apply_control(
+        self,
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        operation: Literal["remember", "correct"],
+        content: str,
+        scope: str,
+        kind: MemoryKind,
+        load_policy: LoadPolicy,
+        evidence: str,
+        expires_at: datetime | None,
+        target_memory_id: str | None,
+        expected_version: int | None,
+    ) -> ControlReceiptResult:
+        """校验显式控制并准备一次事务外向量、事务内原子提交。
+
+        参数：
+        - `access`：当前用户授权快照。
+        - `run_id`、`session_id`、`tool_call_id`：固定 Run 和工具幂等身份。
+        - `operation`：remember 或 correct。
+        - `content`、`scope`、`kind`、`load_policy`、`evidence`、`expires_at`：
+          工具显式请求。
+        - `target_memory_id`、`expected_version`：correct 的并发目标。
+
+        返回：
+        - ControlReceiptResult：原子提交或重放回执。
+
+        异常：
+        - ValueError：控制参数、来源、意图、权限或敏感边界无效。
+        """
+        validate_write_target(
+            target_memory_id=target_memory_id,
+            target_version=expected_version,
+            require_target=operation == "correct",
+            error_code="memory_control_arguments_invalid",
+        )
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise ValueError("memory_control_unavailable")
+        stable_arguments = self._control_arguments(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            operation=operation,
+            content=content,
+            scope=scope,
+            kind=kind,
+            load_policy=load_policy,
+            evidence=evidence,
+            expires_at=expires_at,
+            target_memory_id=target_memory_id,
+            expected_version=expected_version,
+        )
+        content = str(stable_arguments["content"])
+        evidence = str(stable_arguments["evidence"])
+        raise_for_sensitive_texts((content, evidence))
+        arguments_digest = control_arguments_digest(stable_arguments)
+        replay = await lifecycle.control_receipt(
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            arguments_digest=arguments_digest,
+        )
+        if replay is not None:
+            return replay
+        lifecycle, sources = await self._control_context(
+            access,
+            run_id=run_id,
+            session_id=session_id,
+            scope=scope,
+            evidence=evidence,
+            operation=operation,
+            content=content,
+            expires_at=expires_at,
+        )
+        try:
+            normalized_write = normalize_memory_write(
+                content=content,
+                evidence=evidence,
+                source_text=sources.messages[0].text,
+            )
+        except ValueError as error:
+            code = str(error)
+            if code == "memory_write_content_invalid":
+                raise ValueError("memory_control_content_invalid") from error
+            if code == "memory_write_evidence_invalid":
+                raise ValueError("memory_control_evidence_invalid") from error
+            raise
+        content = normalized_write.content
+        evidence = normalized_write.evidence
+        scope_key = self._control_scope_key(access, sources.project_id, scope)
+        state = await lifecycle.scope_state(access.namespace_id, scope_key)
+        if not state.enabled:
+            raise ValueError("memory_scope_disabled")
+        decision_generation = await lifecycle.user_generation(access.namespace_id)
+        try:
+            embedding = (
+                await asyncio.wait_for(
+                    prepare_write_embeddings(self._embedder, [content]),
+                    self._timeout,
+                )
+            )[0]
+        except MemoryEmbeddingError as error:
+            raise ValueError("memory_embedding_invalid") from error
+        receipt = ControlPayload(
+            owner_id=access.namespace_id,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            operation=operation,
+            arguments_digest=arguments_digest,
+            auth_session_id=sources.auth_session_id,
+            namespace_id=access.namespace_id,
+            scope_key=scope_key,
+        )
+        return await lifecycle.apply_control(
+            ControlCommand(
+                receipt=receipt,
+                decision_generation=decision_generation,
+                access_scope_key=scope_key,
+                operation=operation,
+                content=content,
+                kind=kind,
+                load_policy=load_policy,
+                evidence_sources=sources.messages,
+                evidenced_at=max(item.source_at for item in sources.messages),
+                expires_at=expires_at,
+                target_memory_id=target_memory_id,
+                expected_version=expected_version,
+                clear_scope=False,
+                create_memory_id=new_id("mem"),
+                embedding=tuple(embedding),
+                embedding_profile_id=self._profile,
+            )
+        )
+
+    @staticmethod
+    def _control_arguments(
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        operation: Literal["remember", "correct"],
+        content: str,
+        scope: str,
+        kind: MemoryKind,
+        load_policy: LoadPolicy,
+        evidence: str,
+        expires_at: datetime | None,
+        target_memory_id: str | None,
+        expected_version: int | None,
+    ) -> dict[str, Any]:
+        """生成首次提交和异常恢复共用的稳定控制参数。
+
+        参数：
+        - `access`：用户授权快照。
+        - `run_id`、`session_id`、`tool_call_id`：控制身份。
+        - `operation`：remember 或 correct。
+        - `content`、`scope`、`kind`、`load_policy`、`evidence`、`expires_at`：
+          工具显式参数。
+        - `target_memory_id`、`expected_version`：correct 目标。
+
+        返回：
+        - dict[str, Any]：供服务端计算 SHA-256 摘要的规范参数。
+
+        异常：
+        - ValueError：规范正文或证据为空、超长。
+        """
+        canonical_content = normalized_persisted_text(content)
+        canonical_evidence = normalized_persisted_text(evidence)
+        if not 1 <= len(canonical_content) <= 2000 or not 1 <= len(canonical_evidence) <= 2000:
+            raise ValueError("memory_control_content_invalid")
+        return {
+            "owner_id": access.namespace_id,
+            "session_id": session_id,
+            "run_id": run_id,
+            "tool_call_id": tool_call_id,
+            "operation": operation,
+            "content": canonical_content,
+            "requested_scope": scope,
+            "kind": kind.value,
+            "requested_load_policy": load_policy.value,
+            "evidence": canonical_evidence,
+            "expires_at": None if expires_at is None else expires_at.isoformat(),
+            "requested_target_memory_id": target_memory_id,
+            "requested_expected_version": expected_version,
+        }
+
+    @staticmethod
+    def _forget_control_arguments(
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        tool_call_id: str,
+        scope: str,
+        evidence: str,
+        target_memory_id: str | None,
+        expected_version: int | None,
+        clear_scope: bool,
+    ) -> dict[str, Any]:
+        """生成首次提交和异常恢复共用的稳定忘记参数。
+
+        参数：
+        - `access`：用户授权快照。
+        - `run_id`、`session_id`、`tool_call_id`：控制身份。
+        - `scope`、`evidence`：范围和直接证据。
+        - `target_memory_id`、`expected_version`：单目标删除身份。
+        - `clear_scope`：是否清空整个 scope。
+
+        返回：
+        - dict[str, Any]：供服务端计算 SHA-256 摘要的规范参数。
+
+        异常：
+        - ValueError：规范证据为空、超长。
+        """
+        canonical_evidence = normalized_persisted_text(evidence)
+        if not 1 <= len(canonical_evidence) <= 2000:
+            raise ValueError("memory_control_content_invalid")
+        return {
+            "owner_id": access.namespace_id,
+            "session_id": session_id,
+            "run_id": run_id,
+            "tool_call_id": tool_call_id,
+            "operation": "forget",
+            "requested_scope": scope,
+            "evidence": canonical_evidence,
+            "target_memory_id": target_memory_id,
+            "expected_version": expected_version,
+            "clear_scope": clear_scope,
+        }
+
+    async def _query_control_receipt(
+        self,
+        arguments: dict[str, Any],
+        *,
+        run_id: str,
+        tool_call_id: str,
+    ) -> ControlReceiptResult | None:
+        """按原参数摘要只读查询控制回执，不触发业务重试。
+
+        参数：
+        - `arguments`：首次调用相同的稳定参数。
+        - `run_id`、`tool_call_id`：回执唯一控制身份。
+
+        返回：
+        - ControlReceiptResult | None：已提交回执或 None。
+
+        异常：
+        - ValueError：控制依赖不可用。
+        """
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise ValueError("memory_control_unavailable")
+        arguments_digest = control_arguments_digest(arguments)
+        return await lifecycle.control_receipt(
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            arguments_digest=arguments_digest,
+        )
+
+    async def _control_context(
+        self,
+        access: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        scope: str,
+        evidence: str,
+        operation: str,
+        content: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> tuple[
+        MemoryLifecycleRepositoryPort,
+        ControlSourceSnapshot,
+    ]:
+        """读取固定 Run 证据并复核实时访问范围。
+
+        参数：
+        - `access`：当前用户授权快照。
+        - `run_id`、`session_id`：固定 Run 与 Session。
+        - `scope`：请求范围别名。
+        - `evidence`：模型给出的直接用户原话。
+        - `operation`：remember、correct 或 forget。
+        - `content`：需要由证据支持的正文。
+        - `expires_at`：需要由证据支持的到期时间。
+
+        返回：
+        - tuple：生命周期仓储和唯一匹配来源快照。
+
+        异常：
+        - ValueError：依赖、权限、来源、意图、正文或到期证据无效。
+        """
+        del scope
+        lifecycle = self._lifecycle
+        reader = self._control_source
+        if lifecycle is None or reader is None:
+            raise ValueError("memory_control_unavailable")
+        if not access.namespace_id or not access.writable_scopes:
+            raise ValueError("memory_scope_forbidden")
+        sources = await reader.read_control_source(
+            owner_id=access.namespace_id,
+            session_id=session_id,
+            run_id=run_id,
+        )
+        if sources is None:
+            raise ValueError("memory_source_scope_invalid")
+        normalized_evidence = self._normalized_evidence(evidence)
+        matching_messages = tuple(
+            item
+            for item in sources.messages
+            if normalized_evidence
+            and normalized_evidence in self._normalized_evidence(item.text)
+        )
+        if not normalized_evidence or len(matching_messages) != 1:
+            raise ValueError("memory_control_evidence_invalid")
+        matched_source = matching_messages[0]
+        if not self._control_intent_present(matched_source.text, operation):
+            raise ValueError("memory_control_intent_missing")
+        if operation in {"remember", "correct"}:
+            # 保留 evidence 源于用户原话的校验，不再要求 content 是其连续子串。
+            if content is None:
+                raise ValueError("memory_control_evidence_invalid")
+            if expires_at is not None and not self._datetime_supported(
+                expires_at,
+                self._normalized_evidence(matched_source.text),
+            ):
+                raise ValueError("memory_control_evidence_invalid")
+        return lifecycle, replace(sources, messages=(matched_source,))
+
+    @staticmethod
+    def _datetime_supported(value: datetime, normalized_evidence: str) -> bool:
+        """要求到期日期以常见中文或 ISO 形式出现在直接证据中。
+
+        参数：
+        - `value`：待保存到期时间。
+        - `normalized_evidence`：归一后的用户原话。
+
+        返回：
+        - bool：证据是否包含日期表示。
+
+        异常：
+        - 无预期业务异常。
+        """
+        date_value = value.date()
+        representations = (
+            date_value.isoformat(),
+            f"{date_value.year}/{date_value.month}/{date_value.day}",
+            f"{date_value.year}年{date_value.month}月{date_value.day}日",
+        )
+        return any(item.casefold() in normalized_evidence for item in representations)
+
+    @staticmethod
+    def _normalized_evidence(value: str) -> str:
+        """对原文只做 Unicode 与空白归一，用于来源子串复核。
+
+        参数：
+        - `value`：正文或证据文本。
+
+        返回：
+        - str：稳定比较文本。
+
+        异常：
+        - 无预期业务异常。
+        """
+        return normalize_text(value)
+
+    @staticmethod
+    def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
+        """检查固定控制触发词，避免模型声明替代用户原话。
+
+        参数：
+        - `value`：用户原话。
+        - `needles`：固定触发词。
+
+        返回：
+        - bool：是否包含任一触发词。
+
+        异常：
+        - 无预期业务异常。
+        """
+        normalized = unicodedata.normalize("NFKC", value).casefold()
+        return any(needle.casefold() in normalized for needle in needles)
+
+    def _control_intent_present(self, source_text: str, operation: str) -> bool:
+        """按操作检查直接用户控制意图。
+
+        参数：
+        - `source_text`：唯一匹配的直接用户消息。
+        - `operation`：remember、correct 或 forget。
+
+        返回：
+        - bool：消息是否含对应固定意图词。
+
+        异常：
+        - 无预期业务异常。
+        """
+        triggers = {
+            "remember": ("记住", "记下", "保存", "remember"),
+            "correct": ("纠正", "改为", "改成", "不再", "correct", "instead"),
+            "forget": ("忘记", "忘掉", "删除记忆", "清空", "forget", "clear memory"),
+        }
+        return self._contains_any(source_text, triggers.get(operation, ()))
+
+    @staticmethod
+    def _control_scope_key(
+        access: AccessContext,
+        project_id: str | None,
+        scope: str,
+    ) -> str:
+        """把范围别名绑定到当前 Run 固定项目并复核写权限。
+
+        参数：
+        - `access`：当前用户授权快照。
+        - `project_id`：固定 Run 项目 ID。
+        - `scope`：personal 或 project。
+
+        返回：
+        - str：可提交 scope key。
+
+        异常：
+        - ValueError：范围非法或不可写。
+        """
+        if scope == "personal":
+            scope_key = "personal"
+        elif scope == "project" and project_id is not None:
+            scope_key = f"project:{project_id}"
+        else:
+            raise ValueError("memory_control_scope_invalid")
+        if scope_key not in access.writable_scopes:
+            raise ValueError("memory_scope_forbidden")
+        return scope_key
+
     @staticmethod
     def _validate_vector(vector: List[float], error_code: str) -> List[float]:
-        """检查模型输出是否适用于1024维余弦检索。"""
+        """检查向量是否适用于 1024 维余弦检索。
+
+        参数：
+        - `vector`：模型返回向量。
+        - `error_code`：无效时稳定错误码。
+
+        返回：
+        - List[float]：原向量。
+
+        异常：
+        - ValueError：维度、有限值或零向量无效。
+        """
         if len(vector) != 1024 or any(not math.isfinite(value) for value in vector):
             raise ValueError(error_code)
         if not any(vector):

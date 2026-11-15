@@ -11,7 +11,6 @@ import pytest
 from app.memory.service import MemoryService
 from domain.memory.model import (
     AccessContext,
-    AddMemory,
     Memory,
     MemorySource,
     RecallRequest,
@@ -28,18 +27,10 @@ class FakeRepository:
             Memory(f"m{i}", "u", "p", content, "active", "explicit", 1, None, (), now, now)
             for i, content in enumerate(("项目数据库使用 PostgreSQL 17", "用户喜欢中文回答"))
         ]
-        self.seen_request_ids: list[str] = []
         self.edit_calls = 0
 
     async def settings(self, _namespace: str) -> tuple[bool, bool]:
         return True, True
-
-    async def get_by_request(self, _request: AddMemory) -> Memory | None:
-        self.seen_request_ids.append(_request.request_id)
-        return None
-
-    async def add(self, request: AddMemory, _embedding: list[float], _profile: str) -> Memory:
-        return self.items[0]
 
     async def search_keyword(
         self, _namespace: str, _scopes: tuple[str, ...], query: str, _limit: int
@@ -81,11 +72,6 @@ class FakeRepository:
         self.edit_calls += 1
         return True
 
-    async def confirm(
-        self, _access: AccessContext, _memory_id: str, _expected_version: int
-    ) -> bool:
-        return True
-
     async def update_settings(
         self, _namespace: str, _read_enabled: bool, _auto_extract_enabled: bool
     ) -> None:
@@ -117,36 +103,6 @@ def test_recall_fuses_keyword_and_vector_candidates() -> None:
     assert result.status == "ok"
     assert {hit.memory.id for hit in result.hits} == {"m0", "m1"}
     assert result.hits[0].memory.id == "m0"
-
-
-def test_add_rejects_wrong_embedding_dimension() -> None:
-    class BadEmbedding:
-        async def embed(self, _texts: list[str]) -> list[list[float]]:
-            return [[1.0]]
-
-    service = MemoryService(FakeRepository(), BadEmbedding(), FakeReranker(), FakeCounter())
-    with pytest.raises(ValueError, match="memory_embedding_invalid"):
-        asyncio.run(
-            service.add(AddMemory(AccessContext("u", ("p",), ("p",)), "p", "内容", "request-1"))
-        )
-
-
-@pytest.mark.parametrize("request_id", ["", "   ", "\t\n"])
-def test_add_rejects_empty_request_id(request_id: str) -> None:
-    service = MemoryService(FakeRepository(), FakeEmbedding(), FakeReranker(), FakeCounter())
-    with pytest.raises(ValueError, match="memory_request_invalid"):
-        asyncio.run(
-            service.add(AddMemory(AccessContext("u", ("p",), ("p",)), "p", "内容", request_id))
-        )
-
-
-def test_add_strips_request_id_before_idempotency_lookup_and_write() -> None:
-    repository = FakeRepository()
-    service = MemoryService(repository, FakeEmbedding(), FakeReranker(), FakeCounter())
-    asyncio.run(
-        service.add(AddMemory(AccessContext("u", ("p",), ("p",)), "p", "内容", "  request-1  "))
-    )
-    assert repository.seen_request_ids == ["request-1"]
 
 
 def test_edit_rejects_zero_vector_without_changing_repository() -> None:
@@ -185,25 +141,6 @@ def test_recall_marks_budget_truncation() -> None:
     result = asyncio.run(service.recall(request))
     assert result.hits == ()
     assert result.truncated
-
-
-def test_add_idempotent_replay_skips_embedding() -> None:
-    now = datetime.now(UTC)
-    existing = Memory("m1", "u", "p", "内容", "active", "explicit", 1, None, (), now, now)
-
-    class ExistingRepository(FakeRepository):
-        async def get_by_request(self, _request: AddMemory) -> Memory:
-            return existing
-
-    class BrokenEmbedding:
-        async def embed(self, _texts: list[str]) -> list[list[float]]:
-            raise AssertionError("idempotent replay must not embed")
-
-    service = MemoryService(ExistingRepository(), BrokenEmbedding(), FakeReranker(), FakeCounter())
-    result = asyncio.run(
-        service.add(AddMemory(AccessContext("u", ("p",), ("p",)), "p", "内容", "r1"))
-    )
-    assert result is existing
 
 
 def test_list_requires_access_read_scope() -> None:
@@ -447,31 +384,6 @@ def test_recall_does_not_merge_sources_from_stale_duplicate_version() -> None:
     assert len(result.hits) == 1
     assert result.hits[0].memory.id == "m-valid"
     assert {source.reference for source in result.hits[0].memory.sources} == {"valid-source"}
-
-
-def test_extracted_add_checks_auto_extract_setting_before_embedding() -> None:
-    class DisabledRepository(FakeRepository):
-        async def settings(self, _namespace: str) -> tuple[bool, bool]:
-            return True, False
-
-    class BrokenEmbedding:
-        async def embed(self, _texts: list[str]) -> list[list[float]]:
-            raise AssertionError("disabled extraction must stop before embedding")
-
-    service = MemoryService(DisabledRepository(), BrokenEmbedding(), FakeReranker(), FakeCounter())
-    with pytest.raises(ValueError, match="memory_auto_extract_disabled"):
-        asyncio.run(
-            service.add(
-                AddMemory(
-                    AccessContext("u", (), ("p",)),
-                    "p",
-                    "候选记忆",
-                    "candidate-1",
-                    origin="extracted",
-                    status="pending",
-                )
-            )
-        )
 
 
 def test_bounded_inference_cancellation_keeps_real_thread_slot_until_done() -> None:

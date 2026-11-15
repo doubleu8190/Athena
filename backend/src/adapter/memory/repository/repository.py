@@ -2,45 +2,27 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from builtins import list as List
 from datetime import UTC, datetime
-from uuid import uuid4
 
-from sqlalchemy import Text, delete, func, select, update
-from sqlalchemy.dialects.postgresql import TSQUERY, insert
+from sqlalchemy import Text, delete, func, select
+from sqlalchemy.dialects.postgresql import TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
+from adapter.memory.converter import memory_to_domain
 from adapter.memory.model import MemoryModel, MemorySettingModel, MemorySourceModel
-from domain.memory.model import (
-    AccessContext,
-    AddMemory,
-    Memory,
-    MemorySource,
-    RecallSnapshot,
+from adapter.memory.repository.lifecycle import (
+    MemoryLifecycleRepositoryMixin,
+    _mark_user_runs_skipped_locked,
+    _normalized_content_hash,
+    ensure_scan_job_locked,
+    lock_user_memory_setting,
 )
+from domain.memory.model import AccessContext, Memory, RecallSnapshot
 
 
-def _request_hash(request: AddMemory) -> str:
-    """计算新增请求摘要，不把记忆正文复制到幂等存储。"""
-    canonical = json.dumps(
-        {
-            "scope": request.scope_key,
-            "content": request.content,
-            "status": request.status,
-            "origin": request.origin,
-            "sources": [(source.kind, source.reference) for source in request.sources],
-            "expires_at": request.expires_at.isoformat() if request.expires_at else None,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-class MemoryRepository:
+class MemoryRepository(MemoryLifecycleRepositoryMixin):
     """封装记忆自有表的事务和授权范围查询。"""
 
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
@@ -55,117 +37,28 @@ class MemoryRepository:
         self, namespace_id: str, read_enabled: bool, auto_extract_enabled: bool
     ) -> None:
         async with self._factory() as session, session.begin():
-            statement = (
-                insert(MemorySettingModel)
-                .values(
-                    namespace_id=namespace_id,
-                    read_enabled=read_enabled,
-                    auto_extract_enabled=auto_extract_enabled,
+            now = datetime.now(UTC)
+            setting = await lock_user_memory_setting(session, namespace_id)
+            if (
+                setting.read_enabled == read_enabled
+                and setting.auto_extract_enabled == auto_extract_enabled
+            ):
+                return
+            was_auto_extract_enabled = setting.auto_extract_enabled
+            setting.read_enabled = read_enabled
+            setting.auto_extract_enabled = auto_extract_enabled
+            setting.generation += 1
+            if not auto_extract_enabled:
+                # 仅在关闭自动提取时跳过该用户尚未处理的待提取 Run。
+                await _mark_user_runs_skipped_locked(
+                    session,
+                    owner_id=namespace_id,
+                    safe_error_code="memory_auto_extract_disabled",
+                    now=now,
                 )
-                .on_conflict_do_update(
-                    index_elements=["namespace_id"],
-                    set_={
-                        "read_enabled": read_enabled,
-                        "auto_extract_enabled": auto_extract_enabled,
-                    },
-                )
-            )
-            await session.execute(statement)
-
-    async def get_by_request(self, request: AddMemory) -> Memory | None:
-        async with self._factory() as session:
-            row = await session.scalar(
-                select(MemoryModel).where(
-                    MemoryModel.namespace_id == request.access.namespace_id,
-                    MemoryModel.request_id == request.request_id,
-                )
-            )
-            if row is None:
-                return None
-            if row.request_hash != _request_hash(request):
-                raise ValueError("memory_idempotency_conflict")
-            if row.deleted_time is not None:
-                raise ValueError("memory_request_deleted")
-            return self._to_domain(row)
-
-    async def add(self, request: AddMemory, embedding: List[float], profile: str) -> Memory:
-        request_hash = _request_hash(request)
-        now = datetime.now(UTC)
-        async with self._factory() as session, session.begin():
-            if request.origin == "extracted":
-                await session.execute(
-                    insert(MemorySettingModel)
-                    .values(namespace_id=request.access.namespace_id)
-                    .on_conflict_do_nothing(index_elements=["namespace_id"])
-                )
-                auto_extract_enabled = await session.scalar(
-                    select(MemorySettingModel.auto_extract_enabled)
-                    .where(MemorySettingModel.namespace_id == request.access.namespace_id)
-                    .with_for_update(read=True)
-                )
-                if auto_extract_enabled is False:
-                    raise ValueError("memory_auto_extract_disabled")
-            statement = (
-                insert(MemoryModel)
-                .values(
-                    id=f"mem_{uuid4().hex}",
-                    namespace_id=request.access.namespace_id,
-                    scope_key=request.scope_key,
-                    content=request.content,
-                    search_document=func.to_tsvector("athena_memory_chinese", request.content),
-                    embedding=embedding,
-                    embedding_profile_id=profile,
-                    request_id=request.request_id,
-                    request_hash=request_hash,
-                    status=request.status,
-                    origin=request.origin,
-                    version=1,
-                    expires_at=request.expires_at,
-                    created_at=now,
-                    updated_at=now,
-                )
-                .on_conflict_do_nothing(constraint="uq_memories_request")
-                .returning(MemoryModel.id)
-            )
-            memory_id = await session.scalar(statement)
-            if memory_id is None:
-                existing = await session.scalar(
-                    select(MemoryModel)
-                    .where(
-                        MemoryModel.namespace_id == request.access.namespace_id,
-                        MemoryModel.request_id == request.request_id,
-                    )
-                    .with_for_update()
-                )
-                if existing is None or existing.request_hash != request_hash:
-                    raise ValueError("memory_idempotency_conflict")
-                if existing.deleted_time is not None:
-                    raise ValueError("memory_request_deleted")
-                return self._to_domain(existing)
-            for source in request.sources:
-                session.add(
-                    MemorySourceModel(
-                        id=f"msrc_{uuid4().hex}",
-                        memory_id=memory_id,
-                        source_kind=source.kind,
-                        source_ref=source.reference,
-                    )
-                )
-            row = await session.scalar(select(MemoryModel).where(MemoryModel.id == memory_id))
-            assert row is not None
-            return Memory(
-                row.id,
-                row.namespace_id,
-                row.scope_key,
-                row.content,
-                row.status,
-                row.origin,
-                row.version,
-                row.expires_at,
-                request.sources,
-                row.created_at,
-                row.updated_at,
-            )
+            if auto_extract_enabled and not was_auto_extract_enabled:
+                # 首次开启只处理边界之后的新 Run。
+                await ensure_scan_job_locked(session, now)
 
     async def search_keyword(
         self, namespace: str, scopes: tuple[str, ...], query: str, limit: int
@@ -190,12 +83,13 @@ class MemoryRepository:
                         MemoryModel.deleted_time.is_(None),
                         (MemoryModel.expires_at.is_(None) | (MemoryModel.expires_at > func.now())),
                         MemoryModel.search_document.op("@@")(tsquery),
+                        self._enabled_memory_scope(),
                     )
                     .order_by(rank.desc(), MemoryModel.id)
                     .limit(limit)
                 )
             ).all()
-            return [(self._to_domain(row[0]), float(row[1])) for row in rows]
+            return [(memory_to_domain(row[0]), float(row[1])) for row in rows]
 
     async def search_vector(
         self, namespace: str, scopes: tuple[str, ...], vector: list[float], profile: str, limit: int
@@ -213,12 +107,13 @@ class MemoryRepository:
                         MemoryModel.embedding.is_not(None),
                         MemoryModel.embedding_profile_id == profile,
                         (MemoryModel.expires_at.is_(None) | (MemoryModel.expires_at > func.now())),
+                        self._enabled_memory_scope(),
                     )
                     .order_by(distance, MemoryModel.id)
                     .limit(limit)
                 )
             ).all()
-            return [(self._to_domain(row[0]), 1.0 - float(row[1])) for row in rows]
+            return [(memory_to_domain(row[0]), 1.0 - float(row[1])) for row in rows]
 
     async def get_many(
         self, ids: tuple[str, ...], namespace: str, scopes: tuple[str, ...]
@@ -250,6 +145,7 @@ class MemoryRepository:
                                 MemorySettingModel.read_enabled.is_(False),
                             )
                             .exists(),
+                            self._enabled_memory_scope(),
                         )
                     )
                 )
@@ -257,7 +153,7 @@ class MemoryRepository:
                 .scalars()
                 .all()
             )
-            memories = {row.id: self._to_domain(row) for row in rows}
+            memories = {row.id: memory_to_domain(row) for row in rows}
             return RecallSnapshot(enabled, memories)
 
     async def list(
@@ -272,13 +168,14 @@ class MemoryRepository:
                         MemoryModel.scope_key == scope,
                         MemoryModel.scope_key.in_(access.readable_scopes),
                         MemoryModel.deleted_time.is_(None),
+                        self._enabled_memory_scope(),
                     )
                     .order_by(MemoryModel.updated_at.desc(), MemoryModel.id)
                     .offset(offset)
                     .limit(limit)
                 )
             ).all()
-            return tuple(self._to_domain(row) for row in rows)
+            return tuple(memory_to_domain(row) for row in rows)
 
     async def edit(
         self,
@@ -290,8 +187,9 @@ class MemoryRepository:
         expected_version: int,
     ) -> bool:
         async with self._factory() as session, session.begin():
-            result = await session.execute(
-                update(MemoryModel)
+            setting = await lock_user_memory_setting(session, access.namespace_id)
+            target_scope = await session.scalar(
+                select(MemoryModel.scope_key)
                 .where(
                     MemoryModel.id == memory_id,
                     MemoryModel.namespace_id == access.namespace_id,
@@ -299,46 +197,54 @@ class MemoryRepository:
                     MemoryModel.version == expected_version,
                     MemoryModel.deleted_time.is_(None),
                 )
-                .values(
-                    content=content,
-                    search_document=func.to_tsvector("athena_memory_chinese", content),
-                    embedding=embedding,
-                    embedding_profile_id=profile,
-                    version=expected_version + 1,
-                    updated_at=datetime.now(UTC),
-                )
-                .returning(MemoryModel.id)
+                .limit(1)
             )
-            updated_id = result.scalar_one_or_none()
-            if updated_id is None:
+            if target_scope is None:
                 return False
+            now = datetime.now(UTC)
+            scope_state = await self._lock_scope_state(
+                session,
+                access.namespace_id,
+                target_scope,
+            )
+            row = await session.scalar(
+                select(MemoryModel)
+                .where(
+                    MemoryModel.id == memory_id,
+                    MemoryModel.namespace_id == access.namespace_id,
+                    MemoryModel.scope_key == target_scope,
+                    MemoryModel.version == expected_version,
+                    MemoryModel.deleted_time.is_(None),
+                )
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            row.content = content
+            row.search_document = func.to_tsvector(
+                "athena_memory_chinese",
+                content,
+            )
+            row.embedding = embedding
+            row.embedding_profile_id = profile
+            row.content_hash = _normalized_content_hash(content)
+            row.superseded_by_id = None
+            row.version = expected_version + 1
+            row.updated_at = now
             await session.execute(
                 delete(MemorySourceModel).where(MemorySourceModel.memory_id == memory_id)
             )
+            scope_state.updated_at = now
+            setting.generation += 1
             return True
-
-    async def confirm(self, access: AccessContext, memory_id: str, expected_version: int) -> bool:
-        async with self._factory() as session, session.begin():
-            result = await session.execute(
-                update(MemoryModel)
-                .where(
-                    MemoryModel.id == memory_id,
-                    MemoryModel.namespace_id == access.namespace_id,
-                    MemoryModel.scope_key.in_(access.writable_scopes),
-                    MemoryModel.version == expected_version,
-                    MemoryModel.status == "pending",
-                    MemoryModel.deleted_time.is_(None),
-                    MemoryModel.embedding.is_not(None),
-                )
-                .values(status="active", version=expected_version + 1, updated_at=datetime.now(UTC))
-                .returning(MemoryModel.id)
-            )
-            return result.scalar_one_or_none() is not None
 
     async def delete(self, access: AccessContext, memory_id: str, expected_version: int) -> bool:
         async with self._factory() as session, session.begin():
-            result = await session.execute(
-                update(MemoryModel)
+            # 先无锁定位目标 scope，再按“设置 → scope → 目标记忆”的统一
+            # 锁序复核；不能先锁记忆行，否则会与批次提交的 scope 锁互相等待。
+            setting = await lock_user_memory_setting(session, access.namespace_id)
+            target_scope = await session.scalar(
+                select(MemoryModel.scope_key)
                 .where(
                     MemoryModel.id == memory_id,
                     MemoryModel.namespace_id == access.namespace_id,
@@ -346,37 +252,32 @@ class MemoryRepository:
                     MemoryModel.version == expected_version,
                     MemoryModel.deleted_time.is_(None),
                 )
-                .values(
-                    content="",
-                    search_document=func.to_tsvector("athena_memory_chinese", ""),
-                    embedding=None,
-                    version=expected_version + 1,
-                    deleted_time=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                )
-                .returning(MemoryModel.id)
+                .limit(1)
             )
-            deleted_id = result.scalar_one_or_none()
-            if deleted_id is None:
+            if target_scope is None:
                 return False
-            await session.execute(
-                delete(MemorySourceModel).where(MemorySourceModel.memory_id == memory_id)
+            now = datetime.now(UTC)
+            scope_state = await self._lock_scope_state(
+                session,
+                access.namespace_id,
+                target_scope,
             )
+            row = await session.scalar(
+                select(MemoryModel)
+                .where(
+                    MemoryModel.id == memory_id,
+                    MemoryModel.namespace_id == access.namespace_id,
+                    MemoryModel.scope_key == target_scope,
+                    MemoryModel.version == expected_version,
+                    MemoryModel.deleted_time.is_(None),
+                )
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            await self._tombstone(session, row, now)
+            scope_state.updated_at = now
+            setting.generation += 1
+            # 普通单条删除只墓碑目标；scope 级清理专用于关闭 scope，
+            # 否则会把同一 scope 中仍然有效的其他记忆一并删除。
             return True
-
-    @staticmethod
-    def _to_domain(row: MemoryModel) -> Memory:
-        sources = tuple(MemorySource(item.source_kind, item.source_ref) for item in row.sources)
-        return Memory(
-            row.id,
-            row.namespace_id,
-            row.scope_key,
-            row.content,
-            row.status,
-            row.origin,
-            row.version,
-            row.expires_at,
-            sources,
-            row.created_at,
-            row.updated_at,
-        )

@@ -5,7 +5,9 @@ from __future__ import annotations
 from builtins import list as List
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
+
+from domain.memory.lifecycle import LoadPolicy, MemoryKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +16,7 @@ class MemorySource:
 
     kind: str
     reference: str
+    source_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +34,29 @@ class Memory:
     sources: tuple[MemorySource, ...]
     created_at: datetime
     updated_at: datetime
+    kind: MemoryKind = MemoryKind.FACT
+    load_policy: LoadPolicy = LoadPolicy.ON_DEMAND
+    content_hash: str | None = None
+    explicit_long_term: bool = False
+    last_evidenced_at: datetime | None = None
+    superseded_by_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievedMemory:
+    """后台提取决策可见的相似记忆快照。"""
+
+    id: str
+    namespace_id: str
+    scope_key: str
+    content: str
+    version: int
+    status: Literal["active", "archived"]
+    kind: MemoryKind
+    load_policy: LoadPolicy
+    expires_at: datetime | None
+    updated_at: datetime
+    sources: tuple[MemorySource, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,20 +66,6 @@ class AccessContext:
     namespace_id: str
     readable_scopes: tuple[str, ...]
     writable_scopes: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class AddMemory:
-    """携带可信访问范围的新增记忆请求。"""
-
-    access: AccessContext
-    scope_key: str
-    content: str
-    request_id: str
-    origin: str = "explicit"
-    status: str = "active"
-    sources: tuple[MemorySource, ...] = ()
-    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +117,6 @@ class RerankerPort(Protocol):
 class MemoryRepositoryPort(Protocol):
     """记忆服务使用的持久化操作。"""
 
-    async def add(self, request: AddMemory, embedding: List[float], profile: str) -> Memory: ...
-    async def get_by_request(self, request: AddMemory) -> Memory | None: ...
     async def settings(self, namespace_id: str) -> tuple[bool, bool]: ...
     async def search_keyword(
         self, namespace: str, scopes: tuple[str, ...], query: str, limit: int
@@ -132,9 +142,6 @@ class MemoryRepositoryPort(Protocol):
         profile: str,
         expected_version: int,
     ) -> bool: ...
-    async def confirm(
-        self, access: AccessContext, memory_id: str, expected_version: int
-    ) -> bool: ...
     async def update_settings(
         self, namespace: str, read_enabled: bool, auto_extract_enabled: bool
     ) -> None: ...
@@ -142,7 +149,6 @@ class MemoryRepositoryPort(Protocol):
 
 __all__ = [
     "AccessContext",
-    "AddMemory",
     "Memory",
     "MemoryHit",
     "MemorySource",
@@ -151,4 +157,5 @@ __all__ = [
     "RecallResult",
     "RecallSnapshot",
     "RerankerPort",
+    "RetrievedMemory",
 ]

@@ -15,10 +15,11 @@ from domain.auth import AuthTransactionGuard, User, UserStatus
 
 
 class SqlAlchemyAuthTransactionGuard(AuthTransactionGuard):
-    """复用调用方 AsyncSession，在最终写事务中锁定并复核授权身份。
+    """复用调用方 AsyncSession，在最终写事务中以共享锁复核授权身份。
 
     必须在写操作提交之前保持该 session 的事务打开。统一锁顺序为先 users 行、
-    再 auth_sessions 行；角色修改也锁 users，撤销只锁 auth_sessions，不形成反向锁链。
+    再 auth_sessions 行；角色修改与会话撤销持有写锁（FOR UPDATE），本复核使用共享锁
+    （FOR SHARE），使同一管理员并发请求不再互相串行阻塞，同时仍与写锁互斥且不形成反向锁链。
     """
 
     def __init__(
@@ -48,7 +49,7 @@ class SqlAlchemyAuthTransactionGuard(AuthTransactionGuard):
         任一条件不满足或标识不匹配时返回 None。
         异常：数据库错误由 SQLAlchemy 原样传播。
         """
-        # 管理员角色更新与最终授权复核都先锁用户，因此角色结果在线性化点确定。
+        # 管理员角色更新持有写锁，此处使用 FOR SHARE 共享锁：并发请求可并行复核，仍与角色变更互斥。
         user_row = await self._session.scalar(
             select(UserModel)
             .where(
@@ -56,20 +57,20 @@ class SqlAlchemyAuthTransactionGuard(AuthTransactionGuard):
                 UserModel.status == UserStatus.ACTIVE.value,
                 UserModel.deleted_time.is_(None),
             )
-            .with_for_update()
+            .with_for_update(read=True)
             .execution_options(populate_existing=True)
         )
         if user_row is None:
             return None
 
-        # 锁 session 前已持有 user 锁；撤销只访问 session 行，不会反向等待 user。
+        # 锁 session 前已持有 user 共享锁；会话撤销持有写锁且只访问 session 行，不反向等待 user。
         auth_row = await self._session.scalar(
             select(AuthSessionModel)
             .where(
                 AuthSessionModel.user_id == user_id,
                 AuthSessionModel.id == session_id,
             )
-            .with_for_update()
+            .with_for_update(read=True)
             .execution_options(populate_existing=True)
         )
         if auth_row is None:

@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import NoReturn
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -214,16 +214,16 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             async with self._session_factory() as session:
                 async with session.begin():
                     await self._require_admin(session, actor)
+                    # 单条原子 UPDATE ... RETURNING 减少一次 SELECT FOR UPDATE 往返。
                     row = await session.scalar(
-                        select(McpToolModel)
+                        update(McpToolModel)
                         .where(McpToolModel.id == tool_id)
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
+                        .values(requires_approval=requires_approval)
+                        .returning(McpToolModel)
+                        .execution_options(synchronize_session=False, populate_existing=True)
                     )
                     if row is None:
                         raise McpServerNotFoundError("mcp_tool_not_found")
-                    row.requires_approval = requires_approval
-                    await session.flush()
                     return tool_to_admin(row)
         except SQLAlchemyError:
             raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None

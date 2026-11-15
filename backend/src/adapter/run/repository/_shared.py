@@ -430,17 +430,19 @@ class RunRepositorySupportMixin:
         )
         if profile_id is None:
             raise RunStateError("llm_default_profile_unavailable")
+        # 使用 FOR SHARE 共享锁：允许多个 Run 并发提交，同时与管理员禁用/修改互斥。
         profile = await session.scalar(
             select(ModelProfileVersionModel)
             .where(
                 ModelProfileVersionModel.id == profile_id,
             )
-            .with_for_update()
+            .with_for_update(read=True)
         )
+        # 共享锁定默认配置指针，允许并发读取默认版本，仍与管理员切换默认配置互斥。
         default = await session.scalar(
             select(DefaultModelProfileModel)
             .where(DefaultModelProfileModel.singleton_id == 1)
-            .with_for_update()
+            .with_for_update(read=True)
         )
         if default is None or default.profile_id != profile_id:
             raise RunConflictError("llm_default_profile_changed")

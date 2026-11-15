@@ -384,10 +384,11 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     if row is None:
                         continue
+                    # 仅校验启用状态与能力，使用 FOR SHARE 允许并发认领，仍与管理员禁用/修改互斥。
                     profile = await session.scalar(
                         select(ModelProfileVersionModel)
                         .where(ModelProfileVersionModel.id == row.model_config_version_id)
-                        .with_for_update()
+                        .with_for_update(read=True)
                     )
                     db_now = await session.scalar(select(func.clock_timestamp()))
                     if db_now is None:

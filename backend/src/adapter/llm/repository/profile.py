@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -136,19 +136,21 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool
     ) -> ModelProfileVersion:
-        """复核管理员并切换单个版本的可用状态。"""
+        """复核管理员并以单条原子 UPDATE 切换单个版本的可用状态。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
+                # 单条原子 UPDATE ... RETURNING 避免先 SELECT FOR UPDATE 再 UPDATE 的额外往返，
+                # 同时与并发读取该行的 FOR SHARE 事务在行锁层面保持互斥。
                 row = await session.scalar(
-                    select(ModelProfileVersionModel)
+                    update(ModelProfileVersionModel)
                     .where(ModelProfileVersionModel.id == profile_id)
-                    .with_for_update()
+                    .values(enabled=enabled)
+                    .returning(ModelProfileVersionModel)
+                    .execution_options(synchronize_session=False, populate_existing=True)
                 )
                 if row is None:
                     raise ModelProfileNotFoundError()
-                row.enabled = enabled
-                await session.flush()
                 return profile_to_domain(row)
 
     async def set_default(self, actor: AuthContext, profile_id: str) -> ModelProfileVersion:
@@ -227,13 +229,14 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
+                # 仅校验压缩模型启用状态，使用 FOR SHARE 允许并发策略提交，仍与禁用互斥。
                 profile = await session.scalar(
                     select(ModelProfileVersionModel)
                     .where(
                         ModelProfileVersionModel.id == value.compression_model_profile_id,
                         ModelProfileVersionModel.enabled.is_(True),
                     )
-                    .with_for_update()
+                    .with_for_update(read=True)
                 )
                 if profile is None or self._runtime(profile) is None:
                     raise ModelProfileNotFoundError()

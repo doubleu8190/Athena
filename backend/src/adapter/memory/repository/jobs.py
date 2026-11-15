@@ -362,7 +362,7 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
         fact_cutoff = now - timedelta(days=fact_max_age_days)
         other_cutoff = now - timedelta(days=other_max_age_days)
         async with self._factory() as session, session.begin():
-            setting = await lock_user_memory_setting(session, namespace_id)
+            # 维护任务只锁定当前目标 scope 及其下属记忆行，不锁用户级 MemorySettingModel。
             state = await lock_scope_state(session, namespace_id, scope_key)
             if not state.enabled or state.last_maintained_day == day:
                 return MaintainResult()
@@ -414,8 +414,6 @@ class MemoryJobsRepositoryMixin(_MemoryRepositoryHelpersMixin):
                 row.status = "archived"
                 row.version += 1
                 row.updated_at = now
-            if expired_rows or aged_rows:
-                setting.generation += 1
             state.last_maintained_day = day
             state.updated_at = now
         return MaintainResult(expired=len(expired_rows), age_archived=len(aged_rows))

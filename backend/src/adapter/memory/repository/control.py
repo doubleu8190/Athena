@@ -416,9 +416,9 @@ class MemoryControlRepositoryMixin(_MemoryRepositoryHelpersMixin):
         namespace_id: str,
         scope_key: str,
     ) -> MemoryScopeState:
-        """读取或初始化单个 scope 的启用状态。"""
+        """读取或初始化单个 scope 的启用状态（只锁目标 scope，不锁用户设置行）。"""
         async with self._factory() as session, session.begin():
-            row = await self._lock_scope_state(session, namespace_id, scope_key)
+            row = await lock_scope_state(session, namespace_id, scope_key)
             return MemoryScopeState(
                 namespace_id=row.namespace_id,
                 scope_key=row.scope_key,

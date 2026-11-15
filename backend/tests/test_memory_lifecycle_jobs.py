@@ -79,10 +79,11 @@ class _Repository(MemoryLifecycleRepositoryMixin):
 
 
 class _ApplySession:
-    """按锁获取顺序返回 settings 和 extract job。"""
+    """按锁获取顺序返回 extract job 与只读 settings。"""
 
     def __init__(self, setting: MemorySettingModel, job: MemoryJobModel) -> None:
-        self._rows = [setting, job]
+        self._setting = setting
+        self._job = job
 
     async def __aenter__(self) -> Self:
         return self
@@ -101,9 +102,13 @@ class _ApplySession:
     async def execute(self, statement: object) -> None:
         del statement
 
+    async def get(self, model: object, key: object) -> object:
+        del model, key
+        return self._setting
+
     async def scalar(self, statement: object) -> object:
         del statement
-        return self._rows.pop(0)
+        return self._job
 
 
 class _ApplyRepository(MemoryLifecycleRepositoryMixin):
@@ -191,10 +196,10 @@ def test_successful_scan_resets_consecutive_failure_budget() -> None:
     asyncio.run(scenario())
 
 
-def test_normal_batch_completion_advances_generation_once(
+def test_normal_batch_completion_does_not_advance_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """即使批次无候选，正常完成也必须原子推进一次 generation。"""
+    """正常批次完成不再递增用户 generation，避免误打断并发同步控制。"""
 
     async def no_op_mark_batch_runs(
         session: object,
@@ -262,5 +267,5 @@ def test_normal_batch_completion_advances_generation_once(
     )
 
     assert result.status == "applied"
-    assert setting.generation == 4
+    assert setting.generation == 3
     assert job.status == JobStatus.QUEUED.value

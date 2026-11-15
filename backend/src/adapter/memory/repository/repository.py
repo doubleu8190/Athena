@@ -17,6 +17,7 @@ from adapter.memory.repository.lifecycle import (
     _mark_user_runs_skipped_locked,
     _normalized_content_hash,
     ensure_scan_job_locked,
+    lock_scope_state,
     lock_user_memory_setting,
 )
 from domain.memory.model import AccessContext, Memory, RecallSnapshot
@@ -187,7 +188,7 @@ class MemoryRepository(MemoryLifecycleRepositoryMixin):
         expected_version: int,
     ) -> bool:
         async with self._factory() as session, session.begin():
-            setting = await lock_user_memory_setting(session, access.namespace_id)
+            # 先无锁定位目标 scope，再按“scope → 目标记忆”的统一锁序操作，不再锁用户级设置行。
             target_scope = await session.scalar(
                 select(MemoryModel.scope_key)
                 .where(
@@ -202,7 +203,7 @@ class MemoryRepository(MemoryLifecycleRepositoryMixin):
             if target_scope is None:
                 return False
             now = datetime.now(UTC)
-            scope_state = await self._lock_scope_state(
+            scope_state = await lock_scope_state(
                 session,
                 access.namespace_id,
                 target_scope,
@@ -235,14 +236,11 @@ class MemoryRepository(MemoryLifecycleRepositoryMixin):
                 delete(MemorySourceModel).where(MemorySourceModel.memory_id == memory_id)
             )
             scope_state.updated_at = now
-            setting.generation += 1
             return True
 
     async def delete(self, access: AccessContext, memory_id: str, expected_version: int) -> bool:
         async with self._factory() as session, session.begin():
-            # 先无锁定位目标 scope，再按“设置 → scope → 目标记忆”的统一
-            # 锁序复核；不能先锁记忆行，否则会与批次提交的 scope 锁互相等待。
-            setting = await lock_user_memory_setting(session, access.namespace_id)
+            # 先无锁定位目标 scope，再按“scope → 目标记忆”的统一锁序复核，不锁用户级设置行。
             target_scope = await session.scalar(
                 select(MemoryModel.scope_key)
                 .where(
@@ -257,7 +255,7 @@ class MemoryRepository(MemoryLifecycleRepositoryMixin):
             if target_scope is None:
                 return False
             now = datetime.now(UTC)
-            scope_state = await self._lock_scope_state(
+            scope_state = await lock_scope_state(
                 session,
                 access.namespace_id,
                 target_scope,
@@ -277,7 +275,6 @@ class MemoryRepository(MemoryLifecycleRepositoryMixin):
                 return False
             await self._tombstone(session, row, now)
             scope_state.updated_at = now
-            setting.generation += 1
             # 普通单条删除只墓碑目标；scope 级清理专用于关闭 scope，
             # 否则会把同一 scope 中仍然有效的其他记忆一并删除。
             return True

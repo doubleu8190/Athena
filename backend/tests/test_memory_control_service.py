@@ -345,37 +345,54 @@ def test_control_rejects_missing_target_or_stale_expected_version() -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(
-    ("messages", "error_code"),
-    [
-        (
+def test_control_requires_unique_evidence_message_without_hardcoded_intent_keywords() -> None:
+    """remember/correct/单条 forget 不依赖固定意图词，evidence 仍须唯一匹配消息。"""
+
+    async def scenario() -> None:
+        # 即使消息不含“记住/记下/保存”等固定关键词，只要 evidence 唯一匹配用户原话即可写入。
+        lifecycle = _Lifecycle()
+        service = _service(
+            lifecycle,
             (
-                MemorySourceMessage("message_intent", "记住这个偏好", NOW),
+                MemorySourceMessage("message_other", "好的收到", NOW),
                 MemorySourceMessage("message_evidence", "我喜欢苹果", NOW + timedelta(seconds=1)),
             ),
-            "memory_control_intent_missing",
-        ),
-        (
+        )
+        await _remember(service)
+        assert len(lifecycle.applied) == 1
+
+        # 多条消息同时命中同一 evidence 时，仍因来源不唯一被拒绝。
+        duplicate_lifecycle = _Lifecycle()
+        duplicate_service = _service(
+            duplicate_lifecycle,
             (
                 MemorySourceMessage("message_intent", "记住，我喜欢苹果", NOW),
                 MemorySourceMessage("message_evidence", "我喜欢苹果", NOW + timedelta(seconds=1)),
             ),
-            "memory_control_evidence_invalid",
-        ),
-    ],
-)
-def test_control_rejects_intent_and_evidence_from_different_messages(
-    messages: tuple[MemorySourceMessage, ...],
-    error_code: str,
-) -> None:
-    """同一控制意图和正文证据必须来自唯一消息。"""
+        )
+        with pytest.raises(ValueError, match="memory_control_evidence_invalid"):
+            await _remember(duplicate_service)
+        assert duplicate_lifecycle.applied == []
 
-    async def scenario() -> None:
-        lifecycle = _Lifecycle()
-        service = _service(lifecycle, messages)
-        with pytest.raises(ValueError, match=error_code):
-            await _remember(service)
-        assert lifecycle.applied == []
+        # clear_scope=True 仍必须具备明确的清空意图关键词。
+        clear_lifecycle = _Lifecycle()
+        clear_service = _service(
+            clear_lifecycle,
+            (MemorySourceMessage("message_clear", "删掉这条吧", NOW),),
+        )
+        with pytest.raises(ValueError, match="memory_control_intent_missing"):
+            await clear_service.forget(
+                ACCESS,
+                run_id="run_1",
+                session_id="session_1",
+                tool_call_id="tool_clear",
+                scope="personal",
+                evidence="删掉这条吧",
+                target_memory_id=None,
+                expected_version=None,
+                clear_scope=True,
+            )
+        assert clear_lifecycle.applied == []
 
     asyncio.run(scenario())
 

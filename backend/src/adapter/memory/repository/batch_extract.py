@@ -25,7 +25,7 @@ from adapter.memory.repository._shared import (
     _message_text,
     _scope_key,
     _source_message,
-    lock_user_memory_setting,
+    lock_scope_states,
     read_user_memory_generation,
 )
 from adapter.message.model import ConversationMessageModel
@@ -57,7 +57,6 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
         batch = command.batch
         now = utc_now()
         async with self._factory() as session, session.begin():
-            setting = await lock_user_memory_setting(session, batch.owner_id)
             job = await session.scalar(
                 select(MemoryJobModel).where(MemoryJobModel.id == command.job_id).with_for_update()
             )
@@ -79,16 +78,18 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     raise ValueError("memory_batch_discard_invalid")
                 return await self._discard_batch_locked(
                     session,
-                    setting,
+                    batch.owner_id,
                     job,
                     batch,
                     reason=command.discard_reason,
                     now=now,
                 )
-            if not setting.auto_extract_enabled:
+            # 只读检查用户自动提取开关，不加 MemorySettingModel 行锁，避免与同步控制串行阻塞。
+            setting = await session.get(MemorySettingModel, batch.owner_id)
+            if setting is not None and not setting.auto_extract_enabled:
                 return await self._discard_batch_locked(
                     session,
-                    setting,
+                    batch.owner_id,
                     job,
                     batch,
                     reason="memory_auto_extract_disabled",
@@ -108,7 +109,7 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
             except MemoryBatchDiscarded as error:
                 return await self._discard_batch_locked(
                     session,
-                    setting,
+                    batch.owner_id,
                     job,
                     batch,
                     reason=str(error),
@@ -169,7 +170,7 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
                 safe_error_code=None,
                 now=now,
             )
-            setting.generation += 1
+            # 异步提取完成不再递增 setting.generation，避免误打断并发的同步控制 apply_control。
             result = ExtractBatchResult(
                 batch_id=batch.batch_id,
                 run_ids=tuple(item.run_id for item in batch.members),
@@ -209,7 +210,7 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
     async def _discard_batch_locked(
         self,
         session: AsyncSession,
-        setting: MemorySettingModel,
+        owner_id: str,
         job: MemoryJobModel,
         batch: ExtractBatchPayload,
         *,
@@ -237,7 +238,7 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
         job.updated_at = now
         job.status = (
             JobStatus.QUEUED.value
-            if await self._owner_has_pending_runs(session, setting.namespace_id)
+            if await self._owner_has_pending_runs(session, owner_id)
             else JobStatus.DONE.value
         )
         return result
@@ -254,8 +255,9 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
             raise ValueError("memory_pending_query_invalid")
         now = utc_now()
         async with self._factory() as session, session.begin():
-            setting = await lock_user_memory_setting(session, owner_id)
-            if not setting.auto_extract_enabled:
+            # 只读检查用户设置，不加 MemorySettingModel 行锁。
+            setting = await session.get(MemorySettingModel, owner_id)
+            if setting is not None and not setting.auto_extract_enabled:
                 await _mark_user_runs_skipped_locked(
                     session,
                     owner_id=owner_id,
@@ -263,6 +265,7 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     now=now,
                 )
                 return ()
+            generation = 1 if setting is None else setting.generation
             rows = (
                 await session.scalars(
                     select(RunModel)
@@ -284,7 +287,7 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
                     session,
                     row,
                     now,
-                    generation=setting.generation,
+                    generation=generation,
                 )
                 if pending is None:
                     continue
@@ -312,7 +315,6 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
             raise ValueError("memory_skip_runs_invalid")
         now = utc_now()
         async with self._factory() as session, session.begin():
-            await lock_user_memory_setting(session, owner_id)
             rows = (
                 await session.scalars(
                     select(RunModel)
@@ -338,8 +340,8 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
     ) -> tuple[MemorySourceMessage, ...]:
         """模型调用前重新读取固定批次来源，并在短事务内复核可见性与自动提取开关。"""
         async with self._factory() as session, session.begin():
-            setting = await lock_user_memory_setting(session, batch.owner_id)
-            if not setting.auto_extract_enabled:
+            setting = await session.get(MemorySettingModel, batch.owner_id)
+            if setting is not None and not setting.auto_extract_enabled:
                 raise MemoryBatchDiscarded("memory_auto_extract_disabled")
             await self._lock_batch_context(session, batch)
             source_ids = tuple(
@@ -408,21 +410,8 @@ class MemoryBatchExtractRepositoryMixin(_MemoryRepositoryHelpersMixin):
                 or source_session.project_id != member.project_id
             ):
                 raise MemoryBatchDiscarded("memory_batch_session_changed")
-        scope_rows = (
-            await session.scalars(
-                select(MemoryScopeStateModel)
-                .where(
-                    MemoryScopeStateModel.namespace_id == batch.owner_id,
-                    MemoryScopeStateModel.scope_key.in_(batch.scope_keys),
-                )
-                .order_by(
-                    MemoryScopeStateModel.namespace_id,
-                    MemoryScopeStateModel.scope_key,
-                )
-                .with_for_update()
-            )
-        ).all()
-        scopes = {row.scope_key: row for row in scope_rows}
+        # 按 (namespace_id, scope_key) 字典序初始化并锁定目标 scope 状态行，下沉锁粒度至 scope 级。
+        scopes = await lock_scope_states(session, batch.owner_id, batch.scope_keys)
         if any(
             scope_key not in scopes or not scopes[scope_key].enabled
             for scope_key in batch.scope_keys

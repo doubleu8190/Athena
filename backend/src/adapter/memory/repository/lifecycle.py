@@ -13,6 +13,7 @@ from adapter.memory.repository._shared import (
     ensure_scan_job_locked,
     invalidate_session_memory_generation,
     lock_scope_state,
+    lock_scope_states,
     lock_user_memory_setting,
     read_user_memory_generation,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "ensure_scan_job_locked",
     "invalidate_session_memory_generation",
     "lock_scope_state",
+    "lock_scope_states",
     "lock_user_memory_setting",
     "read_user_memory_generation",
 ]

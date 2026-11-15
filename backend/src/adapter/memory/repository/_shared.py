@@ -203,36 +203,62 @@ async def ensure_scan_job_locked(
     return row
 
 
+async def lock_scope_states(
+    session: AsyncSession,
+    namespace_id: str,
+    scope_keys: tuple[str, ...] | list[str],
+) -> dict[str, MemoryScopeStateModel]:
+    """按 scope_key 字典序初始化并锁定多个 scope 状态行，避免多 scope 并发死锁。"""
+    ordered_keys = tuple(sorted(set(scope_keys)))
+    if not ordered_keys:
+        return {}
+    now = utc_now()
+    # 行不存在时先幂等插入默认启用状态，再按 (namespace_id, scope_key) 排序加锁。
+    await session.execute(
+        insert(MemoryScopeStateModel)
+        .values(
+            [
+                {
+                    "namespace_id": namespace_id,
+                    "scope_key": scope_key,
+                    "enabled": True,
+                    "last_maintained_day": None,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for scope_key in ordered_keys
+            ]
+        )
+        .on_conflict_do_nothing(index_elements=["namespace_id", "scope_key"])
+    )
+    rows = (
+        await session.scalars(
+            select(MemoryScopeStateModel)
+            .where(
+                MemoryScopeStateModel.namespace_id == namespace_id,
+                MemoryScopeStateModel.scope_key.in_(ordered_keys),
+            )
+            .order_by(
+                MemoryScopeStateModel.namespace_id,
+                MemoryScopeStateModel.scope_key,
+            )
+            .with_for_update()
+        )
+    ).all()
+    scopes = {row.scope_key: row for row in rows}
+    if len(scopes) != len(ordered_keys):
+        raise RuntimeError("memory_scope_state_missing")
+    return scopes
+
+
 async def lock_scope_state(
     session: AsyncSession,
     namespace_id: str,
     scope_key: str,
 ) -> MemoryScopeStateModel:
     """创建并锁定单个 scope 状态行。"""
-    now = utc_now()
-    await session.execute(
-        insert(MemoryScopeStateModel)
-        .values(
-            namespace_id=namespace_id,
-            scope_key=scope_key,
-            enabled=True,
-            last_maintained_day=None,
-            created_at=now,
-            updated_at=now,
-        )
-        .on_conflict_do_nothing(index_elements=["namespace_id", "scope_key"])
-    )
-    row = await session.scalar(
-        select(MemoryScopeStateModel)
-        .where(
-            MemoryScopeStateModel.namespace_id == namespace_id,
-            MemoryScopeStateModel.scope_key == scope_key,
-        )
-        .with_for_update()
-    )
-    if row is None:
-        raise RuntimeError("memory_scope_state_missing")
-    return row
+    scopes = await lock_scope_states(session, namespace_id, (scope_key,))
+    return scopes[scope_key]
 
 
 async def enqueue_cleanup_job(

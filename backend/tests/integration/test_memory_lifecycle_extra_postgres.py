@@ -1117,7 +1117,8 @@ def test_real_worker_requeues_stale_generation_and_reprocesses_pending_run() -> 
                 run = await session.get(RunModel, fixture.run_ids[0])
                 job = await session.get(MemoryJobModel, "job_worker_stale")
             assert setting is not None
-            assert setting.generation == 5
+            # _GenerationRaceRepository 推进 generation 到 4，apply_batch 不再递增 generation。
+            assert setting.generation == 4
             assert run is not None
             assert run.memory_extraction_status == "completed"
             assert job is not None

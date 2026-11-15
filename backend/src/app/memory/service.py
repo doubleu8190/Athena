@@ -928,8 +928,6 @@ class MemoryService:
         if not normalized_evidence or len(matching_messages) != 1:
             raise ValueError("memory_control_evidence_invalid")
         matched_source = matching_messages[0]
-        if not self._control_intent_present(matched_source.text, operation):
-            raise ValueError("memory_control_intent_missing")
         if operation in {"remember", "correct"}:
             # 保留 evidence 源于用户原话的校验，不再要求 content 是其连续子串。
             if content is None:
@@ -994,26 +992,6 @@ class MemoryService:
         """
         normalized = unicodedata.normalize("NFKC", value).casefold()
         return any(needle.casefold() in normalized for needle in needles)
-
-    def _control_intent_present(self, source_text: str, operation: str) -> bool:
-        """按操作检查直接用户控制意图。
-
-        参数：
-        - `source_text`：唯一匹配的直接用户消息。
-        - `operation`：remember、correct 或 forget。
-
-        返回：
-        - bool：消息是否含对应固定意图词。
-
-        异常：
-        - 无预期业务异常。
-        """
-        triggers = {
-            "remember": ("记住", "记下", "保存", "remember"),
-            "correct": ("纠正", "改为", "改成", "不再", "correct", "instead"),
-            "forget": ("忘记", "忘掉", "删除记忆", "清空", "forget", "clear memory"),
-        }
-        return self._contains_any(source_text, triggers.get(operation, ()))
 
     @staticmethod
     def _control_scope_key(

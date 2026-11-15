@@ -185,8 +185,15 @@ class SqlAlchemySessionRepository(SessionRepository):
         deleted_at: datetime,
     ) -> bool:
         """软删除会话，并保证 owner 内重复删除幂等。"""
+        from adapter.memory.repository.lifecycle import (
+            invalidate_session_memory_generation,
+            lock_user_memory_setting,
+        )
+
         async with self._session_factory() as database_session:
             async with database_session.begin():
+                # 记忆失效事务先锁用户设置，再进入 Session/Run，统一全局锁序。
+                await lock_user_memory_setting(database_session, owner_id)
                 row = await database_session.scalar(
                     select(SessionModel)
                     .where(
@@ -214,6 +221,12 @@ class SqlAlchemySessionRepository(SessionRepository):
                     )
                     if active_run_id is not None:
                         raise SessionHasActiveRunError("session_has_active_run")
+                    await invalidate_session_memory_generation(
+                        database_session,
+                        owner_id=owner_id,
+                        session_id=session_id,
+                        invalidated_at=deleted_at,
+                    )
                     row.deleted_time = deleted_at
                     row.updated_at = _monotonic_updated_at(row.updated_at, deleted_at)
                     await database_session.flush()

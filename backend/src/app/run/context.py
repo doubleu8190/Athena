@@ -124,6 +124,7 @@ def messages_to_llm(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
+    memory_context: str | None = None,
 ) -> tuple[LlmMessage, ...]:
     """把固定 cutoff 的正式消息及本 Run 协议交互转换为模型上下文。"""
     # 固定 system prompt 永远在最前，确保模板版本行为稳定。
@@ -209,6 +210,9 @@ def messages_to_llm(
                 ),
             )
         )
+    if memory_context:
+        # 长期记忆始终以 USER 角色的不可信历史资料注入，不能获得系统指令权限。
+        result.append(LlmMessage(role=LlmRole.USER, content=memory_context))
     # 压缩摘要作为“历史资料”注入，并明确它不是新指令。
     if summary_text:
         result.append(
@@ -278,6 +282,7 @@ def _build_llm_request(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
+    memory_context: str | None = None,
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int]:
     """计数完整上下文和工具 Schema，拒绝超窗请求，不裁剪历史。"""
     # 默认只暴露澄清工具；调用方传入的工具目录会整体计入预算。
@@ -292,6 +297,7 @@ def _build_llm_request(
         retry_context=retry_context,
         skill_context=skill_context,
         input_files=input_files,
+        memory_context=memory_context,
     )
     # 输入 + 协议预留 + 输出预留必须装进模型窗口；超窗时拒绝而不是裁剪历史。
     if input_tokens + PROTOCOL_TOKEN_RESERVE + output_tokens > profile.context_window_tokens:
@@ -309,6 +315,7 @@ def _estimate_request(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
+    memory_context: str | None = None,
 ) -> tuple[tuple[LlmMessage, ...], int, int]:
     """计算完整主请求的输入和输出预算，不在此处拒绝超窗。"""
     selected_tools = (REQUEST_USER_INPUT,) if tools is None else tuple(tools)
@@ -324,6 +331,7 @@ def _estimate_request(
         retry_context=retry_context,
         skill_context=skill_context,
         input_files=input_files,
+        memory_context=memory_context,
     )
     # 每条消息额外 +4 覆盖角色分隔等协议开销。
     input_tokens = sum(
@@ -424,6 +432,7 @@ async def build_llm_request(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
+    memory_context: str | None = None,
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int]:
     """在线程池边界外计数，避免大上下文编码阻塞 Worker 心跳和取消轮询。"""
     # 把可变参数复制成不可变序列后交给工作线程。
@@ -438,6 +447,7 @@ async def build_llm_request(
         tuple(retry_context),
         skill_context,
         tuple(input_files),
+        memory_context,
         timeout_seconds=timeout_seconds,
     )
 
@@ -454,6 +464,7 @@ async def measure_llm_request(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
+    memory_context: str | None = None,
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
     """生成完整请求并返回输入/输出预算，不在调用方裁决前拒绝超窗。"""
     llm_messages, selected_tools, input_tokens, output_tokens = await _run_context_work(
@@ -467,6 +478,7 @@ async def measure_llm_request(
             retry_context,
             skill_context,
             input_files,
+            memory_context,
         ),
         timeout_seconds=timeout_seconds,
     )
@@ -483,6 +495,7 @@ def _measure_request(
     retry_context: Sequence[ToolRetryContext],
     skill_context: RunSkillPromptContext | None,
     input_files: Sequence[RunInputFileContext],
+    memory_context: str | None,
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
     """同步完成完整请求计数，供有界线程边界调用。"""
     selected_tools = (REQUEST_USER_INPUT,) if tools is None else tuple(tools)
@@ -496,6 +509,7 @@ def _measure_request(
         retry_context=retry_context,
         skill_context=skill_context,
         input_files=input_files,
+        memory_context=memory_context,
     )
     return llm_messages, selected_tools, input_tokens, output_tokens
 
@@ -512,6 +526,7 @@ async def estimate_llm_input_tokens(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
+    memory_context: str | None = None,
 ) -> tuple[int, int]:
     """在线程边界内估算主请求输入 Token 和输出预留。"""
     _, input_tokens, output_tokens = await _run_context_work(
@@ -525,6 +540,7 @@ async def estimate_llm_input_tokens(
         tuple(retry_context),
         skill_context,
         tuple(input_files),
+        memory_context,
         timeout_seconds=timeout_seconds,
     )
     return input_tokens, output_tokens

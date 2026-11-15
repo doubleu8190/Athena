@@ -162,6 +162,11 @@ def build_api_dependencies(
     system_prompt_use_case = system_prompt_service
     memory_use_case = memory_service
     memory_enabled = memory_service is not None or env_flag("ATHENA_MEMORY_ENABLED", default=False)
+    if (
+        env_flag("ATHENA_MEMORY_LIFECYCLE_ENABLED", default=False)
+        and not memory_enabled
+    ):
+        raise ValueError("memory_lifecycle_requires_memory")
     knowledge_enabled = knowledge_service is not None or env_flag(
         "ATHENA_KNOWLEDGE_ENABLED", default=False
     )
@@ -240,17 +245,6 @@ def build_api_dependencies(
             message_use_case = MessageService(message_repository)
         else:
             message_repository = SqlAlchemyMessageRepository(database.session_factory)
-        run_repository = SqlAlchemyRunRepository(database.session_factory, message_repository)
-        if run_use_case is None:
-            run_use_case = RunService(run_repository)
-        if auth_use_case is not None:
-            # Redis 未配置时保持为 None，Run 流式服务降级为仅持久化事件。
-            run_transport = build_run_transport()
-            run_stream_service = RunStreamService(
-                run_repository,
-                auth_use_case,
-                run_transport,
-            )
         if mcp_use_case is None:
             if secret_cipher is None or mcp_discovery is None:
                 raise McpSecretError("mcp_secret_key_missing")
@@ -271,6 +265,30 @@ def build_api_dependencies(
         knowledge_use_case = query_services.knowledge
         knowledge_repository = query_services.knowledge_repository
         knowledge_originals = query_services.knowledge_original_store
+        memory_lifecycle_enabled = env_flag(
+            "ATHENA_MEMORY_LIFECYCLE_ENABLED",
+            default=False,
+        )
+        run_repository = (
+            SqlAlchemyRunRepository(
+                database.session_factory,
+                message_repository,
+                memory_wakeup=query_services.memory_lifecycle,
+                memory_lifecycle_enabled=True,
+            )
+            if memory_lifecycle_enabled
+            else SqlAlchemyRunRepository(database.session_factory, message_repository)
+        )
+        if run_use_case is None:
+            run_use_case = RunService(run_repository)
+        if auth_use_case is not None:
+            # Redis 未配置时保持为 None，Run 流式服务降级为仅持久化事件。
+            run_transport = build_run_transport()
+            run_stream_service = RunStreamService(
+                run_repository,
+                auth_use_case,
+                run_transport,
+            )
     # 上传校验器只依赖解析器本身；挂载 knowledge 路由时一并注入。
     document_validator: DocumentFileValidator | None = (
         LocalDocumentParser(ocr_languages="ch") if knowledge_use_case is not None else None

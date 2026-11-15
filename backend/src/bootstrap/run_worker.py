@@ -72,6 +72,18 @@ def _files_enabled() -> bool:
     return any(os.getenv(name, "").strip() for name in _FILE_STORAGE_SETTING_NAMES)
 
 
+def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """读取有界整数配置，非法值在 Worker 启动时明确失败。"""
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name.lower()}_invalid") from error
+    if isinstance(value, bool) or not minimum <= value <= maximum:
+        raise ValueError(f"{name.lower()}_invalid")
+    return value
+
+
 def build_run_worker_dependencies(
     bundle: RunWorkerBundle,
     *,
@@ -96,7 +108,6 @@ def build_run_worker_dependencies(
     profiles = SqlAlchemyModelProfileRepository(database.session_factory, secret_cipher)
     projects_repository = SqlAlchemyProjectRepository(database.session_factory)
     messages = SqlAlchemyMessageRepository(database.session_factory)
-    repository = SqlAlchemyRunRepository(database.session_factory, messages)
     system_prompts = SqlAlchemySystemPromptRepository(database.session_factory)
     auth_repository = SqlAlchemyAuthRepository(database.session_factory)
     session_repository = SqlAlchemySessionRepository(database.session_factory)
@@ -108,6 +119,22 @@ def build_run_worker_dependencies(
         projects=projects,
     )
     bundle.query_services = query_services
+    memory_lifecycle_enabled = env_flag(
+        "ATHENA_MEMORY_LIFECYCLE_ENABLED",
+        default=False,
+    )
+    if memory_lifecycle_enabled and not query_services.memory_enabled:
+        raise ValueError("memory_lifecycle_requires_memory")
+    repository = (
+        SqlAlchemyRunRepository(
+            database.session_factory,
+            messages,
+            memory_wakeup=query_services.memory_lifecycle,
+            memory_lifecycle_enabled=True,
+        )
+        if memory_lifecycle_enabled
+        else SqlAlchemyRunRepository(database.session_factory, messages)
+    )
     skills = None
     session_files = None
     skill_execution = None
@@ -171,6 +198,25 @@ def build_run_worker_dependencies(
         publisher=run_transport or NullRunProgressPublisher(),
         config=config,
         tool_runtime=tool_runtime,
+        memory_lifecycle=query_services.memory_lifecycle,
+        memory_personal_token_budget=_bounded_env_int(
+            "ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS",
+            1_000,
+            minimum=1,
+            maximum=100_000,
+        ),
+        memory_project_token_budget=_bounded_env_int(
+            "ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS",
+            2_000,
+            minimum=1,
+            maximum=100_000,
+        ),
+        memory_per_scope_limit=_bounded_env_int(
+            "ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT",
+            200,
+            minimum=1,
+            maximum=200,
+        ),
     )
     bundle.worker = RunWorker(repository, executor, config, publisher=run_transport)
 

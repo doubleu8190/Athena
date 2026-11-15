@@ -1,5 +1,8 @@
 # 内置记忆查询工具设计
 
+历史查询工具方案。Run 与工具循环现已接入；当前记忆控制及每次请求前的结果复核
+以 [记忆全生命周期设计](memory-lifecycle-design.md) 为准，下文记录当时的查询建设范围。
+
 状态：待确认的设计，不实施代码。复用已实现的MemoryService.recall，底层仍为
 PostgreSQL、zhparser与pgvector。只提供查询，不扩展新增、修改、删除工具。
 

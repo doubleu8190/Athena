@@ -9,6 +9,10 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from domain.memory.lifecycle import (
+    ExtractionStatus,
+    RunMemoryContextState,
+)
 from domain.message import ConversationMessage, ConversationMessageDraft, ExecutionMessageDraft
 from domain.skill import RunSkillSnapshot
 from domain.tool import (
@@ -321,6 +325,23 @@ class Run:
     skill_snapshot: RunSkillSnapshot | None = None
     input_files: RunInputFiles = RunInputFiles()
     report_message_id: str | None = None
+    memory_project_id: str | None = None
+    memory_input_message_ids: tuple[str, ...] = ()
+    memory_context_state: RunMemoryContextState = RunMemoryContextState()
+    memory_extraction_status: ExtractionStatus | None = None
+    memory_extracted_at: datetime | None = None
+    memory_extraction_batch_id: str | None = None
+    memory_extraction_safe_error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InitializeRunMemoryContextCommand:
+    """当前执行代次首次固定 Run 可读取的记忆引用。"""
+
+    run_id: str
+    worker_id: str
+    execution_epoch: int
+    context_state: RunMemoryContextState
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +485,7 @@ __all__ = [
     "AnswerRunCommand",
     "ContextStopReason",
     "InputRequestStatus",
+    "InitializeRunMemoryContextCommand",
     "FailRunCommand",
     "FinishRunCommand",
     "Run",

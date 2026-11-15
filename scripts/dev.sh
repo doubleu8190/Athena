@@ -7,6 +7,7 @@ set -m
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATE=false
 KNOWLEDGE_ENABLED=false
+MEMORY_WORKER_ENABLED=false
 ENV_FILE=".env"
 ENV_FILE_REQUIRED=false
 CHILD_PIDS=()
@@ -15,7 +16,8 @@ usage() {
   cat <<'EOF'
 用法：scripts/dev.sh [--env-file <file>] [--migrate]
 
-启动本地 API、Run Worker、前端 Vite；ATHENA_KNOWLEDGE_ENABLED=true 时也启动知识库 Worker。
+启动本地 API、Run Worker、前端 Vite；知识库开关启用时启动 Knowledge Worker，
+记忆总开关与生命周期开关同时启用时启动 Memory Worker。
 --env-file 指定从项目根目录解析的 shell 格式配置文件；默认使用项目根目录 .env。
 --migrate 先执行 Alembic upgrade head。
 EOF
@@ -72,6 +74,25 @@ case "$knowledge_flag" in
   *) fail "ATHENA_KNOWLEDGE_ENABLED 值无效；请使用 true/false、1/0、yes/no 或 on/off。" ;;
 esac
 
+memory_flag="$(printf '%s' "${ATHENA_MEMORY_ENABLED:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+case "$memory_flag" in
+  1|true|yes|on) memory_flag=true ;;
+  ''|0|false|no|off) memory_flag=false ;;
+  *) fail "ATHENA_MEMORY_ENABLED 值无效；请使用 true/false、1/0、yes/no 或 on/off。" ;;
+esac
+lifecycle_flag="$(printf '%s' "${ATHENA_MEMORY_LIFECYCLE_ENABLED:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+case "$lifecycle_flag" in
+  1|true|yes|on) lifecycle_flag=true ;;
+  ''|0|false|no|off) lifecycle_flag=false ;;
+  *) fail "ATHENA_MEMORY_LIFECYCLE_ENABLED 值无效；请使用 true/false、1/0、yes/no 或 on/off。" ;;
+esac
+if [[ "$memory_flag" == false && "$lifecycle_flag" == true ]]; then
+  fail "ATHENA_MEMORY_LIFECYCLE_ENABLED 不能在 ATHENA_MEMORY_ENABLED 关闭时启用。"
+fi
+if [[ "$memory_flag" == true && "$lifecycle_flag" == true ]]; then
+  MEMORY_WORKER_ENABLED=true
+fi
+
 if [[ "$MIGRATE" == true ]]; then
   .venv/bin/alembic -c backend/alembic.ini upgrade head
 fi
@@ -117,6 +138,9 @@ start_service() {
 
 start_service "API http://127.0.0.1:8000" .venv/bin/python -m uvicorn main:create_app --factory --app-dir backend/src
 start_service "Run Worker" .venv/bin/python -m run_worker
+if [[ "$MEMORY_WORKER_ENABLED" == true ]]; then
+  start_service "Memory Worker" .venv/bin/python -m memory_worker
+fi
 if [[ "$KNOWLEDGE_ENABLED" == true ]]; then
   start_service "Knowledge Worker" .venv/bin/python -m knowledge_worker
 fi

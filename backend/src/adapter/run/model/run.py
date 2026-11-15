@@ -43,6 +43,12 @@ class RunModel(Base):
             "llm_request_count >= 0 AND llm_request_count <= 40",
             name="ck_runs_llm_request_count",
         ),
+        # 与迁移 20261124_0025 保持一致，约束 Run 记忆提取状态枚举值。
+        CheckConstraint(
+            "memory_extraction_status IS NULL OR "
+            "memory_extraction_status IN ('pending','completed','skipped','failed')",
+            name="ck_runs_memory_extraction_status",
+        ),
         ForeignKeyConstraint(
             ["session_id", "owner_id"],
             ["sessions.id", "sessions.owner_id"],
@@ -111,6 +117,19 @@ class RunModel(Base):
         ),
         Index("ix_runs_claim", "status", "queued_at", "id"),
         Index("ix_runs_lease", "status", "lease_expires_at"),
+        Index(
+            "ix_runs_memory_pending",
+            "memory_extraction_status",
+            "finished_at",
+            "id",
+        ),
+        Index(
+            "ix_runs_memory_owner_pending",
+            "owner_id",
+            "memory_extraction_status",
+            "finished_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -132,6 +151,25 @@ class RunModel(Base):
         nullable=False,
         default=list,
         server_default=text("'[]'"),
+    )
+    memory_project_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    memory_input_message_ids: Mapped[list[str]] = mapped_column(
+        _json_type(),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
+    memory_context_state: Mapped[dict[str, object]] = mapped_column(
+        _json_type(),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
+    memory_extraction_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    memory_extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    memory_extraction_batch_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    memory_extraction_safe_error_code: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
     )
     tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
     auth_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

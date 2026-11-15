@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Literal, cast
@@ -46,6 +47,8 @@ from adapter.skill.repository import build_run_skill_snapshot
 from adapter.system_prompt.repository import current_system_prompts
 from common.ids import new_id, now_utc
 from domain.file import PendingSessionFile
+from domain.memory import ExtractionStatus, MemoryRunWakeupPort
+from domain.memory.lifecycle import RunMemoryContextState
 from domain.message import (
     ArtifactFileRef,
     ConversationMessage,
@@ -69,6 +72,7 @@ from domain.run.model import (
     ContextSummary,
     FailRunCommand,
     FinishRunCommand,
+    InitializeRunMemoryContextCommand,
     InputRequestStatus,
     RecordRunUsageCommand,
     RequestRunInputCommand,
@@ -163,6 +167,7 @@ _STREAM_SNAPSHOT_EVENTS = 100
 _STREAM_SNAPSHOT_BYTES = MAX_RUN_SSE_SNAPSHOT_BYTES
 _STREAM_SNAPSHOT_PREFIX_RESERVE = 128
 _MAX_TOOL_BATCH_SIZE = 8
+logger = logging.getLogger(__name__)
 
 
 def _purpose_total(attempts: tuple[RunAttemptUsage, ...], purpose: str) -> int | None:
@@ -182,10 +187,15 @@ class SqlAlchemyRunRepository(RunRepository):
         self,
         session_factory: async_sessionmaker[AsyncSession],
         message_repository: SqlAlchemyMessageRepository,
+        *,
+        memory_wakeup: MemoryRunWakeupPort | None = None,
+        memory_lifecycle_enabled: bool = False,
     ) -> None:
         """保存共享数据库工厂和消息事务内部写入端口。"""
         self._session_factory = session_factory
         self._messages = message_repository
+        self._memory_wakeup = memory_wakeup
+        self._memory_lifecycle_enabled = memory_lifecycle_enabled
 
     async def submit(
         self, session_id: str, owner_id: str, command: SubmitRunCommand
@@ -254,6 +264,8 @@ class SqlAlchemyRunRepository(RunRepository):
                         compression_policy_version_id=compression_policy_id,
                         skill_snapshot=skill_snapshot.model_dump(mode="json"),
                         input_file_ids=list(input_file_ids),
+                        memory_project_id=locked_session.project_id,
+                        memory_input_message_ids=[message.id],
                         prompt_template_version=command.prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -380,6 +392,11 @@ class SqlAlchemyRunRepository(RunRepository):
                         row.auth_session_id = command.auth_session_id
                     row.status = RunStatus.QUEUED.value
                     row.input_file_ids = list(input_file_ids)
+                    if answer.id not in row.memory_input_message_ids:
+                        row.memory_input_message_ids = [
+                            *row.memory_input_message_ids,
+                            answer.id,
+                        ]
                     row.queued_at = command.queued_at
                     row.worker_id = None
                     row.lease_expires_at = None
@@ -430,6 +447,7 @@ class SqlAlchemyRunRepository(RunRepository):
                 )
             ).all()
         leases: list[RunLease] = []
+        memory_wake_owners: list[str] = []
         for candidate_id in candidate_ids:
             if len(leases) >= limit:
                 break
@@ -479,12 +497,14 @@ class SqlAlchemyRunRepository(RunRepository):
                         row.safe_error_code = "model_profile_unavailable"
                         row.finished_at = db_now
                         row.updated_at = db_now
+                        self._mark_memory_pending(row, db_now)
                         await self._append_event(
                             session,
                             row,
                             RunFailedPayload(safe_error_code="model_profile_unavailable"),
                             db_now,
                         )
+                        memory_wake_owners.append(row.owner_id)
                         continue
                     row.status = RunStatus.RUNNING.value
                     row.execution_epoch += 1
@@ -512,6 +532,8 @@ class SqlAlchemyRunRepository(RunRepository):
                             execution_deadline_at=row.execution_deadline_at,
                         )
                     )
+        for owner_id in dict.fromkeys(memory_wake_owners):
+            await self._wake_memory(owner_id)
         return tuple(leases)
 
     async def heartbeat(
@@ -620,6 +642,40 @@ class SqlAlchemyRunRepository(RunRepository):
                     row.updated_at = db_now or now_utc()
                     return snapshot
                 return RuntimeToolSnapshot.model_validate(row.tool_snapshot)
+
+    async def initialize_memory_context(
+        self, command: InitializeRunMemoryContextCommand
+    ) -> RunMemoryContextState | None:
+        """在当前有效租约下原子固定记忆引用；竞争时只返回先写入的快照。"""
+        proposed = RunMemoryContextState.model_validate(
+            command.context_state.model_dump(mode="json")
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await self._lock_worker_run(
+                    session, command.run_id, command.worker_id, command.execution_epoch
+                )
+                db_now = await session.scalar(select(func.clock_timestamp()))
+                if (
+                    row.status != RunStatus.RUNNING.value
+                    or row.cancel_requested_at is not None
+                    or not self._lease_is_valid(
+                        row, command.worker_id, command.execution_epoch, db_now
+                    )
+                    or not self._work_deadline_is_valid(row, db_now)
+                ):
+                    return None
+                context_state = RunMemoryContextState.model_validate(
+                    row.memory_context_state or {}
+                )
+                if context_state.initialized:
+                    return context_state
+                if not proposed.initialized:
+                    raise ValueError("run_memory_context_state_invalid")
+                # 固定上下文独立持久化，后续终态提取不得清空已初始化的空快照。
+                row.memory_context_state = proposed.model_dump(mode="json")
+                row.updated_at = db_now or now_utc()
+                return proposed
 
     async def reserve_llm_request(self, command: ReserveLlmRequestCommand) -> int | None:
         """Atomically reserve one provider call under a live execution lease."""
@@ -1134,6 +1190,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     command.failed_at,
                 )
                 result = run_to_domain(row)
+        await self._wake_memory(result.owner_id)
         return result
 
     async def decide_tool_approval(
@@ -1381,6 +1438,16 @@ class SqlAlchemyRunRepository(RunRepository):
         return await self._finish_tool_call_transaction(command)
 
     async def _finish_tool_call_transaction(
+        self,
+        command: FinishToolCallCommand,
+    ) -> Run | None:
+        """在工具失败事务提交后补做记忆唤醒，提交失败不唤醒。"""
+        result = await self._finish_tool_call_transaction_inner(command)
+        if result is not None and result.status is RunStatus.FAILED:
+            await self._wake_memory(result.owner_id)
+        return result
+
+    async def _finish_tool_call_transaction_inner(
         self,
         command: FinishToolCallCommand,
     ) -> Run | None:
@@ -1947,6 +2014,7 @@ class SqlAlchemyRunRepository(RunRepository):
 
     async def finish(self, command: FinishRunCommand) -> Run | None:
         """在租约有效时原子保存最终消息、usage 和 completed event。"""
+        result: Run | None = None
         async with self._session_factory() as session:
             async with session.begin():
                 row = await self._lock_worker_run(
@@ -1973,6 +2041,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     row.safe_error_code = "tool_outcome_unknown"
                     row.finished_at = command.finished_at
                     row.updated_at = command.finished_at
+                    self._mark_memory_pending(row, command.finished_at)
                     self._clear_lease(row)
                     await self._close_pending_input(session, row, command.finished_at)
                     await self._append_event(
@@ -1981,33 +2050,37 @@ class SqlAlchemyRunRepository(RunRepository):
                         RunFailedPayload(safe_error_code="tool_outcome_unknown"),
                         command.finished_at,
                     )
-                    return run_to_domain(row)
-                if (
+                    result = run_to_domain(row)
+                elif (
                     command.reply_message.session_id != row.session_id
                     or command.reply_message.owner_id != row.owner_id
                     or command.reply_message.run_id != row.id
                     or command.reply_message.role is not ConversationRole.ASSISTANT
                 ):
                     raise RunStateError("run_reply_message_invalid")
-                reply = await self._messages.append_conversation_in_session(
-                    session,
-                    command.reply_message,
-                    locked_session=locked_session,
-                    managed_run_id=row.id,
-                )
-                row.status = RunStatus.COMPLETED.value
-                row.finished_at = command.finished_at
-                row.updated_at = command.finished_at
-                row.safe_error_code = None
-                row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
-                self._clear_lease(row)
-                await self._append_event(
-                    session,
-                    row,
-                    RunCompletedPayload(assistant_message_id=reply.id),
-                    command.finished_at,
-                )
-                result = run_to_domain(row)
+                else:
+                    reply = await self._messages.append_conversation_in_session(
+                        session,
+                        command.reply_message,
+                        locked_session=locked_session,
+                        managed_run_id=row.id,
+                    )
+                    row.status = RunStatus.COMPLETED.value
+                    row.finished_at = command.finished_at
+                    row.updated_at = command.finished_at
+                    row.safe_error_code = None
+                    self._mark_memory_pending(row, command.finished_at)
+                    row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
+                    self._clear_lease(row)
+                    await self._append_event(
+                        session,
+                        row,
+                        RunCompletedPayload(assistant_message_id=reply.id),
+                        command.finished_at,
+                    )
+                    result = run_to_domain(row)
+        if result is not None:
+            await self._wake_memory(result.owner_id)
         return result
 
     async def fail(self, command: FailRunCommand) -> Run | None:
@@ -2103,6 +2176,7 @@ class SqlAlchemyRunRepository(RunRepository):
                 row.safe_error_code = command.safe_error_code
                 row.finished_at = command.failed_at
                 row.updated_at = command.failed_at
+                self._mark_memory_pending(row, command.failed_at)
                 row.report_message_id = report_message_id
                 row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
                 self._clear_lease(row)
@@ -2118,6 +2192,8 @@ class SqlAlchemyRunRepository(RunRepository):
                     command.failed_at,
                 )
                 result = run_to_domain(row)
+        if result is not None:
+            await self._wake_memory(result.owner_id)
         return result
 
     async def settle_cancelled(
@@ -2144,10 +2220,13 @@ class SqlAlchemyRunRepository(RunRepository):
                 row.status = RunStatus.CANCELLED.value
                 row.finished_at = cancelled_at
                 row.updated_at = cancelled_at
+                self._mark_memory_pending(row, cancelled_at)
                 self._clear_lease(row)
                 await self._close_pending_input(session, row, cancelled_at)
                 await self._append_event(session, row, RunCancelledPayload(), cancelled_at)
                 result = run_to_domain(row)
+        if result is not None:
+            await self._wake_memory(result.owner_id)
         return result
 
     async def reclaim_expired(self, *, limit: int) -> tuple[Run, ...]:
@@ -2217,6 +2296,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     row.safe_error_code = None if was_cancelling else "execution_interrupted"
                     row.finished_at = db_now
                     row.updated_at = db_now
+                    self._mark_memory_pending(row, db_now)
                     row.execution_epoch += 1
                     self._clear_lease(row)
                     await self._close_pending_input(session, row, db_now)
@@ -2227,6 +2307,8 @@ class SqlAlchemyRunRepository(RunRepository):
                     )
                     await self._append_event(session, row, payload, db_now)
                     reclaimed.append(run_to_domain(row))
+        for reclaimed_run in reclaimed:
+            await self._wake_memory(reclaimed_run.owner_id)
         return tuple(reclaimed)
 
     async def cancel(
@@ -2261,6 +2343,7 @@ class SqlAlchemyRunRepository(RunRepository):
                     row.status = RunStatus.CANCELLED.value
                     row.finished_at = now
                     row.updated_at = now
+                    self._mark_memory_pending(row, now)
                     await self._close_pending_input(session, row, now)
                     self._clear_lease(row)
                     payload: RunEventPayload = RunCancelledPayload()
@@ -2273,6 +2356,8 @@ class SqlAlchemyRunRepository(RunRepository):
                     return run_to_domain(row)
                 await self._append_event(session, row, payload, now)
                 result = run_to_domain(row)
+        if result is not None and result.status is RunStatus.CANCELLED:
+            await self._wake_memory(result.owner_id)
         return result
 
     async def retry(
@@ -2291,7 +2376,7 @@ class SqlAlchemyRunRepository(RunRepository):
         """幂等重试 failed Run，沿用原 trigger 和 cutoff、绑定当前默认版本。"""
         async with self._session_factory() as session:
             async with session.begin():
-                await self._lock_session(session, session_id, owner_id)
+                locked_session = await self._lock_session(session, session_id, owner_id)
                 source = await session.scalar(
                     select(RunModel)
                     .where(
@@ -2369,6 +2454,10 @@ class SqlAlchemyRunRepository(RunRepository):
                         existing=(),
                         incoming=tuple(source.input_file_ids),
                     )
+                    inherited_skip = (
+                        source.memory_extraction_status
+                        == ExtractionStatus.SKIPPED.value
+                    )
                     created_at = await self._next_run_created_at(session, session_id)
                     row = RunModel(
                         id=new_run_id,
@@ -2384,6 +2473,20 @@ class SqlAlchemyRunRepository(RunRepository):
                         compression_policy_version_id=compression_policy_id,
                         skill_snapshot=skill_snapshot.model_dump(mode="json"),
                         input_file_ids=list(input_file_ids),
+                        memory_project_id=locked_session.project_id,
+                        memory_input_message_ids=[source.trigger_message_id],
+                        memory_extraction_status=(
+                            ExtractionStatus.SKIPPED.value
+                            if inherited_skip
+                            else None
+                        ),
+                        memory_extracted_at=now if inherited_skip else None,
+                        memory_extraction_safe_error_code=(
+                            source.memory_extraction_safe_error_code
+                            or "memory_source_invalidated"
+                            if inherited_skip
+                            else None
+                        ),
                         prompt_template_version=prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -2414,6 +2517,33 @@ class SqlAlchemyRunRepository(RunRepository):
                     )
                     result = run_to_domain(row)
         return result
+
+    def _mark_memory_pending(self, row: RunModel, terminal_at: datetime) -> None:
+        """在 Run 终态事务内标记待提取，并保留已失效输入和固定上下文。"""
+        if not self._memory_lifecycle_enabled:
+            return
+        if row.memory_extraction_status == ExtractionStatus.SKIPPED.value:
+            row.memory_extracted_at = row.memory_extracted_at or terminal_at
+            row.updated_at = terminal_at
+            return
+        row.memory_extraction_status = ExtractionStatus.PENDING.value
+        row.memory_extracted_at = None
+        row.memory_extraction_batch_id = None
+        row.memory_extraction_safe_error_code = None
+        row.updated_at = terminal_at
+
+    async def _wake_memory(self, owner_id: str) -> None:
+        """在 Run 事务提交后尽力唤醒固定用户任务，失败由扫描补偿。"""
+        if self._memory_wakeup is None:
+            return
+        try:
+            await self._memory_wakeup.wake_user(owner_id)
+        except Exception as error:
+            logger.warning(
+                "memory_wakeup_failed owner_id=%s exception_type=%s",
+                owner_id,
+                type(error).__name__,
+            )
 
     async def get(self, session_id: str, owner_id: str, run_id: str) -> Run | None:
         """通过未删除 Session 作用域读取 Run。"""
@@ -3560,6 +3690,7 @@ class SqlAlchemyRunRepository(RunRepository):
         run.safe_error_code = safe_error_code
         run.finished_at = failed_at
         run.updated_at = failed_at
+        self._mark_memory_pending(run, failed_at)
         self._clear_lease(run)
         await self._close_pending_input(session, run, failed_at)
         await self._append_event(

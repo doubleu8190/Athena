@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from adapter.auth.model import UserModel
+from adapter.memory.model import MemorySettingModel
 from adapter.models import Base
 from adapter.project.model import ProjectModel
+from adapter.run.model import RunModel
 from adapter.session.converter import session_to_domain
 from adapter.session.model import SessionModel
 from adapter.session.repository import SqlAlchemySessionRepository
@@ -415,3 +417,171 @@ def test_repository_soft_deletes_idempotently_and_isolates_owners() -> None:
             await engine.dispose()
 
     _run(scenario())
+
+
+def test_soft_delete_invalidates_session_memory_generation_and_keeps_other_runs() -> None:
+    """删除 Session 只失效本会话来源，并保留固定上下文和其他待处理 Run。"""
+
+    async def scenario() -> None:
+        engine, session_factory, repository = await _make_repository()
+        try:
+            await _seed_user(session_factory, "user_1")
+            await _seed_project(session_factory, "project_1", "user_1")
+            await repository.create(
+                _session(
+                    "session_delete",
+                    project_id="project_1",
+                    last_message_sequence=1,
+                )
+            )
+            await repository.create(
+                _session(
+                    "session_keep",
+                    project_id="project_1",
+                    last_message_sequence=1,
+                )
+            )
+            timestamp = datetime(2026, 1, 1, 14, 0, tzinfo=UTC)
+            fixed_context = {
+                "initialized": True,
+                "references": [
+                    {
+                        "memory_id": "memory_keep",
+                        "version": 2,
+                        "scope_key": "personal",
+                    }
+                ],
+            }
+            async with session_factory() as session, session.begin():
+                session.add_all(
+                    [
+                        MemorySettingModel(
+                            namespace_id="user_1",
+                            read_enabled=True,
+                            auto_extract_enabled=True,
+                            generation=3,
+                        ),
+                        _memory_run(
+                            "run_delete",
+                            "session_delete",
+                            timestamp,
+                            status="completed",
+                            extraction_status="pending",
+                            context_state=fixed_context,
+                        ),
+                        _memory_run(
+                            "run_delete_unfinished",
+                            "session_delete",
+                            timestamp,
+                            status="failed",
+                            extraction_status=None,
+                            finished_at=None,
+                            context_state=fixed_context,
+                        ),
+                        _memory_run(
+                            "run_keep",
+                            "session_keep",
+                            timestamp,
+                            status="completed",
+                            extraction_status="pending",
+                            context_state=fixed_context,
+                        ),
+                    ]
+                )
+
+            assert await repository.soft_delete(
+                "user_1",
+                "session_delete",
+                timestamp,
+            )
+
+            async with session_factory() as session:
+                deleted_run = await session.get(RunModel, "run_delete")
+                unfinished_run = await session.get(RunModel, "run_delete_unfinished")
+                kept_run = await session.get(RunModel, "run_keep")
+                setting = await session.get(MemorySettingModel, "user_1")
+                assert deleted_run is not None
+                assert deleted_run.memory_extraction_status == "skipped"
+                assert deleted_run.memory_extraction_safe_error_code == (
+                    "memory_session_deleted"
+                )
+                assert deleted_run.memory_context_state == fixed_context
+                assert unfinished_run is not None
+                assert unfinished_run.memory_extraction_status == "skipped"
+                assert unfinished_run.memory_extracted_at is None
+                assert unfinished_run.memory_context_state == fixed_context
+                assert kept_run is not None
+                assert kept_run.memory_extraction_status == "pending"
+                assert kept_run.memory_context_state == fixed_context
+                assert setting is not None
+                assert setting.generation == 4
+
+            assert await repository.soft_delete(
+                "user_1",
+                "session_delete",
+                timestamp + timedelta(minutes=1),
+            )
+            async with session_factory() as session:
+                setting = await session.get(MemorySettingModel, "user_1")
+                assert setting is not None
+                assert setting.generation == 4
+        finally:
+            await engine.dispose()
+
+    _run(scenario())
+
+
+def _memory_run(
+    run_id: str,
+    session_id: str,
+    timestamp: datetime,
+    *,
+    status: str,
+    extraction_status: str | None,
+    finished_at: datetime | None | object = ...,
+    context_state: dict[str, object] | None = None,
+) -> RunModel:
+    """构造 Session 删除测试所需的最小记忆 Run。"""
+    resolved_finished_at = timestamp if finished_at is ... else finished_at
+    assert resolved_finished_at is None or isinstance(resolved_finished_at, datetime)
+    return RunModel(
+        id=run_id,
+        session_id=session_id,
+        owner_id="user_1",
+        status=status,
+        trigger_message_id=f"message_{run_id}",
+        context_cutoff_sequence=1,
+        retry_of_run_id=None,
+        model_config_version_id="profile_1",
+        main_prompt_version_id="prompt_main",
+        compression_prompt_version_id="prompt_compression",
+        compression_policy_version_id=None,
+        skill_snapshot=None,
+        input_file_ids=[],
+        memory_project_id="project_1",
+        memory_input_message_ids=[f"message_{run_id}"],
+        memory_context_state=context_state or {},
+        memory_extraction_status=extraction_status,
+        memory_extracted_at=None,
+        memory_extraction_batch_id=None,
+        memory_extraction_safe_error_code=None,
+        tool_snapshot=None,
+        auth_session_id=None,
+        llm_request_count=0,
+        prompt_template_version="run-v2",
+        event_sequence=0,
+        execution_epoch=0,
+        worker_id=None,
+        lease_expires_at=None,
+        execution_started_at=None,
+        execution_deadline_at=None,
+        queued_at=timestamp,
+        first_started_at=None,
+        finished_at=resolved_finished_at,
+        created_at=timestamp,
+        updated_at=timestamp,
+        cancel_requested_at=None,
+        safe_error_code=None,
+        report_message_id=None,
+        usage={},
+    )

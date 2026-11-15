@@ -1,7 +1,7 @@
 # ==============================================================================
 # Athena v2 生产环境容器编排配置 (Docker Compose)
 # ------------------------------------------------------------------------------
-# 业务范围：仅编排 Athena 项目自身的前后端代码服务（frontend, backend-api, backend-worker）
+# 业务范围：编排 Athena 自身的前端、API、Run Worker 与可选 Memory Worker。
 # 外部依赖（PostgreSQL、Redis、MinIO）均由外部基础设施提供，并通过环境变量或 .env 注入连接
 # ==============================================================================
 
@@ -48,6 +48,25 @@ x-backend-environment: &backend-environment
   ATHENA_KNOWLEDGE_MINIO_SECRET_KEY: ${ATHENA_KNOWLEDGE_MINIO_SECRET_KEY:-}
   ATHENA_KNOWLEDGE_MINIO_BUCKET: ${ATHENA_KNOWLEDGE_MINIO_BUCKET:-}
   ATHENA_KNOWLEDGE_MINIO_SECURE: ${ATHENA_KNOWLEDGE_MINIO_SECURE:-false}
+
+  # 长期记忆总开关、生命周期与固定模型身份
+  ATHENA_MEMORY_ENABLED: ${ATHENA_MEMORY_ENABLED:-false}
+  ATHENA_MEMORY_LIFECYCLE_ENABLED: ${ATHENA_MEMORY_LIFECYCLE_ENABLED:-false}
+  ATHENA_MEMORY_EMBEDDING_MODEL: ${ATHENA_MEMORY_EMBEDDING_MODEL:-BAAI/bge-m3}
+  ATHENA_MEMORY_EMBEDDING_REVISION: ${ATHENA_MEMORY_EMBEDDING_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
+  ATHENA_MEMORY_EMBEDDING_DEVICE: ${ATHENA_MEMORY_EMBEDDING_DEVICE:-cpu}
+  ATHENA_MEMORY_RERANKER_MODEL: ${ATHENA_MEMORY_RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+  ATHENA_MEMORY_RERANKER_REVISION: ${ATHENA_MEMORY_RERANKER_REVISION:-953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e}
+  ATHENA_MEMORY_RERANKER_DEVICE: ${ATHENA_MEMORY_RERANKER_DEVICE:-cpu}
+  ATHENA_MEMORY_TOKENIZER: ${ATHENA_MEMORY_TOKENIZER:-BAAI/bge-m3}
+  ATHENA_MEMORY_TOKENIZER_REVISION: ${ATHENA_MEMORY_TOKENIZER_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
+  ATHENA_MEMORY_VECTOR_MIN_SCORE: ${ATHENA_MEMORY_VECTOR_MIN_SCORE:-0.70}
+  ATHENA_MEMORY_RERANK_MIN_SCORE: ${ATHENA_MEMORY_RERANK_MIN_SCORE:-0.30}
+  ATHENA_MEMORY_TIMEOUT_SECONDS: ${ATHENA_MEMORY_TIMEOUT_SECONDS:-60}
+  ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE: ${ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE:-}
+  ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS: ${ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS:-1000}
+  ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS: ${ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS:-2000}
+  ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT: ${ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT:-200}
 
   # 结构化应用日志级别
   ATHENA_LOG_LEVEL: ${ATHENA_LOG_LEVEL:-INFO}
@@ -149,7 +168,43 @@ services:
       - athena-network
 
   # ============================================================================
-  # 4. 可选数据库迁移辅助服务 (Database Migration Profile)
+  # 4. 长期记忆生命周期 Worker
+  # ============================================================================
+  # 两个记忆开关同时启用时由单个进程顺序消费提取、扫描、归档和清理任务。
+  backend-memory-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      args:
+        INSTALL_KNOWLEDGE: ${ATHENA_INSTALL_KNOWLEDGE:-false}
+    image: athena-backend:latest
+    container_name: athena-backend-memory-worker
+    command: ["memory-worker"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      <<: *backend-environment
+      ATHENA_MEMORY_WORKER_POLL_SECONDS: ${ATHENA_MEMORY_WORKER_POLL_SECONDS:-1}
+      ATHENA_MEMORY_EXTRACT_BATCH_RUNS: ${ATHENA_MEMORY_EXTRACT_BATCH_RUNS:-20}
+      ATHENA_MEMORY_EXTRACT_BATCH_TOKENS: ${ATHENA_MEMORY_EXTRACT_BATCH_TOKENS:-12000}
+      ATHENA_MEMORY_EXTRACTION_OUTPUT_TOKENS: ${ATHENA_MEMORY_EXTRACTION_OUTPUT_TOKENS:-4000}
+      ATHENA_MEMORY_DECISION_OUTPUT_TOKENS: ${ATHENA_MEMORY_DECISION_OUTPUT_TOKENS:-4000}
+      ATHENA_MEMORY_DECISION_CONTEXT_TOKENS: ${ATHENA_MEMORY_DECISION_CONTEXT_TOKENS:-8000}
+      ATHENA_MEMORY_FACT_ARCHIVE_DAYS: ${ATHENA_MEMORY_FACT_ARCHIVE_DAYS:-180}
+      ATHENA_MEMORY_OTHER_ARCHIVE_DAYS: ${ATHENA_MEMORY_OTHER_ARCHIVE_DAYS:-365}
+    volumes:
+      - athena-var:/app/var
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    # 开关关闭时退出码为 0，不触发重启；真实崩溃时最多重试五次。
+    restart: on-failure:5
+    networks:
+      - athena-network
+
+  # ============================================================================
+  # 5. 可选数据库迁移辅助服务 (Database Migration Profile)
   # ============================================================================
   # 执行方式：docker compose run --rm backend-migration
   # 也可通过已有容器直接执行：docker compose run --rm backend-api migrate

@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.knowledge.repository import KnowledgeRepository
+from adapter.memory.repository import MemoryControlSourceRepository, MemoryRepository
 from app.file.service import SessionFileService
 from app.knowledge.service import KnowledgeService
 from app.memory.service import MemoryService
@@ -27,6 +28,7 @@ from bootstrap.knowledge import build_knowledge_models, build_knowledge_original
 from domain.auth import CurrentSessionReader
 from domain.knowledge.ports import KnowledgeRepositoryPort, OriginalStore
 from domain.mcp import McpToolExecutor, McpToolRuntimeReader
+from domain.memory.ports import MemoryLifecycleRepositoryPort
 from domain.session import SessionRepository
 from infrastructure.embedding import LocalEmbedding
 from infrastructure.embedding.profile import embedding_profile_id
@@ -54,6 +56,7 @@ class QueryServiceBundle:
     knowledge_enabled: bool
     _startables: tuple[Any, ...]
     _closables: tuple[Any, ...]
+    memory_lifecycle: MemoryLifecycleRepositoryPort | None = None
 
     async def start(self) -> None:
         """Start lazily loaded local models before the first query."""
@@ -95,6 +98,10 @@ def build_query_services(
     knowledge_enabled = knowledge_service is not None or env_flag(
         "ATHENA_KNOWLEDGE_ENABLED", default=False
     )
+    memory_lifecycle_enabled = env_flag(
+        "ATHENA_MEMORY_LIFECYCLE_ENABLED",
+        default=False,
+    )
     startables: list[Any] = []
     closables: list[Any] = []
     memory = memory_service
@@ -128,8 +135,13 @@ def build_query_services(
             os.getenv("ATHENA_MEMORY_RERANKER_DEVICE", "cpu"),
         )
         counter = LocalTokenCounter(tokenizer_model, tokenizer_revision)
+        memory_repository = MemoryRepository(sessions)
+        keyword_fallback_raw = os.getenv(
+            "ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE",
+            "",
+        ).strip()
         memory = MemoryService(
-            _memory_repository(sessions),
+            memory_repository,
             embedding,
             reranker,
             counter,
@@ -138,10 +150,10 @@ def build_query_services(
             timeout_seconds=float(os.getenv("ATHENA_MEMORY_TIMEOUT_SECONDS", "60")),
             rerank_min_score=float(os.getenv("ATHENA_MEMORY_RERANK_MIN_SCORE", "0.30")),
             keyword_fallback_min_score=(
-                float(os.environ["ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE"])
-                if "ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE" in os.environ
-                else None
+                float(keyword_fallback_raw) if keyword_fallback_raw else None
             ),
+            lifecycle=memory_repository,
+            control_source=MemoryControlSourceRepository(sessions),
         )
         startables.extend((embedding, reranker, counter))
         closables.extend((embedding, reranker, counter))
@@ -183,13 +195,10 @@ def build_query_services(
         knowledge_enabled=knowledge_enabled,
         _startables=tuple(startables),
         _closables=tuple(closables),
+        memory_lifecycle=(
+            memory.lifecycle_repository if memory_lifecycle_enabled and memory is not None else None
+        ),
     )
-
-
-def _memory_repository(sessions: async_sessionmaker[AsyncSession]) -> Any:
-    from adapter.memory.repository import MemoryRepository
-
-    return MemoryRepository(sessions)
 
 
 def build_mcp_executor(

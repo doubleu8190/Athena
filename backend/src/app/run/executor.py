@@ -23,6 +23,7 @@ from app.run.context import (
     count_plain_text_tokens_async,
     measure_llm_request,
 )
+from app.run.memory_context import RunContextMessage, RunMemoryContextManager
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import (
     MCP_DELIVERY_AUTH_TIMEOUT_SECONDS,
@@ -50,6 +51,13 @@ from domain.llm.model import (
 from domain.llm.model.profile import RuntimeModelProfile
 from domain.llm.ports import LlmRuntimeTextProvider, LlmStreamProvider
 from domain.llm.profile_ports import CompressionPolicyRepository, ModelProfileRepository
+from domain.memory.lifecycle import (
+    MemoryContextItem,
+    RunMemoryContextReference,
+    RunMemoryContextState,
+)
+from domain.memory.model import AccessContext
+from domain.memory.ports import MemoryLifecycleRepositoryPort
 from domain.message import (
     ArtifactFileRef,
     ConversationMessage,
@@ -70,6 +78,7 @@ from domain.run.model import (
     ContextStopReason,
     FailRunCommand,
     FinishRunCommand,
+    InitializeRunMemoryContextCommand,
     RecordRunUsageCommand,
     RequestRunInputCommand,
     Run,
@@ -182,6 +191,9 @@ class _ExecutionState:
     retry_context: tuple[ToolRetryContext, ...]
     input_files: tuple[RunInputFileContext, ...]
     event_cursor: int
+    memory_items: tuple[MemoryContextItem, ...] = ()
+    memory_context_state: RunMemoryContextState | None = None
+    memory_retry_blocked: bool = False
     round: int = 0
     publish_disabled: bool = False
 
@@ -209,6 +221,10 @@ class RunExecutor:
         tool_runtime: RunToolRuntime | None = None,
         publisher: RunProgressPublisher | None = None,
         config: RunWorkerConfig | None = None,
+        memory_lifecycle: MemoryLifecycleRepositoryPort | None = None,
+        memory_personal_token_budget: int = 1_000,
+        memory_project_token_budget: int = 2_000,
+        memory_per_scope_limit: int = 200,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -221,6 +237,16 @@ class RunExecutor:
         self._tool_runtime = tool_runtime
         self._publisher = publisher or NullRunProgressPublisher()
         self._config = config or RunWorkerConfig()
+        self._memory_context = (
+            None
+            if memory_lifecycle is None
+            else RunMemoryContextManager(
+                memory_lifecycle,
+                personal_token_budget=memory_personal_token_budget,
+                project_token_budget=memory_project_token_budget,
+                per_scope_limit=memory_per_scope_limit,
+            )
+        )
         self._id_factory = id_factory
         self._clock = clock
         self._sleep = sleep
@@ -435,7 +461,7 @@ class RunExecutor:
                 response = await self._complete_with_retry(
                     state,
                     request,
-                    allow_retry=not final_only,
+                    allow_retry=not final_only and not state.memory_retry_blocked,
                 )
             except _UseFinalAnswerSlot:
                 # 最后一个预算槽位留给无工具的最终回答，回到循环重新构建请求。
@@ -510,6 +536,12 @@ class RunExecutor:
             if build_skill_context is None
             else await build_skill_context(run, loaded_skill_ids)
         )
+        memory_content, messages, memory_retry_blocked = await self._prepare_memory_context(
+            state,
+            runtime,
+            messages,
+        )
+        state.memory_retry_blocked = memory_retry_blocked
         # 安全裁决永远使用原业务 tools；final-only 只在裁决通过后移除工具。
         business_tools = self._available_tools(state)
         # 剩余执行时间就是本轮上下文构建与压缩的硬上限。
@@ -530,6 +562,7 @@ class RunExecutor:
                     messages,
                     business_tools,
                     skill_context,
+                    memory_content,
                     remaining,
                     ContextStopReason.COMPRESSION_NOT_CONFIGURED,
                 )
@@ -546,6 +579,7 @@ class RunExecutor:
                     retry_context=state.retry_context,
                     skill_context=skill_context,
                     input_files=state.input_files,
+                    memory_context=memory_content,
                     budget=state.budget,
                     allow_compression=state.budget.can_compress,
                 )
@@ -561,6 +595,7 @@ class RunExecutor:
                 messages,
                 business_tools,
                 skill_context,
+                memory_content,
                 remaining,
                 stop_hint,
             )
@@ -623,6 +658,7 @@ class RunExecutor:
         messages: tuple[ConversationMessage | ExecutionMessage, ...],
         tools: tuple[LlmTool, ...],
         skill_context: RunSkillPromptContext | None,
+        memory_context: str,
         timeout_seconds: float,
         stop_hint: ContextStopReason,
     ) -> ContextPreparation:
@@ -637,6 +673,7 @@ class RunExecutor:
             retry_context=state.retry_context,
             skill_context=skill_context,
             input_files=state.input_files,
+            memory_context=memory_context,
         )
         return ContextPreparation(
             messages=llm_messages,
@@ -666,6 +703,107 @@ class RunExecutor:
                 input_schema=dict(item.input_schema),
             )
             for item in definitions
+        )
+
+    async def _prepare_memory_context(
+        self,
+        state: _ExecutionState,
+        runtime: RuntimeModelProfile,
+        messages: tuple[RunContextMessage, ...],
+    ) -> tuple[str, tuple[RunContextMessage, ...], bool]:
+        """首轮固定 always 记忆，之后只复核原条目与历史检索结果。"""
+        manager = self._memory_context
+        if manager is None:
+            return "", messages, False
+        if state.memory_context_state is None:
+            state.memory_context_state = state.run.memory_context_state
+        access = self._memory_access(state)
+        prepare_access = access or AccessContext(
+            namespace_id=state.run.owner_id,
+            readable_scopes=(),
+            writable_scopes=(),
+        )
+        project_scope_key = (
+            None
+            if state.run.memory_project_id is None
+            else f"project:{state.run.memory_project_id}"
+        )
+        if not state.memory_context_state.initialized:
+            built_items: tuple[MemoryContextItem, ...] = ()
+            if access is not None:
+                try:
+                    built_items = await manager.build(
+                        access,
+                        project_scope_key=project_scope_key,
+                        tokenizer_encoding=runtime.version.tokenizer_encoding,
+                    )
+                except Exception:
+                    built_items = ()
+            proposed = self._memory_context_state(built_items)
+            fixed = await self._repository.initialize_memory_context(
+                InitializeRunMemoryContextCommand(
+                    run_id=state.run.id,
+                    worker_id=state.run.worker_id or "",
+                    execution_epoch=state.run.execution_epoch,
+                    context_state=proposed,
+                )
+            )
+            if fixed is None:
+                raise LlmError("run_execution_lease_lost")
+            state.memory_context_state = fixed
+            state.memory_items = built_items if fixed == proposed else ()
+        prepared = await manager.prepare(
+            prepare_access,
+            items=state.memory_items,
+            references=tuple(
+                (item.memory_id, item.version, item.scope_key)
+                for item in state.memory_context_state.references
+            ),
+            tokenizer_encoding=runtime.version.tokenizer_encoding,
+            messages=messages,
+            project_id=state.run.memory_project_id,
+        )
+        state.memory_items = prepared.items
+        return prepared.content, prepared.messages, prepared.contains_memory
+
+    @staticmethod
+    def _memory_context_state(
+        items: tuple[MemoryContextItem, ...],
+    ) -> RunMemoryContextState:
+        """把已装配条目收敛为只含 ID、版本和 scope 的持久引用。"""
+        return RunMemoryContextState(
+            initialized=True,
+            references=tuple(
+                RunMemoryContextReference(
+                    memory_id=item.memory_id,
+                    version=item.version,
+                    scope_key=item.scope_key,
+                )
+                for item in items
+            ),
+        )
+
+    @staticmethod
+    def _memory_access(state: _ExecutionState) -> AccessContext | None:
+        """只按 Run 固定 owner/project 构造可读范围，管理员身份不扩权。
+
+        无工具运行时不会加载实时授权对象，但 Run 创建事务已经固定 owner 与
+        project；scope 启用状态和项目删除屏障仍由生命周期仓储在每次读取时复核。
+        """
+        project_id = state.run.memory_project_id
+        if (
+            project_id is not None
+            and state.authorized is not None
+            and state.authorized.project_id != project_id
+        ):
+            return None
+        scopes = ["personal"]
+        if project_id is not None:
+            scopes.append(f"project:{project_id}")
+        return AccessContext(
+            namespace_id=state.run.owner_id,
+            readable_scopes=tuple(scopes),
+            writable_scopes=(),
         )
 
     async def _complete_with_retry(

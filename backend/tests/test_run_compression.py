@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1023,6 +1023,61 @@ def _prepare_test_context(
         for i in range(1, 5)
     )
     return base, lease, compression_runtime, policy, messages
+
+
+def test_memory_wrapper_is_counted_in_main_request_measurement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """长期记忆包装必须进入主请求 token 预算，而不是仅附加到消息。"""
+
+    async def scenario() -> None:
+        base, _, _, _, messages = _prepare_test_context(
+            previous_summary=None,
+            provider=SimpleNamespace(),
+        )
+        memory_context = (
+            "<untrusted_long_term_memory>\n本项目始终使用 PostgreSQL。"
+            "\n</untrusted_long_term_memory>"
+        )
+        captured: dict[str, Any] = {}
+
+        async def fake_measure(
+            run: Run,
+            active: Sequence[ConversationMessage | ExecutionMessage],
+            profile: ModelProfileVersion,
+            **kwargs: Any,
+        ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
+            del run, active, profile
+            captured.update(kwargs)
+            return (), (), 321 if kwargs["memory_context"] else 100, 50
+
+        monkeypatch.setattr(compression_module, "measure_llm_request", fake_measure)
+        compressor = ContextCompressor(
+            cast(RunRepository, _RunRepositoryFake()),
+            cast(Any, SimpleNamespace()),
+            cast(LlmRuntimeTextProvider, SimpleNamespace()),
+            SimpleNamespace(publish_persisted=AsyncMock()),
+        )
+
+        prepared = await compressor._measure_context(
+            base,
+            messages,
+            _main_runtime_for_prepare(),
+            main_prompt=TEST_MAIN_PROMPT,
+            timeout_seconds=30,
+            summary_text=None,
+            tools=(),
+            retry_context=(),
+            skill_context=None,
+            input_files=(),
+            memory_context=memory_context,
+        )
+
+        assert captured["memory_context"] == memory_context
+        assert prepared.input_tokens == 321
+        assert prepared.output_tokens == 50
+
+    asyncio.run(scenario())
 
 
 class _RecoverableCompressionRepository(_RunRepositoryFake):

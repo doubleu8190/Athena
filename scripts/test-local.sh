@@ -7,7 +7,8 @@
 #     1. FastAPI 后端 API 服务 (http://127.0.0.1:8000)
 #     2. 独立 Run Worker 异步任务调度进程
 #     3. (可选) 独立 Knowledge Worker 知识库解析进程
-#     4. 前端 Vite 开发服务器 (http://localhost:5173)
+#     4. (可选) 独立 Memory Worker 记忆生命周期进程
+#     5. 前端 Vite 开发服务器 (http://localhost:5173)
 #   自动自愈检查底层基础设施容器（PostgreSQL、Redis、MinIO），自动加载测试安全凭据，
 #   并在退出时通过独立进程组（kill -TERM -- "-$pid"）完整清理所有子进程，杜绝孤儿进程。
 #
@@ -259,6 +260,26 @@ start_service() {
 printf '\n'
 start_service "API 服务 (http://127.0.0.1:8000)" .venv/bin/python -m uvicorn main:create_app --factory --app-dir backend/src --host 127.0.0.1 --port 8000
 start_service "Run Worker 任务调度" .venv/bin/python -m run_worker
+memory_flag="$(printf '%s' "${ATHENA_MEMORY_ENABLED:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+lifecycle_flag="$(printf '%s' "${ATHENA_MEMORY_LIFECYCLE_ENABLED:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+case "$memory_flag" in
+  1|true|yes|on)
+    case "$lifecycle_flag" in
+      1|true|yes|on)
+        start_service "Memory Worker 记忆生命周期" .venv/bin/python -m memory_worker
+        ;;
+      ''|0|false|no|off) ;;
+      *) fail "ATHENA_MEMORY_LIFECYCLE_ENABLED 值无效。" ;;
+    esac
+    ;;
+  ''|0|false|no|off)
+    case "$lifecycle_flag" in
+      ''|0|false|no|off) ;;
+      *) fail "记忆生命周期启用时必须同时启用 ATHENA_MEMORY_ENABLED。" ;;
+    esac
+    ;;
+  *) fail "ATHENA_MEMORY_ENABLED 值无效。" ;;
+esac
 if [[ "$RUN_KNOWLEDGE" == true ]]; then
   start_service "Knowledge Worker 知识库解析" .venv/bin/python -m knowledge_worker
 fi

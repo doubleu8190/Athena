@@ -22,7 +22,13 @@ from adapter.llm.model import (
     ModelProfileVersionModel,
 )
 from adapter.mcp.model import McpServerModel, McpToolModel
-from adapter.memory.model import MemoryModel, MemorySettingModel, MemorySourceModel
+from adapter.memory.model import (
+    MemoryJobModel,
+    MemoryModel,
+    MemoryScopeStateModel,
+    MemorySettingModel,
+    MemorySourceModel,
+)
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.project.model import ProjectModel
 from adapter.run.model import (
@@ -51,7 +57,9 @@ __all__ = [
     "ModelProfileVersionModel",
     "McpServerModel",
     "McpToolModel",
+    "MemoryJobModel",
     "MemoryModel",
+    "MemoryScopeStateModel",
     "MemorySettingModel",
     "MemorySourceModel",
     "KnowledgeBaseModel",

@@ -1,5 +1,8 @@
 # 记忆功能设计（产品决策与模块解耦边界）
 
+历史核心设计。当前生命周期以 [记忆全生命周期设计](memory-lifecycle-design.md) 为准；
+其中人工候选确认、自动提取接入与删除规则已由新方案更新。
+
 本文件描述已确认的产品决策和模块边界，不代表代码已实现或授权实施。
 本次修订只修改设计文档；已有实施草稿需在后续明确授权后重新核对。
 
@@ -379,20 +382,20 @@ pending也同步生成向量，确认时可复用。模型应用启动预热，�
 
 ```text
 recall(request: RecallRequest) -> RecallResult
-add(request: AddMemoryRequest) -> AddMemoryResult
+remember/correct/forget(ControlCommand) -> ControlReceiptResult
 ```
 
 | 契约 | 字段与行为 |
 | --- | --- |
 | RecallRequest | 可信访问上下文、选定 scopes、query、limit、token_budget、scope 优先顺序 |
 | RecallResult | hits（ID、正文、版本、scope、来源、相关度），以及 ok/degraded/disabled/unavailable 状态（完整字段见第 5 节） |
-| AddMemoryRequest | 可信写入上下文、目标 scope、content、sources、origin、pending/active、request_id |
-| AddMemoryResult | memory_id、version、当前生命周期状态、created/reused；不返回其他 scope 的内容 |
+| ControlCommand | 固定 Run/tool call、直接用户证据、目标版本和事务外已准备向量 |
+| ControlReceiptResult | operation、memory_id、superseded_memory_id、generation；不返回正文 |
 
 recall 只搜索请求中已授权的 scopes，不允许扩大访问范围；非法或越权 scope 返回
 明确领域错误。正常无命中为 ok + 空 hits，不能与检索失败混淆。
-add 校验范围、内容长度、状态及幂等；自动提取只能写 pending，明确保存或手工
-新增才能写 active，操作来源由可信服务端调用链确定，不能由模型自行声明。
+同步写入口只接受当前 Run 中唯一匹配的直接用户证据；参数、业务变更和幂等回执在
+同一事务提交。异步提取使用独立批次决策并复用同一写入核心与来源写入路径。
 参数无效、未授权、版本冲突、幂等冲突、存储不可用采用明确领域错误。
 
 核心提供edit/confirm/delete/list/settings及按范围删除的管理方法，使用同一
@@ -427,7 +430,7 @@ converter。HTTP 适配与跨领域协调放在核心之外；提取器不属于
 
 | 阶段 | 交付 | 依赖 |
 | --- | --- | --- |
-| M1 | 记忆核心、混合 recall/add、管理、设置、来源、幂等及并发控制 | PostgreSQL/pgvector、分词、Embedding、Reranker |
+| M1 | 记忆核心、混合 recall、同步控制、管理、来源、摘要幂等及并发控制 | PostgreSQL/pgvector、分词、Embedding、Reranker |
 | M1 集成 | 认证/范围映射、HTTP、来源解析和删除协调 | 现有认证/项目/Session/消息及核心公开接口 |
 | M2 | 明确保存意图、逐轮检索注入、来源解释 | Run、模型调用及上下文装配 |
 | M3 | 自动提取候选、确认界面、实际需要的任务执行规则 | M2、后台任务机制及前端 |

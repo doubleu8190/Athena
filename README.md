@@ -466,23 +466,57 @@ Run 仍保留原模型和压缩策略快照；若后续仍需调用没有密钥�
 
 ## 记忆核心
 
-记忆服务随应用在内部组装，当前提供 add、recall 及必要的管理用例，不暴露 HTTP
-接口或自动提取流程。设置 `ATHENA_MEMORY_ENABLED=true` 后才加载本地
-`BAAI/bge-m3`、`BAAI/bge-reranker-v2-m3` 和 BGE tokenizer；默认设备为 CPU。
-模型必须预先放在本地缓存中，启动不会下载权重。也可通过
-`create_app(memory_service=...)` 注入已组装服务。模型 revision 默认固定，
-可分别通过 `ATHENA_MEMORY_EMBEDDING_REVISION`、
-`ATHENA_MEMORY_RERANKER_REVISION` 和 `ATHENA_MEMORY_TOKENIZER_REVISION` 显式覆盖。
-可通过
-`ATHENA_MEMORY_EMBEDDING_MODEL`、`ATHENA_MEMORY_EMBEDDING_DEVICE`、
-`ATHENA_MEMORY_RERANKER_MODEL`、`ATHENA_MEMORY_RERANKER_DEVICE` 和
-`ATHENA_MEMORY_TOKENIZER` 覆盖模型及设备。检索可调
+长期记忆沿用 `ATHENA_MEMORY_ENABLED` 总开关，默认关闭。启用后，API 和 Run
+Worker 加载本地 `BAAI/bge-m3`、`BAAI/bge-reranker-v2-m3` 与 BGE tokenizer；
+Memory Worker 加载文本模型适配、embedding 和预算计数所需 tokenizer，不加载 reranker。模型必须预先放在
+本地缓存中，启动不会下载权重。API、Run Worker 与 Memory Worker 必须使用同一数据库、
+embedding 模型和固定 revision；不一致的 `embedding_profile_id` 会阻止旧向量被误用。
+模型 revision 由 `.env.example` 固定，部署方只应通过管理员模型配置切换文本模型。
+
+`ATHENA_MEMORY_LIFECYCLE_ENABLED=true` 还需与总开关同时启用。它负责终态 Run 的
+多 Run 联合提取、向量/全文 Top-K 检索与一次批量 ADD/UPDATE/IGNORE 决策、可靠唤醒扫描、
+每日归档和项目删除清理。正常有候选时调用文本模型两次：提取一次、整批决策一次，不逐条追加语义评审。首次启用
+从 Memory Worker 启动时间建立扫描边界，只处理此后新完成的 Run，不执行全历史回扫。
+Run 固定 owner、Session、项目、来源消息和模型版本。单个 Memory Worker 顺序处理
+完整 Run 批次，模型调用不持数据库锁；提交时锁用户状态行，复核 generation、成员、来源和设置，
+一次事务写入记忆与所有成员 Run 的处理状态。失效结果丢弃，超长单 Run 跳过，不分片。
+不支持同时运行多个 Memory Worker。普通 running 任务在 Worker 启动时恢复，已提交批次按
+Run 状态去重，不使用记忆任务租约、心跳或逐片恢复协议。
+
+读取只把 `always` 记忆作为优先固定上下文，`on_demand` 仅由检索工具获取；预算按完整
+条目计算，超预算条目不进入请求，避免正文被截断。每个模型请求前都会重新复核固定
+记忆和历史 `memory_search` 结果的 ID、版本与 scope；删除、纠正或关闭读取后，旧工具
+正文会从当前请求投影中移除，同时保留 tool call/result 配对。可通过
+`ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS`、`ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS`
+和 `ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT` 调整上下文边界。
+
+同步 `remember`、`correct`、`forget` 与明确整项目清理沿用 Run 工具审批链；只有事务
+提交成功才反馈完成，响应丢失时按控制键读取同事务回执。删除使用 `deleted_time` 无正文
+墓碑，不新增 `deleted` 生命周期状态；正文、来源、分类、加载策略和向量都会
+清空。数据库约束允许墓碑字段为 `NULL`，降级时为满足旧 schema 使用不含原内容的兼容
+哨兵。历史聊天正文不会被撤回。
+
+API 不因管理员没有配置默认文本模型而启动失败，读取和同步控制仍按各自配置工作；
+Memory Worker 启动时会明确验证默认模型版本，缺失时失败而不是静默跳过自动提取。
+Worker 的轮询、批次、输出和归档参数见 `.env.example` 的
+`ATHENA_MEMORY_*` 配置。检索阈值仍可通过
 `ATHENA_MEMORY_VECTOR_MIN_SCORE`（默认 `0.70`）、
 `ATHENA_MEMORY_RERANK_MIN_SCORE`（默认 `0.30`）和
-`ATHENA_MEMORY_TIMEOUT_SECONDS`（默认 `60`）；只有明确校准后才配置
+`ATHENA_MEMORY_TIMEOUT_SECONDS`（默认 `60`）调整；只有明确校准后才配置
 `ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE`，重排失败时不默认接纳关键词候选。
 重排阈值 `0.30` 来自少量中文正负样例的初始测量，部署前应在目标记忆语料上复核。
-迁移需要 PostgreSQL `vector` 和 `zhparser` 扩展。
+
+单独启动 Memory Worker：
+
+```sh
+.venv/bin/python -m memory_worker
+```
+
+`scripts/dev.sh` 在两个记忆开关同时启用时自动启动该进程。Docker Compose 的
+`backend-memory-worker` 也只在开关启用时持续运行；关闭时以状态码 `0` 退出，
+真实异常则由 `on-failure:5` 有界重启。迁移需要 PostgreSQL `vector` 和 `zhparser`
+扩展。记忆生命周期收缩及检索决策采用增量迁移 `20261125_0026`、`20261126_0027`，验证范围见
+[记忆验收报告](docs/memory-lifecycle-e2e-report.md)。
 
 ## 知识库与 MinIO
 

@@ -3,7 +3,7 @@
 # Athena v2 Docker 容器化测试环境启动与运维脚本
 # ==============================================================================
 # 业务功能：
-#   一键管理基于 Docker 容器化的 Athena 全栈测试环境（frontend, backend-api, backend-worker）。
+#   一键管理基于 Docker 容器化的 Athena 全栈测试环境（frontend、API、Run/Memory Worker）。
 #   自动检测并拉起底层外部中间件依赖（PostgreSQL, Redis, MinIO），执行数据库迁移并健康探活。
 #   采用 Base Image 架构：自动检查/构建 athena-backend-base:latest 固化第三方依赖，
 #   使后续每次业务代码变更重构均可达到秒级构建。
@@ -186,7 +186,7 @@ cmd_up() {
   info "执行测试数据库结构自动迁移 (Alembic migration)..."
   docker compose -p "$COMPOSE_PROJECT" --env-file "$ENV_TEST_FILE" run --rm backend-migration
 
-  info "构建并启动 Athena 业务测试容器 (frontend, backend-api, backend-worker)..."
+  info "构建并启动 Athena 业务测试容器 (frontend、API、Run/Memory Worker)..."
   docker compose -p "$COMPOSE_PROJECT" --env-file "$ENV_TEST_FILE" up -d --build
 
   # 从 .env.test 中提取暴露端口（缺省为 8080）

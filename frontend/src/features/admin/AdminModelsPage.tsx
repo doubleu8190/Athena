@@ -9,6 +9,7 @@ import {
   DisableDefaultModelDialog,
   ModelProfileCreateDialog,
 } from "./ModelProfileDialogs";
+import { AdminPagination, lastPageNumber } from "./AdminPagination";
 import {
   formatRatio,
   formatTokenCount,
@@ -26,6 +27,8 @@ import {
   modelCanBeDefault,
   type ModelProfile,
 } from "./model";
+
+const MODEL_PROFILE_PAGE_SIZE = 5;
 
 function ModelCapabilityList({ profile }: { profile: ModelProfile }) {
   const capabilities = modelCapabilities(profile);
@@ -49,11 +52,37 @@ export function AdminModelsPage() {
   const enabledMutation = useSetModelProfileEnabledMutation();
   const defaultMutation = useSetDefaultModelProfileMutation();
   const [createOpen, setCreateOpen] = useState(false);
+  const [modelPage, setModelPage] = useState(1);
   const [compressionOpen, setCompressionOpen] = useState(false);
   const [disableTarget, setDisableTarget] =
     useState<ModelProfile | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // 默认版本始终置顶；其余版本在前端按创建时间倒序，后端继续返回完整列表。
+  const sortedProfiles = profiles.data
+    ? [...profiles.data.items].sort((left, right) => {
+        const leftIsDefault =
+          left.id === profiles.data.default_profile_id;
+        const rightIsDefault =
+          right.id === profiles.data.default_profile_id;
+        if (leftIsDefault !== rightIsDefault) {
+          return leftIsDefault ? -1 : 1;
+        }
+
+        const createdAtDifference =
+          Date.parse(right.created_at) - Date.parse(left.created_at);
+        return createdAtDifference || left.id.localeCompare(right.id);
+      })
+    : [];
+  const modelLastPage = lastPageNumber(
+    sortedProfiles.length,
+    MODEL_PROFILE_PAGE_SIZE,
+  );
+  const visibleModelPage = Math.min(modelPage, modelLastPage);
+  const visibleProfiles = sortedProfiles.slice(
+    (visibleModelPage - 1) * MODEL_PROFILE_PAGE_SIZE,
+    visibleModelPage * MODEL_PROFILE_PAGE_SIZE,
+  );
   const defaultProfile =
     profiles.data?.items.find(
       (profile) => profile.id === profiles.data?.default_profile_id,
@@ -133,7 +162,7 @@ export function AdminModelsPage() {
           </div>
           {profiles.isSuccess ? (
             <span className="admin-data-count">
-              后端返回 {profiles.data.items.length} 个版本
+              共 {profiles.data.items.length} 个版本
             </span>
           ) : null}
         </header>
@@ -164,132 +193,143 @@ export function AdminModelsPage() {
             title="还没有模型版本"
           />
         ) : (
-          <ul className="admin-model-list">
-            {profiles.data.items.map((profile) => {
-              const isDefault =
-                profile.id === profiles.data.default_profile_id;
-              return (
-                <li
-                  className={`admin-model-card${
-                    isDefault ? " is-default" : ""
-                  }`}
-                  key={profile.id}
-                >
-                  <div className="admin-card-heading">
-                    <div>
-                      <div className="admin-title-line">
-                        <h3>{profile.name}</h3>
-                        {isDefault ? (
-                          <span className="admin-status-badge is-accent">
-                            当前默认
+          <>
+            <ul className="admin-model-list">
+              {visibleProfiles.map((profile) => {
+                const isDefault =
+                  profile.id === profiles.data.default_profile_id;
+                return (
+                  <li
+                    className={`admin-model-card${
+                      isDefault ? " is-default" : ""
+                    }`}
+                    key={profile.id}
+                  >
+                    <div className="admin-card-heading">
+                      <div>
+                        <div className="admin-title-line">
+                          <h3>{profile.name}</h3>
+                          {isDefault ? (
+                            <span className="admin-status-badge is-accent">
+                              当前默认
+                            </span>
+                          ) : null}
+                          <span
+                            className={`admin-status-badge${
+                              profile.enabled
+                                ? " is-success"
+                                : " is-muted"
+                            }`}
+                          >
+                            {profile.enabled ? "已启用" : "已停用"}
                           </span>
-                        ) : null}
-                        <span
-                          className={`admin-status-badge${
-                            profile.enabled
-                              ? " is-success"
-                              : " is-muted"
-                          }`}
-                        >
-                          {profile.enabled ? "已启用" : "已停用"}
-                        </span>
+                        </div>
+                        <p className="admin-code-line">
+                          {profile.protocol} · {profile.model}
+                        </p>
                       </div>
-                      <p className="admin-code-line">
-                        {profile.protocol} · {profile.model}
-                      </p>
+                      <ModelCapabilityList profile={profile} />
                     </div>
-                    <ModelCapabilityList profile={profile} />
-                  </div>
 
-                  <dl className="admin-detail-grid">
-                    <div className="admin-detail-wide">
-                      <dt>HTTPS Base URL</dt>
-                      <dd className="admin-code-value">
-                        {profile.base_url}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>API Key 状态</dt>
-                      <dd className="admin-code-value">
-                        {profile.has_api_key ? "已配置 API Key" : "需要重新配置 API Key"}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Tokenizer</dt>
-                      <dd>{profile.tokenizer_encoding}</dd>
-                    </div>
-                    <div>
-                      <dt>上下文 / 最大输出</dt>
-                      <dd>
-                        {profile.context_window_tokens.toLocaleString()} /{" "}
-                        {profile.max_output_tokens.toLocaleString()} tokens
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>超时 / 并发</dt>
-                      <dd>
-                        请求 {profile.request_timeout_seconds}s · 执行{" "}
-                        {profile.execution_timeout_seconds}s · 并发{" "}
-                        {profile.max_concurrency}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Temperature</dt>
-                      <dd>
-                        {profile.temperature === null
-                          ? "未指定"
-                          : profile.temperature}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>创建时间</dt>
-                      <dd>{formatDateTime(profile.created_at)}</dd>
-                    </div>
-                  </dl>
+                    <dl className="admin-detail-grid">
+                      <div className="admin-detail-wide">
+                        <dt>HTTPS Base URL</dt>
+                        <dd className="admin-code-value">
+                          {profile.base_url}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>API Key 状态</dt>
+                        <dd className="admin-code-value">
+                          {profile.has_api_key
+                            ? "已配置 API Key"
+                            : "需要重新配置 API Key"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Tokenizer</dt>
+                        <dd>{profile.tokenizer_encoding}</dd>
+                      </div>
+                      <div>
+                        <dt>上下文 / 最大输出</dt>
+                        <dd>
+                          {profile.context_window_tokens.toLocaleString()} /{" "}
+                          {profile.max_output_tokens.toLocaleString()} tokens
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>超时 / 并发</dt>
+                        <dd>
+                          请求 {profile.request_timeout_seconds}s · 执行{" "}
+                          {profile.execution_timeout_seconds}s · 并发{" "}
+                          {profile.max_concurrency}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Temperature</dt>
+                        <dd>
+                          {profile.temperature === null
+                            ? "未指定"
+                            : profile.temperature}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>创建时间</dt>
+                        <dd>{formatDateTime(profile.created_at)}</dd>
+                      </div>
+                    </dl>
 
-                  <footer className="admin-card-actions">
-                    <button
-                      className="button-quiet"
-                      disabled={actionPending}
-                      onClick={() => void handleEnabledChange(profile)}
-                      type="button"
-                    >
-                      {enabledMutation.isPending &&
-                      enabledMutation.variables?.profileId === profile.id
-                        ? "正在保存…"
-                        : profile.enabled
-                          ? "停用版本"
-                          : "启用版本"}
-                    </button>
-                    {isDefault ? (
-                      <span className="admin-action-note">
-                        默认版本由后端记录，停用后不会自动切换。
-                      </span>
-                    ) : (
+                    <footer className="admin-card-actions">
                       <button
                         className="button-quiet"
-                        disabled={
-                          actionPending || !modelCanBeDefault(profile)
-                        }
-                        onClick={() => void handleSetDefault(profile)}
-                        title={
-                          modelCanBeDefault(profile)
-                            ? undefined
-                            : "仅已启用且支持流式与工具调用的版本可设为默认"
-                        }
+                        disabled={actionPending}
+                        onClick={() => void handleEnabledChange(profile)}
                         type="button"
                       >
-                        {defaultMutation.isPending &&
-                        defaultMutation.variables === profile.id
-                          ? "正在切换…"
-                          : "设为默认"}
+                        {enabledMutation.isPending &&
+                        enabledMutation.variables?.profileId === profile.id
+                          ? "正在保存…"
+                          : profile.enabled
+                            ? "停用版本"
+                            : "启用版本"}
                       </button>
-                    )}
-                  </footer>
-                </li>
-              );
-            })}
-          </ul>
+                      {isDefault ? (
+                        <span className="admin-action-note">
+                          默认版本由后端记录，停用后不会自动切换。
+                        </span>
+                      ) : (
+                        <button
+                          className="button-quiet"
+                          disabled={
+                            actionPending || !modelCanBeDefault(profile)
+                          }
+                          onClick={() => void handleSetDefault(profile)}
+                          title={
+                            modelCanBeDefault(profile)
+                              ? undefined
+                              : "仅已启用且支持流式与工具调用的版本可设为默认"
+                          }
+                          type="button"
+                        >
+                          {defaultMutation.isPending &&
+                          defaultMutation.variables === profile.id
+                            ? "正在切换…"
+                            : "设为默认"}
+                        </button>
+                      )}
+                    </footer>
+                  </li>
+                );
+              })}
+            </ul>
+            <AdminPagination
+              label="模型版本分页"
+              onPageChange={setModelPage}
+              page={visibleModelPage}
+              pageSize={MODEL_PROFILE_PAGE_SIZE}
+              total={sortedProfiles.length}
+            />
+          </>
         )}
       </section>
 
@@ -431,6 +471,10 @@ export function AdminModelsPage() {
 
       <ModelProfileCreateDialog
         onClose={() => setCreateOpen(false)}
+        onCreated={() => {
+          // 新版本应出现在入口页，避免用户停留在旧页看不到创建结果。
+          setModelPage(1);
+        }}
         open={createOpen}
       />
       {disableTarget ? (

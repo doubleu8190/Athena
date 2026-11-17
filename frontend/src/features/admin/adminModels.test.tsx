@@ -64,6 +64,12 @@ function baseFetch(
 }
 
 describe("管理模型页", () => {
+  function visibleProfileNames(): string[] {
+    return screen
+      .getAllByRole("heading", { level: 3 })
+      .map((heading) => heading.textContent ?? "");
+  }
+
   it("设默认只提交符合条件的版本，失败提示后重试成功", async () => {
     const eligible = makeModelProfile({
       id: "model-eligible",
@@ -169,6 +175,236 @@ describe("管理模型页", () => {
     });
   });
 
+  it("默认版本置顶，其余版本按创建时间倒序并每页展示五项", async () => {
+    const defaultProfile = makeModelProfile({
+      created_at: "2026-01-01T00:00:00Z",
+      id: "model-default-oldest",
+      name: "默认旧版本",
+    });
+    const datedProfiles = Array.from({ length: 11 }, (_, index) =>
+      makeModelProfile({
+        created_at: `2026-01-${String(index + 2).padStart(2, "0")}T00:00:00Z`,
+        id: `model-${index + 1}`,
+        name: `版本 ${String(index + 1).padStart(2, "0")}`,
+      }),
+    );
+    const profiles = [defaultProfile, ...datedProfiles];
+    let defaultProfileId = defaultProfile.id;
+    const fetchMock = baseFetch((url, init) => {
+      if (
+        url.pathname === "/api/v1/admin/llm/model-profiles" &&
+        (!init?.method || init.method === "GET")
+      ) {
+        return jsonResponse({
+          default_profile_id: defaultProfileId,
+          items: [...profiles].reverse(),
+        });
+      }
+      if (
+        url.pathname ===
+          "/api/v1/admin/llm/model-profiles/default" &&
+        init?.method === "PUT"
+      ) {
+        const profileId = (
+          JSON.parse(String(init.body)) as { profile_id: string }
+        ).profile_id;
+        const selected = profiles.find(
+          (profile) => profile.id === profileId,
+        );
+        if (!selected) {
+          throw new Error(`Unknown model profile: ${profileId}`);
+        }
+        defaultProfileId = selected.id;
+        return jsonResponse(selected);
+      }
+      if (
+        url.pathname ===
+        "/api/v1/admin/llm/compression-policy"
+      ) {
+        return jsonResponse(
+          makeCompressionPolicy({
+            compression_model_profile_id: null,
+            created_at: null,
+            id: null,
+            prompt_template_version: null,
+            recent_ratio: null,
+            recent_token_cap: null,
+            summary_ratio: null,
+            summary_token_cap: null,
+            trigger_tokens: null,
+          }),
+        );
+      }
+      return null;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/models");
+
+    await screen.findByText(defaultProfile.name);
+    expect(await screen.findByText("共 12 个版本")).toBeInTheDocument();
+    expect(screen.getByText("第 1 页 · 共 12 项")).toBeInTheDocument();
+    expect(visibleProfileNames()).toEqual([
+      defaultProfile.name,
+      "版本 11",
+      "版本 10",
+      "版本 09",
+      "版本 08",
+    ]);
+
+    await user.click(
+      screen.getByRole("button", { name: "下一页" }),
+    );
+    expect(screen.getByText("第 2 页 · 共 12 项")).toBeInTheDocument();
+    expect(visibleProfileNames()).toEqual([
+      "版本 07",
+      "版本 06",
+      "版本 05",
+      "版本 04",
+      "版本 03",
+    ]);
+
+    const targetCard = screen
+      .getByRole("heading", { name: "版本 07" })
+      .closest("li");
+    expect(targetCard).not.toBeNull();
+    await user.click(
+      within(targetCard as HTMLElement).getByRole("button", {
+        name: "设为默认",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(visibleProfileNames()).toEqual([
+        "版本 06",
+        "版本 05",
+        "版本 04",
+        "版本 03",
+        "版本 02",
+      ]);
+    });
+    await user.click(
+      screen.getByRole("button", { name: "上一页" }),
+    );
+    expect(visibleProfileNames()).toEqual([
+      "版本 07",
+      "版本 11",
+      "版本 10",
+      "版本 09",
+      "版本 08",
+    ]);
+  });
+
+  it("从后续页创建模型成功后回到第一页并显示新版本", async () => {
+    const existingProfiles = Array.from({ length: 6 }, (_, index) =>
+      makeModelProfile({
+        created_at: `2026-01-0${index + 1}T00:00:00Z`,
+        id: `model-existing-${index + 1}`,
+        name: `已有版本 ${index + 1}`,
+      }),
+    );
+    const created = makeModelProfile({
+      created_at: "2026-02-01T00:00:00Z",
+      id: "model-new",
+      name: "新建版本",
+    });
+    let createdOnServer = false;
+    const fetchMock = baseFetch((url, init) => {
+      if (
+        url.pathname === "/api/v1/admin/llm/model-profiles" &&
+        init?.method === "POST"
+      ) {
+        createdOnServer = true;
+        return jsonResponse(created, 201);
+      }
+      if (
+        url.pathname === "/api/v1/admin/llm/model-profiles" &&
+        (!init?.method || init.method === "GET")
+      ) {
+        return jsonResponse({
+          default_profile_id: null,
+          items: createdOnServer
+            ? [...existingProfiles, created]
+            : existingProfiles,
+        });
+      }
+      if (
+        url.pathname ===
+        "/api/v1/admin/llm/compression-policy"
+      ) {
+        return jsonResponse(
+          makeCompressionPolicy({
+            compression_model_profile_id: null,
+            created_at: null,
+            id: null,
+            prompt_template_version: null,
+            recent_ratio: null,
+            recent_token_cap: null,
+            summary_ratio: null,
+            summary_token_cap: null,
+            trigger_tokens: null,
+          }),
+        );
+      }
+      return null;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/models");
+
+    await screen.findByText("第 1 页 · 共 6 项");
+    await user.click(
+      screen.getByRole("button", { name: "下一页" }),
+    );
+    expect(screen.getByText("第 2 页 · 共 6 项")).toBeInTheDocument();
+    expect(visibleProfileNames()).toEqual(["已有版本 1"]);
+
+    await user.click(
+      screen.getByRole("button", { name: "创建模型版本" }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "创建模型版本",
+    });
+    await user.type(
+      within(dialog).getByLabelText("版本名称"),
+      created.name,
+    );
+    await user.type(
+      within(dialog).getByLabelText("模型标识"),
+      "atlas-new",
+    );
+    await user.type(
+      within(dialog).getByLabelText(/^HTTPS Base URL/),
+      "https://llm.example/v1",
+    );
+    await user.type(
+      within(dialog).getByLabelText(/^API Key/),
+      "test-key",
+    );
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "创建不可变版本",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "创建模型版本" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(await screen.findByText("第 1 页 · 共 7 项")).toBeInTheDocument();
+    expect(screen.getByText("共 7 个版本")).toBeInTheDocument();
+    expect(visibleProfileNames()).toEqual([
+      created.name,
+      "已有版本 6",
+      "已有版本 5",
+      "已有版本 4",
+      "已有版本 3",
+    ]);
+  });
+
   it("展示真实字段、限制默认资格并确认停用当前默认版本", async () => {
     let profiles = [PRIMARY, DISABLED, NO_TOOLS];
     const fetchMock = baseFetch((url, init) => {
@@ -213,7 +449,7 @@ describe("管理模型页", () => {
         name: "模型与压缩策略",
       }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("后端返回 3 个版本")).toBeInTheDocument();
+    expect(await screen.findByText("共 3 个版本")).toBeInTheDocument();
     expect(screen.getAllByText(PRIMARY.base_url)).toHaveLength(3);
     expect(
       screen.getAllByText("已配置 API Key"),

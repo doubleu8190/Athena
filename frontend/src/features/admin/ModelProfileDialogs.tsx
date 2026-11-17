@@ -43,11 +43,13 @@ function FieldError({
 
 interface ModelProfileCreateDialogProps {
   onClose: () => void;
+  onCreated: () => void;
   open: boolean;
 }
 
 export function ModelProfileCreateDialog({
   onClose,
+  onCreated,
   open,
 }: ModelProfileCreateDialogProps) {
   const formId = useId();
@@ -105,6 +107,7 @@ export function ModelProfileCreateDialog({
     setRequestError(null);
     try {
       await mutation.mutateAsync(result.input);
+      onCreated();
       onClose();
     } catch (failure) {
       setRequestError(adminErrorMessage(failure));

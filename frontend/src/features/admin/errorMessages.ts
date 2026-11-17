@@ -35,6 +35,18 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
   system_prompt_unavailable:
     "系统提示词初始化配置不可用，请联系部署管理员检查数据库。",
   system_prompt_page_invalid: "提示词历史分页参数无效。",
+  subagent_not_found: "目标 Subagent 不存在或已被删除。",
+  subagent_slug_conflict: "该 Slug 已被其他启用或停用中的 Subagent 占用，请更换。",
+  subagent_slug_reserved: "该 Slug 属于系统保留字，请更换其他标识。",
+  subagent_version_conflict:
+    "当前 Subagent 配置已被其他管理员修改（版本冲突），请刷新最新配置后重试。",
+  subagent_tool_forbidden:
+    "工具白名单包含系统禁止的子智能体嵌套调度工具，无法保存。",
+  subagent_model_unavailable:
+    "所选模型配置不存在或未启用，请选择其他模型或跟随系统默认。",
+  subagent_validation_error:
+    "Subagent 配置参数不符合要求，请检查 Slug、长度及预算超时范围。",
+  subagent_invalid: "Subagent 请求参数无效，请检查后重试。",
   resource_not_found: "目标资源不存在或已被删除。",
   network_error: "无法连接服务器，请检查网络后重试。",
   http_error: "服务器拒绝了本次管理请求，请稍后重试。",
@@ -74,6 +86,22 @@ export function isSystemPromptConflict(error: unknown): boolean {
     error instanceof ApiError &&
     error.status === 409 &&
     error.detail === "system_prompt_version_conflict"
+  );
+}
+
+export function isSubagentVersionConflict(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    error.detail === "subagent_version_conflict"
+  );
+}
+
+export function isSubagentSlugConflict(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    error.detail === "subagent_slug_conflict"
   );
 }
 

@@ -23,12 +23,12 @@ interface ModalProps extends PropsWithChildren {
 }
 
 const FOCUSABLE_SELECTOR = [
-  "button:not([disabled])",
-  "a[href]",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  '[tabindex]:not([tabindex="-1"])',
+  'button:not(:disabled):not([disabled]):not([tabindex="-1"])',
+  'a[href]:not([disabled]):not([tabindex="-1"])',
+  'input:not(:disabled):not([disabled]):not([tabindex="-1"])',
+  'select:not(:disabled):not([disabled]):not([tabindex="-1"])',
+  'textarea:not(:disabled):not([disabled]):not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"]):not(:disabled):not([disabled])',
 ].join(",");
 
 interface ModalLayer {
@@ -143,6 +143,7 @@ export function Modal({
       if (!isTopModal(modalId)) {
         return;
       }
+      // 保留 data-autofocus 的显式优先级，兼容隐藏文件输入的既有程序化聚焦。
       const target =
         panel?.querySelector<HTMLElement>("[data-autofocus]") ??
         panel?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
@@ -155,6 +156,13 @@ export function Modal({
         return;
       }
       if (event.key === "Escape") {
+        const escapeOwner = (event.target as Element | null)?.closest?.(
+          "[data-modal-escape-owner]",
+        );
+        if (escapeOwner) {
+          // 弹层内的展开控件先消费 Escape，Modal 在后续按键中再关闭。
+          return;
+        }
         event.preventDefault();
         if (!closeDisabledRef.current) {
           onCloseRef.current();

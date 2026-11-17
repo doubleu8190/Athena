@@ -92,6 +92,9 @@ describe("管理员技能管理", () => {
     await user.click(
       await screen.findByRole("button", { name: "导入第一个技能" }),
     );
+    await waitFor(() =>
+      expect(screen.getByLabelText("技能 ZIP")).toHaveFocus(),
+    );
     const file = new File(["zip-content"], "sales-report.zip", {
       type: "application/zip",
     });
@@ -457,13 +460,82 @@ describe("管理员技能管理", () => {
       }),
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByLabelText("当前版本"),
-    ).toHaveValue(currentVersion.id);
+      within(dialog).getByRole("combobox", { name: "当前版本" }),
+    ).toHaveTextContent(/当前旧版/);
     expect(
       within(dialog).getByRole("button", { name: /最新版本/ }),
     ).toBeInTheDocument();
     expect(currentVersionCalls).toBe(1);
     expect(pageCalls).toBe(1);
+  });
+
+  it("当前版本下拉展开时 Escape 先收起菜单，再关闭技能详情弹窗", async () => {
+    const initial = makeSkillDetails();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = requestUrl(input);
+          const method = init?.method ?? "GET";
+          if (url.pathname.endsWith("/auth/me")) {
+            return jsonResponse(TEST_ADMIN);
+          }
+          if (url.pathname === "/api/v1/admin/skills" && method === "GET") {
+            return jsonResponse({ items: [initial] });
+          }
+          if (
+            url.pathname === `/api/v1/admin/skills/${initial.id}` &&
+            method === "GET"
+          ) {
+            return jsonResponse(initial);
+          }
+          if (
+            url.pathname ===
+              `/api/v1/admin/skills/${initial.id}/versions` &&
+            method === "GET"
+          ) {
+            return jsonResponse(versionListResponse(initial));
+          }
+          throw new Error(`Unexpected request: ${method} ${url}`);
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderApp("/admin/skills");
+
+    const openDetails = await screen.findByRole("button", {
+      name: "查看版本与指南",
+    });
+    await user.click(openDetails);
+    const dialog = await screen.findByRole("dialog", {
+      name: "技能：销售报表",
+    });
+    const combobox = within(dialog).getByRole("combobox", {
+      name: "当前版本",
+    });
+
+    await user.click(combobox);
+    expect(combobox).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(dialog).getByRole("listbox", { name: "当前版本列表" }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    expect(combobox).toHaveAttribute("aria-expanded", "false");
+    expect(
+      within(dialog).queryByRole("listbox", {
+        name: "当前版本列表",
+      }),
+    ).not.toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "技能：销售报表" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(openDetails).toHaveFocus();
   });
 
   it("版本历史可翻页加载并选择列表外的旧版本", async () => {
@@ -567,8 +639,8 @@ describe("管理员技能管理", () => {
       }),
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByLabelText("当前版本"),
-    ).toHaveValue(historicalVersion.id);
+      within(dialog).getByRole("combobox", { name: "当前版本" }),
+    ).toHaveTextContent(/历史旧版/);
     expect(requestedPages).toEqual(["1", "2"]);
   });
 
@@ -701,8 +773,8 @@ describe("管理员技能管理", () => {
     });
     expect(within(dialog).getByText(/revision 2/)).toBeInTheDocument();
     expect(
-      within(dialog).getByLabelText("当前版本"),
-    ).toHaveValue(latestVersion.id);
+      within(dialog).getByRole("combobox", { name: "当前版本" }),
+    ).toHaveTextContent(/v2/);
     expect(
       within(dialog).getByRole("checkbox", {
         name: "每次脚本执行均需用户审批",
@@ -863,8 +935,8 @@ describe("管理员技能管理", () => {
     expect(uploadUrl).toContain("label=2026+%E5%B9%B4+11+%E6%9C%88");
     expect(uploadIdempotencyKey).toMatch(/^[A-Za-z0-9._~-]+$/);
     expect(
-      within(dialog).getByLabelText("当前版本"),
-    ).toHaveValue(initial.current_version_id);
+      within(dialog).getByRole("combobox", { name: "当前版本" }),
+    ).toHaveTextContent(/v1/);
   });
 
   it("上传新版本 422 显示违规 ZIP 成员路径并保留当前版本", async () => {
@@ -943,7 +1015,105 @@ describe("管理员技能管理", () => {
     expect(alert.textContent).toContain(`包内文件：${memberPath}`);
     expect(alert.querySelector("a")).toBeNull();
     expect(
-      within(dialog).getByLabelText("当前版本"),
-    ).toHaveValue(initial.current_version_id);
+      within(dialog).getByRole("combobox", { name: "当前版本" }),
+    ).toHaveTextContent(/v1/);
+  });
+
+  it("支持通过自定义版本下拉框切换版本并显示未保存变更，且支持清除已选 ZIP 文件", async () => {
+    const v1 = makeSkillVersion({
+      id: "skill-version-1",
+      label: "稳定版",
+      ordinal: 1,
+      skill_id: "skill-custom-controls",
+    });
+    const v2 = makeSkillVersion({
+      dependency_check: {
+        ...makeDependencyCheck(),
+        status: "dependency_unsatisfied",
+      },
+      id: "skill-version-2",
+      label: "候选版",
+      ordinal: 2,
+      skill_id: "skill-custom-controls",
+    });
+    const initial = {
+      ...makeSkillDetails({
+        current_version_id: v1.id,
+        current_version_label: v1.label,
+        id: "skill-custom-controls",
+      }),
+      versions: [v2, v1],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/skills" && method === "GET") {
+          return jsonResponse({ items: [initial] });
+        }
+        if (
+          url.pathname === `/api/v1/admin/skills/${initial.id}` &&
+          method === "GET"
+        ) {
+          return jsonResponse(initial);
+        }
+        if (
+          url.pathname === `/api/v1/admin/skills/${initial.id}/versions` &&
+          method === "GET"
+        ) {
+          return jsonResponse(versionListResponse(initial, [v2, v1]));
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/skills");
+    await user.click(
+      await screen.findByRole("button", { name: "查看版本与指南" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "技能：销售报表",
+    });
+
+    const combobox = within(dialog).getByRole("combobox", {
+      name: "当前版本",
+    });
+    expect(combobox).toHaveTextContent(/稳定版/);
+    expect(within(dialog).queryByText("未保存变更")).not.toBeInTheDocument();
+
+    const fileInput = within(dialog).getByLabelText("选择新版本 ZIP");
+    const fileTrigger = within(dialog).getByRole("button", {
+      name: "选择 ZIP 文件",
+    });
+    expect(fileInput).toHaveAttribute("tabindex", "-1");
+    fileTrigger.focus();
+    await user.tab();
+    expect(within(dialog).getByLabelText("版本标签（可选）")).toHaveFocus();
+    expect(fileInput).not.toHaveFocus();
+
+    await user.click(combobox);
+    const optionV2 = within(dialog).getByRole("option", { name: /候选版/ });
+    expect(optionV2).toHaveTextContent("依赖未满足");
+    await user.click(optionV2);
+
+    expect(combobox).toHaveTextContent(/候选版/);
+    expect(within(dialog).getByText("未保存变更")).toBeInTheDocument();
+
+    expect(within(dialog).getByText("未选择 .zip 文件")).toBeInTheDocument();
+    await user.upload(
+      fileInput,
+      new File(["zip"], "candidate-v3.zip", { type: "application/zip" }),
+    );
+    expect(within(dialog).getByText(/candidate-v3\.zip/)).toBeInTheDocument();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "清除已选文件" }),
+    );
+    expect(within(dialog).getByText("未选择 .zip 文件")).toBeInTheDocument();
   });
 });

@@ -91,5 +91,18 @@ export const adminKeys = {
       query.pageSize,
     ] as const,
   toolsAll: () => ["admin", "tools"] as const,
+  subagents: (query: AdminPageQuery) =>
+    [
+      "admin",
+      "subagents",
+      "list",
+      query.page,
+      query.pageSize,
+    ] as const,
+  subagentsAll: () => ["admin", "subagents"] as const,
+  subagent: (subagentId: string) =>
+    ["admin", "subagents", "detail", subagentId] as const,
+  subagentAvailableTools: () =>
+    ["admin", "subagents", "available-tools"] as const,
 };
 

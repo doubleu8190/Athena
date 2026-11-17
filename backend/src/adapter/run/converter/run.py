@@ -29,11 +29,14 @@ from domain.run.model import (
     RunResumedPayload,
     RunStartedPayload,
     RunStatus,
+    RunSubagentsResumedPayload,
+    RunSubagentStatusChangedPayload,
     RunToolApprovalDecidedPayload,
     RunToolCallFinishedPayload,
     RunToolCallStartedPayload,
     RunUsage,
     RunWaitingForApprovalPayload,
+    RunWaitingForSubagentsPayload,
     RunWaitingPayload,
 )
 from domain.skill import RunSkillSnapshot, SafeSkillApprovalProjection
@@ -63,6 +66,9 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[BaseModel]] = {
     "compression_failed": RunCompressionFailedPayload,
     "tool_call_started": RunToolCallStartedPayload,
     "tool_call_finished": RunToolCallFinishedPayload,
+    "waiting_for_subagents": RunWaitingForSubagentsPayload,
+    "subagents_resumed": RunSubagentsResumedPayload,
+    "subagent_status_changed": RunSubagentStatusChangedPayload,
 }
 
 
@@ -78,9 +84,7 @@ def run_to_domain(row: RunModel) -> Run:
         None if row.tool_snapshot is None else RuntimeToolSnapshot.model_validate(row.tool_snapshot)
     )
     skill_snapshot = (
-        None
-        if row.skill_snapshot is None
-        else RunSkillSnapshot.model_validate(row.skill_snapshot)
+        None if row.skill_snapshot is None else RunSkillSnapshot.model_validate(row.skill_snapshot)
     )
     return Run(
         id=row.id,
@@ -97,10 +101,14 @@ def run_to_domain(row: RunModel) -> Run:
         event_sequence=row.event_sequence,
         execution_epoch=row.execution_epoch,
         worker_id=row.worker_id,
-        lease_expires_at=row.lease_expires_at,
-        execution_started_at=row.execution_started_at,
-        execution_deadline_at=row.execution_deadline_at,
-        queued_at=row.queued_at,
+        lease_expires_at=None if row.lease_expires_at is None else _as_utc(row.lease_expires_at),
+        execution_started_at=(
+            None if row.execution_started_at is None else _as_utc(row.execution_started_at)
+        ),
+        execution_deadline_at=(
+            None if row.execution_deadline_at is None else _as_utc(row.execution_deadline_at)
+        ),
+        queued_at=_as_utc(row.queued_at),
         first_started_at=row.first_started_at,
         finished_at=row.finished_at,
         created_at=_as_utc(row.created_at),
@@ -117,9 +125,7 @@ def run_to_domain(row: RunModel) -> Run:
         report_message_id=row.report_message_id,
         memory_project_id=row.memory_project_id,
         memory_input_message_ids=tuple(row.memory_input_message_ids or ()),
-        memory_context_state=RunMemoryContextState.model_validate(
-            row.memory_context_state or {}
-        ),
+        memory_context_state=RunMemoryContextState.model_validate(row.memory_context_state or {}),
         memory_extraction_status=(
             None
             if row.memory_extraction_status is None
@@ -128,6 +134,16 @@ def run_to_domain(row: RunModel) -> Run:
         memory_extracted_at=row.memory_extracted_at,
         memory_extraction_batch_id=row.memory_extraction_batch_id,
         memory_extraction_safe_error_code=row.memory_extraction_safe_error_code,
+        parent_run_id=row.parent_run_id,
+        root_run_id=row.root_run_id,
+        parent_tool_call_id=row.parent_tool_call_id,
+        depth=row.depth,
+        subagent_profile_id=row.subagent_profile_id,
+        subagent_slug=row.subagent_slug,
+        subagent_name=row.subagent_name,
+        subagent_system_prompt=row.subagent_system_prompt,
+        max_llm_requests=row.max_llm_requests,
+        timeout_seconds=row.timeout_seconds,
     )
 
 
@@ -194,9 +210,7 @@ def tool_call_to_domain(row: RunToolCallModel) -> RunToolCallRecord:
             None if row.approval_decided_at is None else _as_utc(row.approval_decided_at)
         ),
         approval_decision=(
-            None
-            if row.approval_decision is None
-            else ToolApprovalDecision(row.approval_decision)
+            None if row.approval_decision is None else ToolApprovalDecision(row.approval_decision)
         ),
         safe_skill_projection=(
             None

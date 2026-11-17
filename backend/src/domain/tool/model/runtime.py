@@ -84,7 +84,11 @@ class RuntimeToolDefinition(BaseModel):
             raise ValueError("runtime_tool_schema_invalid")
         if self.source.kind == "mcp" and not self.tool_id.startswith("tool_"):
             raise ValueError("runtime_tool_source_invalid")
-        if self.source.kind == "builtin" and not self.tool_id.startswith("builtin_"):
+        if (
+            self.source.kind == "builtin"
+            and not self.tool_id.startswith("builtin_")
+            and self.tool_id != "dispatch_subagents"
+        ):
             raise ValueError("runtime_tool_source_invalid")
         return self
 

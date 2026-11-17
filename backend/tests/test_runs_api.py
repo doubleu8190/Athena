@@ -285,9 +285,7 @@ class InMemoryRunRepository:
                 raise RunConflictError("run_request_id_conflict")
             result = replay[1]
             assert isinstance(result, RunRequestResult)
-            return self.runs.get(
-                (command.owner_id, command.session_id, result.run_id or "")
-            )
+            return self.runs.get((command.owner_id, command.session_id, result.run_id or ""))
         run = await self.get(command.session_id, command.owner_id, command.run_id)
         if run is None:
             return None
@@ -433,6 +431,24 @@ class InMemoryRunRepository:
         self.runs[(owner_id, session_id, new_run.id)] = new_run
         self.requests[key] = (fingerprint, RunRequestResult(run_id=new_run.id))
         return new_run
+
+    async def list_subagent_tasks(
+        self, session_id: str, owner_id: str, parent_run_id: str
+    ) -> tuple[object, ...]:
+        del session_id, owner_id, parent_run_id
+        return ()
+
+    async def list_pending_subagent_inputs(
+        self, session_id: str, owner_id: str, parent_run_id: str
+    ) -> tuple[object, ...]:
+        del session_id, owner_id, parent_run_id
+        return ()
+
+    async def list_pending_subagent_approvals(
+        self, session_id: str, owner_id: str, parent_run_id: str
+    ) -> tuple[object, ...]:
+        del session_id, owner_id, parent_run_id
+        return ()
 
     async def list_tool_calls(
         self,
@@ -838,9 +854,10 @@ def test_tool_approval_api_is_owner_scoped_origin_checked_and_idempotent() -> No
 
         details = client.get(f"/api/v1/sessions/{session_id}/runs/{run_id}")
         assert details.status_code == 200
-        assert [
-            item["call_id"] for item in details.json()["pending_approvals"]
-        ] == ["record-call-1", "record-call-2"]
+        assert [item["call_id"] for item in details.json()["pending_approvals"]] == [
+            "record-call-1",
+            "record-call-2",
+        ]
         assert "arguments" not in details.text
 
         evil_origin = client.post(
@@ -877,9 +894,7 @@ def test_tool_approval_api_is_owner_scoped_origin_checked_and_idempotent() -> No
         )
         assert first.status_code == replay.status_code == 200
         assert first.json()["status"] == "waiting_for_approval"
-        assert [
-            item["call_id"] for item in first.json()["pending_approvals"]
-        ] == ["record-call-2"]
+        assert [item["call_id"] for item in first.json()["pending_approvals"]] == ["record-call-2"]
         assert contradictory_replay.status_code == 409
 
         last = client.post(
@@ -898,9 +913,7 @@ def test_tool_approval_api_is_owner_scoped_origin_checked_and_idempotent() -> No
         assert late.status_code == 409
 
     with AuthTestClient(app, email="approval-intruder@example.com") as intruder:
-        hidden = intruder.get(
-            f"/api/v1/sessions/{session_id}/runs/{run_id}"
-        )
+        hidden = intruder.get(f"/api/v1/sessions/{session_id}/runs/{run_id}")
         denied = intruder.post(
             f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",
             json={"request_id": "intruder", "decision": "approve"},

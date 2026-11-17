@@ -114,6 +114,280 @@ def _draft(
     )
 
 
+def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
+    """真实迁移后的父子关联列应接受 Run 128 与工具调用 256 的边界 ID。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    async def scenario() -> None:
+        schema = f"athena_v2_subagent_parent_ids_{token_hex(8)}"
+        admin_engine = create_async_engine(database_url, poolclass=NullPool)
+        test_engine = create_async_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
+        )
+        try:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            config = Config(str(ALEMBIC_INI))
+            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+            config.attributes["connect_args"] = {
+                "server_settings": {"search_path": f"{schema},public"}
+            }
+            config.attributes["version_table_schema"] = schema
+            await asyncio.to_thread(command.upgrade, config, "head")
+
+            now = datetime.now(UTC)
+            async with test_engine.begin() as connection:
+                column_lengths: dict[str, int | None] = dict(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT column_name, character_maximum_length "
+                                "FROM information_schema.columns "
+                                "WHERE table_schema = current_schema() "
+                                "AND table_name = 'runs' "
+                                "AND column_name IN "
+                                "('parent_run_id','root_run_id','parent_tool_call_id')"
+                            )
+                        )
+                    ).all()
+                )
+                assert column_lengths == {
+                    "parent_run_id": 128,
+                    "root_run_id": 128,
+                    "parent_tool_call_id": 256,
+                }
+                await connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(id,email,password_hash,status,created_at,updated_at) "
+                        "VALUES ('usr_subagent_parent','parent@example.com','unused',"
+                        "'active',:now,:now)"
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO sessions "
+                        "(id,owner_id,title,project_id,last_message_sequence,created_at,"
+                        "updated_at) "
+                        "VALUES ('ses_subagent_parent','usr_subagent_parent',NULL,NULL,"
+                        "1,:now,:now)"
+                    ),
+                    {"now": now},
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO conversation_messages "
+                        "(id,session_id,role,status,sequence,parts,run_id,"
+                        "client_message_id,created_at,metadata) VALUES "
+                        "('msg_subagent_parent','ses_subagent_parent','user','completed',"
+                        "1,CAST(:parts AS jsonb),NULL,NULL,:now,CAST('{}' AS jsonb))"
+                    ),
+                    {
+                        "parts": json.dumps([{"type": "text", "text": "parent ids"}]),
+                        "now": now,
+                    },
+                )
+
+            factory = async_sessionmaker(test_engine, expire_on_commit=False)
+            parent_run_id = f"parent_{'r' * 121}"
+            child_run_id = f"child_{'c' * 122}"
+            parent_tool_call_id = f"tool_{'t' * 251}"
+            assert len(parent_run_id) == 128
+            assert len(child_run_id) == 128
+            assert len(parent_tool_call_id) == 256
+            profile_id = "llmprof_subagent_parent"
+            async with factory() as session, session.begin():
+                session.add(
+                    ModelProfileVersionModel(
+                        id=profile_id,
+                        name="Subagent parent IDs",
+                        protocol="chat_completions",
+                        base_url="https://llm.example/v1",
+                        model="test-model",
+                        **encrypted_llm_key_fields(profile_id),
+                        context_window_tokens=8192,
+                        tokenizer_encoding="o200k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        max_output_tokens=512,
+                        request_timeout_seconds=30,
+                        execution_timeout_seconds=60,
+                        max_concurrency=1,
+                        temperature=None,
+                        enabled=True,
+                        created_at=now,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    RunModel(
+                        id=parent_run_id,
+                        session_id="ses_subagent_parent",
+                        owner_id="usr_subagent_parent",
+                        status=RunStatus.COMPLETED.value,
+                        trigger_message_id="msg_subagent_parent",
+                        context_cutoff_sequence=1,
+                        retry_of_run_id=None,
+                        model_config_version_id=profile_id,
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                        prompt_template_version="run-v2",
+                        event_sequence=0,
+                        execution_epoch=0,
+                        queued_at=now,
+                        finished_at=now,
+                        created_at=now,
+                        updated_at=now,
+                        usage={},
+                    )
+                )
+                await session.flush()
+                session.add(
+                    RunModel(
+                        id=child_run_id,
+                        session_id="ses_subagent_parent",
+                        owner_id="usr_subagent_parent",
+                        status=RunStatus.COMPLETED.value,
+                        trigger_message_id="msg_subagent_parent",
+                        context_cutoff_sequence=1,
+                        retry_of_run_id=None,
+                        model_config_version_id=profile_id,
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                        prompt_template_version="run-v2",
+                        event_sequence=0,
+                        execution_epoch=0,
+                        queued_at=now,
+                        finished_at=now,
+                        created_at=now,
+                        updated_at=now,
+                        usage={},
+                        parent_run_id=parent_run_id,
+                        root_run_id=parent_run_id,
+                        parent_tool_call_id=parent_tool_call_id,
+                        depth=1,
+                    )
+                )
+
+            async with factory() as session:
+                child = await session.get(RunModel, child_run_id)
+                assert child is not None
+                assert child.parent_run_id == parent_run_id
+                assert child.root_run_id == parent_run_id
+                assert child.parent_tool_call_id == parent_tool_call_id
+        finally:
+            await test_engine.dispose()
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            await admin_engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_subagent_parent_id_width_migration_repairs_old_0029_layout() -> None:
+    """旧版 0029 库应安全扩宽，降级不回缩，异常更宽列则整体拒绝。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
+
+    async def scenario() -> None:
+        schema = f"athena_v2_subagent_parent_widths_{token_hex(8)}"
+        admin_engine = create_async_engine(database_url, poolclass=NullPool)
+        test_engine = create_async_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"search_path": f"{schema},public"}},
+        )
+
+        async def _read_widths() -> dict[str, int | None]:
+            """读取三个父 Run 关联列在真实 PostgreSQL 中的宽度。"""
+            async with test_engine.connect() as connection:
+                return dict(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT column_name, character_maximum_length "
+                                "FROM information_schema.columns "
+                                "WHERE table_schema = current_schema() "
+                                "AND table_name = 'runs' "
+                                "AND column_name IN "
+                                "('parent_run_id','root_run_id','parent_tool_call_id')"
+                            )
+                        )
+                    ).all()
+                )
+
+        try:
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            config = Config(str(ALEMBIC_INI))
+            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+            config.attributes["connect_args"] = {
+                "server_settings": {"search_path": f"{schema},public"}
+            }
+            config.attributes["version_table_schema"] = schema
+            await asyncio.to_thread(command.upgrade, config, "20261128_0029")
+            async with test_engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "ALTER TABLE runs "
+                        "ALTER COLUMN parent_run_id TYPE VARCHAR(64), "
+                        "ALTER COLUMN root_run_id TYPE VARCHAR(64), "
+                        "ALTER COLUMN parent_tool_call_id TYPE VARCHAR(64)"
+                    )
+                )
+            assert await _read_widths() == {
+                "parent_run_id": 64,
+                "root_run_id": 64,
+                "parent_tool_call_id": 64,
+            }
+
+            await asyncio.to_thread(command.upgrade, config, "head")
+            assert await _read_widths() == {
+                "parent_run_id": 128,
+                "root_run_id": 128,
+                "parent_tool_call_id": 256,
+            }
+
+            await asyncio.to_thread(command.downgrade, config, "20261128_0029")
+            assert await _read_widths() == {
+                "parent_run_id": 128,
+                "root_run_id": 128,
+                "parent_tool_call_id": 256,
+            }
+
+            async with test_engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "ALTER TABLE runs "
+                        "ALTER COLUMN parent_run_id TYPE VARCHAR(256), "
+                        "ALTER COLUMN root_run_id TYPE VARCHAR(64)"
+                    )
+                )
+            with pytest.raises(
+                RuntimeError,
+                match="subagent_parent_id_width_unsafe:parent_run_id:256>128",
+            ):
+                await asyncio.to_thread(command.upgrade, config, "head")
+            assert await _read_widths() == {
+                "parent_run_id": 256,
+                "root_run_id": 64,
+                "parent_tool_call_id": 256,
+            }
+        finally:
+            await test_engine.dispose()
+            async with admin_engine.begin() as connection:
+                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            await admin_engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
     """真实迁移保留历史 run_id，事务命令、幂等及事件在 PostgreSQL 正确工作。"""
     database_url = DATABASE_URL
@@ -1985,10 +2259,7 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                 ).one()
                 mcp_row = (
                     await connection.execute(
-                        text(
-                            "SELECT requires_approval FROM mcp_tools "
-                            "WHERE id = 'tool_legacy'"
-                        )
+                        text("SELECT requires_approval FROM mcp_tools WHERE id = 'tool_legacy'")
                     )
                 ).one()
                 profile_row = (
@@ -2030,9 +2301,7 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                 ).one()
                 run_row = (
                     await connection.execute(
-                        text(
-                            "SELECT status FROM runs WHERE id = 'run_approval_migration'"
-                        )
+                        text("SELECT status FROM runs WHERE id = 'run_approval_migration'")
                     )
                 ).one()
             assert tool_row.status == "completed"
@@ -2065,7 +2334,7 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                 )
                 await session.flush()
                 with pytest.raises(RunStateError, match="llm_default_profile_unavailable"):
-                    await repository._lock_default_profile(session)
+                    await repository._lock_default_profile_id(session)
                 assert await repository._current_compression_policy_id(session) is None
         finally:
             await test_engine.dispose()

@@ -55,9 +55,11 @@ import {
   runResultIsStale,
   selectRunProjection,
   type ConversationMessagePage,
+  type PendingSubagentApproval,
   type Run,
   type RunListResponse,
   type RunPendingApproval,
+  type RunSnapshotPayload,
   type RunStatus,
 } from "./model";
 import { chatKeys } from "./queryKeys";
@@ -69,6 +71,13 @@ import {
 } from "./runStream";
 import { RunExecutionTrace } from "./RunExecutionTrace";
 import { RunStatusBadge } from "./RunStatusBadge";
+import { SubagentExecutionPanel } from "./SubagentExecutionPanel";
+import {
+  SubagentApprovalPanel,
+  SubagentInputQueuePanel,
+  subagentApprovalKey,
+  subagentInputKey,
+} from "./SubagentHitlPanels";
 import { ToolApprovalPanel } from "./ToolApprovalPanel";
 import { useRunStream } from "./useRunStream";
 
@@ -144,9 +153,11 @@ function mergeReconciledMessages(
 function ComposerHint({
   hasPendingUploads,
   status,
+  targetedSubagentName,
 }: {
   hasPendingUploads: boolean;
   status: RunStatus | null;
+  targetedSubagentName?: string | null;
 }) {
   if (hasPendingUploads) {
     return (
@@ -156,11 +167,25 @@ function ComposerHint({
       </span>
     );
   }
+  if (targetedSubagentName) {
+    return (
+      <span>
+        正在向子智能体「{targetedSubagentName}」提交定向回答；失败时输入和请求标识都会保留。
+      </span>
+    );
+  }
   if (status === "queued") {
     return <span>任务已排队，重复提交已锁定；停止后以服务端状态为准。</span>;
   }
   if (status === "running") {
     return <span>任务运行中，新消息暂不可提交；已输入内容会保留。</span>;
+  }
+  if (status === "waiting_for_subagents") {
+    return (
+      <span>
+        正在等待子智能体完成任务，完成后将自动继续回复；您可随时点击停止以取消任务
+      </span>
+    );
   }
   if (status === "waiting_for_input") {
     return <span>请回答服务端当前提问；失败时输入和请求标识都会保留。</span>;
@@ -331,6 +356,19 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   const [approvalErrors, setApprovalErrors] = useState<
     Record<string, string>
   >({});
+  const [selectedSubagentInputKey, setSelectedSubagentInputKey] = useState<
+    string | null
+  >(null);
+  const [busySubagentApprovalKeys, setBusySubagentApprovalKeys] = useState<
+    ReadonlySet<string>
+  >(new Set());
+  const busySubagentApprovalKeysRef = useRef<Set<string>>(new Set());
+  const [subagentApprovalErrors, setSubagentApprovalErrors] = useState<
+    Record<string, string>
+  >({});
+  const subagentApprovalRequestsRef = useRef<
+    Record<string, { decision: "approve" | "reject"; requestId: string }>
+  >({});
   const [retryOpen, setRetryOpen] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [terminalMessageFailure, setTerminalMessageFailure] =
@@ -390,8 +428,44 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     }
   }, [currentRunId, queryClient, sessionId]);
 
+  const handleStreamSnapshot = useCallback(
+    (snapshot: RunSnapshotPayload) => {
+      if (!currentRunId) {
+        return;
+      }
+      // SSE 快照包含子任务与并发 HITL 最新投影，同步写入主 Run 缓存以立即刷新 UI。
+      const patchRun = (existing: Run): Run => ({
+        ...existing,
+        status: snapshot.status,
+        event_sequence: snapshot.event_sequence,
+        report_message_id: snapshot.report_message_id,
+        subagent_tasks: snapshot.subagent_tasks ?? [],
+        pending_subagent_inputs: snapshot.pending_subagent_inputs ?? [],
+        pending_subagent_approvals: snapshot.pending_subagent_approvals ?? [],
+      });
+      queryClient.setQueryData<Run>(
+        chatKeys.run(sessionId, currentRunId),
+        (existing) => (existing ? patchRun(existing) : existing),
+      );
+      queryClient.setQueryData<RunListResponse>(
+        chatKeys.latestRun(sessionId),
+        (existing) =>
+          existing
+            ? {
+                ...existing,
+                items: existing.items.map((item) =>
+                  item.id === currentRunId ? patchRun(item) : item,
+                ),
+              }
+            : existing,
+      );
+    },
+    [currentRunId, queryClient, sessionId],
+  );
+
   const stream = useRunStream({
     onReconcile: reconcileRunState,
+    onSnapshot: handleStreamSnapshot,
     runId: currentRunId,
     sessionId,
     status: run?.status ?? null,
@@ -415,6 +489,37 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   const isActive = isActiveRunStatus(status);
   const isWaitingInput = status === "waiting_for_input";
   const isWaitingApproval = status === "waiting_for_approval";
+  const isWaitingSubagents = status === "waiting_for_subagents";
+  const subagentTasks =
+    run?.subagent_tasks ??
+    (streamMatchesRun && stream.state.hasSnapshot
+      ? stream.state.subagentTasks
+      : []);
+  const pendingSubagentInputs =
+    run?.pending_subagent_inputs ??
+    (streamMatchesRun && stream.state.hasSnapshot
+      ? stream.state.pendingSubagentInputs
+      : []);
+  const pendingSubagentApprovals =
+    run?.pending_subagent_approvals ??
+    (streamMatchesRun && stream.state.hasSnapshot
+      ? stream.state.pendingSubagentApprovals
+      : []);
+  const activeSubagentInput = useMemo(() => {
+    if (pendingSubagentInputs.length === 0) {
+      return null;
+    }
+    if (selectedSubagentInputKey) {
+      const matched = pendingSubagentInputs.find(
+        (item) => subagentInputKey(item) === selectedSubagentInputKey,
+      );
+      if (matched) {
+        return matched;
+      }
+    }
+    return pendingSubagentInputs[0];
+  }, [pendingSubagentInputs, selectedSubagentInputKey]);
+  const isTargetedSubagentAnswer = Boolean(activeSubagentInput);
   const isLatestRun = Boolean(run && latestRun?.id === run.id);
   const sending = activeCommand === "submit" || activeCommand === "answer";
   const stopping = activeCommand === "cancel";
@@ -688,20 +793,26 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
       reconcileRunState();
       return;
     }
-    if (isActive && !isWaitingInput) {
+    if (isActive && !isWaitingInput && !isTargetedSubagentAnswer) {
       return;
     }
     if (!run && !latestRuns.isSuccess) {
       return;
     }
 
-    const inputRequestId = isWaitingInput
-      ? run?.pending_input?.id
-      : undefined;
-    const submittedSkillIds = isWaitingInput ? [] : [...selectedSkillIds];
+    const inputRequestId = activeSubagentInput
+      ? activeSubagentInput.input_request_id
+      : isWaitingInput
+        ? run?.pending_input?.id
+        : undefined;
+    const targetRunId = activeSubagentInput
+      ? activeSubagentInput.sub_run_id
+      : (run?.id ?? null);
+    const isAnswering = isWaitingInput || isTargetedSubagentAnswer;
+    const submittedSkillIds = isAnswering ? [] : [...selectedSkillIds];
     const submittedFileIds = [...selectedFileIds];
-    const commandKind: RunCommandKind = isWaitingInput ? "answer" : "submit";
-    const commandToken = beginRunCommand(commandKind, run?.id ?? null);
+    const commandKind: RunCommandKind = isAnswering ? "answer" : "submit";
+    const commandToken = beginRunCommand(commandKind, targetRunId);
     if (commandToken === null) {
       return;
     }
@@ -712,7 +823,7 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
         submittedFileIds.join("\u0000") &&
       failedCommand.skillIds.join("\u0000") ===
         submittedSkillIds.join("\u0000") &&
-      (isWaitingInput
+      (isAnswering
         ? failedCommand.kind === "answer" &&
           failedCommand.inputRequestId === inputRequestId
         : failedCommand?.kind === "submit");
@@ -721,24 +832,100 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     setCommandError(null);
     try {
       const nextRun =
-        isWaitingInput && run && inputRequestId
+        activeSubagentInput && inputRequestId
           ? await answerRunInput(
               sessionId,
-              run.id,
+              activeSubagentInput.sub_run_id,
               inputRequestId,
               requestId,
               text,
               submittedFileIds,
             )
-          : await submitRun(
-              sessionId,
-              requestId,
-              text,
-              submittedSkillIds,
-              submittedFileIds,
-            );
-      // HTTP 成功先确认命令结果；投影是否采纳只决定 Run 状态如何同步。
-      applyRunResult(nextRun, commandToken);
+          : isWaitingInput && run && inputRequestId
+            ? await answerRunInput(
+                sessionId,
+                run.id,
+                inputRequestId,
+                requestId,
+                text,
+                submittedFileIds,
+              )
+            : await submitRun(
+                sessionId,
+                requestId,
+                text,
+                submittedSkillIds,
+                submittedFileIds,
+              );
+
+      if (activeSubagentInput) {
+        // 子智能体定向回答返回的是子 Run，不能切换 selectedRunId，
+        // 若回答接口未携带完整 input_interactions，则保留并乐观更新已缓存的提问记录，
+        // 再失效子 Run 查询以拉取服务端权威详情，防止已展开的详情面板闪烁退化为空态。
+        queryClient.setQueryData<Run>(
+          chatKeys.run(sessionId, nextRun.id),
+          (existing) => {
+            if (
+              !nextRun.input_interactions?.length &&
+              existing?.input_interactions?.length
+            ) {
+              return {
+                ...nextRun,
+                input_interactions: existing.input_interactions.map((item) =>
+                  item.input_request_id === activeSubagentInput.input_request_id
+                    ? {
+                        ...item,
+                        status: "answered",
+                        answer_text: text,
+                        answered_at:
+                          item.answered_at ?? new Date().toISOString(),
+                      }
+                    : item,
+                ),
+              };
+            }
+            return nextRun;
+          },
+        );
+        void queryClient.invalidateQueries({
+          queryKey: chatKeys.run(sessionId, nextRun.id),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: chatKeys.toolCalls(sessionId, nextRun.id),
+        });
+        if (currentRunId) {
+          const removeAnswered = (existing: Run): Run => ({
+            ...existing,
+            pending_subagent_inputs: (
+              existing.pending_subagent_inputs ?? []
+            ).filter(
+              (item) =>
+                item.input_request_id !== activeSubagentInput.input_request_id,
+            ),
+          });
+          queryClient.setQueryData<Run>(
+            chatKeys.run(sessionId, currentRunId),
+            (existing) => (existing ? removeAnswered(existing) : existing),
+          );
+          queryClient.setQueryData<RunListResponse>(
+            chatKeys.latestRun(sessionId),
+            (existing) =>
+              existing
+                ? {
+                    ...existing,
+                    items: existing.items.map((item) =>
+                      item.id === currentRunId ? removeAnswered(item) : item,
+                    ),
+                  }
+                : existing,
+          );
+        }
+        reconcileRunState();
+      } else {
+        // HTTP 成功先确认命令结果；投影是否采纳只决定 Run 状态如何同步。
+        applyRunResult(nextRun, commandToken);
+      }
+
       if (isCurrentRunCommand(commandToken)) {
         // 请求期间用户可能继续编辑；只清空仍与提交时完全一致的原草稿。
         setDraft((current) =>
@@ -752,9 +939,11 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
         setHandoffUploads([]);
         clearSessionHandoff(sessionId);
         setCommandNotice(
-          isWaitingInput
-            ? "补充回答已提交，正在按服务端最新运行状态同步。"
-            : "消息已提交，正在按服务端最新运行状态同步。",
+          activeSubagentInput
+            ? `已向子智能体「${activeSubagentInput.subagent_name}」提交回答，正在同步状态。`
+            : isWaitingInput
+              ? "补充回答已提交，正在按服务端最新运行状态同步。"
+              : "消息已提交，正在按服务端最新运行状态同步。",
         );
       }
     } catch (error) {
@@ -762,7 +951,7 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
         setFailedCommand({
           fileIds: submittedFileIds,
           inputRequestId,
-          kind: isWaitingInput ? "answer" : "submit",
+          kind: isAnswering ? "answer" : "submit",
           requestId,
           reuseRequestId: requestIdCanBeReused(error),
           skillIds: submittedSkillIds,
@@ -868,6 +1057,94 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     }
   };
 
+  const handleSubagentApproval = async (
+    approval: PendingSubagentApproval,
+    decision: "approve" | "reject",
+  ) => {
+    const key = subagentApprovalKey(approval);
+    // 同步 ref 锁防止同一渲染帧内连点触发重复审批请求。
+    if (
+      busySubagentApprovalKeysRef.current.has(key) ||
+      busySubagentApprovalKeys.has(key)
+    ) {
+      return;
+    }
+    busySubagentApprovalKeysRef.current.add(key);
+    const previous = subagentApprovalRequestsRef.current[key];
+    const requestId =
+      previous?.decision === decision ? previous.requestId : newRequestId();
+    subagentApprovalRequestsRef.current[key] = { decision, requestId };
+    setSubagentApprovalErrors((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setBusySubagentApprovalKeys((current) => {
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
+    try {
+      // 子智能体工具审批精确路由至对应 sub_run_id，各子智能体之间互不阻塞。
+      const nextSubRun = await decideRunToolApproval(
+        sessionId,
+        approval.sub_run_id,
+        approval.call_id,
+        requestId,
+        decision,
+      );
+      delete subagentApprovalRequestsRef.current[key];
+      queryClient.setQueryData(
+        chatKeys.run(sessionId, nextSubRun.id),
+        nextSubRun,
+      );
+      if (currentRunId) {
+        const removeDecided = (existing: Run): Run => ({
+          ...existing,
+          pending_subagent_approvals: (
+            existing.pending_subagent_approvals ?? []
+          ).filter(
+            (item) =>
+              !(
+                item.sub_run_id === approval.sub_run_id &&
+                item.call_id === approval.call_id
+              ),
+          ),
+        });
+        queryClient.setQueryData<Run>(
+          chatKeys.run(sessionId, currentRunId),
+          (existing) => (existing ? removeDecided(existing) : existing),
+        );
+        queryClient.setQueryData<RunListResponse>(
+          chatKeys.latestRun(sessionId),
+          (existing) =>
+            existing
+              ? {
+                  ...existing,
+                  items: existing.items.map((item) =>
+                    item.id === currentRunId ? removeDecided(item) : item,
+                  ),
+                }
+              : existing,
+        );
+      }
+      reconcileRunState();
+    } catch (error) {
+      setSubagentApprovalErrors((current) => ({
+        ...current,
+        [key]: chatErrorMessage(error),
+      }));
+      reconcileRunState();
+    } finally {
+      busySubagentApprovalKeysRef.current.delete(key);
+      setBusySubagentApprovalKeys((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+
   const handleRetry = async () => {
     if (
       !run ||
@@ -915,7 +1192,8 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     !filePanelBusy &&
     !hasPendingUploads &&
     Boolean(draft.trim()) &&
-    ((isWaitingInput && Boolean(run?.pending_input)) ||
+    (isTargetedSubagentAnswer ||
+      (isWaitingInput && Boolean(run?.pending_input)) ||
       (!isActive && Boolean(run || latestRuns.isSuccess)));
   const streamNotice = streamMatchesRun ? stream.state.notice : null;
   const transientUnfinished =
@@ -1017,6 +1295,11 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             transientUnfinished={transientUnfinished}
           />
 
+          <SubagentExecutionPanel
+            sessionId={sessionId}
+            tasks={subagentTasks}
+          />
+
           <SkillCatalogPicker
             disabled={commandPending || isActive || filePanelBusy}
             onChange={setSelectedSkillIds}
@@ -1025,7 +1308,8 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
 
           <SessionFilesPanel
             disabled={
-              commandPending || (isActive && !isWaitingInput)
+              commandPending ||
+              (isActive && !isWaitingInput && !isTargetedSubagentAnswer)
             }
             initialPendingUploads={handoffUploads}
             onBusyChange={setFilePanelBusy}
@@ -1033,6 +1317,24 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             onInitialPendingUploadsChange={setHandoffUploads}
             selectedFileIds={new Set(selectedFileIds)}
             sessionId={sessionId}
+          />
+
+          <SubagentApprovalPanel
+            approvals={pendingSubagentApprovals}
+            busyKeys={busySubagentApprovalKeys}
+            errors={subagentApprovalErrors}
+            onDecision={(approval, decision) =>
+              void handleSubagentApproval(approval, decision)
+            }
+            sessionId={sessionId}
+          />
+
+          <SubagentInputQueuePanel
+            activeInput={activeSubagentInput}
+            inputs={pendingSubagentInputs}
+            onSelect={(item) =>
+              setSelectedSubagentInputKey(subagentInputKey(item))
+            }
           />
 
           {isWaitingInput && run ? (
@@ -1068,14 +1370,26 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
 
           <section
             aria-busy={commandPending}
-            aria-label={isWaitingInput ? "补充信息输入区" : "消息输入区"}
-            className={`chat-composer${isActive ? " is-locked" : ""}`}
+            aria-label={
+              activeSubagentInput
+                ? `正在回答子智能体「${activeSubagentInput.subagent_name}」的提问`
+                : isWaitingInput
+                  ? "补充信息输入区"
+                  : "消息输入区"
+            }
+            className={`chat-composer${
+              isActive && !isTargetedSubagentAnswer ? " is-locked" : ""
+            }`}
           >
             <header className="chat-composer-header">
               <label htmlFor="session-message">
-                {isWaitingInput ? "补充信息" : "对话草稿"}
+                {activeSubagentInput
+                  ? `正在回答子智能体「${activeSubagentInput.subagent_name}」的提问`
+                  : isWaitingInput
+                    ? "补充信息"
+                    : "对话草稿"}
               </label>
-              {isActive ? (
+              {isActive && !isTargetedSubagentAnswer ? (
                 <span className="chat-composer-lock">
                   <Icon name="lock" size={12} />
                   已锁定重复提交
@@ -1086,9 +1400,13 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
               id="session-message"
               onChange={(event) => setDraft(event.target.value)}
               placeholder={
-                isWaitingInput
-                  ? "回答服务端的当前提问。"
-                  : "描述下一步目标，或继续当前对话。"
+                activeSubagentInput
+                  ? `输入对「${activeSubagentInput.subagent_name}」的回答。`
+                  : isWaitingInput
+                    ? "回答服务端的当前提问。"
+                    : isWaitingSubagents
+                      ? "正在等待子智能体完成任务…"
+                      : "描述下一步目标，或继续当前对话。"
               }
               rows={4}
               value={draft}
@@ -1097,6 +1415,7 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
               <ComposerHint
                 hasPendingUploads={hasPendingUploads}
                 status={status}
+                targetedSubagentName={activeSubagentInput?.subagent_name ?? null}
               />
               <div className="chat-composer-actions">
                 {isActive && run ? (
@@ -1120,14 +1439,18 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
                   type="button"
                 >
                   {sending
-                    ? isWaitingInput
+                    ? isWaitingInput || isTargetedSubagentAnswer
                       ? "正在提交回答…"
                       : "正在提交…"
-                    : isWaitingInput
-                      ? "提交回答"
-                      : isActive
-                        ? "运行中，暂不可发送"
-                        : "发送消息"}
+                    : activeSubagentInput
+                      ? `提交给 ${activeSubagentInput.subagent_name}`
+                      : isWaitingInput
+                        ? "提交回答"
+                        : isWaitingSubagents
+                          ? "等待子智能体完成…"
+                          : isActive
+                            ? "运行中，暂不可发送"
+                            : "发送消息"}
                 </button>
               </div>
             </div>

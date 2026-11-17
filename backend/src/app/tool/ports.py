@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from domain.run import Run, RunInputFileContext
@@ -37,6 +38,9 @@ class RunToolRuntime(Protocol):
         self,
         prompt_template_version: str,
         context: AuthorizedRunContext,
+        *,
+        depth: int = 0,
+        allowed_tool_ids: Sequence[str] | None = None,
     ) -> RuntimeToolSnapshot:
         """Build a bounded catalog without relying on a default page size."""
 

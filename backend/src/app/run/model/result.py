@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from domain.run.model import Run, RunInputRequest
+from domain.run.model import (
+    PendingSubagentApproval,
+    PendingSubagentInput,
+    Run,
+    RunInputRequest,
+    SubagentTaskSummary,
+)
 from domain.tool import PendingToolApproval
 
 
@@ -15,6 +21,9 @@ class RunDetailsResult:
     run: Run
     pending_input: RunInputRequest | None
     pending_approvals: tuple[PendingToolApproval, ...] = ()
+    subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
+    pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
+    pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -442,7 +442,10 @@ export function DeleteKnowledgeBaseDialog({
       <p className="confirm-copy">
         确定删除“{base.name}”吗？知识库中的文档、版本和项目关联将无法继续访问。
       </p>
-      <label className="workspace-checkbox" htmlFor={checkboxId}>
+      <label
+        className="workspace-checkbox workspace-checkbox--danger"
+        htmlFor={checkboxId}
+      >
         <input
           checked={confirmed}
           id={checkboxId}

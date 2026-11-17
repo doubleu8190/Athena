@@ -11,7 +11,9 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -33,14 +35,15 @@ class RunModel(Base):
     __table_args__ = (
         CheckConstraint(
             "status IN ('queued', 'running', 'waiting_for_input', "
-            "'waiting_for_approval', 'cancelling', 'completed', 'failed', 'cancelled')",
+            "'waiting_for_approval', 'waiting_for_subagents', 'cancelling', "
+            "'completed', 'failed', 'cancelled')",
             name="ck_runs_status",
         ),
         CheckConstraint("context_cutoff_sequence >= 0", name="ck_runs_context_cutoff"),
         CheckConstraint("event_sequence >= 0", name="ck_runs_event_sequence"),
         CheckConstraint("execution_epoch >= 0", name="ck_runs_execution_epoch"),
         CheckConstraint(
-            "llm_request_count >= 0 AND llm_request_count <= 40",
+            "llm_request_count >= 0 AND llm_request_count <= 50",
             name="ck_runs_llm_request_count",
         ),
         # 与迁移 20261124_0025 保持一致，约束 Run 记忆提取状态枚举值。
@@ -107,12 +110,12 @@ class RunModel(Base):
             "session_id",
             unique=True,
             postgresql_where=text(
-                "status IN ('queued', 'running', 'waiting_for_input', "
-                "'waiting_for_approval', 'cancelling')"
+                "depth = 0 AND status IN ('queued', 'running', 'waiting_for_input', "
+                "'waiting_for_approval', 'waiting_for_subagents', 'cancelling')"
             ),
             sqlite_where=text(
-                "status IN ('queued', 'running', 'waiting_for_input', "
-                "'waiting_for_approval', 'cancelling')"
+                "depth = 0 AND status IN ('queued', 'running', 'waiting_for_input', "
+                "'waiting_for_approval', 'waiting_for_subagents', 'cancelling')"
             ),
         ),
         Index("ix_runs_claim", "status", "queued_at", "id"),
@@ -130,6 +133,8 @@ class RunModel(Base):
             "finished_at",
             "id",
         ),
+        Index("ix_runs_parent_run_id", "parent_run_id"),
+        Index("ix_runs_root_run_id", "root_run_id"),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -143,9 +148,7 @@ class RunModel(Base):
     main_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    skill_snapshot: Mapped[dict[str, object] | None] = mapped_column(
-        _json_type(), nullable=True
-    )
+    skill_snapshot: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
     input_file_ids: Mapped[list[str]] = mapped_column(
         _json_type(),
         nullable=False,
@@ -192,6 +195,22 @@ class RunModel(Base):
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     report_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     usage: Mapped[dict[str, object]] = mapped_column(_json_type(), nullable=False, default=dict)
+    # Phase 2 Subagent 编排预留字段，默认兼容主 Run（depth=0）。
+    parent_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    root_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    parent_tool_call_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    depth: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    subagent_profile_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    subagent_slug: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    subagent_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    subagent_system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    max_llm_requests: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 __all__ = ["RunModel"]

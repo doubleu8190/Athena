@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.message.repository.message import SqlAlchemyMessageRepository
@@ -32,15 +30,15 @@ class SqlAlchemyRunRepository(
     ) -> None:
         """保存共享数据库工厂和消息事务内部写入端口。"""
         self._session_factory = session_factory
-        self._messages = message_repository
+        # 统一使用 _message_repo 命名持有时效消息子仓储
+        self._message_repo = message_repository
         self._memory_wakeup = memory_wakeup
         self._memory_lifecycle_enabled = memory_lifecycle_enabled
 
-    async def settle_cancelled(self, *args: Any, settled_at: Any = None, **kwargs: Any) -> Any:
-        """使用仓储接口的参数名转发已取消运行的结算。"""
-        if settled_at is not None:
-            kwargs["cancelled_at"] = settled_at
-        return await super().settle_cancelled(*args, **kwargs)
+    @property
+    def _messages(self) -> SqlAlchemyMessageRepository:
+        """平滑兼容属性，指向内部消息仓储实例。"""
+        return self._message_repo
 
 
 __all__ = ["SqlAlchemyRunRepository"]

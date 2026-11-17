@@ -74,6 +74,9 @@ from domain.message import (
     ToolResultPart,
 )
 from domain.run.model import (
+    DISPATCH_SUBAGENTS_TOOL_ID,
+    BeginSubagentBatchCommand,
+    BeginSubagentBatchItem,
     ContextStopReason,
     FailRunCommand,
     FinishRunCommand,
@@ -85,8 +88,10 @@ from domain.run.model import (
     RunLease,
     RunUsage,
 )
+from domain.run.model.errors import RunConflictError, RunInputResourceError, RunStateError
 from domain.run.ports import RunEventTransport, RunRepository
 from domain.skill import SKILL_EXECUTE_TOOL_ID, RunSkillPromptContext
+from domain.subagent import SubagentRepository
 from domain.system_prompt import SystemPromptRepository
 from domain.tool import (
     AdmitToolCallCommand,
@@ -172,6 +177,7 @@ class RunExecutor:
         memory_personal_token_budget: int = 1_000,
         memory_project_token_budget: int = 2_000,
         memory_per_scope_limit: int = 200,
+        subagents: SubagentRepository | None = None,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -184,6 +190,7 @@ class RunExecutor:
         self._tool_runtime = tool_runtime
         self._publisher = publisher
         self._config = config or RunWorkerConfig()
+        self._subagents = subagents
         self._memory_context = (
             None
             if memory_lifecycle is None
@@ -263,6 +270,9 @@ class RunExecutor:
         if prompts is None:
             raise LlmError("system_prompt_unavailable")
         main_prompt, compression_prompt = (item.content for item in prompts)
+        if run.depth >= 1 and run.subagent_system_prompt is not None:
+            # 子 Run 使用派发时冻结的 Subagent 专属系统提示词，不复用主 Run 提示词。
+            main_prompt = run.subagent_system_prompt
         authorized: AuthorizedRunContext | None = None
         if self._tool_runtime is not None:
             # 启用业务工具时必须绑定有效登录会话，否则无法做 owner/项目级鉴权。
@@ -293,7 +303,11 @@ class RunExecutor:
             self._repository,
             context,
             used=run.llm_request_count,
-            maximum=self._config.llm_request_limit,
+            maximum=(
+                run.max_llm_requests
+                if run.max_llm_requests is not None
+                else self._config.llm_request_limit
+            ),
             worker_id=run.worker_id or "",
         )
         # 用户主动重试时带上的安全摘要，只作为历史资料注入，不是当前执行结果。
@@ -333,10 +347,18 @@ class RunExecutor:
                 if authorized is None:
                     raise LlmError("run_auth_session_invalid")
                 # 由运行时构建 v2 工具目录；非 run-v2 已在 _prepare 阶段拒绝，不再兼容 v1。
-                snapshot = await self._tool_runtime.build_snapshot(
-                    run.prompt_template_version,
-                    authorized,
-                )
+                if run.depth >= 1:
+                    snapshot = await self._tool_runtime.build_snapshot(
+                        run.prompt_template_version,
+                        authorized,
+                        depth=run.depth,
+                        allowed_tool_ids=(),
+                    )
+                else:
+                    snapshot = await self._tool_runtime.build_snapshot(
+                        run.prompt_template_version,
+                        authorized,
+                    )
         except ValidationError as error:
             code = (
                 "tool_catalog_too_large"
@@ -432,12 +454,20 @@ class RunExecutor:
                     for call in calls
                 ):
                     raise LlmError("llm_tool_arguments_too_large")
-                # 澄清工具必须单独出现：转存问题并进入等待用户输入，结束本次执行。
+                # 澄清工具与子智能体派发工具不可混合调用，均需单独出现并退出本轮执行。
                 request_inputs = [call for call in calls if call.name == "request_user_input"]
+                dispatch_calls = [call for call in calls if call.name == DISPATCH_SUBAGENTS_TOOL_ID]
+                if request_inputs and dispatch_calls:
+                    raise LlmError("llm_tool_call_mix_unsupported")
                 if request_inputs:
                     if len(calls) != 1:
                         raise LlmError("llm_tool_call_mix_unsupported")
                     await self._save_clarification(state, calls[0], text, response)
+                    return
+                if dispatch_calls and state.run.depth == 0:
+                    if len(calls) != 1:
+                        raise LlmError("llm_tool_call_mix_unsupported")
+                    await self._dispatch_subagents(state, calls[0], text, response)
                     return
                 # 其余工具调用先原子落库（可能进入审批屏障），再执行已批准部分。
                 if not await self._submit_and_execute_batch(state, calls, text, response):
@@ -470,11 +500,15 @@ class RunExecutor:
             if self._tool_runtime is None
             else await self._tool_runtime.build_skill_context(run, loaded_skill_ids)
         )
-        memory_content, messages, memory_retry_blocked = await self._prepare_memory_context(
-            state,
-            runtime,
-            messages,
-        )
+        if run.depth >= 1:
+            # 子 Run 不拉取长期记忆，保持严格上下文隔离。
+            memory_content, memory_retry_blocked = "", False
+        else:
+            memory_content, messages, memory_retry_blocked = await self._prepare_memory_context(
+                state,
+                runtime,
+                messages,
+            )
         state.memory_retry_blocked = memory_retry_blocked
         # 安全裁决永远使用原业务 tools；final-only 只在裁决通过后移除工具。
         business_tools = self._available_tools(state)
@@ -482,7 +516,8 @@ class RunExecutor:
         remaining = self._remaining_seconds(state)
         if remaining <= 0:
             raise TimeoutError("run_execution_deadline")
-        policy_id = run.compression_policy_version_id
+        # 子 Run 无正式会话历史，跳过历史压缩准备流程，直接走完整上下文度量。
+        policy_id = None if run.depth >= 1 else run.compression_policy_version_id
         prepared: ContextPreparation
         if policy_id is not None:
             policy = await self._profiles.get_compression_policy(policy_id)
@@ -534,14 +569,12 @@ class RunExecutor:
 
         # 90% 输入线和 I+O<=W 硬窗均按业务 tools 的完整计数判断，不能先删 tools 降低占用。
         input_limit = (
-            runtime.version.context_window_tokens
-            * CONTEXT_SAFETY_NUMERATOR
+            runtime.version.context_window_tokens * CONTEXT_SAFETY_NUMERATOR
             + CONTEXT_SAFETY_DENOMINATOR
             - 1
         ) // CONTEXT_SAFETY_DENOMINATOR
         hard_window_exceeded = (
-            prepared.input_tokens + prepared.output_tokens
-            > runtime.version.context_window_tokens
+            prepared.input_tokens + prepared.output_tokens > runtime.version.context_window_tokens
         )
         safety_input_exceeded = prepared.input_tokens >= input_limit
         if hard_window_exceeded or safety_input_exceeded:
@@ -550,10 +583,7 @@ class RunExecutor:
             elif prepared.compression_completed:
                 reason = ContextStopReason.COMPRESSION_INSUFFICIENT
             else:
-                reason = (
-                    prepared.stop_reason_hint
-                    or ContextStopReason.COMPRESSION_INSUFFICIENT
-                )
+                reason = prepared.stop_reason_hint or ContextStopReason.COMPRESSION_INSUFFICIENT
             compression_reason = (
                 prepared.stop_reason_hint
                 if prepared.stop_reason_hint is not None and prepared.stop_reason_hint is not reason
@@ -937,9 +967,7 @@ class RunExecutor:
         return ToolCallPreparation(
             outcome=outcome,
             requires_approval=bool(
-                outcome is None
-                and definition is not None
-                and definition.requires_approval
+                outcome is None and definition is not None and definition.requires_approval
             ),
         )
 
@@ -1285,7 +1313,7 @@ class RunExecutor:
         finished_at = self._now()
         delivery_message = (
             None
-            if not result.artifacts
+            if not result.artifacts or state.run.depth >= 1
             else ConversationMessageDraft(
                 # 调用记录一对一决定消息 ID，完成回包不明时重放仍能核对同一条交付。
                 id=f"msg-{call.record.id}",
@@ -1388,8 +1416,7 @@ class RunExecutor:
         run_remaining_seconds = self._remaining_seconds(state)
         # skill_execute 只受 Run 总截止时间约束；其他工具保留通用 tool_timeout 语义。
         skill_execution = (
-            definition.source.kind == "builtin"
-            and definition.tool_id == SKILL_EXECUTE_TOOL_ID
+            definition.source.kind == "builtin" and definition.tool_id == SKILL_EXECUTE_TOOL_ID
         )
         deadline_seconds = (
             run_remaining_seconds
@@ -1529,6 +1556,146 @@ class RunExecutor:
             raise LlmError("run_input_request_invalid")
         await self._publish_pending_events(state)
 
+    async def _dispatch_subagents(
+        self,
+        state: _ExecutionState,
+        call: LlmToolCall,
+        explanation: str,
+        response: LlmResponse,
+    ) -> None:
+        """校验 dispatch_subagents 参数并原子派发子 Run 批次，随后释放主 Run 租约。"""
+        run = state.run
+        if run.depth != 0:
+            raise LlmError("subagent_nested_dispatch_forbidden")
+        if self._tool_runtime is not None and await self._authorize(run) is None:
+            raise LlmError("run_auth_session_invalid")
+        if self._subagents is None:
+            raise LlmError("subagent_runtime_unavailable")
+        definition = self._definition_for_call(state, call.name)
+        if definition is None or definition.tool_id != DISPATCH_SUBAGENTS_TOOL_ID:
+            raise LlmError("tool_unknown")
+        if self._tool_runtime is not None:
+            validation = self._tool_runtime.validate_call(
+                definition, call.name, dict(call.arguments)
+            )
+            if validation is not None:
+                raise LlmError(validation.code)
+
+        raw_tasks = call.arguments.get("tasks")
+        if not isinstance(raw_tasks, list) or not 1 <= len(raw_tasks) <= 5:
+            raise LlmError("subagent_batch_size_invalid")
+
+        created_at = self._now()
+        batch_items: list[BeginSubagentBatchItem] = []
+        for raw_task in raw_tasks:
+            if not isinstance(raw_task, dict):
+                raise LlmError("tool_arguments_invalid")
+            slug = raw_task.get("subagent_slug")
+            task_text = raw_task.get("task")
+            context_text = raw_task.get("context")
+            raw_files = raw_task.get("input_file_ids", [])
+            if (
+                not isinstance(slug, str)
+                or not slug.strip()
+                or not isinstance(task_text, str)
+                or not task_text.strip()
+            ):
+                raise LlmError("tool_arguments_invalid")
+            if context_text is not None and not isinstance(context_text, str):
+                raise LlmError("tool_arguments_invalid")
+            if (
+                not isinstance(raw_files, list)
+                or any(not isinstance(item, str) or not item for item in raw_files)
+                or len(raw_files) != len(set(raw_files))
+            ):
+                raise LlmError("run_input_file_ids_invalid")
+
+            profile = await self._subagents.get_by_slug(slug.strip())
+            if profile is None or not profile.enabled:
+                raise LlmError("subagent_profile_unavailable")
+
+            if self._tool_runtime is not None:
+                if state.authorized is None:
+                    raise LlmError("run_auth_session_invalid")
+                sub_snapshot = await self._tool_runtime.build_snapshot(
+                    run.prompt_template_version,
+                    state.authorized,
+                    depth=1,
+                    allowed_tool_ids=profile.allowed_tool_ids,
+                )
+            else:
+                sub_snapshot = RuntimeToolSnapshot(tools=())
+
+            sub_run_id = self._id_factory("run")
+            formatted_task = (
+                f"任务：\n{task_text.strip()}\n\n补充上下文：\n{context_text.strip()}"
+                if isinstance(context_text, str) and context_text.strip()
+                else task_text.strip()
+            )
+            task_message = ExecutionMessageDraft(
+                id=self._id_factory("exec"),
+                session_id=run.session_id,
+                owner_id=run.owner_id,
+                run_id=sub_run_id,
+                thread_id=sub_run_id,
+                role=ExecutionRole.USER,
+                parts=(TextPart(formatted_task),),
+                tool_call_id=None,
+                source_message_id=None,
+                created_at=created_at,
+                metadata=MessageMetadata(),
+            )
+            batch_items.append(
+                BeginSubagentBatchItem(
+                    sub_run_id=sub_run_id,
+                    subagent_profile_id=profile.id,
+                    subagent_slug=profile.slug,
+                    subagent_name=profile.name,
+                    system_prompt=profile.system_prompt,
+                    model_profile_id=profile.model_profile_id or run.model_config_version_id,
+                    tool_snapshot=sub_snapshot,
+                    skill_snapshot=run.skill_snapshot,
+                    input_file_ids=tuple(raw_files),
+                    task_message=task_message,
+                    max_llm_requests=profile.max_llm_requests,
+                    timeout_seconds=profile.timeout_seconds,
+                )
+            )
+
+        call_message = ExecutionMessageDraft(
+            id=self._id_factory("exec"),
+            session_id=run.session_id,
+            owner_id=run.owner_id,
+            run_id=run.id,
+            thread_id=run.id,
+            role=ExecutionRole.ASSISTANT,
+            parts=(
+                *((TextPart(explanation),) if explanation.strip() else ()),
+                ToolCallPart(call.call_id, call.name, dict(call.arguments)),
+            ),
+            tool_call_id=None,
+            source_message_id=None,
+            created_at=created_at,
+            metadata=MessageMetadata(provider="chat_completions", model=response.model),
+        )
+        try:
+            await self._repository.begin_subagent_batch(
+                BeginSubagentBatchCommand(
+                    run_id=run.id,
+                    worker_id=run.worker_id or "",
+                    execution_epoch=run.execution_epoch,
+                    tool_call_id=call.call_id,
+                    call_message=call_message,
+                    record_id=self._id_factory("toolcall"),
+                    items=tuple(batch_items),
+                    requested_at=created_at,
+                    round=state.round,
+                )
+            )
+        except (RunStateError, RunInputResourceError, RunConflictError) as error:
+            raise LlmError(str(error)) from error
+        await self._publish_pending_events(state)
+
     async def _save_final(
         self,
         state: _ExecutionState,
@@ -1650,6 +1817,7 @@ class RunExecutor:
         # 无实时传输时直接跳过；客户端 SSE 会从 PostgreSQL 对账补齐。
         if state.publish_disabled or self._publisher is None:
             return
+        previous_cursor = state.event_cursor
         state.event_cursor, lookup_failed = await publish_pending_events(
             self._repository,
             self._publisher,
@@ -1661,6 +1829,27 @@ class RunExecutor:
         )
         if lookup_failed:
             state.publish_disabled = True
+        elif state.run.parent_run_id is not None and state.event_cursor > previous_cursor:
+            # 子 Run 事件同步转发至父 Run 频道，触发主 Run SSE 立即对账推送最新子任务状态。
+            events = await self._repository.list_events(
+                state.run.session_id,
+                state.run.owner_id,
+                state.run.id,
+                after_sequence=previous_cursor,
+                limit=100,
+                through_sequence=state.event_cursor,
+            )
+            for event in events:
+                try:
+                    await self._publisher.publish_persisted(
+                        state.run.parent_run_id, state.run.execution_epoch, event
+                    )
+                except Exception:
+                    logger.warning(
+                        "subagent_parent_event_forward_failed parent_run_id=%s sub_run_id=%s",
+                        state.run.parent_run_id,
+                        state.run.id,
+                    )
 
     async def _fail(
         self,

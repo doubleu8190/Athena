@@ -54,9 +54,27 @@ interface ToolFixture {
   tool_id: string;
 }
 
+interface SubagentFixture {
+  allowed_tool_ids: string[];
+  created_at: string;
+  created_by: string;
+  description: string;
+  enabled: boolean;
+  id: string;
+  max_llm_requests: number | null;
+  model_profile_id: string | null;
+  name: string;
+  slug: string;
+  system_prompt: string;
+  timeout_seconds: number | null;
+  updated_at: string;
+  version: number;
+}
+
 interface FixtureState {
   models: ModelFixture[];
   mcpServers: McpFixture[];
+  subagents: SubagentFixture[];
   tools: ToolFixture[];
 }
 
@@ -89,6 +107,25 @@ export async function installAdminFixtures(
   const state: FixtureState = {
     mcpServers: [],
     models: [],
+    subagents: [
+      {
+        allowed_tool_ids: ["tool-e2e"],
+        created_at: NOW,
+        created_by: ADMIN.id,
+        description:
+          "负责分析较长的研究材料，并在复杂布局下保持内容、状态与操作清晰可见。",
+        enabled: true,
+        id: "subagent-e2e",
+        max_llm_requests: 8,
+        model_profile_id: null,
+        name: "端到端子智能体与研究资料分析助手",
+        slug: "e2e-research-subagent-with-a-long-stable-slug",
+        system_prompt: "只提交经过核验的研究结论。",
+        timeout_seconds: 300,
+        updated_at: NOW,
+        version: 3,
+      },
+    ],
     tools: [
       {
         description: "查询端到端知识索引",
@@ -204,6 +241,41 @@ export async function installAdminFixtures(
         page: Number(url.searchParams.get("page") ?? 1),
         page_size: Number(url.searchParams.get("page_size") ?? 20),
         total: state.tools.length,
+      });
+    }
+    if (
+      path === "/api/v1/admin/subagents/available-tools" &&
+      method === "GET"
+    ) {
+      return json(route, {
+        groups: [
+          {
+            group_key: "mcp",
+            items: [
+              {
+                description: "查询知识资料并返回可核验来源。",
+                name: "知识检索",
+                requires_approval: true,
+                server_id: "mcp-e2e",
+                server_name: "知识服务",
+                source_type: "mcp",
+                tool_id: "tool-e2e",
+              },
+            ],
+            label: "MCP 工具",
+          },
+        ],
+      });
+    }
+    if (
+      path === "/api/v1/admin/subagents" &&
+      method === "GET"
+    ) {
+      return json(route, {
+        items: state.subagents,
+        limit: Number(url.searchParams.get("limit") ?? 10),
+        offset: Number(url.searchParams.get("offset") ?? 0),
+        total: state.subagents.length,
       });
     }
     if (

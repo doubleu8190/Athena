@@ -5,12 +5,37 @@ import {
   compressionPolicyBudgets,
   defaultModelProfileForm,
   mcpServerForm,
+  subagentForm,
   validateCompressionPolicyForm,
   validateMcpServerForm,
   validateModelProfileForm,
+  validateSubagentForm,
   validateSystemPromptContent,
   type McpServerFormValues,
+  type SubagentFormValues,
+  type SubagentProfile,
 } from "./model";
+
+function validSubagentFormValues(): SubagentFormValues {
+  return {
+    slug: "research_assistant",
+    name: "调研助手",
+    description: "检索资料并整理摘要。",
+    system_prompt: "你是严谨的调研助手。",
+    model_profile_id: "",
+    allowed_tool_ids: ["builtin_knowledge_search"],
+    enabled: true,
+    max_llm_requests: "",
+    timeout_seconds: "",
+  };
+}
+
+function validateSubagentSlug(slug: string) {
+  return validateSubagentForm({
+    ...validSubagentFormValues(),
+    slug,
+  });
+}
 
 describe("管理表单纯校验", () => {
   it("模型表单拒绝非 HTTPS、容量倒挂和工具并行依赖", () => {
@@ -243,5 +268,166 @@ describe("管理表单纯校验", () => {
     expect(
       validateSystemPromptContent("a".repeat(100_001)),
     ).toContain("100,000");
+  });
+
+  it("子智能体 slug 保留字与后端领域规则一致", () => {
+    for (const reserved of ["main", "default", "system", "subagent"]) {
+      expect(validateSubagentSlug(reserved).errors.slug).toContain(
+        "系统保留字",
+      );
+    }
+
+    for (const allowed of [
+      "admin",
+      "athena",
+      "dispatch_subagents",
+      "root",
+      "self",
+      "subagents",
+    ]) {
+      expect(validateSubagentSlug(allowed).errors.slug).toBeUndefined();
+    }
+  });
+
+  it("子智能体文本按 Unicode 码点校验后端边界", () => {
+    const values = validSubagentFormValues();
+    values.name = "😀".repeat(100);
+    values.description = "😀".repeat(1_000);
+    values.system_prompt = "😀".repeat(32_000);
+
+    expect(validateSubagentForm(values)).toEqual({
+      createInput: expect.objectContaining({
+        name: values.name,
+        description: values.description,
+        system_prompt: values.system_prompt,
+      }),
+      errors: {},
+    });
+
+    values.name = "😀".repeat(101);
+    expect(validateSubagentForm(values).errors.name).toContain("1–100");
+
+    values.name = "调研助手";
+    values.description = "😀".repeat(1_001);
+    expect(validateSubagentForm(values).errors.description).toContain(
+      "1–1,000",
+    );
+
+    values.description = "描述";
+    values.system_prompt = "😀".repeat(32_001);
+    expect(validateSubagentForm(values).errors.system_prompt).toContain(
+      "1–32,000",
+    );
+  });
+
+  it("子智能体文本仅允许后端规定的空白控制字符", () => {
+    const values = validSubagentFormValues();
+    values.description = "第一行\n第二行\r制表\t字符\u0085结束";
+    values.system_prompt = "第一行\n第二行\r制表\t字符\u0085结束";
+    const c1Allowed = validateSubagentForm(values);
+    expect(c1Allowed.createInput?.description).toBe(
+      "第一行\n第二行\r制表\t字符\u0085结束",
+    );
+    expect(c1Allowed.createInput?.system_prompt).toBe(
+      "第一行\n第二行\r制表\t字符\u0085结束",
+    );
+
+    values.name = "调研\n助手";
+    expect(validateSubagentForm(values).errors.name).toContain(
+      "C0 控制字符",
+    );
+
+    values.name = "调研助手";
+    values.description = "包含\u0000控制字符";
+    expect(validateSubagentForm(values).errors.description).toContain(
+      "DEL（U+007F）",
+    );
+
+    values.description = "正常描述";
+    values.system_prompt = "包含\u007f控制字符";
+    expect(validateSubagentForm(values).errors.system_prompt).toContain(
+      "DEL（U+007F）",
+    );
+
+    values.system_prompt = "包含\u001d控制字符";
+    expect(validateSubagentForm(values).errors.system_prompt).toContain(
+      "C0 控制字符",
+    );
+  });
+
+  it("子智能体按 Python strip 边界规范化并提交与后端一致的值", () => {
+    const values = validSubagentFormValues();
+    values.slug = "\u0085research_assistant\u001c";
+    values.name = "\u0085调研助手\u0085";
+    values.description = "\u001c第一行\r\n第二行\u0085";
+    values.system_prompt = "\ufeff\u0085只使用已核验资料\u0085";
+    values.model_profile_id = "\u0085model_1\u001c";
+    values.allowed_tool_ids = ["\u0085tool_1\u001c", "tool_1"];
+
+    const result = validateSubagentForm(values);
+    expect(result.errors).toEqual({});
+    expect(result.createInput).toMatchObject({
+      slug: "research_assistant",
+      name: "调研助手",
+      description: "第一行\r\n第二行",
+      system_prompt: "\ufeff\u0085只使用已核验资料",
+      model_profile_id: "model_1",
+      allowed_tool_ids: ["tool_1"],
+    });
+
+    values.description = "\u0085";
+    expect(validateSubagentForm(values).errors.description).toContain(
+      "1–1,000",
+    );
+  });
+
+  it("工具白名单去重后最多 100 项并保留编辑数据", () => {
+    const values = validSubagentFormValues();
+    const toolIds = Array.from({ length: 100 }, (_, index) => `tool_${index}`);
+    values.allowed_tool_ids = [...toolIds, " tool_0 "];
+
+    expect(validateSubagentForm(values).createInput?.allowed_tool_ids).toEqual(
+      toolIds,
+    );
+
+    values.allowed_tool_ids = [...toolIds, "tool_100"];
+    const tooMany = validateSubagentForm(values);
+    expect(tooMany.createInput).toBeNull();
+    expect(tooMany.errors.allowed_tool_ids).toContain("最多只能选择 100 项");
+    expect(tooMany.errors.allowed_tool_ids).toContain("当前已选择 101 项");
+  });
+
+  it("编辑态完整回填子智能体字段且复制工具数组", () => {
+    const profile: SubagentProfile = {
+      id: "subagent-edit",
+      slug: "research_assistant",
+      name: "已有调研助手",
+      description: "已有描述",
+      system_prompt: "已有提示词",
+      model_profile_id: "model-1",
+      allowed_tool_ids: ["tool_1", "tool_2"],
+      enabled: true,
+      max_llm_requests: 12,
+      timeout_seconds: 180,
+      version: 3,
+      created_by: "admin-1",
+      created_at: "2026-11-16T00:00:00Z",
+      updated_at: "2026-11-16T00:00:00Z",
+    };
+
+    const form = subagentForm(profile);
+    expect(form).toMatchObject({
+      slug: profile.slug,
+      name: profile.name,
+      description: profile.description,
+      system_prompt: profile.system_prompt,
+      model_profile_id: profile.model_profile_id,
+      allowed_tool_ids: profile.allowed_tool_ids,
+      max_llm_requests: "12",
+      timeout_seconds: "180",
+    });
+
+    form.allowed_tool_ids.push("tool_3");
+    expect(profile.allowed_tool_ids).toEqual(["tool_1", "tool_2"]);
   });
 });

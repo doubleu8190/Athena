@@ -1,6 +1,7 @@
 """验证应用组装后的 HTTP 存活检查。"""
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -11,16 +12,20 @@ from fastapi.testclient import TestClient
 import bootstrap.api as bootstrap_api
 import bootstrap.database as bootstrap_database
 import main
+from adapter.mcp.repository import SqlAlchemyMcpRepository
 from app.knowledge.service import KnowledgeService
 from app.memory.service import MemoryService
 from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
 from app.tool import ToolManager
 from bootstrap.tool import QueryServiceBundle, build_query_services
+from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.knowledge.model import OriginalStorageConfigurationError
 from domain.llm.ports import EmbeddingPort, TokenCounterPort
+from domain.mcp import McpServer, McpServerPage, StreamableHttpConfig
 from domain.memory.model import RerankerPort
 from domain.memory.ports import MemoryLifecycleRepositoryPort, MemoryRepositoryPort
+from domain.tool import AdminToolDefinition, ToolPage
 from main import create_app
 
 
@@ -293,6 +298,121 @@ def test_injected_knowledge_service_mounts_project_routes_without_stealing_owner
     assert not knowledge.closed
     assert len(databases) == 1
     assert databases[0].disposed
+
+
+def test_injected_tool_manager_keeps_mcp_tools_in_default_subagent_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """注入 ToolManager 时，默认子代理目录仍读取同库的 MCP 工具。"""
+    now = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+    admin = User(
+        id="usr_admin",
+        email="admin@example.com",
+        password_hash="unused",
+        display_name="Admin",
+        status=UserStatus.ACTIVE,
+        created_at=now,
+        updated_at=now,
+        role=UserRole.ADMIN,
+    )
+    actor = AuthContext(user=admin, session_id="sess_admin")
+    created_repositories: list[SqlAlchemyMcpRepository] = []
+
+    class FakeDatabase:
+        session_factory = object()
+
+        async def dispose(self) -> None:
+            return None
+
+    class FakeMcpRepository:
+        def __init__(self, session_factory: object, secret_cipher: object) -> None:
+            del session_factory, secret_cipher
+            created_repositories.append(cast(SqlAlchemyMcpRepository, self))
+
+        async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
+            del offset, limit
+            return McpServerPage(
+                items=(
+                    McpServer(
+                        id="mcp_github",
+                        name="GitHub",
+                        config=StreamableHttpConfig(
+                            transport="streamable_http",
+                            url="https://example.com/mcp",
+                        ),
+                        secret_metadata=(),
+                        key_version=None,
+                        config_version=1,
+                        created_by=admin.id,
+                        created_at=now,
+                        updated_at=now,
+                        tools_discovered_at=now,
+                    ),
+                ),
+                total=1,
+            )
+
+        async def list_admin(
+            self, *, offset: int, limit: int
+        ) -> ToolPage[AdminToolDefinition]:
+            del offset, limit
+            return ToolPage(
+                items=(
+                    AdminToolDefinition(
+                        tool_id="tool_" + "a" * 32,
+                        model_name="mcp__github_search",
+                        description="Search GitHub",
+                        input_schema={"type": "object"},
+                        server_id="mcp_github",
+                        remote_name="search",
+                    ),
+                ),
+                total=1,
+            )
+
+    class FakeAuthRepository:
+        def __init__(self, session_factory: object) -> None:
+            del session_factory
+
+        async def get_current_session_user(
+            self,
+            user_id: str,
+            session_id: str,
+            current_time: datetime,
+        ) -> User | None:
+            del current_time
+            assert (user_id, session_id) == (admin.id, actor.session_id)
+            return admin
+
+    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    monkeypatch.setenv("ATHENA_MEMORY_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_MEMORY_LIFECYCLE_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    monkeypatch.setattr(bootstrap_api, "build_database", lambda _url: FakeDatabase())
+    monkeypatch.setattr(bootstrap_api, "SqlAlchemyMcpRepository", FakeMcpRepository)
+    monkeypatch.setattr(bootstrap_api, "SqlAlchemyAuthRepository", FakeAuthRepository)
+
+    dependencies = bootstrap_api.build_api_dependencies(
+        project_service=cast(Any, object()),
+        message_service=cast(Any, object()),
+        session_service=cast(Any, object()),
+        run_service=cast(Any, object()),
+        auth_service=cast(Any, object()),
+        tool_manager=cast(ToolManager, object()),
+        model_profile_service=cast(Any, object()),
+        system_prompt_service=cast(Any, object()),
+    )
+
+    assert len(created_repositories) == 1
+    assert dependencies.subagent_service is not None
+    groups = asyncio.run(dependencies.subagent_service.list_available_tools(actor))
+    mcp_group = next(group for group in groups if group.group_key == "mcp")
+    assert [(item.tool_id, item.name) for item in mcp_group.items] == [
+        ("tool_" + "a" * 32, "mcp__github_search")
+    ]
+    asyncio.run(dependencies.aclose())
 
 
 def test_os_error_outside_database_routes_is_not_masked_as_503() -> None:

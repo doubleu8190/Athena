@@ -18,6 +18,7 @@ from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
 from adapter.skill import SqlAlchemySkillRepository
+from adapter.subagent import SqlAlchemySubagentModelChecker, SqlAlchemySubagentRepository
 from adapter.system_prompt import SqlAlchemySystemPromptRepository
 from app.auth.service import AuthService
 from app.file import SessionFileService
@@ -30,6 +31,7 @@ from app.run.service import RunService
 from app.run.stream import RunStreamService
 from app.session.service import SessionService
 from app.skill import DependencyChecker, SkillService
+from app.subagent import DefaultSubagentToolCatalog, SubagentService
 from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.config import env_csv_set, env_flag, memory_enabled_from_env
@@ -95,6 +97,7 @@ class ApiDependencies:
     skill_service: SkillService | None
     session_file_service: SessionFileService | None
     knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
+    subagent_service: SubagentService | None = None
 
     async def start(self) -> None:
         """在首个请求前启动共享查询资源。"""
@@ -150,6 +153,7 @@ def build_api_dependencies(
     knowledge_service: KnowledgeService | None = None,
     skill_service: SkillService | None = None,
     session_file_service: SessionFileService | None = None,
+    subagent_service: SubagentService | None = None,
 ) -> ApiDependencies:
     """按环境变量与注入参数组装 API 进程依赖。
 
@@ -166,6 +170,7 @@ def build_api_dependencies(
     mcp_use_case = tool_manager
     model_profile_use_case = model_profile_service
     system_prompt_use_case = system_prompt_service
+    subagent_use_case = subagent_service
     memory_use_case = memory_service
     memory_enabled = memory_service is not None or memory_enabled_from_env()
     knowledge_enabled = knowledge_service is not None or env_flag(
@@ -191,17 +196,21 @@ def build_api_dependencies(
     # LLM 配置由管理员持久化；部署环境只提供加密主密钥，不提供模型凭据。
     secret_cipher: McpSecretCipher | None = None
     mcp_discovery: McpDiscoveryClient | None = None
-    if database_url and mcp_use_case is None:
+    if database_url and (mcp_use_case is None or subagent_use_case is None):
         # 在创建数据库连接池前验证 MCP 密钥，防止失败组装遗留资源。
+        # 注入 ToolManager 时仍需为默认 Subagent 目录建立同库只读仓储。
         secret_cipher = McpSecretCipher.from_environment()
-        allowed_private_hosts = env_csv_set("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS")
-        stdio_names = env_csv_set("ATHENA_MCP_STDIO_BASE_ENV_NAMES")
-        base_environment = {name: os.environ[name] for name in stdio_names if name in os.environ}
-        mcp_discovery = McpDiscoveryClient(
-            allowed_private_hosts=allowed_private_hosts,
-            stdio_base_environment=base_environment,
-            stdio_allowed_environment_names=stdio_names,
-        )
+        if mcp_use_case is None:
+            allowed_private_hosts = env_csv_set("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS")
+            stdio_names = env_csv_set("ATHENA_MCP_STDIO_BASE_ENV_NAMES")
+            base_environment = {
+                name: os.environ[name] for name in stdio_names if name in os.environ
+            }
+            mcp_discovery = McpDiscoveryClient(
+                allowed_private_hosts=allowed_private_hosts,
+                stdio_base_environment=base_environment,
+                stdio_allowed_environment_names=stdio_names,
+            )
     if database_url and model_profile_use_case is None and secret_cipher is None:
         # LLM 加密密钥未配置时仍允许非 MCP 功能启动；模型调用会安全地保持不可用。
         try:
@@ -219,6 +228,7 @@ def build_api_dependencies(
         # 注入 KnowledgeService 时，项目绑定与查询服务仍共享 API 数据库会话工厂。
         or knowledge_enabled
         or system_prompt_use_case is None
+        or subagent_use_case is None
     ):
         database = build_database(database_url)
         project_repository = SqlAlchemyProjectRepository(database.session_factory)
@@ -247,14 +257,26 @@ def build_api_dependencies(
             message_use_case = MessageService(message_repository)
         else:
             message_repository = SqlAlchemyMessageRepository(database.session_factory)
-        if mcp_use_case is None:
-            if secret_cipher is None or mcp_discovery is None:
+        mcp_repository: SqlAlchemyMcpRepository | None = None
+        if mcp_use_case is None or subagent_use_case is None:
+            if secret_cipher is None:
                 raise McpSecretError("mcp_secret_key_missing")
+            # 子代理目录与服务写入共享同一 API 数据库，避免目录读取使用独立快照。
             mcp_repository = SqlAlchemyMcpRepository(database.session_factory, secret_cipher)
+        if mcp_use_case is None:
+            if mcp_discovery is None or mcp_repository is None:
+                raise McpSecretError("mcp_secret_key_missing")
             mcp_use_case = ToolManager(
                 mcp_repository,
                 mcp_discovery,
                 auth_repository,
+            )
+        if subagent_use_case is None:
+            subagent_use_case = SubagentService(
+                SqlAlchemySubagentRepository(database.session_factory),
+                auth_repository,
+                model_checker=SqlAlchemySubagentModelChecker(database.session_factory),
+                tool_catalog=DefaultSubagentToolCatalog(mcp_repository),
             )
         query_services = build_query_services(
             database.session_factory,
@@ -340,6 +362,7 @@ def build_api_dependencies(
         file_object_store=file_object_store,
         skill_service=skill_use_case,
         session_file_service=session_file_use_case,
+        subagent_service=subagent_use_case,
     )
 
 

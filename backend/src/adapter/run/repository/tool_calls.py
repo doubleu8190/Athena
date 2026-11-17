@@ -25,7 +25,6 @@ from adapter.run.model import (
 )
 from adapter.run.repository._shared import (
     RunRepositorySupportMixin,
-    _skill_execution_row_matches,
 )
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
@@ -45,7 +44,6 @@ from domain.message import (
     ToolResultStatus,
 )
 from domain.run.model import (
-    MAX_RUN_SSE_SNAPSHOT_BYTES,
     Run,
     RunApprovalResumedPayload,
     RunRequestOperation,
@@ -92,17 +90,6 @@ from domain.tool import (
     protocol_status_for_outcome,
 )
 
-_ACTIVE_STATUSES = (
-    RunStatus.QUEUED.value,
-    RunStatus.RUNNING.value,
-    RunStatus.WAITING_FOR_INPUT.value,
-    RunStatus.WAITING_FOR_APPROVAL.value,
-    RunStatus.CANCELLING.value,
-)
-_STREAM_SNAPSHOT_MESSAGES = 8
-_STREAM_SNAPSHOT_EVENTS = 100
-_STREAM_SNAPSHOT_BYTES = MAX_RUN_SSE_SNAPSHOT_BYTES
-_STREAM_SNAPSHOT_PREFIX_RESERVE = 128
 _MAX_TOOL_BATCH_SIZE = 8
 logger = logging.getLogger(__name__)
 
@@ -124,11 +111,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         if any(not item.tool_call_id or len(item.tool_call_id) > 256 for item in command.calls):
             raise ValueError("run_tool_call_identity_invalid")
         # 助手消息必须只包含与 calls 顺序一致的 ToolCallPart，且不能混入工具结果。
-        call_parts = [
-            part
-            for part in command.call_message.parts
-            if isinstance(part, ToolCallPart)
-        ]
+        call_parts = [part for part in command.call_message.parts if isinstance(part, ToolCallPart)]
         if (
             command.call_message.role is not ExecutionRole.ASSISTANT
             or any(isinstance(part, ToolResultPart) for part in command.call_message.parts)
@@ -171,9 +154,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     raise RunStateError("run_tool_call_message_invalid")
 
                 # 幂等重放：同一批助手消息已落库时，校验内容一致后直接返回已有批次。
-                existing_message = await session.get(
-                    ExecutionMessageModel, command.call_message.id
-                )
+                existing_message = await session.get(ExecutionMessageModel, command.call_message.id)
                 if existing_message is not None:
                     existing_records = list(
                         (
@@ -190,9 +171,8 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     # 调用 id、模型名或参数列表不一致说明不是同一批次，按冲突处理。
                     if (
                         [record.tool_call_id for record in existing_records] != protocol_ids
-                        or [
-                            record.model_name for record in existing_records
-                        ] != [item.model_name for item in command.calls]
+                        or [record.model_name for record in existing_records]
+                        != [item.model_name for item in command.calls]
                         or [
                             part
                             for part in execution_to_domain(existing_message).parts
@@ -208,9 +188,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                             record.safe_skill_projection
                         )
                         for record in existing_records
-                    ] != [
-                        item.safe_skill_projection for item in command.calls
-                    ]:
+                    ] != [item.safe_skill_projection for item in command.calls]:
                         raise RunConflictError("run_tool_batch_conflict")
                     # replayed 标志为 True；是否仍在审批等待取决于 Run 当前状态。
                     return BeginToolCallBatchResult(
@@ -231,7 +209,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     or 0
                 )
                 # 先写入助手工具调用消息，再逐条关联工具调用记录。
-                await self._messages.append_execution_in_session(
+                await self._message_repo.append_execution_in_session(
                     session,
                     command.call_message,
                     locked_session=locked_session,
@@ -263,9 +241,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         tool_call_id=item.tool_call_id,
                         ordinal=ordinal,
                         tool_id=item.tool_id,
-                        tool_kind=(
-                            None if item.tool_kind is None else item.tool_kind.value
-                        ),
+                        tool_kind=(None if item.tool_kind is None else item.tool_kind.value),
                         model_name=item.model_name,
                         execution_epoch=command.execution_epoch,
                         status=status.value,
@@ -300,7 +276,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         self._validate_tool_result_message(
                             record, item.result_message, row, outcome
                         )
-                        await self._messages.append_execution_in_session(
+                        await self._message_repo.append_execution_in_session(
                             session,
                             item.result_message,
                             locked_session=locked_session,
@@ -374,16 +350,11 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     )
                 ).all()
             )
-            if any(
-                record.status == ToolCallStatus.PENDING_APPROVAL.value
-                for record in records
-            ):
+            if any(record.status == ToolCallStatus.PENDING_APPROVAL.value for record in records):
                 return None
             return await self._batch_from_records(session, run_id, records)
 
-    async def admit_tool_call(
-        self, command: AdmitToolCallCommand
-    ) -> RunToolCallRecord | None:
+    async def admit_tool_call(self, command: AdmitToolCallCommand) -> RunToolCallRecord | None:
         """Atomically claim one approved call under the current execution lease."""
         async with self._session_factory() as session:
             async with session.begin():
@@ -495,9 +466,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         await self._wake_memory(result.owner_id)
         return result
 
-    async def decide_tool_approval(
-        self, command: DecideToolApprovalCommand
-    ) -> Run | None:
+    async def decide_tool_approval(self, command: DecideToolApprovalCommand) -> Run | None:
         """Apply one idempotent approval decision and queue only after the last pending."""
         async with self._session_factory() as session:
             # 决策写入、工具结果消息、事件与幂等台账都在同一事务内提交。
@@ -587,9 +556,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     record.status = ToolCallStatus.APPROVED.value
                 else:
                     # 拒绝：写入一条失败的 tool 结果消息，让模型下一轮看到未执行及原因。
-                    call_message = await session.get(
-                        ExecutionMessageModel, record.call_message_id
-                    )
+                    call_message = await session.get(ExecutionMessageModel, record.call_message_id)
                     if call_message is None:
                         raise RuntimeError("run_tool_call_message_missing")
                     # 用结构化 error 结果表达拒绝，模型可据此调整后续计划。
@@ -618,7 +585,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         created_at=command.decided_at,
                         metadata=MessageMetadata(),
                     )
-                    await self._messages.append_execution_in_session(
+                    await self._message_repo.append_execution_in_session(
                         session,
                         result_message,
                         locked_session=locked_session,
@@ -665,9 +632,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     await self._append_event(
                         session,
                         row,
-                        RunApprovalResumedPayload(
-                            batch_message_id=record.call_message_id
-                        ),
+                        RunApprovalResumedPayload(batch_message_id=record.call_message_id),
                         command.decided_at,
                     )
                 # 写入幂等台账，供相同 request_id 的重试直接返回。
@@ -724,9 +689,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         batch_message_id=row.call_message_id,
                         ordinal=row.ordinal,
                         model_name=row.model_name,
-                        tool_kind=(
-                            None if row.tool_kind is None else ToolKind(row.tool_kind)
-                        ),
+                        tool_kind=(None if row.tool_kind is None else ToolKind(row.tool_kind)),
                         requested_at=row.requested_at,
                         safe_skill_projection=await self._refresh_safe_skill_projection(
                             session, row
@@ -736,20 +699,13 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         return tuple(pending)
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
-        """Persist one result and atomically converge/fail when required."""
-        return await self._finish_tool_call_transaction(command)
-
-    async def _finish_tool_call_transaction(
-        self,
-        command: FinishToolCallCommand,
-    ) -> Run | None:
-        """在工具失败事务提交后补做记忆唤醒，提交失败不唤醒。"""
-        result = await self._finish_tool_call_transaction_inner(command)
-        if result is not None and result.status is RunStatus.FAILED:
+        """对外入口：持久化工具调用结果并在失败终态时在事务外触发记忆唤醒。"""
+        result = await self._finish_tool_call_in_session(command)
+        if result is not None and result.status is RunStatus.FAILED and result.depth == 0:
             await self._wake_memory(result.owner_id)
         return result
 
-    async def _finish_tool_call_transaction_inner(
+    async def _finish_tool_call_in_session(
         self,
         command: FinishToolCallCommand,
     ) -> Run | None:
@@ -775,7 +731,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     raise RunStateError("run_tool_call_not_found")
                 outcome = bounded_outcome(command.outcome)
                 self._validate_tool_result_message(record, command.result_message, row, outcome)
-                pending_artifacts = self._validated_pending_artifacts(
+                pending_artifacts = self._validate_pending_artifacts(
                     record,
                     command.result_message,
                     command.artifacts,
@@ -852,7 +808,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         record.id,
                         command.finished_at,
                     )
-                await self._messages.append_execution_in_session(
+                await self._message_repo.append_execution_in_session(
                     session,
                     command.result_message,
                     locked_session=locked_session,
@@ -861,7 +817,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 if command.delivery_message is not None:
                     # 产物交付同时作为普通助手消息发布，使分页刷新后的公开消息流
                     # 可恢复同一组 FileRefPart；内部 TOOL 消息仍保持唯一。
-                    await self._messages.append_conversation_in_session(
+                    await self._message_repo.append_conversation_in_session(
                         session,
                         command.delivery_message,
                         locked_session=locked_session,
@@ -1116,7 +1072,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             raise RunStateError("run_tool_result_message_invalid")
 
     @staticmethod
-    def _validated_pending_artifacts(
+    def _validate_pending_artifacts(
         record: RunToolCallModel,
         message: ExecutionMessageDraft,
         artifacts: tuple[PendingSessionFile, ...],
@@ -1130,9 +1086,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             {item.object_key for item in artifacts}
         ) != len(artifacts):
             raise RunStateError("run_tool_artifacts_invalid")
-        result = next(
-            part for part in message.parts if isinstance(part, ToolResultPart)
-        )
+        result = next(part for part in message.parts if isinstance(part, ToolResultPart))
         expected = tuple(
             ArtifactFileRef(
                 file_id=item.id,
@@ -1232,7 +1186,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         if skill_execution is None:
             raise RunStateError("skill_execution_record_missing")
         if skill_execution.status != SkillExecutionStatus.RUNNING.value:
-            if not _skill_execution_row_matches(
+            if not RunToolCallsMixin._skill_execution_row_matches(
                 skill_execution,
                 completion,
                 artifacts,
@@ -1262,6 +1216,37 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         await session.flush()
 
     @staticmethod
+    def _skill_execution_row_matches(
+        row: SkillExecutionModel,
+        completion: SkillExecutionCompletion,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> bool:
+        """比较脚本审计终态，重放不能替换日志、错误或产物集合。"""
+        expected_artifacts = [
+            SkillExecutionArtifact(
+                file_id=artifact.id,
+                filename=artifact.filename,
+                label=artifact.label,
+                mime_type=artifact.mime_type,
+                size_bytes=artifact.size_bytes,
+                sha256=artifact.sha256,
+                object_key=artifact.object_key,
+                output_index=artifact.output_index,
+            ).model_dump(mode="json")
+            for artifact in artifacts
+        ]
+        return (
+            row.status == completion.status.value
+            and row.log_object_key == completion.log_object_key
+            and row.log_truncated == completion.log_truncated
+            and row.log_error_code == completion.log_error_code
+            and row.error_code == completion.error_code
+            and row.cleanup_error_code == completion.cleanup_error_code
+            and row.result_artifacts == expected_artifacts
+            and row.finished_at == completion.finished_at
+        )
+
+    @staticmethod
     async def _skill_completion_matches(
         session: AsyncSession,
         record: RunToolCallModel,
@@ -1284,17 +1269,14 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     SkillExecutionModel.tool_call_record_id == record.id
                 )
             )
-            return (
-                status is None
-                or status != SkillExecutionStatus.RUNNING.value
-            )
+            return status is None or status != SkillExecutionStatus.RUNNING.value
         row = await session.scalar(
             select(SkillExecutionModel).where(
                 SkillExecutionModel.id == completion.execution_id,
                 SkillExecutionModel.tool_call_record_id == record.id,
             )
         )
-        return row is not None and _skill_execution_row_matches(
+        return row is not None and RunToolCallsMixin._skill_execution_row_matches(
             row,
             completion,
             artifacts,
@@ -1308,9 +1290,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         """按冻结摘要重新核对输入文件，不读取当前 Skill 管理配置。"""
         if row.safe_skill_projection is None:
             return None
-        projection = SafeSkillApprovalProjection.model_validate(
-            row.safe_skill_projection
-        )
+        projection = SafeSkillApprovalProjection.model_validate(row.safe_skill_projection)
         if not projection.input_files:
             return projection
         file_ids = tuple(item.file_id for item in projection.input_files)

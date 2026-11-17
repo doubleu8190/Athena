@@ -337,9 +337,7 @@ class SafeStopReporter:
                 raise
             except Exception as error:
                 await self._record_context_report_usage_best_effort(state, report_usage)
-                raise RunContextSafetyCommitError(
-                    None, "authorization_check_failed"
-                ) from error
+                raise RunContextSafetyCommitError(None, "authorization_check_failed") from error
             if authorized is None:
                 # 授权撤销时仍按普通鉴权失败收敛，但保留报告模型已经产生的调用用量。
                 await self._commit_context_authorization_failure(
@@ -435,11 +433,7 @@ class SafeStopReporter:
                 if not await self._repository.is_live_execution(run.id, run.execution_epoch):
                     failure_reason = "lease_lost"
                     break
-                if (
-                    require_authorization
-                    and authorize is not None
-                    and await authorize(run) is None
-                ):
+                if require_authorization and authorize is not None and await authorize(run) is None:
                     failure_reason = "authorization_lost"
                     break
                 failed = await self._repository.fail(command)

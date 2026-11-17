@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
   await installAdminFixtures(page);
 });
 
-test("管理导航在四个真实页面间切换", async ({ page }) => {
+test("管理导航在真实页面间切换", async ({ page }) => {
   await page.goto("/admin/models");
   await expect(
     page.getByRole("heading", {
@@ -35,6 +35,14 @@ test("管理导航在四个真实页面间切换", async ({ page }) => {
     page.getByRole("heading", { level: 1, name: "技能管理" }),
   ).toBeVisible();
   await expect(page.getByText("还没有技能包")).toBeVisible();
+
+  await nav.getByRole("link", { name: "子智能体" }).click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "子智能体管理" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("端到端子智能体与研究资料分析助手"),
+  ).toBeVisible();
 });
 
 test("模型创建表单提交真实字段并更新列表", async ({ page }) => {
@@ -127,6 +135,7 @@ test("920px 与 390px 管理页无水平溢出", async ({ page }) => {
     { heading: "MCP Server", path: "/admin/mcp" },
     { heading: "工具审批策略", path: "/admin/tools" },
     { heading: "技能管理", path: "/admin/skills" },
+    { heading: "子智能体管理", path: "/admin/subagents" },
   ];
 
   for (const target of pages) {
@@ -150,4 +159,84 @@ test("920px 与 390px 管理页无水平溢出", async ({ page }) => {
         .toBeLessThanOrEqual(1);
     }
   }
+});
+
+test("短视口保留主导航与账户入口", async ({ page }) => {
+  await page.setViewportSize({ height: 360, width: 900 });
+  await page.goto("/admin/subagents");
+
+  const rail = page.getByRole("complementary", {
+    name: "应用侧栏",
+  });
+  await expect(rail).toBeVisible();
+  const account = page.getByRole("button", { name: "账户菜单" });
+  await expect(account).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "主导航" }).getByRole("link"),
+  ).toHaveCount(4);
+
+  const layout = await rail.evaluate((element) => {
+    const navigation = element.querySelector<HTMLElement>(".rail-nav");
+    const account = element.querySelector<HTMLElement>(
+      ".account-menu-anchor",
+    );
+    if (!navigation || !account) {
+      return null;
+    }
+    const railRect = element.getBoundingClientRect();
+    const navigationRect = navigation.getBoundingClientRect();
+    const accountRect = account.getBoundingClientRect();
+    return {
+      accountVisible: accountRect.bottom <= railRect.bottom + 1,
+      navigationBeforeAccount:
+        navigationRect.bottom <= accountRect.top + 1,
+    };
+  });
+  expect(layout).toEqual({
+    accountVisible: true,
+    navigationBeforeAccount: true,
+  });
+
+  await account.click();
+  await expect(page.getByRole("menu")).toBeVisible();
+});
+
+test("390px 子智能体卡片与表单无水平溢出", async ({ page }) => {
+  await page.setViewportSize({ height: 844, width: 390 });
+  await page.goto("/admin/subagents");
+
+  await expect(
+    page.getByRole("button", {
+      name: "编辑子智能体：端到端子智能体与研究资料分析助手",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "删除子智能体：端到端子智能体与研究资料分析助手",
+    }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "新建子智能体" }).click();
+  const dialog = page.getByRole("dialog", { name: "新建子智能体" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("绑定模型")).toBeVisible();
+  await expect(
+    dialog.getByRole("checkbox", {
+      name: /知识检索.*查询知识资料/,
+    }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("checkbox", {
+      name: "创建后立即启用该子智能体",
+    }),
+  ).toBeVisible();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          document.documentElement.scrollWidth - window.innerWidth,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
 });

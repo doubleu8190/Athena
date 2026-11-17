@@ -239,5 +239,47 @@ describe("Modal", () => {
       within(outer).getByRole("button", { name: "打开内层弹窗" }),
     ).not.toHaveFocus();
   });
+
+  it("焦点循环跳过程序化和禁用控件", async () => {
+    render(
+      <Modal onClose={() => undefined} open title="上传文件">
+        <button data-autofocus type="button">
+          最后的可见控件
+        </button>
+        <input
+          aria-label="程序化文件输入"
+          tabIndex={-1}
+          type="file"
+        />
+        <button tabIndex={-1} type="button">
+          程序化按钮
+        </button>
+        <fieldset disabled>
+          <button type="button">字段集禁用按钮</button>
+        </fieldset>
+      </Modal>,
+    );
+
+    const lastVisibleControl = screen.getByRole("button", {
+      name: "最后的可见控件",
+    });
+    const hiddenInput = screen.getByLabelText("程序化文件输入");
+    const programmaticButton = screen.getByRole("button", {
+      name: "程序化按钮",
+    });
+    const fieldsetDisabledButton = screen.getByRole("button", {
+      name: "字段集禁用按钮",
+    });
+    const firstControl = screen.getByRole("button", {
+      name: "关闭弹窗",
+    });
+    await waitFor(() => expect(lastVisibleControl).toHaveFocus());
+
+    fireEvent.keyDown(lastVisibleControl, { key: "Tab" });
+    expect(firstControl).toHaveFocus();
+    expect(hiddenInput).not.toHaveFocus();
+    expect(programmaticButton).not.toHaveFocus();
+    expect(fieldsetDisabledButton).not.toHaveFocus();
+  });
 });
 

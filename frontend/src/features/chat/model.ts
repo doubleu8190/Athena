@@ -7,6 +7,7 @@ export type RunStatus =
   | "running"
   | "waiting_for_input"
   | "waiting_for_approval"
+  | "waiting_for_subagents"
   | "cancelling"
   | "completed"
   | "failed"
@@ -96,6 +97,15 @@ export interface RunPendingInput {
   created_at: string;
 }
 
+export interface RunInputInteraction {
+  input_request_id: string;
+  status: string;
+  question_text: string;
+  answer_text: string | null;
+  created_at: string;
+  answered_at: string | null;
+}
+
 export interface RunPendingApproval {
   call_id: string;
   batch_message_id: string;
@@ -151,6 +161,48 @@ export interface RunSkillSnapshot {
   selected_skill_ids: string[];
 }
 
+export interface SubagentTaskSummary {
+  sub_run_id: string;
+  parent_tool_call_id: string;
+  subagent_profile_id: string | null;
+  subagent_slug: string;
+  subagent_name: string;
+  task_index: number;
+  task_summary: string;
+  status: RunStatus;
+  safe_error_code: string | null;
+  created_at: string;
+  first_started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface PendingSubagentInput {
+  sub_run_id: string;
+  subagent_slug: string;
+  subagent_name: string;
+  task_index: number;
+  task_summary: string;
+  input_request_id: string;
+  question_message_id: string;
+  question_text: string;
+  created_at: string;
+}
+
+export interface PendingSubagentApproval {
+  sub_run_id: string;
+  subagent_slug: string;
+  subagent_name: string;
+  task_index: number;
+  task_summary: string;
+  call_id: string;
+  batch_message_id: string;
+  ordinal: number;
+  model_name: string;
+  tool_kind: string | null;
+  requested_at: string;
+  safe_skill_projection: SafeSkillApprovalProjection | null;
+}
+
 export interface Run {
   id: string;
   session_id: string;
@@ -175,6 +227,17 @@ export interface Run {
   pending_approvals: RunPendingApproval[];
   skill_snapshot: RunSkillSnapshot | null;
   input_file_ids: string[];
+  parent_run_id?: string | null;
+  root_run_id?: string | null;
+  parent_tool_call_id?: string | null;
+  depth?: number;
+  subagent_profile_id?: string | null;
+  subagent_slug?: string | null;
+  subagent_name?: string | null;
+  subagent_tasks?: SubagentTaskSummary[];
+  pending_subagent_inputs?: PendingSubagentInput[];
+  pending_subagent_approvals?: PendingSubagentApproval[];
+  input_interactions?: RunInputInteraction[];
   replayed: boolean;
   retry_warning: string | null;
 }
@@ -234,6 +297,9 @@ export interface RunSnapshotPayload {
   messages_before_sequence: number | null;
   events_complete: boolean;
   events_after_sequence: number | null;
+  subagent_tasks?: SubagentTaskSummary[];
+  pending_subagent_inputs?: PendingSubagentInput[];
+  pending_subagent_approvals?: PendingSubagentApproval[];
 }
 
 export interface RunToolOutcome {
@@ -277,6 +343,7 @@ export const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set([
   "running",
   "waiting_for_input",
   "waiting_for_approval",
+  "waiting_for_subagents",
   "cancelling",
 ]);
 
@@ -285,6 +352,7 @@ export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   running: "运行中",
   waiting_for_input: "等待补充",
   waiting_for_approval: "等待审批",
+  waiting_for_subagents: "等待子智能体",
   cancelling: "正在取消",
   completed: "已完成",
   failed: "失败",

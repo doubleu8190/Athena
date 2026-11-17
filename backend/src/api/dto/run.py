@@ -111,6 +111,15 @@ class RunInputRequestResponse(BaseModel):
     created_at: datetime
 
 
+class RunInputInteractionResponse(BaseModel):
+    input_request_id: str
+    status: str
+    question_text: str
+    answer_text: str | None = None
+    created_at: datetime
+    answered_at: datetime | None = None
+
+
 class RunSkillEntryResponse(BaseModel):
     skill_id: str
     slug: str
@@ -125,6 +134,48 @@ class RunSkillSnapshotResponse(BaseModel):
     version: int
     skills: list[RunSkillEntryResponse]
     selected_skill_ids: list[str]
+
+
+class SubagentTaskResponse(BaseModel):
+    sub_run_id: str
+    parent_tool_call_id: str
+    subagent_profile_id: str | None = None
+    subagent_slug: str
+    subagent_name: str
+    task_index: int = 1
+    task_summary: str = ""
+    status: str
+    safe_error_code: str | None = None
+    created_at: datetime
+    first_started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class PendingSubagentInputResponse(BaseModel):
+    sub_run_id: str
+    subagent_slug: str
+    subagent_name: str
+    task_index: int = 1
+    task_summary: str = ""
+    input_request_id: str
+    question_message_id: str
+    question_text: str
+    created_at: datetime
+
+
+class PendingSubagentApprovalResponse(BaseModel):
+    sub_run_id: str
+    subagent_slug: str
+    subagent_name: str
+    task_index: int = 1
+    task_summary: str = ""
+    call_id: str
+    batch_message_id: str
+    ordinal: int
+    model_name: str
+    tool_kind: str | None = None
+    requested_at: datetime
+    safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
 
 
 class RunResponse(BaseModel):
@@ -151,6 +202,17 @@ class RunResponse(BaseModel):
     input_file_ids: list[str]
     pending_input: RunInputRequestResponse | None = None
     pending_approvals: list[RunPendingToolApprovalResponse] = Field(default_factory=list)
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    parent_tool_call_id: str | None = None
+    depth: int = 0
+    subagent_profile_id: str | None = None
+    subagent_slug: str | None = None
+    subagent_name: str | None = None
+    subagent_tasks: list[SubagentTaskResponse] = Field(default_factory=list)
+    pending_subagent_inputs: list[PendingSubagentInputResponse] = Field(default_factory=list)
+    pending_subagent_approvals: list[PendingSubagentApprovalResponse] = Field(default_factory=list)
+    input_interactions: list[RunInputInteractionResponse] = Field(default_factory=list)
     replayed: bool = False
     retry_warning: str | None = None
 
@@ -211,10 +273,14 @@ class RunToolCallListResponse(BaseModel):
 
 
 __all__ = [
+    "PendingSubagentApprovalResponse",
+    "PendingSubagentInputResponse",
     "RunAnswerRequest",
+    "SubagentTaskResponse",
     "RunAttemptUsageResponse",
     "RunEventListResponse",
     "RunEventResponse",
+    "RunInputInteractionResponse",
     "RunInputRequestResponse",
     "RunListResponse",
     "RunPendingToolApprovalResponse",

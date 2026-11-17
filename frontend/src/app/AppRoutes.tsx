@@ -12,6 +12,7 @@ import { DraftChatPage } from "../features/chat/DraftChatPage";
 import { SessionChatPage } from "../features/chat/SessionChatPage";
 import { AdminMcpPage } from "../features/admin/AdminMcpPage";
 import { AdminModelsPage } from "../features/admin/AdminModelsPage";
+import { AdminSubagentsPage } from "../features/admin/AdminSubagentsPage";
 import { AdminSystemPromptsPage } from "../features/admin/AdminSystemPromptsPage";
 import { AdminToolsPage } from "../features/admin/AdminToolsPage";
 import { AdminSkillsPage } from "../features/skills/AdminSkillsPage";
@@ -65,6 +66,7 @@ export function AppRoutes() {
             />
             <Route element={<AdminToolsPage />} path="tools" />
             <Route element={<AdminSkillsPage />} path="skills" />
+            <Route element={<AdminSubagentsPage />} path="subagents" />
           </Route>
         </Route>
       </Route>

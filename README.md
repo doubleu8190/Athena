@@ -119,7 +119,8 @@ MCP Server 管理、安全工具目录 API，以及首期 Run 后端闭环。认
 
 ## 本地开发
 
-需要 Python 3.12 或更高版本。以下命令在项目根目录执行：
+需要 Python 3.12 或更高版本；运行完整容器栈还需要 Docker Desktop 或
+Docker Engine。以下命令在项目根目录执行：
 
 ```sh
 python3 -m venv .venv
@@ -128,41 +129,28 @@ npm --prefix frontend install
 cp .env.example .env
 ```
 
-编辑 `.env`，至少设置可访问的 `ATHENA_DATABASE_URL` 和随机生成的
-`ATHENA_MCP_SECRET_KEY`。本地开发可用以下命令生成密钥，再将结果粘贴到 `.env`：
+`.env` 只用于在宿主机直接运行 Alembic、API 和 Worker；Docker 测试栈使用
+`docker/test.env` 和 `secrets/`，两类配置不要互相复制。编辑 `.env`，至少设置可访问的
+`ATHENA_DATABASE_URL` 和随机生成的 `ATHENA_MCP_SECRET_KEY`。本地开发可用以下
+命令生成密钥，再将结果粘贴到 `.env`：
 
 ```sh
 python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
+chmod 600 .env
 ```
 
-随后运行启动脚本：
+也可以在宿主机单独启动前端或后端服务（如本地调试），后端命令如下：
 
 ```sh
-scripts/dev.sh --migrate
-```
-
-脚本默认从项目根目录 `.env` 读取配置，也可用 `--env-file` 显式指定其他配置文件。
-脚本同时启动 API、Run Worker 和 Vite；设置
-`ATHENA_KNOWLEDGE_ENABLED=true` 时还会启动 Knowledge Worker。前端地址为
-`http://localhost:5173`，API 地址为 `http://127.0.0.1:8000`。按 `Ctrl+C` 会停止
-全部启动的进程。迁移只在传入 `--migrate` 时执行；脚本不会安装依赖，也不会启动
-PostgreSQL、Redis 或 MinIO。
-脚本不启用 Uvicorn 自动重载，以便检测应用启动失败；修改后端代码后需重启脚本。
-`ATHENA_KNOWLEDGE_ENABLED` 按后端规则忽略大小写并去除首尾空白，接受
-`true/false`、`1/0`、`yes/no` 和 `on/off`。
-
-Vite API 代理保留浏览器发送的 `Host` 和 `Origin`。后端同源校验允许请求自身的
-origin，因此从 `http://localhost:5173` 访问时，`.env.example` 中面向直连 API 的
-`ATHENA_PUBLIC_ORIGIN=http://127.0.0.1:8000` 不会阻断前端写请求。
-
-也可以继续分别启动服务。后端命令如下：
-
-```sh
+set -a
+source .env
+set +a
 .venv/bin/alembic -c backend/alembic.ini upgrade head
 .venv/bin/python -m uvicorn main:create_app --factory
 ```
 
-运行迁移和应用前需要设置 PostgreSQL 连接：
+`alembic` 和直接运行的 Python 进程都不会自动读取 `.env`；修改该文件后需要在
+当前终端重新执行上面的 `source`。也可以不使用文件，在当前终端显式设置：
 
 ```sh
 export ATHENA_DATABASE_URL='postgresql+asyncpg://user:password@127.0.0.1:5432/athena'
@@ -224,15 +212,25 @@ MinIO 固定为 `RELEASE.2025-10-15T17-29-55Z` 镜像摘要。
 停止且不写入或清理文件。仅全新环境可显式使用 `--fresh` 生成随机凭据；不要对已有数据
 目录或遗留命名卷使用该选项。已有 secret 不会被覆盖。
 
+两份本地配置的职责不同：
+
+- `.env`：宿主机直接运行 API、Worker 和 Alembic 时使用。
+- `docker/test.env`：Docker 测试栈唯一使用的非敏感配置，包含端口、数据库名、桶名及
+  应用测试参数。
+
+真实随机凭据只保存在 `secrets/`。`scripts/test-docker.sh` 从 `docker/test.env` 读取
+非敏感值，从 `secrets/` 派生容器连接配置；Compose 使用清理后的白名单环境并显式禁用
+根目录 `.env`，因此当前 shell、`.env` 或旧 `.env.test` 中的同名变量不会覆盖测试配置。
+
 ```sh
 if [ ! -f docker/test.env ]; then cp docker/test.env.example docker/test.env; fi
 scripts/bootstrap-test-secrets.py --fresh  # 仅全新且没有旧数据时
 # 有旧配置/凭据的已有环境运行：scripts/bootstrap-test-secrets.py
 ```
 
-已有 `docker/test.env` 的环境应先运行不带 `--fresh` 的 bootstrap，再 source helper。
-bootstrap 会删除旧版固定 MinIO endpoint；helper 会按当前 `MINIO_API_PORT` 生成 endpoint，
-避免随后 `dev.sh --env-file docker/test.env` 再覆盖成旧端口。
+bootstrap 成功后无需再生成第二个配置文件。已有环境先运行不带 `--fresh` 的 bootstrap；
+bootstrap 会删除旧版固定 MinIO endpoint，helper 会按当前数据库名、`MINIO_API_PORT`
+与桶名重新生成连接地址。
 
 PostgreSQL 和 MinIO 启动时从 Compose secrets 读取用户及密码。MinIO 镜像自身不支持
 `_FILE` 变量，由精简入口包装器从只读 secret 读取 root 凭据；桶初始化容器也只读取
@@ -252,15 +250,8 @@ Redis 保持无密码配置。凭据不会写入模板、README 或根目录 `.e
 Compose 数据现在直接绑定到忽略跟踪的 `data/postgres`、`data/redis` 和 `data/minio`；
 原有三个命名卷的数据已复制过去并保留为回滚副本。
 
-构建并启动服务，等待 PostgreSQL、Redis 与 MinIO 健康后再运行一次性桶初始化：
-
-```sh
-docker compose --env-file docker/test.env -f compose.test.yml up -d --build --wait postgres redis minio
-docker compose --env-file docker/test.env -f compose.test.yml run --rm minio-init
-docker compose --env-file docker/test.env -f compose.test.yml ps
-```
-
-`minio-init` 成功退出表示四个租户隔离桶已创建；若初始化失败，Compose 命令会返回非零状态。
+`scripts/test-docker.sh` 会等待 PostgreSQL、Redis 与 MinIO 健康，再运行一次性
+`minio-init`；成功退出表示四个租户隔离桶已创建。
 迁移前先导入本地 helper，再运行 Alembic。该连接明确指向新建的
 开发数据库 `127.0.0.1:5432/athena`，不会迁移项目中其他数据库：
 
@@ -269,29 +260,33 @@ source scripts/load-test-env.sh && \
   .venv/bin/alembic -c backend/alembic.ini upgrade head
 ```
 
-要用这套测试依赖启动 API、Worker 和 Vite，显式选择 Compose 的非敏感配置文件；helper
-提供的数据库 URL、MinIO 凭据和 MCP 密钥会从当前 shell 传入启动脚本。`--migrate` 可选，
-仅在需要升级 `athena` 开发库时添加：
+运行唯一容器服务入口：
 
 ```sh
-source scripts/load-test-env.sh && scripts/dev.sh --env-file docker/test.env
-source scripts/load-test-env.sh && scripts/dev.sh --env-file docker/test.env --migrate
+scripts/test-docker.sh
 ```
 
-显式传入 `--env-file` 可避免根目录 `.env` 覆盖测试数据库配置；不传该选项时，启动脚本
-仍沿用根目录 `.env` 的默认开发流程。
+该脚本自动拉起 PostgreSQL、Redis 和 MinIO，按需预构建
+`athena-backend-base:latest`，从 `secrets/` 同步容器凭据，执行
+`POSTGRES_TEST_DB` 与测试桶对应的数据库迁移，并启动 frontend、API、Run Worker、
+Memory Worker 等业务容器。脚本启动后通过 `docker compose port frontend 80` 读取实际
+宿主机端口再探活 `/health`；`docker/test.env` 默认端口为 `8080`。常用命令：
 
-运行后端集成测试时保持同一终端环境，其中 `ATHENA_TEST_DATABASE_URL` 指向独立的
+- `scripts/test-docker.sh up --build-base`：强制重新构建后端基础依赖镜像并启动。
+- `scripts/test-docker.sh status`：查看业务容器与基础设施容器状态。
+- `scripts/test-docker.sh logs -f`：实时跟踪业务容器日志。
+- `scripts/test-docker.sh down --all`：停止业务容器与底层基础设施。
+
+`ATHENA_KNOWLEDGE_ENABLED` 按后端规则忽略大小写并去除首尾空白，接受
+`true/false`、`1/0`、`yes/no` 和 `on/off`。
+
+运行宿主机后端集成测试（pytest）时，先在终端加载测试环境变量（`source scripts/load-test-env.sh`），其中 `ATHENA_TEST_DATABASE_URL` 指向独立的
 `athena_test` 数据库，`ATHENA_REDIS_URL` 指向本 Compose 的 Redis。Compose 的
 `--env-file` 只提供端口、数据库名和桶名等非敏感配置，不会自动导出给宿主机上的
 Alembic 或 pytest。
-本地测试配置默认启用知识库：`scripts/dev.sh` 会同时启动 Knowledge Worker，
-首次启动会加载或下载嵌入模型。如不需要知识库，可在 `docker/test.env` 中显式设为
-`ATHENA_KNOWLEDGE_ENABLED=false`。
-
-测试后可执行 `docker compose --env-file docker/test.env -f compose.test.yml down` 停止并
-移除本套容器；`data/postgres`、`data/redis` 和 `data/minio` 中的 bind mount 数据会保留，
-供下次启动复用。
+`docker/test.env` 中默认启用知识库配置；如需关闭容器栈的知识库，在该文件中显式设为
+`ATHENA_KNOWLEDGE_ENABLED=false`。测试后执行 `scripts/test-docker.sh down --all`
+停止全部容器；`data/postgres`、`data/redis` 和 `data/minio` 中的 bind mount 数据会保留。
 
 ## 前端开发
 
@@ -512,8 +507,8 @@ Worker 的轮询、批次、输出和归档参数见 `.env.example` 的
 .venv/bin/python -m memory_worker
 ```
 
-`scripts/dev.sh` 在两个记忆开关同时启用时自动启动该进程。Docker Compose 的
-`backend-memory-worker` 也只在开关启用时持续运行；关闭时以状态码 `0` 退出，
+Docker Compose（通过 `scripts/test-docker.sh` 启动）中的
+`backend-memory-worker` 会在两个记忆开关同时启用时持续运行；关闭时以状态码 `0` 退出，
 真实异常则由 `on-failure:5` 有界重启。迁移需要 PostgreSQL `vector` 和 `zhparser`
 扩展。记忆生命周期收缩及检索决策采用增量迁移 `20261125_0026`、`20261126_0027`，验证范围见
 [记忆验收报告](docs/memory-lifecycle-e2e-report.md)。

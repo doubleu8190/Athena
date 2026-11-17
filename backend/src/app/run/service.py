@@ -359,7 +359,28 @@ class RunService:
         )
         if pending_approvals is None:
             raise RunNotFoundError("run_not_found")
-        return RunDetailsResult(run, pending, pending_approvals)
+        if run.depth == 0:
+            subagent_tasks = await self._repository.list_subagent_tasks(
+                session_id, owner_id, run_id
+            )
+            pending_subagent_inputs = await self._repository.list_pending_subagent_inputs(
+                session_id, owner_id, run_id
+            )
+            pending_subagent_approvals = await self._repository.list_pending_subagent_approvals(
+                session_id, owner_id, run_id
+            )
+        else:
+            subagent_tasks = ()
+            pending_subagent_inputs = ()
+            pending_subagent_approvals = ()
+        return RunDetailsResult(
+            run,
+            pending,
+            pending_approvals,
+            subagent_tasks=subagent_tasks,
+            pending_subagent_inputs=pending_subagent_inputs,
+            pending_subagent_approvals=pending_subagent_approvals,
+        )
 
     async def decide_tool_approval(
         self,

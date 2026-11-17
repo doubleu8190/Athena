@@ -195,7 +195,10 @@ function UnbindKnowledgeDialog({
       <p className="confirm-copy">
         确定将“{base.name}”从当前项目解除关联吗？
       </p>
-      <label className="workspace-checkbox" htmlFor={checkboxId}>
+      <label
+        className="workspace-checkbox workspace-checkbox--danger"
+        htmlFor={checkboxId}
+      >
         <input
           checked={confirmed}
           id={checkboxId}

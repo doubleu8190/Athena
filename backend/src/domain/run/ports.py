@@ -10,10 +10,14 @@ from domain.memory.lifecycle import RunMemoryContextState
 from domain.message import ConversationMessage, ExecutionMessage
 from domain.run.model import (
     AnswerRunCommand,
+    BeginSubagentBatchCommand,
+    BeginSubagentBatchResult,
     ContextSummary,
     FailRunCommand,
     FinishRunCommand,
     InitializeRunMemoryContextCommand,
+    PendingSubagentApproval,
+    PendingSubagentInput,
     RecordRunUsageCommand,
     RequestRunInputCommand,
     Run,
@@ -25,6 +29,7 @@ from domain.run.model import (
     RunStreamEvent,
     RunStreamSnapshot,
     SaveContextSummaryCommand,
+    SubagentTaskSummary,
     SubmitRunCommand,
     SubmitRunResult,
 )
@@ -255,6 +260,34 @@ class RunRepository(Protocol):
 
     async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
         """按数据库时钟校验本代执行仍处于 running 且租约有效。"""
+        ...
+
+    async def begin_subagent_batch(
+        self, command: BeginSubagentBatchCommand
+    ) -> BeginSubagentBatchResult:
+        """原子创建子 Run 批次并将主 Run 置为 waiting_for_subagents 且释放租约。"""
+        ...
+
+    async def count_subagent_dispatches(self, root_run_id: str) -> int:
+        """统计同一主 Run 累计已派发的子 Run 数量。"""
+        ...
+
+    async def list_subagent_tasks(
+        self, session_id: str, owner_id: str, parent_run_id: str
+    ) -> tuple[SubagentTaskSummary, ...]:
+        """读取主 Run 下属全部子任务的聚合状态投影。"""
+        ...
+
+    async def list_pending_subagent_inputs(
+        self, session_id: str, owner_id: str, parent_run_id: str
+    ) -> tuple[PendingSubagentInput, ...]:
+        """读取主 Run 下属子 Run 当前待回答的澄清请求。"""
+        ...
+
+    async def list_pending_subagent_approvals(
+        self, session_id: str, owner_id: str, parent_run_id: str
+    ) -> tuple[PendingSubagentApproval, ...]:
+        """读取主 Run 下属子 Run 当前待人工审批的工具调用。"""
         ...
 
 

@@ -485,12 +485,6 @@
   color: var(--forest);
 }
 
-.workspace-field input[type="file"] {
-  min-height: auto;
-  padding: 10px;
-  font-size: 14px;
-}
-
 .workspace-field textarea[aria-invalid="true"],
 .workspace-field select[aria-invalid="true"] {
   border-color: #c98a82;
@@ -526,15 +520,6 @@
   gap: 8px;
   color: var(--muted);
   font-size: 12px;
-}
-
-.knowledge-search-controls select {
-  min-height: 34px;
-  padding: 0 9px;
-  border: 1px solid #d8d3c8;
-  border-radius: 7px;
-  background: #fffefa;
-  color: var(--ink-2);
 }
 
 .knowledge-search-results {

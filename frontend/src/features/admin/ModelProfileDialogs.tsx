@@ -538,7 +538,10 @@ export function DisableDefaultModelDialog({
         “{profile.name}”仍是默认模型。停用后，后端不会自动选择其他版本，
         新 Run 可能因没有可用默认模型而失败。
       </p>
-      <label className="workspace-checkbox" htmlFor={checkboxId}>
+      <label
+        className="workspace-checkbox workspace-checkbox--danger"
+        htmlFor={checkboxId}
+      >
         <input
           checked={confirmed}
           disabled={mutation.isPending}

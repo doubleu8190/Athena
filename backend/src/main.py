@@ -29,6 +29,7 @@ from api.runs import build_run_router
 from api.security import DEFAULT_COOKIE_NAME
 from api.sessions import build_session_router
 from api.skill import build_skill_admin_router, build_skill_user_router
+from api.subagent import build_subagent_admin_router
 from api.system_prompt import build_system_prompt_admin_router
 from api.tools import build_tools_router
 from app.auth.service import AuthService
@@ -41,6 +42,7 @@ from app.project.service import ProjectService
 from app.run.service import RunService
 from app.session.service import SessionService
 from app.skill import SkillService
+from app.subagent import SubagentService
 from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.api import ApiDependencies, build_api_dependencies
@@ -95,9 +97,7 @@ class _KnowledgeUploadLimitMiddleware:
             else self._maximum
         )
         overflow_code = (
-            "skill_zip_too_large"
-            if upload_kind == "skill"
-            else "document_file_too_large"
+            "skill_zip_too_large" if upload_kind == "skill" else "document_file_too_large"
         )
         receive_fn = receive
         send_fn = send
@@ -234,9 +234,7 @@ async def _handle_os_error(request: Request, error: Exception) -> JSONResponse:
     return await _handle_database_unavailable(request, error)
 
 
-async def _handle_file_storage_unavailable(
-    request: Request, error: Exception
-) -> JSONResponse:
+async def _handle_file_storage_unavailable(request: Request, error: Exception) -> JSONResponse:
     """只映射专用对象存储异常，不吞掉其他 RuntimeError。"""
     del error
     logger.error("file_storage_unavailable path=%s", request.url.path)
@@ -246,16 +244,13 @@ async def _handle_file_storage_unavailable(
     )
 
 
-async def _handle_request_validation_error(
-    request: Request, error: Exception
-) -> JSONResponse:
+async def _handle_request_validation_error(request: Request, error: Exception) -> JSONResponse:
     """去除请求值，避免校验响应回显管理员提交的 API Key。"""
     del request
     if not isinstance(error, RequestValidationError):
         return JSONResponse(status_code=422, content={"detail": "request_invalid"})
     safe_errors = [
-        {key: value for key, value in item.items() if key != "input"}
-        for item in error.errors()
+        {key: value for key, value in item.items() if key != "input"} for item in error.errors()
     ]
     return JSONResponse(status_code=422, content={"detail": safe_errors})
 
@@ -274,6 +269,7 @@ def create_app(
     knowledge_service: KnowledgeService | None = None,
     skill_service: SkillService | None = None,
     session_file_service: SessionFileService | None = None,
+    subagent_service: SubagentService | None = None,
     auth_cookie_secure: bool | None = None,
     public_origin: str | None = None,
 ) -> FastAPI:
@@ -299,6 +295,7 @@ def create_app(
         knowledge_service=knowledge_service,
         skill_service=skill_service,
         session_file_service=session_file_service,
+        subagent_service=subagent_service,
     )
     if auth_cookie_secure is None:
         auth_cookie_secure = env_flag("ATHENA_COOKIE_SECURE", default=False)
@@ -332,6 +329,7 @@ def create_app(
     app.state.tool_manager = deps.tool_manager
     app.state.model_profile_service = deps.model_profile_service
     app.state.system_prompt_service = deps.system_prompt_service
+    app.state.subagent_service = deps.subagent_service
     app.state.skill_service = deps.skill_service
     app.state.session_file_service = deps.session_file_service
     app.state.run_service = deps.run_service
@@ -342,6 +340,8 @@ def create_app(
         app.include_router(build_llm_admin_router(deps.model_profile_service))
     if deps.system_prompt_service is not None:
         app.include_router(build_system_prompt_admin_router(deps.system_prompt_service))
+    if deps.subagent_service is not None:
+        app.include_router(build_subagent_admin_router(deps.subagent_service))
     if deps.skill_service is not None:
         app.include_router(build_skill_admin_router(deps.skill_service))
         app.include_router(build_skill_user_router(deps.skill_service))

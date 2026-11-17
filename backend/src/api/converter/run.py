@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from api.dto.message import ArtifactFileRefResponse
 from api.dto.run import (
+    PendingSubagentApprovalResponse,
+    PendingSubagentInputResponse,
     RunAttemptUsageResponse,
     RunEventListResponse,
     RunEventResponse,
+    RunInputInteractionResponse,
     RunInputRequestResponse,
     RunListResponse,
     RunPendingToolApprovalResponse,
@@ -21,9 +24,19 @@ from api.dto.run import (
     SafeSkillApprovalProjectionResponse,
     SafeSkillInputFileResponse,
     SkillParameterSummaryItemResponse,
+    SubagentTaskResponse,
 )
 from app.run.model.result import RunDetailsResult, RunListResult
-from domain.run.model import Run, RunEvent, RunInputRequest, RunStatus, RunUsage
+from domain.run.model import (
+    PendingSubagentApproval,
+    PendingSubagentInput,
+    Run,
+    RunEvent,
+    RunInputRequest,
+    RunStatus,
+    RunUsage,
+    SubagentTaskSummary,
+)
 from domain.skill import (
     SKILL_EXECUTE_TOOL_ID,
     SKILL_LOAD_TOOL_ID,
@@ -142,6 +155,9 @@ def run_to_response(
     *,
     pending_input: RunInputRequest | None = None,
     pending_approvals: tuple[PendingToolApproval, ...] = (),
+    subagent_tasks: tuple[SubagentTaskSummary, ...] = (),
+    pending_subagent_inputs: tuple[PendingSubagentInput, ...] = (),
+    pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = (),
     replayed: bool = False,
 ) -> RunResponse:
     """只公开 Run 业务状态，不包含供应商地址或凭据引用。"""
@@ -198,12 +214,80 @@ def run_to_response(
                 safe_skill_projection=(
                     None
                     if item.safe_skill_projection is None
-                    else safe_skill_projection_to_response(
-                        item.safe_skill_projection
-                    )
+                    else safe_skill_projection_to_response(item.safe_skill_projection)
                 ),
             )
             for item in pending_approvals
+        ],
+        parent_run_id=run.parent_run_id,
+        root_run_id=run.root_run_id,
+        parent_tool_call_id=run.parent_tool_call_id,
+        depth=run.depth,
+        subagent_profile_id=run.subagent_profile_id,
+        subagent_slug=run.subagent_slug,
+        subagent_name=run.subagent_name,
+        subagent_tasks=[
+            SubagentTaskResponse(
+                sub_run_id=item.sub_run_id,
+                parent_tool_call_id=item.parent_tool_call_id,
+                subagent_profile_id=item.subagent_profile_id,
+                subagent_slug=item.subagent_slug,
+                subagent_name=item.subagent_name,
+                task_index=item.task_index,
+                task_summary=item.task_summary,
+                status=item.status.value,
+                safe_error_code=item.safe_error_code,
+                created_at=item.created_at,
+                first_started_at=item.first_started_at,
+                finished_at=item.finished_at,
+            )
+            for item in subagent_tasks
+        ],
+        pending_subagent_inputs=[
+            PendingSubagentInputResponse(
+                sub_run_id=item.sub_run_id,
+                subagent_slug=item.subagent_slug,
+                subagent_name=item.subagent_name,
+                task_index=item.task_index,
+                task_summary=item.task_summary,
+                input_request_id=item.input_request_id,
+                question_message_id=item.question_message_id,
+                question_text=item.question_text,
+                created_at=item.created_at,
+            )
+            for item in pending_subagent_inputs
+        ],
+        pending_subagent_approvals=[
+            PendingSubagentApprovalResponse(
+                sub_run_id=item.sub_run_id,
+                subagent_slug=item.subagent_slug,
+                subagent_name=item.subagent_name,
+                task_index=item.task_index,
+                task_summary=item.task_summary,
+                call_id=item.call_id,
+                batch_message_id=item.batch_message_id,
+                ordinal=item.ordinal,
+                model_name=item.model_name,
+                tool_kind=item.tool_kind,
+                requested_at=item.requested_at,
+                safe_skill_projection=(
+                    None
+                    if item.safe_skill_projection is None
+                    else safe_skill_projection_to_response(item.safe_skill_projection)
+                ),
+            )
+            for item in pending_subagent_approvals
+        ],
+        input_interactions=[
+            RunInputInteractionResponse(
+                input_request_id=item.input_request_id,
+                status=item.status.value,
+                question_text=item.question_text,
+                answer_text=item.answer_text,
+                created_at=item.created_at,
+                answered_at=item.answered_at,
+            )
+            for item in run.input_interactions
         ],
         replayed=replayed,
         retry_warning=(
@@ -219,6 +303,9 @@ def run_details_to_response(details: RunDetailsResult) -> RunResponse:
         details.run,
         pending_input=details.pending_input,
         pending_approvals=details.pending_approvals,
+        subagent_tasks=details.subagent_tasks,
+        pending_subagent_inputs=details.pending_subagent_inputs,
+        pending_subagent_approvals=details.pending_subagent_approvals,
     )
 
 
@@ -313,9 +400,7 @@ def tool_call_to_response(details: RunToolCallDetails) -> RunToolCallDetailRespo
             for artifact in details.artifacts
         ],
         safe_skill_projection=(
-            None
-            if safe_projection is None
-            else safe_skill_projection_to_response(safe_projection)
+            None if safe_projection is None else safe_skill_projection_to_response(safe_projection)
         ),
     )
 

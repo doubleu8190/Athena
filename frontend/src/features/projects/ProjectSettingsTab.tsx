@@ -90,7 +90,10 @@ function DeleteProjectDialog({
       <p className="confirm-copy">
         确定删除“{project.name}”吗？删除后无法在项目中心继续访问。
       </p>
-      <label className="workspace-checkbox" htmlFor={checkboxId}>
+      <label
+        className="workspace-checkbox workspace-checkbox--danger"
+        htmlFor={checkboxId}
+      >
         <input
           checked={confirmed}
           id={checkboxId}

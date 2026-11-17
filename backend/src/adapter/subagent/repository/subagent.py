@@ -1,0 +1,269 @@
+"""Subagent 配置 SQLAlchemy 仓储与模型可用性检查实现。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
+from adapter.llm.model import ModelProfileVersionModel
+from adapter.subagent.converter import subagent_to_domain
+from adapter.subagent.model import SubagentModel
+from domain.auth import AuthContext, UserRole
+from domain.subagent import (
+    SubagentAdminRequiredError,
+    SubagentInvalidSessionError,
+    SubagentModelChecker,
+    SubagentNotFoundError,
+    SubagentPage,
+    SubagentProfile,
+    SubagentRepository,
+    SubagentSlugConflictError,
+    SubagentUpdatePatch,
+    SubagentVersionConflictError,
+)
+
+
+class SqlAlchemySubagentRepository(SubagentRepository):
+    """在单事务内复核管理员身份并维护 Subagent 配置。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """保存异步数据库会话工厂。"""
+        self._session_factory = session_factory
+
+    async def create(self, actor: AuthContext, profile: SubagentProfile) -> SubagentProfile:
+        """在事务内复核管理员身份后写入新 Subagent，冲突时映射为领域异常。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_admin(session, actor)
+                    row = SubagentModel(
+                        id=profile.id,
+                        slug=profile.slug,
+                        name=profile.name,
+                        description=profile.description,
+                        system_prompt=profile.system_prompt,
+                        model_profile_id=profile.model_profile_id,
+                        allowed_tool_ids=list(profile.allowed_tool_ids),
+                        enabled=profile.enabled,
+                        max_llm_requests=profile.max_llm_requests,
+                        timeout_seconds=profile.timeout_seconds,
+                        version=profile.version,
+                        created_by=profile.created_by,
+                        deleted_at=profile.deleted_at,
+                        created_at=profile.created_at,
+                        updated_at=profile.updated_at,
+                    )
+                    session.add(row)
+                    await session.flush()
+                    return subagent_to_domain(row)
+        except IntegrityError as error:
+            if _is_slug_conflict(error):
+                raise SubagentSlugConflictError() from error
+            raise
+
+    async def get(self, subagent_id: str) -> SubagentProfile | None:
+        """按 ID 读取未软删除的 Subagent 配置。"""
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(SubagentModel).where(
+                    SubagentModel.id == subagent_id,
+                    SubagentModel.deleted_at.is_(None),
+                )
+            )
+        return None if row is None else subagent_to_domain(row)
+
+    async def get_by_slug(self, slug: str) -> SubagentProfile | None:
+        """按 slug 读取未软删除的 Subagent 配置。"""
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(SubagentModel).where(
+                    SubagentModel.slug == slug,
+                    SubagentModel.deleted_at.is_(None),
+                )
+            )
+        return None if row is None else subagent_to_domain(row)
+
+    async def list_page(
+        self,
+        *,
+        offset: int,
+        limit: int,
+        enabled: bool | None = None,
+    ) -> SubagentPage:
+        """分页读取未软删除的 Subagent 列表，支持按启停状态过滤。"""
+        filters = [SubagentModel.deleted_at.is_(None)]
+        if enabled is not None:
+            filters.append(SubagentModel.enabled.is_(enabled))
+        async with self._session_factory() as session:
+            total = await session.scalar(select(func.count(SubagentModel.id)).where(*filters)) or 0
+            rows = list(
+                (
+                    await session.scalars(
+                        select(SubagentModel)
+                        .where(*filters)
+                        .order_by(SubagentModel.created_at.desc(), SubagentModel.id.desc())
+                        .offset(offset)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        return SubagentPage(
+            items=tuple(subagent_to_domain(row) for row in rows),
+            total=int(total),
+            offset=offset,
+            limit=limit,
+        )
+
+    async def list_enabled(self) -> tuple[SubagentProfile, ...]:
+        """读取全部未软删除且已启用的 Subagent 配置。"""
+        async with self._session_factory() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(SubagentModel)
+                        .where(
+                            SubagentModel.deleted_at.is_(None),
+                            SubagentModel.enabled.is_(True),
+                        )
+                        .order_by(SubagentModel.slug.asc(), SubagentModel.id.asc())
+                    )
+                ).all()
+            )
+        return tuple(subagent_to_domain(row) for row in rows)
+
+    async def update(
+        self,
+        actor: AuthContext,
+        subagent_id: str,
+        *,
+        expected_version: int,
+        patch: SubagentUpdatePatch,
+    ) -> SubagentProfile:
+        """在事务内复核管理员身份，锁定目标行并校验乐观锁版本后更新。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_admin(session, actor)
+                    # 先锁定未软删除的目标行，避免并发编辑出现覆盖或与软删除竞态。
+                    row = await session.scalar(
+                        select(SubagentModel)
+                        .where(
+                            SubagentModel.id == subagent_id,
+                            SubagentModel.deleted_at.is_(None),
+                        )
+                        .with_for_update()
+                    )
+                    if row is None:
+                        raise SubagentNotFoundError()
+                    if row.version != expected_version:
+                        raise SubagentVersionConflictError()
+                    row.slug = patch.slug
+                    row.name = patch.name
+                    row.description = patch.description
+                    row.system_prompt = patch.system_prompt
+                    row.model_profile_id = patch.model_profile_id
+                    row.allowed_tool_ids = list(patch.allowed_tool_ids)
+                    row.max_llm_requests = patch.max_llm_requests
+                    row.timeout_seconds = patch.timeout_seconds
+                    row.version = row.version + 1
+                    row.updated_at = patch.updated_at
+                    await session.flush()
+                    return subagent_to_domain(row)
+        except IntegrityError as error:
+            if _is_slug_conflict(error):
+                raise SubagentSlugConflictError() from error
+            raise
+
+    async def set_enabled(
+        self,
+        actor: AuthContext,
+        subagent_id: str,
+        enabled: bool,
+        *,
+        updated_at: datetime,
+    ) -> SubagentProfile:
+        """在事务内复核管理员身份并切换启停状态。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_admin(session, actor)
+                row = await session.scalar(
+                    select(SubagentModel)
+                    .where(
+                        SubagentModel.id == subagent_id,
+                        SubagentModel.deleted_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if row is None:
+                    raise SubagentNotFoundError()
+                if row.enabled != enabled:
+                    row.enabled = enabled
+                    row.version = row.version + 1
+                    row.updated_at = updated_at
+                    await session.flush()
+                return subagent_to_domain(row)
+
+    async def soft_delete(
+        self,
+        actor: AuthContext,
+        subagent_id: str,
+        *,
+        deleted_at: datetime,
+    ) -> None:
+        """在事务内复核管理员身份并执行幂等软删除。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_admin(session, actor)
+                row = await session.scalar(
+                    select(SubagentModel).where(SubagentModel.id == subagent_id).with_for_update()
+                )
+                if row is None or row.deleted_at is not None:
+                    # 幂等语义：目标不存在或已软删除时直接成功返回。
+                    return
+                row.deleted_at = deleted_at
+                row.updated_at = deleted_at
+                await session.flush()
+
+    @staticmethod
+    async def _require_admin(session: AsyncSession, actor: AuthContext) -> None:
+        """在资源写事务内以共享锁复核会话有效性及管理员角色。"""
+        guard = SqlAlchemyAuthTransactionGuard(session)
+        user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
+        if user is None:
+            raise SubagentInvalidSessionError()
+        if user.role is not UserRole.ADMIN:
+            raise SubagentAdminRequiredError()
+
+
+class SqlAlchemySubagentModelChecker(SubagentModelChecker):
+    """直接查询模型配置表校验指定模型版本是否存在且启用。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """保存异步数据库会话工厂。"""
+        self._session_factory = session_factory
+
+    async def is_model_available(self, model_profile_id: str) -> bool:
+        """仅当模型配置存在且 enabled=True 时返回 True。"""
+        async with self._session_factory() as session:
+            found_id = await session.scalar(
+                select(ModelProfileVersionModel.id).where(
+                    ModelProfileVersionModel.id == model_profile_id,
+                    ModelProfileVersionModel.enabled.is_(True),
+                )
+            )
+        return found_id is not None
+
+
+def _is_slug_conflict(error: IntegrityError) -> bool:
+    """识别 PostgreSQL 与 SQLite 下 subagents.slug 部分唯一索引冲突。"""
+    message = str(error.orig or error).lower()
+    return "uq_subagents_slug_active" in message or (
+        "unique" in message and "subagents" in message and "slug" in message
+    )
+
+
+__all__ = ["SqlAlchemySubagentModelChecker", "SqlAlchemySubagentRepository"]

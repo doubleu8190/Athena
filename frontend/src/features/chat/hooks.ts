@@ -46,9 +46,10 @@ export function useLatestRun(sessionId: string, enabled = true) {
 export function useRunDetails(
   sessionId: string,
   runId: string | null,
+  enabled = true,
 ) {
   return useQuery({
-    enabled: Boolean(runId),
+    enabled: Boolean(runId) && enabled,
     queryFn: () => getRun(sessionId, runId ?? ""),
     queryKey: chatKeys.run(sessionId, runId ?? ""),
   });
@@ -57,6 +58,7 @@ export function useRunDetails(
 export function useRunToolCalls(
   sessionId: string,
   runId: string | null,
+  enabled = true,
 ) {
   return useInfiniteQuery<
     RunToolCallListResponse,
@@ -65,7 +67,7 @@ export function useRunToolCalls(
     QueryKey,
     number
   >({
-    enabled: Boolean(runId),
+    enabled: Boolean(runId) && enabled,
     getNextPageParam: (lastPage) =>
       lastPage.next_after_ordinal ?? undefined,
     initialPageParam: 0,

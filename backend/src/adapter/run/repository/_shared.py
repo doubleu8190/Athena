@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from sqlalchemy import func, select
@@ -15,7 +16,7 @@ from adapter.llm.model.profile import (
     DefaultModelProfileModel,
     ModelProfileVersionModel,
 )
-from adapter.message.converter.message import conversation_to_domain
+from adapter.message.converter.message import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository.message import SqlAlchemyMessageRepository
 from adapter.run.converter import (
@@ -32,7 +33,6 @@ from adapter.run.model import (
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
 from common.ids import new_id
-from domain.file import PendingSessionFile
 from domain.memory import ExtractionStatus, MemoryRunWakeupPort
 from domain.message import (
     ConversationMessage,
@@ -40,11 +40,11 @@ from domain.message import (
     ExecutionRole,
     MessageMetadata,
     SessionNotFoundError,
+    TextPart,
     ToolResultPart,
     ToolResultStatus,
 )
 from domain.run.model import (
-    MAX_RUN_SSE_SNAPSHOT_BYTES,
     InputRequestStatus,
     Run,
     RunAttemptUsage,
@@ -53,6 +53,8 @@ from domain.run.model import (
     RunRequestOperation,
     RunRequestResult,
     RunStatus,
+    RunSubagentsResumedPayload,
+    RunSubagentStatusChangedPayload,
     RunToolCallFinishedPayload,
     RunUsage,
 )
@@ -63,8 +65,6 @@ from domain.run.model.errors import (
     RunStateError,
 )
 from domain.skill import (
-    SkillExecutionArtifact,
-    SkillExecutionCompletion,
     SkillExecutionStatus,
 )
 from domain.tool import (
@@ -74,18 +74,6 @@ from domain.tool import (
     persisted_status_for_outcome,
 )
 
-_ACTIVE_STATUSES = (
-    RunStatus.QUEUED.value,
-    RunStatus.RUNNING.value,
-    RunStatus.WAITING_FOR_INPUT.value,
-    RunStatus.WAITING_FOR_APPROVAL.value,
-    RunStatus.CANCELLING.value,
-)
-_STREAM_SNAPSHOT_MESSAGES = 8
-_STREAM_SNAPSHOT_EVENTS = 100
-_STREAM_SNAPSHOT_BYTES = MAX_RUN_SSE_SNAPSHOT_BYTES
-_STREAM_SNAPSHOT_PREFIX_RESERVE = 128
-_MAX_TOOL_BATCH_SIZE = 8
 logger = logging.getLogger(__name__)
 
 
@@ -99,14 +87,18 @@ def _purpose_total(attempts: tuple[RunAttemptUsage, ...], purpose: str) -> int |
     return None if not values else sum(values)
 
 
-
 class RunRepositorySupportMixin:
     """提供跨生命周期、工具批处理与上下文子模块共享的事务内辅助能力。"""
 
     _session_factory: async_sessionmaker[AsyncSession]
-    _messages: SqlAlchemyMessageRepository
+    _message_repo: SqlAlchemyMessageRepository
     _memory_wakeup: MemoryRunWakeupPort | None
     _memory_lifecycle_enabled: bool
+
+    @property
+    def _messages(self) -> SqlAlchemyMessageRepository:
+        """平滑兼容属性，指向内部消息仓储实例。"""
+        return self._message_repo
 
     @staticmethod
     def _aggregate_usage(attempts: tuple[RunAttemptUsage, ...]) -> RunUsage:
@@ -204,6 +196,12 @@ class RunRepositorySupportMixin:
 
     def _mark_memory_pending(self, row: RunModel, terminal_at: datetime) -> None:
         """在 Run 终态事务内标记待提取，并保留已失效输入和固定上下文。"""
+        if row.depth >= 1:
+            # 子 Run 不触发对话结束后自动记忆提取，统一固定为 skipped。
+            row.memory_extraction_status = ExtractionStatus.SKIPPED.value
+            row.memory_extracted_at = row.memory_extracted_at or terminal_at
+            row.updated_at = terminal_at
+            return
         if not self._memory_lifecycle_enabled:
             return
         if row.memory_extraction_status == ExtractionStatus.SKIPPED.value:
@@ -337,7 +335,7 @@ class RunRepositorySupportMixin:
                     created_at=settled_at,
                     metadata=MessageMetadata(),
                 )
-                await self._messages.append_execution_in_session(
+                await self._message_repo.append_execution_in_session(
                     session,
                     result_draft,
                     locked_session=locked_session,
@@ -421,8 +419,229 @@ class RunRepositorySupportMixin:
             RunFailedPayload(safe_error_code=safe_error_code),
             failed_at,
         )
+        await self._try_wake_parent_run(session, locked_session, run, failed_at)
 
-    async def _lock_default_profile(self, session: AsyncSession) -> str:
+    async def _try_wake_parent_run(
+        self,
+        session: AsyncSession,
+        locked_session: SessionModel,
+        sub_run: RunModel,
+        settled_at: datetime,
+    ) -> RunModel | None:
+        """子 Run 结算终态后锁定父 Run 行检查收敛条件，全部终态时原子唤醒父 Run。"""
+        if sub_run.parent_run_id is None or sub_run.parent_tool_call_id is None:
+            return None
+        # 在 Session 锁保护下对父 Run 行执行 SELECT ... FOR UPDATE，防止并发子 Run 重复唤醒。
+        parent = await session.scalar(
+            select(RunModel)
+            .where(
+                RunModel.id == sub_run.parent_run_id,
+                RunModel.session_id == sub_run.session_id,
+            )
+            .with_for_update()
+        )
+        if parent is None:
+            return None
+        await self._append_event(
+            session,
+            parent,
+            RunSubagentStatusChangedPayload(
+                sub_run_id=sub_run.id,
+                subagent_slug=sub_run.subagent_slug or "",
+                subagent_name=sub_run.subagent_name or "",
+                status=RunStatus(sub_run.status),
+                safe_error_code=sub_run.safe_error_code,
+            ),
+            settled_at,
+        )
+        if parent.status != RunStatus.WAITING_FOR_SUBAGENTS.value:
+            return parent
+        remaining = await session.scalar(
+            select(func.count(RunModel.id)).where(
+                RunModel.parent_run_id == parent.id,
+                RunModel.parent_tool_call_id == sub_run.parent_tool_call_id,
+                RunModel.status.notin_(
+                    (
+                        RunStatus.COMPLETED.value,
+                        RunStatus.FAILED.value,
+                        RunStatus.CANCELLED.value,
+                    )
+                ),
+            )
+        )
+        if remaining and remaining > 0:
+            return parent
+
+        # 同批全部子 Run 均已进入终态，组装结构化汇总 JSON 并写入主 Run 的 ToolResultPart。
+        batch_runs = (
+            await session.scalars(
+                select(RunModel)
+                .where(
+                    RunModel.parent_run_id == parent.id,
+                    RunModel.parent_tool_call_id == sub_run.parent_tool_call_id,
+                )
+                .order_by(RunModel.created_at, RunModel.id)
+            )
+        ).all()
+        results_payload: list[dict[str, object]] = []
+        completed_count = 0
+        failed_count = 0
+        for item in batch_runs:
+            if item.status == RunStatus.COMPLETED.value:
+                completed_count += 1
+                output_text = await self._load_subagent_final_output(session, item.id)
+                artifacts = await self._load_subagent_artifacts(session, item.id)
+                results_payload.append(
+                    {
+                        "sub_run_id": item.id,
+                        "subagent_slug": item.subagent_slug,
+                        "subagent_name": item.subagent_name,
+                        "status": "completed",
+                        "output": output_text,
+                        "artifacts": artifacts,
+                    }
+                )
+            else:
+                failed_count += 1
+                fallback_code = (
+                    "cancelled" if item.status == RunStatus.CANCELLED.value else "execution_failed"
+                )
+                results_payload.append(
+                    {
+                        "sub_run_id": item.id,
+                        "subagent_slug": item.subagent_slug,
+                        "subagent_name": item.subagent_name,
+                        "status": item.status,
+                        "safe_error_code": item.safe_error_code or fallback_code,
+                    }
+                )
+
+        summary_json: dict[str, object] = {
+            "results": results_payload,
+            "completed_count": completed_count,
+            "failed_count": failed_count,
+        }
+        tool_call_row = await session.scalar(
+            select(RunToolCallModel)
+            .where(
+                RunToolCallModel.run_id == parent.id,
+                RunToolCallModel.tool_call_id == sub_run.parent_tool_call_id,
+            )
+            .with_for_update()
+        )
+        thread_id = parent.id
+        if tool_call_row is not None:
+            call_message = await session.get(ExecutionMessageModel, tool_call_row.call_message_id)
+            if call_message is not None:
+                thread_id = call_message.thread_id
+        result_message_id = new_id("exec")
+        result_draft = ExecutionMessageDraft(
+            id=result_message_id,
+            session_id=parent.session_id,
+            owner_id=parent.owner_id,
+            run_id=parent.id,
+            thread_id=thread_id,
+            role=ExecutionRole.TOOL,
+            parts=(
+                ToolResultPart(
+                    tool_call_id=sub_run.parent_tool_call_id,
+                    status=ToolResultStatus.SUCCESS,
+                    output=json.dumps(summary_json, ensure_ascii=False, separators=(",", ":")),
+                ),
+            ),
+            tool_call_id=sub_run.parent_tool_call_id,
+            source_message_id=None,
+            created_at=settled_at,
+            metadata=MessageMetadata(),
+        )
+        await self._message_repo.append_execution_in_session(
+            session,
+            result_draft,
+            locked_session=locked_session,
+            managed_run_id=parent.id,
+        )
+        if tool_call_row is not None and tool_call_row.status == ToolCallStatus.EXECUTING.value:
+            outcome = ToolOutcome(
+                status=ToolOutcomeStatus.OK,
+                code="subagents_completed",
+                message=f"子智能体批次已完成（成功 {completed_count}，失败 {failed_count}）。",
+                data=summary_json,
+            )
+            tool_call_row.result_message_id = result_message_id
+            tool_call_row.status = ToolCallStatus.COMPLETED.value
+            tool_call_row.finished_at = settled_at
+            tool_call_row.outcome = outcome.model_dump(mode="json")
+
+        parent.status = RunStatus.QUEUED.value
+        parent.queued_at = settled_at
+        parent.updated_at = settled_at
+        self._clear_lease(parent)
+        await self._append_event(
+            session,
+            parent,
+            RunSubagentsResumedPayload(
+                tool_call_id=sub_run.parent_tool_call_id,
+                completed_count=completed_count,
+                failed_count=failed_count,
+            ),
+            settled_at,
+        )
+        return parent
+
+    @staticmethod
+    async def _load_subagent_final_output(session: AsyncSession, sub_run_id: str) -> str:
+        """读取子 Run 最终助手执行消息中的文本输出。"""
+        row = await session.scalar(
+            select(ExecutionMessageModel)
+            .where(
+                ExecutionMessageModel.run_id == sub_run_id,
+                ExecutionMessageModel.role == ExecutionRole.ASSISTANT.value,
+            )
+            .order_by(ExecutionMessageModel.sequence.desc())
+            .limit(1)
+        )
+        if row is None:
+            return ""
+        msg = execution_to_domain(row)
+        return "".join(part.text for part in msg.parts if isinstance(part, TextPart))
+
+    @staticmethod
+    async def _load_subagent_artifacts(
+        session: AsyncSession, sub_run_id: str
+    ) -> list[dict[str, object]]:
+        """汇总子 Run 工具调用产生的交付文件元数据。"""
+        rows = (
+            await session.scalars(
+                select(ExecutionMessageModel)
+                .where(
+                    ExecutionMessageModel.run_id == sub_run_id,
+                    ExecutionMessageModel.role == ExecutionRole.TOOL.value,
+                )
+                .order_by(ExecutionMessageModel.sequence)
+            )
+        ).all()
+        artifacts: list[dict[str, object]] = []
+        seen_ids: set[str] = set()
+        for row in rows:
+            msg = execution_to_domain(row)
+            for part in msg.parts:
+                if isinstance(part, ToolResultPart):
+                    for artifact in part.artifacts:
+                        if artifact.file_id in seen_ids:
+                            continue
+                        seen_ids.add(artifact.file_id)
+                        artifacts.append(
+                            {
+                                "file_id": artifact.file_id,
+                                "filename": artifact.filename,
+                                "label": artifact.label,
+                                "mime_type": artifact.mime_type,
+                                "size_bytes": artifact.size_bytes,
+                            }
+                        )
+        return artifacts
+
+    async def _lock_default_profile_id(self, session: AsyncSession) -> str:
         profile_id = await session.scalar(
             select(DefaultModelProfileModel.profile_id).where(
                 DefaultModelProfileModel.singleton_id == 1
@@ -479,11 +698,15 @@ class RunRepositorySupportMixin:
         )
         if database_now is None:
             raise RuntimeError("run_database_clock_unavailable")
+        if database_now.tzinfo is None:
+            database_now = database_now.replace(tzinfo=UTC)
+        if latest_created_at is not None and latest_created_at.tzinfo is None:
+            latest_created_at = latest_created_at.replace(tzinfo=UTC)
         if latest_created_at is None or database_now > latest_created_at:
             return database_now
         return latest_created_at + timedelta(microseconds=1)
 
-    async def _validated_input_file_ids(
+    async def _validate_and_merge_input_file_ids(
         self,
         session: AsyncSession,
         session_id: str,
@@ -553,23 +776,25 @@ class RunRepositorySupportMixin:
         return row
 
     async def _lock_worker_run(
-        self, session: AsyncSession, run_id: str, worker_id: str, epoch: int
+        self, session: AsyncSession, run_id: str, worker_id: str, execution_epoch: int
     ) -> RunModel:
         session_id = await session.scalar(select(RunModel.session_id).where(RunModel.id == run_id))
         if session_id is None:
             raise RunNotFoundError("run_not_found")
         await self._lock_session_by_id(session, session_id)
         row = await self._lock_run(session, session_id, run_id)
-        if row.worker_id != worker_id or row.execution_epoch != epoch:
+        if row.worker_id != worker_id or row.execution_epoch != execution_epoch:
             raise RunStateError("run_execution_lease_lost")
         return row
 
     @staticmethod
-    def _lease_is_valid(row: RunModel, worker_id: str, epoch: int, db_now: datetime | None) -> bool:
+    def _lease_is_valid(
+        row: RunModel, worker_id: str, execution_epoch: int, db_now: datetime | None
+    ) -> bool:
         return bool(
             db_now is not None
             and row.worker_id == worker_id
-            and row.execution_epoch == epoch
+            and row.execution_epoch == execution_epoch
             and row.lease_expires_at is not None
             and row.lease_expires_at > db_now
         )
@@ -683,35 +908,3 @@ class RunRepositorySupportMixin:
         if run is None or message is None:
             raise RunNotFoundError("run_request_result_missing")
         return run_to_domain(run), conversation_to_domain(message)
-
-
-
-def _skill_execution_row_matches(
-    row: SkillExecutionModel,
-    completion: SkillExecutionCompletion,
-    artifacts: tuple[PendingSessionFile, ...],
-) -> bool:
-    """比较脚本审计终态，重放不能替换日志、错误或产物集合。"""
-    expected_artifacts = [
-        SkillExecutionArtifact(
-            file_id=artifact.id,
-            filename=artifact.filename,
-            label=artifact.label,
-            mime_type=artifact.mime_type,
-            size_bytes=artifact.size_bytes,
-            sha256=artifact.sha256,
-            object_key=artifact.object_key,
-            output_index=artifact.output_index,
-        ).model_dump(mode="json")
-        for artifact in artifacts
-    ]
-    return (
-        row.status == completion.status.value
-        and row.log_object_key == completion.log_object_key
-        and row.log_truncated == completion.log_truncated
-        and row.log_error_code == completion.log_error_code
-        and row.error_code == completion.error_code
-        and row.cleanup_error_code == completion.cleanup_error_code
-        and row.result_artifacts == expected_artifacts
-        and row.finished_at == completion.finished_at
-    )

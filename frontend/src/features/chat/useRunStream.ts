@@ -11,9 +11,12 @@ import {
 import { runStreamUrl } from "./api";
 import {
   isTerminalRunStatus,
+  type PendingSubagentApproval,
+  type PendingSubagentInput,
   type RunEvent,
   type RunSnapshotPayload,
   type RunStatus,
+  type SubagentTaskSummary,
 } from "./model";
 import {
   INITIAL_RUN_STREAM_STATE,
@@ -42,6 +45,7 @@ interface UseRunStreamOptions {
   enabled?: boolean;
   eventSourceFactory?: RunEventSourceFactory;
   onReconcile?: () => void;
+  onSnapshot?: (snapshot: RunSnapshotPayload) => void;
   runId: string | null;
   sessionId: string;
   status: RunStatus | null;
@@ -114,6 +118,15 @@ function parseSnapshotPayload(value: unknown): RunSnapshotPayload | null {
         ? value.report_message_id
         : null,
     status,
+    subagent_tasks: Array.isArray(value.subagent_tasks)
+      ? (value.subagent_tasks as SubagentTaskSummary[])
+      : [],
+    pending_subagent_inputs: Array.isArray(value.pending_subagent_inputs)
+      ? (value.pending_subagent_inputs as PendingSubagentInput[])
+      : [],
+    pending_subagent_approvals: Array.isArray(value.pending_subagent_approvals)
+      ? (value.pending_subagent_approvals as PendingSubagentApproval[])
+      : [],
   };
 }
 
@@ -136,6 +149,7 @@ function dispatchWireEvent(
   eventName: string,
   data: Record<string, unknown>,
   dispatch: Dispatch<RunStreamAction>,
+  onSnapshot?: (snapshot: RunSnapshotPayload) => void,
 ):
   | "snapshot_waiting"
   | "snapshot_terminal"
@@ -150,6 +164,7 @@ function dispatchWireEvent(
       return null;
     }
     dispatch({ payload: snapshot, type: "snapshot" });
+    onSnapshot?.(snapshot);
     if (
       snapshot.status === "waiting_for_input" ||
       snapshot.status === "waiting_for_approval"
@@ -205,6 +220,7 @@ export function useRunStream({
   enabled = true,
   eventSourceFactory = defaultEventSourceFactory,
   onReconcile,
+  onSnapshot,
   runId,
   sessionId,
   status,
@@ -216,6 +232,7 @@ export function useRunStream({
   const [reconnectGeneration, setReconnectGeneration] = useState(0);
   const sourceRef = useRef<RunEventSource | null>(null);
   const reconcileRef = useRef(onReconcile);
+  const snapshotRef = useRef(onSnapshot);
   const mode = runStreamMode(status);
   // 等待和终态由查询/快照承载；只有仍可能产生实时增量的状态才建立连接。
   const shouldConnect = Boolean(enabled && runId && mode === "live");
@@ -227,6 +244,10 @@ export function useRunStream({
   useEffect(() => {
     reconcileRef.current = onReconcile;
   }, [onReconcile]);
+
+  useEffect(() => {
+    snapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
 
   const syncStatus = useCallback(
     (targetRunId: string, nextStatus: RunStatus) => {
@@ -300,7 +321,12 @@ export function useRunStream({
         dispatch({ type: "error" });
         return;
       }
-      const outcome = dispatchWireEvent(eventName, data, dispatch);
+      const outcome = dispatchWireEvent(
+        eventName,
+        data,
+        dispatch,
+        snapshotRef.current,
+      );
       if (outcome === "snapshot_live") {
         snapshotReceived = true;
       }

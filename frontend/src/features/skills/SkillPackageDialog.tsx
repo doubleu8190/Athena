@@ -1,8 +1,8 @@
 import { useId, useRef, useState } from "react";
 
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
+import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
 import { newRequestId } from "../chat/requestId";
 import { skillErrorMessage } from "./errorMessages";
 import { useImportSkillMutation } from "./hooks";
@@ -22,6 +22,8 @@ export function SkillPackageDialog({
   const formId = useId();
   const inputId = useId();
   const errorId = useId();
+  const hintId = useId();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [validationError, setValidationError] = useState<string | null>(
     null,
@@ -107,33 +109,32 @@ export function SkillPackageDialog({
           <code>references/</code>。后端会校验路径安全、解压边界、依赖与脚本
           Schema。
         </div>
-        <label className="workspace-field" htmlFor={inputId}>
+        <div className="workspace-field">
           <span>技能 ZIP</span>
-          <input
-            aria-label="技能 ZIP"
-            aria-describedby={validationError ? errorId : undefined}
-            aria-invalid={Boolean(validationError)}
+          <WorkspaceFilePicker
             accept=".zip,application/zip"
-            data-autofocus
+            describedBy={
+              validationError ? `${hintId} ${errorId}` : hintId
+            }
             disabled={mutation.isPending}
+            file={file}
+            focusOnOpen
             id={inputId}
-            onChange={(event) => {
-              const selected = event.target.files?.[0] ?? null;
+            inputRef={fileInputRef}
+            invalid={Boolean(validationError)}
+            label="技能 ZIP"
+            onChange={(selected) => {
               setFile(selected);
               requestIdRef.current = null;
               resetTransientState();
             }}
-            type="file"
+            placeholder="未选择技能 ZIP"
+            triggerLabel="选择 ZIP 文件"
           />
-          <small>ZIP 不超过 25 MiB；首次导入成功后版本保持未启用。</small>
-        </label>
-        {file ? (
-          <p className="admin-skill-selected-file">
-            <Icon name="inbox" size={15} />
-            <strong>{file.name}</strong>
-            <span>{Math.ceil(file.size / 1024).toLocaleString()} KiB</span>
-          </p>
-        ) : null}
+          <small id={hintId}>
+            ZIP 不超过 25 MiB；首次导入成功后版本保持未启用。
+          </small>
+        </div>
         {validationError ? (
           <p className="field-error" id={errorId} role="alert">
             {validationError}

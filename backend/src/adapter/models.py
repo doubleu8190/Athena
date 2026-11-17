@@ -41,6 +41,7 @@ from adapter.run.model import (
 )
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from adapter.subagent.model import SubagentModel
 from adapter.system_prompt.model import (
     SystemPromptSettingModel,
     SystemPromptVersionModel,
@@ -84,6 +85,7 @@ __all__ = [
     "SkillExecutionModel",
     "SkillModel",
     "SkillVersionModel",
+    "SubagentModel",
     "SystemPromptSettingModel",
     "SystemPromptVersionModel",
     "UserModel",

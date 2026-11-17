@@ -23,24 +23,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 COMPOSE_PROJECT="athena-test"
-ENV_TEST_FILE=".env.test"
-ENV_TEST_EXAMPLE=".env.test.example"
+BUSINESS_COMPOSE_FILE="compose.yml"
 DEPS_COMPOSE_FILE="compose.test.yml"
-
-# 显式清理可能从宿主机终端环境继承而来的带有 127.0.0.1 的本地环境变量，
-# 避免其覆盖 .env.test 中容器所需的 host.docker.internal 导致 ConnectionRefusedError 启动报错
-unset ATHENA_DATABASE_URL ATHENA_TEST_DATABASE_URL ATHENA_REDIS_URL
-unset ATHENA_KNOWLEDGE_MINIO_ENDPOINT ATHENA_TEST_MINIO_ENDPOINT
-unset ATHENA_FILE_MINIO_ENDPOINT ATHENA_FILE_MINIO_ACCESS_KEY ATHENA_FILE_MINIO_SECRET_KEY ATHENA_FILE_MINIO_BUCKET ATHENA_FILE_MINIO_SECURE
-unset ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY ATHENA_KNOWLEDGE_MINIO_SECRET_KEY ATHENA_KNOWLEDGE_MINIO_BUCKET ATHENA_KNOWLEDGE_MINIO_SECURE
-unset ATHENA_MCP_SECRET_KEY ATHENA_MCP_SECRET_KEY_VERSION ATHENA_MCP_ALLOWED_PRIVATE_HOSTS ATHENA_MCP_STDIO_BASE_ENV_NAMES
-unset ATHENA_PUBLIC_ORIGIN ATHENA_COOKIE_SECURE ATHENA_LOG_LEVEL
-unset ATHENA_DATABASE_POOL_SIZE ATHENA_DATABASE_MAX_OVERFLOW
-unset ATHENA_RUN_WORKER_CONCURRENCY ATHENA_RUN_LEASE_SECONDS ATHENA_RUN_HEARTBEAT_SECONDS ATHENA_RUN_EXECUTION_SECONDS
-unset ATHENA_RUN_CANCEL_POLL_SECONDS ATHENA_RUN_QUEUE_POLL_SECONDS ATHENA_RUN_RECLAIM_SECONDS
-unset ATHENA_SKILL_TEMP_ROOT ATHENA_SKILL_TEMP_STALE_SECONDS ATHENA_FILE_ORPHAN_RETENTION_SECONDS ATHENA_FILE_MAINTENANCE_INTERVAL_SECONDS
-unset ATHENA_FILES_ENABLED ATHENA_KNOWLEDGE_ENABLED ATHENA_INSTALL_KNOWLEDGE
-unset PORT HF_ENDPOINT
+TEST_ENV_FILE="$ROOT_DIR/docker/test.env"
+TEST_ENV_EXAMPLE="$ROOT_DIR/docker/test.env.example"
+COMPOSE_ENV=()
 
 # 终端输出样式辅助函数
 info() {
@@ -91,25 +78,99 @@ check_docker() {
   docker info >/dev/null 2>&1 || fail "Docker 守护进程未运行或无法连接，请先启动 Docker Desktop / Docker 引擎。"
 }
 
-# 2. 检查并确保 .env.test 存在
+# 2. 检查并加载唯一的 docker/test.env 配置
 ensure_env_file() {
-  if [[ ! -f "$ENV_TEST_FILE" ]]; then
-    if [[ -f "$ENV_TEST_EXAMPLE" ]]; then
-      info "未检测到 $ENV_TEST_FILE，正在从 $ENV_TEST_EXAMPLE 自动初始化..."
-      cp "$ENV_TEST_EXAMPLE" "$ENV_TEST_FILE"
-      success "已创建 $ENV_TEST_FILE 配置文件。"
+  if [[ ! -f "$TEST_ENV_FILE" ]]; then
+    if [[ -f "$TEST_ENV_EXAMPLE" ]]; then
+      info "未检测到 docker/test.env，正在从模板自动初始化..."
+      cp "$TEST_ENV_EXAMPLE" "$TEST_ENV_FILE"
+      chmod 600 "$TEST_ENV_FILE"
+      success "已创建 docker/test.env 配置文件。"
     else
-      fail "缺少环境配置文件模板 $ENV_TEST_EXAMPLE，无法初始化测试配置。"
+      fail "缺少环境配置文件模板 docker/test.env.example，无法初始化测试配置。"
     fi
   fi
+}
+
+load_test_environment() {
+  ensure_env_file
+  # helper 只从 secrets/ 构造凭据；container 模式改用测试库、测试桶和 Docker
+  # 宿主机网关，连接字符串中的用户名、密码和库名均逐段百分号编码。
+  ATHENA_TEST_ENV_TARGET=container
+  export ATHENA_TEST_ENV_TARGET
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/scripts/load-test-env.sh"
+  unset ATHENA_TEST_ENV_TARGET
+  PORT="${PORT:-8080}"
+  export PORT
+  prepare_compose_environment
+}
+
+prepare_compose_environment() {
+  COMPOSE_ENV=(
+    env -i
+    "HOME=$HOME"
+    "PATH=$PATH"
+    "TMPDIR=${TMPDIR:-/tmp}"
+  )
+
+  local inherited_key
+  for inherited_key in \
+    DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG DOCKER_CERT_PATH \
+    DOCKER_TLS_VERIFY DOCKER_BUILDKIT BUILDKIT_HOST SSH_AUTH_SOCK \
+    HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
+    http_proxy https_proxy no_proxy all_proxy; do
+    if [[ -n "${!inherited_key+x}" ]]; then
+      COMPOSE_ENV+=("$inherited_key=${!inherited_key}")
+    fi
+  done
+
+  local key
+  while IFS= read -r key; do
+    if [[ -n "${!key+x}" ]]; then
+      COMPOSE_ENV+=("$key=${!key}")
+    fi
+  done < <(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*$/\2/p' "$TEST_ENV_FILE")
+
+  local derived_keys=(
+    ATHENA_DATABASE_URL ATHENA_TEST_DATABASE_URL ATHENA_REDIS_URL
+    ATHENA_MCP_SECRET_KEY
+    ATHENA_FILE_MINIO_ENDPOINT ATHENA_FILE_MINIO_ACCESS_KEY
+    ATHENA_FILE_MINIO_SECRET_KEY ATHENA_FILE_MINIO_BUCKET ATHENA_FILE_MINIO_SECURE
+    ATHENA_KNOWLEDGE_MINIO_ENDPOINT ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY
+    ATHENA_KNOWLEDGE_MINIO_SECRET_KEY ATHENA_KNOWLEDGE_MINIO_BUCKET
+    ATHENA_KNOWLEDGE_MINIO_SECURE
+    ATHENA_TEST_MINIO_ENDPOINT ATHENA_TEST_MINIO_ACCESS_KEY
+    ATHENA_TEST_MINIO_SECRET_KEY ATHENA_TEST_MINIO_BUCKET ATHENA_TEST_MINIO_SECURE
+    POSTGRES_DB POSTGRES_TEST_DB POSTGRES_PORT REDIS_PORT
+    MINIO_API_PORT MINIO_CONSOLE_PORT
+    MINIO_DEV_BUCKET MINIO_TEST_BUCKET
+    MINIO_FILES_DEV_BUCKET MINIO_FILES_TEST_BUCKET
+    PORT
+  )
+  for key in "${derived_keys[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      COMPOSE_ENV+=("$key=${!key}")
+    fi
+  done
+}
+
+business_compose() {
+  "${COMPOSE_ENV[@]}" docker compose \
+    --env-file /dev/null -p "$COMPOSE_PROJECT" -f "$BUSINESS_COMPOSE_FILE" "$@"
+}
+
+dependency_compose() {
+  "${COMPOSE_ENV[@]}" docker compose \
+    --env-file /dev/null -f "$DEPS_COMPOSE_FILE" "$@"
 }
 
 # 3. 构建/检查后端基础依赖镜像 (athena-backend-base:latest)
 build_base_image() {
   info "正在构建后端基础依赖镜像 athena-backend-base:latest..."
   local install_knowledge="false"
-  if grep -E '^ATHENA_KNOWLEDGE_ENABLED=true' "$ENV_TEST_FILE" >/dev/null 2>&1 || \
-     grep -E '^ATHENA_INSTALL_KNOWLEDGE=true' "$ENV_TEST_FILE" >/dev/null 2>&1; then
+  if grep -E '^ATHENA_KNOWLEDGE_ENABLED=true' "$TEST_ENV_FILE" >/dev/null 2>&1 || \
+     grep -E '^ATHENA_INSTALL_KNOWLEDGE=true' "$TEST_ENV_FILE" >/dev/null 2>&1; then
     install_knowledge="true"
   fi
   info "Base 镜像构建参数: INSTALL_KNOWLEDGE=${install_knowledge}"
@@ -138,20 +199,20 @@ ensure_base_image() {
 ensure_dependencies() {
   info "检查外部测试基础设施状态 (PostgreSQL, Redis, MinIO)..."
   # 拉起外部依赖容器
-  docker compose -f "$DEPS_COMPOSE_FILE" up -d
+  dependency_compose up -d
 
   # 等待 minio-init 初始化完成测试存储桶（athena-knowledge-test, athena-files-test）
   info "等待底层基础设施就绪及 MinIO 测试存储桶初始化..."
-  docker compose -f "$DEPS_COMPOSE_FILE" wait minio-init >/dev/null 2>&1 || true
+  dependency_compose wait minio-init >/dev/null 2>&1 || true
 
   # 探活验证基础设施健康状态
   local attempt=0
   local max_attempts=30
   local ready=false
   while (( attempt < max_attempts )); do
-    if docker compose -f "$DEPS_COMPOSE_FILE" ps postgres 2>/dev/null | grep -Eq "healthy|Up" && \
-       docker compose -f "$DEPS_COMPOSE_FILE" ps redis 2>/dev/null | grep -Eq "healthy|Up" && \
-       docker compose -f "$DEPS_COMPOSE_FILE" ps minio 2>/dev/null | grep -Eq "healthy|Up"; then
+    if dependency_compose ps postgres 2>/dev/null | grep -Eq "healthy|Up" && \
+       dependency_compose ps redis 2>/dev/null | grep -Eq "healthy|Up" && \
+       dependency_compose ps minio 2>/dev/null | grep -Eq "healthy|Up"; then
       ready=true
       break
     fi
@@ -166,10 +227,25 @@ ensure_dependencies() {
   fi
 }
 
+read_health_port() {
+  local endpoint port
+  if ! endpoint="$(business_compose port frontend 80 | awk 'NF { print; exit }')"; then
+    fail "无法读取 frontend 的 Compose 端口映射。"
+  fi
+  if [[ -z "$endpoint" ]]; then
+    fail "frontend 尚未建立宿主机端口映射。"
+  fi
+  port="${endpoint##*:}"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    fail "frontend 端口映射格式无效：$endpoint"
+  fi
+  printf '%s' "$port"
+}
+
 # 执行 up 命令核心流程
 cmd_up() {
   check_docker
-  ensure_env_file
+  load_test_environment
 
   local force_build_base=false
   while (($#)); do
@@ -184,17 +260,13 @@ cmd_up() {
   ensure_dependencies
 
   info "执行测试数据库结构自动迁移 (Alembic migration)..."
-  docker compose -p "$COMPOSE_PROJECT" --env-file "$ENV_TEST_FILE" run --rm backend-migration
+  business_compose run --rm backend-migration
 
   info "构建并启动 Athena 业务测试容器 (frontend、API、Run/Memory Worker)..."
-  docker compose -p "$COMPOSE_PROJECT" --env-file "$ENV_TEST_FILE" up -d --build
+  business_compose up -d --build
 
-  # 从 .env.test 中提取暴露端口（缺省为 8080）
-  local port="8080"
-  if grep -E '^PORT=' "$ENV_TEST_FILE" >/dev/null 2>&1; then
-    port=$(grep -E '^PORT=' "$ENV_TEST_FILE" | cut -d'=' -f2 | tr -d ' "' | tr -d '\r')
-  fi
-  port="${port:-8080}"
+  local port
+  port="$(read_health_port)"
 
   info "等待 Athena 前端网关与健康探针就绪 (http://127.0.0.1:${port}/health)..."
   local attempt=0
@@ -243,13 +315,13 @@ cmd_down() {
     shift
   done
 
-  ensure_env_file
+  load_test_environment
   info "正在停止并清理 Athena 业务测试容器 ($COMPOSE_PROJECT)..."
-  docker compose -p "$COMPOSE_PROJECT" --env-file "$ENV_TEST_FILE" down
+  business_compose down
 
   if [[ "$stop_all" == true ]]; then
     info "正在停止并清理外部测试基础设施容器 ($DEPS_COMPOSE_FILE)..."
-    docker compose -f "$DEPS_COMPOSE_FILE" down
+    dependency_compose down
     success "已成功停止业务容器与底层基础设施容器。"
   else
     success "已停止 Athena 业务测试容器。"
@@ -260,20 +332,20 @@ cmd_down() {
 # 执行 status 命令
 cmd_status() {
   check_docker
-  ensure_env_file
+  load_test_environment
   printf '\n\033[1;36m=== Athena 业务测试容器状态 (%s) ===\033[0m\n' "$COMPOSE_PROJECT"
-  docker compose -p "$COMPOSE_PROJECT" --env-file "$ENV_TEST_FILE" ps || true
+  business_compose ps || true
 
   printf '\n\033[1;36m=== 外部基础设施容器状态 (%s) ===\033[0m\n' "$DEPS_COMPOSE_FILE"
-  docker compose -f "$DEPS_COMPOSE_FILE" ps || true
+  dependency_compose ps || true
   printf '\n'
 }
 
 # 执行 logs 命令
 cmd_logs() {
   check_docker
-  ensure_env_file
-  docker compose -p "$COMPOSE_PROJECT" --env-file "$ENV_TEST_FILE" logs -f "$@"
+  load_test_environment
+  business_compose logs -f "$@"
 }
 
 # 主入口调度
@@ -288,7 +360,7 @@ case "$COMMAND" in
     ;;
   build-base)
     check_docker
-    ensure_env_file
+    load_test_environment
     build_base_image
     ;;
   down)

@@ -19,6 +19,7 @@ from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session import SqlAlchemySessionRepository
 from adapter.skill import SqlAlchemySkillRepository
 from adapter.skill.execution import PythonScriptExecutor
+from adapter.subagent import SqlAlchemySubagentRepository
 from adapter.system_prompt import SqlAlchemySystemPromptRepository
 from app.file import SessionFileService
 from app.project.service import ProjectService
@@ -136,16 +137,12 @@ def build_run_worker_dependencies(
         object_store = MinioFileObjectStore.from_environment(deferred=True)
         bundle.file_object_store = object_store
         skill_repository = SqlAlchemySkillRepository(database.session_factory)
-        python_executable = Path(
-            os.getenv("ATHENA_SKILL_PYTHON_EXECUTABLE", sys.executable)
-        )
+        python_executable = Path(os.getenv("ATHENA_SKILL_PYTHON_EXECUTABLE", sys.executable))
         skills = SkillService(
             skill_repository,
             object_store,
             auth_repository,
-            dependency_checker=DependencyChecker(
-                python_executable=python_executable
-            ),
+            dependency_checker=DependencyChecker(python_executable=python_executable),
         )
         file_repository = SqlAlchemySessionFileRepository(database.session_factory)
         session_files = SessionFileService(
@@ -167,6 +164,7 @@ def build_run_worker_dependencies(
             temp_root=temp_root,
         )
         bundle.skill_execution = skill_execution
+    subagents_repository = SqlAlchemySubagentRepository(database.session_factory)
     tool_runtime = build_run_tool_runtime(
         auth=auth_repository,
         sessions=session_repository,
@@ -176,6 +174,7 @@ def build_run_worker_dependencies(
         skills=skills,
         session_files=session_files,
         skill_execution=skill_execution,
+        subagents=subagents_repository,
     )
     provider = OpenAIChatCompletionsAdapter()
     bundle.provider = provider
@@ -193,6 +192,7 @@ def build_run_worker_dependencies(
         config=config,
         tool_runtime=tool_runtime,
         memory_lifecycle=query_services.memory_lifecycle,
+        subagents=subagents_repository,
     )
     bundle.worker = RunWorker(repository, executor, config, publisher=run_transport)
 

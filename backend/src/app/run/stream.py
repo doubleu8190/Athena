@@ -100,6 +100,9 @@ class RunStreamService:
             transport_epoch = current_epoch
             deltas_interrupted = deltas_interrupted or bool(last_event_id)
             current_status = snapshot.run.status
+            current_subagent_tasks = snapshot.subagent_tasks
+            current_pending_subagent_inputs = snapshot.pending_subagent_inputs
+            current_pending_subagent_approvals = snapshot.pending_subagent_approvals
             event_cursor = snapshot.events[-1].sequence if snapshot.events else 0
             seen_message_ids.update(message.id for message in snapshot.messages)
             yield RunSnapshotEvent(
@@ -116,6 +119,9 @@ class RunStreamService:
                     messages_before_sequence=snapshot.messages_before_sequence,
                     events_complete=snapshot.events_complete,
                     events_after_sequence=snapshot.events_after_sequence,
+                    subagent_tasks=snapshot.subagent_tasks,
+                    pending_subagent_inputs=snapshot.pending_subagent_inputs,
+                    pending_subagent_approvals=snapshot.pending_subagent_approvals,
                 ),
             )
             output_sequence += 1
@@ -284,6 +290,9 @@ class RunStreamService:
                         snapshot.run.execution_epoch != current_epoch
                         or snapshot.run.status != current_status
                         or any(message.id not in seen_message_ids for message in snapshot.messages)
+                        or snapshot.subagent_tasks != current_subagent_tasks
+                        or snapshot.pending_subagent_inputs != current_pending_subagent_inputs
+                        or snapshot.pending_subagent_approvals != current_pending_subagent_approvals
                     ):
                         seen_message_ids.update(message.id for message in snapshot.messages)
                         # 状态切换先发送权威快照，再更新本地状态，避免丢掉终态投影。
@@ -301,6 +310,9 @@ class RunStreamService:
                                 messages_before_sequence=snapshot.messages_before_sequence,
                                 events_complete=snapshot.events_complete,
                                 events_after_sequence=snapshot.events_after_sequence,
+                                subagent_tasks=snapshot.subagent_tasks,
+                                pending_subagent_inputs=snapshot.pending_subagent_inputs,
+                                pending_subagent_approvals=snapshot.pending_subagent_approvals,
                             ),
                         )
                         output_sequence += 1
@@ -310,6 +322,9 @@ class RunStreamService:
                             deltas_interrupted = False
                         current_epoch = snapshot.run.execution_epoch
                         current_status = snapshot.run.status
+                        current_subagent_tasks = snapshot.subagent_tasks
+                        current_pending_subagent_inputs = snapshot.pending_subagent_inputs
+                        current_pending_subagent_approvals = snapshot.pending_subagent_approvals
                     last_reconcile = now
                     if snapshot.run.status.value in {
                         "waiting_for_input",

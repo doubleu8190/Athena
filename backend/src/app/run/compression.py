@@ -870,9 +870,7 @@ class ContextCompressor:
         return ContextStopReason.COMPRESSION_FAILED
 
     async def _publish(self, event: RunEvent, run: Run) -> None:
-        await publish_persisted_event(
-            self._publisher, run.id, run.execution_epoch, event
-        )
+        await publish_persisted_event(self._publisher, run.id, run.execution_epoch, event)
 
     @staticmethod
     def _messages_after_summary(

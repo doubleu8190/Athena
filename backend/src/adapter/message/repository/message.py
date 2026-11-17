@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from adapter.message.converter.message import (
     conversation_to_domain,
@@ -213,33 +214,46 @@ class SqlAlchemyMessageRepository:
         limit: int,
     ) -> ConversationMessagePage | None:
         """在同一 SQL 快照内校验会话可见性并读取一页公开消息。"""
-        message_join = ConversationMessageModel.session_id == SessionModel.id
-        if before_sequence is not None:
-            message_join = and_(
-                message_join,
-                ConversationMessageModel.sequence < before_sequence,
+        # 隔离主聊天历史：先在子查询中过滤掉子 Run（depth >= 1）的澄清提问与定向回答，
+        # 再与 SessionModel 做 outerjoin，确保会话存在但仅有子 Run 消息时仍返回空页而非 None。
+        visible_messages = (
+            select(ConversationMessageModel)
+            .outerjoin(RunModel, RunModel.id == ConversationMessageModel.managed_run_id)
+            .where(
+                ConversationMessageModel.session_id == session_id,
+                *(
+                    (ConversationMessageModel.sequence < before_sequence,)
+                    if before_sequence is not None
+                    else ()
+                ),
+                or_(
+                    ConversationMessageModel.managed_run_id.is_(None),
+                    RunModel.depth == 0,
+                ),
             )
+            .order_by(ConversationMessageModel.sequence.desc())
+            .limit(limit + 1)
+            .subquery()
+        )
+        visible_msg_alias = aliased(ConversationMessageModel, visible_messages)
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
-                    select(SessionModel.id, ConversationMessageModel)
+                    select(SessionModel.id, visible_msg_alias)
                     .select_from(SessionModel)
-                    .outerjoin(ConversationMessageModel, message_join)
+                    .outerjoin(visible_msg_alias, visible_msg_alias.session_id == SessionModel.id)
                     .where(
                         SessionModel.id == session_id,
                         SessionModel.owner_id == owner_id,
                         SessionModel.deleted_time.is_(None),
                     )
-                    .order_by(ConversationMessageModel.sequence.desc())
-                    .limit(limit + 1)
+                    .order_by(visible_msg_alias.sequence.desc())
                 )
             ).all()
         if not rows:
             return None
 
-        message_rows = [
-            row.ConversationMessageModel for row in rows if row.ConversationMessageModel is not None
-        ]
+        message_rows = [msg_row for _, msg_row in rows if msg_row is not None]
         has_more = len(message_rows) > limit
         page_rows = message_rows[:limit]
         next_before_sequence = page_rows[-1].sequence if has_more and page_rows else None

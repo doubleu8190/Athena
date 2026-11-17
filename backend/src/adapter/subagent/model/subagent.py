@@ -1,0 +1,85 @@
+"""Subagent 配置 PostgreSQL / SQLite ORM 映射。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from adapter.base import Base
+
+
+def _json_type() -> JSON:
+    """在 PostgreSQL 使用 JSONB，在 SQLite 测试中使用 JSON。"""
+    return JSON().with_variant(JSONB(), "postgresql")
+
+
+class SubagentModel(Base):
+    """管理员配置的 Subagent 持久化表。"""
+
+    __tablename__ = "subagents"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_subagents_version"),
+        CheckConstraint(
+            "max_llm_requests IS NULL OR (max_llm_requests >= 1 AND max_llm_requests <= 50)",
+            name="ck_subagents_max_llm_requests",
+        ),
+        CheckConstraint(
+            "timeout_seconds IS NULL OR (timeout_seconds >= 10 AND timeout_seconds <= 1800)",
+            name="ck_subagents_timeout_seconds",
+        ),
+        Index(
+            "uq_subagents_slug_active",
+            "slug",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
+        Index("ix_subagents_enabled_created", "enabled", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(String(1000), nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    model_profile_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    allowed_tool_ids: Mapped[list[str]] = mapped_column(
+        _json_type(),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    max_llm_requests: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+__all__ = ["SubagentModel"]

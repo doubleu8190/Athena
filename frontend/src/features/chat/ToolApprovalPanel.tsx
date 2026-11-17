@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
+import { Icon } from "../../shared/ui/Icons";
 import { useToolCallDetail } from "./hooks";
 import { isSkillTool, type RunPendingApproval } from "./model";
 import { SafeSkillProjection } from "./SafeSkillProjection";
@@ -59,10 +60,15 @@ function ApprovalRow({
         </div>
         <button
           aria-expanded={expanded}
-          className="text-button"
+          className="text-button detail-toggle"
           onClick={() => setExpanded((value) => !value)}
           type="button"
         >
+          <Icon
+            className="detail-toggle-chevron"
+            name="chevron"
+            size={12}
+          />
           {expanded
             ? skillCall
               ? "收起安全详情"

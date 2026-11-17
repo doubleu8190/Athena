@@ -210,6 +210,7 @@ class SqlAlchemySessionRepository(SessionRepository):
                                     RunStatus.RUNNING.value,
                                     RunStatus.WAITING_FOR_INPUT.value,
                                     RunStatus.WAITING_FOR_APPROVAL.value,
+                                    RunStatus.WAITING_FOR_SUBAGENTS.value,
                                     RunStatus.CANCELLING.value,
                                 ]
                             ),

@@ -8,7 +8,14 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from domain.run.model.entities import Run, RunEvent, RunStatus
+from domain.run.model.entities import (
+    PendingSubagentApproval,
+    PendingSubagentInput,
+    Run,
+    RunEvent,
+    RunStatus,
+    SubagentTaskSummary,
+)
 
 MAX_RUN_SSE_EVENT_BYTES = 64 * 1024
 MAX_RUN_SSE_SNAPSHOT_BYTES = 512 * 1024
@@ -41,6 +48,9 @@ class RunSnapshotPayload(BaseModel):
     messages_before_sequence: int | None = None
     events_complete: bool = True
     events_after_sequence: int | None = None
+    subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
+    pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
+    pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
 
 
 class RunTextDeltaPayload(BaseModel):
@@ -147,6 +157,9 @@ class RunStreamSnapshot:
     messages_before_sequence: int | None = None
     events_complete: bool = True
     events_after_sequence: int | None = None
+    subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
+    pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
+    pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
 
 
 __all__ = [

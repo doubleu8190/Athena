@@ -14,7 +14,8 @@ from domain.memory.lifecycle import (
     RunMemoryContextState,
 )
 from domain.message import ConversationMessage, ConversationMessageDraft, ExecutionMessageDraft
-from domain.skill import RunSkillSnapshot
+from domain.skill import RunSkillSnapshot, SafeSkillApprovalProjection
+from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID
 from domain.tool import (
     RuntimeToolSnapshot,
     ToolApprovalDecision,
@@ -29,6 +30,7 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     WAITING_FOR_INPUT = "waiting_for_input"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
+    WAITING_FOR_SUBAGENTS = "waiting_for_subagents"
     CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -258,6 +260,28 @@ class RunToolCallFinishedPayload(_RunEventPayload):
     safe_error_code: str | None = None
 
 
+class RunWaitingForSubagentsPayload(_RunEventPayload):
+    type: Literal["waiting_for_subagents"] = "waiting_for_subagents"
+    tool_call_id: str
+    subagent_run_ids: tuple[str, ...]
+
+
+class RunSubagentsResumedPayload(_RunEventPayload):
+    type: Literal["subagents_resumed"] = "subagents_resumed"
+    tool_call_id: str
+    completed_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+
+
+class RunSubagentStatusChangedPayload(_RunEventPayload):
+    type: Literal["subagent_status_changed"] = "subagent_status_changed"
+    sub_run_id: str
+    subagent_slug: str
+    subagent_name: str
+    status: RunStatus
+    safe_error_code: str | None = None
+
+
 type RunEventPayload = Annotated[
     RunQueuedPayload
     | RunStartedPayload
@@ -274,7 +298,10 @@ type RunEventPayload = Annotated[
     | RunCompressionCompletedPayload
     | RunCompressionFailedPayload
     | RunToolCallStartedPayload
-    | RunToolCallFinishedPayload,
+    | RunToolCallFinishedPayload
+    | RunWaitingForSubagentsPayload
+    | RunSubagentsResumedPayload
+    | RunSubagentStatusChangedPayload,
     Field(discriminator="type"),
 ]
 
@@ -332,6 +359,29 @@ class Run:
     memory_extracted_at: datetime | None = None
     memory_extraction_batch_id: str | None = None
     memory_extraction_safe_error_code: str | None = None
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    parent_tool_call_id: str | None = None
+    depth: int = 0
+    subagent_profile_id: str | None = None
+    subagent_slug: str | None = None
+    subagent_name: str | None = None
+    subagent_system_prompt: str | None = None
+    max_llm_requests: int | None = None
+    timeout_seconds: int | None = None
+    input_interactions: tuple[RunInputInteraction, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RunInputInteraction:
+    """单次用户输入请求的问答摘要投影，供子任务详情回看。"""
+
+    input_request_id: str
+    status: InputRequestStatus
+    question_text: str
+    answer_text: str | None
+    created_at: datetime
+    answered_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,13 +531,114 @@ class RunLease:
     execution_deadline_at: datetime
 
 
+class SubagentTaskSummary(BaseModel):
+    """主 Run 下单个子任务的聚合状态投影。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sub_run_id: str
+    parent_tool_call_id: str
+    subagent_profile_id: str | None = None
+    subagent_slug: str
+    subagent_name: str
+    task_index: int = Field(default=1, ge=1)
+    task_summary: str = ""
+    status: RunStatus
+    safe_error_code: str | None = None
+    created_at: datetime
+    first_started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class PendingSubagentInput(BaseModel):
+    """子 Run 触发的待回答用户输入请求。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sub_run_id: str
+    subagent_slug: str
+    subagent_name: str
+    task_index: int = Field(default=1, ge=1)
+    task_summary: str = ""
+    input_request_id: str
+    question_message_id: str
+    question_text: str
+    created_at: datetime
+
+
+class PendingSubagentApproval(BaseModel):
+    """子 Run 触发的待人工审批工具调用。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sub_run_id: str
+    subagent_slug: str
+    subagent_name: str
+    task_index: int = Field(default=1, ge=1)
+    task_summary: str = ""
+    call_id: str
+    batch_message_id: str
+    ordinal: int
+    model_name: str
+    tool_kind: str | None = None
+    requested_at: datetime
+    safe_skill_projection: SafeSkillApprovalProjection | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BeginSubagentBatchItem:
+    """单个待创建子 Run 的冻结配置与初始任务输入。"""
+
+    sub_run_id: str
+    subagent_profile_id: str
+    subagent_slug: str
+    subagent_name: str
+    system_prompt: str
+    model_profile_id: str
+    tool_snapshot: RuntimeToolSnapshot
+    skill_snapshot: RunSkillSnapshot | None
+    input_file_ids: tuple[str, ...]
+    task_message: ExecutionMessageDraft
+    max_llm_requests: int | None = None
+    timeout_seconds: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BeginSubagentBatchCommand:
+    """原子派发一批子 Run 并将主 Run 置为 waiting_for_subagents 的命令。"""
+
+    run_id: str
+    worker_id: str
+    execution_epoch: int
+    tool_call_id: str
+    call_message: ExecutionMessageDraft
+    record_id: str
+    items: tuple[BeginSubagentBatchItem, ...]
+    requested_at: datetime
+    round: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class BeginSubagentBatchResult:
+    """子 Run 批次派发事务结果。"""
+
+    run: Run
+    sub_runs: tuple[Run, ...]
+
+
 __all__ = [
     "AnswerRunCommand",
+    "BeginSubagentBatchCommand",
+    "BeginSubagentBatchItem",
+    "BeginSubagentBatchResult",
     "ContextStopReason",
+    "DISPATCH_SUBAGENTS_TOOL_ID",
     "InputRequestStatus",
     "InitializeRunMemoryContextCommand",
     "FailRunCommand",
     "FinishRunCommand",
+    "PendingSubagentApproval",
+    "PendingSubagentInput",
     "Run",
     "RunAttemptUsage",
     "RunCancelledPayload",
@@ -497,6 +648,7 @@ __all__ = [
     "RunEventPayload",
     "RunFailedPayload",
     "RunInputRequest",
+    "RunInputInteraction",
     "RunInputFiles",
     "RunInputCall",
     "RunLease",
@@ -509,10 +661,14 @@ __all__ = [
     "RunResumedPayload",
     "RunStartedPayload",
     "RunStatus",
+    "RunSubagentStatusChangedPayload",
+    "RunSubagentsResumedPayload",
     "RunToolCallFinishedPayload",
     "RunToolCallStartedPayload",
     "RunUsage",
+    "RunWaitingForSubagentsPayload",
     "RunWaitingPayload",
+    "SubagentTaskSummary",
     "SubmitRunCommand",
     "SubmitRunResult",
 ]

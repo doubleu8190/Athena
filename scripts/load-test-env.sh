@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 # 用法：source scripts/load-test-env.sh；配置仅进入当前 shell 及其子进程。
+# 容器 Compose 入口在 source 前设置 ATHENA_TEST_ENV_TARGET=container，连接地址会改用
+# host.docker.internal，并指向测试库、测试桶。
 _athena_clear_test_credentials() {
   unset ATHENA_DATABASE_URL ATHENA_TEST_DATABASE_URL ATHENA_REDIS_URL
   unset ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY ATHENA_KNOWLEDGE_MINIO_SECRET_KEY
@@ -13,6 +15,20 @@ _athena_clear_test_credentials() {
 }
 
 _athena_clear_test_credentials
+_ATHENA_TEST_ENV_TARGET="${ATHENA_TEST_ENV_TARGET:-host}"
+case "$_ATHENA_TEST_ENV_TARGET" in
+  host)
+    _ATHENA_TEST_DATABASE_HOST="127.0.0.1"
+    ;;
+  container)
+    _ATHENA_TEST_DATABASE_HOST="host.docker.internal"
+    ;;
+  *)
+    printf 'ATHENA_TEST_ENV_TARGET 仅支持 host 或 container。\n' >&2
+    unset _ATHENA_TEST_ENV_TARGET
+    return 1
+    ;;
+esac
 if [[ -n "${ZSH_VERSION:-}" ]]; then
   _ATHENA_TEST_SOURCE="${(%):-%x}"
 else
@@ -24,12 +40,44 @@ if [[ ! -f "$_ATHENA_TEST_ROOT/docker/test.env" ]]; then
   return 1
 fi
 
+# Compose 基础设施参数以 docker/test.env 为准；先移除终端同名值，旧配置缺少
+# 新字段时再使用模板默认值，避免宿主 shell 隐式覆盖测试环境。
+unset POSTGRES_DB POSTGRES_TEST_DB POSTGRES_PORT REDIS_PORT
+unset MINIO_API_PORT MINIO_CONSOLE_PORT
+unset MINIO_DEV_BUCKET MINIO_TEST_BUCKET
+unset MINIO_FILES_DEV_BUCKET MINIO_FILES_TEST_BUCKET
+
 set -a
 # shellcheck disable=SC1091
 source "$_ATHENA_TEST_ROOT/docker/test.env"
 set +a
 # 模板可能由旧版本升级而来，连接密钥一律由下方 secret 文件重新生成。
 _athena_clear_test_credentials
+POSTGRES_DB="${POSTGRES_DB:-athena}"
+POSTGRES_TEST_DB="${POSTGRES_TEST_DB:-athena_test}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+MINIO_API_PORT="${MINIO_API_PORT:-9000}"
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-9001}"
+MINIO_DEV_BUCKET="${MINIO_DEV_BUCKET:-athena-knowledge-dev}"
+MINIO_TEST_BUCKET="${MINIO_TEST_BUCKET:-athena-knowledge-test}"
+MINIO_FILES_DEV_BUCKET="${MINIO_FILES_DEV_BUCKET:-athena-files-dev}"
+MINIO_FILES_TEST_BUCKET="${MINIO_FILES_TEST_BUCKET:-athena-files-test}"
+# 默认值在 `set -a` 之后补入，必须在两个 Python 子进程开始前显式导出。
+export POSTGRES_DB POSTGRES_TEST_DB POSTGRES_PORT REDIS_PORT
+export MINIO_API_PORT MINIO_CONSOLE_PORT
+export MINIO_DEV_BUCKET MINIO_TEST_BUCKET
+export MINIO_FILES_DEV_BUCKET MINIO_FILES_TEST_BUCKET
+case "$_ATHENA_TEST_ENV_TARGET" in
+  host)
+    _ATHENA_TEST_DATABASE_NAME="${POSTGRES_DB}"
+    _ATHENA_TEST_KNOWLEDGE_BUCKET="${MINIO_DEV_BUCKET:-athena-knowledge-dev}"
+    ;;
+  container)
+    _ATHENA_TEST_DATABASE_NAME="${POSTGRES_TEST_DB}"
+    _ATHENA_TEST_KNOWLEDGE_BUCKET="${MINIO_TEST_BUCKET:-athena-knowledge-test}"
+    ;;
+esac
 
 _athena_read_secret() {
   local secret_path="$_ATHENA_TEST_ROOT/secrets/$1"
@@ -55,19 +103,22 @@ ATHENA_MCP_SECRET_KEY="$(_athena_read_secret mcp_secret_key)" || {
 
 # URL 凭据必须逐段百分号编码，避免密码中的 @、:、/ 等字符改写连接地址。
 ATHENA_DATABASE_URL="$(ATHENA_TEST_SECRET_DIRECTORY="$_ATHENA_TEST_ROOT/secrets" \
-  python3 -c 'import os; from pathlib import Path; from urllib.parse import quote; root=Path(os.environ["ATHENA_TEST_SECRET_DIRECTORY"]); user=(root/"postgres_user").read_text(); password=(root/"postgres_password").read_text(); print("postgresql+asyncpg://" + quote(user, safe="") + ":" + quote(password, safe="") + "@127.0.0.1:" + os.environ["POSTGRES_PORT"] + "/" + quote(os.environ["POSTGRES_DB"], safe=""))')" || {
+  ATHENA_TEST_DATABASE_HOST="$_ATHENA_TEST_DATABASE_HOST" \
+  ATHENA_TEST_DATABASE_NAME="$_ATHENA_TEST_DATABASE_NAME" \
+  python3 -c 'import os; from pathlib import Path; from urllib.parse import quote; root=Path(os.environ["ATHENA_TEST_SECRET_DIRECTORY"]); user=(root/"postgres_user").read_text(); password=(root/"postgres_password").read_text(); print("postgresql+asyncpg://" + quote(user, safe="") + ":" + quote(password, safe="") + "@" + os.environ["ATHENA_TEST_DATABASE_HOST"] + ":" + os.environ["POSTGRES_PORT"] + "/" + quote(os.environ["ATHENA_TEST_DATABASE_NAME"], safe=""))')" || {
   _athena_clear_test_credentials
   return 1
 }
 ATHENA_TEST_DATABASE_URL="$(ATHENA_TEST_SECRET_DIRECTORY="$_ATHENA_TEST_ROOT/secrets" \
-  python3 -c 'import os; from pathlib import Path; from urllib.parse import quote; root=Path(os.environ["ATHENA_TEST_SECRET_DIRECTORY"]); user=(root/"postgres_user").read_text(); password=(root/"postgres_password").read_text(); print("postgresql+asyncpg://" + quote(user, safe="") + ":" + quote(password, safe="") + "@127.0.0.1:" + os.environ["POSTGRES_PORT"] + "/" + quote(os.environ["POSTGRES_TEST_DB"], safe=""))')" || {
+  ATHENA_TEST_DATABASE_HOST="$_ATHENA_TEST_DATABASE_HOST" \
+  python3 -c 'import os; from pathlib import Path; from urllib.parse import quote; root=Path(os.environ["ATHENA_TEST_SECRET_DIRECTORY"]); user=(root/"postgres_user").read_text(); password=(root/"postgres_password").read_text(); print("postgresql+asyncpg://" + quote(user, safe="") + ":" + quote(password, safe="") + "@" + os.environ["ATHENA_TEST_DATABASE_HOST"] + ":" + os.environ["POSTGRES_PORT"] + "/" + quote(os.environ["POSTGRES_TEST_DB"], safe=""))')" || {
   _athena_clear_test_credentials
   return 1
 }
-ATHENA_REDIS_URL="redis://127.0.0.1:${REDIS_PORT}/0"
-ATHENA_KNOWLEDGE_MINIO_ENDPOINT="127.0.0.1:${MINIO_API_PORT}"
-ATHENA_TEST_MINIO_ENDPOINT="127.0.0.1:${MINIO_API_PORT}"
-ATHENA_KNOWLEDGE_MINIO_BUCKET="${MINIO_DEV_BUCKET:-athena-knowledge-dev}"
+ATHENA_REDIS_URL="redis://${_ATHENA_TEST_DATABASE_HOST}:${REDIS_PORT}/0"
+ATHENA_KNOWLEDGE_MINIO_ENDPOINT="${_ATHENA_TEST_DATABASE_HOST}:${MINIO_API_PORT}"
+ATHENA_TEST_MINIO_ENDPOINT="${_ATHENA_TEST_DATABASE_HOST}:${MINIO_API_PORT}"
+ATHENA_KNOWLEDGE_MINIO_BUCKET="$_ATHENA_TEST_KNOWLEDGE_BUCKET"
 ATHENA_TEST_MINIO_BUCKET="${MINIO_TEST_BUCKET:-athena-knowledge-test}"
 ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY="$_ATHENA_TEST_MINIO_USER"
 ATHENA_KNOWLEDGE_MINIO_SECRET_KEY="$_ATHENA_TEST_MINIO_PASSWORD"
@@ -88,3 +139,5 @@ export ATHENA_FILE_MINIO_ACCESS_KEY ATHENA_FILE_MINIO_SECRET_KEY
 
 unset _ATHENA_TEST_ROOT
 unset _ATHENA_TEST_MINIO_USER _ATHENA_TEST_MINIO_PASSWORD
+unset _ATHENA_TEST_ENV_TARGET _ATHENA_TEST_DATABASE_HOST
+unset _ATHENA_TEST_DATABASE_NAME _ATHENA_TEST_KNOWLEDGE_BUCKET

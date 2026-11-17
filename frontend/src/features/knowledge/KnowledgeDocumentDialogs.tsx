@@ -5,6 +5,7 @@ import { newRequestId } from "../../shared/lib/requestId";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { Modal } from "../../shared/ui/Modal";
+import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
 import {
   idempotencyKeyCanBeReused,
   knowledgeErrorMessage,
@@ -56,6 +57,7 @@ export function KnowledgeIngestDialog({
   const titleErrorId = useId();
   const textErrorId = useId();
   const fileErrorId = useId();
+  const fileHintId = useId();
   const [mode, setMode] = useState<IngestMode>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
@@ -297,25 +299,29 @@ export function KnowledgeIngestDialog({
         ) : null}
 
         {mode === "upload" ? (
-          <label className="workspace-field" htmlFor={`${formId}-file`}>
+          <div className="workspace-field">
             <span>{replacing ? "新版本文件" : "文件"}</span>
-            <input
+            <WorkspaceFilePicker
               accept={KNOWLEDGE_FILE_ACCEPT}
-              aria-label={replacing ? "新版本文件" : "文件"}
-              aria-describedby={fileError ? fileErrorId : undefined}
-              aria-invalid={Boolean(fileError)}
-              disabled={pending}
-              id={`${formId}-file`}
-              onChange={(event) =>
-                handleFile(event.target.files?.[0] ?? null)
+              describedBy={
+                fileError ? `${fileHintId} ${fileErrorId}` : fileHintId
               }
-              ref={fileInputRef}
-              type="file"
+              disabled={pending}
+              file={file}
+              id={`${formId}-file`}
+              inputRef={fileInputRef}
+              invalid={Boolean(fileError)}
+              label={replacing ? "新版本文件" : "文件"}
+              onChange={handleFile}
+              placeholder={
+                replacing ? "未选择新版本文件" : "未选择知识文档"
+              }
+              triggerLabel="选择文档文件"
             />
-            <small>
+            <small id={fileHintId}>
               支持 TXT、MD、PDF、DOCX、XLSX、PPTX、PNG、JPG、JPEG，最大 20 MiB。
             </small>
-          </label>
+          </div>
         ) : (
           <label className="workspace-field" htmlFor={`${formId}-text`}>
             <span>文本内容</span>
@@ -559,7 +565,10 @@ export function DeleteKnowledgeDocumentDialog({
       <p className="confirm-copy">
         确定删除“{document.title}”吗？删除后无法继续检索或下载其来源。
       </p>
-      <label className="workspace-checkbox" htmlFor={checkboxId}>
+      <label
+        className="workspace-checkbox workspace-checkbox--danger"
+        htmlFor={checkboxId}
+      >
         <input
           checked={confirmed}
           id={checkboxId}

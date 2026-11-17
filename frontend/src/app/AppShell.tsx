@@ -36,6 +36,7 @@ const ADMIN_NAVIGATION: NavigationItem[] = [
   { icon: "settings", label: "MCP Server", to: "/admin/mcp" },
   { icon: "tools", label: "工具审批策略", to: "/admin/tools" },
   { icon: "spark", label: "技能管理", to: "/admin/skills" },
+  { icon: "chat", label: "子智能体", to: "/admin/subagents" },
 ];
 
 function getDisplayName(displayName: string | null, email: string): string {

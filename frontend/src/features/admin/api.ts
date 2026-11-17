@@ -12,6 +12,11 @@ import type {
   ModelProfile,
   ModelProfileCreateInput,
   ModelProfileListResponse,
+  SubagentAvailableToolsResponse,
+  SubagentCreateInput,
+  SubagentListResponse,
+  SubagentProfile,
+  SubagentUpdateInput,
   SystemPromptKind,
   SystemPromptVersion,
   SystemPromptVersionListResponse,
@@ -195,6 +200,81 @@ export function restoreSystemPrompt(
         expected_current_version_id: expectedCurrentVersionId,
       },
     },
+  );
+}
+
+// ---------------- Subagent 管理 API ----------------
+
+export function listSubagents(
+  query: AdminPageQuery & { enabled?: boolean },
+): Promise<SubagentListResponse> {
+  const offset = Math.max(0, (query.page - 1) * query.pageSize);
+  const params = new URLSearchParams({
+    offset: String(offset),
+    limit: String(query.pageSize),
+  });
+  if (query.enabled !== undefined) {
+    params.set("enabled", String(query.enabled));
+  }
+  return apiRequest<SubagentListResponse>(
+    `/admin/subagents?${params.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function getSubagent(subagentId: string): Promise<SubagentProfile> {
+  return apiRequest<SubagentProfile>(
+    `/admin/subagents/${encodeURIComponent(subagentId)}`,
+    { method: "GET" },
+  );
+}
+
+export function createSubagent(
+  input: SubagentCreateInput,
+): Promise<SubagentProfile> {
+  return apiRequest<SubagentProfile>("/admin/subagents", {
+    method: "POST",
+    body: input,
+  });
+}
+
+export function updateSubagent(
+  subagentId: string,
+  input: SubagentUpdateInput,
+): Promise<SubagentProfile> {
+  return apiRequest<SubagentProfile>(
+    `/admin/subagents/${encodeURIComponent(subagentId)}`,
+    {
+      method: "PATCH",
+      body: input,
+    },
+  );
+}
+
+export function setSubagentEnabled(
+  subagentId: string,
+  enabled: boolean,
+): Promise<SubagentProfile> {
+  return apiRequest<SubagentProfile>(
+    `/admin/subagents/${encodeURIComponent(subagentId)}/enabled`,
+    {
+      method: "PUT",
+      body: { enabled },
+    },
+  );
+}
+
+export function deleteSubagent(subagentId: string): Promise<void> {
+  return apiRequest<void>(
+    `/admin/subagents/${encodeURIComponent(subagentId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function listSubagentAvailableTools(): Promise<SubagentAvailableToolsResponse> {
+  return apiRequest<SubagentAvailableToolsResponse>(
+    "/admin/subagents/available-tools",
+    { method: "GET" },
   );
 }
 

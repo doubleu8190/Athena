@@ -13,20 +13,27 @@ import {
 import {
   createMcpServer,
   createModelProfile,
+  createSubagent,
+  deleteSubagent,
   getCompressionPolicy,
   getMcpServer,
+  getSubagent,
   getSystemPrompt,
   getSystemPromptVersion,
   listAdminTools,
   listMcpServers,
   listModelProfiles,
+  listSubagentAvailableTools,
+  listSubagents,
   listSystemPromptVersions,
   restoreSystemPrompt,
   saveSystemPrompt,
   setDefaultModelProfile,
   setModelProfileEnabled,
+  setSubagentEnabled,
   updateCompressionPolicy,
   updateMcpServer,
+  updateSubagent,
   updateToolApprovalPolicy,
 } from "./api";
 import type {
@@ -38,6 +45,8 @@ import type {
   McpServerWriteInput,
   ModelProfile,
   ModelProfileCreateInput,
+  SubagentCreateInput,
+  SubagentUpdateInput,
   SystemPromptKind,
 } from "./model";
 import { adminKeys } from "./queryKeys";
@@ -447,5 +456,143 @@ export function useUpdateToolApprovalForRow(): {
       });
     },
   };
+}
+
+// ---------------- Subagent 管理 Hooks ----------------
+
+export function useSubagents(query: AdminPageQuery) {
+  return useQuery({
+    queryKey: adminKeys.subagents(query),
+    queryFn: () => listSubagents(query),
+  });
+}
+
+export function useSubagent(subagentId: string | null) {
+  return useQuery({
+    queryKey: adminKeys.subagent(subagentId ?? ""),
+    queryFn: () => getSubagent(subagentId ?? ""),
+    enabled: Boolean(subagentId),
+    refetchOnMount: "always",
+    staleTime: 0,
+  });
+}
+
+export function useSubagentAvailableTools() {
+  return useQuery({
+    queryKey: adminKeys.subagentAvailableTools(),
+    queryFn: listSubagentAvailableTools,
+  });
+}
+
+export function useCreateSubagentMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      input,
+      identityEpoch,
+    }: {
+      input: SubagentCreateInput;
+      identityEpoch: number;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        throw authIdentityChangedError();
+      }
+      return createSubagent(input);
+    },
+    onSuccess: async (created, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        return;
+      }
+      queryClient.setQueryData(adminKeys.subagent(created.id), created);
+      await queryClient.invalidateQueries({
+        queryKey: adminKeys.subagentsAll(),
+      });
+    },
+  });
+}
+
+export function useUpdateSubagentMutation(subagentId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      input,
+      identityEpoch,
+    }: {
+      input: SubagentUpdateInput;
+      identityEpoch: number;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        throw authIdentityChangedError();
+      }
+      return updateSubagent(subagentId, input);
+    },
+    onSuccess: async (updated, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        return;
+      }
+      queryClient.setQueryData(adminKeys.subagent(updated.id), updated);
+      await queryClient.invalidateQueries({
+        queryKey: adminKeys.subagentsAll(),
+      });
+    },
+  });
+}
+
+export function useSetSubagentEnabledMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      subagentId,
+      enabled,
+      identityEpoch,
+    }: {
+      subagentId: string;
+      enabled: boolean;
+      identityEpoch: number;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        throw authIdentityChangedError();
+      }
+      return setSubagentEnabled(subagentId, enabled);
+    },
+    onSuccess: async (updated, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        return;
+      }
+      queryClient.setQueryData(adminKeys.subagent(updated.id), updated);
+      await queryClient.invalidateQueries({
+        queryKey: adminKeys.subagentsAll(),
+      });
+    },
+  });
+}
+
+export function useDeleteSubagentMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      subagentId,
+      identityEpoch,
+    }: {
+      subagentId: string;
+      identityEpoch: number;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        throw authIdentityChangedError();
+      }
+      return deleteSubagent(subagentId);
+    },
+    onSuccess: async (_data, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        return;
+      }
+      queryClient.removeQueries({
+        queryKey: adminKeys.subagent(variables.subagentId),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: adminKeys.subagentsAll(),
+      });
+    },
+  });
 }
 

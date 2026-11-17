@@ -1,10 +1,13 @@
 import {
   isTerminalRunStatus,
   type ConversationMessagePage,
+  type PendingSubagentApproval,
+  type PendingSubagentInput,
   type RunEvent,
   type RunSnapshotPayload,
   type RunStatus,
   type RunStreamMessage,
+  type SubagentTaskSummary,
 } from "./model";
 import { listMessages, listRunEvents } from "./api";
 
@@ -19,12 +22,16 @@ export type RunStreamConnection =
 export interface RunStreamState {
   connection: RunStreamConnection;
   events: RunEvent[];
+  hasSnapshot: boolean;
   lastHeartbeatAt: string | null;
   messages: RunStreamMessage[];
   notice: string | null;
+  pendingSubagentApprovals: PendingSubagentApproval[];
+  pendingSubagentInputs: PendingSubagentInput[];
   reportMessageId: string | null;
   runId: string | null;
   status: RunStatus | null;
+  subagentTasks: SubagentTaskSummary[];
   transientText: string;
 }
 
@@ -45,12 +52,16 @@ export type RunStreamAction =
 export const INITIAL_RUN_STREAM_STATE: RunStreamState = {
   connection: "idle",
   events: [],
+  hasSnapshot: false,
   lastHeartbeatAt: null,
   messages: [],
   notice: null,
+  pendingSubagentApprovals: [],
+  pendingSubagentInputs: [],
   reportMessageId: null,
   runId: null,
   status: null,
+  subagentTasks: [],
   transientText: "",
 };
 
@@ -66,6 +77,8 @@ function eventStatus(type: string): RunStatus | null {
       return "waiting_for_input";
     case "waiting_for_approval":
       return "waiting_for_approval";
+    case "waiting_for_subagents":
+      return "waiting_for_subagents";
     case "cancel_requested":
       return "cancelling";
     case "completed":
@@ -217,13 +230,18 @@ export function runStreamReducer(
             ? "closed"
             : "open",
         events: action.payload.events,
+        hasSnapshot: true,
         messages: action.payload.messages,
+        pendingSubagentApprovals:
+          action.payload.pending_subagent_approvals ?? [],
+        pendingSubagentInputs: action.payload.pending_subagent_inputs ?? [],
         // 非终态快照代表可继续生成的权威进度；终态 snapshot 不含未完成文本，
         // 必须等 completed 或带报告的 failed 精确对账后才能收敛临时文本。
         transientText: terminalSnapshot ? state.transientText : "",
         notice: null,
         reportMessageId: action.payload.report_message_id,
         status: authoritativeStatus,
+        subagentTasks: action.payload.subagent_tasks ?? [],
       };
     }
     default:
@@ -239,6 +257,7 @@ export function runStreamMode(
   if (
     status === "queued" ||
     status === "running" ||
+    status === "waiting_for_subagents" ||
     status === "cancelling"
   ) {
     return "live";

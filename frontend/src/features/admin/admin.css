@@ -220,6 +220,11 @@
   border-top: 1px solid var(--line-soft);
 }
 
+.admin-subagent-card .admin-card-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .admin-action-note,
 .admin-muted,
 .admin-card-footnote {
@@ -1305,23 +1310,6 @@
   width: min(680px, 100%);
 }
 
-.admin-skill-selected-file {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 11px;
-  border: 1px solid #d9e2db;
-  border-radius: 8px;
-  background: #f4f8f5;
-  color: var(--green);
-  font-size: 12px;
-}
-
-.admin-skill-selected-file span {
-  margin-left: auto;
-  color: var(--muted-2);
-}
-
 .admin-skill-detail-modal {
   width: min(1100px, 100%);
   max-height: min(92vh, 1040px);
@@ -1350,7 +1338,9 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 13px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
 .admin-skill-config h3,
@@ -1358,21 +1348,207 @@
 .admin-skill-version-upload h4 {
   color: var(--ink);
   font-family: var(--serif);
-  font-size: 21px;
+  font-size: 17px;
   font-weight: 600;
+  line-height: 1.3;
 }
 
 .admin-skill-config header p,
 .admin-skill-versions header p,
 .admin-skill-version-upload p,
 .admin-skill-version-content p {
-  margin-top: 4px;
+  margin-top: 3px;
   color: var(--muted-2);
   font-size: 12px;
-  line-height: 1.65;
+  line-height: 1.6;
+}
+
+.admin-skill-config header code {
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* 当前发布配置桌面端双栏：左侧版本下拉框，右侧启停与审批开关 */
+.admin-skill-config-grid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 16px;
+}
+
+.admin-skill-field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.admin-skill-dirty-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid #d5e2d9;
+  border-radius: 999px;
+  background: var(--green-soft);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* 自定义当前版本下拉框：风格与工作区 DraftChatPage 的 combobox 浮层保持一致 */
+.admin-skill-dropdown {
+  position: relative;
+  min-width: 0;
+}
+
+.admin-skill-dropdown-trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 11px;
+  border: 1px solid #d5d2c8;
+  border-radius: 9px;
+  outline: 0;
+  background: #fffefa;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.admin-skill-dropdown-trigger:hover:not(:disabled) {
+  border-color: #c7d4cb;
+}
+
+.admin-skill-dropdown-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-skill-dropdown-trigger:focus-visible,
+.admin-skill-dropdown-trigger[aria-expanded="true"] {
+  border-color: #8fac9d;
+  box-shadow: 0 0 0 3px rgba(34, 107, 85, 0.08);
+}
+
+.admin-skill-dropdown-trigger:disabled {
+  background: #f0ede6;
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.admin-skill-dropdown-chevron {
+  flex: 0 0 auto;
+  color: var(--muted-2);
+  transform: rotate(90deg);
+  transition: transform 140ms ease;
+}
+
+.admin-skill-dropdown-trigger[aria-expanded="true"] .admin-skill-dropdown-chevron {
+  transform: rotate(-90deg);
+}
+
+.admin-skill-dropdown-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: min(240px, 40vh);
+  gap: 3px;
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid rgba(213, 210, 200, 0.92);
+  border-radius: 12px;
+  background: #fffefa;
+  box-shadow:
+    0 12px 28px rgba(39, 48, 43, 0.14),
+    0 2px 6px rgba(39, 48, 43, 0.06);
+}
+
+.admin-skill-dropdown-option {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-skill-dropdown-option:hover,
+.admin-skill-dropdown-option:focus-visible,
+.admin-skill-dropdown-option[data-active="true"] {
+  outline: 0;
+  background: rgba(34, 107, 85, 0.08);
+}
+
+.admin-skill-dropdown-option[aria-selected="true"] {
+  background: rgba(34, 107, 85, 0.1);
+  color: var(--green);
+  font-weight: 600;
+}
+
+.admin-skill-dropdown-option-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-skill-dropdown-option-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid #ead8b9;
+  border-radius: 999px;
+  background: #fbf3e5;
+  color: #8a6328;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.admin-skill-dropdown-check {
+  flex: 0 0 auto;
+  color: var(--green);
+  font-weight: 700;
 }
 
 .admin-skill-config .admin-check-grid {
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 0;
+}
+
+.admin-skill-config > .admin-inline-warning,
+.admin-skill-config > .workspace-error,
+.admin-skill-config > .admin-skill-inline-success {
   margin-top: 12px;
 }
 
@@ -1381,6 +1557,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-top: 0;
   margin-bottom: 12px;
 }
 
@@ -1389,14 +1566,17 @@
   font-weight: 500;
 }
 
+/* 上传完整新版本：首行标题说明占满整行，第二行三列控件底部对齐 */
 .admin-skill-version-upload {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(230px, 0.8fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.9fr) auto;
   align-items: end;
-  gap: 11px;
+  gap: 11px 12px;
 }
 
-.admin-skill-version-upload > :first-child {
+.admin-skill-version-upload > :first-child,
+.admin-skill-version-upload-header {
+  grid-column: 1 / -1;
   align-self: start;
 }
 
@@ -1404,40 +1584,167 @@
 .admin-skill-version-upload > small,
 .admin-skill-version-upload > .admin-skill-inline-success {
   grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.admin-skill-versions > ol {
+.admin-skill-file-picker-field {
+  min-width: 0;
+}
+
+/* 自定义 ZIP 文件选择器：与版本标签输入框、上传按钮统一为 38px 高度并底部对齐 */
+.admin-skill-file-picker {
   display: flex;
-  gap: 7px;
-  overflow-x: auto;
-  margin: 0 0 14px;
-  padding: 0 0 4px;
-  list-style: none;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  gap: 9px;
+  padding: 3px 8px 3px 4px;
+  border: 1px solid #d5d2c8;
+  border-radius: 9px;
+  background: #fffefa;
+  transition: border-color 140ms ease;
+}
+
+.admin-skill-file-picker:hover {
+  border-color: #c7d4cb;
+}
+
+.admin-skill-file-picker-trigger {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid #d7e2da;
+  border-radius: 6px;
+  background: #f2f7f3;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+
+.admin-skill-file-picker-trigger:hover:not(:disabled) {
+  border-color: #b8d1c3;
+  background: #e8f3ec;
+}
+
+.admin-skill-file-picker-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.admin-skill-file-picker-placeholder,
+.admin-skill-file-picker-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-skill-file-picker-placeholder {
+  color: var(--muted-2);
+}
+
+.admin-skill-file-picker-name {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.admin-skill-file-picker-clear {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-2);
+  cursor: pointer;
+}
+
+.admin-skill-file-picker-clear:hover:not(:disabled) {
+  background: #f0ede6;
+  color: var(--ink-2);
+}
+
+.admin-skill-version-upload .workspace-field input {
+  min-height: 38px;
+}
+
+.admin-skill-upload-submit {
+  min-height: 38px;
+}
+
+/* 不可变版本历史：桌面端 Master-Detail 左右分栏 */
+.admin-skill-versions-layout {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(260px, 276px) minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.admin-skill-versions-sidebar {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-skill-versions-detail {
+  min-width: 0;
+  padding-left: 16px;
+  border-left: 1px solid var(--line-soft);
 }
 
 .admin-skill-version-pagination {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
-  margin-bottom: 11px;
+  gap: 6px 8px;
   color: var(--muted-2);
   font-size: 12px;
 }
 
 .admin-skill-version-pagination > span:first-child {
-  margin-right: auto;
+  flex: 1 0 100%;
 }
 
-.admin-skill-versions > ol > li {
+.admin-skill-version-list {
+  display: flex;
+  min-width: 0;
+  max-height: 520px;
+  flex-direction: column;
+  gap: 7px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0 2px 0 0;
+  list-style: none;
+}
+
+.admin-skill-version-list > li {
   flex: 0 0 auto;
 }
 
 .admin-skill-version-tab {
   display: flex;
-  min-width: 215px;
+  width: 100%;
+  min-width: 0;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 10px 11px;
   border: 1px solid #ded9ce;
   border-radius: 9px;
@@ -1446,23 +1753,30 @@
 }
 
 .admin-skill-version-tab:hover,
-.admin-skill-versions > ol > li.is-selected .admin-skill-version-tab {
+.admin-skill-version-list > li.is-selected .admin-skill-version-tab {
   border-color: #b8d1c3;
   background: #f1f8f4;
 }
 
+.admin-skill-version-list > li.is-selected .admin-skill-version-tab {
+  box-shadow: inset 3px 0 0 var(--green);
+}
+
 .admin-skill-version-tab > span:first-child {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 3px;
 }
 
 .admin-skill-version-tab strong {
+  overflow-wrap: anywhere;
   color: var(--ink-2);
   font-size: 12px;
 }
 
 .admin-skill-version-tab small {
+  overflow-wrap: anywhere;
   color: var(--muted-2);
   font-size: 12px;
 }
@@ -1471,33 +1785,64 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 17px;
+  gap: 14px;
 }
 
 .admin-skill-version-heading {
   display: flex;
+  min-width: 0;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding-bottom: 12px;
+  padding-bottom: 11px;
   border-bottom: 1px solid var(--line-soft);
+}
+
+.admin-skill-version-heading > div {
+  min-width: 0;
 }
 
 .admin-skill-version-heading strong {
   color: var(--ink);
   font-family: var(--serif);
-  font-size: 20px;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.admin-skill-version-heading p,
+.admin-skill-version-heading code {
+  overflow-wrap: anywhere;
 }
 
 .admin-skill-version-content section > h4 {
   margin-bottom: 8px;
   color: var(--ink-2);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
 }
 
+/* 文件清单、登记脚本与依赖检查采用紧凑卡片双列编排 */
+.admin-skill-version-meta-grid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.admin-skill-version-meta-grid > section {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e6e1d7;
+  border-radius: 9px;
+  background: #fcfaf4;
+}
+
+.admin-skill-version-meta-grid > .admin-skill-version-dependencies {
+  grid-column: 1 / -1;
+}
+
 .admin-skill-guide {
-  max-height: 440px;
+  max-height: 360px;
   overflow: auto;
   padding: 14px;
   border: 1px solid #e2ddd3;
@@ -1546,6 +1891,7 @@
 .admin-skill-file-list small,
 .admin-skill-script-list p,
 .admin-skill-dependency-list li > span:last-child {
+  overflow-wrap: anywhere;
   color: var(--muted-2);
   font-size: 12px;
   line-height: 1.55;
@@ -1554,6 +1900,8 @@
 .admin-skill-file-list code,
 .admin-skill-script-list code {
   flex: 0 0 auto;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-family: var(--mono);
   font-size: 12px;
@@ -1592,6 +1940,27 @@
   line-height: 1.6;
 }
 
+@media (max-width: 768px) {
+  .admin-skill-versions-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-skill-versions-detail {
+    padding-top: 14px;
+    padding-left: 0;
+    border-top: 1px solid var(--line-soft);
+    border-left: 0;
+  }
+
+  .admin-skill-version-list {
+    max-height: 260px;
+  }
+
+  .admin-skill-version-meta-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 720px) {
   .admin-skill-card .admin-card-heading,
   .admin-skill-config > header,
@@ -1599,6 +1968,7 @@
     flex-direction: column;
   }
 
+  .admin-skill-config-grid,
   .admin-skill-version-upload {
     grid-template-columns: 1fr;
   }
@@ -1609,8 +1979,172 @@
     flex-direction: column;
   }
 
+  /* 纵向堆叠时重置首项 flex-basis，避免主轴变为垂直方向后高度被 100% 拉伸 */
+  .admin-skill-version-pagination > span:first-child {
+    flex: 0 0 auto;
+  }
+
   .admin-skill-dependency-list li {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+}
+
+.admin-slug-badge {
+  max-width: 100%;
+  padding: 2px 7px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-subagent-tools-fieldset {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper-2);
+}
+
+.admin-subagent-tools-fieldset legend {
+  padding: 0 6px;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.admin-subagent-tool-groups {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 280px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.admin-subagent-tool-group {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.admin-subagent-tool-group-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-subagent-tool-list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-subagent-tool-item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.admin-subagent-tool-item:hover {
+  background: rgba(34, 107, 85, 0.07);
+}
+
+.admin-subagent-tool-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.admin-subagent-tool-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-subagent-tool-copy small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.admin-subagent-dialog .admin-subagent-tools-fieldset input[type="checkbox"],
+.admin-subagent-dialog .admin-checkbox-line {
+  flex: 0 0 auto;
+}
+
+/* admin-form 会重置直接子 fieldset 的边框；权限白名单需恢复分组边界。 */
+.admin-subagent-dialog .admin-form > .admin-subagent-tools-fieldset {
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper-2);
+}
+
+.admin-subagent-dialog .admin-subagent-tool-item {
+  min-height: 36px;
+  align-items: flex-start;
+}
+
+.admin-subagent-dialog .admin-form-help,
+.admin-subagent-dialog .workspace-field small {
+  overflow-wrap: anywhere;
+}
+
+.admin-subagent-dialog .admin-form-help.is-limit {
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.admin-subagent-dialog .workspace-field > span {
+  font-size: 13px;
+}
+
+.admin-subagent-tool-item input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+.admin-subagent-card-actions {
+  justify-content: flex-end;
+}
+
+.admin-subagent-card .admin-muted {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .admin-subagent-tool-groups {
+    max-height: min(42svh, 320px);
   }
 }

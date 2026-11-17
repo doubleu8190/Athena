@@ -61,6 +61,7 @@ from domain.skill import (
     SkillNotFoundError,
     SkillPackageError,
 )
+from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID, SubagentProfile, SubagentRepository
 from domain.tool import (
     MAX_TOOL_ARGUMENT_BYTES,
     AuthorizedRunContext,
@@ -345,6 +346,70 @@ SESSION_FILE_READ_DEFINITION = RuntimeToolDefinition(
 )
 
 
+def build_dispatch_subagents_definition(
+    subagents: Sequence[SubagentProfile],
+) -> RuntimeToolDefinition:
+    """按当前已启用 Subagent 列表构造主 Run 专用的异步派发工具定义。"""
+    catalog_lines = "\n".join(
+        f"- {item.slug}（{item.name}）：{item.description}" for item in subagents
+    )
+    return RuntimeToolDefinition(
+        tool_id=DISPATCH_SUBAGENTS_TOOL_ID,
+        model_name="dispatch_subagents",
+        description=(
+            "将 1 到 5 个独立子任务异步派发给专业子智能体并发执行。"
+            "派发后当前轮次将暂停等待全部子智能体完成并自动汇总结果。\n可用子智能体：\n"
+            + catalog_lines
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subagent_slug": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 64,
+                            },
+                            "task": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 32000,
+                            },
+                            "context": {
+                                "type": "string",
+                                "maxLength": 32000,
+                            },
+                            "input_file_ids": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128,
+                                },
+                                "maxItems": 100,
+                                "uniqueItems": True,
+                                "default": [],
+                            },
+                        },
+                        "required": ["subagent_slug", "task"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["tasks"],
+            "additionalProperties": False,
+        },
+        source=BuiltinToolSource(version=BUILTIN_VERSION),
+        requires_approval=False,
+    )
+
+
 class RunToolRuntimeService(RunToolRuntime):
     """Build a frozen catalog and execute one validated tool without retries."""
 
@@ -362,6 +427,7 @@ class RunToolRuntimeService(RunToolRuntime):
         skills: SkillService | None = None,
         session_files: SessionFileService | None = None,
         skill_execution: SkillExecutionService | None = None,
+        subagents: SubagentRepository | None = None,
         clock: Any = utc_now,
     ) -> None:
         self._auth = auth
@@ -375,6 +441,7 @@ class RunToolRuntimeService(RunToolRuntime):
         self._skills = skills
         self._session_files = session_files
         self._skill_execution = skill_execution
+        self._subagents = subagents
         self._clock = clock
 
     async def authorize(
@@ -414,6 +481,9 @@ class RunToolRuntimeService(RunToolRuntime):
         self,
         prompt_template_version: str,
         context: AuthorizedRunContext,
+        *,
+        depth: int = 0,
+        allowed_tool_ids: Sequence[str] | None = None,
     ) -> RuntimeToolSnapshot:
         """Freeze the complete v2 tool catalog."""
         # 只支持当前模板版本；其余版本（含历史 v1）统一拒绝。
@@ -457,6 +527,23 @@ class RunToolRuntimeService(RunToolRuntime):
             )
         # 合并 MCP 目录中的工具定义（仓储已直接构造不可变 RuntimeToolDefinition，无需二次拷贝）。
         definitions.extend(await self._mcp_catalog.list_runtime_tools(limit=201))
+
+        if depth == 0 and self._subagents is not None:
+            enabled_subagents = await self._subagents.list_enabled()
+            if enabled_subagents:
+                definitions.append(build_dispatch_subagents_definition(enabled_subagents))
+        elif depth >= 1:
+            # 子 Run 强制剔除 dispatch_subagents 防止嵌套调度，并与白名单求严格交集。
+            definitions = [
+                item
+                for item in definitions
+                if item.tool_id != DISPATCH_SUBAGENTS_TOOL_ID
+                and item.model_name != "dispatch_subagents"
+            ]
+            if allowed_tool_ids is not None:
+                allowed_set = set(allowed_tool_ids) - {DISPATCH_SUBAGENTS_TOOL_ID}
+                definitions = [item for item in definitions if item.tool_id in allowed_set]
+
         return RuntimeToolSnapshot(tools=tuple(definitions))
 
     async def prepare_call(
@@ -778,10 +865,14 @@ class RunToolRuntimeService(RunToolRuntime):
                 _error("tool_permission_denied", "当前登录或聊天权限已失效。"),
                 "run_auth_session_invalid",
             )
-        # 澄清工具由执行器单独处理，运行时不允许直接调用。
+        # 澄清与子智能体调度工具由执行器单独处理，运行时不允许直接调用。
         if definition.model_name == "request_user_input":
             return ToolExecutionResult(
                 _error("tool_unavailable", "澄清工具只能由 Run 执行器处理。")
+            )
+        if definition.model_name == "dispatch_subagents":
+            return ToolExecutionResult(
+                _error("tool_unavailable", "子智能体调度工具只能由 Run 执行器处理。")
             )
         if definition.tool_id == SKILL_EXECUTE_TOOL_ID:
             if self._skill_execution is None:

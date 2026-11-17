@@ -186,6 +186,7 @@ export function KnowledgeSearchDialog({
           <label htmlFor={`${formId}-limit`}>
             <span>结果数量</span>
             <select
+              className="workspace-select"
               id={`${formId}-limit`}
               onChange={(event) => setLimit(Number(event.target.value))}
               value={limit}

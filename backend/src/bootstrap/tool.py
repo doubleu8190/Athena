@@ -34,6 +34,7 @@ from domain.knowledge.ports import (
 from domain.mcp import McpToolExecutor, McpToolRuntimeReader
 from domain.memory.ports import MemoryLifecycleRepositoryPort
 from domain.session import SessionRepository
+from domain.subagent import SubagentRepository
 from infrastructure.embedding import ApproximateTokenCounter, LocalEmbedding
 from infrastructure.embedding.profile import embedding_profile_id
 from infrastructure.mcp.execution import McpToolCallClient
@@ -222,6 +223,7 @@ def build_run_tool_runtime(
     skills: SkillService | None = None,
     session_files: SessionFileService | None = None,
     skill_execution: SkillExecutionService | None = None,
+    subagents: SubagentRepository | None = None,
 ) -> RunToolRuntimeService:
     """Bind the shared query services and MCP ports to the Run tool runtime."""
     return RunToolRuntimeService(
@@ -236,6 +238,7 @@ def build_run_tool_runtime(
         skills=skills,
         session_files=session_files,
         skill_execution=skill_execution,
+        subagents=subagents,
     )
 
 

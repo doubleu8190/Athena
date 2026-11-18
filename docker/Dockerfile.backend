@@ -22,9 +22,10 @@ ENV PYTHONUNBUFFERED=1 \
 # 构建参数兼容（由 Base 镜像或 Compose 传入）
 ARG INSTALL_KNOWLEDGE=false
 
-# 步骤 1：拷贝业务源码、文档与配置文件（业务代码变动仅在此层生效）
+# 步骤 1：拷贝业务源码、管理员维护的 MCP Server 与配置文件（业务代码变动仅在此层生效）
 COPY README.md ./
 COPY backend/ ./backend/
+COPY mcp_servers/ ./mcp_servers/
 
 # 在工作目录下放置 alembic.ini 并修正相对路径
 # 适配后无论执行 `alembic upgrade head` 还是 `alembic -c backend/alembic.ini upgrade head` 均能正确寻址

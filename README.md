@@ -443,6 +443,39 @@ DNS 解析地址并阻断重定向；发现受总时限、响应大小、页数�
 定时刷新尚未实现；普通工具目录查询只读取最近一次成功发现并持久化的结果。
 Run、LLM 配置及 Redis/SSE 的实现边界见下文。
 
+### 随后端镜像部署 stdio Server
+
+管理员维护的 Python stdio MCP Server 放在仓库根目录 `mcp_servers/`，后端镜像会
+原样复制到 `/app/mcp_servers/`。仓库提供 `mcp_servers/payroll/` 作为测试示例，
+部署时不应把它当作生产业务 Server；运行时不安装额外依赖，只允许使用
+`athena-backend:latest` 中已有的 Python 依赖。具体目录约定和限制见
+[`mcp_servers/README.md`](mcp_servers/README.md)。
+
+注册时使用镜像内的绝对解释器和绝对脚本路径。例如脚本位于
+`mcp_servers/example/server.py`：
+
+```json
+{
+  "name": "example",
+  "transport": "stdio",
+  "command": "/usr/local/bin/python",
+  "args": ["/app/mcp_servers/example/server.py"],
+  "cwd": "/app/mcp_servers/example",
+  "secrets": {}
+}
+```
+
+API、Run Worker 及其他后端服务共用 `athena-backend:latest`。修改 `mcp_servers/`
+后必须重建镜像并重新创建相关容器，不能依赖运行中容器热加载：
+
+```sh
+docker compose build backend-api backend-worker
+docker compose up -d --force-recreate backend-api backend-worker
+```
+
+若部署了 `backend-memory-worker` 或 `backend-migration`，也应使用新镜像重建并
+重新创建。注册前先确认容器内脚本路径存在，再通过管理 API 完成 MCP 发现。
+
 ## LLM 调用模块
 
 生产 Run 路径使用 Chat Completions；管理员在后台配置模型版本和 API Key，密钥以
@@ -745,6 +778,7 @@ backend/src/infrastructure/    数据库、密码与 MCP transport/秘密加密�
 backend/src/main.py            应用组装入口
 backend/tests/                 后端测试
 backend/migrations/            Alembic 迁移
+mcp_servers/                   管理员维护的 stdio MCP Server 源码
 docs/architecture.md           架构说明和待决策事项
 ```
 

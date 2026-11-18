@@ -63,7 +63,7 @@ sources = ["backend/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
-pythonpath = ["backend/src", "backend/tests", "backend/scripts"]
+pythonpath = [".", "backend/src", "backend/tests", "backend/scripts"]
 markers = [
     "integration: requires ATHENA_TEST_DATABASE_URL and PostgreSQL",
     "llm_live: uses a configured real LLM service and is skipped by default",
@@ -87,14 +87,15 @@ known-first-party = [
     "domain",
     "infrastructure",
     "main",
+    "mcp_servers",
 ]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 explicit_package_bases = true
-mypy_path = "backend/src:backend/tests:backend/scripts"
-files = ["backend/src", "backend/scripts", "backend/tests"]
+mypy_path = ".:backend/src:backend/tests:backend/scripts"
+files = ["backend/src", "backend/scripts", "backend/tests", "mcp_servers"]
 
 [[tool.mypy.overrides]]
 module = ["minio", "minio.*"]

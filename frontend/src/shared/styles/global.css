@@ -4,6 +4,7 @@
   --paper: #fffdf8;
   --paper-2: #f8f5ee;
   --paper-3: #efebe2;
+  --paper-elevated: rgba(255, 253, 248, 0.92);
   --ink: #17231f;
   --ink-2: #35443e;
   /* 次要文字与占位文字保持在浅色纸张背景上的可读对比度。 */
@@ -12,16 +13,24 @@
   --placeholder: #596660;
   --line: #dfd9ce;
   --line-soft: #ebe6dc;
+  --line-strong: #cfc8ba;
   --forest: #16362c;
   --forest-2: #214a3d;
   --green: #226b55;
   --green-soft: #e1f0e9;
+  --accent: #226b55;
+  --accent-soft: rgba(34, 107, 85, 0.1);
   --gold: #c79b5e;
+  --gold-soft: #fbf5e8;
   --danger: #a94a42;
   --danger-soft: #f9e9e6;
   --focus: #3b8d71;
-  --shadow-sm: 0 8px 22px rgba(37, 44, 37, 0.06);
-  --shadow-md: 0 24px 70px rgba(37, 44, 37, 0.12);
+  --focus-ring: 0 0 0 3px rgba(34, 107, 85, 0.12);
+  --shadow-xs: 0 2px 6px rgba(28, 38, 32, 0.04), 0 1px 2px rgba(28, 38, 32, 0.03);
+  --shadow-sm: 0 10px 26px -4px rgba(28, 38, 32, 0.06), 0 2px 6px -1px rgba(28, 38, 32, 0.04);
+  --shadow-md: 0 24px 64px -8px rgba(22, 34, 28, 0.12), 0 4px 14px -2px rgba(22, 34, 28, 0.05);
+  --surface-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --serif: "Iowan Old Style", "Palatino Linotype", "Songti SC", "STSong",
     serif;
   --sans: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont,
@@ -207,16 +216,37 @@ h3 {
   place-items: center;
 }
 
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d4cfc4;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #b8b2a6;
+}
+
 .button-secondary {
   min-height: 38px;
-  margin-top: 16px;
   padding: 0 16px;
-  border: 1px solid #cfdad2;
+  border: 1px solid #cbd7ce;
   border-radius: 8px;
-  background: white;
+  background: #fffefa;
   color: var(--forest);
   font-size: 14px;
   font-weight: 700;
+  transition:
+    background 0.16s var(--ease-out),
+    border-color 0.16s var(--ease-out),
+    color 0.16s var(--ease-out);
 }
 
 .button-secondary:hover {

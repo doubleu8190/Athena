@@ -210,7 +210,7 @@ export function DraftChatPage() {
         </div>
         <span className="integration-chip">
           <span aria-hidden="true" />
-          阶段 3
+          智能工作台
         </span>
       </header>
 
@@ -357,6 +357,19 @@ export function DraftChatPage() {
           disabled={submitting}
           id="draft-message"
           onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            // 支持 Cmd/Ctrl + Enter 快捷发送，同时避开中文输入法组合态与提交锁定态。
+            if (
+              (event.metaKey || event.ctrlKey) &&
+              event.key === "Enter" &&
+              !event.nativeEvent.isComposing
+            ) {
+              event.preventDefault();
+              if (!submitting && contextReady && draft.trim()) {
+                void handleSubmit();
+              }
+            }
+          }}
           placeholder="描述目标、粘贴资料，或直接提问。"
           rows={4}
           value={draft}

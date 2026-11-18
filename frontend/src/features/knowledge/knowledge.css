@@ -35,7 +35,18 @@
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.5), transparent 66%),
     var(--paper);
-  box-shadow: 0 5px 18px rgba(42, 49, 42, 0.035);
+  box-shadow: var(--surface-highlight), var(--shadow-xs);
+  transition:
+    border-color 0.18s var(--ease-out),
+    box-shadow 0.18s var(--ease-out),
+    transform 0.18s var(--ease-out);
+}
+
+.knowledge-card:hover,
+.knowledge-project-card:hover {
+  border-color: #cbd6ce;
+  box-shadow: var(--surface-highlight), var(--shadow-sm);
+  transform: translateY(-1px);
 }
 
 .knowledge-card {
@@ -196,7 +207,7 @@
   background:
     radial-gradient(circle at 92% 0%, rgba(193, 215, 197, 0.45), transparent 30%),
     linear-gradient(135deg, #fdfaf3 0%, #f5f5ec 100%);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--surface-highlight), var(--shadow-sm);
 }
 
 .knowledge-hero-top {
@@ -213,7 +224,7 @@
 .knowledge-hero h1 {
   overflow-wrap: anywhere;
   font-family: var(--serif);
-  font-size: clamp(38px, 4.4vw, 53px);
+  font-size: clamp(30px, 3.4vw, 40px);
   font-weight: 600;
   letter-spacing: -0.05em;
   line-height: 1.06;
@@ -292,7 +303,7 @@
 }
 
 .knowledge-document-row:hover {
-  background: #fbfaf5;
+  background: #f7f9f5;
 }
 
 .knowledge-document-main {
@@ -918,7 +929,7 @@
   }
 
   .knowledge-hero h1 {
-    font-size: 35px;
+    font-size: 26px;
   }
 
   .knowledge-document-actions {

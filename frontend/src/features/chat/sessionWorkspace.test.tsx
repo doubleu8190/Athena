@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -2628,6 +2628,156 @@ describe("新草稿创建与提交部分失败", () => {
     expect(sessionCreateCount).toBe(1);
     expect(runRequestIds).toHaveLength(2);
     expect(runRequestIds[0]).toBe(runRequestIds[1]);
+  });
+
+  it("草稿页与会话页均支持 Ctrl/Meta+Enter 快捷发送，且忽略 IME 组合态与锁定态", async () => {
+    window.innerWidth = 1024;
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const created = makeSession({
+      id: "session-shortcut",
+      project_id: null,
+      title: "快捷键会话",
+    });
+    const firstRun = makeRun({
+      id: "run-shortcut-1",
+      session_id: created.id,
+      status: "completed",
+    });
+    const secondRun = makeRun({
+      id: "run-shortcut-2",
+      session_id: created.id,
+      status: "running",
+    });
+    let runs: Run[] = [firstRun];
+    const submittedTexts: string[] = [];
+
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(getRequestUrl(input), "http://localhost");
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_USER);
+        }
+        if (url.pathname === "/api/v1/projects") {
+          return jsonResponse(listResponse([], 1, 100, 0));
+        }
+        if (url.pathname === "/api/v1/skills") {
+          return jsonResponse({ items: [] });
+        }
+        if (url.pathname === "/api/v1/sessions" && method === "GET") {
+          return jsonResponse(listResponse([]));
+        }
+        if (url.pathname === "/api/v1/sessions" && method === "POST") {
+          return jsonResponse(created);
+        }
+        if (
+          url.pathname === `/api/v1/sessions/${created.id}/runs` &&
+          method === "POST"
+        ) {
+          const body = JSON.parse(String(init?.body)) as { text: string };
+          submittedTexts.push(body.text);
+          if (submittedTexts.length === 1) {
+            runs = [firstRun];
+            return jsonResponse(firstRun);
+          }
+          runs = [secondRun, firstRun];
+          return jsonResponse(secondRun);
+        }
+        if (
+          url.pathname === `/api/v1/sessions/${created.id}/runs` &&
+          method === "GET"
+        ) {
+          return jsonResponse({ items: runs, next_cursor: null });
+        }
+        if (
+          url.pathname.startsWith(`/api/v1/sessions/${created.id}/runs/`) &&
+          url.pathname.endsWith("/tool-calls")
+        ) {
+          return jsonResponse({ items: [], next_after_ordinal: null });
+        }
+        if (
+          url.pathname.startsWith(`/api/v1/sessions/${created.id}/runs/`) &&
+          method === "GET"
+        ) {
+          const runId = url.pathname.split("/").pop();
+          const matched = runs.find((item) => item.id === runId) ?? runs[0];
+          return jsonResponse(matched);
+        }
+        if (
+          url.pathname === `/api/v1/sessions/${created.id}` &&
+          method === "GET"
+        ) {
+          return jsonResponse(created);
+        }
+        if (url.pathname === `/api/v1/sessions/${created.id}/messages`) {
+          return jsonResponse({ items: [], next_before_sequence: null });
+        }
+        if (url.pathname === `/api/v1/sessions/${created.id}/files`) {
+          return jsonResponse({
+            items: [],
+            next_after_file_id: null,
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/chat");
+
+    const draftComposer = await screen.findByLabelText("对话草稿");
+    await user.type(draftComposer, "草稿快捷键发送");
+    // IME 组合输入态下按 Ctrl+Enter 不应触发提交
+    fireEvent.keyDown(draftComposer, {
+      ctrlKey: true,
+      isComposing: true,
+      key: "Enter",
+    });
+    expect(submittedTexts).toHaveLength(0);
+
+    // 正常 Ctrl+Enter 触发草稿页创建会话并提交 Run
+    fireEvent.keyDown(draftComposer, {
+      ctrlKey: true,
+      key: "Enter",
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "快捷键会话" }),
+    ).toBeInTheDocument();
+    expect(submittedTexts).toEqual(["草稿快捷键发送"]);
+
+    const sessionComposer = await screen.findByLabelText("对话草稿");
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "发送消息" }),
+      ).toBeInTheDocument();
+    });
+    await user.type(sessionComposer, "会话页 Meta+Enter 发送");
+
+    // 会话页 Meta+Enter 触发提交
+    fireEvent.keyDown(sessionComposer, {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() => {
+      expect(submittedTexts).toEqual([
+        "草稿快捷键发送",
+        "会话页 Meta+Enter 发送",
+      ]);
+    });
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(sessionComposer).toHaveValue("");
+
+    // 运行锁定态下输入新内容并按 Ctrl+Enter 不应重复提交
+    await user.type(sessionComposer, "锁定期间不可发送");
+    fireEvent.keyDown(sessionComposer, {
+      ctrlKey: true,
+      key: "Enter",
+    });
+    expect(submittedTexts).toHaveLength(2);
+    expect(sessionComposer).toHaveValue("锁定期间不可发送");
   });
 });
 

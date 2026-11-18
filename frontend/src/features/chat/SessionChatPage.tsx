@@ -1399,6 +1399,19 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             <textarea
               id="session-message"
               onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                // 支持 Cmd/Ctrl + Enter 快捷提交消息或补充回答，忽略输入法组合态及当前不可提交状态。
+                if (
+                  (event.metaKey || event.ctrlKey) &&
+                  event.key === "Enter" &&
+                  !event.nativeEvent.isComposing
+                ) {
+                  event.preventDefault();
+                  if (canSubmit) {
+                    void handleSubmit();
+                  }
+                }
+              }}
               placeholder={
                 activeSubagentInput
                   ? `输入对「${activeSubagentInput.subagent_name}」的回答。`

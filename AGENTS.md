@@ -7,6 +7,7 @@ Product Manager: product-manager
 Designer: ui-designer
 Implementer: implementer (后端) / frontend-implementer (前端)
 Reviewer: reviewer
+备用 Reviewer: reviewer_fallback（主 Reviewer 无法启动或模型调用失败时使用）
 
 ## 固定工作流
 
@@ -39,6 +40,7 @@ Root → Product Manager → Designer → Root → Implementer → Reviewer → 
 
 ### 3. Reviewer：Review
 - Root 在 Implementer 完成后启动 Reviewer。
+- 优先启动 reviewer；若其无法启动或模型调用失败，由 Root 启动 reviewer_fallback 审查同一实际 Diff，并在汇报中说明回退。审查发现问题或返回 CHANGES_REQUIRED 不属于回退条件。
 - Reviewer 必须独立审查实际代码 Diff。
 - 核对实现与方案是否一致。
 - 检查 Bug、并发安全、异常处理、

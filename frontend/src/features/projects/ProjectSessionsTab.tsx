@@ -125,14 +125,17 @@ export function ProjectSessionsTab({ project }: ProjectSessionsTabProps) {
                 </span>
                 <strong>{sessionDisplayTitle(session.title)}</strong>
               </Link>
+              {/* 为时间戳提供 data-label，便于移动端隐藏表头时通过伪元素展示语义前缀 */}
               <time
                 className="project-session-date"
+                data-label="创建于 "
                 dateTime={session.created_at}
               >
                 {formatDateTime(session.created_at)}
               </time>
               <time
                 className="project-session-date"
+                data-label="更新于 "
                 dateTime={session.updated_at}
               >
                 {formatDateTime(session.updated_at)}

@@ -4,8 +4,10 @@
   padding-top: 58px;
 }
 
+/* 非卡片内部副表头去除 19px 左右内边距，与主标题和下方卡片网格左右齐平 */
 .knowledge-list-header {
   margin-bottom: 13px;
+  padding-inline: 2px;
   padding-bottom: 14px;
 }
 
@@ -294,6 +296,11 @@
   font-size: 12px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
+}
+
+/* 操作列头右对齐，与行内右侧操作图标组对齐 */
+.knowledge-document-head > :last-child {
+  text-align: right;
 }
 
 .knowledge-document-row {
@@ -748,7 +755,9 @@
   font-size: 21px;
 }
 
+/* 推至卡片底部，保证同行不同描述行数的卡片底部时间与按钮水平对齐 */
 .knowledge-project-time {
+  margin-top: auto;
   color: var(--muted-2);
   font-family: var(--mono);
   font-size: 12px;
@@ -864,9 +873,9 @@
     grid-column: 1 / -1;
   }
 
+  /* 移动端顶部已展开“更新于 ...”摘要，隐藏独立时间列避免重复显示 */
   .knowledge-document-time {
-    align-self: center;
-    grid-column: 1;
+    display: none;
   }
 
   .knowledge-document-actions {

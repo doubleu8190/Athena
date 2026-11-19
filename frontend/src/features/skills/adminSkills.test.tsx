@@ -89,6 +89,12 @@ describe("管理员技能管理", () => {
 
     renderApp("/admin/skills");
 
+    expect(
+      await screen.findByRole("heading", {
+        level: 1,
+        name: "公共技能",
+      }),
+    ).toBeInTheDocument();
     await user.click(
       await screen.findByRole("button", { name: "导入第一个技能" }),
     );

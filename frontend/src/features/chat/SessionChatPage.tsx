@@ -263,10 +263,10 @@ function RunSummary({
         <p className="run-summary-error">安全错误码：{run.safe_error_code}</p>
       ) : null}
       {run.skill_snapshot ? (
-        <div className="run-skill-snapshot" aria-label="本次运行固定技能">
-          <span>固定技能</span>
+        <div className="run-skill-snapshot" aria-label="本次指定技能">
+          <span>本次指定技能</span>
           {selectedSkills.length === 0 ? (
-            <small>未手动指定，允许 Agent 按任务加载已启用技能</small>
+            <small>自动选择，允许 Agent 按任务使用可用技能</small>
           ) : (
             selectedSkills.map((skill) => (
               <span
@@ -1308,12 +1308,6 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             tasks={subagentTasks}
           />
 
-          <SkillCatalogPicker
-            disabled={commandPending || isActive || filePanelBusy}
-            onChange={setSelectedSkillIds}
-            selectedSkillIds={selectedSkillIds}
-          />
-
           <SessionFilesPanel
             disabled={
               commandPending ||
@@ -1432,6 +1426,18 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
               rows={4}
               value={draft}
             />
+            <div className="chat-composer-toolbar">
+              <SkillCatalogPicker
+                disabled={commandPending || isActive || filePanelBusy}
+                disabledNote={
+                  isActive
+                    ? "任务运行中，本次指定技能已锁定；下一轮可继续调整。"
+                    : "当前操作进行中，下一轮可调整技能。"
+                }
+                onChange={setSelectedSkillIds}
+                selectedSkillIds={selectedSkillIds}
+              />
+            </div>
             <div className="chat-composer-footer">
               <ComposerHint
                 hasPendingUploads={hasPendingUploads}

@@ -210,8 +210,9 @@ dd {
   color: #d8b477;
 }
 
+/* 提升深色底栏下品牌副标题透明度，确保满足 WCAG AA 对比度 */
 .brand--light .brand-subtitle {
-  color: rgba(255, 250, 240, 0.4);
+  color: rgba(255, 250, 240, 0.68);
 }
 
 .brand--mark-only {

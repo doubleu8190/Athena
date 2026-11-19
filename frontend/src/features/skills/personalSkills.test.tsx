@@ -169,7 +169,7 @@ describe("普通用户个人技能管理", () => {
     );
     const user = userEvent.setup();
 
-    renderApp("/skills");
+    renderApp("/skills?view=mine");
 
     await user.click(
       await screen.findByRole("button", { name: "新建第一个个人技能" }),
@@ -190,7 +190,7 @@ describe("普通用户个人技能管理", () => {
 
     expect(
       await screen.findByText(/已创建并启用「会议纪要」/),
-    ).toBeInTheDocument();
+    ).toHaveTextContent("不会自动加入当前对话");
     expect(
       await screen.findByRole("heading", { name: "会议纪要" }),
     ).toBeInTheDocument();
@@ -255,7 +255,7 @@ describe("普通用户个人技能管理", () => {
     );
     const user = userEvent.setup();
 
-    renderApp("/skills");
+    renderApp("/skills?view=mine");
 
     await user.click(
       await screen.findByRole("button", { name: "新建第一个个人技能" }),
@@ -352,7 +352,7 @@ describe("普通用户个人技能管理", () => {
     );
     const user = userEvent.setup();
 
-    renderApp("/skills");
+    renderApp("/skills?view=mine");
     await user.click(
       await screen.findByRole("button", { name: "新建第一个个人技能" }),
     );
@@ -462,7 +462,7 @@ describe("普通用户个人技能管理", () => {
     );
     const user = userEvent.setup();
 
-    renderApp("/skills");
+    renderApp("/skills?view=mine");
     await user.click(
       await screen.findByRole("button", {
         name: "编辑个人技能：技能 A",
@@ -612,7 +612,7 @@ describe("普通用户个人技能管理", () => {
     );
     const user = userEvent.setup();
 
-    renderApp("/skills");
+    renderApp("/skills?view=mine");
 
     const card = await screen.findByRole("listitem");
     await user.click(
@@ -665,7 +665,9 @@ describe("普通用户个人技能管理", () => {
       expected_revision: 2,
     });
     expect(
-      await screen.findByText("已停用「周报整理」，新任务将不再使用该技能。"),
+      await screen.findByText(
+        "已停用「周报整理」，后续对话不会再把该技能列入可用目录。",
+      ),
     ).toBeInTheDocument();
 
     await user.click(
@@ -735,7 +737,7 @@ describe("普通用户个人技能管理", () => {
     );
     const user = userEvent.setup();
 
-    renderApp("/skills");
+    renderApp("/skills?view=mine");
     await user.click(
       await screen.findByRole("button", {
         name: "编辑个人技能：周报整理",
@@ -810,6 +812,7 @@ describe("普通用户个人技能管理", () => {
       }),
     );
     const client = createTestQueryClient();
+    const user = userEvent.setup();
 
     render(
       <QueryClientProvider client={client}>
@@ -820,6 +823,9 @@ describe("普通用户个人技能管理", () => {
       </QueryClientProvider>,
     );
 
+    await user.click(
+      screen.getByRole("button", { name: /本次技能/ }),
+    );
     const personalOption = (
       await screen.findByText("个人聊天技能")
     ).closest("label");

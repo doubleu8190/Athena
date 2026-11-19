@@ -30,9 +30,9 @@ test("管理导航在真实页面间切换", async ({ page }) => {
   ).toBeVisible();
   await expect(page.getByText("后端返回 1 个工具")).toBeVisible();
 
-  await nav.getByRole("link", { name: "技能管理" }).click();
+  await nav.getByRole("link", { name: "公共技能" }).click();
   await expect(
-    page.getByRole("heading", { level: 1, name: "技能管理" }),
+    page.getByRole("heading", { level: 1, name: "公共技能" }),
   ).toBeVisible();
   await expect(page.getByText("还没有技能包")).toBeVisible();
 
@@ -134,7 +134,7 @@ test("920px 与 390px 管理页无水平溢出", async ({ page }) => {
     },
     { heading: "MCP Server", path: "/admin/mcp" },
     { heading: "工具审批策略", path: "/admin/tools" },
-    { heading: "技能管理", path: "/admin/skills" },
+    { heading: "公共技能", path: "/admin/skills" },
     { heading: "子智能体管理", path: "/admin/subagents" },
   ];
 
@@ -173,7 +173,7 @@ test("短视口保留主导航与账户入口", async ({ page }) => {
   await expect(account).toBeVisible();
   await expect(
     page.getByRole("navigation", { name: "主导航" }).getByRole("link"),
-  ).toHaveCount(4);
+  ).toHaveCount(5);
 
   const layout = await rail.evaluate((element) => {
     const navigation = element.querySelector<HTMLElement>(".rail-nav");
@@ -239,4 +239,56 @@ test("390px 子智能体卡片与表单无水平溢出", async ({ page }) => {
       ),
     )
     .toBeLessThanOrEqual(1);
+});
+
+test("管理端详情列表左对齐、模型表单报错双列对齐与子智能体弹窗规格符合预期", async ({
+  page,
+}) => {
+  await page.setViewportSize({ height: 844, width: 1280 });
+  await page.goto("/admin/models");
+
+  // 验证模型创建弹窗触发必填校验错误时，「版本名称」与「模型标识」输入框仍保持同行水平对齐
+  await page.getByRole("button", { name: "创建模型版本" }).click();
+  const modelDialog = page.getByRole("dialog", { name: "创建模型版本" });
+  await modelDialog.getByRole("button", { name: "创建不可变版本" }).click();
+  await expect(modelDialog.locator(".field-error").first()).toBeVisible();
+  const nameBox = await modelDialog.getByLabel("版本名称").boundingBox();
+  const modelBox = await modelDialog.getByLabel("模型标识").boundingBox();
+  expect(nameBox).not.toBeNull();
+  expect(modelBox).not.toBeNull();
+  expect(Math.abs(nameBox!.y - modelBox!.y)).toBeLessThanOrEqual(2);
+
+  await page.goto("/admin/subagents");
+
+  // 验证管理卡片 .admin-detail-grid 内 dd 与 dt 左边缘对齐（消除浏览器默认 40px 缩进）
+  const detailCell = page.locator(".admin-detail-grid > div").first();
+  await expect(detailCell).toBeVisible();
+  const detailOffset = await detailCell.evaluate((cell) => {
+    const dt = cell.querySelector("dt");
+    const dd = cell.querySelector("dd");
+    if (!dt || !dd) {
+      return null;
+    }
+    return Math.abs(
+      dd.getBoundingClientRect().left - dt.getBoundingClientRect().left,
+    );
+  });
+  expect(detailOffset).not.toBeNull();
+  expect(detailOffset!).toBeLessThanOrEqual(1);
+
+  // 验证子智能体新建弹窗桌面端宽度符合 .admin-modal（> 600px），且字段 label 字重 >= 600
+  await page.getByRole("button", { name: "新建子智能体" }).click();
+  const subagentDialog = page.getByRole("dialog", { name: "新建子智能体" });
+  await expect(subagentDialog).toBeVisible();
+  const dialogBox = await subagentDialog.boundingBox();
+  expect(dialogBox).not.toBeNull();
+  expect(dialogBox!.width).toBeGreaterThan(600);
+
+  const labelFontWeight = await subagentDialog
+    .locator(".workspace-field > label")
+    .first()
+    .evaluate((el) =>
+      Number.parseInt(window.getComputedStyle(el).fontWeight, 10),
+    );
+  expect(labelFontWeight).toBeGreaterThanOrEqual(600);
 });

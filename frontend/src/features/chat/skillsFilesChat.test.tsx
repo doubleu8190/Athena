@@ -69,6 +69,27 @@ function requestUrl(input: RequestInfo | URL): URL {
   return new URL(getRequestUrl(input), "http://localhost");
 }
 
+async function openSkillPicker(
+  user: ReturnType<typeof userEvent.setup>,
+) {
+  const trigger = await screen.findByRole("button", { name: /本次技能/ });
+  await user.click(trigger);
+  return screen.getByRole("dialog", { name: "选择本次技能" });
+}
+
+async function selectSkill(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string,
+) {
+  const dialog = await openSkillPicker(user);
+  await user.click(
+    within(dialog).getByRole("checkbox", {
+      name: new RegExp(name),
+    }),
+  );
+  await user.click(within(dialog).getByRole("button", { name: "完成" }));
+}
+
 interface SessionFetchOptions {
   onCreateSession?: () => Response;
   onUpload?: (file: File) => Response;
@@ -291,9 +312,7 @@ describe("聊天技能选择与会话文件", () => {
       await screen.findByLabelText("对话草稿"),
       "生成本月销售报表",
     );
-    await user.click(
-      screen.getByRole("checkbox", { name: /销售报表/ }),
-    );
+    await selectSkill(user, "销售报表");
     const file = new File(["month,amount\n11,42"], "sales.csv", {
       type: "text/csv",
     });
@@ -429,9 +448,7 @@ describe("聊天技能选择与会话文件", () => {
     renderApp("/chat");
 
     await user.type(await screen.findByLabelText("对话草稿"), "保留这次任务");
-    await user.click(
-      screen.getByRole("checkbox", { name: /销售报表/ }),
-    );
+    await selectSkill(user, "销售报表");
     const file = new File(["draft"], "draft.txt", {
       type: "text/plain",
     });
@@ -445,8 +462,15 @@ describe("聊天技能选择与会话文件", () => {
       "保留这次任务",
     );
     expect(
-      screen.getByRole("checkbox", { name: /销售报表/ }),
+      screen.getByRole("button", { name: /本次技能/ }),
+    ).toHaveTextContent("销售报表");
+    let skillDialog = await openSkillPicker(user);
+    expect(
+      within(skillDialog).getByRole("checkbox", { name: /销售报表/ }),
     ).toBeChecked();
+    await user.click(
+      within(skillDialog).getByRole("button", { name: "完成" }),
+    );
     expect(screen.getByText("draft.txt")).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", {
@@ -538,9 +562,6 @@ describe("聊天技能选择与会话文件", () => {
     renderApp(`/chat/${SESSION.id}`);
 
     await user.click(
-      await screen.findByRole("checkbox", { name: /销售报表/ }),
-    );
-    await user.click(
       await screen.findByRole("checkbox", { name: /sales.csv/ }),
     );
     await user.type(
@@ -558,8 +579,8 @@ describe("聊天技能选择与会话文件", () => {
     });
     expect(answerBody).not.toHaveProperty("skill_ids");
     expect(
-      screen.getByRole("checkbox", { name: /销售报表/ }),
-    ).not.toBeChecked();
+      screen.getByRole("button", { name: /本次技能/ }),
+    ).toHaveTextContent("自动选择");
   });
 
   it("刷新后从服务端恢复多文件列表，并可把已发布产物引用到后续 Run", async () => {

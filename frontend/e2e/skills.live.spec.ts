@@ -254,14 +254,21 @@ async function startSkillRun(
   selectSkill = true,
 ): Promise<string> {
   await page.goto("/chat");
-  const skillOption = page
-    .locator("label.skill-catalog-option")
+  await page.getByRole("button", { name: /本次技能/ }).click();
+  const skillDialog = page.getByRole("dialog", {
+    name: "选择本次技能",
+  });
+  const skillOption = skillDialog
+    .locator("label.composer-skill-option")
     .filter({ hasText: state.skillName })
     .first();
   await expect(skillOption).toBeVisible();
   if (selectSkill) {
     await skillOption.getByRole("checkbox").check();
   }
+  await skillDialog
+    .getByRole("button", { name: "完成" })
+    .click();
   await page.getByLabel("选择任务文件").setInputFiles(state.csvPath);
   await expect(
     page.getByText(state.csvFilename, { exact: true }).first(),
@@ -624,7 +631,7 @@ test.describe.serial("Skills 真实浏览器闭环", () => {
       await loginThroughUi(adminPage, state.admin);
       await adminPage.goto("/admin/skills");
       await expect(
-        adminPage.getByRole("heading", { level: 1, name: "技能管理" }),
+        adminPage.getByRole("heading", { level: 1, name: "公共技能" }),
       ).toBeVisible();
 
       await adminPage
@@ -1189,12 +1196,21 @@ test.describe.serial("Skills 真实浏览器闭环", () => {
       await loginThroughUi(userPage, state.user);
       await userPage.goto("/chat");
 
-      const option = userPage
-        .locator("label.skill-catalog-option")
+      await userPage
+        .getByRole("button", { name: /本次技能/ })
+        .click();
+      const skillDialog = userPage.getByRole("dialog", {
+        name: "选择本次技能",
+      });
+      const option = skillDialog
+        .locator("label.composer-skill-option")
         .filter({ hasText: state.skillName })
         .first();
       await expect(option).toBeVisible();
       await option.getByRole("checkbox").check();
+      await skillDialog
+        .getByRole("button", { name: "完成" })
+        .click();
       await userPage
         .getByLabel("选择任务文件")
         .setInputFiles(state.csvPath);

@@ -478,8 +478,9 @@ function VersionUpload({
           新包 slug 必须为 {slug}。上传只新增不可变版本，不自动切换。
         </p>
       </div>
-      <div className="admin-skill-file-picker-field">
-        <label className="sr-only" htmlFor={inputId}>
+      {/* 显式展示文件选择器顶部标签，与右侧“版本标签（可选）”输入框保持同高对齐 */}
+      <div className="workspace-field admin-skill-file-picker-field">
+        <label htmlFor={inputId}>
           选择新版本 ZIP
         </label>
         <input

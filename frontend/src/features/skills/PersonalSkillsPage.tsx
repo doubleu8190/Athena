@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
 import { EmptyState } from "../../shared/ui/EmptyState";
@@ -12,9 +13,15 @@ import {
 import {
   useDeletePersonalSkillMutation,
   usePersonalSkills,
+  usePublicSkills,
   useSetPersonalSkillEnabledMutation,
 } from "./hooks";
-import type { Skill, SkillAdminDetails } from "./model";
+import {
+  skillExecutionLabel,
+  skillScope,
+  type Skill,
+  type SkillAdminDetails,
+} from "./model";
 import { PersonalSkillEditorDialog } from "./PersonalSkillEditorDialog";
 import { SkillScopeBadge } from "./SkillScopeBadge";
 
@@ -22,6 +29,9 @@ type EditorState =
   | { mode: "create"; open: true }
   | { mode: "edit"; open: true; skillId: string }
   | { mode: "closed"; open: false };
+
+type SkillsLibraryViewName = "available" | "mine";
+type CreateAction = () => void;
 
 const CLOSED_EDITOR: EditorState = { mode: "closed", open: false };
 
@@ -31,8 +41,133 @@ function conflictMessage(error: unknown, fallback: string): string {
     : skillErrorMessage(error) || fallback;
 }
 
+function AvailableSkillCard({ skill }: { skill: Skill }) {
+  const scope = skillScope(skill);
+  return (
+    <li className="available-skill-card">
+      <div className="available-skill-heading">
+        <div className="personal-skill-title-line">
+          <h3>{skill.name}</h3>
+          <SkillScopeBadge scope={scope} />
+          <span className="available-skill-status">后续对话可用</span>
+        </div>
+        <p>{skill.description || "未填写描述"}</p>
+      </div>
+      <dl className="available-skill-meta">
+        <div>
+          <dt>来源</dt>
+          <dd>
+            <SkillScopeBadge compact scope={scope} />
+            <span>{scope === "personal" ? "本人创建" : "管理员发布"}</span>
+          </dd>
+        </div>
+        <div>
+          <dt>当前版本</dt>
+          <dd>{skill.current_version_label?.trim() || "暂无版本"}</dd>
+        </div>
+        <div>
+          <dt>执行语义</dt>
+          <dd>{skillExecutionLabel(skill)}</dd>
+        </div>
+      </dl>
+    </li>
+  );
+}
+
 export function PersonalSkillsPage() {
-  const skills = usePersonalSkills();
+  const [searchParams] = useSearchParams();
+  const view: SkillsLibraryViewName =
+    searchParams.get("view") === "mine" ? "mine" : "available";
+  const createActionRef = useRef<CreateAction | null>(null);
+  const availableLinkRef = useRef<HTMLAnchorElement>(null);
+  const mineLinkRef = useRef<HTMLAnchorElement>(null);
+  const previousViewRef = useRef(view);
+
+  const registerCreateAction = useCallback(
+    (action: CreateAction | null) => {
+      createActionRef.current = action;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (previousViewRef.current === view) {
+      return;
+    }
+    // AppShell 只监听 pathname，技能库的 view query 变化不会自动聚焦主内容；
+    // 因而在 query 切换或浏览器前进/后退后，主动聚焦新的当前视图入口。
+    (view === "mine" ? mineLinkRef : availableLinkRef).current?.focus();
+    previousViewRef.current = view;
+  }, [view]);
+
+  return (
+    <div className="page-shell personal-skills-page">
+      <header className="page-heading">
+        <div className="page-heading-copy">
+          <p className="page-eyebrow">Workspace / Skill library</p>
+          <h1>技能库</h1>
+          <p className="page-description">
+            公共技能由管理员发布，个人技能仅本人可见。启用表示允许后续对话按任务使用，并不等于每次对话都会执行。
+          </p>
+        </div>
+        <button
+          className="button-primary"
+          onClick={() => createActionRef.current?.()}
+          type="button"
+        >
+          <Icon name="plus" size={14} />
+          新建个人技能
+        </button>
+      </header>
+
+      <nav aria-label="技能库视图" className="skills-library-view-nav">
+        <Link
+          aria-current={view === "available" ? "page" : undefined}
+          className={`skills-library-view-link${
+            view === "available" ? " is-active" : ""
+          }`}
+          ref={availableLinkRef}
+          to="/skills"
+        >
+          <Icon name="spark" size={15} />
+          可用技能
+        </Link>
+        <Link
+          aria-current={view === "mine" ? "page" : undefined}
+          className={`skills-library-view-link${
+            view === "mine" ? " is-active" : ""
+          }`}
+          ref={mineLinkRef}
+          to="/skills?view=mine"
+        >
+          <Icon name="user" size={15} />
+          我的技能
+        </Link>
+      </nav>
+
+      {/* key 只隔离视图数据、提示、弹窗和 mutation；页面标题与视图导航保持在父层，避免切换时焦点被卸载。 */}
+      <SkillsLibraryView
+        key={view}
+        registerCreateAction={registerCreateAction}
+        view={view}
+      />
+    </div>
+  );
+}
+
+interface SkillsLibraryViewProps {
+  registerCreateAction: (action: CreateAction | null) => void;
+  view: SkillsLibraryViewName;
+}
+
+function SkillsLibraryView({
+  registerCreateAction,
+  view,
+}: SkillsLibraryViewProps) {
+  const publicSkills = usePublicSkills(view === "available");
+  const personalSkills = usePersonalSkills(view === "mine");
+  const activeSkills =
+    view === "mine" ? personalSkills : publicSkills;
   const toggleMutation = useSetPersonalSkillEnabledMutation();
   const deleteMutation = useDeletePersonalSkillMutation();
   const [editor, setEditor] = useState<EditorState>(CLOSED_EDITOR);
@@ -40,6 +175,17 @@ export function PersonalSkillsPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const openCreateEditor = useCallback(() => {
+    setActionError(null);
+    setSuccessMessage(null);
+    setEditor({ mode: "create", open: true });
+  }, []);
+
+  useEffect(() => {
+    registerCreateAction(openCreateEditor);
+    return () => registerCreateAction(null);
+  }, [openCreateEditor, registerCreateAction]);
 
   const handleSaved = (
     details: SkillAdminDetails,
@@ -49,8 +195,8 @@ export function PersonalSkillsPage() {
     setActionError(null);
     setSuccessMessage(
       mode === "create"
-        ? `已创建并启用「${details.name}」。下一次新任务可以使用该技能。`
-        : `已保存「${details.name}」的新版本并启用。`,
+        ? `已创建并启用「${details.name}」。后续对话可按任务使用；不会自动加入当前对话。`
+        : `已保存「${details.name}」的新版本并启用。后续对话可按任务使用；不会自动加入当前对话。`,
     );
   };
 
@@ -65,8 +211,8 @@ export function PersonalSkillsPage() {
       });
       setSuccessMessage(
         details.enabled
-          ? `已启用「${details.name}」。`
-          : `已停用「${details.name}」，新任务将不再使用该技能。`,
+          ? `已启用「${details.name}」；后续对话可按任务使用，每次是否执行仍由 Agent 判断。`
+          : `已停用「${details.name}」，后续对话不会再把该技能列入可用目录。`,
       );
     } catch (error) {
       setActionError(
@@ -99,29 +245,7 @@ export function PersonalSkillsPage() {
   };
 
   return (
-    <div className="page-shell personal-skills-page">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <p className="page-eyebrow">Workspace / Personal Skills</p>
-          <h1>我的技能</h1>
-          <p className="page-description">
-            用 Markdown 保存只对自己可见的工作方法。保存会启用新版本，你也可以随时停用或删除。
-          </p>
-        </div>
-        <button
-          className="button-primary"
-          onClick={() => {
-            setActionError(null);
-            setSuccessMessage(null);
-            setEditor({ mode: "create", open: true });
-          }}
-          type="button"
-        >
-          <Icon name="plus" size={14} />
-          新建个人技能
-        </button>
-      </header>
-
+    <>
       {successMessage ? (
         <div
           aria-live="polite"
@@ -135,26 +259,68 @@ export function PersonalSkillsPage() {
       {actionError ? (
         <ErrorBanner
           message={actionError}
-          onRetry={() => void skills.refetch()}
+          onRetry={() => void activeSkills.refetch()}
           retryLabel="刷新列表"
         />
       ) : null}
 
-      {skills.isPending ? (
+      {activeSkills.isPending ? (
         <div className="page-loading" role="status">
-          正在读取我的技能…
+          {view === "mine" ? "正在读取我的技能…" : "正在读取可用技能…"}
         </div>
-      ) : skills.isError ? (
+      ) : activeSkills.isError ? (
         <ErrorBanner
-          message={skillErrorMessage(skills.error)}
-          onRetry={() => void skills.refetch()}
+          message={skillErrorMessage(activeSkills.error)}
+          onRetry={() => void activeSkills.refetch()}
         />
-      ) : skills.data.length === 0 ? (
+      ) : view === "available" ? (
+        activeSkills.data.length === 0 ? (
+          <EmptyState
+            action={
+              <button
+                className="button-primary"
+                onClick={openCreateEditor}
+                type="button"
+              >
+                <Icon name="plus" size={14} />
+                创建个人技能
+              </button>
+            }
+            description="管理员发布公共技能，或你在“我的技能”中启用个人技能后，会出现在这里。当前对话仍可继续。"
+            icon="spark"
+            kicker="Available skills"
+            title="当前没有可用技能"
+          />
+        ) : (
+          <section
+            aria-labelledby="available-skill-list-title"
+            className="personal-skill-section"
+          >
+            <header className="personal-skill-list-header">
+              <div>
+                <span className="empty-panel-kicker">Available catalog</span>
+                <h2 id="available-skill-list-title">可用技能</h2>
+              </div>
+              <span>共 {activeSkills.data.length} 个</span>
+            </header>
+            <p className="skills-library-availability-note">
+              <Icon name="shield" size={15} />
+              这里展示公共技能与你已启用的个人技能；可用只表示后续对话可以按任务使用。
+            </p>
+            <ul className="available-skill-list">
+              {activeSkills.data.map((skill) => (
+                // 可用技能是运行目录投影，仅供查看；个人启停与删除只在“我的技能”中操作。
+                <AvailableSkillCard key={skill.id} skill={skill} />
+              ))}
+            </ul>
+          </section>
+        )
+      ) : activeSkills.data.length === 0 ? (
         <EmptyState
           action={
             <button
               className="button-primary"
-              onClick={() => setEditor({ mode: "create", open: true })}
+              onClick={openCreateEditor}
               type="button"
             >
               <Icon name="plus" size={14} />
@@ -174,13 +340,13 @@ export function PersonalSkillsPage() {
           <header className="personal-skill-list-header">
             <div>
               <span className="empty-panel-kicker">Private catalog</span>
-              <h2 id="personal-skill-list-title">个人技能目录</h2>
+              <h2 id="personal-skill-list-title">我的技能</h2>
             </div>
-            <span>共 {skills.data.length} 个</span>
+            <span>共 {activeSkills.data.length} 个</span>
           </header>
 
           <ul className="personal-skill-list">
-            {skills.data.map((skill) => {
+            {activeSkills.data.map((skill) => {
               const toggling =
                 toggleMutation.isPending &&
                 toggleMutation.variables?.skillId === skill.id;
@@ -313,20 +479,20 @@ export function PersonalSkillsPage() {
         <div className="personal-skill-delete-copy">
           <Icon name="shield" size={18} />
           <p>
-            新任务将无法使用该技能，进行中的任务和历史记录不受影响。删除后，当前技能目录会立即刷新。
+            后续对话将不再使用该技能，进行中的任务和历史记录不受影响。删除后，当前技能目录会立即刷新。
           </p>
         </div>
         {deleteError ? (
           <ErrorBanner
             message={deleteError}
             onRetry={() => {
-              void skills.refetch();
+              void activeSkills.refetch();
               setDeleteTarget(null);
             }}
             retryLabel="刷新列表"
           />
         ) : null}
       </Modal>
-    </div>
+    </>
   );
 }

@@ -10,6 +10,10 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import {
+  FOCUSABLE_SELECTOR,
+  getFocusableElements,
+} from "./focus";
 import { Icon } from "./Icons";
 
 interface ModalProps extends PropsWithChildren {
@@ -21,15 +25,6 @@ interface ModalProps extends PropsWithChildren {
   panelClassName?: string;
   title: string;
 }
-
-const FOCUSABLE_SELECTOR = [
-  'button:not(:disabled):not([disabled]):not([tabindex="-1"])',
-  'a[href]:not([disabled]):not([tabindex="-1"])',
-  'input:not(:disabled):not([disabled]):not([tabindex="-1"])',
-  'select:not(:disabled):not([disabled]):not([tabindex="-1"])',
-  'textarea:not(:disabled):not([disabled]):not([tabindex="-1"])',
-  '[tabindex]:not([tabindex="-1"]):not(:disabled):not([disabled])',
-].join(",");
 
 interface ModalLayer {
   depth: number;
@@ -174,9 +169,7 @@ export function Modal({
       }
 
       // 焦点在本对话框内循环，避免键盘用户落到遮罩后的页面控件。
-      const controls = Array.from(
-        panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-      );
+      const controls = getFocusableElements(panelRef.current);
       if (controls.length === 0) {
         event.preventDefault();
         panelRef.current.focus();

@@ -262,6 +262,29 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 test.describe("个人技能前端 mock 浏览器验收", () => {
+  test("技能库视图的键盘切换与浏览器后退保持有效焦点", async ({
+    page,
+  }) => {
+    await installPersonalSkillsFixtures(page);
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await page.goto("/skills");
+
+    const viewNav = page.getByRole("navigation", {
+      name: "技能库视图",
+    });
+    const mineLink = viewNav.getByRole("link", { name: "我的技能" });
+    await mineLink.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/skills\?view=mine$/);
+    await expect(mineLink).toBeFocused();
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\/skills$/);
+    await expect(
+      viewNav.getByRole("link", { name: "可用技能" }),
+    ).toBeFocused();
+  });
+
   test("桌面主流程：导航、创建、编辑、启停与删除", async ({ page }) => {
     await installPersonalSkillsFixtures(page);
     await page.setViewportSize({ height: 900, width: 1280 });
@@ -270,11 +293,22 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
     await expect(
       page.getByRole("heading", { level: 1, name: "对话工作台" }),
     ).toBeVisible();
-    await page.locator(".sidebar-skill-entry").click();
+    await page.getByRole("link", { name: "技能库" }).click();
     await expect(page).toHaveURL(/\/skills$/);
     await expect(
-      page.getByRole("heading", { level: 1, name: "我的技能" }),
+      page.getByRole("heading", { level: 1, name: "技能库" }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "技能库" }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(
+      page.getByRole("heading", { name: "公共审批技能" }),
+    ).toBeVisible();
+    await page
+      .getByRole("navigation", { name: "技能库视图" })
+      .getByRole("link", { name: "我的技能" })
+      .click();
+    await expect(page).toHaveURL(/\/skills\?view=mine$/);
 
     await page
       .getByRole("button", { name: "新建第一个个人技能" })
@@ -293,7 +327,9 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
       .getByRole("button", { name: "创建并启用" })
       .click();
 
-    await expect(page.getByText(/已创建并启用「会议纪要」/)).toBeVisible();
+    await expect(
+      page.getByText(/已创建并启用「会议纪要」/),
+    ).toContainText("不会自动加入当前对话");
     const card = page
       .locator(".personal-skill-card")
       .filter({ hasText: "会议纪要" });
@@ -323,14 +359,20 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
       .getByRole("button", { name: "停用个人技能：会议纪要" })
       .click();
     await expect(
-      page.getByText("已停用「会议纪要」，新任务将不再使用该技能。"),
+      page.getByText(
+        "已停用「会议纪要」，后续对话不会再把该技能列入可用目录。",
+      ),
     ).toBeVisible();
     await expect(card.getByText("已停用", { exact: true })).toBeVisible();
 
     await card
       .getByRole("button", { name: "启用个人技能：会议纪要" })
       .click();
-    await expect(page.getByText("已启用「会议纪要」。")).toBeVisible();
+    await expect(
+      page.getByText(
+        "已启用「会议纪要」；后续对话可按任务使用，每次是否执行仍由 Agent 判断。",
+      ),
+    ).toBeVisible();
     await expect(card.getByText("已启用", { exact: true })).toBeVisible();
 
     await card
@@ -340,7 +382,7 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
       name: "删除「会议纪要」？",
     });
     await expect(deleteDialog).toContainText(
-      "新任务将无法使用该技能，进行中的任务和历史记录不受影响",
+      "后续对话将不再使用该技能，进行中的任务和历史记录不受影响",
     );
     await deleteDialog
       .getByRole("button", { name: "确认删除" })
@@ -357,9 +399,9 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
     await installPersonalSkillsFixtures(page);
     await page.setViewportSize({ height: 844, width: 390 });
 
-    await page.goto("/skills");
+    await page.goto("/skills?view=mine");
     await expect(
-      page.getByRole("heading", { level: 1, name: "我的技能" }),
+      page.getByRole("heading", { level: 1, name: "技能库" }),
     ).toBeVisible();
     await expectNoHorizontalOverflow(page);
 
@@ -404,11 +446,31 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
     await expect(
       page.getByRole("heading", { level: 1, name: "对话工作台" }),
     ).toBeVisible();
+    await page
+      .getByRole("button", { name: /本次技能/ })
+      .click();
+    const skillDialog = page.getByRole("dialog", {
+      name: "选择本次技能",
+    });
+    await expect(skillDialog).toHaveAttribute("aria-modal", "true");
+    await expect(skillDialog).toBeFocused();
+    await expect
+      .poll(() => page.evaluate(() => document.body.style.overflow))
+      .toBe("hidden");
+    const skillDialogBox = await skillDialog.boundingBox();
+    expect(skillDialogBox).not.toBeNull();
+    expect(skillDialogBox!.x).toBeGreaterThanOrEqual(0);
+    expect(
+      skillDialogBox!.x + skillDialogBox!.width,
+    ).toBeLessThanOrEqual(390);
+    expect(
+      Math.abs(skillDialogBox!.y + skillDialogBox!.height - 844),
+    ).toBeLessThanOrEqual(1);
     const publicOption = page
-      .locator(".skill-catalog-option.is-public")
+      .locator(".composer-skill-option.is-public")
       .filter({ hasText: "公共审批技能" });
     const personalOption = page
-      .locator(".skill-catalog-option.is-personal")
+      .locator(".composer-skill-option.is-personal")
       .filter({ hasText: "访谈整理" });
     await expect(publicOption.getByText("公共", { exact: true })).toBeVisible();
     await expect(
@@ -422,5 +484,34 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
     ).toBeVisible();
     await expect(personalOption).not.toContainText("脚本执行");
     await expectNoHorizontalOverflow(page);
+
+    await page.keyboard.press("Tab");
+    await expect(
+      skillDialog.getByRole("button", { name: "关闭技能选择面板" }),
+    ).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      skillDialog.getByRole("button", { name: "完成" }),
+    ).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(skillDialog).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: /本次技能/ }),
+    ).toBeFocused();
+    await expect
+      .poll(() => page.evaluate(() => document.body.style.overflow))
+      .toBe("");
+
+    const trigger = page.getByRole("button", { name: /本次技能/ });
+    await trigger.click();
+    await expect(skillDialog).toBeVisible();
+    await page.locator(".composer-skill-scrim").click({
+      position: { x: 12, y: 12 },
+    });
+    await expect(skillDialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await expect
+      .poll(() => page.evaluate(() => document.body.style.overflow))
+      .toBe("");
   });
 });

@@ -216,7 +216,7 @@ export function SubagentDialog({
         }
       }}
       open={open}
-      panelClassName="admin-dialog admin-subagent-dialog"
+      panelClassName="admin-modal admin-dialog admin-subagent-dialog"
       title={editing ? "编辑子智能体" : "新建子智能体"}
     >
       {editing && detail.isPending ? (

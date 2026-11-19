@@ -29,6 +29,7 @@ const BASE_NAVIGATION: NavigationItem[] = [
   { icon: "chat", label: "对话", to: "/chat" },
   { icon: "folder", label: "项目", to: "/projects" },
   { icon: "book", label: "知识库", to: "/knowledge" },
+  { icon: "spark", label: "技能库", to: "/skills" },
 ];
 
 const ADMIN_NAVIGATION: NavigationItem[] = [
@@ -36,7 +37,7 @@ const ADMIN_NAVIGATION: NavigationItem[] = [
   { icon: "book", label: "系统提示词", to: "/admin/system-prompts" },
   { icon: "settings", label: "MCP Server", to: "/admin/mcp" },
   { icon: "tools", label: "工具审批策略", to: "/admin/tools" },
-  { icon: "spark", label: "技能管理", to: "/admin/skills" },
+  { icon: "spark", label: "公共技能", to: "/admin/skills" },
   { icon: "chat", label: "子智能体", to: "/admin/subagents" },
 ];
 
@@ -146,7 +147,6 @@ export function AppShell() {
   const accountMenuRef = useRef<HTMLDivElement>(null);
   const accountTriggerRef = useRef<HTMLButtonElement>(null);
   const profileLinkRef = useRef<HTMLAnchorElement>(null);
-  const skillsLinkRef = useRef<HTMLAnchorElement>(null);
   const logoutButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -293,7 +293,6 @@ export function AppShell() {
                     event.preventDefault();
                     const items = [
                       profileLinkRef.current,
-                      skillsLinkRef.current,
                       logoutButtonRef.current,
                     ].filter(
                       (item): item is NonNullable<typeof item> => Boolean(item),
@@ -323,16 +322,6 @@ export function AppShell() {
                 >
                   <Icon name="user" size={15} />
                   <span>个人页面</span>
-                </Link>
-                <Link
-                  className="account-menu-item"
-                  onClick={() => setAccountMenuOpen(false)}
-                  ref={skillsLinkRef}
-                  role="menuitem"
-                  to="/skills"
-                >
-                  <Icon name="spark" size={15} />
-                  <span>我的技能</span>
                 </Link>
                 <button
                   className="account-menu-item account-menu-logout"

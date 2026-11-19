@@ -155,9 +155,10 @@ export function ModelProfileCreateDialog({
         }}
       >
         <fieldset disabled={mutation.isPending}>
+          {/* 双列网格内使用独立 workspace-field 容器包裹 label、input 与错误提示，防止报错节点挤占网格列并保持无障碍标签纯净 */}
           <div className="admin-form-grid">
-            <label className="workspace-field" htmlFor={fieldId("name")}>
-              <span>版本名称</span>
+            <div className="workspace-field">
+              <label htmlFor={fieldId("name")}>版本名称</label>
               <input
                 aria-describedby={
                   errors.name ? fieldId("name-error") : undefined
@@ -170,14 +171,14 @@ export function ModelProfileCreateDialog({
                 placeholder="例如：Atlas 主模型 v1"
                 value={values.name}
               />
-            </label>
-            <FieldError
-              error={errors.name}
-              id={fieldId("name-error")}
-            />
+              <FieldError
+                error={errors.name}
+                id={fieldId("name-error")}
+              />
+            </div>
 
-            <label className="workspace-field" htmlFor={fieldId("model")}>
-              <span>模型标识</span>
+            <div className="workspace-field">
+              <label htmlFor={fieldId("model")}>模型标识</label>
               <input
                 aria-describedby={
                   errors.model ? fieldId("model-error") : undefined
@@ -189,11 +190,11 @@ export function ModelProfileCreateDialog({
                 placeholder="服务端实际接收的 model"
                 value={values.model}
               />
-            </label>
-            <FieldError
-              error={errors.model}
-              id={fieldId("model-error")}
-            />
+              <FieldError
+                error={errors.model}
+                id={fieldId("model-error")}
+              />
+            </div>
           </div>
 
           <label className="workspace-field" htmlFor={fieldId("base_url")}>

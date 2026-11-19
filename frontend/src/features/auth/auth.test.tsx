@@ -353,10 +353,13 @@ describe("认证流程", () => {
     const menu = screen.getByRole("menu");
     const profileItem = screen.getByRole("menuitem", { name: "个人页面" });
     expect(profileItem).toHaveFocus();
-    await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("menuitem", { name: "我的技能" })).toHaveFocus();
+    expect(
+      screen.queryByRole("menuitem", { name: "我的技能" }),
+    ).not.toBeInTheDocument();
     await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("menuitem", { name: "退出登录" })).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(profileItem).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
@@ -395,8 +398,6 @@ describe("认证流程", () => {
 
     await user.click(trigger);
     await user.tab();
-    expect(screen.getByRole("menuitem", { name: "我的技能" })).toHaveFocus();
-    await user.tab();
     expect(screen.getByRole("menuitem", { name: "退出登录" })).toHaveFocus();
     await user.tab();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
@@ -408,7 +409,7 @@ describe("认证流程", () => {
     expect(screen.getByRole("menu")).toBeInTheDocument();
     await user.keyboard("{Shift>}{Tab}{/Shift}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "知识库" })).toHaveFocus();
+    expect(screen.getByRole("link", { name: "技能库" })).toHaveFocus();
   });
 
   it("退出接口失败时留在工作区并显示错误", async () => {
@@ -911,7 +912,7 @@ describe("认证流程", () => {
       within(subnav).getByRole("link", { name: "系统提示词" }),
     ).toHaveAttribute("href", "/admin/system-prompts");
     expect(
-      within(subnav).getByRole("link", { name: "技能管理" }),
+      within(subnav).getByRole("link", { name: "公共技能" }),
     ).toHaveAttribute("href", "/admin/skills");
   });
 });

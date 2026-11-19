@@ -22,9 +22,9 @@ export function AdminSkillsPage() {
       <header className="page-heading">
         <div className="page-heading-copy">
           <p className="page-eyebrow">Admin / Skills</p>
-          <h1>技能管理</h1>
+          <h1>公共技能</h1>
           <p className="page-description">
-            导入可信技能包，检查依赖，查看不可变指南与资源版本，再决定当前版本、启停和脚本审批。
+            发布和管理所有用户可在后续对话中按任务使用的公共技能；导入可信技能包，检查依赖，查看不可变指南与资源版本，再决定当前版本、启停和脚本审批。
           </p>
         </div>
         <button

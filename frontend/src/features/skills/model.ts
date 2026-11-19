@@ -166,6 +166,17 @@ export function skillScope(skill: Pick<Skill, "scope">): SkillScope {
   return skill.scope === "personal" ? "personal" : "public";
 }
 
+export function skillExecutionLabel(
+  skill: Pick<Skill, "scope" | "script_requires_approval">,
+): string {
+  if (skillScope(skill) === "personal") {
+    return "纯文档";
+  }
+  return skill.script_requires_approval
+    ? "脚本执行需审批"
+    : "脚本执行无需审批";
+}
+
 export function validatePersonalSkillFile(file: File | null): string | null {
   if (!file) {
     return "请选择 Markdown 文件。";

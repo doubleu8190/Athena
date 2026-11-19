@@ -181,8 +181,9 @@ async function refreshPersonalSkillData(
   ]);
 }
 
-export function usePersonalSkills() {
+export function usePersonalSkills(enabled = true) {
   return useQuery({
+    enabled,
     queryFn: listPersonalSkills,
     queryKey: skillKeys.personalList(),
   });

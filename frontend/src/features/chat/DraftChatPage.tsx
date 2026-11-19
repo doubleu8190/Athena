@@ -267,12 +267,6 @@ export function DraftChatPage() {
         </p>
       </section>
 
-      <SkillCatalogPicker
-        disabled={submitting}
-        onChange={setSelectedSkillIds}
-        selectedSkillIds={selectedSkillIds}
-      />
-
       <section
         aria-labelledby="draft-files-title"
         className="draft-file-panel"
@@ -374,6 +368,14 @@ export function DraftChatPage() {
           rows={4}
           value={draft}
         />
+        <div className="chat-composer-toolbar">
+          <SkillCatalogPicker
+            disabled={submitting}
+            disabledNote="正在提交本次消息，下一轮可调整技能。"
+            onChange={setSelectedSkillIds}
+            selectedSkillIds={selectedSkillIds}
+          />
+        </div>
         {submitError ? <ErrorBanner message={submitError} /> : null}
         <div className="draft-composer-footer">
           <p id="draft-send-note">

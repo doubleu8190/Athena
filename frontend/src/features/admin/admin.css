@@ -217,6 +217,8 @@
 }
 
 .admin-detail-grid dd {
+  /* 显式清除 dd 默认缩进，保证详情值与标题 dt 左边缘对齐 */
+  margin: 0;
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--ink-2);
@@ -258,11 +260,11 @@
   border-top: 1px dashed #e4dfd5;
 }
 
+/* 上下文压缩策略卡片改为上下单列排布，使模型标题与警告说明占满宽度，下方 7 项指标自适应网格展开 */
 .admin-policy-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px 24px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
 }
 
 .admin-policy-card h3 {
@@ -274,9 +276,10 @@
 }
 
 .admin-policy-ratios {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 8px;
+  width: 100%;
   margin: 0;
 }
 
@@ -446,7 +449,8 @@
 
 /* 管理弹窗与表单 */
 
-.admin-modal {
+.admin-modal,
+.admin-dialog {
   width: min(760px, 100%);
 }
 
@@ -491,6 +495,13 @@
   line-height: 1.65;
 }
 
+/* 使表单提示语前的内联图标（如权限白名单盾牌）与文字同行对齐 */
+.admin-form-help > svg {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+
 .workspace-field small {
   color: var(--muted-2);
   font-size: 12px;
@@ -520,6 +531,7 @@
 
 .admin-inline-notice,
 .admin-inline-warning,
+.admin-warning,
 .admin-empty-inline {
   padding: 10px 11px;
   border-radius: 8px;
@@ -533,11 +545,17 @@
   color: #725a2c;
 }
 
-.admin-inline-warning {
+/* 统一琥珀色警告框样式，兼容策略卡片与表单内联警告 */
+.admin-inline-warning,
+.admin-warning {
   border: 1px solid #ecd4b6;
   background: #fcf3e5;
   color: #805a27;
   font-weight: 600;
+}
+
+.admin-policy-card .admin-warning {
+  margin-top: 10px;
 }
 
 .admin-empty-inline {
@@ -692,8 +710,9 @@
   background: #fffefa;
 }
 
+/* 桌面端输入框高 44px、删除按钮高 31px，底部偏移 6.5px 实现垂直居中对齐 */
 .admin-secret-remove {
-  margin-bottom: 6px;
+  margin-bottom: 6.5px;
 }
 
 /* 系统提示词页面把编辑与不可变历史并列，窄屏时再按阅读顺序堆叠。 */
@@ -1254,10 +1273,11 @@
     grid-column: 1;
   }
 
+  /* 移动端第一行标签（21px）+ 间距（7px）+ 居中偏移（6.5px）= 34.5px */
   .admin-secret-remove {
     grid-column: 2;
     grid-row: 1;
-    margin-top: 24px;
+    margin-top: 34.5px;
     margin-bottom: 0;
   }
 
@@ -1412,7 +1432,7 @@
   border-radius: 999px;
   background: var(--green-soft);
   color: var(--green);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.5;
   white-space: nowrap;
@@ -1548,7 +1568,7 @@
   border-radius: 999px;
   background: #fbf3e5;
   color: #8a6328;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -1559,10 +1579,11 @@
   font-weight: 700;
 }
 
+/* 桌面端下移右侧复选框组 28px，使其顶边与左侧“当前版本”下拉框对齐 */
 .admin-skill-config .admin-check-grid {
   flex-direction: column;
   gap: 10px;
-  margin-top: 0;
+  margin-top: 28px;
 }
 
 .admin-skill-config > .admin-inline-warning,
@@ -1739,6 +1760,13 @@
 
 .admin-skill-version-pagination > span:first-child {
   flex: 1 0 100%;
+}
+
+/* 260px 版本历史侧栏内采用紧凑分页按钮尺寸 */
+.admin-skill-version-pagination .button-quiet {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .admin-skill-version-list {
@@ -1992,6 +2020,10 @@
     grid-template-columns: 1fr;
   }
 
+  .admin-skill-config .admin-check-grid {
+    margin-top: 0;
+  }
+
   .admin-skill-config > div.admin-inline-warning,
   .admin-skill-version-pagination {
     align-items: stretch;
@@ -2145,7 +2177,8 @@
   font-weight: 650;
 }
 
-.admin-subagent-dialog .workspace-field > span {
+.admin-subagent-dialog .workspace-field > span,
+.admin-subagent-dialog .workspace-field > label {
   font-size: 13px;
 }
 

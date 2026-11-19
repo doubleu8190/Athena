@@ -123,6 +123,7 @@ class RunInputInteractionResponse(BaseModel):
 class RunSkillEntryResponse(BaseModel):
     skill_id: str
     slug: str
+    scope: str
     name: str
     description: str
     version_id: str

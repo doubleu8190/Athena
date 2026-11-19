@@ -12,6 +12,7 @@ from domain.skill.model import (
     SkillExecutionRecord,
     SkillExecutionStatus,
     SkillPackageManifest,
+    SkillScope,
     SkillVersion,
 )
 
@@ -57,6 +58,9 @@ def skill_to_domain(row: SkillModel, version: SkillVersionModel | None = None) -
         description="" if current is None else current.manifest.description,
         current_version_label=None if current is None else current.label,
         dependency_check=None if current is None else current.dependency_check,
+        scope=SkillScope(row.scope),
+        owner_id=row.owner_id,
+        deleted_at=None if row.deleted_at is None else _utc(row.deleted_at),
     )
 
 

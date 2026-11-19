@@ -14,6 +14,7 @@ import { ChatSidebarContent } from "../features/chat/ChatSidebar";
 import { DraftChatProvider } from "../features/chat/DraftChatContext";
 import { KnowledgeSidebar } from "../features/knowledge/KnowledgeSidebar";
 import { ProjectCenterSidebar } from "../features/projects/ProjectCenterSidebar";
+import { PersonalSkillsSidebar } from "../features/skills/PersonalSkillsSidebar";
 import { Brand } from "../shared/ui/Brand";
 import { Icon, type IconName } from "../shared/ui/Icons";
 import { Modal } from "../shared/ui/Modal";
@@ -60,6 +61,7 @@ function WorkspaceSidebar() {
   const isAdminPath = pathname.startsWith("/admin");
   const isProjectPath = pathname.startsWith("/projects");
   const isKnowledgePath = pathname.startsWith("/knowledge");
+  const isSkillsPath = pathname.startsWith("/skills");
 
   return (
     <aside className="workspace-sidebar" aria-label="工作区侧栏">
@@ -101,6 +103,8 @@ function WorkspaceSidebar() {
         <ProjectCenterSidebar />
       ) : isKnowledgePath ? (
         <KnowledgeSidebar />
+      ) : isSkillsPath ? (
+        <PersonalSkillsSidebar />
       ) : (
         <ChatSidebarContent />
       )}
@@ -142,6 +146,7 @@ export function AppShell() {
   const accountMenuRef = useRef<HTMLDivElement>(null);
   const accountTriggerRef = useRef<HTMLButtonElement>(null);
   const profileLinkRef = useRef<HTMLAnchorElement>(null);
+  const skillsLinkRef = useRef<HTMLAnchorElement>(null);
   const logoutButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -286,11 +291,20 @@ export function AppShell() {
                     event.key === "ArrowUp"
                   ) {
                     event.preventDefault();
-                    if (document.activeElement === profileLinkRef.current) {
-                      logoutButtonRef.current?.focus();
-                    } else {
-                      profileLinkRef.current?.focus();
-                    }
+                    const items = [
+                      profileLinkRef.current,
+                      skillsLinkRef.current,
+                      logoutButtonRef.current,
+                    ].filter(
+                      (item): item is NonNullable<typeof item> => Boolean(item),
+                    );
+                    const currentIndex = items.findIndex(
+                      (item) => item === document.activeElement,
+                    );
+                    const direction = event.key === "ArrowDown" ? 1 : -1;
+                    const nextIndex =
+                      (currentIndex + direction + items.length) % items.length;
+                    items[nextIndex]?.focus();
                   }
                 }}
                 role="menu"
@@ -309,6 +323,16 @@ export function AppShell() {
                 >
                   <Icon name="user" size={15} />
                   <span>个人页面</span>
+                </Link>
+                <Link
+                  className="account-menu-item"
+                  onClick={() => setAccountMenuOpen(false)}
+                  ref={skillsLinkRef}
+                  role="menuitem"
+                  to="/skills"
+                >
+                  <Icon name="spark" size={15} />
+                  <span>我的技能</span>
                 </Link>
                 <button
                   className="account-menu-item account-menu-logout"

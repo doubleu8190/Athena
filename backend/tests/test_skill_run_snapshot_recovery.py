@@ -71,6 +71,9 @@ def _catalog_row(
     skill = SkillModel(
         id="skill_recovery",
         slug=manifest.slug,
+        scope="public",
+        owner_id=None,
+        deleted_at=None,
         current_version_id="skillver_recovery",
         enabled=enabled,
         script_requires_approval=False,
@@ -108,6 +111,7 @@ def test_old_unsatisfied_check_does_not_hide_recovered_skill_from_run_snapshot()
         build_run_skill_snapshot(
             cast(Any, _Session([(skill, version)])),
             (skill.id,),
+            owner_id="usr_owner",
         )
     )
 

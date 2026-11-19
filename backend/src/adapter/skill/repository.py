@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,17 +33,22 @@ from domain.skill.model import (
     SkillImportRequestResult,
     SkillNotFoundError,
     SkillPackageManifest,
+    SkillScope,
     SkillVersion,
     SkillVersionPage,
 )
 from domain.skill.ports import SkillRepository
 
+_PERSONAL_REQUEST_OPERATIONS = frozenset({"personal_create", "personal_publish"})
+
 
 async def build_run_skill_snapshot(
     session: AsyncSession,
     selected_skill_ids: tuple[str, ...],
+    *,
+    owner_id: str,
 ) -> RunSkillSnapshot:
-    """在当前 Run 创建事务中读取一条一致目录并固定版本。"""
+    """在当前 Run 事务中固定公共及本人个人 Skill 的一致目录。"""
     if len(selected_skill_ids) != len(set(selected_skill_ids)):
         raise SkillConflictError("skill_selection_invalid")
     rows = (
@@ -53,8 +58,18 @@ async def build_run_skill_snapshot(
                 SkillVersionModel,
                 SkillVersionModel.id == SkillModel.current_version_id,
             )
-            .where(SkillModel.enabled.is_(True))
-            .order_by(SkillModel.slug, SkillModel.id)
+            .where(
+                SkillModel.enabled.is_(True),
+                SkillModel.deleted_at.is_(None),
+                or_(
+                    SkillModel.scope == SkillScope.PUBLIC.value,
+                    and_(
+                        SkillModel.scope == SkillScope.PERSONAL.value,
+                        SkillModel.owner_id == owner_id,
+                    ),
+                ),
+            )
+            .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
         )
     ).all()
     available: list[tuple[SkillModel, SkillVersionModel]] = []
@@ -63,6 +78,13 @@ async def build_run_skill_snapshot(
         # 实际脚本执行前仍会实时复核，这里只验证目录和不可变清单完整性。
         # 清单解析失败说明不可变记录损坏，不能让 Run 以不完整目录继续。
         version = skill_version_to_domain(version_row)
+        scope = SkillScope(skill_row.scope)
+        if scope is SkillScope.PERSONAL and (
+            version.dependency_requirements
+            or version.manifest.scripts
+            or skill_row.script_requires_approval
+        ):
+            raise SkillConflictError("skill_catalog_integrity_invalid")
         available.append((skill_row, version_row))
         if version.manifest.slug != skill_row.slug:
             raise SkillConflictError("skill_catalog_integrity_invalid")
@@ -79,6 +101,7 @@ async def build_run_skill_snapshot(
             version_id=version.id,
             version_label=version.label,
             requires_approval=skill.script_requires_approval,
+            scope=SkillScope(skill.scope),
         )
         for skill, version in available
     )
@@ -97,7 +120,7 @@ class SqlAlchemySkillRepository(SkillRepository):
         self._session_factory = session_factory
 
     async def list_skills(self) -> tuple[Skill, ...]:
-        """按 slug 稳定读取全部管理目录项。"""
+        """按 slug 稳定读取全部未删除公共管理目录项。"""
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
@@ -106,13 +129,17 @@ class SqlAlchemySkillRepository(SkillRepository):
                         SkillVersionModel,
                         SkillVersionModel.id == SkillModel.current_version_id,
                     )
+                    .where(
+                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.deleted_at.is_(None),
+                    )
                     .order_by(SkillModel.slug, SkillModel.id)
                 )
             ).all()
         return tuple(skill_to_domain(row, version) for row, version in rows)
 
     async def get_skill(self, skill_id: str) -> Skill | None:
-        """读取一个管理目录项及其当前版本展示元数据。"""
+        """读取一个公共管理目录项及其当前版本展示元数据。"""
         async with self._session_factory() as session:
             row = (
                 await session.execute(
@@ -121,7 +148,11 @@ class SqlAlchemySkillRepository(SkillRepository):
                         SkillVersionModel,
                         SkillVersionModel.id == SkillModel.current_version_id,
                     )
-                    .where(SkillModel.id == skill_id)
+                    .where(
+                        SkillModel.id == skill_id,
+                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.deleted_at.is_(None),
+                    )
                 )
             ).one_or_none()
         return None if row is None else skill_to_domain(row[0], row[1])
@@ -138,11 +169,79 @@ class SqlAlchemySkillRepository(SkillRepository):
                     )
                     .where(
                         SkillModel.enabled.is_(True),
+                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.deleted_at.is_(None),
                     )
                     .order_by(SkillModel.slug, SkillModel.id)
                 )
             ).all()
         return tuple(skill_to_domain(row, version) for row, version in rows)
+
+    async def get_user_directory(self, owner_id: str) -> tuple[Skill, ...]:
+        """读取公共和本人已启用且未删除的 Skill 候选。"""
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .join(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .where(
+                        SkillModel.enabled.is_(True),
+                        SkillModel.deleted_at.is_(None),
+                        or_(
+                            SkillModel.scope == SkillScope.PUBLIC.value,
+                            and_(
+                                SkillModel.scope == SkillScope.PERSONAL.value,
+                                SkillModel.owner_id == owner_id,
+                            ),
+                        ),
+                    )
+                    .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
+                )
+            ).all()
+        return tuple(skill_to_domain(row, version) for row, version in rows)
+
+    async def list_personal_skills(self, owner_id: str) -> tuple[Skill, ...]:
+        """读取一人未删除的个人 Skill，包含停用项。"""
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .outerjoin(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .where(
+                        SkillModel.scope == SkillScope.PERSONAL.value,
+                        SkillModel.owner_id == owner_id,
+                        SkillModel.deleted_at.is_(None),
+                    )
+                    .order_by(SkillModel.updated_at.desc(), SkillModel.id)
+                )
+            ).all()
+        return tuple(skill_to_domain(row, version) for row, version in rows)
+
+    async def get_personal_skill(self, owner_id: str, skill_id: str) -> Skill | None:
+        """只在本人、个人范围且未删除时读取 Skill 详情。"""
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .outerjoin(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .where(
+                        SkillModel.id == skill_id,
+                        SkillModel.scope == SkillScope.PERSONAL.value,
+                        SkillModel.owner_id == owner_id,
+                        SkillModel.deleted_at.is_(None),
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else skill_to_domain(row[0], row[1])
 
     async def list_versions(
         self, skill_id: str, *, page: int, page_size: int
@@ -152,7 +251,11 @@ class SqlAlchemySkillRepository(SkillRepository):
             raise ValueError("skill_version_page_invalid")
         async with self._session_factory() as session:
             exists = await session.scalar(
-                select(SkillModel.id).where(SkillModel.id == skill_id)
+                select(SkillModel.id).where(
+                    SkillModel.id == skill_id,
+                    SkillModel.scope == SkillScope.PUBLIC.value,
+                    SkillModel.deleted_at.is_(None),
+                )
             )
             if exists is None:
                 return None
@@ -212,6 +315,9 @@ class SqlAlchemySkillRepository(SkillRepository):
                     skill_row = SkillModel(
                         id=skill_id,
                         slug=manifest.slug,
+                        scope=SkillScope.PUBLIC.value,
+                        owner_id=None,
+                        deleted_at=None,
                         current_version_id=None,
                         enabled=False,
                         script_requires_approval=False,
@@ -256,6 +362,181 @@ class SqlAlchemySkillRepository(SkillRepository):
                 return replay.skill, replay.version
             raise SkillConflictError("skill_slug_exists") from error
 
+    async def create_personal_skill(
+        self,
+        *,
+        skill_id: str,
+        version_id: str,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> SkillImportRequestResult:
+        """原子创建本人 Skill、首版和启用指针。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_active_user(session, actor)
+                    skill_row = SkillModel(
+                        id=skill_id,
+                        slug=manifest.slug,
+                        scope=SkillScope.PERSONAL.value,
+                        owner_id=actor.user.id,
+                        deleted_at=None,
+                        current_version_id=None,
+                        enabled=True,
+                        script_requires_approval=False,
+                        revision=1,
+                        created_by=actor.user.id,
+                        created_at=created_at,
+                        updated_at=created_at,
+                    )
+                    version_row = self._version_model(
+                        version_id=version_id,
+                        skill_id=skill_id,
+                        ordinal=1,
+                        label="v1",
+                        manifest=manifest,
+                        object_key=object_key,
+                        package_sha256=package_sha256,
+                        dependency_check=dependency_check,
+                        created_by=actor.user.id,
+                        request_operation="personal_create",
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        request_target_skill_id=None,
+                        created_at=created_at,
+                    )
+                    session.add(skill_row)
+                    await session.flush()
+                    session.add(version_row)
+                    await session.flush()
+                    skill_row.current_version_id = version_id
+                    await session.flush()
+                    request_version = skill_version_to_domain(version_row)
+                    return SkillImportRequestResult(
+                        skill=skill_to_domain(skill_row, version_row),
+                        version=request_version,
+                        request_version=request_version,
+                    )
+        except IntegrityError as error:
+            replay = await self._read_import_result(
+                actor,
+                operation="personal_create",
+                target_skill_id=None,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                return replay
+            raise SkillConflictError("skill_personal_create_conflict") from error
+
+    async def publish_personal_version(
+        self,
+        skill_id: str,
+        *,
+        version_id: str,
+        expected_revision: int,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> SkillImportRequestResult | None:
+        """追加个人版本，并在同一事务中切换指针、启用和修订号。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_active_user(session, actor)
+                    skill_row = await session.scalar(
+                        select(SkillModel)
+                        .where(
+                            SkillModel.id == skill_id,
+                            SkillModel.scope == SkillScope.PERSONAL.value,
+                            SkillModel.owner_id == actor.user.id,
+                            SkillModel.deleted_at.is_(None),
+                        )
+                        .with_for_update()
+                    )
+                    if skill_row is None:
+                        return None
+                    # 同一幂等键的并发请求在拿到身份锁后先重放胜者，
+                    # 不能因为胜者已递增 revision 而误报 CAS 冲突。
+                    replay = await self._read_import_result_in_session(
+                        session,
+                        actor,
+                        operation="personal_publish",
+                        target_skill_id=skill_id,
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                    )
+                    if replay is not None:
+                        return replay
+                    if skill_row.revision != expected_revision:
+                        raise SkillConflictError("skill_revision_conflict")
+                    if skill_row.slug != manifest.slug:
+                        raise SkillConflictError("skill_personal_integrity_invalid")
+                    ordinal = (
+                        int(
+                            (
+                                await session.scalar(
+                                    select(func.max(SkillVersionModel.ordinal)).where(
+                                        SkillVersionModel.skill_id == skill_id
+                                    )
+                                )
+                            )
+                            or 0
+                        )
+                        + 1
+                    )
+                    version_row = self._version_model(
+                        version_id=version_id,
+                        skill_id=skill_id,
+                        ordinal=ordinal,
+                        label=f"v{ordinal}",
+                        manifest=manifest,
+                        object_key=object_key,
+                        package_sha256=package_sha256,
+                        dependency_check=dependency_check,
+                        created_by=actor.user.id,
+                        request_operation="personal_publish",
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        request_target_skill_id=skill_id,
+                        created_at=created_at,
+                    )
+                    session.add(version_row)
+                    await session.flush()
+                    skill_row.current_version_id = version_id
+                    skill_row.enabled = True
+                    skill_row.revision += 1
+                    skill_row.updated_at = created_at
+                    await session.flush()
+                    request_version = skill_version_to_domain(version_row)
+                    return SkillImportRequestResult(
+                        skill=skill_to_domain(skill_row, version_row),
+                        version=request_version,
+                        request_version=request_version,
+                    )
+        except IntegrityError as error:
+            replay = await self._read_import_result(
+                actor,
+                operation="personal_publish",
+                target_skill_id=skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                return replay
+            raise SkillConflictError("skill_personal_publish_conflict") from error
+
     async def add_version(
         self,
         skill_id: str,
@@ -278,7 +559,11 @@ class SqlAlchemySkillRepository(SkillRepository):
                     await self._require_admin(session, actor)
                     skill_row = await session.scalar(
                         select(SkillModel)
-                        .where(SkillModel.id == skill_id)
+                        .where(
+                            SkillModel.id == skill_id,
+                            SkillModel.scope == SkillScope.PUBLIC.value,
+                            SkillModel.deleted_at.is_(None),
+                        )
                         .with_for_update()
                     )
                     if skill_row is None:
@@ -351,6 +636,36 @@ class SqlAlchemySkillRepository(SkillRepository):
                     request_fingerprint=request_fingerprint,
                 )
 
+    async def find_personal_request_result(
+        self,
+        actor: AuthContext,
+        *,
+        operation: str,
+        target_skill_id: str | None,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> SkillImportRequestResult | None:
+        """在本人有效登录事务内读取个人创建或发布幂等结果。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_active_user(session, actor)
+                result = await self._read_import_result_in_session(
+                    session,
+                    actor,
+                    operation=operation,
+                    target_skill_id=target_skill_id,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                )
+                if result is not None and (
+                    result.skill.scope is not SkillScope.PERSONAL
+                    or result.skill.owner_id != actor.user.id
+                ):
+                    raise SkillConflictError("skill_personal_integrity_invalid")
+                if result is not None and result.skill.deleted_at is not None:
+                    raise SkillNotFoundError()
+                return result
+
     async def update_configuration(
         self,
         skill_id: str,
@@ -369,7 +684,11 @@ class SqlAlchemySkillRepository(SkillRepository):
                 await self._require_admin(session, actor)
                 skill_row = await session.scalar(
                     select(SkillModel)
-                    .where(SkillModel.id == skill_id)
+                    .where(
+                        SkillModel.id == skill_id,
+                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.deleted_at.is_(None),
+                    )
                     .with_for_update()
                 )
                 if skill_row is None:
@@ -399,6 +718,78 @@ class SqlAlchemySkillRepository(SkillRepository):
                     skill_row.updated_at = updated_at
                     await session.flush()
                 return skill_to_domain(skill_row, version_row)
+
+    async def set_personal_enabled(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: int,
+        enabled: bool,
+        actor: AuthContext,
+        updated_at: datetime,
+    ) -> Skill | None:
+        """在 owner 和个人范围锁内 CAS 更新启停。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_active_user(session, actor)
+                skill_row = await session.scalar(
+                    select(SkillModel)
+                    .where(
+                        SkillModel.id == skill_id,
+                        SkillModel.scope == SkillScope.PERSONAL.value,
+                        SkillModel.owner_id == actor.user.id,
+                        SkillModel.deleted_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if skill_row is None:
+                    return None
+                if skill_row.revision != expected_revision:
+                    raise SkillConflictError("skill_revision_conflict")
+                version_row = await session.get(
+                    SkillVersionModel,
+                    skill_row.current_version_id,
+                )
+                if version_row is None or version_row.skill_id != skill_id:
+                    raise SkillNotFoundError("skill_version_unavailable")
+                if skill_row.enabled != enabled:
+                    skill_row.enabled = enabled
+                    skill_row.revision += 1
+                    skill_row.updated_at = updated_at
+                    await session.flush()
+                return skill_to_domain(skill_row, version_row)
+
+    async def delete_personal_skill(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: int,
+        actor: AuthContext,
+        deleted_at: datetime,
+    ) -> bool:
+        """按 owner 与 revision 软删除个人身份，保留全部版本。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_active_user(session, actor)
+                skill_row = await session.scalar(
+                    select(SkillModel)
+                    .where(
+                        SkillModel.id == skill_id,
+                        SkillModel.scope == SkillScope.PERSONAL.value,
+                        SkillModel.owner_id == actor.user.id,
+                    )
+                    .with_for_update()
+                )
+                if skill_row is None:
+                    raise SkillNotFoundError()
+                if skill_row.revision != expected_revision:
+                    raise SkillConflictError("skill_revision_conflict")
+                if skill_row.deleted_at is not None:
+                    return True
+                skill_row.deleted_at = deleted_at
+                skill_row.updated_at = deleted_at
+                await session.flush()
+                return True
 
     async def record_dependency_check(
         self,
@@ -641,7 +1032,7 @@ class SqlAlchemySkillRepository(SkillRepository):
         idempotency_key: str,
         request_fingerprint: str,
     ) -> SkillImportRequestResult | None:
-        """校验请求键绑定的内容和目标，再返回原版本。"""
+        """校验请求键后，为个人请求返回当前指针对应的自洽详情。"""
         row = await session.scalar(
             select(SkillVersionModel).where(
                 SkillVersionModel.created_by == actor.user.id,
@@ -659,9 +1050,28 @@ class SqlAlchemySkillRepository(SkillRepository):
         skill_row = await session.get(SkillModel, row.skill_id)
         if skill_row is None:
             raise SkillConflictError("skill_catalog_integrity_invalid")
+        request_version = skill_version_to_domain(row)
+        result_version_row = row
+        if (
+            row.request_operation in _PERSONAL_REQUEST_OPERATIONS
+            and skill_row.deleted_at is None
+        ):
+            if skill_row.current_version_id is None:
+                raise SkillConflictError("skill_catalog_integrity_invalid")
+            current_version_row = await session.get(
+                SkillVersionModel,
+                skill_row.current_version_id,
+            )
+            if (
+                current_version_row is None
+                or current_version_row.skill_id != skill_row.id
+            ):
+                raise SkillConflictError("skill_catalog_integrity_invalid")
+            result_version_row = current_version_row
         return SkillImportRequestResult(
-            skill=skill_to_domain(skill_row, row),
-            version=skill_version_to_domain(row),
+            skill=skill_to_domain(skill_row, result_version_row),
+            version=skill_version_to_domain(result_version_row),
+            request_version=request_version,
         )
 
     @staticmethod
@@ -671,6 +1081,14 @@ class SqlAlchemySkillRepository(SkillRepository):
         user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
         if user is None or user.role is not UserRole.ADMIN:
             raise PermissionError("admin_required")
+
+    @staticmethod
+    async def _require_active_user(session: AsyncSession, actor: AuthContext) -> None:
+        """在个人写事务内复核当前账号及登录会话仍然有效。"""
+        guard = SqlAlchemyAuthTransactionGuard(session)
+        user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
+        if user is None:
+            raise PermissionError("not_authenticated")
 
     @staticmethod
     def _version_model(

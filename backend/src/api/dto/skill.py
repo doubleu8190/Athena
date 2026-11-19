@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -58,6 +59,7 @@ class SkillVersionResponse(BaseModel):
 class SkillSummaryResponse(BaseModel):
     id: str
     slug: str
+    scope: Literal["public", "personal"]
     name: str
     description: str
     current_version_id: str | None
@@ -81,6 +83,10 @@ class SkillDirectoryResponse(BaseModel):
     items: list[SkillSummaryResponse]
 
 
+class SkillPersonalListResponse(BaseModel):
+    items: list[SkillSummaryResponse]
+
+
 class SkillVersionListResponse(BaseModel):
     items: list[SkillVersionResponse]
     total: int
@@ -95,6 +101,31 @@ class SkillConfigurationRequest(BaseModel):
     current_version_id: str = Field(min_length=1, max_length=128)
     enabled: bool
     script_requires_approval: bool
+
+
+class SkillPersonalCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str
+    guide: str
+
+
+class SkillPersonalVersionRequest(SkillPersonalCreateRequest):
+    expected_revision: int = Field(ge=1)
+
+
+class SkillPersonalToggleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    expected_revision: int = Field(ge=1)
+
+
+class SkillMarkdownParseResponse(BaseModel):
+    name: str
+    description: str
+    guide: str
 
 
 class SkillExecutionResponse(BaseModel):
@@ -126,7 +157,12 @@ __all__ = [
     "SkillDependencyItemResponse",
     "SkillDirectoryResponse",
     "SkillExecutionResponse",
+    "SkillMarkdownParseResponse",
     "SkillPackageResourceResponse",
+    "SkillPersonalCreateRequest",
+    "SkillPersonalListResponse",
+    "SkillPersonalToggleRequest",
+    "SkillPersonalVersionRequest",
     "SkillScriptResponse",
     "SkillSummaryResponse",
     "SkillVersionListResponse",

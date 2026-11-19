@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 
 from domain.knowledge.ports import KnowledgeRepositoryPort
+from domain.skill import MAX_PERSONAL_MARKDOWN_BYTES
 from main import _KnowledgeUploadLimitMiddleware
 
 
@@ -47,6 +48,103 @@ def test_chunked_upload_without_content_length_is_bounded_before_parsing() -> No
         assert calls == 0
         assert responses[0]["status"] == 413
         assert not messages
+
+    asyncio.run(scenario())
+
+
+def test_personal_markdown_chunked_upload_is_bounded_before_parsing() -> None:
+    """个人 Markdown 在 multipart 解析前按原始分块计数并返回稳定 413。"""
+
+    async def scenario() -> None:
+        calls = 0
+
+        async def application(scope: object, receive: object, send: object) -> None:
+            nonlocal calls
+            calls += 1
+
+        middleware = _KnowledgeUploadLimitMiddleware(application)
+        messages = [
+            {"type": "http.request", "body": b"x" * 600_000, "more_body": True},
+            {"type": "http.request", "body": b"y" * 600_000, "more_body": True},
+            {"type": "http.request", "body": b"z", "more_body": False},
+        ]
+        responses: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            return messages.pop(0)
+
+        async def send(message: dict[str, object]) -> None:
+            responses.append(message)
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/me/skills/parse",
+                "headers": [(b"content-type", b"multipart/form-data; boundary=x")],
+            },
+            receive,
+            send,
+        )
+        assert MAX_PERSONAL_MARKDOWN_BYTES < 1_200_000
+        assert calls == 0
+        assert responses[0]["status"] == 413
+        body = responses[-1]["body"]
+        assert isinstance(body, bytes)
+        assert b'"detail":"skill_markdown_too_large"' in body
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/api/v1/me/skills",
+        "/api/v1/me/skills/skill_demo/versions",
+    ),
+)
+def test_personal_json_chunked_write_is_bounded_before_parsing(path: str) -> None:
+    """个人创建和发布 JSON 在无 Content-Length 的分块请求中同样受限。"""
+
+    async def scenario() -> None:
+        calls = 0
+
+        async def application(scope: object, receive: object, send: object) -> None:
+            nonlocal calls
+            calls += 1
+
+        middleware = _KnowledgeUploadLimitMiddleware(application)
+        messages = [
+            {"type": "http.request", "body": b"{" + b" " * (1024 * 1024), "more_body": True},
+            {
+                "type": "http.request",
+                "body": b" " * (1024 * 1024) + b"}",
+                "more_body": False,
+            },
+        ]
+        responses: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            return messages.pop(0)
+
+        async def send(message: dict[str, object]) -> None:
+            responses.append(message)
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": path,
+                "headers": [(b"content-type", b"application/json")],
+            },
+            receive,
+            send,
+        )
+        assert calls == 0
+        assert responses[0]["status"] == 413
+        body = responses[-1]["body"]
+        assert isinstance(body, bytes)
+        assert b'"detail":"skill_personal_request_too_large"' in body
 
     asyncio.run(scenario())
 

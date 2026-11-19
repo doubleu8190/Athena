@@ -16,6 +16,7 @@ import { AdminSubagentsPage } from "../features/admin/AdminSubagentsPage";
 import { AdminSystemPromptsPage } from "../features/admin/AdminSystemPromptsPage";
 import { AdminToolsPage } from "../features/admin/AdminToolsPage";
 import { AdminSkillsPage } from "../features/skills/AdminSkillsPage";
+import { PersonalSkillsPage } from "../features/skills/PersonalSkillsPage";
 import { KnowledgeDetailPage } from "../features/knowledge/KnowledgeDetailPage";
 import { KnowledgePage } from "../features/knowledge/KnowledgePage";
 import { ProjectsPage } from "../features/projects/ProjectsPage";
@@ -51,6 +52,7 @@ export function AppRoutes() {
             path="/projects/:projectId/:tab"
           />
           <Route element={<KnowledgePage />} path="/knowledge" />
+          <Route element={<PersonalSkillsPage />} path="/skills" />
           <Route
             element={<KnowledgeDetailPage />}
             path="/knowledge/:baseId"

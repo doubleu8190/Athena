@@ -4,12 +4,18 @@ import type {
   SkillAdminDetails,
   SkillConfigurationInput,
   SkillListResponse,
+  PersonalSkillDraft,
+  PersonalSkillInput,
   SkillVersion,
   SkillVersionPage,
 } from "./model";
 
 function adminSkillPath(skillId: string): string {
   return `/admin/skills/${encodeURIComponent(skillId)}`;
+}
+
+function personalSkillPath(skillId: string): string {
+  return `/me/skills/${encodeURIComponent(skillId)}`;
 }
 
 export async function listPublicSkills(): Promise<Skill[]> {
@@ -103,4 +109,79 @@ export function updateSkillConfiguration(
     method: "PATCH",
     body: input,
   });
+}
+
+export async function listPersonalSkills(): Promise<Skill[]> {
+  const response = await apiRequest<SkillListResponse>("/me/skills", {
+    method: "GET",
+  });
+  return response.items;
+}
+
+export function getPersonalSkill(
+  skillId: string,
+): Promise<SkillAdminDetails> {
+  return apiRequest<SkillAdminDetails>(personalSkillPath(skillId), {
+    method: "GET",
+  });
+}
+
+export async function parsePersonalSkillFile(
+  file: File,
+): Promise<PersonalSkillDraft> {
+  const form = new FormData();
+  form.set("file", file);
+  return apiMultipart<PersonalSkillDraft>("/me/skills/parse", form, {
+    method: "POST",
+  });
+}
+
+export function createPersonalSkill(
+  input: PersonalSkillInput,
+  requestId: string,
+): Promise<SkillAdminDetails> {
+  return apiRequest<SkillAdminDetails>("/me/skills", {
+    method: "POST",
+    body: input,
+    headers: { "Idempotency-Key": requestId },
+  });
+}
+
+export function savePersonalSkillVersion(
+  skillId: string,
+  input: PersonalSkillInput & { expected_revision: number },
+  requestId: string,
+): Promise<SkillAdminDetails> {
+  return apiRequest<SkillAdminDetails>(
+    `${personalSkillPath(skillId)}/versions`,
+    {
+      method: "POST",
+      body: input,
+      headers: { "Idempotency-Key": requestId },
+    },
+  );
+}
+
+export function setPersonalSkillEnabled(
+  skillId: string,
+  enabled: boolean,
+  expectedRevision: number,
+): Promise<SkillAdminDetails> {
+  return apiRequest<SkillAdminDetails>(personalSkillPath(skillId), {
+    method: "PATCH",
+    body: {
+      enabled,
+      expected_revision: expectedRevision,
+    },
+  });
+}
+
+export async function deletePersonalSkill(
+  skillId: string,
+  expectedRevision: number,
+): Promise<void> {
+  await apiRequest<void>(
+    `${personalSkillPath(skillId)}?expected_revision=${expectedRevision}`,
+    { method: "DELETE" },
+  );
 }

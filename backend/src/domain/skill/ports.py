@@ -26,13 +26,22 @@ class SkillRepository(Protocol):
     """Skill 管理目录及执行附加记录的事务端口。"""
 
     async def list_skills(self) -> tuple[Skill, ...]:
-        """读取全部稳定 Skill 身份。"""
+        """读取全部未删除的公共稳定 Skill 身份。"""
 
     async def get_skill(self, skill_id: str) -> Skill | None:
-        """读取一个管理目录项。"""
+        """读取一个未删除的公共管理目录项。"""
 
     async def get_public_directory(self) -> tuple[Skill, ...]:
         """返回已启用候选，当前依赖状态由服务层实时探测。"""
+
+    async def get_user_directory(self, owner_id: str) -> tuple[Skill, ...]:
+        """返回公共及该用户本人已启用且未删除的 Skill 候选。"""
+
+    async def list_personal_skills(self, owner_id: str) -> tuple[Skill, ...]:
+        """按稳定顺序读取指定用户未删除的个人 Skill。"""
+
+    async def get_personal_skill(self, owner_id: str, skill_id: str) -> Skill | None:
+        """只在指定归属范围内读取一个未删除的个人 Skill。"""
 
     async def list_versions(
         self, skill_id: str, *, page: int, page_size: int
@@ -59,6 +68,22 @@ class SkillRepository(Protocol):
     ) -> tuple[Skill, SkillVersion]:
         """原子创建首发 Skill 与第一个未启用版本。"""
 
+    async def create_personal_skill(
+        self,
+        *,
+        skill_id: str,
+        version_id: str,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> SkillImportRequestResult:
+        """原子创建本人 Skill 与已启用首版，并保持请求键幂等。"""
+
     async def add_version(
         self,
         skill_id: str,
@@ -76,6 +101,23 @@ class SkillRepository(Protocol):
     ) -> SkillVersion | None:
         """追加完整更新版本，不改变当前指针和启用状态。"""
 
+    async def publish_personal_version(
+        self,
+        skill_id: str,
+        *,
+        version_id: str,
+        expected_revision: int,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> SkillImportRequestResult | None:
+        """按修订号 CAS 追加个人版本，并原子切换当前指针和启用状态。"""
+
     async def find_import_result(
         self,
         actor: AuthContext,
@@ -86,6 +128,17 @@ class SkillRepository(Protocol):
         request_fingerprint: str,
     ) -> SkillImportRequestResult | None:
         """读取已提交导入请求；键冲突或目标不一致时抛出稳定冲突。"""
+
+    async def find_personal_request_result(
+        self,
+        actor: AuthContext,
+        *,
+        operation: str,
+        target_skill_id: str | None,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> SkillImportRequestResult | None:
+        """只在当前用户归属内读取已提交的个人创建或发布请求。"""
 
     async def update_configuration(
         self,
@@ -100,6 +153,27 @@ class SkillRepository(Protocol):
         updated_at: datetime,
     ) -> Skill | None:
         """按修订号 CAS 切换版本、启停和审批配置。"""
+
+    async def set_personal_enabled(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: int,
+        enabled: bool,
+        actor: AuthContext,
+        updated_at: datetime,
+    ) -> Skill | None:
+        """按修订号 CAS 启停本人 Skill，不接受版本或脚本审批修改。"""
+
+    async def delete_personal_skill(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: int,
+        actor: AuthContext,
+        deleted_at: datetime,
+    ) -> bool:
+        """软删除本人 Skill；同 revision 重放成功，冲突时抛出稳定业务异常。"""
 
     async def record_dependency_check(
         self,
@@ -170,6 +244,7 @@ def snapshot_from_skill(skill: Skill, version: SkillVersion) -> RunSkillSnapshot
                 version_id=version.id,
                 version_label=version.label,
                 requires_approval=skill.script_requires_approval,
+                scope=skill.scope,
             ),
         ),
         selected_skill_ids=(skill.id,),

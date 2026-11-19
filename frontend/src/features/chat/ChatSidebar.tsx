@@ -226,6 +226,10 @@ export function ChatSidebarContent() {
         <Icon name="edit" size={15} />
         <span>新建对话</span>
       </Link>
+      <Link className="sidebar-skill-entry" to="/skills">
+        <Icon name="spark" size={15} />
+        <span>我的技能</span>
+      </Link>
 
       <div className="sidebar-scroll">
         <section className="sidebar-section" aria-labelledby="project-tree-title">

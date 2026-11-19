@@ -16,6 +16,9 @@ MAX_PACKAGE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_PACKAGE_FILE_BYTES = 25 * 1024 * 1024
 MAX_PACKAGE_FILES = 500
 MAX_GUIDE_CHARACTERS = 100_000
+MAX_SKILL_NAME_CHARACTERS = 120
+MAX_SKILL_DESCRIPTION_CHARACTERS = 1_000
+MAX_PERSONAL_MARKDOWN_BYTES = 1024 * 1024
 SKILL_LOAD_TOOL_ID = "builtin_skill_load"
 SKILL_READ_RESOURCE_TOOL_ID = "builtin_skill_read_resource"
 SKILL_EXECUTE_TOOL_ID = "builtin_skill_execute"
@@ -29,6 +32,13 @@ class DependencyCheckStatus(StrEnum):
     SATISFIED = "satisfied"
     UNSATISFIED = "dependency_unsatisfied"
     INVALID = "dependency_invalid"
+
+
+class SkillScope(StrEnum):
+    """Skill 对当前用户的可见范围。"""
+
+    PUBLIC = "public"
+    PERSONAL = "personal"
 
 
 class _FrozenModel(BaseModel):
@@ -153,7 +163,7 @@ class SkillVersion:
 
 @dataclass(frozen=True, slots=True)
 class Skill:
-    """一个稳定 Skill 身份及管理员可修改的当前指针。"""
+    """一个稳定 Skill 身份及其当前可用版本指针。"""
 
     id: str
     slug: str
@@ -168,6 +178,9 @@ class Skill:
     description: str
     current_version_label: str | None = None
     dependency_check: DependencyCheck | None = None
+    scope: SkillScope = SkillScope.PUBLIC
+    owner_id: str | None = None
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,10 +193,11 @@ class SkillVersionPage:
 
 @dataclass(frozen=True, slots=True)
 class SkillImportRequestResult:
-    """一个导入请求键首次提交后对应的稳定技能与版本。"""
+    """一个导入请求键对应的当前返回详情及原始请求版本。"""
 
     skill: Skill
     version: SkillVersion
+    request_version: SkillVersion | None = None
 
 
 class RunSkillEntry(_FrozenModel):
@@ -196,6 +210,7 @@ class RunSkillEntry(_FrozenModel):
     version_id: str
     version_label: str
     requires_approval: bool
+    scope: SkillScope = SkillScope.PUBLIC
 
 
 class RunSkillSnapshot(_FrozenModel):
@@ -219,6 +234,20 @@ class RunSkillSnapshot(_FrozenModel):
         """只从 Run 冻结快照解析技能。"""
         return next((item for item in self.skills if item.skill_id == skill_id), None)
 
+    def trusted_subset(self, requested: RunSkillSnapshot) -> RunSkillSnapshot:
+        """用父 Run 已授权条目重建子 Run 子集，不信任请求中的版本元数据。"""
+        parent_ids = {item.skill_id for item in self.skills}
+        requested_ids = {item.skill_id for item in requested.skills}
+        if not requested_ids <= parent_ids:
+            raise ValueError("run_skill_selection_invalid")
+        catalog = tuple(
+            item for item in self.skills if item.skill_id in requested_ids
+        )
+        return RunSkillSnapshot(
+            skills=catalog,
+            selected_skill_ids=requested.selected_skill_ids,
+        )
+
 
 class ActiveSkillGuide(_FrozenModel):
     """注入不可压缩基础上下文的单个固定版本指南。"""
@@ -228,6 +257,7 @@ class ActiveSkillGuide(_FrozenModel):
     version_id: str
     version_label: str
     guide: str
+    scope: SkillScope = SkillScope.PUBLIC
 
 
 class RunSkillPromptContext(_FrozenModel):

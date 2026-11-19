@@ -1,4 +1,10 @@
 export const SKILL_ZIP_MAX_BYTES = 25 * 1024 * 1024;
+export const PERSONAL_SKILL_FILE_MAX_BYTES = 1024 * 1024;
+export const PERSONAL_SKILL_NAME_MAX_LENGTH = 120;
+export const PERSONAL_SKILL_DESCRIPTION_MAX_LENGTH = 1000;
+export const PERSONAL_SKILL_GUIDE_MAX_LENGTH = 100_000;
+
+export type SkillScope = "public" | "personal";
 
 export type DependencyCheckStatus =
   | "satisfied"
@@ -57,6 +63,7 @@ export interface Skill {
   enabled: boolean;
   script_requires_approval: boolean;
   revision: number;
+  scope?: SkillScope;
   updated_at: string;
   dependency_check: DependencyCheck | null;
 }
@@ -106,6 +113,28 @@ export interface SkillFormState {
   scriptRequiresApproval: boolean;
 }
 
+export interface PersonalSkillInput {
+  name: string;
+  description: string;
+  guide: string;
+}
+
+export type PersonalSkillDraft = PersonalSkillInput;
+
+export interface PersonalSkillFieldErrors {
+  name?: string;
+  description?: string;
+  guide?: string;
+}
+
+const INVALID_SINGLE_LINE_CONTROL = /[\u0000-\u001f\u007f]/u;
+const INVALID_MULTILINE_CONTROL =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
+
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 export function validateSkillZip(file: File | null): string | null {
   if (!file) {
     return "请选择技能 ZIP 文件。";
@@ -130,4 +159,76 @@ export function dependencySatisfied(
 
 export function versionLabel(version: SkillVersion): string {
   return version.label?.trim() || `v${version.ordinal}`;
+}
+
+export function skillScope(skill: Pick<Skill, "scope">): SkillScope {
+  // 旧目录 fixture 和旧快照没有 scope 时继续按公共技能解释，保持向后兼容。
+  return skill.scope === "personal" ? "personal" : "public";
+}
+
+export function validatePersonalSkillFile(file: File | null): string | null {
+  if (!file) {
+    return "请选择 Markdown 文件。";
+  }
+  if (!file.name.toLowerCase().endsWith(".md")) {
+    return "只支持 .md 文件，扩展名不区分大小写。";
+  }
+  if (file.size === 0) {
+    return "Markdown 文件不能为空。";
+  }
+  if (file.size > PERSONAL_SKILL_FILE_MAX_BYTES) {
+    return "Markdown 文件不能超过 1 MiB。";
+  }
+  return null;
+}
+
+export function validatePersonalSkillInput(
+  input: PersonalSkillInput,
+): PersonalSkillFieldErrors {
+  const errors: PersonalSkillFieldErrors = {};
+  const name = input.name.trim();
+  const description = input.description.trim();
+  const guide = input.guide.trim();
+
+  if (!name) {
+    errors.name = "请输入技能名称。";
+  } else if (codePointLength(name) > PERSONAL_SKILL_NAME_MAX_LENGTH) {
+    errors.name = `技能名称不能超过 ${PERSONAL_SKILL_NAME_MAX_LENGTH} 个字符。`;
+  } else if (INVALID_SINGLE_LINE_CONTROL.test(name)) {
+    errors.name = "技能名称不能包含控制字符。";
+  }
+
+  if (!description) {
+    errors.description = "请输入技能描述。";
+  } else if (
+    codePointLength(description) > PERSONAL_SKILL_DESCRIPTION_MAX_LENGTH
+  ) {
+    errors.description =
+      `技能描述不能超过 ${PERSONAL_SKILL_DESCRIPTION_MAX_LENGTH} 个字符。`;
+  } else if (INVALID_MULTILINE_CONTROL.test(description)) {
+    errors.description = "技能描述不能包含控制字符。";
+  }
+
+  if (!guide) {
+    errors.guide = "请输入 Markdown 正文。";
+  } else if (
+    codePointLength(input.guide) > PERSONAL_SKILL_GUIDE_MAX_LENGTH
+  ) {
+    errors.guide =
+      `Markdown 正文不能超过 ${PERSONAL_SKILL_GUIDE_MAX_LENGTH} 个字符。`;
+  } else if (INVALID_MULTILINE_CONTROL.test(input.guide)) {
+    errors.guide = "Markdown 正文不能包含空字节或其他不支持的控制字符。";
+  }
+
+  return errors;
+}
+
+export function normalizePersonalSkillInput(
+  input: PersonalSkillInput,
+): PersonalSkillInput {
+  return {
+    description: input.description.trim(),
+    guide: input.guide,
+    name: input.name.trim(),
+  };
 }

@@ -9,13 +9,16 @@ from api.dto.skill import (
     SkillDependencyItemResponse,
     SkillDirectoryResponse,
     SkillExecutionResponse,
+    SkillMarkdownParseResponse,
     SkillPackageResourceResponse,
+    SkillPersonalListResponse,
     SkillScriptResponse,
     SkillSummaryResponse,
     SkillVersionListResponse,
     SkillVersionResponse,
 )
 from app.skill.model import SkillAdminDetails
+from app.skill.personal import PersonalSkillDraft
 from domain.skill import DependencyCheck, Skill, SkillExecutionRecord, SkillVersion
 
 
@@ -45,6 +48,7 @@ def skill_to_response(skill: Skill) -> SkillSummaryResponse:
     return SkillSummaryResponse(
         id=skill.id,
         slug=skill.slug,
+        scope=skill.scope.value,
         name=skill.name,
         description=skill.description,
         current_version_id=skill.current_version_id,
@@ -127,6 +131,20 @@ def directory_to_response(items: tuple[Skill, ...]) -> SkillDirectoryResponse:
     return SkillDirectoryResponse(items=[skill_to_response(item) for item in items])
 
 
+def personal_list_to_response(items: tuple[Skill, ...]) -> SkillPersonalListResponse:
+    """转换本人管理列表，停用项也会保留。"""
+    return SkillPersonalListResponse(items=[skill_to_response(item) for item in items])
+
+
+def personal_draft_to_response(draft: PersonalSkillDraft) -> SkillMarkdownParseResponse:
+    """转换 Markdown 解析结果，不落库也不生成版本。"""
+    return SkillMarkdownParseResponse(
+        name=draft.name,
+        description=draft.description,
+        guide=draft.guide,
+    )
+
+
 def version_page_to_response(
     items: tuple[SkillVersion, ...], *, total: int, page: int, page_size: int
 ) -> SkillVersionListResponse:
@@ -169,6 +187,8 @@ __all__ = [
     "dependency_check_to_response",
     "directory_to_response",
     "execution_to_response",
+    "personal_draft_to_response",
+    "personal_list_to_response",
     "skill_to_response",
     "version_page_to_response",
     "version_to_response",

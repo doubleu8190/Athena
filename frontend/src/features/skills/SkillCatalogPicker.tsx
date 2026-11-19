@@ -2,6 +2,8 @@ import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { usePublicSkills } from "./hooks";
 import { skillErrorMessage } from "./errorMessages";
+import { skillScope } from "./model";
+import { SkillScopeBadge } from "./SkillScopeBadge";
 
 interface SkillCatalogPickerProps {
   disabled?: boolean;
@@ -67,31 +69,42 @@ export function SkillCatalogPicker({
       ) : (
         <fieldset className="skill-catalog-options" disabled={disabled}>
           <legend className="sr-only">选择技能</legend>
-          {skills.data.map((skill) => (
-            <label
-              className={`skill-catalog-option${
-                selected.has(skill.id) ? " is-selected" : ""
-              }`}
-              key={skill.id}
-            >
-              <input
-                checked={selected.has(skill.id)}
-                onChange={() => toggle(skill.id)}
-                type="checkbox"
-              />
-              <span className="skill-catalog-option-main">
-                <strong>{skill.name}</strong>
-                <small>
-                  {skill.current_version_label ?? "当前版本"} ·{" "}
-                  {skill.script_requires_approval
-                    ? "脚本执行需审批"
-                    : "脚本执行无需审批"}
-                </small>
-                <span>{skill.description}</span>
-              </span>
-              <Icon name="spark" size={15} />
-            </label>
-          ))}
+          {skills.data.map((skill) => {
+            const scope = skillScope(skill);
+            return (
+              <label
+                className={`skill-catalog-option is-${scope}${
+                  selected.has(skill.id) ? " is-selected" : ""
+                }`}
+                key={skill.id}
+              >
+                <input
+                  checked={selected.has(skill.id)}
+                  onChange={() => toggle(skill.id)}
+                  type="checkbox"
+                />
+                <span className="skill-catalog-option-main">
+                  <strong>{skill.name}</strong>
+                  <small>
+                    <SkillScopeBadge compact scope={scope} />
+                    <span>
+                      {skill.current_version_label ?? "当前版本"}
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {scope === "personal"
+                        ? "纯文档"
+                        : skill.script_requires_approval
+                          ? "脚本执行需审批"
+                          : "脚本执行无需审批"}
+                    </span>
+                  </small>
+                  <span>{skill.description}</span>
+                </span>
+                <Icon name="spark" size={15} />
+              </label>
+            );
+          })}
         </fieldset>
       )}
 

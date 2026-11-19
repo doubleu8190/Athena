@@ -6,16 +6,26 @@ import {
 
 import { adminKeys } from "../admin/queryKeys";
 import {
+  createPersonalSkill,
+  deletePersonalSkill,
   getAdminSkill,
   getAdminSkillVersion,
+  getPersonalSkill,
   importSkillPackage,
   listAdminSkills,
   listAdminSkillVersions,
+  listPersonalSkills,
   listPublicSkills,
+  parsePersonalSkillFile,
+  savePersonalSkillVersion,
+  setPersonalSkillEnabled,
   updateSkillConfiguration,
   uploadSkillVersion,
 } from "./api";
-import type { SkillConfigurationInput } from "./model";
+import type {
+  PersonalSkillInput,
+  SkillConfigurationInput,
+} from "./model";
 import { skillKeys } from "./queryKeys";
 
 async function refreshSkillCatalogs(
@@ -148,6 +158,136 @@ export function useUpdateSkillConfigurationMutation(skillId: string) {
       // PATCH 返回同一修订下的完整详情，先写入缓存可避免保存成功到后台刷新间短暂显示旧草稿。
       queryClient.setQueryData(adminKeys.skill(skillId), details);
       await refreshSkillCatalogs(queryClient, skillId);
+    },
+  });
+}
+
+async function refreshPersonalSkillData(
+  queryClient: ReturnType<typeof useQueryClient>,
+  skillId?: string,
+) {
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: skillKeys.personalList(),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: skillKeys.catalog(),
+    }),
+    skillId
+      ? queryClient.invalidateQueries({
+          queryKey: skillKeys.personalDetail(skillId),
+        })
+      : Promise.resolve(),
+  ]);
+}
+
+export function usePersonalSkills() {
+  return useQuery({
+    queryFn: listPersonalSkills,
+    queryKey: skillKeys.personalList(),
+  });
+}
+
+export function usePersonalSkill(skillId: string | null) {
+  return useQuery({
+    enabled: Boolean(skillId),
+    queryFn: () => getPersonalSkill(skillId ?? ""),
+    queryKey: skillKeys.personalDetail(skillId ?? ""),
+    staleTime: 0,
+  });
+}
+
+export function useParsePersonalSkillMutation() {
+  return useMutation({
+    mutationFn: parsePersonalSkillFile,
+  });
+}
+
+export function useCreatePersonalSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      input,
+      requestId,
+    }: {
+      input: PersonalSkillInput;
+      requestId: string;
+    }) => createPersonalSkill(input, requestId),
+    onSuccess: async (details) => {
+      queryClient.setQueryData(
+        skillKeys.personalDetail(details.id),
+        details,
+      );
+      // 创建只启用服务端目录，不把新技能写入当前聊天选择，避免隐式扩大下一轮 Run 范围。
+      await refreshPersonalSkillData(queryClient, details.id);
+    },
+  });
+}
+
+export function useSavePersonalSkillVersionMutation(skillId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      expectedRevision,
+      input,
+      requestId,
+    }: {
+      expectedRevision: number;
+      input: PersonalSkillInput;
+      requestId: string;
+    }) =>
+      savePersonalSkillVersion(
+        skillId,
+        { ...input, expected_revision: expectedRevision },
+        requestId,
+      ),
+    onSuccess: async (details) => {
+      queryClient.setQueryData(
+        skillKeys.personalDetail(skillId),
+        details,
+      );
+      await refreshPersonalSkillData(queryClient, skillId);
+    },
+  });
+}
+
+export function useSetPersonalSkillEnabledMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      enabled,
+      expectedRevision,
+      skillId,
+    }: {
+      enabled: boolean;
+      expectedRevision: number;
+      skillId: string;
+    }) => setPersonalSkillEnabled(skillId, enabled, expectedRevision),
+    onSuccess: async (details) => {
+      queryClient.setQueryData(
+        skillKeys.personalDetail(details.id),
+        details,
+      );
+      await refreshPersonalSkillData(queryClient, details.id);
+    },
+  });
+}
+
+export function useDeletePersonalSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      expectedRevision,
+      skillId,
+    }: {
+      expectedRevision: number;
+      skillId: string;
+    }) => deletePersonalSkill(skillId, expectedRevision),
+    onSuccess: async (_result, variables) => {
+      queryClient.removeQueries({
+        queryKey: skillKeys.personalDetail(variables.skillId),
+      });
+      await refreshPersonalSkillData(queryClient);
     },
   });
 }

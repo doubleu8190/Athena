@@ -20,6 +20,8 @@ import { SessionFilesPanel } from "../files/SessionFilesPanel";
 import type { PendingSessionUpload } from "../files/model";
 import { sessionFileKeys } from "../files/queryKeys";
 import { SkillCatalogPicker } from "../skills/SkillCatalogPicker";
+import { SkillScopeBadge } from "../skills/SkillScopeBadge";
+import { skillScope } from "../skills/model";
 import {
   isSessionNotFound,
   sessionErrorMessage,
@@ -270,9 +272,15 @@ function RunSummary({
               <span
                 className="run-skill-snapshot-item"
                 key={skill.skill_id}
-                title={`${skill.name} · ${skill.version_label}`}
+                title={`${skillScope(skill) === "personal" ? "个人" : "公共"} · ${skill.name} · ${skill.version_label}`}
               >
-                {skill.name} · {skill.version_label}
+                <SkillScopeBadge
+                  compact
+                  scope={skillScope(skill)}
+                />
+                <span>
+                  {skill.name} · {skill.version_label}
+                </span>
               </span>
             ))
           )}

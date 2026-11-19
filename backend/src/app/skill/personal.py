@@ -1,0 +1,221 @@
+"""个人 Skill 的单文件 Markdown 协议与内存包构造。"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import re
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+import yaml  # type: ignore[import-untyped]
+
+from domain.skill import (
+    MAX_GUIDE_CHARACTERS,
+    MAX_PERSONAL_MARKDOWN_BYTES,
+    MAX_SKILL_DESCRIPTION_CHARACTERS,
+    MAX_SKILL_NAME_CHARACTERS,
+    PackageResource,
+    SkillPackageManifest,
+)
+
+_ALLOWED_METADATA_FIELDS = frozenset({"name", "description", "slug"})
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_FRONTMATTER = re.compile(
+    r"\A---[ \t]*\r?\n(?P<metadata>.*?)(?:\r?\n)---[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+
+
+class PersonalSkillError(ValueError):
+    """个人 Markdown 或结构化内容未通过稳定业务校验。"""
+
+    def __init__(self, code: str, *, field: str | None = None) -> None:
+        """保存可供前端投影的安全错误码及可选表单字段。"""
+        super().__init__(code)
+        self.code = code
+        self.field = field
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalSkillDraft:
+    """解析后进入编辑表单的名称、描述和 Markdown 正文。"""
+
+    name: str
+    description: str
+    guide: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalSkillPackage:
+    """只含根 ``SKILL.md`` 的规范化不可变包。"""
+
+    manifest: SkillPackageManifest
+    content: bytes
+    package_sha256: str
+
+
+def parse_personal_markdown(filename: str, path: Path) -> PersonalSkillDraft:
+    """解析单个 UTF-8 Markdown，并允许 frontmatter 缺省名称和描述。"""
+    if PurePosixPath(filename.replace("\\", "/")).suffix.casefold() != ".md":
+        raise PersonalSkillError("skill_markdown_filename_invalid", field="file")
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise PersonalSkillError("skill_markdown_unreadable", field="file") from error
+    if size > MAX_PERSONAL_MARKDOWN_BYTES:
+        raise PersonalSkillError("skill_markdown_too_large", field="file")
+    if size == 0:
+        raise PersonalSkillError("skill_markdown_empty", field="file")
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise PersonalSkillError("skill_markdown_unreadable", field="file") from error
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise PersonalSkillError("skill_markdown_encoding_invalid", field="file") from error
+    _validate_markdown_text(text)
+
+    name = ""
+    description = ""
+    guide = text
+    if text.startswith("---"):
+        matched = _FRONTMATTER.match(text)
+        if matched is not None:
+            metadata = _load_metadata(matched.group("metadata"))
+            if metadata is not None:
+                # 只有完整闭合且中间确为 YAML 映射时才消费分隔线，避免把水平线正文误删。
+                name = _metadata_text(metadata, "name", MAX_SKILL_NAME_CHARACTERS)
+                description = _metadata_text(
+                    metadata,
+                    "description",
+                    MAX_SKILL_DESCRIPTION_CHARACTERS,
+                )
+                guide = text[matched.end() :]
+    _validate_guide(guide)
+    return PersonalSkillDraft(name=name, description=description, guide=guide)
+
+
+def validate_personal_content(name: str, description: str, guide: str) -> PersonalSkillDraft:
+    """校验在线创建或新版本的三个字段，并返回规范化表单值。"""
+    if not isinstance(name, str):
+        raise PersonalSkillError("skill_name_invalid", field="name")
+    if not isinstance(description, str):
+        raise PersonalSkillError("skill_description_invalid", field="description")
+    if not isinstance(guide, str):
+        raise PersonalSkillError("skill_guide_invalid", field="guide")
+    normalized_name = name.strip()
+    normalized_description = description.strip()
+    if (
+        not normalized_name
+        or len(normalized_name) > MAX_SKILL_NAME_CHARACTERS
+        or _CONTROL_CHARACTER.search(normalized_name)
+    ):
+        raise PersonalSkillError("skill_name_invalid", field="name")
+    if (
+        not normalized_description
+        or len(normalized_description) > MAX_SKILL_DESCRIPTION_CHARACTERS
+        or _CONTROL_CHARACTER.search(normalized_description)
+    ):
+        raise PersonalSkillError("skill_description_invalid", field="description")
+    _validate_guide(guide)
+    return PersonalSkillDraft(
+        name=normalized_name,
+        description=normalized_description,
+        guide=guide,
+    )
+
+
+def build_personal_package(slug: str, draft: PersonalSkillDraft) -> PersonalSkillPackage:
+    """把已校验正文规范化为只含 ``SKILL.md`` 的确定性 ZIP。"""
+    guide_bytes = draft.guide.encode("utf-8")
+    manifest = SkillPackageManifest(
+        slug=slug,
+        name=draft.name,
+        description=draft.description,
+        dependencies=(),
+        guide=draft.guide,
+        scripts=(),
+        files=(
+            PackageResource(
+                path="SKILL.md",
+                size_bytes=len(guide_bytes),
+                sha256=hashlib.sha256(guide_bytes).hexdigest(),
+                text=True,
+            ),
+        ),
+    )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        info = zipfile.ZipInfo("SKILL.md", date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o100644 << 16
+        archive.writestr(info, guide_bytes)
+    content = output.getvalue()
+    return PersonalSkillPackage(
+        manifest=manifest,
+        content=content,
+        package_sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _validate_markdown_text(text: str) -> None:
+    """拒绝 Markdown 文件中的非法控制字符。"""
+    if _CONTROL_CHARACTER.search(text):
+        raise PersonalSkillError("skill_markdown_control_character", field="file")
+
+
+def _load_metadata(raw_metadata: str) -> dict[str, Any] | None:
+    """安全读取 YAML frontmatter；非映射返回空值以保留原正文。"""
+    try:
+        value = yaml.safe_load(raw_metadata)
+    except yaml.YAMLError as error:
+        raise PersonalSkillError("skill_markdown_metadata_invalid", field="file") from error
+    if not isinstance(value, dict):
+        return None
+    metadata = {str(key): item for key, item in value.items()}
+    unsupported = sorted(set(metadata) - _ALLOWED_METADATA_FIELDS)
+    if unsupported:
+        raise PersonalSkillError(
+            "skill_markdown_field_unsupported",
+            field=unsupported[0],
+        )
+    slug = metadata.get("slug")
+    if slug is not None and not isinstance(slug, str):
+        raise PersonalSkillError("skill_markdown_slug_invalid", field="slug")
+    return metadata
+
+
+def _metadata_text(metadata: dict[str, Any], field: str, maximum: int) -> str:
+    """读取可选文本元数据；未提供或空白时保留为空串。"""
+    value = metadata.get(field)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise PersonalSkillError(f"skill_markdown_{field}_invalid", field=field)
+    normalized = value.strip()
+    if len(normalized) > maximum or _CONTROL_CHARACTER.search(normalized):
+        raise PersonalSkillError(f"skill_markdown_{field}_invalid", field=field)
+    return normalized
+
+
+def _validate_guide(guide: str) -> None:
+    """要求正文非空、字符数有界且不含非法控制字符。"""
+    if not guide.strip() or len(guide) > MAX_GUIDE_CHARACTERS:
+        raise PersonalSkillError("skill_guide_invalid", field="guide")
+    if _CONTROL_CHARACTER.search(guide):
+        raise PersonalSkillError("skill_guide_control_character", field="guide")
+
+
+__all__ = [
+    "MAX_PERSONAL_MARKDOWN_BYTES",
+    "PersonalSkillDraft",
+    "PersonalSkillError",
+    "PersonalSkillPackage",
+    "build_personal_package",
+    "parse_personal_markdown",
+    "validate_personal_content",
+]

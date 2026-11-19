@@ -28,7 +28,11 @@ from api.projects import build_project_router
 from api.runs import build_run_router
 from api.security import DEFAULT_COOKIE_NAME
 from api.sessions import build_session_router
-from api.skill import build_skill_admin_router, build_skill_user_router
+from api.skill import (
+    build_skill_admin_router,
+    build_skill_personal_router,
+    build_skill_user_router,
+)
 from api.subagent import build_subagent_admin_router
 from api.system_prompt import build_system_prompt_admin_router
 from api.tools import build_tools_router
@@ -49,8 +53,12 @@ from bootstrap.api import ApiDependencies, build_api_dependencies
 from bootstrap.config import env_flag, env_int
 from common.ids import new_id
 from domain.knowledge.ports import KnowledgeUploadSlotRepository
+from domain.skill import MAX_PERSONAL_MARKDOWN_BYTES
 
 logger = logging.getLogger(__name__)
+
+_PERSONAL_MARKDOWN_MULTIPART_OVERHEAD = 64 * 1024
+_PERSONAL_JSON_MAXIMUM = 2 * 1024 * 1024
 
 
 class _KnowledgeUploadLimitMiddleware:
@@ -77,6 +85,10 @@ class _KnowledgeUploadLimitMiddleware:
             path.startswith("/api/v1/admin/skills/") and path.endswith("/versions")
         )
         session_file_upload = path.startswith("/api/v1/sessions/") and path.endswith("/files")
+        personal_markdown_upload = path == "/api/v1/me/skills/parse"
+        personal_json_write = path == "/api/v1/me/skills" or (
+            path.startswith("/api/v1/me/skills/") and path.endswith("/versions")
+        )
         upload_kind = (
             "knowledge"
             if knowledge_upload
@@ -84,21 +96,31 @@ class _KnowledgeUploadLimitMiddleware:
             if skill_upload
             else "session_file"
             if session_file_upload
+            else "personal_markdown"
+            if personal_markdown_upload
+            else "personal_json"
+            if personal_json_write
             else None
         )
         if method != "POST" or upload_kind is None:
             await self.app(scope, receive, send)  # type: ignore[operator]
             return
-        maximum = (
-            26 * 1024 * 1024
-            if upload_kind == "skill"
-            else 52 * 1024 * 1024
-            if upload_kind == "session_file"
-            else self._maximum
-        )
-        overflow_code = (
-            "skill_zip_too_large" if upload_kind == "skill" else "document_file_too_large"
-        )
+        maximum = {
+            "knowledge": self._maximum,
+            "skill": 26 * 1024 * 1024,
+            "session_file": 52 * 1024 * 1024,
+            "personal_markdown": (
+                MAX_PERSONAL_MARKDOWN_BYTES + _PERSONAL_MARKDOWN_MULTIPART_OVERHEAD
+            ),
+            "personal_json": _PERSONAL_JSON_MAXIMUM,
+        }[upload_kind]
+        overflow_code = {
+            "knowledge": "document_file_too_large",
+            "skill": "skill_zip_too_large",
+            "session_file": "document_file_too_large",
+            "personal_markdown": "skill_markdown_too_large",
+            "personal_json": "skill_personal_request_too_large",
+        }[upload_kind]
         receive_fn = receive
         send_fn = send
         assert callable(receive_fn) and callable(send_fn)
@@ -207,6 +229,8 @@ _DATABASE_BACKED_ROUTE_PREFIXES = (
     "/api/v1/admin",
     "/api/v1/tools",
     "/api/v1/knowledge-bases",
+    "/api/v1/me",
+    "/api/v1/skills",
 )
 
 
@@ -345,6 +369,7 @@ def create_app(
     if deps.skill_service is not None:
         app.include_router(build_skill_admin_router(deps.skill_service))
         app.include_router(build_skill_user_router(deps.skill_service))
+        app.include_router(build_skill_personal_router(deps.skill_service))
     if deps.session_file_service is not None:
         app.include_router(build_session_file_router(deps.session_file_service))
     if deps.project_service is not None:

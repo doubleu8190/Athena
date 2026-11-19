@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     Text,
@@ -33,7 +34,37 @@ class SkillModel(Base):
     __tablename__ = "skills"
     __table_args__ = (
         CheckConstraint("revision >= 1", name="ck_skills_revision"),
-        UniqueConstraint("slug", name="uq_skills_slug"),
+        CheckConstraint(
+            "scope IN ('public', 'personal')",
+            name="ck_skills_scope",
+        ),
+        CheckConstraint(
+            "(scope = 'public' AND owner_id IS NULL AND deleted_at IS NULL) OR "
+            "(scope = 'personal' AND owner_id IS NOT NULL)",
+            name="ck_skills_owner_scope",
+        ),
+        Index(
+            "uq_skills_public_slug",
+            "slug",
+            unique=True,
+            postgresql_where=text("scope = 'public'"),
+            sqlite_where=text("scope = 'public'"),
+        ),
+        Index(
+            "uq_skills_personal_owner_slug",
+            "owner_id",
+            "slug",
+            unique=True,
+            postgresql_where=text("scope = 'personal' AND deleted_at IS NULL"),
+            sqlite_where=text("scope = 'personal' AND deleted_at IS NULL"),
+        ),
+        Index(
+            "ix_skills_owner_scope_enabled",
+            "owner_id",
+            "scope",
+            "enabled",
+            "deleted_at",
+        ),
         ForeignKeyConstraint(
             ["current_version_id", "id"],
             ["skill_versions.id", "skill_versions.skill_id"],
@@ -41,10 +72,23 @@ class SkillModel(Base):
             use_alter=True,
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["owner_id"],
+            ["users.id"],
+            name="fk_skills_owner",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="public", server_default="public"
+    )
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     current_version_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
@@ -67,18 +111,21 @@ class SkillVersionModel(Base):
     __table_args__ = (
         CheckConstraint("ordinal > 0", name="ck_skill_versions_ordinal"),
         CheckConstraint(
-            "request_operation IN ('import', 'add_version')",
+            "request_operation IN "
+            "('import', 'add_version', 'personal_create', 'personal_publish')",
             name="ck_skill_versions_request_operation",
         ),
         CheckConstraint(
-            "(request_operation = 'import' AND request_target_skill_id IS NULL) OR "
-            "(request_operation = 'add_version' AND request_target_skill_id IS NOT NULL)",
+            "(request_operation IN ('import', 'personal_create') "
+            "AND request_target_skill_id IS NULL) OR "
+            "(request_operation IN ('add_version', 'personal_publish') "
+            "AND request_target_skill_id IS NOT NULL)",
             name="ck_skill_versions_request_target",
         ),
         UniqueConstraint("skill_id", "ordinal", name="uq_skill_versions_ordinal"),
         UniqueConstraint("object_key", name="uq_skill_versions_object_key"),
         UniqueConstraint("id", "skill_id", name="uq_skill_versions_id_skill"),
-        UniqueConstraint("package_sha256", name="uq_skill_versions_package_hash"),
+        Index("ix_skill_versions_package_sha256", "package_sha256"),
         UniqueConstraint(
             "created_by",
             "request_operation",

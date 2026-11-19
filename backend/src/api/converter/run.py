@@ -190,6 +190,7 @@ def run_to_response(
                     RunSkillEntryResponse(
                         skill_id=item.skill_id,
                         slug=item.slug,
+                        scope=item.scope.value,
                         name=item.name,
                         description=item.description,
                         version_id=item.version_id,

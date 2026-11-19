@@ -354,6 +354,8 @@ describe("认证流程", () => {
     const profileItem = screen.getByRole("menuitem", { name: "个人页面" });
     expect(profileItem).toHaveFocus();
     await user.keyboard("{ArrowDown}");
+    expect(screen.getByRole("menuitem", { name: "我的技能" })).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
     expect(screen.getByRole("menuitem", { name: "退出登录" })).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
@@ -392,6 +394,8 @@ describe("认证流程", () => {
     const trigger = await screen.findByRole("button", { name: "账户菜单" });
 
     await user.click(trigger);
+    await user.tab();
+    expect(screen.getByRole("menuitem", { name: "我的技能" })).toHaveFocus();
     await user.tab();
     expect(screen.getByRole("menuitem", { name: "退出登录" })).toHaveFocus();
     await user.tab();

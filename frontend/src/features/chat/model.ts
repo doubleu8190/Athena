@@ -1,4 +1,5 @@
 import type { ArtifactFileRef } from "../files/model";
+import type { SkillScope } from "../skills/model";
 
 export type MessageRole = "user" | "assistant";
 
@@ -153,6 +154,7 @@ export interface RunSkillEntry {
   version_id: string;
   version_label: string;
   requires_approval: boolean;
+  scope?: SkillScope;
 }
 
 export interface RunSkillSnapshot {

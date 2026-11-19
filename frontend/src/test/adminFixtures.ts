@@ -190,6 +190,7 @@ export function makeSkill(
     id,
     name: "销售报表",
     revision: 1,
+    scope: "public",
     script_requires_approval: false,
     slug: "sales-report",
     updated_at: "2026-11-12T01:00:00Z",

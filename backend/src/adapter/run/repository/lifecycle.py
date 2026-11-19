@@ -130,6 +130,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     skill_snapshot = await build_run_skill_snapshot(
                         session,
                         command.selected_skill_ids,
+                        owner_id=owner_id,
                     )
                     input_file_ids = await self._validate_and_merge_input_file_ids(
                         session,
@@ -1208,6 +1209,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     skill_snapshot = await build_run_skill_snapshot(
                         session,
                         selected_skill_ids,
+                        owner_id=owner_id,
                     )
                     input_file_ids = await self._validate_and_merge_input_file_ids(
                         session,
@@ -1546,8 +1548,15 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 ):
                     raise RunStateError("run_tool_call_message_invalid")
 
+                parent_skill_snapshot = (
+                    None
+                    if row.skill_snapshot is None
+                    else RunSkillSnapshot.model_validate(row.skill_snapshot)
+                )
                 # 校验每个子任务对应的 Subagent 配置、模型可用性与输入文件归属。
-                validated_items: list[tuple[str, tuple[str, ...]]] = []
+                validated_items: list[
+                    tuple[str, tuple[str, ...], RunSkillSnapshot | None]
+                ] = []
                 for item in command.items:
                     subagent_row = await session.scalar(
                         select(SubagentModel).where(
@@ -1584,7 +1593,22 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         existing=(),
                         incoming=item.input_file_ids,
                     )
-                    validated_items.append((model_profile_id, validated_files))
+                    if item.skill_snapshot is None:
+                        child_skill_snapshot = None
+                    elif parent_skill_snapshot is None:
+                        raise RunStateError("subagent_skill_snapshot_invalid")
+                    else:
+                        try:
+                            # 子 Run 只继承父 Run 已冻结条目；请求中的名称、版本和审批
+                            # 字段不可作为授权依据，必须由父快照重建。
+                            child_skill_snapshot = parent_skill_snapshot.trusted_subset(
+                                item.skill_snapshot
+                            )
+                        except ValueError as error:
+                            raise RunStateError("subagent_skill_snapshot_invalid") from error
+                    validated_items.append(
+                        (model_profile_id, validated_files, child_skill_snapshot)
+                    )
 
                 # 父 Run 行锁已覆盖本查询，派发批次必须续接同一 Run 的全局工具序号。
                 max_tool_ordinal = await session.scalar(
@@ -1620,7 +1644,9 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
 
                 child_rows: list[RunModel] = []
                 for idx, item in enumerate(command.items):
-                    model_profile_id, validated_files = validated_items[idx]
+                    model_profile_id, validated_files, child_skill_snapshot = (
+                        validated_items[idx]
+                    )
                     child_created_at = await self._next_run_created_at(session, row.session_id)
                     child = RunModel(
                         id=item.sub_run_id,
@@ -1637,8 +1663,8 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         compression_policy_version_id=None,
                         skill_snapshot=(
                             None
-                            if item.skill_snapshot is None
-                            else item.skill_snapshot.model_dump(mode="json")
+                            if child_skill_snapshot is None
+                            else child_skill_snapshot.model_dump(mode="json")
                         ),
                         input_file_ids=list(validated_files),
                         memory_project_id=None,

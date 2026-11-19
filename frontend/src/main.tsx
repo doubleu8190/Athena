@@ -9,6 +9,7 @@ import "./app/workspace.css";
 import "./features/chat/chat.css";
 import "./features/knowledge/knowledge.css";
 import "./features/admin/admin.css";
+import "./features/skills/personalSkills.css";
 
 const root = document.getElementById("root");
 

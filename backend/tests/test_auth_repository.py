@@ -451,3 +451,112 @@ def test_transaction_guard_checks_locked_user_and_session_state() -> None:
             await engine.dispose()
 
     _run(scenario())
+
+
+def test_password_change_rejects_revoked_expired_foreign_disabled_and_deleted_sessions() -> None:
+    """改密写事务内复核账号状态与当前保留会话有效性，失效身份不得改密或撤销他人会话。"""
+
+    async def scenario() -> None:
+        engine, session_factory, repository = await _make_repository()
+        try:
+            now = datetime(2026, 1, 2, tzinfo=UTC)
+            active = _user("usr_active_cp", "active-cp@example.com")
+            other_user = _user("usr_other_cp", "other-cp@example.com")
+            disabled = _user(
+                "usr_disabled_cp",
+                "disabled-cp@example.com",
+                status=UserStatus.DISABLED,
+            )
+            deleted = _user("usr_deleted_cp", "deleted-cp@example.com", deleted=True)
+
+            active_sess = _session("ses_active_1", active.id, "a" * 64)
+            active_sibling = _session("ses_active_2", active.id, "b" * 64)
+            revoked_sess = _session("ses_revoked", active.id, "c" * 64)
+            expired_sess = _session(
+                "ses_expired",
+                active.id,
+                "d" * 64,
+                expires_at=now - timedelta(seconds=1),
+            )
+            other_sess = _session("ses_other_user", other_user.id, "e" * 64)
+            disabled_sess = _session("ses_disabled", disabled.id, "f" * 64)
+            deleted_sess = _session("ses_deleted", deleted.id, "g" * 64)
+
+            await repository.create_user_with_session(active, active_sess)
+            await repository.create_session(active_sibling)
+            await repository.create_session(revoked_sess)
+            await repository.create_session(expired_sess)
+            await repository.create_user_with_session(other_user, other_sess)
+            await repository.create_user_with_session(disabled, disabled_sess)
+            await repository.create_user_with_session(deleted, deleted_sess)
+            assert await repository.revoke_session("c" * 64, now) is True
+
+            # 1. 已登出（已撤销）会话被拒绝
+            assert (
+                await repository.change_password_and_revoke_sessions(
+                    active.id,
+                    "hash:should-not-apply",
+                    now,
+                    keep_session_id=revoked_sess.id,
+                    revoked_at=now,
+                )
+                is False
+            )
+            # 2. 已过期会话被拒绝
+            assert (
+                await repository.change_password_and_revoke_sessions(
+                    active.id,
+                    "hash:should-not-apply",
+                    now,
+                    keep_session_id=expired_sess.id,
+                    revoked_at=now,
+                )
+                is False
+            )
+            # 3. 属于其他用户的会话被拒绝
+            assert (
+                await repository.change_password_and_revoke_sessions(
+                    active.id,
+                    "hash:should-not-apply",
+                    now,
+                    keep_session_id=other_sess.id,
+                    revoked_at=now,
+                )
+                is False
+            )
+            # 4. 已禁用账号被拒绝
+            assert (
+                await repository.change_password_and_revoke_sessions(
+                    disabled.id,
+                    "hash:should-not-apply",
+                    now,
+                    keep_session_id=disabled_sess.id,
+                    revoked_at=now,
+                )
+                is False
+            )
+            # 5. 已软删除账号被拒绝
+            assert (
+                await repository.change_password_and_revoke_sessions(
+                    deleted.id,
+                    "hash:should-not-apply",
+                    now,
+                    keep_session_id=deleted_sess.id,
+                    revoked_at=now,
+                )
+                is False
+            )
+
+            # 所有拒绝分支均不得修改原密码或撤销其他有效会话。
+            stored = await repository.get_user_by_email("active-cp@example.com")
+            assert stored is not None and stored.password_hash == "hash:old-password"
+            assert await repository.get_active_session("a" * 64, now) is not None
+            assert await repository.get_active_session("b" * 64, now) is not None
+            async with session_factory() as db_session:
+                disabled_row = await db_session.get(UserModel, disabled.id)
+                assert disabled_row is not None
+                assert disabled_row.password_hash == "hash:old-password"
+        finally:
+            await engine.dispose()
+
+    _run(scenario())

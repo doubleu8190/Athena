@@ -7,8 +7,9 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
 from contextlib import asynccontextmanager
+from http.cookies import CookieError, SimpleCookie
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -26,7 +27,7 @@ from api.messages import build_message_router
 from api.project_knowledge import build_project_knowledge_router
 from api.projects import build_project_router
 from api.runs import build_run_router
-from api.security import DEFAULT_COOKIE_NAME
+from api.security import DEFAULT_COOKIE_NAME, NOT_AUTHENTICATED
 from api.sessions import build_session_router
 from api.skill import (
     build_skill_admin_router,
@@ -52,6 +53,7 @@ from app.tool import ToolManager
 from bootstrap.api import ApiDependencies, build_api_dependencies
 from bootstrap.config import env_flag, env_int
 from common.ids import new_id
+from domain.auth import Authenticator, UserRole
 from domain.knowledge.ports import KnowledgeUploadSlotRepository
 from domain.skill import MAX_PERSONAL_MARKDOWN_BYTES
 
@@ -61,21 +63,83 @@ _PERSONAL_MARKDOWN_MULTIPART_OVERHEAD = 64 * 1024
 _PERSONAL_JSON_MAXIMUM = 2 * 1024 * 1024
 
 
+def _extract_cookie_token(scope: dict[str, object], cookie_name: str) -> str | None:
+    """从 ASGI scope 的 Cookie 请求头中安全提取指定名称的会话令牌。"""
+    raw_headers = scope.get("headers")
+    if not isinstance(raw_headers, Iterable):
+        return None
+    token: str | None = None
+    for item in raw_headers:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        name, value = item
+        if not isinstance(name, bytes) or not isinstance(value, bytes):
+            continue
+        if name.lower() != b"cookie":
+            continue
+        decoded = value.decode("latin-1")
+        # 按分号逐段解析，防止单个畸形 Cookie 截断后续有效会话 Cookie。
+        for segment in decoded.split(";"):
+            part = segment.strip()
+            if not part:
+                continue
+            jar: SimpleCookie = SimpleCookie()
+            try:
+                jar.load(part)
+            except CookieError:
+                continue
+            morsel = jar.get(cookie_name)
+            if morsel is not None and morsel.value:
+                token = morsel.value
+    return token
+
+
 class _KnowledgeUploadLimitMiddleware:
-    """在 Starlette 解析 multipart 字段前限制原始请求体。"""
+    """在 Starlette 解析 multipart 字段前执行鉴权预检、并发准入与请求体限流。"""
 
     _maximum = 22 * 1024 * 1024  # 20 MiB file plus bounded multipart metadata.
+    _local_slot_limits: dict[str, int] = {
+        "knowledge": 4,
+        "skill": 2,
+        "session_file": 4,
+        "personal_markdown": 4,
+        "personal_json": 8,
+    }
+    _capacity_error_codes: dict[str, str] = {
+        "knowledge": "knowledge_upload_capacity_exceeded",
+        "skill": "skill_upload_capacity_exceeded",
+        "session_file": "session_file_upload_capacity_exceeded",
+        "personal_markdown": "upload_capacity_exceeded",
+        "personal_json": "upload_capacity_exceeded",
+    }
+    _timeout_error_codes: dict[str, str] = {
+        "knowledge": "knowledge_upload_timeout",
+        "skill": "skill_upload_timeout",
+        "session_file": "session_file_upload_timeout",
+        "personal_markdown": "upload_timeout",
+        "personal_json": "upload_timeout",
+    }
 
     def __init__(
         self,
         app: object,
         repository: KnowledgeUploadSlotRepository | None = None,
+        *,
+        authenticator: Authenticator | None = None,
+        cookie_name: str = DEFAULT_COOKIE_NAME,
     ) -> None:
         self.app = app
         self._repository = repository
-        self._local_slots = asyncio.Semaphore(4)
+        self._authenticator = authenticator
+        self._cookie_name = cookie_name
+        # 按 upload_kind 独立维护占用计数；事件循环单线程内同步增减实现零排队快速失败。
+        self._local_active: dict[str, int] = dict.fromkeys(self._local_slot_limits, 0)
 
     async def __call__(self, scope: dict[str, object], receive: object, send: object) -> None:
+        scope_type = scope.get("type")
+        if scope_type is not None and scope_type != "http":
+            await self.app(scope, receive, send)  # type: ignore[operator]
+            return
         path = str(scope.get("path", ""))
         method = str(scope.get("method", ""))
         knowledge_upload = path.startswith("/api/v1/knowledge-bases/") and (
@@ -124,6 +188,24 @@ class _KnowledgeUploadLimitMiddleware:
         receive_fn = receive
         send_fn = send
         assert callable(receive_fn) and callable(send_fn)
+        # 鉴权前置：在磁盘检查、槽位占用和读取任何请求体之前拦截未登录与非管理员请求。
+        if self._authenticator is not None:
+            token = _extract_cookie_token(scope, self._cookie_name)
+            if not token:
+                await _send_json(send_fn, 401, NOT_AUTHENTICATED)
+                return
+            try:
+                context = await self._authenticator.authenticate(token)
+            except (SQLAlchemyError, OSError):
+                logger.error("database_unavailable path=%s", path)
+                await _send_json(send_fn, 503, "database_unavailable")
+                return
+            if context is None:
+                await _send_json(send_fn, 401, NOT_AUTHENTICATED)
+                return
+            if upload_kind == "skill" and context.user.role is not UserRole.ADMIN:
+                await _send_json(send_fn, 403, "admin_required")
+                return
         if upload_kind == "knowledge":
             minimum_free_bytes = env_int(
                 "ATHENA_KNOWLEDGE_UPLOAD_MIN_FREE_BYTES",
@@ -139,18 +221,23 @@ class _KnowledgeUploadLimitMiddleware:
                 await _send_json(send_fn, 503, "knowledge_upload_storage_unavailable")
                 return
         slot_token = new_id("kuslot")
+        use_local_slot = upload_kind != "knowledge" or self._repository is None
         acquired = False
-        if upload_kind != "knowledge" or self._repository is None:
-            await self._local_slots.acquire()
-            acquired = True
+        if use_local_slot:
+            # 按 upload_kind 独立限额快速失败，避免慢连接在共享信号量上无限排队阻塞其他上传。
+            limit = self._local_slot_limits[upload_kind]
+            if self._local_active[upload_kind] < limit:
+                self._local_active[upload_kind] += 1
+                acquired = True
         else:
+            assert self._repository is not None
             try:
                 acquired = await self._repository.acquire_upload_slot(slot_token, lease_seconds=900)
             except Exception:
                 await _send_json(send_fn, 503, "knowledge_upload_admission_unavailable")
                 return
         if not acquired:
-            await _send_json(send_fn, 429, "knowledge_upload_capacity_exceeded")
+            await _send_json(send_fn, 429, self._capacity_error_codes[upload_kind])
             return
         response_started = False
 
@@ -194,11 +281,12 @@ class _KnowledgeUploadLimitMiddleware:
                     await self.app(scope, replay, tracked_send)  # type: ignore[operator]
         except TimeoutError:
             if not response_started:
-                await _send_json(tracked_send, 504, "knowledge_upload_timeout")
+                await _send_json(tracked_send, 504, self._timeout_error_codes[upload_kind])
         finally:
-            if upload_kind != "knowledge" or self._repository is None:
-                self._local_slots.release()
+            if use_local_slot:
+                self._local_active[upload_kind] -= 1
             else:
+                assert self._repository is not None
                 try:
                     await asyncio.shield(self._repository.release_upload_slot(slot_token))
                 except Exception:
@@ -342,6 +430,8 @@ def create_app(
     app.add_middleware(
         _KnowledgeUploadLimitMiddleware,
         repository=deps.knowledge_upload_slots,
+        authenticator=deps.auth_service,
+        cookie_name=DEFAULT_COOKIE_NAME,
     )
     app.add_exception_handler(SQLAlchemyError, _handle_database_unavailable)
     app.add_exception_handler(OSError, _handle_os_error)

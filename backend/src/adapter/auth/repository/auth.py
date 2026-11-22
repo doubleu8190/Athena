@@ -197,13 +197,20 @@ class SqlAlchemyAuthRepository(AuthRepository, CurrentSessionReader):
         keep_session_id: str,
         revoked_at: datetime,
     ) -> bool:
-        """原子更新密码并撤销其他设备会话。"""
+        """在写事务内锁定并复核用户与当前保留会话后，原子更新密码并撤销其他设备会话。"""
         async with self._session_factory() as session:
             async with session.begin():
+                # 复用事务守卫锁定 users 与 auth_sessions 行，复核账号 active/未删除及
+                # keep_session_id 仍归属该用户且未撤销、未过期，防止并发登出或封禁后仍改密。
+                guard = SqlAlchemyAuthTransactionGuard(session, clock=lambda: updated_at)
+                current_user = await guard.lock_current_session_user(user_id, keep_session_id)
+                if current_user is None:
+                    return False
                 updated_user_id = await session.scalar(
                     update(UserModel)
                     .where(
                         UserModel.id == user_id,
+                        UserModel.status == UserStatus.ACTIVE.value,
                         UserModel.deleted_time.is_(None),
                     )
                     .values(

@@ -254,6 +254,7 @@ def build_auth_router(
             InvalidPasswordError,
             InvalidCurrentPasswordError,
             InvalidSessionError,
+            RateLimitExceededError,
         ) as error:
             _raise_auth_error(error)
         response = Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1032,3 +1032,104 @@ locked_directory.chmod(0o500)
         if locked_directory.exists():
             locked_directory.chmod(0o700)
         shutil.rmtree(working_directory, ignore_errors=True)
+
+
+def test_script_execution_isolates_environment_and_interpreter_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """子进程不得读取宿主敏感环境变量或 PYTHONPATH，且保持同包 helper 与 venv 依赖可用。"""
+    rogue_dir = tmp_path / "rogue_pythonpath"
+    rogue_dir.mkdir()
+    (rogue_dir / "rogue_injected_module.py").write_text("SECRET = 'pwned'\n", encoding="utf-8")
+
+    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql://secret-user:secret-pass@db/athena")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "super-secret-mcp-key")
+    monkeypatch.setenv("ATHENA_FILE_MINIO_SECRET_KEY", "super-secret-minio-key")
+    monkeypatch.setenv("PYTHONPATH", str(rogue_dir))
+
+    script = """
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import helper
+import pydantic
+
+rogue_import_blocked = False
+try:
+    import rogue_injected_module  # type: ignore[import-not-found]
+except ModuleNotFoundError:
+    rogue_import_blocked = True
+
+input_path = Path(os.environ["ATHENA_INPUT_PATH"])
+payload = json.loads(input_path.read_text(encoding="utf-8"))
+output_dir = Path(payload["output_dir"])
+(output_dir / "manifest.json").write_text('{"outputs": []}', encoding="utf-8")
+
+# 校验受控 HOME / TMPDIR 可写且位于工作目录内。
+home_dir = Path(os.environ["HOME"])
+tmp_dir = Path(os.environ["TMPDIR"])
+(home_dir / "probe.txt").write_text("home-ok", encoding="utf-8")
+(tmp_dir / "probe.txt").write_text("tmp-ok", encoding="utf-8")
+
+observation = {
+    "env_keys": sorted(os.environ.keys()),
+    "has_db_url": "ATHENA_DATABASE_URL" in os.environ,
+    "has_mcp_key": "ATHENA_MCP_SECRET_KEY" in os.environ,
+    "has_minio_key": "ATHENA_FILE_MINIO_SECRET_KEY" in os.environ,
+    "has_pythonpath": "PYTHONPATH" in os.environ,
+    "input_path": str(input_path),
+    "home": str(home_dir),
+    "tmpdir": str(tmp_dir),
+    "resolved_tempdir": str(Path(tempfile.gettempdir()).resolve()),
+    "helper_value": helper.VALUE,
+    "pydantic_version": pydantic.__version__,
+    "rogue_import_blocked": rogue_import_blocked,
+    "ignore_environment": sys.flags.ignore_environment,
+    "no_user_site": sys.flags.no_user_site,
+    "dont_write_bytecode": sys.dont_write_bytecode,
+    "utf8_mode": sys.flags.utf8_mode,
+    "pycache_exists": (Path(__file__).resolve().parent / "__pycache__").exists(),
+}
+print(json.dumps(observation, ensure_ascii=False, sort_keys=True))
+"""
+    working_directory, output_directory = _prepare_workspace(tmp_path, script)
+    (working_directory / "scripts" / "helper.py").write_text(
+        "VALUE = 'helper-loaded'\n", encoding="utf-8"
+    )
+    request = _request(working_directory, output_directory)
+
+    async def scenario() -> None:
+        executor = PythonScriptExecutor()
+        async with executor.execute(request) as result:
+            assert result.succeeded, result.stderr.decode("utf-8", errors="replace")
+            observation = json.loads(result.stdout.decode("utf-8"))
+            assert observation["has_db_url"] is False
+            assert observation["has_mcp_key"] is False
+            assert observation["has_minio_key"] is False
+            assert observation["has_pythonpath"] is False
+            assert all(
+                key == "ATHENA_INPUT_PATH"
+                for key in observation["env_keys"]
+                if key.startswith("ATHENA_")
+            )
+            resolved_work = working_directory.resolve()
+            assert Path(observation["home"]).parent == resolved_work
+            assert Path(observation["tmpdir"]).parent == resolved_work
+            assert Path(observation["resolved_tempdir"]) == Path(observation["tmpdir"]).resolve()
+            assert observation["input_path"] == str(resolved_work / "input.json")
+            assert observation["helper_value"] == "helper-loaded"
+            assert bool(observation["pydantic_version"])
+            assert observation["rogue_import_blocked"] is True
+            assert observation["ignore_environment"] == 1
+            assert observation["no_user_site"] == 1
+            assert observation["dont_write_bytecode"] is True
+            assert observation["utf8_mode"] == 1
+            assert observation["pycache_exists"] is False
+            assert tuple(result.outputs) == ()
+
+    asyncio.run(scenario())
+    assert not working_directory.exists()

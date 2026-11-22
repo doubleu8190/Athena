@@ -559,3 +559,30 @@ def test_me_requires_authentication_and_password_requires_current_password() -> 
     assert unauthenticated.json() == {"detail": "not_authenticated"}
     assert wrong_current.status_code == 400
     assert wrong_current.json() == {"detail": "current_password_invalid"}
+
+
+def test_change_password_api_returns_429_after_repeated_failures() -> None:
+    """改密接口连续 5 次当前密码错误后，第 6 次请求返回 429 rate_limited。"""
+    service = _service()
+    with TestClient(_app(service)) as client:
+        _register(client)
+        for _ in range(5):
+            resp = client.post(
+                "/api/v1/auth/password",
+                json={
+                    "current_password": "wrong-current-password",
+                    "new_password": "new-long-enough-password",
+                },
+            )
+            assert resp.status_code == 400
+            assert resp.json() == {"detail": "current_password_invalid"}
+        limited = client.post(
+            "/api/v1/auth/password",
+            json={
+                "current_password": "long-enough-password",
+                "new_password": "new-long-enough-password",
+            },
+        )
+
+    assert limited.status_code == 429
+    assert limited.json() == {"detail": "rate_limited"}

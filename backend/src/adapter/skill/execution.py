@@ -52,6 +52,10 @@ _MANIFEST_READ_CHUNK_CHARACTERS = 64 * 1024
 _PROCESS_GROUP_EXIT_SECONDS = 1.0
 _DIRECT_PROCESS_CLEANUP_SECONDS = 0.5
 _MANIFEST_STAGE_DATABASE = ".athena-manifest.sqlite3"
+_SCRIPT_HOME_DIRECTORY = ".athena-home"
+_SCRIPT_TMP_DIRECTORY = ".athena-tmp"
+# 仅透传 POSIX/venv 正常运行所需的最小宿主环境变量，彻底阻断 ATHENA_* 密钥与 PYTHON* 污染。
+_ALLOWED_HOST_ENV_NAMES = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,8 @@ class _PreparedExecution:
     input_path: Path
     input_files: tuple[tuple[str, Path], ...]
     output_directory: Path
+    home_directory: Path
+    temp_directory: Path
 
 
 @dataclass(slots=True)
@@ -548,12 +554,21 @@ class PythonScriptExecutor(ScriptExecutionPort):
         )
 
         try:
-            environment = os.environ.copy()
-            environment["ATHENA_INPUT_PATH"] = str(prepared.input_path)
+            # 严格使用白名单构造子进程环境，不复制宿主 os.environ，
+            # 防止泄漏数据库/对象存储/MCP 凭据。
+            environment = self._build_script_environment(prepared)
             log_pipes = await self._open_log_pipes()
             launch_task = asyncio.create_task(
                 asyncio.create_subprocess_exec(
                     str(self._python_executable),
+                    # -E 忽略 PYTHON* 变量，-s 禁用用户 site-packages，
+                    # -B 禁止写 .pyc，-X utf8 强制 UTF-8；
+                    # 不加 -I 以保留 scripts/ 同包模块导入及 venv 第三方依赖解析。
+                    "-E",
+                    "-s",
+                    "-B",
+                    "-X",
+                    "utf8",
                     str(prepared.script_path),
                     cwd=str(prepared.working_directory),
                     env=environment,
@@ -752,12 +767,25 @@ class PythonScriptExecutor(ScriptExecutionPort):
                 input_files=input_files,
                 output_directory=output_directory,
             )
+            # 在独占工作目录内创建受控 HOME 与 TMPDIR，避免子进程污染宿主目录并随工作目录统一清理。
+            home_directory = self._prepare_private_directory(
+                working_root,
+                _SCRIPT_HOME_DIRECTORY,
+                output_directory=output_directory,
+            )
+            temp_directory = self._prepare_private_directory(
+                working_root,
+                _SCRIPT_TMP_DIRECTORY,
+                output_directory=output_directory,
+            )
             return _PreparedExecution(
                 working_directory=working_root,
                 script_path=script_path,
                 input_path=input_path,
                 input_files=input_files,
                 output_directory=output_directory,
+                home_directory=home_directory,
+                temp_directory=temp_directory,
             )
         except Exception as error:
             # 请求进入目录准备阶段后即由本次执行独占；任何准备失败都要先删除该目录。
@@ -773,6 +801,37 @@ class PythonScriptExecutor(ScriptExecutionPort):
                         (cleanup_issue,),
                     ) from error
             raise
+
+    @staticmethod
+    def _build_script_environment(prepared: _PreparedExecution) -> dict[str, str]:
+        """按严格白名单构造子进程环境变量，禁止透传宿主业务凭据与 PYTHON* 变量。"""
+        environment: dict[str, str] = {}
+        for name in _ALLOWED_HOST_ENV_NAMES:
+            value = os.environ.get(name)
+            if value is not None:
+                environment[name] = value
+        environment["HOME"] = str(prepared.home_directory)
+        environment["TMPDIR"] = str(prepared.temp_directory)
+        environment["ATHENA_INPUT_PATH"] = str(prepared.input_path)
+        return environment
+
+    def _prepare_private_directory(
+        self,
+        working_root: Path,
+        name: str,
+        *,
+        output_directory: Path,
+    ) -> Path:
+        """在工作目录内独占创建权限收紧的运行时隔离目录（HOME/TMPDIR）。"""
+        candidate = working_root / name
+        if candidate == output_directory:
+            raise ScriptExecutionConfigurationError("script_output_directory_invalid")
+        self._reject_existing_symlink_components(working_root, candidate)
+        try:
+            os.mkdir(candidate, 0o700)
+        except OSError as error:
+            raise ScriptExecutionConfigurationError("script_working_directory_invalid") from error
+        return candidate.resolve(strict=True)
 
     def _persist_process_diagnostic(
         self,

@@ -545,3 +545,46 @@ def test_admin_revalidation_reads_current_role_and_rejects_revoked_session() -> 
         assert await service.revalidate_admin(context) is None
 
     _run(scenario())
+
+
+def test_change_password_rate_limits_failures_and_resets_on_success() -> None:
+    """改密按 user_id 限制连续失败次数（默认 5 次触发限流），改密成功后重置计数。"""
+
+    async def scenario() -> None:
+        service, _, _, _ = _service()
+        issued = await service.register("user@example.com", "long-enough-password")
+        context = await service.authenticate(issued.token)
+        assert context is not None
+
+        # 前 4 次错密码均报 InvalidCurrentPasswordError，第 5 次正确改密后应重置计数窗口。
+        for _ in range(4):
+            with pytest.raises(InvalidCurrentPasswordError):
+                await service.change_password(
+                    context,
+                    "wrong-current-password",
+                    "next-long-enough-password",
+                )
+        await service.change_password(
+            context,
+            "long-enough-password",
+            "next-long-enough-password",
+        )
+
+        # 刷新上下文，验证重置后仍拥有完整的 5 次尝试额度，第 6 次触发 RateLimitExceededError。
+        refreshed = await service.authenticate(issued.token)
+        assert refreshed is not None
+        for _ in range(5):
+            with pytest.raises(InvalidCurrentPasswordError):
+                await service.change_password(
+                    refreshed,
+                    "wrong-current-password",
+                    "third-long-enough-password",
+                )
+        with pytest.raises(RateLimitExceededError):
+            await service.change_password(
+                refreshed,
+                "next-long-enough-password",
+                "third-long-enough-password",
+            )
+
+    _run(scenario())

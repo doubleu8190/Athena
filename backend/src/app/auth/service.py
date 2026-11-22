@@ -136,6 +136,7 @@ class AuthService:
         login_account_limiter: RateLimiter | None = None,
         login_ip_limiter: RateLimiter | None = None,
         register_limiter: RateLimiter | None = None,
+        change_password_limiter: RateLimiter | None = None,
     ) -> None:
         """保存仓储、密码哈希器、限流器及可替换来源。"""
         self._repository = repository
@@ -156,6 +157,10 @@ class AuthService:
         self._register_limiter = register_limiter or FixedWindowRateLimiter(
             limit=10,
             window_seconds=60 * 60,
+        )
+        self._change_password_limiter = change_password_limiter or FixedWindowRateLimiter(
+            limit=5,
+            window_seconds=15 * 60,
         )
 
     async def register(
@@ -325,6 +330,10 @@ class AuthService:
         new_password: str,
     ) -> None:
         """校验当前密码并撤销其他设备会话。"""
+        rate_limit_key = f"change_password:user:{context.user.id}"
+        # 按 user_id 限制改密失败次数，在进入 Argon2 校验前拦截暴力猜测。
+        if not self._change_password_limiter.consume(rate_limit_key):
+            raise RateLimitExceededError("rate_limited")
         if not current_password or len(current_password) > MAX_PASSWORD_LENGTH:
             raise InvalidCurrentPasswordError("current_password_invalid")
         if not await self._run_password_operation(
@@ -334,19 +343,22 @@ class AuthService:
         ):
             raise InvalidCurrentPasswordError("current_password_invalid")
         validated_password = _validate_password(new_password)
+        password_hash = await self._run_password_operation(
+            self._password_hasher.hash_password,
+            validated_password,
+        )
         current = _utc_value(self._clock())
         changed = await self._repository.change_password_and_revoke_sessions(
             context.user.id,
-            await self._run_password_operation(
-                self._password_hasher.hash_password,
-                validated_password,
-            ),
+            password_hash,
             current,
             keep_session_id=context.session_id,
             revoked_at=current,
         )
         if not changed:
             raise InvalidSessionError("invalid_session")
+        # 改密成功后重置当前用户的失败计数窗口。
+        self._change_password_limiter.reset(rate_limit_key)
 
     async def update_display_name(
         self,

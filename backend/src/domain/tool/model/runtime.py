@@ -56,7 +56,13 @@ class RuntimeToolDefinition(BaseModel):
     @field_validator("description")
     @classmethod
     def _clean_description(cls, value: str) -> str:
-        return "".join(character for character in value if unicodedata.category(character) != "Cc")
+        # 规范换行并保留 \n 与 \t，避免破坏多行工具说明，同时剔除其余 Cc 控制字符。
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+        return "".join(
+            character
+            for character in normalized
+            if character in {"\n", "\t"} or unicodedata.category(character) != "Cc"
+        )
 
     @field_validator("model_name")
     @classmethod

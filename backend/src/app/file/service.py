@@ -413,6 +413,10 @@ class SessionFileService:
         if output_index < 0:
             raise FileInputError("session_file_output_index_invalid")
         safe_filename = sanitize_filename(filename)
+        # 脚本产物与用户上传统一执行单文件 50 MiB 上限，先于内容检查与对象上传拦截超大文件。
+        size = await asyncio.to_thread(lambda: path.stat().st_size)
+        if size < 0 or size > MAX_SESSION_FILE_BYTES:
+            raise FileInputError("session_file_too_large")
         inspection = await _inspect_file_cancellable(
             path,
             safe_filename,
@@ -420,6 +424,8 @@ class SessionFileService:
         )
         mime_type = inspection.mime_type
         size = inspection.size_bytes
+        if size < 0 or size > MAX_SESSION_FILE_BYTES:
+            raise FileInputError("session_file_too_large")
         digest = inspection.sha256
         file_id = self._id_factory("file")
         call_digest = hashlib.sha256(source_call_id.encode("utf-8")).hexdigest()

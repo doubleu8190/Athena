@@ -471,6 +471,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         timeout: float,
     ) -> dict[str, Any]:
         """构造无工具、非流式的完整响应请求参数。"""
+        # 严格遵循 OpenAI Chat Completions 规范：无工具请求不发送空 tools 与孤立 tool_choice。
         return {
             **cls._common_request_parameters(
                 config,
@@ -478,8 +479,6 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 request,
                 timeout=timeout,
             ),
-            "tools": [],
-            "tool_choice": "none",
             "stream": False,
         }
 
@@ -491,19 +490,25 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         timeout: float,
     ) -> dict[str, Any]:
         """构造携带工具配置与 usage 尾分片的流式请求参数。"""
-        return {
+        parameters: dict[str, Any] = {
             **self._common_request_parameters(
                 config,
                 self._messages(request.messages),
                 request,
                 timeout=timeout,
             ),
-            "tools": self._tools(request),
-            "tool_choice": self._tool_choice(request),
-            "parallel_tool_calls": config.supports_parallel_tool_calls,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        tool_choice = self._tool_choice(request)
+        tools = self._tools(request)
+        # 仅在提供至少一个工具定义时才发送 tools、tool_choice 与 parallel_tool_calls，
+        # 避免严格 OpenAI 兼容网关拒绝空 tools 数组或无工具时的 tool_choice 字段。
+        if tools:
+            parameters["tools"] = tools
+            parameters["tool_choice"] = tool_choice
+            parameters["parallel_tool_calls"] = config.supports_parallel_tool_calls
+        return parameters
 
     @staticmethod
     def _usage(raw_usage: Any) -> LlmUsage | None:

@@ -1321,7 +1321,68 @@ def test_sdk_wire_final_request_uses_no_tools_and_disables_retries() -> None:
 
         assert sdk.max_retries == 0
         assert len(requests) == 1
-        assert requests[0]["tools"] == []
+        assert "tools" not in requests[0]
+        assert "tool_choice" not in requests[0]
+        assert "parallel_tool_calls" not in requests[0]
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
+def test_sdk_wire_stream_request_keeps_tools_and_tool_choice_none_when_tools_provided() -> None:
+    """提供工具且 tool_choice='none' 时，流式请求正常携带 tools 与 tool_choice='none'。"""
+
+    async def run() -> None:
+        requests: list[dict[str, Any]] = []
+
+        async def handle(request: httpx2.Request) -> httpx2.Response:
+            requests.append(cast(dict[str, Any], json.loads(request.content)))
+            body = (
+                'data: {"id":"chatcmpl_none","object":"chat.completion.chunk",'
+                '"created":1,"model":"test-model","choices":[{"index":0,'
+                '"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n'
+                "data: [DONE]\n\n"
+            )
+            return httpx2.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=body.encode(),
+                request=request,
+            )
+
+        runtime = runtime_profile()
+        adapter = OpenAIChatCompletionsAdapter()
+        sdk = AsyncOpenAI(
+            api_key=runtime.api_key,
+            base_url=runtime.version.base_url,
+            max_retries=0,
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)),
+        )
+        adapter._clients[
+            (
+                runtime.version.base_url,
+                hashlib.sha256(runtime.api_key.encode()).hexdigest(),
+            )
+        ] = sdk
+        request = LlmRequest(
+            "unused",
+            (LlmMessage(LlmRole.USER, "answer without calling tools"),),
+            tools=(
+                LlmTool(
+                    "lookup",
+                    "Lookup helper",
+                    {"type": "object", "properties": {}, "additionalProperties": False},
+                ),
+            ),
+            tool_choice="none",
+        )
+
+        async with adapter.stream(runtime, request) as events:
+            _ = [event async for event in events]
+
+        assert len(requests) == 1
+        assert len(requests[0]["tools"]) == 1
+        assert requests[0]["tools"][0]["function"]["name"] == "lookup"
         assert requests[0]["tool_choice"] == "none"
         assert requests[0]["parallel_tool_calls"] is False
         await adapter.aclose()
@@ -1459,7 +1520,9 @@ def test_complete_allows_runtime_without_stream_or_tool_capabilities() -> None:
 
     async def create(**kwargs: object) -> object:
         assert kwargs["stream"] is False
-        assert kwargs["tools"] == []
+        assert "tools" not in kwargs
+        assert "tool_choice" not in kwargs
+        assert "parallel_tool_calls" not in kwargs
         assert kwargs["timeout"] == runtime.version.request_timeout_seconds
         return response
 

@@ -34,6 +34,7 @@ from app.tool.runtime import (
 )
 from common.ids import new_id, now_utc
 from common.json import utf8_size
+from domain.file import PendingSessionFile
 from domain.llm.model import (
     LlmError,
     LlmProviderError,
@@ -90,7 +91,7 @@ from domain.run.model import (
 )
 from domain.run.model.errors import RunConflictError, RunInputResourceError, RunStateError
 from domain.run.ports import RunEventTransport, RunRepository
-from domain.skill import SKILL_EXECUTE_TOOL_ID, RunSkillPromptContext
+from domain.skill import SKILL_EXECUTE_TOOL_ID, RunSkillPromptContext, SkillExecutionStatus
 from domain.subagent import SubagentRepository
 from domain.system_prompt import SystemPromptRepository
 from domain.tool import (
@@ -1343,29 +1344,75 @@ class RunExecutor:
             )
         )
         # 原子写入结果消息、事件与记录终态；返回 None 表示租约已丢失。
-        finished = await self._repository.finish_tool_call(
-            FinishToolCallCommand(
-                run_id=state.run.id,
-                worker_id=state.run.worker_id or "",
-                execution_epoch=state.run.execution_epoch,
-                record_id=call.record.id,
-                result_message=self._tool_result_draft(
-                    state,
-                    tool_call_id=call.record.tool_call_id,
+        try:
+            finished = await self._repository.finish_tool_call(
+                FinishToolCallCommand(
+                    run_id=state.run.id,
+                    worker_id=state.run.worker_id or "",
+                    execution_epoch=state.run.execution_epoch,
+                    record_id=call.record.id,
+                    result_message=self._tool_result_draft(
+                        state,
+                        tool_call_id=call.record.tool_call_id,
+                        outcome=outcome,
+                        created_at=finished_at,
+                        thread_id=thread_id,
+                        artifacts=artifact_refs,
+                    ),
                     outcome=outcome,
-                    created_at=finished_at,
-                    thread_id=thread_id,
-                    artifacts=artifact_refs,
-                ),
-                outcome=outcome,
-                finished_at=finished_at,
-                artifacts=result.artifacts,
-                delivery_message=delivery_message,
-                skill_execution_completion=result.skill_execution_completion,
-                terminate_error_code=result.terminate_run_error_code,
-                defer_terminal_convergence=True,
+                    finished_at=finished_at,
+                    artifacts=result.artifacts,
+                    delivery_message=delivery_message,
+                    skill_execution_completion=result.skill_execution_completion,
+                    terminate_error_code=result.terminate_run_error_code,
+                    defer_terminal_convergence=True,
+                )
             )
-        )
+        except (ValueError, RunStateError) as error:
+            if str(error) != "session_file_quota_exceeded" or not result.artifacts:
+                raise
+            # 会话文件数量达到配额上限导致事务回滚：先清理本次刚上传至对象存储的临时产物，
+            # 再将本次工具调用与脚本审计收敛为配额错误，防止 MinIO 孤儿对象和未收口审计行。
+            await self._abandon_artifacts_safely(result.artifacts)
+            outcome = ToolOutcome(
+                status=ToolOutcomeStatus.ERROR,
+                code="session_file_quota_exceeded",
+                message="当前会话的文件数量已达上限，无法保存本次脚本产物。",
+                cleanup_error_code=outcome.cleanup_error_code,
+            )
+            quota_completion = (
+                None
+                if result.skill_execution_completion is None
+                else result.skill_execution_completion.model_copy(
+                    update={
+                        "status": SkillExecutionStatus.FAILED,
+                        "error_code": "session_file_quota_exceeded",
+                    }
+                )
+            )
+            finished = await self._repository.finish_tool_call(
+                FinishToolCallCommand(
+                    run_id=state.run.id,
+                    worker_id=state.run.worker_id or "",
+                    execution_epoch=state.run.execution_epoch,
+                    record_id=call.record.id,
+                    result_message=self._tool_result_draft(
+                        state,
+                        tool_call_id=call.record.tool_call_id,
+                        outcome=outcome,
+                        created_at=finished_at,
+                        thread_id=thread_id,
+                        artifacts=(),
+                    ),
+                    outcome=outcome,
+                    finished_at=finished_at,
+                    artifacts=(),
+                    delivery_message=None,
+                    skill_execution_completion=quota_completion,
+                    terminate_error_code=result.terminate_run_error_code,
+                    defer_terminal_convergence=True,
+                )
+            )
         if finished is None:
             stop_dispatch.set()
             return _BatchCallResult(call.record.id, call.record.ordinal, lease_lost=True)
@@ -1386,6 +1433,25 @@ class RunExecutor:
                 )
             ),
         )
+
+    async def _abandon_artifacts_safely(
+        self,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> None:
+        """尽力清理落库失败的临时产物对象，清理异常不影响调用状态收敛。"""
+        if not artifacts or self._tool_runtime is None:
+            return
+        abandon = getattr(self._tool_runtime, "abandon_artifacts", None)
+        if not callable(abandon):
+            return
+        try:
+            await abandon(artifacts)
+        except Exception as error:
+            logger.warning(
+                "run_tool_artifact_abandon_failed count=%d exception_type=%s",
+                len(artifacts),
+                type(error).__name__,
+            )
 
     async def _execute_tool(
         self,

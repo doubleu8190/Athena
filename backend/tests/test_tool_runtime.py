@@ -14,6 +14,7 @@ from app.memory.service import MemoryService
 from app.project.knowledge import ProjectKnowledgeService
 from app.tool.runtime import (
     KNOWLEDGE_SEARCH_DEFINITION,
+    MCP_DELIVERY_AUTH_ERROR,
     MEMORY_CORRECT_DEFINITION,
     MEMORY_FORGET_DEFINITION,
     MEMORY_REMEMBER_DEFINITION,
@@ -1549,7 +1550,9 @@ def test_knowledge_search_drops_body_when_scope_recheck_fails() -> None:
     asyncio.run(scenario())
 
 
-def test_mcp_known_success_survives_revocation_but_builtin_content_is_dropped() -> None:
+def test_mcp_and_builtin_drop_content_when_delivery_auth_revoked() -> None:
+    """MCP 与内置工具在交付前权限撤销时均必须丢弃原始载荷并终止 Run。"""
+
     async def scenario() -> None:
         auth = _Auth()
         auth.allow_next_calls(1)
@@ -1557,7 +1560,7 @@ def test_mcp_known_success_survives_revocation_but_builtin_content_is_dropped() 
             McpCallResult(
                 McpCallStatus.OK,
                 "mcp_tool_completed",
-                text="known external effect",
+                text="sensitive mcp payload",
             )
         )
         catalog = _McpCatalog((_mcp_snapshot_definition(),))
@@ -1574,9 +1577,11 @@ def test_mcp_known_success_survives_revocation_but_builtin_content_is_dropped() 
             deadline_seconds=1,
             run_remaining_seconds=10,
         )
-        assert mcp.outcome.status is ToolOutcomeStatus.OK
-        assert mcp.outcome.data["text"] == "known external effect"
-        assert mcp.terminate_run_error_code == "run_auth_session_invalid"
+        assert mcp.outcome.status is ToolOutcomeStatus.ERROR
+        assert mcp.outcome.code == "tool_permission_revoked"
+        assert mcp.outcome.data == {}
+        assert "sensitive mcp payload" not in mcp.outcome.canonical_output()
+        assert mcp.terminate_run_error_code == MCP_DELIVERY_AUTH_ERROR
         assert catalog.target_requests == [("tool_lookup", "mcp_1", "remote_lookup", 2)]
 
         memory = _Memory(
@@ -1626,6 +1631,88 @@ def test_mcp_known_success_survives_revocation_but_builtin_content_is_dropped() 
     asyncio.run(scenario())
 
 
+def test_mcp_delivery_auth_timeout_exhausted_and_error_discard_payload() -> None:
+    """MCP 交付前鉴权超时、剩余时间耗尽或抛异常时，均不得回传原始载荷。"""
+
+    class _SlowOrFailingAuth(_Auth):
+        def __init__(self, *, mode: Literal["timeout", "error"]) -> None:
+            super().__init__()
+            self._mode = mode
+
+        async def get_current_session_user(
+            self, user_id: str, session_id: str, now: datetime
+        ) -> User | None:
+            if self.requests >= 1:
+                self.requests += 1
+                if self._mode == "timeout":
+                    await asyncio.sleep(5)
+                raise RuntimeError("auth_backend_down")
+            return await super().get_current_session_user(user_id, session_id, now)
+
+    async def scenario() -> None:
+        executor = _McpExecutor(
+            McpCallResult(
+                McpCallStatus.OK,
+                "mcp_tool_completed",
+                text="TOP_SECRET_MCP_DATA",
+                structured={"secret": "TOP_SECRET_MCP_DATA"},
+            )
+        )
+        catalog = _McpCatalog((_mcp_snapshot_definition(),))
+
+        # 1. 交付前鉴权超时
+        timeout_runtime, _ = _runtime(
+            auth=_SlowOrFailingAuth(mode="timeout"),
+            mcp_catalog=catalog,
+            mcp_executor=executor,
+        )
+        timeout_res = await timeout_runtime.execute(
+            _mcp_definition(),
+            "lookup",
+            {"query": "value"},
+            _context(),
+            deadline_seconds=1,
+            run_remaining_seconds=0.05,
+        )
+        # 2. 交付前 Run 剩余时间已耗尽
+        exhausted_runtime, _ = _runtime(
+            auth=_Auth(),
+            mcp_catalog=catalog,
+            mcp_executor=executor,
+        )
+        exhausted_res = await exhausted_runtime.execute(
+            _mcp_definition(),
+            "lookup",
+            {"query": "value"},
+            _context(),
+            deadline_seconds=1,
+            run_remaining_seconds=0.0,
+        )
+        # 3. 交付前鉴权抛出异常
+        error_runtime, _ = _runtime(
+            auth=_SlowOrFailingAuth(mode="error"),
+            mcp_catalog=catalog,
+            mcp_executor=executor,
+        )
+        error_res = await error_runtime.execute(
+            _mcp_definition(),
+            "lookup",
+            {"query": "value"},
+            _context(),
+            deadline_seconds=1,
+            run_remaining_seconds=10,
+        )
+
+        for result in (timeout_res, exhausted_res, error_res):
+            assert result.outcome.status is ToolOutcomeStatus.ERROR
+            assert result.outcome.code == "tool_permission_revoked"
+            assert result.outcome.data == {}
+            assert "TOP_SECRET_MCP_DATA" not in result.outcome.canonical_output()
+            assert result.terminate_run_error_code == MCP_DELIVERY_AUTH_ERROR
+
+    asyncio.run(scenario())
+
+
 def test_bounded_outcome_preserves_valid_utf8_json_and_truncation_flag() -> None:
     outcome = ToolOutcome(
         status=ToolOutcomeStatus.OK,
@@ -1638,6 +1725,24 @@ def test_bounded_outcome_preserves_valid_utf8_json_and_truncation_flag() -> None
     assert len(encoded) <= 1024
     assert bounded.truncated is True
     assert json.loads(encoded)["truncated"] is True
+
+
+def test_bounded_outcome_terminates_for_minimum_limit_with_long_chinese_message() -> None:
+    """512 字节最小上限搭配超长中文 message 与引号转义时必须立即终止且满足字节上限。"""
+    outcome = ToolOutcome(
+        status=ToolOutcomeStatus.ERROR,
+        code="tool_error_" + "x" * 64,
+        message=('中文错误详情"带引号"与\\反斜杠' * 80)[:2000],
+        data={"payload": "长内容" * 500},
+    )
+    bounded = bounded_outcome(outcome, maximum_bytes=512)
+    encoded = bounded.canonical_output().encode("utf-8")
+    assert len(encoded) <= 512
+    assert bounded.truncated is True
+    assert bounded.data == {}
+    parsed = json.loads(encoded.decode("utf-8"))
+    assert parsed["code"] == outcome.code
+    assert parsed["truncated"] is True
 
 
 def test_snapshot_rejects_duplicate_model_names_and_oversized_catalogs() -> None:

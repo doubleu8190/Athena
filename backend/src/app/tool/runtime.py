@@ -30,7 +30,7 @@ from app.tool.ports import RunToolRuntime
 from common.date import utc_now
 from common.json import utf8_size
 from domain.auth.ports import CurrentSessionReader
-from domain.file import SessionFile, TextFileReadError
+from domain.file import PendingSessionFile, SessionFile, TextFileReadError
 from domain.knowledge.model import SearchResult
 from domain.mcp import (
     McpCallResult,
@@ -346,21 +346,66 @@ SESSION_FILE_READ_DEFINITION = RuntimeToolDefinition(
 )
 
 
+_DISPATCH_SUBAGENTS_DESCRIPTION_MAX_CHARS = 8192
+_DISPATCH_SUBAGENT_ITEM_DESCRIPTION_MAX_CHARS = 240
+_DISPATCH_SUBAGENTS_DESCRIPTION_PREFIX = (
+    "将 1 到 5 个独立子任务异步派发给专业子智能体并发执行。"
+    "派发后当前轮次将暂停等待全部子智能体完成并自动汇总结果。\n可用子智能体：\n"
+)
+
+
+def _truncate_catalog_text(value: str, maximum_chars: int) -> str:
+    """按字符预算裁剪单条目录描述，避免单个 Subagent 占满工具描述空间。"""
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    if len(normalized) <= maximum_chars:
+        return normalized
+    if maximum_chars <= 1:
+        return "…"[:maximum_chars]
+    return normalized[: maximum_chars - 1].rstrip() + "…"
+
+
 def build_dispatch_subagents_definition(
     subagents: Sequence[SubagentProfile],
 ) -> RuntimeToolDefinition:
     """按当前已启用 Subagent 列表构造主 Run 专用的异步派发工具定义。"""
-    catalog_lines = "\n".join(
-        f"- {item.slug}（{item.name}）：{item.description}" for item in subagents
-    )
+    # 严格控制最终描述不超过 RuntimeToolDefinition.description 的 8192 字符上限，
+    # 避免启用多个长描述 Subagent 时主 Run 冻结工具快照失败。
+    lines: list[str] = []
+    current_length = len(_DISPATCH_SUBAGENTS_DESCRIPTION_PREFIX)
+    total = len(subagents)
+    for index, item in enumerate(subagents):
+        trimmed_desc = _truncate_catalog_text(
+            item.description,
+            _DISPATCH_SUBAGENT_ITEM_DESCRIPTION_MAX_CHARS,
+        )
+        line = f"- {item.slug}（{item.name}）：{trimmed_desc}"
+        remaining_after = total - index - 1
+        separator_len = 1 if lines else 0
+        reserved_suffix = (
+            f"\n…其余 {remaining_after} 个子智能体已省略" if remaining_after > 0 else ""
+        )
+        if (
+            current_length + separator_len + len(line) + len(reserved_suffix)
+            <= _DISPATCH_SUBAGENTS_DESCRIPTION_MAX_CHARS
+        ):
+            lines.append(line)
+            current_length += separator_len + len(line)
+        else:
+            omitted_count = total - index
+            omitted_line = f"…其余 {omitted_count} 个子智能体已省略"
+            if (
+                current_length + separator_len + len(omitted_line)
+                <= _DISPATCH_SUBAGENTS_DESCRIPTION_MAX_CHARS
+            ):
+                lines.append(omitted_line)
+            break
+    description = (_DISPATCH_SUBAGENTS_DESCRIPTION_PREFIX + "\n".join(lines))[
+        :_DISPATCH_SUBAGENTS_DESCRIPTION_MAX_CHARS
+    ]
     return RuntimeToolDefinition(
         tool_id=DISPATCH_SUBAGENTS_TOOL_ID,
         model_name="dispatch_subagents",
-        description=(
-            "将 1 到 5 个独立子任务异步派发给专业子智能体并发执行。"
-            "派发后当前轮次将暂停等待全部子智能体完成并自动汇总结果。\n可用子智能体：\n"
-            + catalog_lines
-        ),
+        description=description,
         input_schema={
             "type": "object",
             "properties": {
@@ -732,6 +777,15 @@ class RunToolRuntimeService(RunToolRuntime):
             return _error("tool_arguments_invalid", "查询内容不能为空。")
         return None
 
+    async def abandon_artifacts(
+        self,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> None:
+        """在工具结果落库失败时主动清理已上传但未发布的临时产物对象。"""
+        if not artifacts or self._session_files is None:
+            return
+        await self._session_files.abandon_artifacts(artifacts)
+
     async def execute(
         self,
         definition: RuntimeToolDefinition | None,
@@ -811,10 +865,14 @@ class RunToolRuntimeService(RunToolRuntime):
             deadline_seconds=remaining,
         )
         outcome = _mcp_outcome(result)
-        # 结果返回后再鉴权：交付前权限失效则丢弃结果并终止 Run。
+        revoked_result = ToolExecutionResult(
+            _error("tool_permission_revoked", "Tool permission revoked before delivery."),
+            MCP_DELIVERY_AUTH_ERROR,
+        )
+        # 结果返回后再鉴权：交付前权限失效、超时或复核异常时一律丢弃原始结果并终止 Run。
         remaining_after_result = run_deadline - loop.time()
         if remaining_after_result <= 0:
-            return ToolExecutionResult(outcome, MCP_DELIVERY_AUTH_ERROR)
+            return revoked_result
         try:
             async with asyncio.timeout(
                 min(remaining_after_result, MCP_DELIVERY_AUTH_TIMEOUT_SECONDS)
@@ -826,15 +884,15 @@ class RunToolRuntimeService(RunToolRuntime):
                     context.auth_session_id,
                 )
         except TimeoutError:
-            return ToolExecutionResult(outcome, MCP_DELIVERY_AUTH_ERROR)
+            return revoked_result
         except Exception as error:
             logger.warning(
                 "mcp_delivery_auth_failed exception_type=%s",
                 type(error).__name__,
             )
-            return ToolExecutionResult(outcome, MCP_DELIVERY_AUTH_ERROR)
+            return revoked_result
         if authorized is None:
-            return ToolExecutionResult(outcome, MCP_DELIVERY_AUTH_ERROR)
+            return revoked_result
         return ToolExecutionResult(outcome)
 
     async def _execute_builtin(

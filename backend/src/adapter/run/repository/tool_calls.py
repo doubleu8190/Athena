@@ -1108,7 +1108,14 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         artifacts: tuple[PendingSessionFile, ...],
         run: RunModel,
     ) -> None:
-        """产物必须同时形成一条安全、可恢复的普通助手文件引用消息。"""
+        """主 Run 产物必须同时形成助手文件引用消息；子 Run 不向公开会话写入交付消息。"""
+        del record
+        # 子 Run（depth >= 1）的产物仅随 TOOL 执行消息落库并在唤醒父 Run 时汇总，
+        # 不得附带公开交付消息。
+        if run.depth >= 1:
+            if message is not None:
+                raise RunStateError("run_tool_delivery_message_invalid")
+            return
         if not artifacts:
             if message is not None:
                 raise RunStateError("run_tool_delivery_message_invalid")

@@ -2306,3 +2306,410 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
             await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_subagent_artifact_finishes_without_delivery_message_and_parent_summarizes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """子 Run 产出产物时不写公开交付消息可正常落库，并在唤醒父 Run 时正确汇总。"""
+    from domain.file import PendingSessionFile
+    from domain.message import ArtifactFileRef, FileRefPart, ToolResultPart, ToolResultStatus
+    from domain.tool import (
+        AdmitToolCallCommand,
+        FinishToolCallCommand,
+        ToolOutcome,
+        ToolOutcomeStatus,
+    )
+
+    async def scenario() -> None:
+        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        try:
+            main_lease = await _submit_main_run(repo, run_id="run_main_artifact")
+            sub_run_id = "run_sub_artifact"
+            await repo.begin_subagent_batch(
+                _subagent_batch_command(main_lease, sequence=1, sub_run_id=sub_run_id)
+            )
+            sub_leases = await repo.claim(
+                "worker-sub", lease_seconds=60, execution_seconds=300, limit=1
+            )
+            assert len(sub_leases) == 1
+            sub_lease = sub_leases[0]
+            assert sub_lease.run.id == sub_run_id
+            assert sub_lease.run.depth == 1
+
+            call_msg = ExecutionMessageDraft(
+                id="exec_sub_call_1",
+                session_id="sess_1",
+                owner_id="usr_1",
+                run_id=sub_run_id,
+                thread_id=sub_run_id,
+                role=ExecutionRole.ASSISTANT,
+                parts=(ToolCallPart("tc_sub_1", "artifact_helper", {"script": "run.py"}),),
+                tool_call_id=None,
+                source_message_id=None,
+                created_at=NOW,
+                metadata=MessageMetadata(),
+            )
+            await repo.begin_tool_call_batch(
+                BeginToolCallBatchCommand(
+                    run_id=sub_run_id,
+                    worker_id=sub_lease.run.worker_id or "",
+                    execution_epoch=sub_lease.run.execution_epoch,
+                    call_message=call_msg,
+                    calls=(
+                        BeginToolCallBatchItem(
+                            record_id="rec_sub_1",
+                            tool_call_id="tc_sub_1",
+                            model_name="artifact_helper",
+                            tool_id="builtin_test_artifact",
+                            tool_kind=ToolKind.BUILTIN,
+                            requires_approval=False,
+                        ),
+                    ),
+                    requested_at=NOW,
+                )
+            )
+            admitted = await repo.admit_tool_call(
+                AdmitToolCallCommand(
+                    run_id=sub_run_id,
+                    worker_id=sub_lease.run.worker_id or "",
+                    execution_epoch=sub_lease.run.execution_epoch,
+                    record_id="rec_sub_1",
+                    admitted_at=NOW,
+                )
+            )
+            assert admitted is not None
+
+            artifact = PendingSessionFile(
+                id="file_sub_art_1",
+                filename="summary.csv",
+                label="调研报表",
+                mime_type="text/csv",
+                size_bytes=128,
+                sha256="c" * 64,
+                object_key="session-artifacts/cc/rec_sub_1/file_sub_art_1",
+                output_index=0,
+                created_at=NOW,
+            )
+            outcome = ToolOutcome(
+                status=ToolOutcomeStatus.OK,
+                code="skill_execution_succeeded",
+                message="脚本执行成功。",
+                data={"artifact_count": 1},
+            )
+            result_msg = ExecutionMessageDraft(
+                id="exec_sub_res_1",
+                session_id="sess_1",
+                owner_id="usr_1",
+                run_id=sub_run_id,
+                thread_id=sub_run_id,
+                role=ExecutionRole.TOOL,
+                parts=(
+                    ToolResultPart(
+                        tool_call_id="tc_sub_1",
+                        status=ToolResultStatus.SUCCESS,
+                        output=outcome.canonical_output(),
+                        artifacts=(
+                            ArtifactFileRef(
+                                file_id=artifact.id,
+                                filename=artifact.filename,
+                                label=artifact.label,
+                                mime_type=artifact.mime_type,
+                                size_bytes=artifact.size_bytes,
+                            ),
+                        ),
+                    ),
+                ),
+                tool_call_id="tc_sub_1",
+                source_message_id=None,
+                created_at=NOW,
+                metadata=MessageMetadata(),
+            )
+            # 子 Run 错误传入 delivery_message 时必须被明确拒绝。
+            bad_delivery = ConversationMessageDraft(
+                id="msg_bad_sub_delivery",
+                session_id="sess_1",
+                owner_id="usr_1",
+                role=ConversationRole.ASSISTANT,
+                status=MessageStatus.COMPLETED,
+                parts=(
+                    FileRefPart(
+                        file_id=artifact.id,
+                        filename=artifact.filename,
+                        mime_type=artifact.mime_type,
+                        size_bytes=artifact.size_bytes,
+                    ),
+                ),
+                reply_to_message_id=sub_lease.run.trigger_message_id,
+                run_id=sub_run_id,
+                client_message_id=None,
+                created_at=NOW,
+                completed_at=NOW,
+                metadata=MessageMetadata(),
+                context_turn_id=sub_lease.run.trigger_message_id,
+            )
+            with pytest.raises(RunStateError, match="run_tool_delivery_message_invalid"):
+                await repo.finish_tool_call(
+                    FinishToolCallCommand(
+                        run_id=sub_run_id,
+                        worker_id=sub_lease.run.worker_id or "",
+                        execution_epoch=sub_lease.run.execution_epoch,
+                        record_id="rec_sub_1",
+                        result_message=result_msg,
+                        outcome=outcome,
+                        finished_at=NOW,
+                        artifacts=(artifact,),
+                        delivery_message=bad_delivery,
+                    )
+                )
+
+            # 子 Run delivery_message=None 正常落库，并支持幂等重放。
+            finish_cmd = FinishToolCallCommand(
+                run_id=sub_run_id,
+                worker_id=sub_lease.run.worker_id or "",
+                execution_epoch=sub_lease.run.execution_epoch,
+                record_id="rec_sub_1",
+                result_message=result_msg,
+                outcome=outcome,
+                finished_at=NOW,
+                artifacts=(artifact,),
+                delivery_message=None,
+            )
+            finished = await repo.finish_tool_call(finish_cmd)
+            assert finished is not None
+            replayed = await repo.finish_tool_call(finish_cmd)
+            assert replayed is not None
+
+            # 完成子 Run 唤醒父 Run，校验父 Run 汇总结果包含该产物。
+            await repo.finish(
+                FinishRunCommand(
+                    run_id=sub_run_id,
+                    worker_id=sub_lease.run.worker_id or "",
+                    execution_epoch=sub_lease.run.execution_epoch,
+                    reply_message=ConversationMessageDraft(
+                        id="msg_sub_final_ignored",
+                        session_id="sess_1",
+                        owner_id="usr_1",
+                        role=ConversationRole.ASSISTANT,
+                        status=MessageStatus.COMPLETED,
+                        parts=(TextPart("子任务完成，已生成报表。"),),
+                        reply_to_message_id=sub_lease.run.trigger_message_id,
+                        run_id=sub_run_id,
+                        client_message_id=None,
+                        created_at=NOW,
+                        completed_at=NOW,
+                        metadata=MessageMetadata(),
+                        context_turn_id=sub_lease.run.trigger_message_id,
+                    ),
+                    usage=RunUsage(),
+                    finished_at=NOW,
+                )
+            )
+            async with factory() as session:
+                stored_file = await session.get(SessionFileModel, artifact.id)
+                assert stored_file is not None
+                parent_tool_msg = await session.scalar(
+                    select(ExecutionMessageModel).where(
+                        ExecutionMessageModel.run_id == "run_main_artifact",
+                        ExecutionMessageModel.role == ExecutionRole.TOOL.value,
+                    )
+                )
+                assert parent_tool_msg is not None
+                summary = json.loads(parent_tool_msg.parts[0]["output"])
+                assert summary["completed_count"] == 1
+                assert summary["results"][0]["artifacts"] == [
+                    {
+                        "file_id": "file_sub_art_1",
+                        "filename": "summary.csv",
+                        "label": "调研报表",
+                        "mime_type": "text/csv",
+                        "size_bytes": 128,
+                    }
+                ]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_subagent_max_llm_requests_50_runs_without_budget_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置 max_llm_requests=50 的子 Run 可正常通过 RunLlmBudget 并完成执行。"""
+    from app.run.budget import RunLlmBudget
+    from domain.llm.model.profile import ModelProfileVersion
+    from domain.tool import ToolExecutionContext
+
+    async def scenario() -> None:
+        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        try:
+            main_lease = await _submit_main_run(repo, run_id="run_main_budget50")
+            sub_run_id = "run_sub_budget50"
+            item = _subagent_batch_item(sub_run_id)
+            item_with_50 = BeginSubagentBatchItem(
+                sub_run_id=item.sub_run_id,
+                subagent_profile_id=item.subagent_profile_id,
+                subagent_slug=item.subagent_slug,
+                subagent_name=item.subagent_name,
+                system_prompt=item.system_prompt,
+                model_profile_id=item.model_profile_id,
+                tool_snapshot=item.tool_snapshot,
+                skill_snapshot=item.skill_snapshot,
+                input_file_ids=item.input_file_ids,
+                task_message=item.task_message,
+                max_llm_requests=50,
+            )
+            base_cmd = _subagent_batch_command(main_lease, sequence=1, sub_run_id=sub_run_id)
+            await repo.begin_subagent_batch(
+                BeginSubagentBatchCommand(
+                    run_id=base_cmd.run_id,
+                    worker_id=base_cmd.worker_id,
+                    execution_epoch=base_cmd.execution_epoch,
+                    tool_call_id=base_cmd.tool_call_id,
+                    call_message=base_cmd.call_message,
+                    record_id=base_cmd.record_id,
+                    items=(item_with_50,),
+                    requested_at=base_cmd.requested_at,
+                )
+            )
+            sub_leases = await repo.claim(
+                "worker-50", lease_seconds=60, execution_seconds=300, limit=1
+            )
+            assert len(sub_leases) == 1
+            sub_lease = sub_leases[0]
+            assert sub_lease.run.max_llm_requests == 50
+
+            # 验证 RunLlmBudget 允许 50 上限且仍拒绝 51。
+            ctx = ToolExecutionContext(
+                owner_id="usr_1",
+                chat_session_id="sess_1",
+                project_id=None,
+                run_id=sub_run_id,
+                execution_epoch=sub_lease.run.execution_epoch,
+                auth_session_id="auth_1",
+                deadline_at=sub_lease.execution_deadline_at,
+            )
+            budget = RunLlmBudget(repo, ctx, used=0, maximum=50, worker_id="worker-50")
+            assert budget.maximum == 50
+            with pytest.raises(ValueError, match="run_llm_request_limit_invalid"):
+                RunLlmBudget(repo, ctx, used=0, maximum=51, worker_id="worker-50")
+
+            # 实际通过 RunExecutor 运行该子 Run，确认不触发预算校验崩溃。
+            cipher = McpSecretCipher(b"k" * 32, key_version=1)
+            profiles = SqlAlchemyModelProfileRepository(factory, cipher)
+
+            async def _get_runtime(profile_id: str) -> RuntimeModelProfile | None:
+                del profile_id
+                return RuntimeModelProfile(
+                    version=ModelProfileVersion(
+                        id="mp_1",
+                        name="Default GPT",
+                        protocol="chat_completions",
+                        base_url="https://api.example.com/v1",
+                        model="gpt-4o",
+                        context_window_tokens=128000,
+                        max_output_tokens=4096,
+                        tokenizer_encoding="o200k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        supports_parallel_tool_calls=True,
+                        request_timeout_seconds=60,
+                        execution_timeout_seconds=300,
+                        max_concurrency=4,
+                        temperature=0.0,
+                        has_api_key=True,
+                        enabled=True,
+                        created_at=NOW,
+                    ),
+                    api_key="sk-test",
+                )
+
+            profiles.get_runtime = _get_runtime  # type: ignore[method-assign]
+            provider = _FakeProvider(
+                [
+                    LlmResponse(
+                        output=(LlmText("budget 50 completed"),),
+                        status="completed",
+                        incomplete_reason=None,
+                        model="gpt-4o",
+                        response_id="resp_50",
+                        request_id=None,
+                        usage=LlmUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+                    )
+                ]
+            )
+            executor = RunExecutor(
+                repo,
+                profiles,
+                provider,  # type: ignore[arg-type]
+                system_prompts=FakeSystemPromptRepository(),
+                config=RunWorkerConfig(),
+                clock=lambda: NOW,
+            )
+            await executor.execute(sub_lease)
+
+            finished_sub = await repo.get("sess_1", "usr_1", sub_run_id)
+            assert finished_sub is not None
+            assert finished_sub.status is RunStatus.COMPLETED
+            assert finished_sub.llm_request_count == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_subagents_catalog_bounds_description_and_preserves_newlines() -> None:
+    """启用 20+ 长描述 Subagent 时，工具快照描述不超 8192 字符且保留多行换行结构。"""
+
+    async def scenario() -> None:
+        profiles = tuple(
+            SubagentProfile(
+                id=f"sub_{index}",
+                slug=f"agent-{index:02d}",
+                name=f"专业子智能体{index:02d}",
+                description=(
+                    f"第一行职责{index}\r\n\t第二行细则：" + "详" * 960 + "\x00\x07"
+                )[:1000],
+                system_prompt="你是专业子智能体",
+                model_profile_id=None,
+                allowed_tool_ids=(REQUEST_USER_INPUT_ID,),
+                enabled=True,
+                max_llm_requests=50,
+                timeout_seconds=120,
+                version=1,
+                created_by=None,
+                deleted_at=None,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+            for index in range(40)
+        )
+        runtime = RunToolRuntimeService(
+            auth=_StubAuthReader(),  # type: ignore[arg-type]
+            sessions=_StubSessionRepo(),  # type: ignore[arg-type]
+            mcp_catalog=_StubMcpCatalog(),  # type: ignore[arg-type]
+            mcp_executor=_StubMcpExecutor(),  # type: ignore[arg-type]
+            memory=None,
+            memory_enabled=False,
+            knowledge=None,
+            project_knowledge=None,
+            subagents=_StubSubagentRepo(profiles),  # type: ignore[arg-type]
+        )
+        ctx = AuthorizedRunContext(
+            owner_id="usr_1",
+            chat_session_id="sess_1",
+            project_id=None,
+            auth_session_id="auth_1",
+        )
+        snapshot = await runtime.build_snapshot("run-v2", ctx, depth=0)
+        dispatch_def = snapshot.by_model_name("dispatch_subagents")
+        assert dispatch_def is not None
+        assert len(dispatch_def.description) <= 8192
+        assert "\n可用子智能体：\n- agent-00（专业子智能体00）：" in dispatch_def.description
+        assert "\t第二行细则：" in dispatch_def.description
+        assert "\r" not in dispatch_def.description
+        assert "\x00" not in dispatch_def.description
+        assert "\x07" not in dispatch_def.description
+        assert "个子智能体已省略" in dispatch_def.description
+
+    asyncio.run(scenario())

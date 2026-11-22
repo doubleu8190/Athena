@@ -1350,18 +1350,17 @@ def test_mcp_cleanup_budget_keeps_confirmed_success_out_of_unknown(
 
 
 @pytest.mark.parametrize(
-    ("mcp_status", "expected_status", "mcp_code"),
+    ("mcp_status", "mcp_code"),
     [
-        (McpCallStatus.OK, ToolOutcomeStatus.OK, "mcp_tool_completed"),
-        (McpCallStatus.ERROR, ToolOutcomeStatus.ERROR, "mcp_tool_error"),
+        (McpCallStatus.OK, "mcp_tool_completed"),
+        (McpCallStatus.ERROR, "mcp_tool_error"),
     ],
 )
-def test_real_runtime_preserves_known_mcp_result_when_delivery_auth_times_out(
+def test_real_runtime_discards_mcp_result_when_delivery_auth_times_out(
     mcp_status: McpCallStatus,
-    expected_status: ToolOutcomeStatus,
     mcp_code: str,
 ) -> None:
-    """MCP 结果确定后，认证复核超时只能终止 Run，不能改写业务事实。"""
+    """MCP 交付前认证复核超时时必须丢弃原始载荷并以 tool_permission_revoked 终止 Run。"""
 
     async def scenario() -> None:
         definition = _mcp_definition()
@@ -1413,9 +1412,10 @@ def test_real_runtime_preserves_known_mcp_result_when_delivery_auth_times_out(
         assert repository.last_finish_command is not None
         assert repository.last_finish_command.terminate_error_code == "run_auth_session_invalid"
         outcome = repository.last_finish_command.outcome
-        assert outcome.status is expected_status
-        assert outcome.code == mcp_code
-        assert outcome.data["text"] == "known external effect"
+        assert outcome.status is ToolOutcomeStatus.ERROR
+        assert outcome.code == "tool_permission_revoked"
+        assert outcome.data == {}
+        assert "known external effect" not in outcome.canonical_output()
 
     asyncio.run(scenario())
 
@@ -3376,5 +3376,145 @@ def test_execute_stops_context_report_replay_when_repository_loses_lease(
         assert len(usage_commands) == 1
         assert usage_commands[0].total_tokens == 9
         assert repository.failures == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("abandon_raises", [False, True])
+def test_executor_abandons_artifacts_and_converges_when_session_file_quota_exceeded(
+    abandon_raises: bool,
+) -> None:
+    """finish_tool_call 因会话文件配额超限回滚时，主动清理临时产物并收敛工具调用与脚本审计。"""
+    from domain.file import PendingSessionFile
+    from domain.skill import SkillExecutionCompletion, SkillExecutionStatus
+
+    async def scenario() -> None:
+        artifact_1 = PendingSessionFile(
+            id="file_quota_1",
+            filename="out1.txt",
+            label="输出 1",
+            mime_type="text/plain",
+            size_bytes=12,
+            sha256="a" * 64,
+            object_key="session-artifacts/aa/call/file_quota_1",
+            output_index=0,
+            created_at=NOW,
+        )
+        artifact_2 = PendingSessionFile(
+            id="file_quota_2",
+            filename="out2.txt",
+            label="输出 2",
+            mime_type="text/plain",
+            size_bytes=24,
+            sha256="b" * 64,
+            object_key="session-artifacts/aa/call/file_quota_2",
+            output_index=1,
+            created_at=NOW,
+        )
+        completion = SkillExecutionCompletion(
+            execution_id="skexec_quota_1",
+            status=SkillExecutionStatus.SUCCEEDED,
+            log_object_key="skill-logs/aa/call/skexec_quota_1.log",
+            log_truncated=False,
+            log_error_code=None,
+            error_code=None,
+            cleanup_error_code=None,
+            finished_at=NOW,
+        )
+        abandoned: list[tuple[PendingSessionFile, ...]] = []
+
+        class _ArtifactRuntime(_ToolRuntime):
+            async def execute(
+                self,
+                definition: RuntimeToolDefinition | None,
+                model_name: str,
+                arguments: dict[str, Any],
+                context: object,
+                *,
+                deadline_seconds: float,
+                run_remaining_seconds: float,
+            ) -> ToolExecutionResult:
+                del (
+                    definition,
+                    model_name,
+                    arguments,
+                    context,
+                    deadline_seconds,
+                    run_remaining_seconds,
+                )
+                return ToolExecutionResult(
+                    outcome=ToolOutcome(
+                        status=ToolOutcomeStatus.OK,
+                        code="skill_execution_succeeded",
+                        message="脚本执行成功。",
+                        data={"artifact_count": 2},
+                    ),
+                    artifacts=(artifact_1, artifact_2),
+                    skill_execution_completion=completion,
+                )
+
+            async def abandon_artifacts(
+                self,
+                artifacts: tuple[PendingSessionFile, ...],
+            ) -> None:
+                abandoned.append(artifacts)
+                if abandon_raises:
+                    raise RuntimeError("minio_delete_transient_error")
+
+        class _QuotaRejectingRepository(_Repository):
+            def __init__(self, run: Run) -> None:
+                super().__init__(run)
+                self.finish_attempts: list[FinishToolCallCommand] = []
+
+            async def finish_tool_call(self, command: FinishToolCallCommand) -> Run:
+                self.finish_attempts.append(command)
+                if command.artifacts:
+                    raise ValueError("session_file_quota_exceeded")
+                return await super().finish_tool_call(command)
+
+        lease = _lease()
+        repository = _QuotaRejectingRepository(lease.run)
+        provider = _ScriptedProvider(
+            [
+                _response(
+                    call=LlmToolCall(
+                        "call-quota-1",
+                        "test_tool",
+                        {"query": "generate"},
+                    )
+                ),
+                _response(text="文件数量超限，已停止保存产物。"),
+            ]
+        )
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, provider),
+            tool_runtime=cast(
+                RunToolRuntime,
+                _ArtifactRuntime(
+                    ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
+                ),
+            ),
+        )
+
+        await executor.execute(lease)
+
+        assert abandoned == [(artifact_1, artifact_2)]
+        assert len(repository.finish_attempts) == 2
+        assert repository.finish_attempts[0].artifacts == (artifact_1, artifact_2)
+        converged = repository.finish_attempts[1]
+        assert converged.outcome.status is ToolOutcomeStatus.ERROR
+        assert converged.outcome.code == "session_file_quota_exceeded"
+        assert converged.artifacts == ()
+        assert converged.delivery_message is None
+        assert converged.skill_execution_completion is not None
+        assert converged.skill_execution_completion.execution_id == "skexec_quota_1"
+        assert converged.skill_execution_completion.status is SkillExecutionStatus.FAILED
+        assert converged.skill_execution_completion.error_code == "session_file_quota_exceeded"
+        assert converged.skill_execution_completion.log_object_key == (
+            "skill-logs/aa/call/skexec_quota_1.log"
+        )
+        assert repository.run.status is RunStatus.COMPLETED
 
     asyncio.run(scenario())

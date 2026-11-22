@@ -548,10 +548,10 @@ def test_upload_limit_is_checked_before_hashing_or_storage(tmp_path: Path) -> No
     assert objects.puts == 0
 
 
-def test_generated_artifact_is_not_subject_to_upload_byte_limit(tmp_path: Path) -> None:
-    """生成产物没有用户上传的 50 MiB 限制，仍按流式类型检查发布。"""
+def test_generated_artifact_exceeding_size_limit_is_rejected(tmp_path: Path) -> None:
+    """脚本产物与用户上传统一执行 50 MiB 上限，超限必须在上传对象存储前被拒绝。"""
 
-    class StreamOnlyObjects(_Objects):
+    class RejectingObjects(_Objects):
         async def put_file(
             self,
             key: str,
@@ -559,37 +559,34 @@ def test_generated_artifact_is_not_subject_to_upload_byte_limit(tmp_path: Path) 
             *,
             content_type: str,
         ) -> None:
-            del content_type
-            assert path.stat().st_size > MAX_SESSION_FILE_BYTES
-            self.puts += 1
-            self.values[key] = b""
+            raise AssertionError("oversized artifact must not be uploaded")
 
     path = tmp_path / "large.csv"
     path.write_bytes(b"a")
     os.truncate(path, MAX_SESSION_FILE_BYTES + 1)
-    objects = StreamOnlyObjects()
+    objects = RejectingObjects()
     service = _service(objects, _Repository(objects))
 
-    artifact = asyncio.run(
-        service.prepare_artifact(
-            source_call_id="toolcall_" + "a" * 24,
-            output_index=0,
-            path=path,
-            filename="large.csv",
-            label="large",
+    with pytest.raises(FileInputError, match="session_file_too_large"):
+        asyncio.run(
+            service.prepare_artifact(
+                source_call_id="toolcall_" + "a" * 24,
+                output_index=0,
+                path=path,
+                filename="large.csv",
+                label="large",
+            )
         )
-    )
 
-    assert artifact.size_bytes == MAX_SESSION_FILE_BYTES + 1
-    assert objects.puts == 1
+    assert objects.puts == 0
 
 
 @pytest.mark.parametrize("json_kind", ["scalar", "key", "nested"])
-def test_generated_json_artifact_validation_uses_streaming_path_without_size_cap(
+def test_generated_json_artifact_validation_uses_streaming_path_within_size_cap(
     tmp_path: Path,
     json_kind: str,
 ) -> None:
-    """产物 JSON 的大标量、大键和深嵌套都不受上传限额且走流式检查。"""
+    """50 MiB 限额内的超大标量、大键和深嵌套 JSON 产物仍走流式校验发布。"""
 
     class StreamOnlyObjects(_Objects):
         async def put_file(
@@ -612,7 +609,7 @@ def test_generated_json_artifact_validation_uses_streaming_path_without_size_cap
         with path.open("wb") as stream:
             stream.write(prefix)
             chunk = b"a" * (1024 * 1024)
-            for _ in range(51):
+            for _ in range(2):
                 stream.write(chunk)
             stream.write(suffix)
     objects = StreamOnlyObjects()

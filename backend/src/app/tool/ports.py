@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol
 
+from domain.file import PendingSessionFile
 from domain.run import Run, RunInputFileContext
 from domain.skill import RunSkillPromptContext
 from domain.tool import (
@@ -88,6 +89,12 @@ class RunToolRuntime(Protocol):
         arguments: dict[str, Any],
     ) -> ToolOutcome | None:
         """Return a safe local error before approval is requested."""
+
+    async def abandon_artifacts(
+        self,
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> None:
+        """在工具结果落库失败时主动清理已上传但未发布的临时产物对象。"""
 
 
 __all__ = ["RunToolRuntime"]

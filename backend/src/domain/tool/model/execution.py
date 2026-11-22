@@ -378,16 +378,28 @@ def bounded_outcome(
     excerpt = truncate_utf8(dumps(outcome.data), max(0, excerpt_limit))
     candidate = outcome.model_copy(
         update={
-            "message": outcome.message[:512],
-            "data": {"truncated_json": excerpt},
+            "message": truncate_utf8(outcome.message, 512),
+            "data": {"truncated_json": excerpt} if excerpt else {},
             "truncated": True,
         }
     )
-    while utf8_size(candidate.model_dump(mode="json")) > maximum_bytes:
+    # 仅在 excerpt 非空时折半缩短，避免 excerpt 耗尽后因长中文 message 陷入死循环。
+    while excerpt and utf8_size(candidate.model_dump(mode="json")) > maximum_bytes:
         excerpt = excerpt[: max(0, len(excerpt) // 2)]
         candidate = candidate.model_copy(
             update={"data": {"truncated_json": excerpt} if excerpt else {}}
         )
+    # 若清空 data 后仍超过字节上限，按 UTF-8 字节边界安全截断 message 再收敛。
+    if utf8_size(candidate.model_dump(mode="json")) > maximum_bytes:
+        candidate = candidate.model_copy(update={"data": {}})
+        base_size = utf8_size(candidate.model_copy(update={"message": ""}).model_dump(mode="json"))
+        message_budget = max(0, maximum_bytes - base_size)
+        trimmed_message = truncate_utf8(candidate.message, message_budget)
+        candidate = candidate.model_copy(update={"message": trimmed_message})
+        while trimmed_message and utf8_size(candidate.model_dump(mode="json")) > maximum_bytes:
+            message_budget //= 2
+            trimmed_message = truncate_utf8(trimmed_message, message_budget)
+            candidate = candidate.model_copy(update={"message": trimmed_message})
     if utf8_size(candidate.model_dump(mode="json")) > maximum_bytes:
         candidate = candidate.model_copy(update={"message": "", "data": {}})
     return candidate

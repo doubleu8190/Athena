@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from domain.llm.model import LlmError
 from domain.run.ports import RunRepository
+from domain.subagent import MAX_SUBAGENT_MAX_LLM_REQUESTS
 from domain.tool import (
     MAX_LLM_REQUESTS_PER_RUN,
     ReserveLlmRequestCommand,
     ToolExecutionContext,
 )
+
+# 主 Run 默认上限为 40，子 Run 与数据库约束允许最高 50，预算上限与之保持一致。
+_MAX_ALLOWED_LLM_REQUESTS = max(MAX_LLM_REQUESTS_PER_RUN, MAX_SUBAGENT_MAX_LLM_REQUESTS)
 
 
 class RunLlmBudget:
@@ -23,7 +27,7 @@ class RunLlmBudget:
         maximum: int = MAX_LLM_REQUESTS_PER_RUN,
         worker_id: str,
     ) -> None:
-        if not 0 <= used <= maximum or not 1 <= maximum <= MAX_LLM_REQUESTS_PER_RUN:
+        if not 0 <= used <= maximum or not 1 <= maximum <= _MAX_ALLOWED_LLM_REQUESTS:
             raise ValueError("run_llm_request_limit_invalid")
         self._repository = repository
         self._context = context

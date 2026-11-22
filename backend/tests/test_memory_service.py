@@ -304,3 +304,68 @@ def test_bounded_inference_cancellation_keeps_real_thread_slot_until_done() -> N
             await inference.run(lambda: "after close")
 
     asyncio.run(scenario())
+
+
+def test_memory_repository_search_keyword_builds_safe_tsquery_for_special_chars() -> None:
+    """Memory 关键词检索使用 to_tsvector + plainto_tsquery，不把特殊符号喂给 to_tsquery。"""
+    import re
+    from types import TracebackType
+    from typing import Any, Self, cast
+
+    from sqlalchemy.dialects import postgresql
+
+    from adapter.memory.repository import MemoryRepository
+
+    compiled_statements: list[str] = []
+
+    class _Result:
+        def unique(self) -> Self:
+            return self
+
+        def all(self) -> list[object]:
+            return []
+
+    class _Session:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, traceback
+
+        async def get(self, model: object, key: object) -> None:
+            del model, key
+            return None
+
+        async def execute(self, statement: Any) -> _Result:
+            dialect = cast(Any, postgresql).dialect()
+            compiled = str(
+                statement.compile(
+                    dialect=dialect,
+                    compile_kwargs={"literal_binds": False},
+                )
+            )
+            compiled_statements.append(compiled)
+            return _Result()
+
+    async def scenario() -> None:
+        repo = MemoryRepository(cast(Any, lambda: _Session()))
+        # 空白或空词元直接返回 []，不触发查询
+        assert await repo.search_keyword("u", ("personal",), "   \t\n  ", 5) == []
+        assert compiled_statements == []
+
+        for special_query in ("C++", "foo:bar", "(测试)", r"C:\Users\test", "+++ () !"):
+            rows = await repo.search_keyword("u", ("personal",), special_query, 5)
+            assert rows == []
+            sql = compiled_statements[-1]
+            assert re.search(r"\bto_tsquery\(", sql) is None
+            assert "to_tsvector(" in sql
+            assert "plainto_tsquery(" in sql
+            assert "nullif(" in sql.lower()
+            assert "string_agg(" in sql
+
+    asyncio.run(scenario())

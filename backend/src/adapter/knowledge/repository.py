@@ -2121,8 +2121,9 @@ def _optional_str(value: object) -> str | None:
 
 
 def _tsquery_token(token: str) -> str:
-    """转义受控 token，避免用户输入被解释为 tsquery 运算符。"""
-    return "'" + token.replace("'", "''") + "'"
+    """转义受控 token 中的反斜杠与单引号，避免用户输入破坏 tsquery 词法或被解释为运算符。"""
+    escaped = token.replace("\\", "\\\\").replace("'", "''")
+    return "'" + escaped + "'"
 
 
 def _visible_chunks_query(

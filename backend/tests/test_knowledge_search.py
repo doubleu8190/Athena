@@ -190,3 +190,21 @@ def test_retry_delay_uses_exponential_backoff_with_jitter(attempt: int, base: in
     assert _retry_delay_seconds(attempt, 0.8) == base * 0.8
     assert _retry_delay_seconds(attempt, 1.2) == base * 1.2
     assert base * 0.8 <= _retry_delay_seconds(attempt) <= base * 1.2
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("C++", "'C++'"),
+        ("foo:bar", "'foo:bar'"),
+        ("(测试)", "'(测试)'"),
+        (r"C:\Users\test", r"'C:\\Users\\test'"),
+        ("C:\\Users\\test\\", "'C:\\\\Users\\\\test\\\\'"),
+        ("a'b\\c", "'a''b\\\\c'"),
+    ],
+)
+def test_tsquery_token_escapes_backslashes_and_single_quotes(token: str, expected: str) -> None:
+    """Knowledge 全文检索词元必须先转义反斜杠再转义单引号，防止破坏 tsquery 语法。"""
+    from adapter.knowledge.repository import _tsquery_token
+
+    assert _tsquery_token(token) == expected

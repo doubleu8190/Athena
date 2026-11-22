@@ -159,6 +159,12 @@ def build_memory_worker_dependencies(
             0.05,
             60.0,
         ),
+        scan_interval_seconds=_bounded_float(
+            "ATHENA_MEMORY_SCAN_INTERVAL_SECONDS",
+            30.0,
+            0.0,
+            3_600.0,
+        ),
     )
     bundle.config = config
     bundle.worker = MemoryWorker(

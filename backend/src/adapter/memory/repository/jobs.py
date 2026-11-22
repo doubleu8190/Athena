@@ -50,7 +50,12 @@ class MemoryJobsRepository:
     def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = factory
 
-    async def wake_user(self, owner_id: str) -> None:
+    async def wake_user(
+        self,
+        owner_id: str,
+        *,
+        respect_backoff: bool = False,
+    ) -> None:
         """刷新用户级提取任务；单 Worker 顺序消费。"""
         if not owner_id.strip():
             raise ValueError("memory_owner_required")
@@ -83,11 +88,25 @@ class MemoryJobsRepository:
             )
             if row is None:
                 raise RuntimeError("memory_wakeup_job_missing")
+            # 正在执行的任务由 apply_batch / complete_job 收敛，不在此覆写调度时间。
+            if row.status == JobStatus.RUNNING.value:
+                return
+            if row.status == JobStatus.QUEUED.value:
+                # 周期扫描唤醒（respect_backoff=True）或任务仍处于退避窗口内时，
+                # 绝不覆写 available_at，防止击穿 complete_job 设定的指数退避。
+                if respect_backoff or as_utc(row.available_at) > now:
+                    return
+                row.available_at = now
+                row.updated_at = now
+                return
+            # 任务从 DONE/FAILED 终态重新入队时，必须归零重试计数，
+            # 避免新到达的 pending Run 继承历史失败次数而被立即判死。
+            row.status = JobStatus.QUEUED.value
+            row.result = None
+            row.attempt_count = 0
+            row.schema_retry_count = 0
             row.available_at = now
             row.updated_at = now
-            if row.status != JobStatus.RUNNING.value:
-                row.status = JobStatus.QUEUED.value
-                row.result = None
 
     async def recover_running_jobs(self) -> int:
         """启动时把遗留 running 后台任务恢复为 queued。"""
@@ -251,7 +270,8 @@ class MemoryJobsRepository:
         page = rows[:page_limit]
         owners = tuple(dict.fromkeys(row.owner_id for row in page))
         for owner_id in owners:
-            await self.wake_user(owner_id)
+            # 缺漏扫描仅补救未入队或终态用户，严格保护已有 QUEUED 任务的指数退避窗口。
+            await self.wake_user(owner_id, respect_backoff=True)
         has_more = len(rows) > page_limit
         last = page[-1] if page else None
         return ScanResult(

@@ -7,6 +7,7 @@ import logging
 import os
 import random
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
@@ -19,6 +20,23 @@ from bootstrap.memory_worker import (
 from common.date import utc_now
 
 logger = logging.getLogger(__name__)
+DEFAULT_MEMORY_SCAN_LOOKBACK_HOURS = 24
+MAX_MEMORY_SCAN_LOOKBACK_HOURS = 24 * 30
+
+
+def _scan_lookback_hours() -> int:
+    """读取启动扫描的回看缓冲小时数（0..720），避免重启窗口内终态 Run 遗漏。"""
+    raw = os.getenv(
+        "ATHENA_MEMORY_SCAN_LOOKBACK_HOURS",
+        str(DEFAULT_MEMORY_SCAN_LOOKBACK_HOURS),
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError("athena_memory_scan_lookback_hours_invalid") from error
+    if not 0 <= value <= MAX_MEMORY_SCAN_LOOKBACK_HOURS:
+        raise ValueError("athena_memory_scan_lookback_hours_invalid")
+    return value
 
 
 async def _consume(
@@ -73,7 +91,7 @@ def _is_recoverable_worker_error(error: Exception) -> bool:
     )
 
 
-async def run_worker() -> None: 
+async def run_worker() -> None:
     """装配资源、验证默认模型并运行 Memory Worker。"""
     bundle = MemoryWorkerBundle()
     failure: BaseException | None = None
@@ -96,8 +114,9 @@ async def run_worker() -> None:
         await worker.validate_runtime()
         # 单 Worker 启动时先恢复遗留 running；仓储明确排除 control 回执。
         await worker.recover_running_jobs()
-        # 首次上线从当前时间建立扫描边界。
-        worker.set_scan_boundary(utc_now())
+        # 启动扫描边界向前回看缓冲窗口，覆盖进程重启或升级期间漏唤醒的终态 pending Run。
+        lookback_hours = _scan_lookback_hours()
+        worker.set_scan_boundary(utc_now() - timedelta(hours=lookback_hours))
         # 直接复用组合根已校验的 idle_sleep_seconds，避免重复解析环境变量。
         await _consume(
             worker,

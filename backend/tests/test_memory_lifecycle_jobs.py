@@ -264,3 +264,104 @@ def test_normal_batch_completion_does_not_advance_generation(
     assert result.status == "applied"
     assert setting.generation == 3
     assert job.status == JobStatus.QUEUED.value
+
+
+def test_wake_user_preserves_backoff_and_resets_counters_after_failed_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """扫描唤醒不击穿退避窗口，且 FAILED 任务被重新唤醒时清零重试计数。"""
+    from datetime import timedelta
+
+    from adapter.memory.repository import jobs as jobs_module
+
+    class _WakeSession(_Session):
+        async def execute(self, statement: object) -> None:
+            del statement
+
+    class _WakeRepository(MemoryRepository):
+        def __init__(self, row: MemoryJobModel) -> None:
+            super().__init__(cast(Any, lambda: _WakeSession(row)))
+
+    current_time = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(jobs_module, "utc_now", lambda: current_time)
+
+    async def scenario() -> None:
+        row = MemoryJobModel(
+            id="mjob_extract_owner_1",
+            dedupe_key="extract_pending:owner_1",
+            kind=JobKind.EXTRACT_PENDING.value,
+            status=JobStatus.RUNNING.value,
+            payload=ExtractPendingPayload(owner_id="owner_1").model_dump(mode="json"),
+            result=None,
+            namespace_id="owner_1",
+            scope_key=None,
+            attempt_count=2,
+            schema_retry_count=1,
+            available_at=current_time,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+        repo = _WakeRepository(row)
+
+        # 1. 失败退避：进入 QUEUED 且 available_at 位于未来。
+        assert await repo.complete_job(
+            CompleteJobCommand(
+                job_id=row.id,
+                result=None,
+                safe_error_code="memory_extraction_model_failed",
+                retryable=True,
+            )
+        )
+        assert row.status == JobStatus.QUEUED.value
+        backoff_until = row.available_at
+        assert backoff_until == current_time + timedelta(seconds=2)
+
+        # 2. 缺漏扫描（respect_backoff=True）及普通唤醒均不得击穿退避窗口。
+        await repo.wake_user("owner_1", respect_backoff=True)
+        assert row.available_at == backoff_until
+        assert row.attempt_count == 2
+        assert row.schema_retry_count == 1
+
+        await repo.wake_user("owner_1")
+        assert row.available_at == backoff_until
+        assert row.attempt_count == 2
+
+        # 3. 耗尽 5 次重试进入 FAILED 后，新 Run 唤醒必须清零 attempt_count 与 schema_retry_count。
+        row.status = JobStatus.RUNNING.value
+        row.attempt_count = 5
+        row.schema_retry_count = 1
+        assert await repo.complete_job(
+            CompleteJobCommand(
+                job_id=row.id,
+                result=None,
+                safe_error_code="memory_extraction_model_failed",
+                retryable=False,
+            )
+        )
+        assert row.status == JobStatus.FAILED.value
+        assert row.attempt_count == 5
+
+        await repo.wake_user("owner_1")
+        assert row.status == JobStatus.QUEUED.value
+        assert row.attempt_count == 0
+        assert row.schema_retry_count == 0
+        assert row.available_at == current_time
+
+        # 4. 即使由 scan_missing_runs（respect_backoff=True）唤醒 FAILED 任务，同样清零重试计数。
+        row.status = JobStatus.FAILED.value
+        row.attempt_count = 5
+        row.schema_retry_count = 1
+        await repo.wake_user("owner_1", respect_backoff=True)
+        assert row.status == JobStatus.QUEUED.value
+        assert row.attempt_count == 0
+        assert row.schema_retry_count == 0
+        assert row.available_at == current_time
+
+        # 5. RUNNING 任务不被 wake_user 覆写状态或 available_at。
+        row.status = JobStatus.RUNNING.value
+        row.available_at = current_time - timedelta(seconds=10)
+        await repo.wake_user("owner_1", respect_backoff=True)
+        assert row.status == JobStatus.RUNNING.value
+        assert row.available_at == current_time - timedelta(seconds=10)
+
+    asyncio.run(scenario())

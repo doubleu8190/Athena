@@ -427,3 +427,68 @@ def test_missing_source_maps_to_not_found_not_storage_unavailable() -> None:
     )
     assert response.status_code == 404
     assert response.json()["detail"] == "source_not_found"
+
+
+@pytest.mark.parametrize(
+    ("stage", "conflict_code"),
+    [
+        ("reserve", "document_update_in_progress"),
+        ("reserve", "idempotency_conflict"),
+        ("replace", "document_update_in_progress"),
+        ("replace", "idempotency_conflict"),
+    ],
+)
+def test_replace_file_document_conflicts_return_http_409(
+    stage: str,
+    conflict_code: str,
+) -> None:
+    """文件替换在预留或提交阶段触发并发更新/幂等冲突时，API 必须返回 409 而非 422。"""
+    from knowledge_fakes import MemoryOriginalStore
+
+    from domain.knowledge.ports import FileUploadReservation, KnowledgeRepositoryPort
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _SimpleTokenizer:
+        def tokenize(self, text: str) -> tuple[str, ...]:
+            return tuple(text.split())
+
+    class _ConflictRepo:
+        async def get_document(
+            self, owner_id: str, base_id: str, document_id: str
+        ) -> Document | None:
+            return Document(document_id, owner_id, base_id, "Doc", None, None, now, now)
+
+        async def reserve_file_upload(self, **kwargs: object) -> FileUploadReservation:
+            if stage == "reserve":
+                raise ValueError(conflict_code)
+            return FileUploadReservation(
+                document_id=str(kwargs["document_id"]),
+                version_id=str(kwargs["version_id"]),
+                reservation_token=str(kwargs["reservation_token"]),
+                storage_key=str(kwargs["storage_key"]),
+                source_id=str(kwargs["source_id"]),
+                job_id=str(kwargs["job_id"]),
+            )
+
+        async def replace_file_document(self, **kwargs: object) -> tuple[Document, str]:
+            del kwargs
+            raise ValueError(conflict_code)
+
+    service = KnowledgeService(
+        cast(KnowledgeRepositoryPort, _ConflictRepo()),
+        _SimpleTokenizer(),
+        originals=MemoryOriginalStore(),
+    )
+    app = FastAPI()
+    app.include_router(build_knowledge_router(service, LocalDocumentParser()))
+    app.dependency_overrides[get_current_auth] = lambda: _context("owner_a")
+
+    response = TestClient(app).post(
+        "/api/v1/knowledge-bases/kb_a/documents/doc_a/versions/upload",
+        headers={"Idempotency-Key": f"replace-{stage}-{conflict_code}"},
+        files={"file": ("notes.txt", b"replacement body", "text/plain")},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == conflict_code

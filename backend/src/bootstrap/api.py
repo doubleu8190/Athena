@@ -278,11 +278,14 @@ def build_api_dependencies(
                 model_checker=SqlAlchemySubagentModelChecker(database.session_factory),
                 tool_catalog=DefaultSubagentToolCatalog(mcp_repository),
             )
+        # API 进程无记忆检索或控制 HTTP 路由，不空载本地 Memory 向量与重排模型；
+        # 仍保留 memory_lifecycle 仓储供 Run 终态唤醒后台 Memory Worker。
         query_services = build_query_services(
             database.session_factory,
             projects=project_use_case,
             memory_service=memory_use_case,
             knowledge_service=knowledge_use_case,
+            load_memory_models=False,
         )
         memory_use_case = query_services.memory
         knowledge_use_case = query_services.knowledge

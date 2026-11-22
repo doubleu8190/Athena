@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -71,6 +73,7 @@ class MemoryWorkerConfig:
     fact_max_age_days: int = 180
     other_max_age_days: int = 365
     idle_sleep_seconds: float = 1.0
+    scan_interval_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         """拒绝无界批次、非法归档期限和过于紧密的轮询。"""
@@ -82,6 +85,8 @@ class MemoryWorkerConfig:
             raise ValueError("memory_worker_maintenance_invalid")
         if not 0.05 <= self.idle_sleep_seconds <= 60:
             raise ValueError("memory_worker_poll_invalid")
+        if not 0.0 <= self.scan_interval_seconds <= 3_600:
+            raise ValueError("memory_worker_scan_interval_invalid")
 
 
 class MemoryWorkerConfigurationError(RuntimeError):
@@ -98,22 +103,26 @@ class MemoryWorker:
         extraction: MemoryExtractionService,
         *,
         config: MemoryWorkerConfig | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         """保存固定依赖；生产入口只创建一个共享实例。"""
         self._repository = repository
         self._profiles = profiles
         self._extraction = extraction
         self._config = config or MemoryWorkerConfig()
+        self._monotonic = monotonic
         self._maintenance_day: str | None = None
         self._scan_boundary_at: datetime = utc_now()
         self._scan_cursor_finished_at: datetime | None = None
         self._scan_cursor_run_id: str | None = None
+        self._last_scan_at: float | None = None
 
     def set_scan_boundary(self, enabled_boundary_at: datetime) -> None:
         """设置缺漏 Run 扫描的起始时间边界，避免全表历史回扫。"""
         self._scan_boundary_at = enabled_boundary_at
         self._scan_cursor_finished_at = None
         self._scan_cursor_run_id = None
+        self._last_scan_at = None
 
     async def validate_runtime(self) -> None:
         """启动前确认管理员默认文本模型可解析。"""
@@ -448,7 +457,15 @@ class MemoryWorker:
         self._maintenance_day = day
 
     async def _scan_missing_runs(self) -> None:
-        """在 Worker 循环内有界扫描遗漏的 pending Run，无需持久化游标任务。"""
+        """在 Worker 循环内按周期节流有界扫描遗漏的 pending Run，无需持久化游标任务。"""
+        # 仅在整轮扫描已收敛且未到下一周期时跳过，避免每次 run_once() 重复扫库；
+        # 首次启动及多页续扫期间立即执行，保证积压尽快排空。
+        if (
+            self._scan_cursor_finished_at is None
+            and self._last_scan_at is not None
+            and (self._monotonic() - self._last_scan_at) < self._config.scan_interval_seconds
+        ):
+            return
         result = await self._repository.scan_missing_runs(
             enabled_boundary_at=self._scan_boundary_at,
             cursor_finished_at=self._scan_cursor_finished_at,
@@ -458,6 +475,7 @@ class MemoryWorker:
         if result.round_complete:
             self._scan_cursor_finished_at = None
             self._scan_cursor_run_id = None
+            self._last_scan_at = self._monotonic()
         else:
             self._scan_cursor_finished_at = result.next_cursor_finished_at
             self._scan_cursor_run_id = result.next_cursor_run_id

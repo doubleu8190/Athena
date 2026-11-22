@@ -355,21 +355,26 @@ class KnowledgeService:
         owner_scope = hashlib.sha256(owner.encode()).hexdigest()
         at = _utc(self._clock())
         candidate_source_id = self._id_factory("ksrc")
-        reservation = await self._repository.reserve_file_upload(
-            owner_id=owner,
-            operation="replace",
-            request_key=key,
-            request_hash=request_hash,
-            base_id=base_id,
-            document_id=document_id,
-            size_bytes=len(content),
-            reservation_token=self._id_factory("kres"),
-            storage_key=(f"{owner_scope}/{candidate_source_id}/{sha256[:2]}/{sha256}"),
-            source_id=candidate_source_id,
-            version_id=self._id_factory("kver"),
-            job_id=self._id_factory("kjob"),
-            at=at,
-        )
+        try:
+            reservation = await self._repository.reserve_file_upload(
+                owner_id=owner,
+                operation="replace",
+                request_key=key,
+                request_hash=request_hash,
+                base_id=base_id,
+                document_id=document_id,
+                size_bytes=len(content),
+                reservation_token=self._id_factory("kres"),
+                storage_key=(f"{owner_scope}/{candidate_source_id}/{sha256[:2]}/{sha256}"),
+                source_id=candidate_source_id,
+                version_id=self._id_factory("kver"),
+                job_id=self._id_factory("kjob"),
+                at=at,
+            )
+        except ValueError as error:
+            # 将仓储冲突/并发更新等业务 ValueError 统一转为 KnowledgeInputError，
+            # 与 replace_text_document 对齐，确保 API 层稳定映射为 409。
+            raise KnowledgeInputError(str(error)) from error
         if reservation.replay_document is not None:
             return reservation.replay_document, reservation.version_id
         if (
@@ -380,25 +385,28 @@ class KnowledgeService:
         ):
             raise RuntimeError("knowledge_upload_reservation_invalid")
         await self._originals.put(reservation.storage_key, content)
-        return await self._repository.replace_file_document(
-            owner_id=owner,
-            base_id=base_id,
-            document_id=document_id,
-            title=document.title,
-            filename=safe_filename,
-            media_type=media_type,
-            storage_key=reservation.storage_key,
-            size_bytes=len(content),
-            sha256=sha256,
-            request_key=key,
-            request_hash=request_hash,
-            version_id=reservation.version_id,
-            source_id=reservation.source_id,
-            job_id=reservation.job_id,
-            reservation_token=reservation.reservation_token,
-            profile_id=self._profile_id,
-            at=at,
-        )
+        try:
+            return await self._repository.replace_file_document(
+                owner_id=owner,
+                base_id=base_id,
+                document_id=document_id,
+                title=document.title,
+                filename=safe_filename,
+                media_type=media_type,
+                storage_key=reservation.storage_key,
+                size_bytes=len(content),
+                sha256=sha256,
+                request_key=key,
+                request_hash=request_hash,
+                version_id=reservation.version_id,
+                source_id=reservation.source_id,
+                job_id=reservation.job_id,
+                reservation_token=reservation.reservation_token,
+                profile_id=self._profile_id,
+                at=at,
+            )
+        except ValueError as error:
+            raise KnowledgeInputError(str(error)) from error
 
     async def list_documents(
         self, owner_id: str, base_id: str, *, page: int, page_size: int

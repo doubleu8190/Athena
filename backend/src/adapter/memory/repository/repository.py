@@ -6,7 +6,7 @@ from builtins import list as List
 from datetime import UTC, datetime
 from typing import cast
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, func, select
 from sqlalchemy.dialects.postgresql import TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
@@ -93,12 +93,31 @@ class MemoryRepository(MemoryRepositoryPort, MemoryControlSourcePort):
         terms = [term for term in query.strip().split() if term]
         if not terms:
             return []
-        lexemes = " & ".join(term.replace("'", " ") for term in terms[:8])
+        normalized_query = " ".join(terms[:8])
         async with self._factory() as session:
             read_enabled, _ = await self._settings_in_session(session, namespace)
             if not read_enabled:
                 return []
-            tsquery = func.to_tsquery("athena_memory_chinese", lexemes).cast(TSQUERY)
+            # 使用 to_tsvector + plainto_tsquery 安全构造 tsquery，
+            # 禁止将原始符号直接喂给 to_tsquery；空词元时 string_agg 返回 NULL，安全命中 0 行。
+            lexemes = func.tsvector_to_array(
+                func.to_tsvector("athena_memory_chinese", normalized_query)
+            )
+            query_terms = (
+                func.unnest(lexemes).table_valued("lexeme").render_derived(name="query_terms")
+            )
+            safe_terms = func.nullif(
+                func.plainto_tsquery(
+                    "athena_memory_chinese",
+                    query_terms.c.lexeme,
+                ).cast(Text),
+                "",
+            )
+            tsquery = (
+                select(func.string_agg(safe_terms, " & ").cast(TSQUERY))
+                .select_from(query_terms)
+                .scalar_subquery()
+            )
             score = func.ts_rank(MemoryModel.search_document, tsquery)
             rows = (
                 (
@@ -267,8 +286,8 @@ class MemoryRepository(MemoryRepositoryPort, MemoryControlSourcePort):
     ) -> MemoryScopeState:
         return await self._control.scope_state(namespace_id, scope_key)
 
-    async def wake_user(self, owner_id: str) -> None:
-        await self._jobs.wake_user(owner_id)
+    async def wake_user(self, owner_id: str, *, respect_backoff: bool = False) -> None:
+        await self._jobs.wake_user(owner_id, respect_backoff=respect_backoff)
 
     async def user_generation(self, owner_id: str) -> int:
         return await self._control.user_generation(owner_id)

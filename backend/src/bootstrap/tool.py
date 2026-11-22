@@ -24,7 +24,11 @@ from app.skill.execution_service import SkillExecutionService
 from app.skill.service import SkillService
 from app.tool.runtime import RunToolRuntimeService
 from bootstrap.config import env_csv_set, env_flag, memory_enabled_from_env
-from bootstrap.knowledge import build_knowledge_models, build_knowledge_original_store
+from bootstrap.knowledge import (
+    build_knowledge_models,
+    build_knowledge_original_store,
+    knowledge_embedding_settings,
+)
 from domain.auth import CurrentSessionReader
 from domain.knowledge.ports import (
     KnowledgeRepositoryPort,
@@ -98,6 +102,7 @@ def build_query_services(
     projects: ProjectService,
     memory_service: MemoryService | None = None,
     knowledge_service: KnowledgeService | None = None,
+    load_memory_models: bool = True,
 ) -> QueryServiceBundle:
     """Build memory/knowledge query services from the same environment in both processes."""
     # 统一记忆开关：兼容 ATHENA_MEMORY_ENABLED 与 ATHENA_MEMORY_LIFECYCLE_ENABLED。
@@ -109,6 +114,8 @@ def build_query_services(
     closables: list[Any] = []
     memory = memory_service
     memory_repository: MemoryRepository | None = None
+    memory_embedding: LocalEmbedding | None = None
+    memory_embedding_key: tuple[str, str, str] | None = None
     knowledge = knowledge_service
     # 组合根是唯一允许构造具体适配器的地方；bundle 只暴露领域端口。
     knowledge_repository: KnowledgeRepositoryPort | None = None
@@ -117,46 +124,63 @@ def build_query_services(
     project_knowledge_repository: ProjectKnowledgeRepository | None = None
     knowledge_originals: OriginalStore | None = None
     if memory_enabled and memory is None:
-        embedding_model = os.getenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
-        embedding_revision = os.getenv(
-            "ATHENA_MEMORY_EMBEDDING_REVISION",
-            "5617a9f61b028005a4858fdac845db406aefb181",
-        )
-        reranker_model = os.getenv("ATHENA_MEMORY_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-        reranker_revision = os.getenv(
-            "ATHENA_MEMORY_RERANKER_REVISION",
-            "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
-        )
-        # QueryServiceBundle 的记忆召回仅需粗略 token 预算估算，
-        # 使用轻量计数器避免常驻加载额外 AutoTokenizer。
-        embedding = LocalEmbedding(
-            embedding_model,
-            embedding_revision,
-            os.getenv("ATHENA_MEMORY_EMBEDDING_DEVICE", "cpu"),
-        )
-        reranker = LocalReranker(
-            reranker_model,
-            reranker_revision,
-            os.getenv("ATHENA_MEMORY_RERANKER_DEVICE", "cpu"),
-        )
-        counter = ApproximateTokenCounter()
+        # 无论是否加载本地模型，只要启用记忆就构造生命周期仓储，
+        # 保证 API 进程仍可唤醒 Memory Worker。
         memory_repository = MemoryRepository(sessions)
-        memory = MemoryService(
-            memory_repository,
-            embedding,
-            reranker,
-            counter,
-            profile_id=_profile_id(embedding_model, embedding_revision),
-            lifecycle=memory_repository,
-            control_source=memory_repository,
-        )
-        startables.extend((embedding, reranker))
-        closables.extend((embedding, reranker))
+        if load_memory_models:
+            embedding_model = os.getenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
+            embedding_revision = os.getenv(
+                "ATHENA_MEMORY_EMBEDDING_REVISION",
+                "5617a9f61b028005a4858fdac845db406aefb181",
+            )
+            embedding_device = os.getenv("ATHENA_MEMORY_EMBEDDING_DEVICE", "cpu")
+            reranker_model = os.getenv("ATHENA_MEMORY_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+            reranker_revision = os.getenv(
+                "ATHENA_MEMORY_RERANKER_REVISION",
+                "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+            )
+            # QueryServiceBundle 的记忆召回仅需粗略 token 预算估算，
+            # 使用轻量计数器避免常驻加载额外 AutoTokenizer。
+            memory_embedding = LocalEmbedding(
+                embedding_model,
+                embedding_revision,
+                embedding_device,
+            )
+            memory_embedding_key = (embedding_model, embedding_revision, embedding_device)
+            reranker = LocalReranker(
+                reranker_model,
+                reranker_revision,
+                os.getenv("ATHENA_MEMORY_RERANKER_DEVICE", "cpu"),
+            )
+            counter = ApproximateTokenCounter()
+            memory = MemoryService(
+                memory_repository,
+                memory_embedding,
+                reranker,
+                counter,
+                profile_id=_profile_id(embedding_model, embedding_revision),
+                lifecycle=memory_repository,
+                control_source=memory_repository,
+            )
+            startables.extend((memory_embedding, reranker))
+            closables.extend((memory_embedding, reranker))
     if knowledge_enabled and knowledge is None:
         # 先校验并构造原件存储，再加载模型资源，保持原有启动顺序。
         minio_originals = build_knowledge_original_store()
         knowledge_originals = minio_originals
-        models = build_knowledge_models()
+        # 同进程内若 Memory 与 Knowledge 的 (model, revision, device) 完全一致，
+        # 共享同一个 LocalEmbedding 实例且只注册一次启停生命周期，避免重复占用显存/内存。
+        reused_embedding = (
+            memory_embedding
+            if memory_embedding is not None
+            and memory_embedding_key == knowledge_embedding_settings()
+            else None
+        )
+        models = (
+            build_knowledge_models(embedding=reused_embedding)
+            if reused_embedding is not None
+            else build_knowledge_models()
+        )
         concrete_repository = KnowledgeRepository(sessions)
         knowledge_repository = concrete_repository
         knowledge_upload_slots = concrete_repository
@@ -169,9 +193,14 @@ def build_query_services(
             models.counter,
             profile_id=models.profile_id,
         )
-        # 启动顺序沿用存储 → 计数 → 向量模型，关闭时按相反依赖顺序释放。
-        startables.extend((minio_originals, models.counter, models.embedding))
-        closables.extend((minio_originals, models.embedding, models.counter))
+        # 启动顺序沿用存储 → 计数 → 向量模型，关闭时按相反依赖顺序释放；
+        # 复用 Memory 向量实例时不再重复加入 startables/closables。
+        if reused_embedding is None:
+            startables.extend((minio_originals, models.counter, models.embedding))
+            closables.extend((minio_originals, models.embedding, models.counter))
+        else:
+            startables.extend((minio_originals, models.counter))
+            closables.extend((minio_originals, models.counter))
     elif knowledge is not None and knowledge_repository is None:
         concrete_repository = KnowledgeRepository(sessions)
         knowledge_repository = concrete_repository

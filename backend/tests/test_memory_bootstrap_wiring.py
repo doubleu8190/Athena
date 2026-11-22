@@ -433,3 +433,258 @@ assert "system_prompt_versions" in RunModel.metadata.tables
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_memory_worker_entry_sets_lookback_scan_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Memory Worker 启动设置带回看缓冲的扫描边界，覆盖重启期间终态 pending Run。"""
+    from datetime import UTC, datetime, timedelta
+
+    import memory_worker as memory_entry_module
+
+    from app.memory.worker import MemoryWorkerConfig
+    from bootstrap.memory_worker import MemoryWorkerBundle
+
+    fixed_now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    recorded_boundaries: list[datetime] = []
+
+    class _NoopResource:
+        async def start(self) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def dispose(self) -> None:
+            return None
+
+    class _Worker:
+        async def validate_runtime(self) -> None:
+            return None
+
+        async def recover_running_jobs(self) -> int:
+            return 0
+
+        def set_scan_boundary(self, enabled_boundary_at: datetime) -> None:
+            recorded_boundaries.append(enabled_boundary_at)
+
+    def _build(bundle: MemoryWorkerBundle) -> None:
+        bundle.database = cast(Any, _NoopResource())
+        bundle.provider = cast(Any, _NoopResource())
+        bundle.embedding = cast(Any, _NoopResource())
+        bundle.counter = cast(Any, _NoopResource())
+        bundle.worker = cast(Any, _Worker())
+        bundle.config = MemoryWorkerConfig(idle_sleep_seconds=0.5)
+
+    async def _noop_consume(worker: object, *, idle_sleep_seconds: float) -> None:
+        del worker, idle_sleep_seconds
+
+    monkeypatch.setattr(memory_entry_module, "build_memory_worker_dependencies", _build)
+    monkeypatch.setattr(memory_entry_module, "_consume", _noop_consume)
+    monkeypatch.setattr(memory_entry_module, "utc_now", lambda: fixed_now)
+
+    # 默认回看 24 小时
+    monkeypatch.delenv("ATHENA_MEMORY_SCAN_LOOKBACK_HOURS", raising=False)
+    asyncio.run(memory_entry_module.run_worker())
+    assert recorded_boundaries[-1] == fixed_now - timedelta(hours=24)
+
+    # 支持环境变量有界覆盖
+    monkeypatch.setenv("ATHENA_MEMORY_SCAN_LOOKBACK_HOURS", "6")
+    asyncio.run(memory_entry_module.run_worker())
+    assert recorded_boundaries[-1] == fixed_now - timedelta(hours=6)
+
+    # 非法回看小时数明确拒绝
+    monkeypatch.setenv("ATHENA_MEMORY_SCAN_LOOKBACK_HOURS", "-1")
+    with pytest.raises(ValueError, match="athena_memory_scan_lookback_hours_invalid"):
+        asyncio.run(memory_entry_module.run_worker())
+
+
+def test_api_bootstrap_skips_memory_models_but_keeps_memory_lifecycle_wakeup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API 进程开启 ATHENA_MEMORY_ENABLED 时不加载本地 Memory 模型，但仍向 Run 仓储注入唤醒端口。"""
+    import bootstrap.api as bootstrap_api
+    import bootstrap.tool as bootstrap_tool
+
+    constructed_models: list[str] = []
+    run_repo_kwargs: dict[str, object] = {}
+
+    class _FakeDatabase:
+        session_factory = object()
+
+        async def dispose(self) -> None:
+            return None
+
+    class _FakeMemoryRepository:
+        def __init__(self, sessions: object) -> None:
+            self.sessions = sessions
+
+    class _FakeRunRepository:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args
+            run_repo_kwargs.update(kwargs)
+
+    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    monkeypatch.setenv("ATHENA_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    monkeypatch.setattr(bootstrap_api, "build_database", lambda _url: _FakeDatabase())
+    monkeypatch.setattr(bootstrap_api, "SqlAlchemyRunRepository", _FakeRunRepository)
+    monkeypatch.setattr(bootstrap_tool, "MemoryRepository", _FakeMemoryRepository)
+    monkeypatch.setattr(
+        bootstrap_tool,
+        "LocalEmbedding",
+        lambda *args: constructed_models.append("embedding"),
+    )
+    monkeypatch.setattr(
+        bootstrap_tool,
+        "LocalReranker",
+        lambda *args: constructed_models.append("reranker"),
+    )
+
+    deps = bootstrap_api.build_api_dependencies(
+        project_service=cast(Any, object()),
+        message_service=cast(Any, object()),
+        session_service=cast(Any, object()),
+        auth_service=cast(Any, object()),
+        tool_manager=cast(Any, object()),
+        model_profile_service=cast(Any, object()),
+        system_prompt_service=cast(Any, object()),
+        subagent_service=cast(Any, object()),
+    )
+
+    assert constructed_models == []
+    assert deps.memory_service is None
+    assert deps.query_services is not None
+    assert isinstance(deps.query_services.memory_lifecycle, _FakeMemoryRepository)
+    assert run_repo_kwargs["memory_wakeup"] is deps.query_services.memory_lifecycle
+    assert run_repo_kwargs["memory_lifecycle_enabled"] is True
+    asyncio.run(deps.aclose())
+
+
+def test_query_services_share_identical_local_embedding_and_separate_distinct_configs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同进程同时开启 Memory 与 Knowledge：配置一致时共享单实例且仅启停一次，不同则各自独立。"""
+    import bootstrap.knowledge as bootstrap_knowledge
+    import bootstrap.tool as bootstrap_tool
+
+    embeddings: list[_TrackedEmbedding] = []
+    rerankers: list[Any] = []
+    counters: list[Any] = []
+    originals: list[Any] = []
+    memory_services: list[tuple[object, ...]] = []
+    knowledge_services: list[tuple[object, ...]] = []
+
+    class _TrackedEmbedding:
+        def __init__(self, model: str, revision: str, device: str) -> None:
+            self.key = (model, revision, device)
+            self.starts = 0
+            self.closes = 0
+            embeddings.append(self)
+
+        async def start(self) -> None:
+            self.starts += 1
+
+        async def aclose(self) -> None:
+            self.closes += 1
+
+    def _capture_memory_service(*args: object, **kwargs: object) -> object:
+        del kwargs
+        memory_services.append(args)
+        return SimpleNamespace(args=args)
+
+    def _capture_knowledge_service(*args: object, **kwargs: object) -> object:
+        del kwargs
+        knowledge_services.append(args)
+        return SimpleNamespace(args=args)
+
+    class _TrackedResource:
+        def __init__(self, bucket: list[Any], *args: object) -> None:
+            del args
+            self.starts = 0
+            self.closes = 0
+            bucket.append(self)
+
+        async def start(self) -> None:
+            self.starts += 1
+
+        async def aclose(self) -> None:
+            self.closes += 1
+
+        def close(self) -> None:
+            self.closes += 1
+
+    monkeypatch.setenv("ATHENA_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
+    monkeypatch.setenv("ATHENA_MEMORY_EMBEDDING_REVISION", "rev-shared")
+    monkeypatch.setenv("ATHENA_MEMORY_EMBEDDING_DEVICE", "cpu")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_REVISION", "rev-shared")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu")
+
+    monkeypatch.setattr(bootstrap_tool, "LocalEmbedding", _TrackedEmbedding)
+    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", _TrackedEmbedding)
+    monkeypatch.setattr(
+        bootstrap_tool,
+        "LocalReranker",
+        lambda *args: _TrackedResource(rerankers, *args),
+    )
+    monkeypatch.setattr(
+        bootstrap_knowledge,
+        "LocalTokenCounter",
+        lambda *args: _TrackedResource(counters, *args),
+    )
+    monkeypatch.setattr(bootstrap_knowledge, "JiebaChineseTokenizer", lambda: object())
+    monkeypatch.setattr(
+        bootstrap_tool,
+        "build_knowledge_original_store",
+        lambda: _TrackedResource(originals),
+    )
+    monkeypatch.setattr(bootstrap_tool, "MemoryRepository", lambda _sessions: object())
+    monkeypatch.setattr(bootstrap_tool, "KnowledgeRepository", lambda _sessions: object())
+    monkeypatch.setattr(bootstrap_tool, "MemoryService", _capture_memory_service)
+    monkeypatch.setattr(bootstrap_tool, "KnowledgeService", _capture_knowledge_service)
+
+    # 1. 模型、版本、设备完全一致 -> 仅构造 1 个 LocalEmbedding，共享实例且启停各 1 次。
+    shared_bundle = build_query_services(
+        cast(Any, object()),
+        projects=cast(ProjectService, object()),
+        load_memory_models=True,
+    )
+    assert len(embeddings) == 1
+    assert memory_services[-1][1] is embeddings[0]
+    assert knowledge_services[-1][2] is embeddings[0]
+
+    asyncio.run(shared_bundle.start())
+    asyncio.run(shared_bundle.aclose())
+    assert embeddings[0].starts == 1
+    assert embeddings[0].closes == 1
+
+    # 2. 设备不同 -> 各自构造独立 LocalEmbedding，并分别启停 1 次。
+    embeddings.clear()
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "mps")
+    separate_bundle = build_query_services(
+        cast(Any, object()),
+        projects=cast(ProjectService, object()),
+        load_memory_models=True,
+    )
+    assert len(embeddings) == 2
+    assert embeddings[0] is not embeddings[1]
+    assert embeddings[0].key == ("BAAI/bge-m3", "rev-shared", "cpu")
+    assert embeddings[1].key == ("BAAI/bge-m3", "rev-shared", "mps")
+    assert memory_services[-1][1] is embeddings[0]
+    assert knowledge_services[-1][2] is embeddings[1]
+
+    asyncio.run(separate_bundle.start())
+    asyncio.run(separate_bundle.aclose())
+    assert embeddings[0].starts == 1
+    assert embeddings[0].closes == 1
+    assert embeddings[1].starts == 1
+    assert embeddings[1].closes == 1

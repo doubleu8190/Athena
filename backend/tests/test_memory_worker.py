@@ -648,3 +648,130 @@ def test_extract_final_failure_only_marks_batch_runs_failed() -> None:
         assert command.failed_run_ids == ("run_batch_1", "run_batch_2")
 
     asyncio.run(scenario())
+
+
+def test_scan_missing_runs_is_throttled_and_does_not_break_backoff() -> None:
+    """缺漏扫描受周期节流，且连续 run_once() 不会击穿失败任务的退避窗口。"""
+    from datetime import timedelta
+
+    class _BackoffRepository(_Repository):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.now = NOW
+            self.scan_calls = 0
+            self.claim_count = 0
+            self.job_status = JobStatus.QUEUED
+            self.job_attempt = 0
+            self.job_available_at = NOW
+            self.round_complete_sequence: list[bool] = []
+
+        async def scan_missing_runs(
+            self,
+            *,
+            enabled_boundary_at: datetime,
+            cursor_finished_at: datetime | None = None,
+            cursor_run_id: str | None = None,
+            page_limit: int = 100,
+        ) -> ScanResult:
+            del enabled_boundary_at, cursor_finished_at, cursor_run_id
+            self.scan_calls += 1
+            self.scan_page_limit = page_limit
+            # 模拟 scan_missing_runs 的 respect_backoff=True 行为：不覆写 QUEUED 的退避时间。
+            if self.job_status in {JobStatus.DONE, JobStatus.FAILED}:
+                self.job_status = JobStatus.QUEUED
+                self.job_attempt = 0
+                self.job_available_at = self.now
+            complete = (
+                self.round_complete_sequence.pop(0) if self.round_complete_sequence else True
+            )
+            return ScanResult(
+                scanned=1,
+                awakened=1,
+                has_more=not complete,
+                next_cursor_finished_at=None if complete else self.now,
+                next_cursor_run_id=None if complete else "run_cursor",
+                round_complete=complete,
+            )
+
+        async def claim_job(
+            self,
+            *,
+            kinds: tuple[JobKind, ...],
+            limit: int = 1,
+        ) -> MemoryJob | None:
+            self.claim_kinds = kinds
+            self.claim_limit = limit
+            if self.job_status is not JobStatus.QUEUED or self.job_available_at > self.now:
+                return None
+            self.claim_count += 1
+            self.job_status = JobStatus.RUNNING
+            self.job_attempt += 1
+            return _job(
+                ExtractPendingPayload(owner_id="owner_worker"),
+                attempt_count=self.job_attempt,
+            )
+
+        async def complete_job(self, command: CompleteJobCommand) -> bool:
+            self.completed.append(command)
+            if command.retryable and self.job_attempt < 5:
+                self.job_status = JobStatus.QUEUED
+                self.job_available_at = self.now + timedelta(seconds=10)
+            else:
+                self.job_status = JobStatus.FAILED
+            return True
+
+    async def scenario() -> None:
+        clock = [100.0]
+        repository = _BackoffRepository()
+        repository.pending = (_pending_run("run_backoff"),)
+        extraction = _Extraction(decision_error=ExtractionInfrastructureError("temporary"))
+        worker = MemoryWorker(
+            cast(MemoryLifecycleRepositoryPort, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(MemoryExtractionService, extraction),
+            config=MemoryWorkerConfig(
+                batch_run_limit=20,
+                batch_token_limit=12_000,
+                idle_sleep_seconds=0.05,
+                scan_interval_seconds=30.0,
+            ),
+            monotonic=lambda: clock[0],
+        )
+
+        # 第 1 次 run_once：首次扫描立即触发，领取任务失败后进入 10 秒退避。
+        assert await worker.run_once() is True
+        assert repository.scan_calls == 1
+        assert repository.claim_count == 1
+        assert repository.job_available_at == NOW + timedelta(seconds=10)
+
+        # 第 2、3 次 run_once（仍在退避与 30s 扫描间隔内）：不重复扫库，也不提前领取。
+        clock[0] = 105.0
+        repository.now = NOW + timedelta(seconds=5)
+        assert await worker.run_once() is False
+        assert await worker.run_once() is False
+        assert repository.scan_calls == 1
+        assert repository.claim_count == 1
+
+        # 超过 30 秒触发新扫描，但若仍人为设置未来退避窗口，扫描也不得击穿退避。
+        clock[0] = 131.0
+        repository.job_available_at = NOW + timedelta(seconds=60)
+        repository.now = NOW + timedelta(seconds=31)
+        assert await worker.run_once() is False
+        assert repository.scan_calls == 2
+        assert repository.claim_count == 1
+        assert repository.job_available_at == NOW + timedelta(seconds=60)
+
+        # 多页扫描（round_complete=False）应立即续扫，不额外等待 30 秒。
+        clock[0] = 162.0
+        repository.round_complete_sequence = [False, True]
+        assert await worker.run_once() is False
+        assert repository.scan_calls == 3
+        clock[0] = 162.5
+        assert await worker.run_once() is False
+        assert repository.scan_calls == 4
+        # 整轮结束后重新进入 30 秒节流。
+        clock[0] = 163.0
+        assert await worker.run_once() is False
+        assert repository.scan_calls == 4
+
+    asyncio.run(scenario())

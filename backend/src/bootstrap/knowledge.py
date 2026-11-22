@@ -24,24 +24,33 @@ class KnowledgeModelResources:
     profile_id: str
 
 
-def build_knowledge_models() -> KnowledgeModelResources:
-    """按统一环境变量构造 embedding、token 计数与分词资源。
-
-    profile_id 必须由模型与修订版本共同推导，保证写入侧与后台消费侧使用
-    同一个向量档案标识，避免混用不同预处理规则的向量。
-    """
+def knowledge_embedding_settings() -> tuple[str, str, str]:
+    """读取知识库本地向量模型配置，供同进程共享实例判定复用。"""
     model = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
     revision = os.getenv(
         "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
         DEFAULT_EMBEDDING_REVISION,
     )
-    embedding = LocalEmbedding(
-        model,
-        revision,
-        os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu"),
+    device = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu")
+    return model, revision, device
+
+
+def build_knowledge_models(
+    *,
+    embedding: LocalEmbedding | None = None,
+) -> KnowledgeModelResources:
+    """按统一环境变量构造 embedding、token 计数与分词资源。
+
+    profile_id 必须由模型与修订版本共同推导，保证写入侧与后台消费侧使用
+    同一个向量档案标识，避免混用不同预处理规则的向量。
+    调用方已构造同配置 LocalEmbedding 时可显式注入复用，避免同进程重复加载模型。
+    """
+    model, revision, device = knowledge_embedding_settings()
+    selected_embedding = (
+        embedding if embedding is not None else LocalEmbedding(model, revision, device)
     )
     return KnowledgeModelResources(
-        embedding=embedding,
+        embedding=selected_embedding,
         counter=LocalTokenCounter(model, revision),
         tokenizer=JiebaChineseTokenizer(),
         profile_id=embedding_profile_id(model, revision),
@@ -62,5 +71,6 @@ __all__ = [
     "KnowledgeModelResources",
     "build_knowledge_models",
     "build_knowledge_original_store",
+    "knowledge_embedding_settings",
     "validate_knowledge_storage_configuration",
 ]

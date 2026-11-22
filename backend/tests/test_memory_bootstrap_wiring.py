@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -390,3 +393,43 @@ def test_memory_worker_entry_recovers_before_single_consumer(
         "counter.close",
         "database.close",
     ]
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ("memory_worker", "bootstrap.memory_worker"),
+)
+def test_worker_orm_import_registers_run_system_prompt_foreign_keys(
+    module_name: str,
+) -> None:
+    """独立进程只加载 Worker 入口或组合根时，RunModel 的系统提示词外键仍可配置。"""
+    backend_root = Path(__file__).resolve().parents[1]
+    source_root = backend_root / "src"
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = (
+        str(source_root)
+        if not existing_pythonpath
+        else f"{source_root}{os.pathsep}{existing_pythonpath}"
+    )
+    script = f"""
+import importlib
+importlib.import_module({module_name!r})
+from sqlalchemy.orm import configure_mappers
+from adapter.run.model import RunModel
+
+configure_mappers()
+targets = {{foreign_key.target_fullname for foreign_key in RunModel.__table__.foreign_keys}}
+assert "system_prompt_versions.id" in targets
+assert "system_prompt_versions" in RunModel.metadata.tables
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=backend_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr

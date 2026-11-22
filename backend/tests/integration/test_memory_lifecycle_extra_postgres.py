@@ -33,8 +33,10 @@ from adapter.memory.model import (
 )
 from adapter.memory.repository import MemoryRepository
 from adapter.message.model import ConversationMessageModel
+from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
 from adapter.session.model import SessionModel
+from app.memory.extraction import MemoryExtractionService
 from app.memory.service import MemoryService
 from app.memory.worker import MemoryWorker, MemoryWorkerConfig
 from domain.memory.lifecycle import (
@@ -62,6 +64,7 @@ pytestmark = [
 
 _EMBEDDING_PROFILE = "bge-m3-1024-v1"
 _EMBEDDING = (0.1,) * 1024
+_LONG_TOOL_CALL_ID = "call_" + ("x" * 160)
 
 
 class _BlockingEmbedding:
@@ -75,6 +78,14 @@ class _BlockingEmbedding:
         """通知测试已读到来源，并等待撤销事务提交。"""
         self.started.set()
         await self.release.wait()
+        return [list(_EMBEDDING) for _ in texts]
+
+
+class _Embedding:
+    """立即返回固定有效向量，供真实服务写入路径使用。"""
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """为基础写入测试返回固定向量。"""
         return [list(_EMBEDDING) for _ in texts]
 
 
@@ -1234,6 +1245,418 @@ def test_real_service_rechecks_revoked_auth_in_write_transaction() -> None:
             async with harness.database.factory() as session:
                 count = await session.scalar(select(func.count()).select_from(MemoryModel))
             assert count == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("operation", "requested_scope"),
+    (
+        ("remember", "personal"),
+        ("remember", "project"),
+        ("correct", "personal"),
+        ("correct", "project"),
+    ),
+)
+def test_project_session_control_writes_selected_scope_with_fixed_request_id(
+    operation: str,
+    requested_scope: str,
+) -> None:
+    """项目会话的 remember/correct 均可落个人或当前项目，并按原控制身份幂等重放。"""
+
+    async def scenario() -> None:
+        owner_id = f"owner_control_scope_{operation}_{requested_scope}"
+        async with lifecycle_harness(
+            owner_id,
+            pending_count=1,
+            generation=2,
+        ) as harness:
+            fixture = harness.fixture
+            project_scope = f"project:{fixture.project_id}"
+            expected_scope = "personal" if requested_scope == "personal" else project_scope
+            target_id: str | None = None
+            if operation == "correct":
+                target_id = f"memory_target_{requested_scope}"
+                await insert_memory(
+                    harness.database.factory,
+                    memory_id=target_id,
+                    namespace_id=fixture.owner_id,
+                    scope_key=expected_scope,
+                    content="旧的乌龙茶偏好",
+                    now=fixture.now - timedelta(days=1),
+                )
+
+            service = MemoryService(
+                harness.memory,
+                _Embedding(),
+                _Reranker(),
+                _Counter(),
+                lifecycle=harness.memory,
+                control_source=harness.memory,
+            )
+            access = AccessContext(
+                fixture.owner_id,
+                ("personal", project_scope),
+                ("personal", project_scope),
+            )
+            arguments: dict[str, object] = {
+                "run_id": fixture.run_ids[0],
+                "session_id": fixture.session_id,
+                "tool_call_id": _LONG_TOOL_CALL_ID,
+                "content": "用户喜欢乌龙茶",
+                "scope": requested_scope,
+                "kind": MemoryKind.PREFERENCE,
+                "load_policy": LoadPolicy.ON_DEMAND,
+                "evidence": "用户证据 1",
+            }
+            if operation == "remember":
+                result = await service.remember(access, **arguments)  # type: ignore[arg-type]
+                replay = await service.remember(access, **arguments)  # type: ignore[arg-type]
+            else:
+                result = await service.correct(
+                    access,
+                    **arguments,  # type: ignore[arg-type]
+                    target_memory_id=target_id or "",
+                    expected_version=1,
+                )
+                replay = await service.correct(
+                    access,
+                    **arguments,  # type: ignore[arg-type]
+                    target_memory_id=target_id or "",
+                    expected_version=1,
+                )
+
+            assert replay == result
+            assert result.memory_id is not None
+            assert result.superseded_memory_id == (target_id if operation == "correct" else None)
+            async with harness.database.factory() as session:
+                stored = await session.get(MemoryModel, result.memory_id)
+                target = None if target_id is None else await session.get(MemoryModel, target_id)
+                receipt = await session.scalar(
+                    select(MemoryJobModel).where(
+                        MemoryJobModel.dedupe_key
+                        == f"control:{fixture.run_ids[0]}:{_LONG_TOOL_CALL_ID}"
+                    )
+                )
+                stored_count = await session.scalar(
+                    select(func.count())
+                    .select_from(MemoryModel)
+                    .where(
+                        MemoryModel.request_id
+                        == (None if stored is None else stored.request_id)
+                    )
+                )
+            assert stored is not None
+            assert stored.scope_key == expected_scope
+            assert stored.request_id.startswith("mreq_control_")
+            assert len(stored.request_id) == 77
+            assert stored_count == 1
+            assert receipt is not None
+            assert receipt.status == "done"
+            legacy_request_id = (
+                f"control:{fixture.run_ids[0]}:{_LONG_TOOL_CALL_ID}:owner:"
+                f"{fixture.owner_id}:{result.memory_id}"
+            )
+            assert len(legacy_request_id) > 128
+            if operation == "correct":
+                assert target is not None
+                assert target.status == "superseded"
+                assert target.superseded_by_id == result.memory_id
+                assert target.version == 2
+
+    asyncio.run(scenario())
+
+
+def test_project_control_rejects_foreign_project_session_drift_and_clear_forget() -> None:
+    """项目会话放宽写入范围后仍拒绝其他项目、实时会话漂移和 forget 清空范围变化。"""
+
+    async def scenario() -> None:
+        async with lifecycle_harness(
+            "owner_control_boundaries",
+            pending_count=1,
+            generation=2,
+        ) as harness:
+            fixture = harness.fixture
+            project_scope = f"project:{fixture.project_id}"
+            other_project_id = "project_other"
+            foreign_scope = f"project:{other_project_id}"
+            async with harness.database.factory() as session, session.begin():
+                session.add(
+                    ProjectModel(
+                        id=other_project_id,
+                        owner_id=fixture.owner_id,
+                        name="Other Project",
+                        created_at=fixture.now,
+                        updated_at=fixture.now,
+                        deleted_time=None,
+                    )
+                )
+                session.add(
+                    MemoryScopeStateModel(
+                        namespace_id=fixture.owner_id,
+                        scope_key=foreign_scope,
+                        enabled=True,
+                        last_maintained_day=None,
+                        created_at=fixture.now,
+                        updated_at=fixture.now,
+                    )
+                )
+
+            service = MemoryService(
+                harness.memory,
+                _Embedding(),
+                _Reranker(),
+                _Counter(),
+                lifecycle=harness.memory,
+                control_source=harness.memory,
+            )
+            access = AccessContext(
+                fixture.owner_id,
+                ("personal", project_scope, foreign_scope),
+                ("personal", project_scope, foreign_scope),
+            )
+            with pytest.raises(ValueError, match="memory_control_scope_invalid"):
+                await service.forget(
+                    access,
+                    run_id=fixture.run_ids[0],
+                    session_id=fixture.session_id,
+                    tool_call_id="tool_clear_personal",
+                    scope="personal",
+                    evidence="用户证据 1",
+                    target_memory_id=None,
+                    expected_version=None,
+                    clear_scope=True,
+                )
+
+            pending = await harness.memory.list_pending_runs(
+                fixture.owner_id,
+                limit=20,
+                token_budget=1_000_000,
+            )
+            source = pending[0].messages[0]
+            foreign_receipt = ControlPayload(
+                owner_id=fixture.owner_id,
+                run_id=fixture.run_ids[0],
+                tool_call_id="tool_foreign_project",
+                operation="remember",
+                arguments_digest="d" * 64,
+                auth_session_id=fixture.auth_session_id,
+                namespace_id=fixture.owner_id,
+                scope_key=foreign_scope,
+            )
+            foreign_command = ControlCommand(
+                receipt=foreign_receipt,
+                decision_generation=2,
+                access_scope_key=foreign_scope,
+                operation="remember",
+                content="用户喜欢乌龙茶",
+                kind=MemoryKind.PREFERENCE,
+                load_policy=LoadPolicy.ON_DEMAND,
+                evidence_sources=(source,),
+                evidenced_at=source.source_at,
+                expires_at=None,
+                target_memory_id=None,
+                expected_version=None,
+                clear_scope=False,
+                create_memory_id="memory_foreign_project",
+                embedding=_EMBEDDING,
+                embedding_profile_id=_EMBEDDING_PROFILE,
+            )
+            with pytest.raises(ValueError, match="memory_control_scope_invalid"):
+                await harness.memory.apply_control(foreign_command)
+
+            async with harness.database.factory() as session, session.begin():
+                chat_session = await session.get(SessionModel, fixture.session_id)
+                assert chat_session is not None
+                chat_session.project_id = other_project_id
+                chat_session.updated_at = fixture.now
+            drifted_receipt = ControlPayload(
+                owner_id=fixture.owner_id,
+                run_id=fixture.run_ids[0],
+                tool_call_id="tool_session_drift",
+                operation="remember",
+                arguments_digest="e" * 64,
+                auth_session_id=fixture.auth_session_id,
+                namespace_id=fixture.owner_id,
+                scope_key="personal",
+            )
+            with pytest.raises(ValueError, match="memory_control_session_invalid"):
+                await harness.memory.apply_control(
+                    ControlCommand(
+                        receipt=drifted_receipt,
+                        decision_generation=2,
+                        access_scope_key="personal",
+                        operation="remember",
+                        content="用户喜欢乌龙茶",
+                        kind=MemoryKind.PREFERENCE,
+                        load_policy=LoadPolicy.ON_DEMAND,
+                        evidence_sources=(source,),
+                        evidenced_at=source.source_at,
+                        expires_at=None,
+                        target_memory_id=None,
+                        expected_version=None,
+                        clear_scope=False,
+                        create_memory_id="memory_session_drift",
+                        embedding=_EMBEDDING,
+                        embedding_profile_id=_EMBEDDING_PROFILE,
+                    )
+                )
+
+            async with harness.database.factory() as session:
+                memory_count = await session.scalar(select(func.count()).select_from(MemoryModel))
+                control_count = await session.scalar(
+                    select(func.count())
+                    .select_from(MemoryJobModel)
+                    .where(MemoryJobModel.kind == "control")
+                )
+            assert memory_count == 0
+            assert control_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_project_personal_scope_must_be_enabled_before_control_write() -> None:
+    """项目会话写个人范围仍须通过目标 scope 的启用门槛。"""
+
+    async def scenario() -> None:
+        async with lifecycle_harness(
+            "owner_personal_scope_disabled",
+            pending_count=1,
+            generation=2,
+        ) as harness:
+            fixture = harness.fixture
+            project_scope = f"project:{fixture.project_id}"
+            async with harness.database.factory() as session, session.begin():
+                personal = await session.get(
+                    MemoryScopeStateModel,
+                    (fixture.owner_id, "personal"),
+                )
+                assert personal is not None
+                personal.enabled = False
+
+            service = MemoryService(
+                harness.memory,
+                _Embedding(),
+                _Reranker(),
+                _Counter(),
+                lifecycle=harness.memory,
+                control_source=harness.memory,
+            )
+            with pytest.raises(ValueError, match="memory_scope_disabled"):
+                await service.remember(
+                    AccessContext(
+                        fixture.owner_id,
+                        ("personal", project_scope),
+                        ("personal", project_scope),
+                    ),
+                    run_id=fixture.run_ids[0],
+                    session_id=fixture.session_id,
+                    tool_call_id="tool_disabled_personal",
+                    content="用户喜欢乌龙茶",
+                    scope="personal",
+                    kind=MemoryKind.PREFERENCE,
+                    load_policy=LoadPolicy.ON_DEMAND,
+                    evidence="用户证据 1",
+                )
+            async with harness.database.factory() as session:
+                memory_count = await session.scalar(select(func.count()).select_from(MemoryModel))
+                control_count = await session.scalar(
+                    select(func.count())
+                    .select_from(MemoryJobModel)
+                    .where(MemoryJobModel.kind == "control")
+                )
+            assert memory_count == 0
+            assert control_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_actual_extraction_request_id_persists_and_replays_in_postgres() -> None:
+    """真实提取服务生成的固定长度请求键可落库，并以原批次结果幂等重放。"""
+
+    async def scenario() -> None:
+        async with lifecycle_harness(
+            "owner_extract_request",
+            pending_count=1,
+            generation=3,
+        ) as harness:
+            fixture = harness.fixture
+            project_scope = f"project:{fixture.project_id}"
+            await add_extract_job(
+                harness.database.factory,
+                owner_id=fixture.owner_id,
+                job_id="job_extract_request",
+            )
+            job = await harness.memory.claim_job(kinds=(JobKind.EXTRACT_PENDING,))
+            assert job is not None
+            pending = await harness.memory.list_pending_runs(
+                fixture.owner_id,
+                limit=20,
+                token_budget=1_000_000,
+            )
+            source = pending[0].messages[0]
+            candidate = MemoryCandidate(
+                content="用户喜欢项目内使用乌龙茶",
+                kind=MemoryKind.PREFERENCE,
+                scope="project",
+                source_message_ids=(source.message_id,),
+                evidence=source.text,
+                proposed_load_policy=LoadPolicy.ON_DEMAND,
+            )
+            decision = ExtractionDecision(
+                candidate_index=0,
+                candidate=candidate,
+                action=DecisionAction.ADD,
+                content=candidate.content,
+                namespace_id=fixture.owner_id,
+                scope_key=project_scope,
+                source_message_ids=(source.message_id,),
+            )
+            batch = build_batch(
+                fixture,
+                pending,
+                batch_id="batch_" + ("x" * 96),
+                candidates=(candidate,),
+                decisions=(decision,),
+            )
+            await harness.memory.load_batch_sources(batch)
+            extraction = MemoryExtractionService(
+                harness.memory,
+                _EmptyExtraction(),  # type: ignore[arg-type]
+                _Embedding(),
+                _Counter(),
+                embedding_profile_id=_EMBEDDING_PROFILE,
+            )
+            changes = await extraction.prepare_changes(batch, (source,))
+            create = changes[0].create
+            assert create is not None
+            assert create.request_id.startswith("mreq_extract_")
+            assert len(create.request_id) == 77
+            legacy_request_id = (
+                f"extract:{batch.batch_id}:{decision.candidate_index}:owner:"
+                f"{fixture.owner_id}:{create.memory_id}"
+            )
+            assert len(legacy_request_id) > 128
+
+            command = ApplyBatchCommand(
+                job_id=job.id,
+                batch=batch,
+                changes=changes,
+            )
+            applied = await harness.memory.apply_batch(command)
+            replayed = await harness.memory.apply_batch(command)
+            assert replayed == applied
+            assert applied.created == 1
+            async with harness.database.factory() as session:
+                stored = await session.get(MemoryModel, create.memory_id)
+                run = await session.get(RunModel, fixture.run_ids[0])
+                stored_job = await session.get(MemoryJobModel, job.id)
+            assert stored is not None
+            assert stored.request_id == create.request_id
+            assert run is not None
+            assert run.memory_extraction_status == "completed"
+            assert stored_job is not None
+            assert stored_job.status == "done"
 
     asyncio.run(scenario())
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from adapter.llm import OpenAIChatCompletionsAdapter
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.memory.repository import MemoryRepository
+from adapter.system_prompt.model import SystemPromptVersionModel
 from app.memory.extraction import ExtractionLimits, MemoryExtractionService
 from app.memory.worker import MemoryWorker, MemoryWorkerConfig
 from bootstrap.config import memory_enabled_from_env
@@ -16,6 +17,10 @@ from infrastructure.database import Database
 from infrastructure.embedding import LocalEmbedding, LocalTokenCounter
 from infrastructure.embedding.profile import embedding_profile_id
 from infrastructure.security.mcp_secrets import McpSecretCipher
+
+# RunModel 的系统提示词外键在独立 Worker 进程中也必须能找到目标 ORM 表；
+# 保留显式模型集合，具体提示词仍由 Run Worker/API 管理。
+_REQUIRED_RUN_FOREIGN_KEY_MODELS = (SystemPromptVersionModel,)
 
 
 @dataclass(slots=True)

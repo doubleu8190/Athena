@@ -386,6 +386,187 @@ describe("会话工作台初始加载与历史", () => {
 });
 
 describe("Run 命令与真实状态", () => {
+  it("普通发送成功后等待目标用户消息进入列表再定位最新", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const triggerMessage = makeMessage({
+      id: "message-sent-after-http",
+      parts: [{ text: "等待真实消息进入列表再滚动", type: "text" }],
+      role: "user",
+      sequence: 2,
+      session_id: SESSION.id,
+    });
+    const queuedRun = makeRun({
+      id: "run-after-send-scroll",
+      session_id: SESSION.id,
+      status: "queued",
+      trigger_message_id: triggerMessage.id,
+    });
+    let runs: Run[] = [];
+    let serveDelayedPage = false;
+    const delayedPageRequested = deferred<void>();
+    const delayedPage = deferred<Response>();
+    installWorkspaceFetch({
+      getRuns: () => runs,
+      handleWrite: async (pathname, method) => {
+        if (pathname.endsWith("/runs") && method === "POST") {
+          runs = [queuedRun];
+          serveDelayedPage = true;
+          return jsonResponse(queuedRun, 201);
+        }
+        throw new Error(`Unexpected write: ${pathname}`);
+      },
+      messages: () => ({
+        items: [
+          makeMessage({
+            id: "message-before-send",
+            parts: [{ text: "发送前历史", type: "text" }],
+            role: "user",
+            sequence: 1,
+            session_id: SESSION.id,
+          }),
+        ],
+        next_before_sequence: null,
+      }),
+      messagesResponse: async () => {
+        if (serveDelayedPage) {
+          serveDelayedPage = false;
+          delayedPageRequested.resolve();
+          return delayedPage.promise;
+        }
+        return jsonResponse({
+          items: [
+            makeMessage({
+              id: "message-before-send",
+              parts: [{ text: "发送前历史", type: "text" }],
+              role: "user",
+              sequence: 1,
+              session_id: SESSION.id,
+            }),
+          ],
+          next_before_sequence: null,
+        });
+      },
+    });
+    const user = userEvent.setup();
+
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("发送前历史")).toBeInTheDocument();
+    const list = screen.getByRole("region", { name: "消息历史" });
+    let scrollHeight = 900;
+    Object.defineProperties(list, {
+      clientHeight: {
+        configurable: true,
+        value: 300,
+      },
+      scrollHeight: {
+        configurable: true,
+        get: () => scrollHeight,
+      },
+      scrollTop: {
+        configurable: true,
+        value: 0,
+        writable: true,
+      },
+    });
+    fireEvent.scroll(list);
+
+    const composer = screen.getByLabelText("对话草稿");
+    await user.type(composer, "等待真实消息进入列表再滚动");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(
+      await screen.findByText("消息已提交，正在按服务端最新运行状态同步。"),
+    ).toBeInTheDocument();
+    await delayedPageRequested.promise;
+    expect(list.scrollTop).toBe(0);
+
+    scrollHeight = 1200;
+    await act(async () => {
+      delayedPage.resolve(
+        jsonResponse({
+          items: [
+            makeMessage({
+              id: "message-before-send",
+              parts: [{ text: "发送前历史", type: "text" }],
+              role: "user",
+              sequence: 1,
+              session_id: SESSION.id,
+            }),
+            triggerMessage,
+          ],
+          next_before_sequence: null,
+        }),
+      );
+      await delayedPage.promise;
+    });
+
+    expect(
+      await screen.findByText("等待真实消息进入列表再滚动"),
+    ).toBeInTheDocument();
+    expect(list.scrollTop).toBe(1200);
+  });
+
+  it("普通发送失败时不会把旧消息末尾误当成发送成功", async () => {
+    const failedMessage = "失败后保持当前阅读位置";
+    installWorkspaceFetch({
+      getRuns: () => [],
+      handleWrite: async (pathname, method) => {
+        if (pathname.endsWith("/runs") && method === "POST") {
+          throw new TypeError("Failed to fetch");
+        }
+        throw new Error(`Unexpected write: ${pathname}`);
+      },
+      messages: () => ({
+        items: [
+          makeMessage({
+            id: "message-failure-history",
+            parts: [{ text: "仍在上方阅读的历史", type: "text" }],
+            role: "user",
+            sequence: 1,
+            session_id: SESSION.id,
+          }),
+        ],
+        next_before_sequence: null,
+      }),
+    });
+    const user = userEvent.setup();
+
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("仍在上方阅读的历史")).toBeInTheDocument();
+    const list = screen.getByRole("region", { name: "消息历史" });
+    Object.defineProperties(list, {
+      clientHeight: {
+        configurable: true,
+        value: 300,
+      },
+      scrollHeight: {
+        configurable: true,
+        value: 1000,
+      },
+      scrollTop: {
+        configurable: true,
+        value: 100,
+        writable: true,
+      },
+    });
+    fireEvent.scroll(list);
+
+    const composer = screen.getByLabelText("对话草稿");
+    await user.type(composer, failedMessage);
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(
+      await screen.findByText("无法连接服务器，请检查网络后重试。"),
+    ).toBeInTheDocument();
+    expect(composer).toHaveValue(failedMessage);
+    expect(list.scrollTop).toBe(100);
+    expect(
+      screen.getByRole("button", { name: "回到最新" }),
+    ).toBeInTheDocument();
+  });
+
   it("latest list 与 detail 同版本时保留 detail 的待审批投影", async () => {
     const pending: RunPendingApproval = {
       batch_message_id: "batch-1",

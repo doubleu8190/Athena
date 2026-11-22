@@ -400,13 +400,23 @@ class MemoryExtractionService:
             create: PreparedMemoryCreate | None = None
             if decision.action is not DecisionAction.IGNORE:
                 memory_id = self._stable_memory_id(batch, decision.candidate_index)
+                # 摘要完整覆盖旧 request_id 的四项稳定输入，并以用途前缀区分同步控制；
+                # 固定 77 字符，避免实际 Run/批次标识组合超过 VARCHAR(128)。
+                request_id_digest = hashlib.sha256(
+                    dumps(
+                        {
+                            "batch_id": batch.batch_id,
+                            "candidate_index": decision.candidate_index,
+                            "owner_id": batch.owner_id,
+                            "memory_id": memory_id,
+                        },
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
                 create = PreparedMemoryCreate(
                     memory_id=memory_id,
                     namespace_id=batch.owner_id,
-                    request_id=(
-                        f"extract:{batch.batch_id}:{decision.candidate_index}:owner:"
-                        f"{batch.owner_id}:{memory_id}"
-                    ),
+                    request_id=f"mreq_extract_{request_id_digest}",
                     scope_key=decision.scope_key,
                     content=decision.content,
                     content_hash=self._content_hash(decision.content),

@@ -34,6 +34,7 @@ from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
 from adapter.session.model import SessionModel
 from common.date import as_utc, utc_now
+from common.json import dumps
 from domain.memory.lifecycle import (
     ControlCommand,
     ControlJobResult,
@@ -276,7 +277,17 @@ class MemoryControlRepository:
             raise ValueError("memory_control_run_invalid")
         session_id, project_id = hint
         expected_scope = _scope_key(project_id)
-        if command.access_scope_key != expected_scope:
+        # 项目会话的 remember/correct 可明确写入 personal 或当前项目；删除仍只作用于
+        # Run 固定的单一 scope，避免放宽无关控制语义。
+        allowed_scopes = (
+            ("personal", expected_scope)
+            if command.operation in {"remember", "correct"} and project_id is not None
+            else (expected_scope,)
+        )
+        if (
+            command.access_scope_key not in allowed_scopes
+            or receipt.scope_key != command.access_scope_key
+        ):
             raise ValueError("memory_control_scope_invalid")
         if project_id is not None:
             # ProjectModel 为只读归属校验表，不加 FOR UPDATE 行锁。
@@ -391,13 +402,23 @@ class MemoryControlRepository:
         ):
             return None
         last_evidence = max(item.source_at for item in command.evidence_sources)
+        # 摘要完整覆盖旧 request_id 的四项稳定输入，并以用途前缀区分控制与自动提取；
+        # 固定 77 字符，避免外部 Run/调用标识长度影响 VARCHAR(128) 持久化。
+        identity_digest = hashlib.sha256(
+            dumps(
+                {
+                    "namespace_id": command.receipt.namespace_id,
+                    "run_id": command.receipt.run_id,
+                    "tool_call_id": command.receipt.tool_call_id,
+                    "create_memory_id": command.create_memory_id,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
         return PreparedMemoryCreate(
             memory_id=command.create_memory_id,
             namespace_id=command.receipt.namespace_id,
-            request_id=(
-                f"control:{command.receipt.run_id}:{command.receipt.tool_call_id}:owner:"
-                f"{command.receipt.namespace_id}:{command.create_memory_id}"
-            ),
+            request_id=f"mreq_control_{identity_digest}",
             scope_key=command.access_scope_key,
             content=command.content,
             content_hash=_normalized_content_hash(command.content),

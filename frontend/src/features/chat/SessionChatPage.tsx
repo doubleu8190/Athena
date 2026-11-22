@@ -38,6 +38,7 @@ import {
 import {
   ChatMessageList,
   findQuestionText,
+  type ChatAutoScrollRequest,
 } from "./ChatMessageList";
 import { useDraftChat } from "./DraftChatContext";
 import {
@@ -382,6 +383,8 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   const [terminalMessageFailure, setTerminalMessageFailure] =
     useState<TerminalMessageFailure | null>(null);
   const [terminalMessageRetry, setTerminalMessageRetry] = useState(0);
+  const [autoScrollRequest, setAutoScrollRequest] =
+    useState<ChatAutoScrollRequest | null>(null);
   const [traceOpen, setTraceOpen] = useState(
     () => typeof window === "undefined" || window.innerWidth > 920,
   );
@@ -816,6 +819,11 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     const targetRunId = activeSubagentInput
       ? activeSubagentInput.sub_run_id
       : (run?.id ?? null);
+    const sequenceAtSubmit = messages.reduce(
+      (latestSequence, message) =>
+        Math.max(latestSequence, message.sequence),
+      0,
+    );
     const isAnswering = isWaitingInput || isTargetedSubagentAnswer;
     const submittedSkillIds = isAnswering ? [] : [...selectedSkillIds];
     const submittedFileIds = [...selectedFileIds];
@@ -946,6 +954,22 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
         setSelectedSkillIds([]);
         setHandoffUploads([]);
         clearSessionHandoff(sessionId);
+        // 子 Run 的定向回答不会进入主消息历史；主发送与主 Run 补充回答
+        // 等对应用户消息真正出现后再通知列表定位，失败路径不会登记。
+        if (!activeSubagentInput) {
+          setAutoScrollRequest(
+            isAnswering
+              ? {
+                  afterSequence: sequenceAtSubmit,
+                  key: `${commandToken}:${requestId}`,
+                  text,
+                }
+              : {
+                  key: `${commandToken}:${requestId}`,
+                  messageId: nextRun.trigger_message_id,
+                },
+          );
+        }
         setCommandNotice(
           activeSubagentInput
             ? `已向子智能体「${activeSubagentInput.subagent_name}」提交回答，正在同步状态。`
@@ -1291,10 +1315,12 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
           ) : null}
 
           <ChatMessageList
+            autoScrollRequest={autoScrollRequest}
             error={messagesQuery.isError ? messagesQuery.error : null}
             hasMore={Boolean(messagesQuery.hasNextPage)}
             isLoading={messagesQuery.isPending}
             isLoadingMore={messagesQuery.isFetchingNextPage}
+            key={sessionId}
             messages={messages}
             onLoadMore={() => void messagesQuery.fetchNextPage()}
             onRetry={() => void messagesQuery.refetch()}

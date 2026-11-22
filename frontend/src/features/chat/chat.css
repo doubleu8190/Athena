@@ -259,11 +259,19 @@
   font-size: 12px;
 }
 
+.chat-message-list-frame {
+  position: relative;
+  min-width: 0;
+  /* 外层不参与文档滚动锚定；历史消息保位由内层列表的原生锚定负责。 */
+  overflow-anchor: none;
+}
+
 .chat-message-list {
   position: relative;
   min-height: 330px;
   max-height: min(68vh, 820px);
   overflow-y: auto;
+  overflow-anchor: auto;
   padding: 18px;
   border: 1px solid #e0dcd2;
   border-radius: 15px;
@@ -272,6 +280,26 @@
     rgba(255, 253, 248, 0.78);
   scrollbar-color: #c7cfc9 transparent;
   scrollbar-width: thin;
+}
+
+.chat-message-list:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.chat-jump-latest {
+  position: absolute;
+  z-index: 3;
+  right: 22px;
+  bottom: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 8px 22px rgba(23, 48, 38, 0.16);
+}
+
+.chat-jump-latest svg {
+  transform: rotate(90deg);
 }
 
 .chat-message-list .state-panel {
@@ -1441,6 +1469,11 @@
   .chat-message-list {
     max-height: 55svh;
     padding: 12px;
+  }
+
+  .chat-jump-latest {
+    right: 14px;
+    bottom: 14px;
   }
 
   .chat-message {

@@ -828,7 +828,7 @@ describe("认证身份缓存隔离", () => {
     const app = renderApp("/chat");
     const user = userEvent.setup();
 
-    await screen.findByRole("heading", { name: "对话工作台" });
+    await screen.findByRole("heading", { name: /你好，/ });
     await act(async () => {
       void app.client
         .refetchQueries({
@@ -860,7 +860,7 @@ describe("认证身份缓存隔离", () => {
       ).toEqual(USER_B);
     });
     expect(
-      screen.getByRole("heading", { name: "对话工作台" }),
+      screen.getByRole("heading", { name: /你好，/ }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("暂时无法确认登录状态"),
@@ -1038,7 +1038,7 @@ describe("认证身份缓存隔离", () => {
       ).toEqual(USER_B);
     });
     expect(
-      screen.getByRole("heading", { name: "对话工作台" }),
+      screen.getByRole("heading", { name: /你好，/ }),
     ).toBeInTheDocument();
     expect(
       screen.getAllByText(PROJECT_FOR_B.name),

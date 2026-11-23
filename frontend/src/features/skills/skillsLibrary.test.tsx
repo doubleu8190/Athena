@@ -89,7 +89,7 @@ describe("技能库一级页面", () => {
     expect(publicCard).not.toBeNull();
     expect(personalCardInAvailable).not.toBeNull();
     expect(
-      within(publicCard as HTMLElement).getAllByText("公共"),
+      within(publicCard as HTMLElement).getAllByText("全公司"),
     ).toHaveLength(2);
     expect(
       within(publicCard as HTMLElement).getByText("脚本执行需审批"),

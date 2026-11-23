@@ -839,7 +839,7 @@ describe("普通用户个人技能管理", () => {
     expect(
       within(personalOption as HTMLElement).queryByText(/脚本执行/),
     ).not.toBeInTheDocument();
-    expect(within(publicOption as HTMLElement).getByText("公共")).toBeVisible();
+    expect(within(publicOption as HTMLElement).getByText("全公司")).toBeVisible();
     expect(
       within(publicOption as HTMLElement).getByText("脚本执行需审批"),
     ).toBeVisible();

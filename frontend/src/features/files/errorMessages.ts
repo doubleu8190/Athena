@@ -22,8 +22,37 @@ const FILE_ERROR_COPY: Record<string, string> = {
 };
 
 export function fileErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return FILE_ERROR_COPY[error.detail] ?? "文件操作未完成，请稍后重试。";
+  if (
+    error instanceof ApiError &&
+    Object.hasOwn(FILE_ERROR_COPY, error.detail)
+  ) {
+    return FILE_ERROR_COPY[error.detail];
   }
   return "文件操作未完成，请稍后重试。";
+}
+
+/**
+ * 判断文件上传失败后是否应复用同一 Idempotency-Key：
+ * 仅在网络中断（status === 0）、服务端 5xx 或响应无法解析（结果不确定）时复用原键，
+ * 避免重复落库；明确的 4xx 客户端拒绝需换新键重试。
+ */
+export function fileRequestCanBeReused(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return (
+      error.status === 0 ||
+      error.status >= 500 ||
+      error.detail === "invalid_response"
+    );
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    "detail" in error
+  ) {
+    const status = Number(error.status);
+    const detail = String(error.detail);
+    return status === 0 || status >= 500 || detail === "invalid_response";
+  }
+  return false;
 }

@@ -17,7 +17,6 @@ import { Icon } from "../../shared/ui/Icons";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { Modal } from "../../shared/ui/Modal";
 import { useProjectDirectory } from "../projects/hooks";
-import { SessionFilesPanel } from "../files/SessionFilesPanel";
 import type { PendingSessionUpload } from "../files/model";
 import { sessionFileKeys } from "../files/queryKeys";
 import { SkillScopeBadge } from "../skills/SkillScopeBadge";
@@ -89,10 +88,28 @@ interface FailedComposerCommand {
   fileIds: string[];
   inputRequestId?: string;
   kind: "answer" | "submit";
+  knowledgeBaseIds: string[] | null;
+  modelProfileId: string | null;
   requestId: string;
   reuseRequestId: boolean;
   skillIds: string[];
   text: string;
+}
+
+/** 精确对比知识库三态（null / [] / string[]），确保 request_id 幂等指纹与后端完全一致。 */
+function knowledgeScopeEqual(
+  left: string[] | null | undefined,
+  right: string[] | null | undefined,
+): boolean {
+  const normalizedLeft = left ?? null;
+  const normalizedRight = right ?? null;
+  if (normalizedLeft === null || normalizedRight === null) {
+    return normalizedLeft === normalizedRight;
+  }
+  return (
+    normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((id, index) => id === normalizedRight[index])
+  );
 }
 
 type RunCommandKind = "answer" | "approval" | "cancel" | "retry" | "submit";
@@ -223,7 +240,13 @@ function RunSummary({
               <span
                 className="run-skill-snapshot-item"
                 key={skill.skill_id}
-                title={`${skillScope(skill) === "personal" ? "个人" : "公共"} · ${skill.name} · ${skill.version_label}`}
+                title={`${
+                  skillScope(skill) === "personal"
+                    ? "个人"
+                    : skillScope(skill) === "department"
+                      ? "部门共享"
+                      : "全公司"
+                } · ${skill.name} · ${skill.version_label}`}
               >
                 <SkillScopeBadge
                   compact
@@ -271,7 +294,13 @@ function RunSummary({
   );
 }
 
-function SessionConversation({ sessionId }: { sessionId: string }) {
+function SessionConversation({
+  hasProjectContext,
+  sessionId,
+}: {
+  hasProjectContext: boolean;
+  sessionId: string;
+}) {
   const queryClient = useQueryClient();
   const { clearSessionHandoff, getSessionHandoff } = useDraftChat();
   const initialHandoff = useMemo(
@@ -284,15 +313,18 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>(
     initialHandoff?.inputFileIds ?? [],
   );
-  // 缓存选中文件 ID 集合，避免渲染期重复创建 Set 引起子面板无效刷新。
-  const selectedFileIdSet = useMemo(
-    () => new Set(selectedFileIds),
-    [selectedFileIds],
+  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[] | null>(
+    initialHandoff?.knowledgeBaseIds ?? null,
+  );
+  const [modelProfileId, setModelProfileId] = useState<string | null>(
+    initialHandoff?.modelProfileId ?? null,
   );
   const [handoffUploads, setHandoffUploads] = useState<
     PendingSessionUpload[]
   >(initialHandoff?.pendingUploads ?? []);
-  const [filePanelBusy, setFilePanelBusy] = useState(false);
+  const [hasBlockingUploads, setHasBlockingUploads] = useState(
+    () => (initialHandoff?.pendingUploads?.length ?? 0) > 0,
+  );
   const [commandError, setCommandError] = useState<string | null>(
     initialHandoff?.error ?? null,
   );
@@ -303,6 +335,8 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
         ? {
             kind: "submit",
             fileIds: initialHandoff.inputFileIds ?? [],
+            knowledgeBaseIds: initialHandoff.knowledgeBaseIds ?? null,
+            modelProfileId: initialHandoff.modelProfileId ?? null,
             requestId: initialHandoff.requestId,
             reuseRequestId: initialHandoff.reuseRequestId,
             skillIds: initialHandoff.selectedSkillIds ?? [],
@@ -832,9 +866,9 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     if (!text || commandLockRef.current) {
       return false;
     }
-    if (handoffUploads.length > 0) {
+    if (hasBlockingUploads || handoffUploads.length > 0) {
       setCommandError(
-        "请先上传或移除会话文件面板中的待上传文件，再提交消息或补充回答。",
+        "请先等待附件上传完成，或重试/移除失败的附件后再提交。",
       );
       return false;
     }
@@ -866,6 +900,12 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     const isAnswering = isWaitingInput || isTargetedSubagentAnswer;
     const submittedSkillIds = isAnswering ? [] : [...selectedSkillIds];
     const submittedFileIds = [...selectedFileIds];
+    const submittedKnowledgeBaseIds = isAnswering
+      ? null
+      : knowledgeBaseIds === null
+        ? null
+        : [...knowledgeBaseIds];
+    const submittedModelProfileId = isAnswering ? null : modelProfileId;
     const commandKind: RunCommandKind = isAnswering ? "answer" : "submit";
     const commandToken = beginRunCommand(commandKind, targetRunId);
     if (commandToken === null) {
@@ -878,6 +918,12 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
         submittedFileIds.join("\u0000") &&
       failedCommand.skillIds.join("\u0000") ===
         submittedSkillIds.join("\u0000") &&
+      knowledgeScopeEqual(
+        failedCommand.knowledgeBaseIds,
+        submittedKnowledgeBaseIds,
+      ) &&
+      (failedCommand.modelProfileId ?? null) ===
+        (submittedModelProfileId ?? null) &&
       (isAnswering
         ? failedCommand.kind === "answer" &&
           failedCommand.inputRequestId === inputRequestId
@@ -911,6 +957,10 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
                 text,
                 submittedSkillIds,
                 submittedFileIds,
+                {
+                  knowledgeBaseIds: submittedKnowledgeBaseIds,
+                  modelProfileId: submittedModelProfileId,
+                },
               );
 
       if (activeSubagentInput) {
@@ -1021,6 +1071,8 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
           fileIds: submittedFileIds,
           inputRequestId,
           kind: isAnswering ? "answer" : "submit",
+          knowledgeBaseIds: submittedKnowledgeBaseIds,
+          modelProfileId: submittedModelProfileId,
           requestId,
           reuseRequestId: requestIdCanBeReused(error),
           skillIds: submittedSkillIds,
@@ -1255,12 +1307,11 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
     }
   };
 
-  // 待上传文件还没有服务端 file ID，必须阻止 Run 以免静默漏掉用户选择。
-  const hasPendingUploads = handoffUploads.length > 0;
+  // 仍有上传中或上传失败的附件时阻止提交，避免静默漏掉用户选择的资料。
   const canSendWithoutDraft =
     !commandPending &&
-    !filePanelBusy &&
-    !hasPendingUploads &&
+    !hasBlockingUploads &&
+    handoffUploads.length === 0 &&
     (isTargetedSubagentAnswer ||
       (isWaitingInput && Boolean(run?.pending_input)) ||
       (!isActive && Boolean(run || latestRuns.isSuccess)));
@@ -1371,19 +1422,6 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             tasks={subagentTasks}
           />
 
-          <SessionFilesPanel
-            disabled={
-              commandPending ||
-              (isActive && !isWaitingInput && !isTargetedSubagentAnswer)
-            }
-            initialPendingUploads={handoffUploads}
-            onBusyChange={setFilePanelBusy}
-            onChangeSelectedFileIds={setSelectedFileIds}
-            onInitialPendingUploadsChange={setHandoffUploads}
-            selectedFileIds={selectedFileIdSet}
-            sessionId={sessionId}
-          />
-
           <SubagentApprovalPanel
             approvals={pendingSubagentApprovals}
             busyKeys={busySubagentApprovalKeys}
@@ -1437,19 +1475,28 @@ function SessionConversation({ sessionId }: { sessionId: string }) {
             activeSubagentInput={activeSubagentInput}
             canSendWithoutDraft={canSendWithoutDraft}
             commandPending={commandPending}
-            filePanelBusy={filePanelBusy}
-            hasPendingUploads={hasPendingUploads}
+            hasProjectContext={hasProjectContext}
             hasRun={Boolean(run)}
             initialDraft={initialHandoff?.draft ?? ""}
+            initialPendingUploads={handoffUploads}
             isActive={isActive}
             isTargetedSubagentAnswer={isTargetedSubagentAnswer}
             isWaitingInput={isWaitingInput}
             isWaitingSubagents={isWaitingSubagents}
+            knowledgeBaseIds={knowledgeBaseIds}
+            modelProfileId={modelProfileId}
+            onBlockingUploadsChange={setHasBlockingUploads}
             onCancel={handleCancel}
+            onChangeKnowledgeBaseIds={setKnowledgeBaseIds}
+            onChangeModelProfileId={setModelProfileId}
+            onChangeSelectedFileIds={setSelectedFileIds}
             onChangeSelectedSkillIds={setSelectedSkillIds}
+            onPendingUploadsChange={setHandoffUploads}
             onSubmit={handleSubmit}
+            selectedFileIds={selectedFileIds}
             selectedSkillIds={selectedSkillIds}
             sending={sending}
+            sessionId={sessionId}
             status={status}
             stopping={stopping}
           />
@@ -1621,7 +1668,11 @@ export function SessionChatPage() {
         ) : null}
       </header>
 
-      <SessionConversation key={sessionId} sessionId={sessionId} />
+      <SessionConversation
+        hasProjectContext={Boolean(session.data?.project_id)}
+        key={sessionId}
+        sessionId={sessionId}
+      />
     </div>
   );
 }

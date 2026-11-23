@@ -18,6 +18,10 @@ const ERROR_CODES = [
   "run_tool_approval_not_pending",
   "run_tool_approval_already_decided",
   "tool_retry_confirmation_required",
+  "knowledge_base_not_found",
+  "run_knowledge_base_ids_invalid",
+  "run_model_profile_id_invalid",
+  "model_profile_unavailable",
   "network_error",
 ] as const;
 
@@ -26,6 +30,15 @@ describe("Run 错误映射", () => {
     const message = chatErrorMessage(new ApiError(409, code));
     expect(message).not.toBe("运行操作未完成，请稍后重试。");
     expect(message.length).toBeGreaterThan(4);
+  });
+
+  it("使用 Object.hasOwn 安全查表，原型链键名回退默认提示", () => {
+    expect(chatErrorMessage(new ApiError(500, "toString"))).toBe(
+      "运行操作未完成，请稍后重试。",
+    );
+    expect(chatErrorMessage(new ApiError(500, "constructor"))).toBe(
+      "运行操作未完成，请稍后重试。",
+    );
   });
 
   it("只对结果不确定的失败复用 request_id", () => {

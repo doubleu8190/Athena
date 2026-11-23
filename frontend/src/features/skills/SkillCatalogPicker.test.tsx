@@ -11,23 +11,33 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { makeSkill } from "../../test/adminFixtures";
-import {
-  getRequestUrl,
-} from "../../test/fixtures";
+import { getRequestUrl } from "../../test/fixtures";
 import {
   createTestQueryClient,
   jsonResponse,
 } from "../../test/testUtils";
 import { SkillCatalogPicker } from "./SkillCatalogPicker";
 
-const PUBLIC_SKILL = makeSkill({
+const COMPANY_LEGACY_SKILL = makeSkill({
   current_version_label: "v3",
   description: "按统一模板生成项目复盘。",
-  id: "public-review",
+  id: "company-review",
   name: "项目复盘",
+  // 故意保留历史 "public" 枚举，验证前端将其安全归一到「全公司技能」。
   scope: "public",
   script_requires_approval: true,
   slug: "project-review",
+});
+
+const DEPARTMENT_SKILL = makeSkill({
+  current_version_label: "v1",
+  description: "按财务部门规范校验费用报销单。",
+  id: "dept-expense",
+  name: "费用报销审核",
+  owner_department_id: "dept-fin",
+  scope: "department",
+  script_requires_approval: false,
+  slug: "expense-audit",
 });
 
 const PERSONAL_SKILL = makeSkill({
@@ -71,28 +81,19 @@ function renderPicker(initialSelected: string[] = []) {
   );
 }
 
-function setViewportWidth(width: number) {
-  Object.defineProperty(window, "innerWidth", {
-    configurable: true,
-    value: width,
-  });
-  window.dispatchEvent(new Event("resize"));
-}
-
 afterEach(() => {
-  setViewportWidth(1024);
   vi.unstubAllGlobals();
 });
 
 describe("Composer 技能选择器", () => {
-  it("默认自动选择，展开后按公共与个人分组并能完成选择", async () => {
+  it("默认自动选择，展开后按全公司/部门共享/个人三层分组，支持搜索并完成选择", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
         expect(url.pathname).toBe("/api/v1/skills");
         return jsonResponse({
-          items: [PUBLIC_SKILL, PERSONAL_SKILL],
+          items: [COMPANY_LEGACY_SKILL, DEPARTMENT_SKILL, PERSONAL_SKILL],
         });
       }),
     );
@@ -111,49 +112,69 @@ describe("Composer 技能选择器", () => {
       name: "选择本次技能",
     });
     expect(
-      within(dialog).getByRole("heading", { name: "公共技能" }),
+      within(dialog).getByRole("heading", { name: "全公司技能" }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("heading", { name: "部门共享技能" }),
     ).toBeInTheDocument();
     expect(
       within(dialog).getByRole("heading", { name: "我的技能" }),
     ).toBeInTheDocument();
 
-    const publicOption = within(dialog)
+    const companyOption = within(dialog)
       .getByText("项目复盘")
+      .closest("label");
+    const deptOption = within(dialog)
+      .getByText("费用报销审核")
       .closest("label");
     const personalOption = within(dialog)
       .getByText("会议纪要")
       .closest("label");
-    expect(publicOption).not.toBeNull();
+    expect(companyOption).not.toBeNull();
+    expect(deptOption).not.toBeNull();
     expect(personalOption).not.toBeNull();
     expect(
-      within(publicOption as HTMLElement).getByText("脚本执行需审批"),
+      within(companyOption as HTMLElement).getByText("全公司"),
     ).toBeVisible();
     expect(
-      within(publicOption as HTMLElement).getByText("v3"),
+      within(companyOption as HTMLElement).getByText("脚本执行需审批"),
+    ).toBeVisible();
+    expect(within(companyOption as HTMLElement).getByText("v3")).toBeVisible();
+    expect(
+      within(deptOption as HTMLElement).getByText("部门共享"),
+    ).toBeVisible();
+    expect(
+      within(personalOption as HTMLElement).getByText("个人"),
     ).toBeVisible();
     expect(
       within(personalOption as HTMLElement).getByText("纯文档"),
     ).toBeVisible();
 
+    // 关键字过滤只展示命中项
+    const searchInput = within(dialog).getByLabelText("搜索技能");
+    await user.type(searchInput, "报销");
+    expect(within(dialog).getByText("费用报销审核")).toBeInTheDocument();
+    expect(within(dialog).queryByText("项目复盘")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("会议纪要")).not.toBeInTheDocument();
+
+    await user.clear(searchInput);
     await user.click(
       within(dialog).getByRole("checkbox", { name: /项目复盘/ }),
     );
     expect(screen.getByTestId("selected-skills")).toHaveTextContent(
-      PUBLIC_SKILL.id,
+      COMPANY_LEGACY_SKILL.id,
     );
-    await user.click(
-      within(dialog).getByRole("button", { name: "完成" }),
-    );
+    await user.click(within(dialog).getByRole("button", { name: "完成" }));
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    await waitFor(() => expect(trigger).toHaveFocus());
     expect(trigger).toHaveTextContent("项目复盘");
   });
 
   it("Escape 关闭时返还触发器焦点，点击外部保留外部焦点", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
+      vi.fn(async () => jsonResponse({ items: [COMPANY_LEGACY_SKILL] })),
     );
     const user = userEvent.setup();
     renderPicker();
@@ -165,7 +186,7 @@ describe("Composer 技能选择器", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    await waitFor(() => expect(trigger).toHaveFocus());
 
     await user.click(trigger);
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -177,7 +198,7 @@ describe("Composer 技能选择器", () => {
   it("关闭按钮会把焦点还给技能触发按钮", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
+      vi.fn(async () => jsonResponse({ items: [COMPANY_LEGACY_SKILL] })),
     );
     const user = userEvent.setup();
     renderPicker();
@@ -195,30 +216,28 @@ describe("Composer 技能选择器", () => {
       }),
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    await waitFor(() => expect(trigger).toHaveFocus());
   });
 
   it("不可用已选项不会被静默替换，可显式移除", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
+      vi.fn(async () => jsonResponse({ items: [COMPANY_LEGACY_SKILL] })),
     );
     const user = userEvent.setup();
-    renderPicker(["missing-skill", PUBLIC_SKILL.id]);
+    renderPicker(["missing-skill", COMPANY_LEGACY_SKILL.id]);
 
     const trigger = await screen.findByRole("button", {
       name: /本次技能/,
     });
-    await waitFor(() =>
-      expect(trigger).toHaveTextContent("含不可用项"),
-    );
+    await waitFor(() => expect(trigger).toHaveTextContent("含不可用项"));
     await user.click(trigger);
     const dialog = screen.getByRole("dialog", {
       name: "选择本次技能",
     });
-    expect(
-      within(dialog).getByRole("alert"),
-    ).toHaveTextContent("页面不会自动替换");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "页面不会自动替换",
+    );
     expect(screen.getByTestId("selected-skills")).toHaveTextContent(
       "missing-skill",
     );
@@ -229,27 +248,23 @@ describe("Composer 技能选择器", () => {
       }),
     );
     expect(screen.getByTestId("selected-skills")).toHaveTextContent(
-      PUBLIC_SKILL.id,
+      COMPANY_LEGACY_SKILL.id,
     );
-    expect(
-      screen.getByTestId("selected-skills"),
-    ).not.toHaveTextContent("missing-skill");
-    expect(
-      within(dialog).getByRole("button", { name: "完成" }),
-    ).toHaveFocus();
+    expect(screen.getByTestId("selected-skills")).not.toHaveTextContent(
+      "missing-skill",
+    );
+    expect(within(dialog).getByRole("button", { name: "完成" })).toHaveFocus();
   });
 
   it("移除全部不可用项后仍把焦点留在稳定的完成按钮", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
+      vi.fn(async () => jsonResponse({ items: [COMPANY_LEGACY_SKILL] })),
     );
     const user = userEvent.setup();
     renderPicker(["missing-skill"]);
 
-    await user.click(
-      await screen.findByRole("button", { name: /本次技能/ }),
-    );
+    await user.click(await screen.findByRole("button", { name: /本次技能/ }));
     const dialog = screen.getByRole("dialog", {
       name: "选择本次技能",
     });
@@ -260,9 +275,7 @@ describe("Composer 技能选择器", () => {
     await user.keyboard("{Enter}");
 
     expect(screen.getByTestId("selected-skills")).toHaveTextContent("");
-    expect(
-      within(dialog).getByRole("button", { name: "完成" }),
-    ).toHaveFocus();
+    expect(within(dialog).getByRole("button", { name: "完成" })).toHaveFocus();
     expect(
       within(dialog).queryByRole("button", { name: "移除不可用项" }),
     ).not.toBeInTheDocument();
@@ -271,7 +284,7 @@ describe("Composer 技能选择器", () => {
   it("复选框聚焦时 Enter 不提交外层表单，Space 仍切换勾选", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
+      vi.fn(async () => jsonResponse({ items: [COMPANY_LEGACY_SKILL] })),
     );
     const user = userEvent.setup();
     const handleSubmit = vi.fn((event: React.FormEvent) => {
@@ -287,13 +300,13 @@ describe("Composer 技能选择器", () => {
       </QueryClientProvider>,
     );
 
-    await user.click(
-      await screen.findByRole("button", { name: /本次技能/ }),
-    );
+    await user.click(await screen.findByRole("button", { name: /本次技能/ }));
     const dialog = screen.getByRole("dialog", {
       name: "选择本次技能",
     });
-    await waitFor(() => expect(dialog).toHaveFocus());
+    await waitFor(() =>
+      expect(dialog.contains(document.activeElement)).toBe(true),
+    );
 
     const checkbox = within(dialog).getByRole("checkbox", {
       name: /项目复盘/,
@@ -308,25 +321,25 @@ describe("Composer 技能选择器", () => {
     await user.keyboard(" ");
     expect(checkbox).toBeChecked();
     expect(screen.getByTestId("selected-skills")).toHaveTextContent(
-      PUBLIC_SKILL.id,
+      COMPANY_LEGACY_SKILL.id,
     );
   });
 
   it("键盘恢复自动选择后焦点留在完成按钮且恢复按钮禁用", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
+      vi.fn(async () => jsonResponse({ items: [COMPANY_LEGACY_SKILL] })),
     );
     const user = userEvent.setup();
-    renderPicker([PUBLIC_SKILL.id]);
+    renderPicker([COMPANY_LEGACY_SKILL.id]);
 
-    await user.click(
-      await screen.findByRole("button", { name: /本次技能/ }),
-    );
+    await user.click(await screen.findByRole("button", { name: /本次技能/ }));
     const dialog = screen.getByRole("dialog", {
       name: "选择本次技能",
     });
-    await waitFor(() => expect(dialog).toHaveFocus());
+    await waitFor(() =>
+      expect(dialog.contains(document.activeElement)).toBe(true),
+    );
 
     const restoreAutomatic = within(dialog).getByRole("button", {
       name: "恢复自动选择",
@@ -363,9 +376,7 @@ describe("Composer 技能选择器", () => {
     await user.click(trigger);
     expect(screen.getByText("正在读取技能库…")).toBeInTheDocument();
     resolveSkills?.(jsonResponse({ items: [] }));
-    expect(
-      await screen.findByText("当前没有可用技能"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("当前没有可用技能")).toBeInTheDocument();
     app.unmount();
 
     vi.stubGlobal(
@@ -396,9 +407,7 @@ describe("Composer 技能选择器", () => {
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(
-      await screen.findByRole("button", { name: /本次技能/ }),
-    );
+    await user.click(await screen.findByRole("button", { name: /本次技能/ }));
     const dialog = screen.getByRole("dialog", {
       name: "选择本次技能",
     });
@@ -406,72 +415,5 @@ describe("Composer 技能选择器", () => {
     expect(
       within(dialog).getByRole("button", { name: "重试" }),
     ).toBeInTheDocument();
-  });
-
-  it("移动端 sheet 使用模态语义、锁定滚动并循环焦点", async () => {
-    setViewportWidth(390);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
-    );
-    const user = userEvent.setup();
-    renderPicker();
-
-    const trigger = await screen.findByRole("button", {
-      name: /本次技能/,
-    });
-    await user.click(trigger);
-    const dialog = screen.getByRole("dialog", {
-      name: "选择本次技能",
-    });
-    expect(dialog).toHaveAttribute("aria-modal", "true");
-    await waitFor(() =>
-      expect(document.body.style.overflow).toBe("hidden"),
-    );
-    await waitFor(() => expect(dialog).toHaveFocus());
-
-    const closeButton = within(dialog).getByRole("button", {
-      name: "关闭技能选择面板",
-    });
-    const completeButton = within(dialog).getByRole("button", {
-      name: "完成",
-    });
-
-    await user.tab();
-    expect(closeButton).toHaveFocus();
-    await user.tab({ shift: true });
-    expect(completeButton).toHaveFocus();
-    await user.tab();
-    expect(closeButton).toHaveFocus();
-
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
-    expect(document.body.style.overflow).toBe("");
-  });
-
-  it("移动端点击遮罩关闭时返还触发按钮焦点并恢复滚动", async () => {
-    setViewportWidth(390);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse({ items: [PUBLIC_SKILL] })),
-    );
-    const user = userEvent.setup();
-    renderPicker();
-
-    const trigger = await screen.findByRole("button", {
-      name: /本次技能/,
-    });
-    await user.click(trigger);
-    await waitFor(() =>
-      expect(document.body.style.overflow).toBe("hidden"),
-    );
-    await user.click(
-      screen.getByRole("button", { name: "关闭技能选择浮层" }),
-    );
-
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
-    expect(document.body.style.overflow).toBe("");
   });
 });

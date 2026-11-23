@@ -1,25 +1,35 @@
-import type { SkillScope } from "./model";
+import { VisibilityBadge, cn } from "../../shared/ui";
+import {
+  skillScope,
+  type LegacyCompatibleSkillScope,
+} from "./model";
 
 interface SkillScopeBadgeProps {
+  className?: string;
   compact?: boolean;
-  scope: SkillScope | undefined;
+  departmentName?: string | null;
+  scope: LegacyCompatibleSkillScope | undefined;
 }
 
+/**
+ * 技能三层可见性标签：统一复用全站 VisibilityBadge 原语，自动兼容历史 "public" 枚举。
+ */
 export function SkillScopeBadge({
+  className,
   compact = false,
+  departmentName,
   scope,
 }: SkillScopeBadgeProps) {
-  const normalizedScope: SkillScope =
-    scope === "personal" ? "personal" : "public";
-  const label = normalizedScope === "personal" ? "个人" : "公共";
+  const normalizedScope = skillScope({ scope });
 
   return (
-    <span
-      className={`skill-scope-badge is-${normalizedScope}${
-        compact ? " is-compact" : ""
-      }`}
-    >
-      {label}
-    </span>
+    <VisibilityBadge
+      className={cn(
+        compact && "px-1.5 py-0 text-[11px] leading-4",
+        className,
+      )}
+      departmentName={departmentName}
+      scope={normalizedScope}
+    />
   );
 }

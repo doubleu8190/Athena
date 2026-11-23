@@ -758,7 +758,7 @@ describe("单层可折叠主应用壳层（AppShell）", () => {
     const user = userEvent.setup();
     const app = renderApp("/chat");
 
-    await screen.findByRole("heading", { name: "对话工作台" });
+    await screen.findByRole("heading", { name: /你好，/ });
     expect(
       screen.queryByRole("complementary", { name: "工作区侧栏" }),
     ).not.toBeInTheDocument();
@@ -967,7 +967,7 @@ describe("单层可折叠主应用壳层（AppShell）", () => {
     const user = userEvent.setup();
 
     renderApp("/chat");
-    await screen.findByRole("heading", { name: "对话工作台" });
+    await screen.findByRole("heading", { name: /你好，/ });
 
     // 1. 打开抽屉，输入搜索词后按 Escape：清空搜索并保持抽屉打开；再次按 Escape 才关闭抽屉。
     await user.click(screen.getByRole("button", { name: "打开导航菜单" }));

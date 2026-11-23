@@ -1,76 +1,172 @@
+import {
+  BarChart3,
+  BookOpenCheck,
+  Check,
+  ClipboardList,
+  FilePenLine,
+  FileSearch,
+  FolderKanban,
+  Paperclip,
+  RefreshCw,
+  Sparkles,
+  Wand2,
+  type LucideIcon,
+} from "lucide-react";
 import { useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
-import { SelectDropdown } from "../../shared/ui/SelectDropdown";
-import { projectErrorMessage } from "../projects/errorMessages";
-import { useProject, useProjectDirectory } from "../projects/hooks";
-import { useCreateSessionMutation } from "../sessions/hooks";
+import {
+  Badge,
+  Button,
+  InlineAlert,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Tooltip,
+  VisibilityBadge,
+  cn,
+  toast,
+} from "../../shared/ui";
+import { useAuth } from "../auth/AuthProvider";
+import { getPrimaryDepartment, getUserDisplayName } from "../auth/model";
 import { uploadSessionFile } from "../files/api";
-import { fileErrorMessage } from "../files/errorMessages";
+import {
+  fileErrorMessage,
+  fileRequestCanBeReused,
+} from "../files/errorMessages";
 import {
   validateSessionUpload,
   type PendingSessionUpload,
 } from "../files/model";
-import { SkillCatalogPicker } from "../skills/SkillCatalogPicker";
+import { projectErrorMessage } from "../projects/errorMessages";
+import { useProject, useProjectDirectory } from "../projects/hooks";
+import { useCreateSessionMutation } from "../sessions/hooks";
+import { usePublicSkills } from "../skills/hooks";
+import { skillScope } from "../skills/model";
 import { submitRun } from "./api";
-import { useDraftChat } from "./DraftChatContext";
 import {
-  chatErrorMessage,
-  requestIdCanBeReused,
-} from "./errorMessages";
+  isImageAttachmentFile,
+  type ComposerAttachmentChip,
+  type ComposerSkillChip,
+} from "./ComposerAttachmentBar";
+import { useDraftChat } from "./DraftChatContext";
+import { chatErrorMessage, requestIdCanBeReused } from "./errorMessages";
 import { newRequestId } from "./requestId";
+import { ChatComposer } from "./SessionComposer";
+
+const UNBOUND_PROJECT_VALUE = "__unbound__";
+const MAX_FEATURED_SKILLS = 4;
+const TOTAL_WORKBENCH_CARDS = 6;
+
+interface OfficeScenarioTemplate {
+  id: string;
+  title: string;
+  description: string;
+  prompt: string;
+  icon: LucideIcon;
+}
+
+const OFFICE_SCENARIO_TEMPLATES: readonly OfficeScenarioTemplate[] = [
+  {
+    description: "快速起草工作周报、汇报材料与正式通知",
+    icon: FilePenLine,
+    id: "template-weekly-report",
+    prompt: "请帮我起草一份本周工作周报，包含核心进展、问题风险与下周计划：",
+    title: "公文与周报起草",
+  },
+  {
+    description: "基于企业与部门知识库，解答报销、人事与审批制度",
+    icon: BookOpenCheck,
+    id: "template-policy-qa",
+    prompt: "请结合公司与部门制度说明以下流程与标准：",
+    title: "制度与流程问答",
+  },
+  {
+    description: "上传 PDF、Word 或汇报材料，快速提炼核心结论与要点",
+    icon: FileSearch,
+    id: "template-doc-summary",
+    prompt: "请帮我提炼以下文档的核心结论、关键数据与待办事项：",
+    title: "长文档提炼总结",
+  },
+  {
+    description: "梳理讨论要点、决议事项与负责人行动清单",
+    icon: ClipboardList,
+    id: "template-meeting-minutes",
+    prompt:
+      "请根据以下会议记录整理结构化会议纪要与行动项（含负责人和截止时间）：",
+    title: "会议纪要整理",
+  },
+  {
+    description: "上传表格或数据摘要，发现业务趋势与异常指标",
+    icon: BarChart3,
+    id: "template-data-insight",
+    prompt: "请分析以下业务数据的核心趋势、异常点并给出改进建议：",
+    title: "数据分析与图表解读",
+  },
+  {
+    description: "检查业务方案逻辑漏洞，优化专业表达与结构",
+    icon: Wand2,
+    id: "template-proposal-polish",
+    prompt: "请从可行性、风险与表达清晰度角度评审并优化以下方案：",
+    title: "方案评审与润色",
+  },
+];
 
 export function DraftChatPage() {
   const selectId = useId();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const projects = useProjectDirectory();
+  const skillsQuery = usePublicSkills();
   const createSession = useCreateSessionMutation();
   const {
+    chooseProject,
     contextNotice,
     contextReady,
     draft,
+    knowledgeBaseIds,
+    modelProfileId,
     pendingUploads,
     projectId: selectedProjectId,
     selectedSkillIds,
-    chooseProject,
-    setSessionHandoff,
     setDraft,
+    setKnowledgeBaseIds,
+    setModelProfileId,
     setPendingUploads,
     setSelectedSkillIds,
+    setSessionHandoff,
   } = useDraftChat();
   const selectedProjectQuery = useProject(selectedProjectId);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [fileErrors, setFileErrors] = useState<Record<string, string>>(
-    {},
+  const [fileValidationErrors, setFileValidationErrors] = useState<string[]>(
+    [],
   );
   const [submitStage, setSubmitStage] = useState<
     "idle" | "creating" | "uploading" | "submitting"
   >("idle");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const displayName = getUserDisplayName(user);
+  const primaryDepartment = getPrimaryDepartment(user);
+  const greetingSubtitle = primaryDepartment
+    ? `${primaryDepartment.name} · 已自动连接企业与本部门知识库，随时协助处理工作`
+    : "已自动连接企业共享知识库，随时协助处理工作";
 
   const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
-  const selectedProject = allProjects.find(
-    (project) => project.id === selectedProjectId,
-  );
-  const selectedProjectName =
-    selectedProject?.name ??
-    (selectedProjectQuery.data?.id === selectedProjectId
-      ? selectedProjectQuery.data.name
-      : null);
   const projectOptions = useMemo(() => {
-    const items = [
-      { label: "未归属项目", value: "" },
-      ...allProjects.map((project) => ({
-        label: project.name,
-        value: project.id,
-      })),
-    ];
+    const items = allProjects.map((project) => ({
+      label: project.name,
+      value: project.id,
+    }));
     if (
       selectedProjectQuery.data &&
-      !allProjects.some((project) => project.id === selectedProjectQuery.data?.id)
+      !allProjects.some(
+        (project) => project.id === selectedProjectQuery.data?.id,
+      )
     ) {
       items.push({
         label: selectedProjectQuery.data.name,
@@ -79,6 +175,74 @@ export function DraftChatPage() {
     }
     return items;
   }, [allProjects, selectedProjectQuery.data]);
+
+  const featuredSkills = useMemo(() => {
+    const enabledSkills = (skillsQuery.data ?? []).filter(
+      (skill) => skill.enabled !== false,
+    );
+    // 优先展示当前员工所在部门共享技能，其次展示全公司技能，最多取前 4 项。
+    const departmentSkills = enabledSkills.filter(
+      (skill) => skillScope(skill) === "department",
+    );
+    const companySkills = enabledSkills.filter(
+      (skill) => skillScope(skill) === "company",
+    );
+    return [...departmentSkills, ...companySkills].slice(
+      0,
+      MAX_FEATURED_SKILLS,
+    );
+  }, [skillsQuery.data]);
+
+  const featuredTemplates = useMemo(() => {
+    const remainingSlots = Math.max(
+      0,
+      TOTAL_WORKBENCH_CARDS - featuredSkills.length,
+    );
+    return OFFICE_SCENARIO_TEMPLATES.slice(0, remainingSlots);
+  }, [featuredSkills.length]);
+
+  const selectedSkillSet = useMemo(
+    () => new Set(selectedSkillIds),
+    [selectedSkillIds],
+  );
+
+  const handleAddDraftFiles = (incomingFiles: File[]) => {
+    if (submitting || incomingFiles.length === 0) {
+      return;
+    }
+    const nextErrors: string[] = [];
+    const accepted: PendingSessionUpload[] = [];
+    for (const file of incomingFiles) {
+      const error = validateSessionUpload(file);
+      if (error) {
+        nextErrors.push(error);
+      } else {
+        accepted.push({
+          file,
+          requestId: newRequestId(),
+          reuseRequestId: false,
+        });
+      }
+    }
+    setFileValidationErrors(nextErrors);
+    if (nextErrors.length > 0) {
+      toast.error(nextErrors[0]);
+    }
+    if (accepted.length > 0) {
+      setPendingUploads([...pendingUploads, ...accepted]);
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const resetDraftState = () => {
+    setDraft("");
+    setPendingUploads([]);
+    setSelectedSkillIds([]);
+    setKnowledgeBaseIds(null);
+    setModelProfileId(null);
+  };
 
   const handleSubmit = async () => {
     const text = draft.trim();
@@ -95,7 +259,7 @@ export function DraftChatPage() {
     setSubmitStage("creating");
     let createdSessionId: string;
     try {
-      // 新草稿直到用户真正发送才创建 Session；标题保持为空，由后端展示“未命名对话”。
+      // 草稿直到用户首次发送才创建真实会话，避免浏览首页产生空会话垃圾。
       const session = await createSession.mutateAsync({
         project_id: selectedProjectId,
         title: null,
@@ -111,7 +275,9 @@ export function DraftChatPage() {
     const requestId = newRequestId();
     const uploadedFileIds: string[] = [];
     const remainingUploads = [...pendingUploads];
-    setSubmitStage("uploading");
+    if (pendingUploads.length > 0) {
+      setSubmitStage("uploading");
+    }
     for (const pending of pendingUploads) {
       try {
         const uploaded = await uploadSessionFile(
@@ -122,19 +288,27 @@ export function DraftChatPage() {
         uploadedFileIds.push(uploaded.id);
         remainingUploads.shift();
       } catch (error) {
-        // Session 已创建时记录已发布文件 ID 与剩余本地文件，避免重传成功项。
+        // 当前失败项依据错误类型决定是否复用原 Idempotency-Key（5xx/网络/不可解析响应复用，4xx 换新键）；
+        // 后续尚未发出请求的待传文件保留原 requestId 并标记可直接使用。
+        const handoffPendingUploads: PendingSessionUpload[] =
+          remainingUploads.map((item, index) => ({
+            ...item,
+            reuseRequestId:
+              index === 0 ? fileRequestCanBeReused(error) : true,
+          }));
+        // 会话已创建但附件上传中断：将已上传文件 ID、剩余文件及全部模型/知识库/技能选择完整移交至会话页。
         setSessionHandoff(createdSessionId, {
           draft: text,
           error: fileErrorMessage(error),
           inputFileIds: uploadedFileIds,
-          pendingUploads: remainingUploads,
+          knowledgeBaseIds,
+          modelProfileId,
+          pendingUploads: handoffPendingUploads,
           requestId,
           reuseRequestId: false,
           selectedSkillIds,
         });
-        setDraft("");
-        setPendingUploads([]);
-        setSelectedSkillIds([]);
+        resetDraftState();
         setSubmitting(false);
         setSubmitStage("idle");
         navigate(`/chat/${encodeURIComponent(createdSessionId)}`);
@@ -150,265 +324,402 @@ export function DraftChatPage() {
         text,
         selectedSkillIds,
         uploadedFileIds,
+        {
+          knowledgeBaseIds,
+          modelProfileId,
+        },
       );
-      setDraft("");
-      setPendingUploads([]);
-      setSelectedSkillIds([]);
+      resetDraftState();
       setSubmitting(false);
       setSubmitStage("idle");
       navigate(`/chat/${encodeURIComponent(createdSessionId)}`);
     } catch (error) {
-      // Run 结果不明时不再停留在草稿页，避免用户再次发送时重复创建 Session。
+      // Run 提交结果不明时移交至已创建会话页继续重试，避免在草稿页重复创建空会话。
       setSessionHandoff(createdSessionId, {
         draft: text,
         error: chatErrorMessage(error),
         inputFileIds: uploadedFileIds,
+        knowledgeBaseIds,
+        modelProfileId,
         pendingUploads: [],
         requestId,
         reuseRequestId: requestIdCanBeReused(error),
         selectedSkillIds,
       });
-      setDraft("");
-      setPendingUploads([]);
-      setSelectedSkillIds([]);
+      resetDraftState();
       setSubmitting(false);
       setSubmitStage("idle");
       navigate(`/chat/${encodeURIComponent(createdSessionId)}`);
     }
   };
 
-  const addDraftFiles = (selected: FileList | null) => {
-    if (!selected) {
+  const attachmentChips = useMemo<ComposerAttachmentChip[]>(
+    () =>
+      pendingUploads.map((pending) => ({
+        filename: pending.file.name,
+        id: pending.requestId,
+        mimeType: pending.file.type || null,
+        onRemove: submitting
+          ? undefined
+          : () =>
+              setPendingUploads(
+                pendingUploads.filter(
+                  (item) => item.requestId !== pending.requestId,
+                ),
+              ),
+        removeAriaLabel: `移除任务文件：${pending.file.name}`,
+        sizeBytes: pending.file.size,
+        status: "queued",
+      })),
+    [pendingUploads, setPendingUploads, submitting],
+  );
+
+  const hasImageAttachment = useMemo(
+    () =>
+      pendingUploads.some((pending) =>
+        isImageAttachmentFile(pending.file.name, pending.file.type),
+      ),
+    [pendingUploads],
+  );
+
+  const skillChips = useMemo<ComposerSkillChip[]>(() => {
+    const catalogMap = new Map(
+      (skillsQuery.data ?? []).map((skill) => [skill.id, skill]),
+    );
+    return selectedSkillIds.map((skillId) => {
+      const matched = catalogMap.get(skillId);
+      const unavailable = skillsQuery.isSuccess && !matched;
+      return {
+        id: skillId,
+        name: matched?.name ?? (unavailable ? "不可用技能" : skillId),
+        onRemove: submitting
+          ? undefined
+          : () =>
+              setSelectedSkillIds(
+                selectedSkillIds.filter((id) => id !== skillId),
+              ),
+        unavailable,
+      };
+    });
+  }, [
+    selectedSkillIds,
+    setSelectedSkillIds,
+    skillsQuery.data,
+    skillsQuery.isSuccess,
+    submitting,
+  ]);
+
+  const handleSelectSkillCard = (skillId: string) => {
+    if (submitting) {
       return;
     }
-    const nextErrors: Record<string, string> = {};
-    const accepted: PendingSessionUpload[] = [];
-    Array.from(selected).forEach((file, index) => {
-      const error = validateSessionUpload(file);
-      if (error) {
-        nextErrors[`${file.name}-${index}`] = error;
-      } else {
-        accepted.push({
-          file,
-          requestId: newRequestId(),
-          reuseRequestId: false,
-        });
-      }
-    });
-    setFileErrors(nextErrors);
-    if (accepted.length > 0) {
-      setPendingUploads([...pendingUploads, ...accepted]);
+    if (!selectedSkillSet.has(skillId)) {
+      setSelectedSkillIds([...selectedSkillIds, skillId]);
     }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
+    textareaRef.current?.focus();
   };
 
-  return (
-    <div className="page-shell chat-draft-page">
-      <header className="page-heading chat-page-heading">
-        <div className="page-heading-copy">
-          <p className="page-eyebrow">Workspace / New conversation</p>
-          <h1>对话工作台</h1>
-          <p className="page-description">
-            这是本地新对话草稿。选择项目只会保存在当前页面；首次发送时才创建真实会话并提交
-            Run。
-          </p>
-        </div>
-        <span className="integration-chip">
-          <span aria-hidden="true" />
-          智能工作台
-        </span>
-      </header>
+  const handleSelectTemplateCard = (template: OfficeScenarioTemplate) => {
+    if (submitting) {
+      return;
+    }
+    if (!draft.trim()) {
+      setDraft(template.prompt);
+    } else {
+      // 用户已有草稿时绝不粗暴覆盖，保留原内容并平滑聚焦至输入框。
+      toast.info("当前输入框已有内容，已为您聚焦输入框，未覆盖原草稿。");
+    }
+    queueMicrotask(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) {
+        return;
+      }
+      textarea.focus();
+      const length = textarea.value.length;
+      textarea.setSelectionRange(length, length);
+    });
+  };
 
-      <section className="chat-context-card" aria-labelledby="draft-context-title">
-        <div className="chat-context-copy">
-          <span className="chat-context-label" id="draft-context-title">
-            当前项目上下文
-          </span>
-          <strong>
-            {!contextReady
-              ? "正在确认项目…"
-              : selectedProjectName ?? "未归属项目"}
-          </strong>
-          <span>
-            {selectedProjectId
-              ? "首条消息发送前仍可更改绑定。"
-              : "这次对话不会归入任何项目。"}
-          </span>
-        </div>
-        <div className="chat-context-select">
-          <span>更改项目</span>
-          <SelectDropdown
-            classPrefix="chat-project-dropdown"
-            disabled={!contextReady || projects.isPending}
-            id={selectId}
-            label="更改项目"
-            listboxLabel="项目"
-            onChange={(projectId) => chooseProject(projectId || null)}
-            options={projectOptions}
-            placeholder="未归属项目"
-            value={selectedProjectId ?? ""}
+  const submitButtonLabel = submitting
+    ? submitStage === "creating"
+      ? "正在创建对话…"
+      : submitStage === "uploading"
+        ? "正在上传附件…"
+        : "正在发送…"
+    : "发送消息";
+
+  const attachmentControl = (
+    <>
+      <input
+        aria-label="选择任务文件"
+        className="sr-only"
+        disabled={submitting}
+        multiple
+        onChange={(event) => {
+          const files = event.target.files
+            ? Array.from(event.target.files)
+            : [];
+          handleAddDraftFiles(files);
+        }}
+        ref={fileInputRef}
+        type="file"
+      />
+      <Tooltip content="上传附件（支持拖拽或粘贴）">
+        <button
+          aria-label="添加附件"
+          className={cn(
+            "inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border-default bg-canvas text-text-secondary transition-colors",
+            "hover:border-border-strong hover:bg-subtle hover:text-text-primary",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+          )}
+          data-compact-control="true"
+          disabled={submitting}
+          onClick={() => fileInputRef.current?.click()}
+          type="button"
+        >
+          <Paperclip aria-hidden="true" className="h-4 w-4" />
+        </button>
+      </Tooltip>
+    </>
+  );
+
+  return (
+    <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col px-4 py-5 sm:px-6 lg:px-8">
+      {/* 极简顶部项目上下文条：支持日常对话与个人项目自由切换。 */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <FolderKanban
+            aria-hidden="true"
+            className="h-4 w-4 shrink-0 text-text-tertiary"
           />
+          <label
+            className="text-xs font-medium text-text-secondary"
+            htmlFor={selectId}
+          >
+            更改项目
+          </label>
+          <Select
+            disabled={!contextReady || projects.isPending || submitting}
+            onValueChange={(nextValue) =>
+              chooseProject(
+                nextValue === UNBOUND_PROJECT_VALUE ? null : nextValue,
+              )
+            }
+            value={selectedProjectId ?? UNBOUND_PROJECT_VALUE}
+          >
+            <SelectTrigger
+              aria-label="更改项目"
+              className="h-8 w-auto min-w-[180px] max-w-[260px] rounded-lg px-2.5 text-xs"
+              id={selectId}
+            >
+              <SelectValue
+                placeholder={
+                  !contextReady ? "正在确认项目…" : "日常对话（不归属项目）"
+                }
+              />
+            </SelectTrigger>
+            <SelectContent align="start">
+              <SelectItem value={UNBOUND_PROJECT_VALUE}>
+                日常对话（不归属项目）
+              </SelectItem>
+              {projectOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
-      </section>
+
+        {!contextReady ? (
+          <span className="text-xs text-text-tertiary" role="status">
+            正在确认项目…
+          </span>
+        ) : null}
+      </div>
 
       {contextNotice ? (
-        <div className="context-notice" role="status">
-          <Icon name="inbox" size={16} />
-          <span>{contextNotice}</span>
+        <div className="mt-3">
+          <InlineAlert description={contextNotice} variant="warning" />
         </div>
       ) : null}
 
       {projects.isError && !selectedProjectQuery.data ? (
-        <ErrorBanner
-          message={projectErrorMessage(projects.error)}
-          onRetry={() => void projects.refetch()}
-        />
+        <div className="mt-3">
+          <InlineAlert
+            action={
+              <Button
+                onClick={() => void projects.refetch()}
+                size="xs"
+                variant="outline"
+              >
+                <RefreshCw aria-hidden="true" className="h-3 w-3" />
+                重试
+              </Button>
+            }
+            description={projectErrorMessage(projects.error)}
+            variant="danger"
+          />
+        </div>
       ) : null}
 
-      <section className="chat-empty-stage" aria-labelledby="draft-stage-title">
-        <span className="chat-stage-mark" aria-hidden="true">
-          <Icon name="spark" size={28} />
-        </span>
-        <p className="empty-panel-kicker">Ready to run</p>
-        <h2 id="draft-stage-title">从一个清晰的目标开始</h2>
-        <p>
-          消息发送后会创建真实 Session 并提交 Run。运行中会展示服务端返回的状态、临时输出和工具审批请求。
-        </p>
-      </section>
-
-      <section
-        aria-labelledby="draft-files-title"
-        className="draft-file-panel"
-      >
-        <header>
-          <div>
-            <span className="empty-panel-kicker">Input files</span>
-            <h2 id="draft-files-title">任务文件</h2>
-            <p>
-              首次发送时先创建 Session，再逐个上传；文件发布后才提交包含文件 ID 的 Run。
-            </p>
-          </div>
-          <button
-            className="button-quiet"
-            disabled={submitting}
-            onClick={() => fileInputRef.current?.click()}
-            type="button"
-          >
-            <Icon name="plus" size={14} />
-            选择文件
-          </button>
-          <input
-            aria-label="选择任务文件"
-            className="sr-only"
-            disabled={submitting}
-            multiple
-            onChange={(event) => addDraftFiles(event.target.files)}
-            ref={fileInputRef}
-            type="file"
-          />
-        </header>
-        {pendingUploads.length === 0 ? (
-          <p className="draft-file-empty">
-            可将文本、Office、PDF 或常见图片作为本次任务输入。
+      {/* 居中办公工作台主体：问候区 + 一体化输入器 + 权限化办公场景卡片。 */}
+      <div className="my-auto flex w-full flex-col items-center py-8 sm:py-12">
+        <header className="w-full max-w-2xl text-center">
+          <h1 className="text-2xl font-semibold tracking-tight text-text-primary sm:text-3xl">
+            你好，{displayName}
+          </h1>
+          <p className="mt-2 text-sm leading-relaxed text-text-secondary">
+            {greetingSubtitle}
           </p>
-        ) : (
-          <ul className="draft-file-list">
-            {pendingUploads.map((pending) => (
-              <li key={pending.requestId}>
-                <Icon name="inbox" size={15} />
-                <span>
-                  <strong>{pending.file.name}</strong>
-                  <small>
-                    {Math.ceil(pending.file.size / 1024).toLocaleString()} KiB
-                  </small>
-                </span>
+        </header>
+
+        <div className="mt-7 w-full max-w-3xl">
+          <ChatComposer
+            ariaLabel="新建对话输入区"
+            attachmentControl={attachmentControl}
+            attachments={attachmentChips}
+            attachmentsDisabled={submitting}
+            busy={submitting}
+            canSubmit={Boolean(draft.trim()) && !submitting && contextReady}
+            capabilityControlsDisabled={submitting}
+            disabled={submitting}
+            draft={draft}
+            errorBanner={submitError}
+            footerHint={
+              submitting
+                ? "正在准备新对话，请稍候…"
+                : "Enter 发送 · Shift + Enter 换行 · 支持拖拽或粘贴文件与截图"
+            }
+            hasImageAttachment={hasImageAttachment}
+            hasProjectContext={Boolean(selectedProjectId)}
+            knowledgeBaseIds={knowledgeBaseIds}
+            modelProfileId={modelProfileId}
+            onAddFiles={handleAddDraftFiles}
+            onChangeDraft={setDraft}
+            onChangeKnowledgeBaseIds={setKnowledgeBaseIds}
+            onChangeModelProfileId={setModelProfileId}
+            onChangeSelectedSkillIds={setSelectedSkillIds}
+            onDismissValidationErrors={() => setFileValidationErrors([])}
+            onSubmit={handleSubmit}
+            placeholder="输入问题、粘贴截图或拖入办公资料，开始协作…"
+            selectedSkillIds={selectedSkillIds}
+            skillChips={skillChips}
+            skillDisabledNote="正在发送本次消息，下一轮可调整技能。"
+            submitButtonLabel={submitButtonLabel}
+            submitLoading={submitting}
+            textareaId="draft-message"
+            textareaLabel="对话草稿"
+            textareaRef={textareaRef}
+            validationErrors={fileValidationErrors}
+          />
+        </div>
+
+        <section
+          aria-labelledby="workbench-scenarios-heading"
+          className="mt-8 w-full max-w-3xl"
+        >
+          <div className="mb-3 flex items-center justify-between px-0.5">
+            <h2
+              className="text-xs font-semibold text-text-secondary"
+              id="workbench-scenarios-heading"
+            >
+              常用办公场景与快捷应用
+            </h2>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {featuredSkills.map((skill) => {
+              const scope = skillScope(skill);
+              const isSelected = selectedSkillSet.has(skill.id);
+              return (
                 <button
-                  aria-label={`移除任务文件：${pending.file.name}`}
-                  className="text-button"
+                  className={cn(
+                    "group flex flex-col justify-between rounded-xl border p-3.5 text-left transition-colors",
+                    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus",
+                    "disabled:cursor-not-allowed disabled:opacity-50",
+                    isSelected
+                      ? "border-brand-border bg-brand-subtle/60"
+                      : "border-border-default bg-canvas hover:border-brand-border hover:bg-subtle/60",
+                  )}
+                  data-scenario-card="skill"
+                  data-skill-scope={scope}
                   disabled={submitting}
-                  onClick={() =>
-                    setPendingUploads(
-                      pendingUploads.filter(
-                        (item) => item.requestId !== pending.requestId,
-                      ),
-                    )
-                  }
+                  key={skill.id}
+                  onClick={() => handleSelectSkillCard(skill.id)}
                   type="button"
                 >
-                  移除
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <VisibilityBadge
+                        className="px-1.5 py-0 text-[11px]"
+                        scope={scope}
+                      />
+                      {isSelected ? (
+                        <span className="inline-flex items-center gap-0.5 text-[11px] font-medium text-brand">
+                          <Check aria-hidden="true" className="h-3 w-3" />
+                          已挂载
+                        </span>
+                      ) : (
+                        <Sparkles
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5 text-text-tertiary transition-colors group-hover:text-brand"
+                        />
+                      )}
+                    </div>
+                    <div className="text-sm font-medium text-text-primary">
+                      {skill.name}
+                    </div>
+                    <p className="line-clamp-2 text-xs leading-relaxed text-text-secondary">
+                      {skill.description || "点击挂载该技能并开始对话"}
+                    </p>
+                  </div>
                 </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        {Object.entries(fileErrors).map(([key, error]) => (
-          <p className="field-error" key={key} role="alert">
-            {error}
-          </p>
-        ))}
-      </section>
+              );
+            })}
 
-      <form
-        className="draft-composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void handleSubmit();
-        }}
-      >
-        <label htmlFor="draft-message">对话草稿</label>
-        <textarea
-          disabled={submitting}
-          id="draft-message"
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            // 支持 Cmd/Ctrl + Enter 快捷发送，同时避开中文输入法组合态与提交锁定态。
-            if (
-              (event.metaKey || event.ctrlKey) &&
-              event.key === "Enter" &&
-              !event.nativeEvent.isComposing
-            ) {
-              event.preventDefault();
-              if (!submitting && contextReady && draft.trim()) {
-                void handleSubmit();
-              }
-            }
-          }}
-          placeholder="描述目标、粘贴资料，或直接提问。"
-          rows={4}
-          value={draft}
-        />
-        <div className="chat-composer-toolbar">
-          <SkillCatalogPicker
-            disabled={submitting}
-            disabledNote="正在提交本次消息，下一轮可调整技能。"
-            onChange={setSelectedSkillIds}
-            selectedSkillIds={selectedSkillIds}
-          />
-        </div>
-        {submitError ? <ErrorBanner message={submitError} /> : null}
-        <div className="draft-composer-footer">
-          <p id="draft-send-note">
-            <Icon name="shield" size={13} />
-            发送时才创建会话；Run 提交使用幂等请求标识。
-          </p>
-          <button
-            aria-describedby="draft-send-note"
-            className="button-primary"
-            disabled={!draft.trim() || submitting || !contextReady}
-            type="submit"
-          >
-            {submitting
-              ? submitStage === "creating"
-                ? "正在创建会话…"
-                : submitStage === "uploading"
-                  ? "正在上传文件…"
-                  : "正在提交…"
-              : "发送消息"}
-          </button>
-        </div>
-      </form>
+            {featuredTemplates.map((template) => {
+              const TemplateIcon = template.icon;
+              return (
+                <button
+                  className={cn(
+                    "group flex flex-col justify-between rounded-xl border border-border-default bg-canvas p-3.5 text-left transition-colors",
+                    "hover:border-brand-border hover:bg-subtle/60",
+                    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus",
+                    "disabled:cursor-not-allowed disabled:opacity-50",
+                  )}
+                  data-scenario-card="template"
+                  disabled={submitting}
+                  key={template.id}
+                  onClick={() => handleSelectTemplateCard(template)}
+                  type="button"
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-subtle text-brand transition-colors group-hover:bg-brand-subtle">
+                        <TemplateIcon aria-hidden="true" className="h-4 w-4" />
+                      </span>
+                      <Badge
+                        className="px-1.5 py-0 text-[11px]"
+                        variant="neutral"
+                      >
+                        办公模板
+                      </Badge>
+                    </div>
+                    <div className="text-sm font-medium text-text-primary">
+                      {template.title}
+                    </div>
+                    <p className="line-clamp-2 text-xs leading-relaxed text-text-secondary">
+                      {template.description}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

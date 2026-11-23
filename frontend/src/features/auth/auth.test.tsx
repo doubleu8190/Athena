@@ -156,7 +156,7 @@ async function waitForStableChatWorkspace(
       search: "",
     });
     expect(
-      screen.getByRole("heading", { name: "对话工作台" }),
+      screen.getByRole("heading", { name: /你好，/ }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("对话草稿")).toBeInTheDocument();
     expect(
@@ -1152,7 +1152,7 @@ describe("认证流程与本地应急登录", () => {
     const user = userEvent.setup();
     const app = renderApp("/chat");
 
-    await screen.findByRole("heading", { name: "对话工作台" });
+    await screen.findByRole("heading", { name: /你好，/ });
     await clickLogout(user);
     expect(await screen.findByRole("alert")).toHaveTextContent("请求未完成");
     expect(app.getLocation().pathname).toBe("/chat");

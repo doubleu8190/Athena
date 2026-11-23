@@ -64,21 +64,50 @@ export function listRunEvents(
   );
 }
 
+export interface SubmitRunOptions {
+  /**
+   * 知识库检索范围三态：
+   * - null：企业默认范围（企业公共库 + 本部门共享库，项目内自动合并项目库）
+   * - []：本轮显式关闭知识库检索
+   * - string[]：仅检索指定的知识库 ID 列表（最多 20 个）
+   */
+  knowledgeBaseIds?: string[] | null;
+  /** 指定对话模型配置 ID；null 表示沿用系统默认模型。 */
+  modelProfileId?: string | null;
+}
+
 export function submitRun(
   sessionId: string,
   requestId: string,
   text: string,
   skillIds: string[] = [],
   inputFileIds: string[] = [],
+  options?: SubmitRunOptions,
 ): Promise<Run> {
+  const body: Record<string, unknown> = {
+    request_id: requestId,
+    text,
+    skill_ids: skillIds,
+    input_file_ids: inputFileIds,
+  };
+  // 显式传入时才写入对应字段，精确区分 undefined（未传入）与 null / [] / string[]。
+  if (
+    options &&
+    "knowledgeBaseIds" in options &&
+    options.knowledgeBaseIds !== undefined
+  ) {
+    body.knowledge_base_ids = options.knowledgeBaseIds;
+  }
+  if (
+    options &&
+    "modelProfileId" in options &&
+    options.modelProfileId !== undefined
+  ) {
+    body.model_profile_id = options.modelProfileId;
+  }
   return apiRequest<Run>(sessionRunsPath(sessionId), {
     method: "POST",
-    body: {
-      request_id: requestId,
-      text,
-      skill_ids: skillIds,
-      input_file_ids: inputFileIds,
-    },
+    body,
   });
 }
 

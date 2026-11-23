@@ -21,6 +21,10 @@ interface DraftChatState {
   contextNotice: string | null;
   contextReady: boolean;
   draft: string;
+  /** 知识库三态范围：null 企业默认 / [] 关闭检索 / string[] 显式指定。 */
+  knowledgeBaseIds: string[] | null;
+  /** 场景化模型配置 ID：null 表示使用系统默认模型。 */
+  modelProfileId: string | null;
   pendingUploads: PendingSessionUpload[];
   projectId: string | null;
   selectedSkillIds: string[];
@@ -39,6 +43,8 @@ export interface SessionSubmissionHandoff {
   draft: string;
   error: string | null;
   inputFileIds?: string[];
+  knowledgeBaseIds?: string[] | null;
+  modelProfileId?: string | null;
   pendingUploads?: PendingSessionUpload[];
   requestId: string;
   reuseRequestId: boolean;
@@ -52,6 +58,8 @@ interface DraftChatContextValue extends DraftChatState {
     sessionId: string,
   ) => SessionSubmissionHandoff | null;
   setDraft: (draft: string) => void;
+  setKnowledgeBaseIds: (knowledgeBaseIds: string[] | null) => void;
+  setModelProfileId: (modelProfileId: string | null) => void;
   setPendingUploads: (uploads: PendingSessionUpload[]) => void;
   setSelectedSkillIds: (skillIds: string[]) => void;
   setSessionHandoff: (
@@ -81,6 +89,8 @@ function createEntry(requestedProjectId: string | null): DraftChatEntry {
     contextNotice: null,
     contextReady: !requestedProjectId,
     draft: "",
+    knowledgeBaseIds: null,
+    modelProfileId: null,
     pendingUploads: [],
     projectContext: requestedProjectId ? "pending" : "ready",
     projectId: null,
@@ -289,6 +299,53 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
     });
   }, []);
 
+  const setKnowledgeBaseIds = useCallback(
+    (knowledgeBaseIds: string[] | null) => {
+      setStore((current) => {
+        if (!current.activeKey) {
+          return current;
+        }
+        const entry = current.entries[current.activeKey];
+        if (!entry) {
+          return current;
+        }
+        return {
+          ...current,
+          entries: {
+            ...current.entries,
+            [current.activeKey]: {
+              ...entry,
+              knowledgeBaseIds,
+            },
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const setModelProfileId = useCallback((modelProfileId: string | null) => {
+    setStore((current) => {
+      if (!current.activeKey) {
+        return current;
+      }
+      const entry = current.entries[current.activeKey];
+      if (!entry) {
+        return current;
+      }
+      return {
+        ...current,
+        entries: {
+          ...current.entries,
+          [current.activeKey]: {
+            ...entry,
+            modelProfileId,
+          },
+        },
+      };
+    });
+  }, []);
+
   const setSessionHandoff = useCallback(
     (sessionId: string, handoff: SessionSubmissionHandoff) => {
       sessionHandoffsRef.current[sessionId] = handoff;
@@ -312,6 +369,8 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
     contextNotice,
     contextReady,
     draft,
+    knowledgeBaseIds,
+    modelProfileId,
     pendingUploads,
     projectId,
     selectedSkillIds,
@@ -324,10 +383,14 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
       contextReady,
       draft,
       getSessionHandoff,
+      knowledgeBaseIds,
+      modelProfileId,
       pendingUploads,
       projectId,
       selectedSkillIds,
       setDraft,
+      setKnowledgeBaseIds,
+      setModelProfileId,
       setPendingUploads,
       setSessionHandoff,
       setSelectedSkillIds,
@@ -339,10 +402,14 @@ export function DraftChatProvider({ children }: PropsWithChildren) {
       contextReady,
       draft,
       getSessionHandoff,
+      knowledgeBaseIds,
+      modelProfileId,
       pendingUploads,
       projectId,
       selectedSkillIds,
       setDraft,
+      setKnowledgeBaseIds,
+      setModelProfileId,
       setPendingUploads,
       setSessionHandoff,
       setSelectedSkillIds,

@@ -1,3 +1,5 @@
+import type { VisibilityScope } from "../../shared/ui/VisibilityBadge";
+
 export const KNOWLEDGE_BASE_NAME_MAX_LENGTH = 120;
 export const KNOWLEDGE_DESCRIPTION_MAX_LENGTH = 500;
 export const DOCUMENT_TITLE_MAX_LENGTH = 255;
@@ -28,8 +30,24 @@ export interface KnowledgeBase {
   id: string;
   name: string;
   description: string | null;
+  visibility_scope?: VisibilityScope;
+  owner_department_id?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 统一解析知识库可见性层级，兼容旧测试夹具缺省字段（按后端创建默认值为 personal）。 */
+export function knowledgeBaseScope(
+  base: Pick<KnowledgeBase, "visibility_scope">,
+): VisibilityScope {
+  if (
+    base.visibility_scope === "company" ||
+    base.visibility_scope === "department" ||
+    base.visibility_scope === "personal"
+  ) {
+    return base.visibility_scope;
+  }
+  return "personal";
 }
 
 export interface KnowledgeBaseListResponse {

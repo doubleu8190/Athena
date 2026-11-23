@@ -92,7 +92,7 @@ async function selectSkill(
 
 interface SessionFetchOptions {
   onCreateSession?: () => Response;
-  onUpload?: (file: File) => Response;
+  onUpload?: (file: File) => Response | Promise<Response>;
   onSubmit?: (
     body: Record<string, unknown>,
   ) => Response;
@@ -343,8 +343,13 @@ describe("聊天技能选择与会话文件", () => {
     });
   });
 
-  it("会话有待上传文件时明确禁用发送且不会创建 Run", async () => {
+  it("会话附件上传进行中时明确禁用发送且不会创建 Run，上传完成后自动选中可发送", async () => {
+    let resolveUpload: ((response: Response) => void) | undefined;
     const fetchMock = installFetch({
+      onUpload: () =>
+        new Promise<Response>((resolve) => {
+          resolveUpload = resolve;
+        }),
       runs: () => [],
     });
     const user = userEvent.setup();
@@ -361,7 +366,7 @@ describe("聊天技能选择与会话文件", () => {
     );
 
     expect(
-      screen.getByText(/请先在会话文件中上传或移除待上传文件/),
+      await screen.findByText(/正在上传附件，完成后即可发送/),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "发送消息" }),
@@ -374,9 +379,23 @@ describe("聊天技能选择与会话文件", () => {
           init?.method === "POST",
       ),
     ).toBe(false);
+
+    resolveUpload?.(
+      jsonResponse(
+        makeSessionFile({
+          filename: "pending.txt",
+          id: "file-pending-done",
+          session_id: SESSION.id,
+        }),
+        201,
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled(),
+    );
   });
 
-  it("补充回答前存在待上传文件时禁用回答且不会提交 Run 输入", async () => {
+  it("补充回答前附件上传未完成或失败时禁用回答且不会提交 Run 输入", async () => {
     const waiting = makeRun({
       id: "run-waiting-pending-upload",
       pending_input: {
@@ -402,6 +421,8 @@ describe("聊天技能选择与会话文件", () => {
           session_id: SESSION.id,
         }),
       ],
+      onUpload: () =>
+        jsonResponse({ detail: "file_storage_unavailable" }, 503),
       runs: () => [waiting],
     });
     const user = userEvent.setup();
@@ -420,7 +441,7 @@ describe("聊天技能选择与会话文件", () => {
     );
 
     expect(
-      screen.getByText(/请先在会话文件中上传或移除待上传文件/),
+      await screen.findByText(/有附件上传失败，请先重试或移除后再发送/),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "提交回答" }),
@@ -561,9 +582,11 @@ describe("聊天技能选择与会话文件", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
+    await user.click(await screen.findByRole("button", { name: "添加附件" }));
     await user.click(
       await screen.findByRole("checkbox", { name: /sales.csv/ }),
     );
+    await user.keyboard("{Escape}");
     await user.type(
       screen.getByLabelText("补充信息"),
       "使用这份文件",
@@ -614,7 +637,11 @@ describe("聊天技能选择与会话文件", () => {
       runs: () => [completed],
     });
 
+    const firstUser = userEvent.setup();
     const firstView = renderApp(`/chat/${SESSION.id}`);
+    await firstUser.click(
+      await screen.findByRole("button", { name: "添加附件" }),
+    );
     expect(
       await screen.findByRole("checkbox", { name: /月度销售报表/ }),
     ).toBeInTheDocument();
@@ -639,9 +666,11 @@ describe("聊天技能选择与会话文件", () => {
     const user = userEvent.setup();
     renderApp(`/chat/${SESSION.id}`);
 
+    await user.click(await screen.findByRole("button", { name: "添加附件" }));
     await user.click(
       await screen.findByRole("checkbox", { name: /月度销售报表/ }),
     );
+    await user.keyboard("{Escape}");
     await user.type(
       screen.getByLabelText("对话草稿"),
       "基于上次产物继续分析",

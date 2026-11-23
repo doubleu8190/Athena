@@ -4,7 +4,9 @@ export const PERSONAL_SKILL_NAME_MAX_LENGTH = 120;
 export const PERSONAL_SKILL_DESCRIPTION_MAX_LENGTH = 1000;
 export const PERSONAL_SKILL_GUIDE_MAX_LENGTH = 100_000;
 
-export type SkillScope = "public" | "personal";
+export type SkillScope = "company" | "department" | "personal";
+/** 兼容后端历史与旧测试夹具可能出现的 "public" 枚举，运行时通过 skillScope() 统一归一为 "company"。 */
+export type LegacyCompatibleSkillScope = SkillScope | "public";
 
 export type DependencyCheckStatus =
   | "satisfied"
@@ -63,7 +65,8 @@ export interface Skill {
   enabled: boolean;
   script_requires_approval: boolean;
   revision: number;
-  scope?: SkillScope;
+  scope?: LegacyCompatibleSkillScope;
+  owner_department_id?: string | null;
   updated_at: string;
   dependency_check: DependencyCheck | null;
 }
@@ -164,9 +167,17 @@ export function versionLabel(version: SkillVersion): string {
   return version.label?.trim() || `v${version.ordinal}`;
 }
 
-export function skillScope(skill: Pick<Skill, "scope">): SkillScope {
-  // 旧目录 fixture 和旧快照没有 scope 时继续按公共技能解释，保持向后兼容。
-  return skill.scope === "personal" ? "personal" : "public";
+export function skillScope(
+  skill: Pick<Skill, "scope">,
+): SkillScope {
+  // 统一将历史或旧测试夹具中的 "public" 与缺省值归一为 "company"，完整支持三层可见性。
+  if (skill.scope === "personal") {
+    return "personal";
+  }
+  if (skill.scope === "department") {
+    return "department";
+  }
+  return "company";
 }
 
 export function skillExecutionLabel(

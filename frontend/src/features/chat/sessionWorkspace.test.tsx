@@ -2813,7 +2813,7 @@ describe("新草稿创建与提交部分失败", () => {
     expect(runRequestIds[0]).toBe(runRequestIds[1]);
   });
 
-  it("草稿页与会话页均支持 Ctrl/Meta+Enter 快捷发送，且忽略 IME 组合态与锁定态", async () => {
+  it("草稿页与会话页均支持 Enter 直接发送、Shift+Enter 换行，且忽略 IME 组合态与锁定态", async () => {
     window.innerWidth = 1024;
     vi.stubGlobal("EventSource", FakeEventSource);
     const created = makeSession({
@@ -2911,17 +2911,24 @@ describe("新草稿创建与提交部分失败", () => {
 
     const draftComposer = await screen.findByLabelText("对话草稿");
     await user.type(draftComposer, "草稿快捷键发送");
-    // IME 组合输入态下按 Ctrl+Enter 不应触发提交
+    // IME 组合输入态（isComposing 或 WebKit keyCode 229）下按 Enter 不应触发提交
     fireEvent.keyDown(draftComposer, {
-      ctrlKey: true,
       isComposing: true,
       key: "Enter",
     });
+    fireEvent.keyDown(draftComposer, {
+      key: "Enter",
+      keyCode: 229,
+    });
+    // Shift + Enter 仅换行不提交
+    fireEvent.keyDown(draftComposer, {
+      key: "Enter",
+      shiftKey: true,
+    });
     expect(submittedTexts).toHaveLength(0);
 
-    // 正常 Ctrl+Enter 触发草稿页创建会话并提交 Run
+    // 正常 Enter 触发草稿页创建会话并提交 Run
     fireEvent.keyDown(draftComposer, {
-      ctrlKey: true,
       key: "Enter",
     });
 
@@ -2936,27 +2943,32 @@ describe("新草稿创建与提交部分失败", () => {
         screen.getByRole("button", { name: "发送消息" }),
       ).toBeInTheDocument();
     });
-    await user.type(sessionComposer, "会话页 Meta+Enter 发送");
+    await user.type(sessionComposer, "会话页 Enter 发送");
 
-    // 会话页 Meta+Enter 触发提交
+    // 会话页 Shift+Enter 不触发提交
     fireEvent.keyDown(sessionComposer, {
       key: "Enter",
-      metaKey: true,
+      shiftKey: true,
+    });
+    expect(submittedTexts).toHaveLength(1);
+
+    // 会话页直接 Enter 触发提交
+    fireEvent.keyDown(sessionComposer, {
+      key: "Enter",
     });
 
     await waitFor(() => {
       expect(submittedTexts).toEqual([
         "草稿快捷键发送",
-        "会话页 Meta+Enter 发送",
+        "会话页 Enter 发送",
       ]);
     });
     expect(await screen.findByText("运行中")).toBeInTheDocument();
     expect(sessionComposer).toHaveValue("");
 
-    // 运行锁定态下输入新内容并按 Ctrl+Enter 不应重复提交
+    // 运行锁定态下输入新内容并按 Enter 不应重复提交
     await user.type(sessionComposer, "锁定期间不可发送");
     fireEvent.keyDown(sessionComposer, {
-      ctrlKey: true,
       key: "Enter",
     });
     expect(submittedTexts).toHaveLength(2);

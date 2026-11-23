@@ -34,14 +34,23 @@ const CHAT_ERROR_COPY: Record<string, string> = {
   file_storage_unavailable: "文件存储暂时不可用，请稍后重试。",
   tool_retry_confirmation_required: "重试可能重复已成功操作，请确认后重试。",
   project_not_found: "指定项目不存在或不可访问。",
+  knowledge_base_not_found: "所选知识库不存在或当前无权访问，请重新选择。",
+  run_knowledge_base_ids_invalid:
+    "知识库选择包含无效、重复或超过 20 个上限的项，请重新选择。",
+  knowledge_base_ids_invalid: "所选知识库范围无效，请重新选择。",
+  run_model_profile_id_invalid: "所选模型标识无效，请重新选择模型后重试。",
+  model_profile_unavailable: "所选模型当前不可用，请切换其他模型后重试。",
   network_error: "无法连接服务器，请检查网络后重试。",
   http_error: "服务器拒绝了本次请求，请稍后重试。",
   invalid_response: "服务器返回了无法识别的响应，请稍后重试。",
 };
 
 export function chatErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return CHAT_ERROR_COPY[error.detail] ?? "运行操作未完成，请稍后重试。";
+  if (
+    error instanceof ApiError &&
+    Object.hasOwn(CHAT_ERROR_COPY, error.detail)
+  ) {
+    return CHAT_ERROR_COPY[error.detail];
   }
   return "运行操作未完成，请稍后重试。";
 }

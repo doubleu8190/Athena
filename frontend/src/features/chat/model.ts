@@ -1,5 +1,5 @@
 import type { ArtifactFileRef } from "../files/model";
-import type { SkillScope } from "../skills/model";
+import type { LegacyCompatibleSkillScope } from "../skills/model";
 
 export type MessageRole = "user" | "assistant";
 
@@ -154,7 +154,16 @@ export interface RunSkillEntry {
   version_id: string;
   version_label: string;
   requires_approval: boolean;
-  scope?: SkillScope;
+  scope?: LegacyCompatibleSkillScope;
+}
+
+export interface RunModelSnapshot {
+  id: string;
+  name: string;
+  model: string;
+  scenario_label: string | null;
+  supports_vision: boolean;
+  version: number;
 }
 
 export interface RunSkillSnapshot {
@@ -229,6 +238,8 @@ export interface Run {
   pending_approvals: RunPendingApproval[];
   skill_snapshot: RunSkillSnapshot | null;
   input_file_ids: string[];
+  knowledge_base_ids?: string[] | null;
+  model_snapshot?: RunModelSnapshot | null;
   parent_run_id?: string | null;
   root_run_id?: string | null;
   parent_tool_call_id?: string | null;

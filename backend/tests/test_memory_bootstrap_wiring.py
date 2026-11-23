@@ -688,3 +688,248 @@ def test_query_services_share_identical_local_embedding_and_separate_distinct_co
     assert embeddings[0].closes == 1
     assert embeddings[1].starts == 1
     assert embeddings[1].closes == 1
+
+
+def test_bootstrap_wires_memory_recall_knowledge_threshold_and_run_context_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """组合根应读取并有界校验 7 个记忆配置及知识库语义阈值，透传至对应服务。"""
+    import bootstrap.knowledge as bootstrap_knowledge
+    import bootstrap.run_worker as bootstrap_run_worker
+    import bootstrap.tool as bootstrap_tool
+
+    captured_memory: dict[str, object] = {}
+    captured_knowledge: dict[str, object] = {}
+    captured_executor: dict[str, object] = {}
+
+    class _StubResource:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def start(self) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _CaptureMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args
+            captured_memory.update(kwargs)
+
+    class _CaptureKnowledge:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args
+            captured_knowledge.update(kwargs)
+
+    monkeypatch.setenv("ATHENA_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_MEMORY_VECTOR_MIN_SCORE", "0.78")
+    monkeypatch.setenv("ATHENA_MEMORY_RERANK_MIN_SCORE", "0.45")
+    monkeypatch.setenv("ATHENA_MEMORY_TIMEOUT_SECONDS", "25.5")
+    monkeypatch.setenv("ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE", "0.22")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE", "0.41")
+
+    monkeypatch.setattr(bootstrap_tool, "LocalEmbedding", _StubResource)
+    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", _StubResource)
+    monkeypatch.setattr(bootstrap_tool, "LocalReranker", _StubResource)
+    monkeypatch.setattr(bootstrap_knowledge, "LocalTokenCounter", _StubResource)
+    monkeypatch.setattr(bootstrap_knowledge, "JiebaChineseTokenizer", lambda: object())
+    monkeypatch.setattr(bootstrap_tool, "build_knowledge_original_store", _StubResource)
+    monkeypatch.setattr(bootstrap_tool, "MemoryRepository", lambda _s: object())
+    monkeypatch.setattr(bootstrap_tool, "KnowledgeRepository", lambda _s: object())
+    monkeypatch.setattr(bootstrap_tool, "MemoryService", _CaptureMemory)
+    monkeypatch.setattr(bootstrap_tool, "KnowledgeService", _CaptureKnowledge)
+
+    build_query_services(cast(Any, object()), projects=cast(ProjectService, object()))
+    assert captured_memory["vector_min_score"] == pytest.approx(0.78)
+    assert captured_memory["rerank_min_score"] == pytest.approx(0.45)
+    assert captured_memory["timeout_seconds"] == pytest.approx(25.5)
+    assert captured_memory["keyword_fallback_min_score"] == pytest.approx(0.22)
+    assert captured_knowledge["semantic_min_score"] == pytest.approx(0.41)
+
+    # 空字符串应回退为 None（关闭关键词兜底）。
+    monkeypatch.setenv("ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE", "   ")
+    build_query_services(cast(Any, object()), projects=cast(ProjectService, object()))
+    assert captured_memory["keyword_fallback_min_score"] is None
+
+    # 越界值应在启动时明确拒绝。
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE", "1.5")
+    with pytest.raises(ValueError, match="athena_knowledge_semantic_min_score_invalid"):
+        build_query_services(cast(Any, object()), projects=cast(ProjectService, object()))
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE", "0.35")
+
+    # 验证 Run Worker 组合根透传 3 个记忆上下文预算配置。
+    class _FakeDb:
+        session_factory = object()
+
+    class _FakeBundle:
+        memory = None
+        knowledge = None
+        project_knowledge = None
+        knowledge_repository = None
+        knowledge_original_store = None
+        memory_enabled = False
+        knowledge_enabled = False
+        memory_lifecycle = None
+
+    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/db")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS", "1500")
+    monkeypatch.setenv("ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS", "3500")
+    monkeypatch.setenv("ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT", "120")
+    monkeypatch.setattr(bootstrap_run_worker, "build_database", lambda _u: _FakeDb())
+    monkeypatch.setattr(
+        bootstrap_run_worker,
+        "build_query_services",
+        lambda *a, **kw: _FakeBundle(),
+    )
+    monkeypatch.setattr(bootstrap_run_worker, "build_run_transport", lambda: None)
+    monkeypatch.setattr(bootstrap_run_worker, "OpenAIChatCompletionsAdapter", _StubResource)
+    monkeypatch.setattr(
+        bootstrap_run_worker,
+        "RunExecutor",
+        lambda *a, **kw: captured_executor.update(kw) or object(),
+    )
+    monkeypatch.setattr(bootstrap_run_worker, "RunWorker", lambda *a, **kw: object())
+
+    run_bundle = bootstrap_run_worker.RunWorkerBundle()
+    bootstrap_run_worker.build_run_worker_dependencies(run_bundle)
+    assert captured_executor["memory_personal_token_budget"] == 1500
+    assert captured_executor["memory_project_token_budget"] == 3500
+    assert captured_executor["memory_per_scope_limit"] == 120
+
+    monkeypatch.setenv("ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT", "500")
+    with pytest.raises(ValueError, match="athena_memory_context_per_scope_limit_invalid"):
+        bootstrap_run_worker.build_run_worker_dependencies(bootstrap_run_worker.RunWorkerBundle())
+
+
+def test_memory_worker_graceful_stop_and_log_level_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Memory Worker 应支持 ATHENA_LOG_LEVEL 优先回退与 stop_event 优雅停机清理。"""
+    import memory_worker as memory_entry_module
+
+    from app.memory.worker import MemoryWorkerConfig
+    from bootstrap.memory_worker import MemoryWorkerBundle
+
+    monkeypatch.delenv("ATHENA_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    assert memory_entry_module._log_level() == "INFO"
+    monkeypatch.setenv("LOG_LEVEL", "warning")
+    assert memory_entry_module._log_level() == "WARNING"
+    monkeypatch.setenv("ATHENA_LOG_LEVEL", "debug")
+    assert memory_entry_module._log_level() == "DEBUG"
+
+    events: list[str] = []
+
+    class _Resource:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        async def start(self) -> None:
+            events.append(f"{self._name}.start")
+
+        async def aclose(self) -> None:
+            events.append(f"{self._name}.close")
+
+        def close(self) -> None:
+            events.append(f"{self._name}.close")
+
+        async def dispose(self) -> None:
+            events.append(f"{self._name}.close")
+
+    class _Worker:
+        async def validate_runtime(self) -> None:
+            return None
+
+        async def recover_running_jobs(self) -> int:
+            return 0
+
+        def set_scan_boundary(self, _at: object) -> None:
+            return None
+
+    def _build(bundle: MemoryWorkerBundle) -> None:
+        bundle.database = cast(Any, _Resource("db"))
+        bundle.provider = cast(Any, _Resource("provider"))
+        bundle.embedding = cast(Any, _Resource("embedding"))
+        bundle.counter = cast(Any, _Resource("counter"))
+        bundle.worker = cast(Any, _Worker())
+        bundle.config = MemoryWorkerConfig(idle_sleep_seconds=0.1)
+
+    consume_started = asyncio.Event()
+
+    async def _blocking_consume(_worker: object, *, idle_sleep_seconds: float) -> None:
+        del idle_sleep_seconds
+        consume_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("consume.cancelled")
+            raise
+
+    monkeypatch.setattr(memory_entry_module, "build_memory_worker_dependencies", _build)
+    monkeypatch.setattr(memory_entry_module, "_consume", _blocking_consume)
+
+    async def scenario() -> None:
+        stop_event = asyncio.Event()
+        runner = asyncio.create_task(memory_entry_module.run_worker(stop_event=stop_event))
+        await asyncio.wait_for(consume_started.wait(), timeout=2.0)
+        stop_event.set()
+        await asyncio.wait_for(runner, timeout=2.0)
+
+    asyncio.run(scenario())
+    assert events == [
+        "embedding.start",
+        "counter.start",
+        "consume.cancelled",
+        "provider.close",
+        "embedding.close",
+        "counter.close",
+        "db.close",
+    ]
+
+    # 启动期间提前触发停机信号应直接跳过 _consume 并完成逆序清理。
+    events.clear()
+
+    async def pre_stopped_scenario() -> None:
+        pre_stopped = asyncio.Event()
+        pre_stopped.set()
+        await memory_entry_module.run_worker(stop_event=pre_stopped)
+
+    asyncio.run(pre_stopped_scenario())
+    assert events == [
+        "embedding.start",
+        "counter.start",
+        "provider.close",
+        "embedding.close",
+        "counter.close",
+        "db.close",
+    ]
+
+    # _main 退出前应对已安装信号调用 remove_signal_handler 解绑。
+    import signal
+
+    installed: list[signal.Signals] = []
+    removed: list[signal.Signals] = []
+
+    async def main_scenario() -> None:
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "add_signal_handler", lambda sig, *_a: installed.append(sig))
+        monkeypatch.setattr(
+            loop, "remove_signal_handler", lambda sig: removed.append(sig) or True
+        )
+
+        async def immediate_run(*, stop_event: asyncio.Event | None = None) -> None:
+            assert stop_event is not None
+
+        monkeypatch.setattr(memory_entry_module, "run_worker", immediate_run)
+        await memory_entry_module._main()
+
+    asyncio.run(main_scenario())
+    assert installed == [signal.SIGINT, signal.SIGTERM]
+    assert removed == [signal.SIGINT, signal.SIGTERM]

@@ -99,9 +99,10 @@ content 可省略，省略时服务端使用候选正文。需要合并、纠正
 必须保留用户明确表达的否定、条件和范围，不得加入输入中没有的事实。不要输出 version、
 scope_key、来源 ID、权限或未被候选允许的目标 ID；这些均由服务端固定。
 
-同批处理必须先按整批时间线联合判断，不得把每个候选孤立处理。使用候选 sources 中最早的
-source_at 排序；同一 source_at 时按 candidate_index 排序。若同一设置或同一范围的后一候选
-明确纠正、替换或重新设定前一候选，则前一候选只是已被覆盖的中间值：
+同批处理必须先按整批时间线联合判断，不得把每个候选孤立处理。根据候选的
+source_message_ids 在顶层 sources 中查找对应消息，按最早的 source_at 排序；同一
+source_at 时按 candidate_index 排序。若同一设置或同一范围的后一候选明确纠正、替换或
+重新设定前一候选，则前一候选只是已被覆盖的中间值：
 - 较早候选必须 IGNORE，即使它与已有旧记忆完全相同，也不得 UPDATE、ADD 或延长旧记忆。
 - 只有时间上最终的候选可以 UPDATE 被纠正的旧记忆；没有允许的旧目标时才 ADD。
 
@@ -626,33 +627,44 @@ class MemoryExtractionService:
         - ExtractionSchemaError：同一旧 ID 在不同候选出现冲突快照。
         """
         memories: dict[str, RetrievedMemory] = {}
+        referenced_source_ids: list[str] = []
         for context in contexts:
+            referenced_source_ids.extend(context.candidate.source_message_ids)
             for memory in context.memories:
                 existing = memories.get(memory.id)
                 if existing is not None and existing != memory:
                     raise ExtractionSchemaError("memory_retrieval_snapshot_invalid")
                 memories[memory.id] = memory
+        # 将整批唯一来源消息去重汇总到顶层 sources，各候选仅保留 source_message_ids 引用，
+        # 避免多候选共享来源时重复内联完整消息正文挤压决策上下文预算。
+        unique_sources = self._ordered_sources(
+            tuple(dict.fromkeys(referenced_source_ids)),
+            source_by_id,
+        )
         return {
             "prompt_version": PROMPT_VERSION,
+            "sources": [
+                {
+                    "message_id": source.message_id,
+                    "source_at": source.source_at.isoformat(),
+                    "text": source.text,
+                }
+                for source in unique_sources
+            ],
             "candidates": [
                 {
                     "candidate_index": context.candidate_index,
                     "content": context.candidate.content,
                     "kind": context.candidate.kind.value,
                     "scope_key": context.scope_key,
-                    "source_message_ids": list(context.candidate.source_message_ids),
-                    "evidence": context.candidate.evidence,
-                    "sources": [
-                        {
-                            "message_id": source.message_id,
-                            "source_at": source.source_at.isoformat(),
-                            "text": source.text,
-                        }
+                    "source_message_ids": [
+                        source.message_id
                         for source in self._ordered_sources(
                             context.candidate.source_message_ids,
                             source_by_id,
                         )
                     ],
+                    "evidence": context.candidate.evidence,
                     "proposed_load_policy": context.candidate.proposed_load_policy.value,
                     "classification_reason": context.candidate.classification_reason,
                     "expires_at": (

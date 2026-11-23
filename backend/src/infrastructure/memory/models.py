@@ -46,7 +46,9 @@ class LocalReranker:
                     self._load()
 
     async def score(self, query: str, contents: list[str]) -> list[float]:
-        self._ensure_loaded()
+        if self._model is None:
+            # 将首次懒加载卸载到工作线程，避免在事件循环线程同步加载模型造成全局卡顿。
+            await asyncio.to_thread(self._ensure_loaded)
         pairs = [[query, content[:4000]] for content in contents]
         return await self._inference.run(lambda: self._predict(pairs))
 

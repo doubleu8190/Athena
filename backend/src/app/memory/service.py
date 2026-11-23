@@ -102,11 +102,16 @@ class MemoryService:
             results = await asyncio.wait_for(
                 asyncio.gather(keyword_task, vector_task, return_exceptions=True), self._timeout
             )
-        except TimeoutError:
+        except BaseException as error:
+            # 无论超时还是外部取消（CancelledError），都必须显式取消并等待两路并发任务收尾，
+            # 避免脱离作用域的数据库查询或向量推理泄漏在后台运行。
             for task in (keyword_task, vector_task):
-                task.cancel()
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(keyword_task, vector_task, return_exceptions=True)
-            return RecallResult("unavailable", degradation_reasons=("recall_deadline",))
+            if isinstance(error, TimeoutError):
+                return RecallResult("unavailable", degradation_reasons=("recall_deadline",))
+            raise
         keyword_rows, vector_rows = results
         failures: list[str] = []
         candidates: dict[str, tuple[Memory, dict[str, tuple[int, float]]]] = {}

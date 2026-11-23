@@ -6,7 +6,9 @@ import asyncio
 import logging
 import os
 import random
+import signal
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import timedelta
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
@@ -91,8 +93,17 @@ def _is_recoverable_worker_error(error: Exception) -> bool:
     )
 
 
-async def run_worker() -> None:
-    """装配资源、验证默认模型并运行 Memory Worker。"""
+def _log_level() -> str:
+    """统一日志级别解析：优先 ATHENA_LOG_LEVEL，其次兼容 LOG_LEVEL，默认 INFO。"""
+    return (
+        (os.getenv("ATHENA_LOG_LEVEL") or "").strip()
+        or (os.getenv("LOG_LEVEL") or "").strip()
+        or "INFO"
+    ).upper()
+
+
+async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
+    """装配资源、验证默认模型并运行 Memory Worker；支持停机信号优雅退出。"""
     bundle = MemoryWorkerBundle()
     failure: BaseException | None = None
     try:
@@ -118,10 +129,37 @@ async def run_worker() -> None:
         lookback_hours = _scan_lookback_hours()
         worker.set_scan_boundary(utc_now() - timedelta(hours=lookback_hours))
         # 直接复用组合根已校验的 idle_sleep_seconds，避免重复解析环境变量。
-        await _consume(
-            worker,
-            idle_sleep_seconds=config.idle_sleep_seconds,
-        )
+        if stop_event is None:
+            await _consume(
+                worker,
+                idle_sleep_seconds=config.idle_sleep_seconds,
+            )
+        elif not stop_event.is_set():
+            # 启动加载模型期间若已收到停机信号，跳过消费循环直接进入 finally 逆序清理。
+            consume_task = asyncio.create_task(
+                _consume(worker, idle_sleep_seconds=config.idle_sleep_seconds)
+            )
+            stop_task = asyncio.create_task(stop_event.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (consume_task, stop_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if consume_task in done:
+                    await consume_task
+                else:
+                    consume_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await consume_task
+            finally:
+                if not stop_task.done():
+                    stop_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await stop_task
+                if not consume_task.done():
+                    consume_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await consume_task
     except BaseException as error:
         failure = error
     finally:
@@ -169,10 +207,30 @@ async def run_worker() -> None:
         raise failure
 
 
+async def _main() -> None:
+    """安装 SIGINT/SIGTERM 信号处理并运行 Memory Worker 生命周期。"""
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    installed_signals: list[signal.Signals] = []
+    for signal_name in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signal_name, stop_event.set)
+        except NotImplementedError:
+            continue
+        installed_signals.append(signal_name)
+    try:
+        await run_worker(stop_event=stop_event)
+    finally:
+        # 退出前解绑信号处理器，避免复用事件循环时回调残留。
+        for signal_name in installed_signals:
+            with suppress(NotImplementedError):
+                loop.remove_signal_handler(signal_name)
+
+
 def main() -> None:
     """配置日志并以正常信号语义运行异步入口。"""
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-    asyncio.run(run_worker())
+    logging.basicConfig(level=_log_level())
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":

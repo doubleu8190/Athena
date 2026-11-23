@@ -73,10 +73,12 @@ def _files_enabled() -> bool:
 
 
 def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
-    """读取有界整数配置，非法值在 Worker 启动时明确失败。"""
-    raw = os.getenv(name, str(default)).strip()
+    """读取有界整数配置，空值回退默认，非法值在 Worker 启动时明确失败。"""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
     try:
-        value = int(raw)
+        value = int(raw.strip())
     except ValueError as error:
         raise ValueError(f"{name.lower()}_invalid") from error
     if isinstance(value, bool) or not minimum <= value <= maximum:
@@ -182,6 +184,25 @@ def build_run_worker_dependencies(
     # 仅失去实时推送，不影响 Run 的持久化与状态流转。
     run_transport = build_run_transport()
     bundle.run_transport = run_transport
+    # 接通 compose.yml 已声明的 Run 记忆上下文预算与单 scope 条目上限，启动期有界校验。
+    memory_personal_tokens = _bounded_env_int(
+        "ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS",
+        1_000,
+        minimum=1,
+        maximum=100_000,
+    )
+    memory_project_tokens = _bounded_env_int(
+        "ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS",
+        2_000,
+        minimum=1,
+        maximum=100_000,
+    )
+    memory_per_scope_limit = _bounded_env_int(
+        "ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT",
+        200,
+        minimum=1,
+        maximum=200,
+    )
     # Executor 负责执行单个 Run；Worker 负责领取、续约并驱动执行。
     executor = RunExecutor(
         repository,
@@ -192,6 +213,9 @@ def build_run_worker_dependencies(
         config=config,
         tool_runtime=tool_runtime,
         memory_lifecycle=query_services.memory_lifecycle,
+        memory_personal_token_budget=memory_personal_tokens,
+        memory_project_token_budget=memory_project_tokens,
+        memory_per_scope_limit=memory_per_scope_limit,
         subagents=subagents_repository,
     )
     bundle.worker = RunWorker(repository, executor, config, publisher=run_transport)

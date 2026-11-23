@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -49,6 +50,40 @@ logger = logging.getLogger(__name__)
 
 def _profile_id(model: str, revision: str) -> str:
     return embedding_profile_id(model, revision)
+
+
+def _bounded_env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """读取有界浮点环境变量，非法值、NaN/Inf 或越界在启动阶段直接失败。"""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError as error:
+        raise ValueError(f"{name.lower()}_invalid") from error
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError(f"{name.lower()}_invalid")
+    return value
+
+
+def _optional_env_float(name: str, *, minimum: float) -> float | None:
+    """读取可选浮点环境变量；未设或空白时返回 None，设置时要求为有限且不小于下界。"""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw.strip())
+    except ValueError as error:
+        raise ValueError(f"{name.lower()}_invalid") from error
+    if not math.isfinite(value) or value < minimum:
+        raise ValueError(f"{name.lower()}_invalid")
+    return value
 
 
 @dataclass(slots=True)
@@ -153,12 +188,39 @@ def build_query_services(
                 os.getenv("ATHENA_MEMORY_RERANKER_DEVICE", "cpu"),
             )
             counter = ApproximateTokenCounter()
+            # 接通 compose.yml 已声明的记忆召回分数下限、超时与关键词兜底阈值配置。
+            vector_min_score = _bounded_env_float(
+                "ATHENA_MEMORY_VECTOR_MIN_SCORE",
+                0.70,
+                minimum=0.0,
+                maximum=1.0,
+            )
+            rerank_min_score = _bounded_env_float(
+                "ATHENA_MEMORY_RERANK_MIN_SCORE",
+                0.30,
+                minimum=0.0,
+                maximum=1.0,
+            )
+            timeout_seconds = _bounded_env_float(
+                "ATHENA_MEMORY_TIMEOUT_SECONDS",
+                60.0,
+                minimum=0.1,
+                maximum=600.0,
+            )
+            keyword_fallback_min_score = _optional_env_float(
+                "ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE",
+                minimum=0.0,
+            )
             memory = MemoryService(
                 memory_repository,
                 memory_embedding,
                 reranker,
                 counter,
                 profile_id=_profile_id(embedding_model, embedding_revision),
+                vector_min_score=vector_min_score,
+                timeout_seconds=timeout_seconds,
+                rerank_min_score=rerank_min_score,
+                keyword_fallback_min_score=keyword_fallback_min_score,
                 lifecycle=memory_repository,
                 control_source=memory_repository,
             )
@@ -185,6 +247,12 @@ def build_query_services(
         knowledge_repository = concrete_repository
         knowledge_upload_slots = concrete_repository
         project_knowledge_repository = concrete_repository
+        semantic_min_score = _bounded_env_float(
+            "ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE",
+            0.35,
+            minimum=0.0,
+            maximum=1.0,
+        )
         knowledge = KnowledgeService(
             concrete_repository,
             models.tokenizer,
@@ -192,6 +260,7 @@ def build_query_services(
             knowledge_originals,
             models.counter,
             profile_id=models.profile_id,
+            semantic_min_score=semantic_min_score,
         )
         # 启动顺序沿用存储 → 计数 → 向量模型，关闭时按相反依赖顺序释放；
         # 复用 Memory 向量实例时不再重复加入 startables/closables。

@@ -41,6 +41,8 @@ BACKGROUND_JOB_KINDS = (
 )
 _SCAN_PAGE_LIMIT = 100
 _MAX_EXTRACT_ATTEMPTS = 5
+# 仅不可恢复的业务失效走整批丢弃；memory_batch_target_changed 属于并发乐观锁版本冲突，
+# 不列入此处，交由 _handle_infrastructure_failure 走有界退避重试，避免永久跳过整批 Run。
 _BUSINESS_FAILURE_CODES = frozenset(
     {
         "memory_auto_extract_disabled",
@@ -53,7 +55,6 @@ _BUSINESS_FAILURE_CODES = frozenset(
         "memory_batch_session_changed",
         "memory_batch_source_changed",
         "memory_batch_source_invalid",
-        "memory_batch_target_changed",
         "memory_decision_content_invalid",
         "memory_decision_context_too_large",
         "memory_decision_coverage_invalid",
@@ -240,7 +241,9 @@ class MemoryWorker:
             if batch is None or code not in _BUSINESS_FAILURE_CODES:
                 await self._handle_infrastructure_failure(
                     job,
-                    "memory_extraction_failed",
+                    code
+                    if code == "memory_batch_target_changed"
+                    else "memory_extraction_failed",
                     batch,
                 )
                 return

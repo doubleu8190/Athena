@@ -5,20 +5,26 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 from alembic import command
 from integration.test_memory_lifecycle_support import (
     DATABASE_URL,
+    HeadFixture,
     isolated_database,
     seed_head_fixture,
 )
 from sqlalchemy import func, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.memory.model import MemoryModel, MemorySourceModel
 from adapter.memory.repository import MemoryRepository
+from adapter.message.model import ConversationMessageModel
 from domain.memory.lifecycle import ExtractJobResult
 from domain.memory.model import AccessContext
+from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 
 pytestmark = [
     pytest.mark.integration,
@@ -37,15 +43,111 @@ _FACT_COLUMNS = {
 }
 
 
+async def _seed_0026_fixture(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    owner_id: str,
+    generation: int,
+) -> HeadFixture:
+    """在 20261125_0026 历史 schema 下写入基础数据与显式 0026 列名 Run。"""
+    base = await seed_head_fixture(
+        factory,
+        owner_id=owner_id,
+        pending_count=0,
+        generation=generation,
+    )
+    run_id = f"run_{owner_id}_000"
+    message_id = f"message_{owner_id}_000"
+    source_at = base.now + timedelta(microseconds=1)
+    async with factory() as session, session.begin():
+        message = ConversationMessageModel(
+            id=message_id,
+            session_id=base.session_id,
+            role="user",
+            status="completed",
+            sequence=1,
+            parts=[{"type": "text", "text": "用户证据 1"}],
+            reply_to_message_id=None,
+            run_id=None,
+            managed_run_id=None,
+            context_turn_id=None,
+            client_message_id=None,
+            created_at=source_at,
+            completed_at=source_at,
+            metadata_json={},
+        )
+        session.add(message)
+        await session.flush()
+        # 显式使用 0026 时代 runs 表列名插入，避免 head ORM 的 subagent 字段导致 UndefinedColumn。
+        await session.execute(
+            text(
+                "INSERT INTO runs ("
+                "id, session_id, owner_id, status, trigger_message_id, context_cutoff_sequence, "
+                "retry_of_run_id, model_config_version_id, main_prompt_version_id, "
+                "compression_prompt_version_id, compression_policy_version_id, skill_snapshot, "
+                "input_file_ids, memory_project_id, memory_input_message_ids, "
+                "memory_context_state, "
+                "memory_extraction_status, memory_extracted_at, memory_extraction_batch_id, "
+                "memory_extraction_safe_error_code, tool_snapshot, auth_session_id, "
+                "llm_request_count, prompt_template_version, event_sequence, execution_epoch, "
+                "worker_id, lease_expires_at, execution_started_at, execution_deadline_at, "
+                "queued_at, first_started_at, finished_at, created_at, updated_at, "
+                "cancel_requested_at, safe_error_code, report_message_id, usage"
+                ") VALUES ("
+                ":id, :session_id, :owner_id, 'completed', :trigger_message_id, 1, "
+                "NULL, :model_config_version_id, :main_prompt_version_id, "
+                ":compression_prompt_version_id, NULL, NULL, "
+                "CAST('[]' AS jsonb), :memory_project_id, "
+                "CAST(:memory_input_message_ids AS jsonb), "
+                "CAST(:memory_context_state AS jsonb), "
+                "'pending', NULL, NULL, NULL, NULL, :auth_session_id, "
+                "0, 'run-v2', 0, 0, NULL, NULL, NULL, NULL, "
+                ":source_at, NULL, :source_at, :source_at, :source_at, "
+                "NULL, NULL, NULL, CAST('{}' AS jsonb)"
+                ")"
+            ),
+            {
+                "id": run_id,
+                "session_id": base.session_id,
+                "owner_id": owner_id,
+                "trigger_message_id": message_id,
+                "model_config_version_id": base.profile_id,
+                "main_prompt_version_id": INITIAL_SYSTEM_PROMPT_IDS["main"],
+                "compression_prompt_version_id": INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                "memory_project_id": base.project_id,
+                "memory_input_message_ids": json.dumps([message_id]),
+                "memory_context_state": json.dumps(
+                    {
+                        "initialized": True,
+                        "references": [
+                            {
+                                "memory_id": f"memory_{owner_id}",
+                                "version": 1,
+                                "scope_key": "personal",
+                            }
+                        ],
+                    }
+                ),
+                "auth_session_id": base.auth_session_id,
+                "source_at": source_at,
+            },
+        )
+        await session.execute(
+            text("UPDATE sessions SET last_message_sequence = 1 WHERE id = :session_id"),
+            {"session_id": base.session_id},
+        )
+        message.run_id = run_id
+    return replace(base, run_ids=(run_id,), message_ids=(message_id,))
+
+
 def test_0027_preserves_data_projects_extract_json_and_drops_fact_schema() -> None:
     """从 0026 升级后只删除事实身份结构，并保留审计与完成语义。"""
 
     async def scenario() -> None:
         async with isolated_database(revision="20261125_0026") as harness:
-            fixture = await seed_head_fixture(
+            fixture = await _seed_0026_fixture(
                 harness.factory,
                 owner_id="owner_0027",
-                pending_count=1,
                 generation=9,
             )
             context_state = {
@@ -373,7 +475,8 @@ def test_0027_preserves_data_projects_extract_json_and_drops_fact_schema() -> No
                     },
                 )
 
-            await asyncio.to_thread(command.upgrade, harness.config, "head")
+            # 精确升级至目标迁移 20261126_0027，避免后续新迁移改变 revision 断言与回滚路径。
+            await asyncio.to_thread(command.upgrade, harness.config, "20261126_0027")
 
             async with harness.factory() as session:
                 revision = await session.scalar(text("SELECT version_num FROM alembic_version"))

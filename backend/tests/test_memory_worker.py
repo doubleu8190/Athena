@@ -775,3 +775,42 @@ def test_scan_missing_runs_is_throttled_and_does_not_break_backoff() -> None:
         assert repository.scan_calls == 4
 
     asyncio.run(scenario())
+
+
+def test_optimistic_lock_target_changed_retries_instead_of_discarding_batch() -> None:
+    """apply_batch 遇到 memory_batch_target_changed 乐观锁冲突时走可重试退避，不永久丢弃整批。"""
+
+    class _TargetConflictRepository(_Repository):
+        async def apply_batch(self, command: ApplyBatchCommand) -> ExtractBatchResult:
+            if command.discard_reason is None:
+                raise ValueError("memory_batch_target_changed")
+            return await super().apply_batch(command)
+
+    async def scenario() -> None:
+        # 第 1 次尝试冲突 -> 应通过 complete_job(retryable=True) 退避重排，不调用 _discard_batch。
+        repo_retry = _TargetConflictRepository(
+            _job(ExtractPendingPayload(owner_id="owner_worker"), attempt_count=1)
+        )
+        repo_retry.pending = (_pending_run("run_lock_1"), _pending_run("run_lock_2"))
+        repo_retry.sources = (_message("msg_run_lock_1"), _message("msg_run_lock_2"))
+        assert await _worker(repo_retry).run_once() is True
+        assert repo_retry.apply_commands == []
+        assert len(repo_retry.completed) == 1
+        assert repo_retry.completed[0].retryable is True
+        assert repo_retry.completed[0].safe_error_code == "memory_batch_target_changed"
+        assert repo_retry.completed[0].failed_run_ids == ()
+
+        # 尝试耗尽（attempt_count=5） -> 收敛当前批次 Run 为失败，不再无限重试。
+        repo_exhausted = _TargetConflictRepository(
+            _job(ExtractPendingPayload(owner_id="owner_worker"), attempt_count=5)
+        )
+        repo_exhausted.pending = (_pending_run("run_lock_3"),)
+        repo_exhausted.sources = (_message("msg_run_lock_3"),)
+        assert await _worker(repo_exhausted).run_once() is True
+        assert repo_exhausted.apply_commands == []
+        assert len(repo_exhausted.completed) == 1
+        assert repo_exhausted.completed[0].retryable is False
+        assert repo_exhausted.completed[0].safe_error_code == "memory_batch_target_changed"
+        assert repo_exhausted.completed[0].failed_run_ids == ("run_lock_3",)
+
+    asyncio.run(scenario())

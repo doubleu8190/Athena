@@ -398,9 +398,13 @@ def test_candidates_and_sources_are_ordered_by_original_source_time() -> None:
             early.message_id,
             early_detail.message_id,
         ]
-        assert [source["message_id"] for source in candidates[0]["sources"]] == [
+        assert "sources" not in candidates[0]
+        assert "sources" not in candidates[1]
+        # 顶层 sources 按时间稳定有序去重汇总全部引用来源消息。
+        assert [source["message_id"] for source in payload["sources"]] == [
             early.message_id,
             early_detail.message_id,
+            late.message_id,
         ]
         assert repository.retrieval_calls == [
             ("personal", "用户喜欢苹果", 5),
@@ -1022,5 +1026,48 @@ def test_prepare_changes_reuses_candidate_embeddings_and_only_reembeds_rewritten
         assert changes[0].create.embedding[0] == pytest.approx(0.1)
         assert changes[1].create is not None
         assert changes[1].create.embedding[0] == pytest.approx(0.2)
+
+    asyncio.run(scenario())
+
+
+def test_decision_payload_deduplicates_shared_sources_at_top_level() -> None:
+    """多个候选引用同一条长来源消息时，决策输入仅在顶层 sources 保留一份原文。"""
+
+    async def scenario() -> None:
+        long_text = "我喜欢苹果，也喜欢香蕉，并且平时用 PostgreSQL。" + ("背景" * 80)
+        shared = _source("msg_shared", long_text)
+        c1 = _candidate("用户喜欢苹果", "我喜欢苹果", shared.message_id)
+        c2 = _candidate("用户喜欢香蕉", "也喜欢香蕉", shared.message_id)
+        c3 = _candidate("用户平时用 PostgreSQL", "平时用 PostgreSQL", shared.message_id)
+        provider = _Provider(
+            [
+                {
+                    "decisions": [
+                        {"candidate_index": 0, "action": "ADD"},
+                        {"candidate_index": 1, "action": "ADD"},
+                        {"candidate_index": 2, "action": "ADD"},
+                    ]
+                }
+            ]
+        )
+        service = _service(_Repository(), provider)
+
+        await service.complete_decisions(
+            _batch((shared,), candidates=(c1, c2, c3)),
+            _runtime(),
+            (shared,),
+        )
+
+        request_text = provider.requests[0].messages[-1].content
+        payload = json.loads(request_text.split("\n", 1)[1].rsplit("\n", 1)[0])
+        assert len(payload["sources"]) == 1
+        assert payload["sources"][0]["message_id"] == shared.message_id
+        assert payload["sources"][0]["text"] == long_text
+        assert request_text.count(long_text) == 1
+        assert all("sources" not in item for item in payload["candidates"])
+        assert all(
+            item["source_message_ids"] == [shared.message_id]
+            for item in payload["candidates"]
+        )
 
     asyncio.run(scenario())

@@ -369,3 +369,87 @@ def test_memory_repository_search_keyword_builds_safe_tsquery_for_special_chars(
             assert "string_agg(" in sql
 
     asyncio.run(scenario())
+
+
+def test_recall_cancels_both_channel_tasks_when_caller_cancels() -> None:
+    """外部取消 recall() 时必须显式取消并回收 keyword_task 与 vector_task，防止后台任务泄漏。"""
+    keyword_started = asyncio.Event()
+    vector_started = asyncio.Event()
+    keyword_cancelled = False
+    vector_cancelled = False
+
+    class _HangingRepository(FakeRepository):
+        async def search_keyword(
+            self, _namespace: str, _scopes: tuple[str, ...], _query: str, _limit: int
+        ) -> list[tuple[Memory, float]]:
+            nonlocal keyword_cancelled
+            keyword_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                keyword_cancelled = True
+                raise
+            return []
+
+    class _HangingEmbedding:
+        async def embed(self, _texts: list[str]) -> list[list[float]]:
+            nonlocal vector_cancelled
+            vector_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                vector_cancelled = True
+                raise
+            return []
+
+    async def scenario() -> None:
+        service = MemoryService(
+            _HangingRepository(), _HangingEmbedding(), FakeReranker(), FakeCounter()
+        )
+        task = asyncio.create_task(
+            service.recall(RecallRequest(AccessContext("u", ("p",), ()), ("p",), "取消测试"))
+        )
+        await asyncio.wait_for(
+            asyncio.gather(keyword_started.wait(), vector_started.wait()),
+            timeout=2.0,
+        )
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert keyword_cancelled is True
+        assert vector_cancelled is True
+
+    asyncio.run(scenario())
+
+
+def test_local_reranker_lazy_loads_off_event_loop_thread() -> None:
+    """LocalReranker.score 首次懒加载必须在工作线程执行，不得同步阻塞事件循环。"""
+    import threading
+    from typing import Any
+
+    from infrastructure.memory.models import LocalReranker
+
+    main_thread = threading.current_thread()
+    load_threads: list[threading.Thread] = []
+
+    class _FakeCrossEncoder:
+        def predict(self, pairs: list[list[str]]) -> list[float]:
+            return [0.75 for _ in pairs]
+
+    async def scenario() -> None:
+        reranker = LocalReranker("fake-model", "rev-1", "cpu")
+
+        def fake_load() -> None:
+            load_threads.append(threading.current_thread())
+            reranker._model = _FakeCrossEncoder()  # type: ignore[assignment]
+
+        reranker._load = fake_load  # type: ignore[method-assign]
+        try:
+            scores: list[Any] = await reranker.score("q", ["a", "b"])
+            assert scores == [0.75, 0.75]
+            assert len(load_threads) == 1
+            assert load_threads[0] is not main_thread
+        finally:
+            await reranker.aclose()
+
+    asyncio.run(scenario())

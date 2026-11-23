@@ -419,7 +419,7 @@ class SqlAlchemyAccessControlRepository(AccessControlRepository):
                     McpServerModel.id,
                     McpServerModel.visibility_scope,
                     McpServerModel.owner_department_id,
-                )
+                ).where(McpServerModel.deleted_at.is_(None))
                 if unique_ids is not None:
                     mcp_stmt = mcp_stmt.where(McpServerModel.id.in_(unique_ids))
                 mcp_rows = (await session.execute(mcp_stmt)).all()

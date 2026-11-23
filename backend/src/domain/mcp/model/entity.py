@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,9 +10,10 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from domain.access import VisibilityGrant, VisibilityGrantInput, VisibilityScope
-from domain.mcp.model.config import McpServerConfig
+from domain.mcp.model.config import McpServerConfig, StdioConfig, StreamableHttpConfig
 
 MAX_MCP_SECRET_BYTES = 16 * 1024
+_SECRET_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}")
 
 
 class McpTransport(StrEnum):
@@ -75,11 +77,53 @@ class McpServer:
     visibility_scope: VisibilityScope = VisibilityScope.COMPANY
     owner_department_id: str | None = None
     visibility_grants: tuple[VisibilityGrant, ...] = ()
+    enabled: bool = True
 
     @property
     def transport(self) -> McpTransport:
         """返回判别配置中的传输类型。"""
         return McpTransport(self.config.transport)
+
+
+@dataclass(frozen=True, slots=True)
+class McpServerConnectionState:
+    """仅供受控应用层运维路径（保密合并/重发现）使用的 Server 投影与已解封凭据。"""
+
+    server: McpServer
+    secrets: Mapping[str, str] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        """冻结凭据视图，防止共享可变字典或意外泄漏。"""
+        object.__setattr__(self, "secrets", MappingProxyType(dict(self.secrets)))
+
+
+def extract_config_secret_placeholders(config: McpServerConfig) -> frozenset[str]:
+    """提取配置字符串中引用的全部 ${SECRET} 占位符名称集合。"""
+    texts: list[str] = []
+    if isinstance(config, StreamableHttpConfig):
+        texts.append(config.url)
+    elif isinstance(config, StdioConfig):
+        texts.append(config.command)
+        texts.extend(config.args)
+        if config.cwd is not None:
+            texts.append(config.cwd)
+    placeholders: set[str] = set()
+    for text in texts:
+        placeholders.update(_SECRET_PLACEHOLDER_PATTERN.findall(text))
+    return frozenset(placeholders)
+
+
+def validate_mcp_secret_placeholders(config: McpServerConfig, secrets: Mapping[str, str]) -> None:
+    """确认合并后的密钥集合满足最终 config 引用的全部 ${SECRET} 占位符。"""
+    referenced = extract_config_secret_placeholders(config)
+    if not referenced:
+        return
+    if config.transport == "streamable_http":
+        available = {name.lower() for name in secrets}
+        if any(name.lower() not in available for name in referenced):
+            raise ValueError("mcp_secret_placeholder_missing")
+    elif not referenced <= set(secrets):
+        raise ValueError("mcp_secret_placeholder_missing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +238,9 @@ __all__ = [
     "McpSecretMetadata",
     "McpSecretPurpose",
     "McpServer",
+    "McpServerConnectionState",
     "McpServerWrite",
     "McpTransport",
+    "extract_config_secret_placeholders",
+    "validate_mcp_secret_placeholders",
 ]

@@ -16,7 +16,13 @@ from domain.llm.model.errors import (
     LlmRequestError,
     LlmToolArgumentsError,
 )
-from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, RuntimeModelProfile
+from domain.llm.model.profile import (
+    MODEL_PROFILE_UNSET,
+    ModelProfileInput,
+    ModelProfileUpdateInput,
+    ModelProfileVersion,
+    RuntimeModelProfile,
+)
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
     ModelProfileConflictError,
@@ -66,7 +72,9 @@ __all__ = [
     "ToolArgumentsDelta",
     "ToolCallCompleted",
     "ToolCallStarted",
+    "MODEL_PROFILE_UNSET",
     "ModelProfileInput",
+    "ModelProfileUpdateInput",
     "CompressionPolicyInput",
     "CompressionPolicyVersion",
     "MAX_COMPRESSION_TOKEN_BUDGET",

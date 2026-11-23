@@ -23,6 +23,7 @@ from domain.mcp.model import (
     McpSecretPurpose,
     McpServer,
     McpServerConfig,
+    McpServerConnectionState,
     McpServerNameConflictError,
     McpServerNotFoundError,
     McpServerPage,
@@ -31,9 +32,11 @@ from domain.mcp.model import (
     McpTransport,
     StdioConfig,
     StreamableHttpConfig,
+    extract_config_secret_placeholders,
     mcp_content_projection,
     mcp_message_from_result,
     parse_server_config,
+    validate_mcp_secret_placeholders,
 )
 from domain.mcp.ports import (
     McpDiscovery,
@@ -66,6 +69,7 @@ __all__ = [
     "McpServer",
     "McpRuntimeToolTarget",
     "McpServerConfig",
+    "McpServerConnectionState",
     "McpServerNameConflictError",
     "McpServerNotFoundError",
     "McpServerPage",
@@ -77,7 +81,9 @@ __all__ = [
     "McpTransport",
     "StdioConfig",
     "StreamableHttpConfig",
+    "extract_config_secret_placeholders",
     "mcp_content_projection",
     "mcp_message_from_result",
     "parse_server_config",
+    "validate_mcp_secret_placeholders",
 ]

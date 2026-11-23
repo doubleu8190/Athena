@@ -176,11 +176,12 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     if active is not None:
                         raise RunConflictError("run_already_active")
-                    profile_id = (
-                        await self._lock_selected_profile_id(session, command.model_profile_id)
+                    profile = (
+                        await self._lock_selected_profile_row(session, command.model_profile_id)
                         if command.model_profile_id is not None
-                        else await self._lock_default_profile_id(session)
+                        else await self._lock_default_profile_row(session)
                     )
+                    model_snapshot_json = self._build_model_snapshot_json(profile)
                     compression_policy_id = await self._current_compression_policy_id(session)
                     system_prompts = await current_system_prompts(session)
                     if system_prompts is None:
@@ -200,7 +201,8 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         trigger_message_id=message.id,
                         context_cutoff_sequence=locked_session.last_message_sequence,
                         retry_of_run_id=None,
-                        model_config_version_id=profile_id,
+                        model_config_version_id=profile.id,
+                        model_snapshot_json=model_snapshot_json,
                         main_prompt_version_id=system_prompts.main.id,
                         compression_prompt_version_id=system_prompts.compression.id,
                         compression_policy_version_id=compression_policy_id,
@@ -1160,10 +1162,11 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         raise RunConflictError("run_already_active")
                     # 重试继承原 Run 绑定的模型版本并在同一事务内共享锁定复核其可用性，
                     # 防止失败重试静默漂移回默认模型或绕过停用/隐藏/软删除限制。
-                    profile_id = await self._lock_retry_profile_id(
+                    profile = await self._lock_retry_profile_row(
                         session,
                         source.model_config_version_id,
                     )
+                    model_snapshot_json = self._build_model_snapshot_json(profile)
                     compression_policy_id = await self._current_compression_policy_id(session)
                     system_prompts = await current_system_prompts(session)
                     if system_prompts is None:
@@ -1205,7 +1208,8 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         trigger_message_id=source.trigger_message_id,
                         context_cutoff_sequence=source.context_cutoff_sequence,
                         retry_of_run_id=source.id,
-                        model_config_version_id=profile_id,
+                        model_config_version_id=profile.id,
+                        model_snapshot_json=model_snapshot_json,
                         main_prompt_version_id=system_prompts.main.id,
                         compression_prompt_version_id=system_prompts.compression.id,
                         compression_policy_version_id=compression_policy_id,
@@ -1518,9 +1522,14 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     if row.skill_snapshot is None
                     else RunSkillSnapshot.model_validate(row.skill_snapshot)
                 )
-                # 校验每个子任务对应的 Subagent 配置、模型可用性与输入文件归属。
+                # 校验子任务 Subagent、模型可用性与输入文件归属，并固化子 Run 模型快照。
                 validated_items: list[
-                    tuple[str, tuple[str, ...], RunSkillSnapshot | None]
+                    tuple[
+                        str,
+                        dict[str, object],
+                        tuple[str, ...],
+                        RunSkillSnapshot | None,
+                    ]
                 ] = []
                 for item in command.items:
                     subagent_row = await session.scalar(
@@ -1573,7 +1582,12 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         except ValueError as error:
                             raise RunStateError("subagent_skill_snapshot_invalid") from error
                     validated_items.append(
-                        (model_profile_id, validated_files, child_skill_snapshot)
+                        (
+                            model_profile_id,
+                            self._build_model_snapshot_json(profile_row),
+                            validated_files,
+                            child_skill_snapshot,
+                        )
                     )
 
                 # 父 Run 行锁已覆盖本查询，派发批次必须续接同一 Run 的全局工具序号。
@@ -1610,9 +1624,12 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
 
                 child_rows: list[RunModel] = []
                 for idx, item in enumerate(command.items):
-                    model_profile_id, validated_files, child_skill_snapshot = (
-                        validated_items[idx]
-                    )
+                    (
+                        model_profile_id,
+                        child_model_snapshot,
+                        validated_files,
+                        child_skill_snapshot,
+                    ) = validated_items[idx]
                     child_created_at = await self._next_run_created_at(session, row.session_id)
                     child = RunModel(
                         id=item.sub_run_id,
@@ -1623,6 +1640,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         context_cutoff_sequence=row.context_cutoff_sequence,
                         retry_of_run_id=None,
                         model_config_version_id=model_profile_id,
+                        model_snapshot_json=child_model_snapshot,
                         main_prompt_version_id=row.main_prompt_version_id,
                         compression_prompt_version_id=row.compression_prompt_version_id,
                         # 子 Run 上下文隔离且无正式会话历史，不继承主 Run 压缩策略。

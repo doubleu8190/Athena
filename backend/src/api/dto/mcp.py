@@ -86,8 +86,34 @@ McpServerUpdateRequest = Annotated[
 ]
 
 
+class McpServerPatchRequest(BaseModel):
+    """保留既有加密凭据的 MCP Server 局部更新请求。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_config_version: int = Field(ge=1)
+    name: str | None = None
+    config: dict[str, Any] | None = None
+    secrets_upsert: dict[str, str] | None = Field(default=None, repr=False)
+    secrets_remove: list[str] | None = None
+    visibility_scope: Literal["company", "department"] | None = None
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantRequest] | None = None
+    enabled: bool | None = None
+    rediscover: bool = False
+
+
+class McpServerEnabledRequest(BaseModel):
+    """切换 MCP Server 启停状态的请求。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool
+    expected_config_version: int | None = Field(default=None, ge=1)
+
+
 class McpServerResponse(BaseModel):
-    """管理员可见的 Server 配置、可见范围与脱敏秘密状态。"""
+    """管理员可见的 Server 配置、启停状态、可见范围与脱敏秘密状态。"""
 
     id: str
     name: str
@@ -95,6 +121,7 @@ class McpServerResponse(BaseModel):
     config: dict[str, Any]
     secrets: list[dict[str, Any]]
     config_version: int
+    enabled: bool = True
     visibility_scope: Literal["company", "department"] = "company"
     owner_department_id: str | None = None
     visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
@@ -117,7 +144,9 @@ __all__ = [
     "HttpServerCreateRequest",
     "HttpServerUpdateRequest",
     "McpServerCreateRequest",
+    "McpServerEnabledRequest",
     "McpServerListResponse",
+    "McpServerPatchRequest",
     "McpServerResponse",
     "McpServerUpdateRequest",
     "StdioServerCreateRequest",

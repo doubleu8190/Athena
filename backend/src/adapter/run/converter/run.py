@@ -23,6 +23,7 @@ from domain.run.model import (
     RunFailedPayload,
     RunInputFiles,
     RunInputRequest,
+    RunModelSnapshot,
     RunQueuedPayload,
     RunResumedPayload,
     RunStartedPayload,
@@ -84,6 +85,11 @@ def run_to_domain(row: RunModel) -> Run:
     skill_snapshot = (
         None if row.skill_snapshot is None else RunSkillSnapshot.model_validate(row.skill_snapshot)
     )
+    model_snapshot = (
+        None
+        if row.model_snapshot_json is None
+        else RunModelSnapshot.model_validate(row.model_snapshot_json)
+    )
     return Run(
         id=row.id,
         session_id=row.session_id,
@@ -115,6 +121,7 @@ def run_to_domain(row: RunModel) -> Run:
         safe_error_code=row.safe_error_code,
         usage=usage,
         compression_policy_version_id=row.compression_policy_version_id,
+        model_snapshot=model_snapshot,
         tool_snapshot=tool_snapshot,
         auth_session_id=row.auth_session_id,
         llm_request_count=row.llm_request_count,

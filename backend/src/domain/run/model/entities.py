@@ -13,6 +13,7 @@ from domain.message import ConversationMessage, ConversationMessageDraft, Execut
 from domain.skill import RunSkillSnapshot, SafeSkillApprovalProjection
 from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID
 from domain.tool import (
+    FormattedToolArgument,
     RuntimeToolSnapshot,
     ToolApprovalDecision,
     ToolCallStatus,
@@ -302,6 +303,31 @@ type RunEventPayload = Annotated[
 ]
 
 
+class RunModelSnapshot(BaseModel):
+    """创建 Run 时固化的非密钥模型元数据快照，解耦后续编辑或软删除对历史审计的影响。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    name: str
+    protocol: str
+    base_url: str
+    model: str
+    context_window_tokens: int
+    tokenizer_encoding: str
+    supports_stream: bool
+    supports_tools: bool
+    supports_parallel_tool_calls: bool
+    max_output_tokens: int
+    request_timeout_seconds: int
+    execution_timeout_seconds: int
+    max_concurrency: int
+    temperature: float | None = None
+    scenario_label: str | None = None
+    supports_vision: bool = False
+    version: int = 1
+
+
 class RunRequestResult(BaseModel):
     """命令幂等记录返回的资源引用。"""
 
@@ -342,6 +368,7 @@ class Run:
     safe_error_code: str | None
     usage: RunUsage
     compression_policy_version_id: str | None = None
+    model_snapshot: RunModelSnapshot | None = None
     tool_snapshot: RuntimeToolSnapshot | None = None
     auth_session_id: str | None = None
     llm_request_count: int = 0
@@ -565,6 +592,9 @@ class PendingSubagentApproval(BaseModel):
     tool_kind: str | None = None
     requested_at: datetime
     safe_skill_projection: SafeSkillApprovalProjection | None = None
+    display_name: str | None = None
+    approval_summary: str | None = None
+    formatted_arguments: tuple[FormattedToolArgument, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,6 +663,7 @@ __all__ = [
     "RunInputFiles",
     "RunInputCall",
     "RunLease",
+    "RunModelSnapshot",
     "RunQueuedPayload",
     "RecordRunUsageCommand",
     "RunRequest",

@@ -11,6 +11,7 @@ from domain.mcp.model import (
     McpConnectionInput,
     McpRuntimeToolTarget,
     McpServer,
+    McpServerConnectionState,
     McpServerPage,
     McpServerWrite,
 )
@@ -20,6 +21,7 @@ from domain.tool import (
     PublicToolDefinition,
     RuntimeToolDefinition,
     ToolDefinition,
+    ToolMetadataPatch,
     ToolPage,
 )
 
@@ -45,19 +47,67 @@ class McpServerRepository(Protocol):
     ) -> McpServer:
         """比较配置版本后原子替换 Server 配置和工具快照。"""
 
+    async def patch_server(
+        self,
+        actor: AuthContext,
+        server_id: str,
+        expected_config_version: int,
+        replacement: McpServerWrite,
+        *,
+        enabled: bool,
+        sync_grants: bool,
+        rediscovered_tools: Sequence[ToolDefinition] | None = None,
+    ) -> McpServer:
+        """比较配置版本后原子应用保密局部更新；仅当 rediscovered_tools 非空时增量对齐工具快照。"""
+
+    async def set_enabled(
+        self,
+        actor: AuthContext,
+        server_id: str,
+        enabled: bool,
+        *,
+        expected_config_version: int | None = None,
+    ) -> McpServer:
+        """原子切换未软删 Server 的启停状态并递增 config_version。"""
+
+    async def sync_discovered_tools(
+        self,
+        actor: AuthContext,
+        server_id: str,
+        expected_config_version: int,
+        tools: Sequence[ToolDefinition],
+    ) -> McpServer:
+        """结合 CAS 版本保护增量对齐远端发现工具，保留存活工具的身份与审批展示元信息。"""
+
     async def delete(self, actor: AuthContext, server_id: str) -> None:
-        """同一事务复核管理员后物理删除 Server 及其工具。"""
+        """同一事务复核管理员后软删除 Server、清空密文并移除其工具与可见性授权。"""
 
     async def get(self, server_id: str) -> McpServer | None:
-        """读取不含秘密明文的 Server 投影。"""
+        """读取未软删 Server 的不含秘密明文投影。"""
+
+    async def get_connection_state(self, server_id: str) -> McpServerConnectionState | None:
+        """读取未软删 Server 及已解封凭据，仅用于内部保密局部更新和独立重发现。"""
 
     async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
-        """分页读取 Server 安全投影。"""
+        """分页读取未软删 Server 安全投影。"""
 
     async def set_requires_approval(
         self, actor: AuthContext, tool_id: str, requires_approval: bool
     ) -> AdminToolDefinition:
         """复核管理员后更新已注册工具的审批策略。"""
+
+    async def update_tool_metadata(
+        self, actor: AuthContext, tool_id: str, patch: ToolMetadataPatch
+    ) -> AdminToolDefinition:
+        """复核管理员后局部更新工具审批开关与业务化审批展示元信息。"""
+
+    async def batch_set_requires_approval(
+        self,
+        actor: AuthContext,
+        tool_ids: Sequence[str],
+        requires_approval: bool,
+    ) -> tuple[AdminToolDefinition, ...]:
+        """单事务原子批量切换全部目标工具的审批开关，任一缺失整批回滚。"""
 
     async def list_public(
         self,

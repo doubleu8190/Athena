@@ -858,7 +858,8 @@ def test_tool_approval_api_is_owner_scoped_origin_checked_and_idempotent() -> No
             "record-call-1",
             "record-call-2",
         ]
-        assert "arguments" not in details.text
+        # 待审批投影仅暴露脱敏后的 formatted_arguments，严禁出现原始未处理 arguments 字段。
+        assert all("arguments" not in item for item in details.json()["pending_approvals"])
 
         evil_origin = client.post(
             f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/record-call-1/approval",

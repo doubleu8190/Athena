@@ -14,6 +14,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -52,7 +53,14 @@ class McpServerModel(Base):
             "OR (visibility_scope = 'department' AND owner_department_id IS NOT NULL)",
             name="ck_mcp_servers_owner_department_scope",
         ),
-        UniqueConstraint("name", name="uq_mcp_servers_name"),
+        # 仅对未软删除行强制名称唯一，允许软删除后复用同名重新注册。
+        Index(
+            "uq_mcp_servers_name_active",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
         Index("ix_mcp_servers_visibility_dept", "visibility_scope", "owner_department_id"),
     )
 
@@ -64,6 +72,12 @@ class McpServerModel(Base):
     secrets_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     key_version: Mapped[int | None] = mapped_column(nullable=True)
     config_version: Mapped[int] = mapped_column(nullable=False, server_default="1")
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
     visibility_scope: Mapped[str] = mapped_column(
         String(16), nullable=False, default="company", server_default="company"
     )
@@ -75,6 +89,11 @@ class McpServerModel(Base):
     created_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -103,6 +122,15 @@ class McpToolModel(Base):
     description: Mapped[str] = mapped_column(String(8192), nullable=False)
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(_JSON_DOCUMENT, nullable=False)
     requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 面向业务审批人展示的中文别名、审批摘要模板与参数标签映射。
+    display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    approval_summary_template: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    parameter_labels_json: Mapped[dict[str, str]] = mapped_column(
+        _JSON_DOCUMENT,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

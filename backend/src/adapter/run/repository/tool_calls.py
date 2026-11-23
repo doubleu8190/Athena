@@ -654,8 +654,8 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
     ) -> tuple[PendingToolApproval, ...] | None:
         """Read the safe pending-call projection for an owner-visible Run."""
         async with self._session_factory() as session:
-            visible = await session.scalar(
-                select(RunModel.id)
+            run_row = await session.scalar(
+                select(RunModel)
                 .join(SessionModel, SessionModel.id == RunModel.session_id)
                 .where(
                     RunModel.id == run_id,
@@ -665,7 +665,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     SessionModel.deleted_time.is_(None),
                 )
             )
-            if visible is None:
+            if run_row is None:
                 return None
             rows = (
                 await session.scalars(
@@ -678,10 +678,25 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     .order_by(RunToolCallModel.ordinal)
                 )
             ).all()
-            pending: list[PendingToolApproval] = []
+            if not rows:
+                return ()
+            skill_projections: list[SafeSkillApprovalProjection | None] = []
             for row in rows:
                 if row.requested_at is None:
                     raise RuntimeError("run_tool_call_requested_at_missing")
+                skill_projections.append(await self._refresh_safe_skill_projection(session, row))
+            enriched = await self._enrich_pending_approvals_in_session(
+                session,
+                [
+                    (row, run_row, skill_proj)
+                    for row, skill_proj in zip(rows, skill_projections, strict=True)
+                ],
+            )
+            pending: list[PendingToolApproval] = []
+            for row, skill_proj, (display_name, approval_summary, formatted_arguments) in zip(
+                rows, skill_projections, enriched, strict=True
+            ):
+                assert row.requested_at is not None
                 pending.append(
                     PendingToolApproval(
                         call_id=row.id,
@@ -690,9 +705,10 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         model_name=row.model_name,
                         tool_kind=(None if row.tool_kind is None else ToolKind(row.tool_kind)),
                         requested_at=row.requested_at,
-                        safe_skill_projection=await self._refresh_safe_skill_projection(
-                            session, row
-                        ),
+                        safe_skill_projection=skill_proj,
+                        display_name=display_name,
+                        approval_summary=approval_summary,
+                        formatted_arguments=formatted_arguments,
                     )
                 )
         return tuple(pending)

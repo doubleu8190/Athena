@@ -22,7 +22,7 @@ def public_tool_to_response(tool: PublicToolDefinition) -> PublicToolResponse:
 
 
 def admin_tool_to_response(tool: AdminToolDefinition) -> AdminToolResponse:
-    """显式映射管理员工具来源字段。"""
+    """显式映射管理员工具来源与业务审批展示字段。"""
     return AdminToolResponse(
         tool_id=tool.tool_id,
         model_name=tool.model_name,
@@ -31,6 +31,9 @@ def admin_tool_to_response(tool: AdminToolDefinition) -> AdminToolResponse:
         server_id=tool.server_id,
         remote_name=tool.remote_name,
         requires_approval=tool.requires_approval,
+        display_name=tool.display_name,
+        approval_summary_template=tool.approval_summary_template,
+        parameter_labels=dict(tool.parameter_labels),
     )
 
 

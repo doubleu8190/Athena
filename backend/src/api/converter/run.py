@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from api.dto.message import ArtifactFileRefResponse
 from api.dto.run import (
+    FormattedToolArgumentResponse,
     PendingSubagentApprovalResponse,
     PendingSubagentInputResponse,
     RunAttemptUsageResponse,
@@ -12,6 +13,7 @@ from api.dto.run import (
     RunInputInteractionResponse,
     RunInputRequestResponse,
     RunListResponse,
+    RunModelSnapshotResponse,
     RunPendingToolApprovalResponse,
     RunResponse,
     RunSkillEntryResponse,
@@ -169,6 +171,18 @@ def run_to_response(
         context_cutoff_sequence=run.context_cutoff_sequence,
         retry_of_run_id=run.retry_of_run_id,
         model_config_version_id=run.model_config_version_id,
+        model_snapshot=(
+            None
+            if run.model_snapshot is None
+            else RunModelSnapshotResponse(
+                id=run.model_snapshot.id,
+                name=run.model_snapshot.name,
+                model=run.model_snapshot.model,
+                scenario_label=run.model_snapshot.scenario_label,
+                supports_vision=run.model_snapshot.supports_vision,
+                version=run.model_snapshot.version,
+            )
+        ),
         prompt_template_version=run.prompt_template_version,
         event_sequence=run.event_sequence,
         execution_epoch=run.execution_epoch,
@@ -220,6 +234,16 @@ def run_to_response(
                     if item.safe_skill_projection is None
                     else safe_skill_projection_to_response(item.safe_skill_projection)
                 ),
+                display_name=item.display_name,
+                approval_summary=item.approval_summary,
+                formatted_arguments=[
+                    FormattedToolArgumentResponse(
+                        key=arg.key,
+                        label=arg.label,
+                        value=arg.value,
+                    )
+                    for arg in item.formatted_arguments
+                ],
             )
             for item in pending_approvals
         ],
@@ -279,6 +303,16 @@ def run_to_response(
                     if item.safe_skill_projection is None
                     else safe_skill_projection_to_response(item.safe_skill_projection)
                 ),
+                display_name=item.display_name,
+                approval_summary=item.approval_summary,
+                formatted_arguments=[
+                    FormattedToolArgumentResponse(
+                        key=arg.key,
+                        label=arg.label,
+                        value=arg.value,
+                    )
+                    for arg in item.formatted_arguments
+                ],
             )
             for item in pending_subagent_approvals
         ],

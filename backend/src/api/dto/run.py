@@ -72,6 +72,25 @@ class SafeSkillApprovalProjectionResponse(BaseModel):
     unavailable_reason: str | None = None
 
 
+class FormattedToolArgumentResponse(BaseModel):
+    """面向业务用户的待审批工具参数可读键值项。"""
+
+    key: str
+    label: str
+    value: str
+
+
+class RunModelSnapshotResponse(BaseModel):
+    """Run 创建时固化的安全模型元数据只读投影，严禁暴露供应商地址与凭据信息。"""
+
+    id: str
+    name: str
+    model: str
+    scenario_label: str | None = None
+    supports_vision: bool = False
+    version: int = 1
+
+
 class RunPendingToolApprovalResponse(BaseModel):
     call_id: str
     batch_message_id: str
@@ -80,6 +99,9 @@ class RunPendingToolApprovalResponse(BaseModel):
     tool_kind: str | None
     requested_at: datetime
     safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
+    display_name: str | None = None
+    approval_summary: str | None = None
+    formatted_arguments: list[FormattedToolArgumentResponse] = Field(default_factory=list)
 
 
 class RunAttemptUsageResponse(BaseModel):
@@ -179,6 +201,9 @@ class PendingSubagentApprovalResponse(BaseModel):
     tool_kind: str | None = None
     requested_at: datetime
     safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
+    display_name: str | None = None
+    approval_summary: str | None = None
+    formatted_arguments: list[FormattedToolArgumentResponse] = Field(default_factory=list)
 
 
 class RunResponse(BaseModel):
@@ -189,6 +214,7 @@ class RunResponse(BaseModel):
     context_cutoff_sequence: int
     retry_of_run_id: str | None
     model_config_version_id: str
+    model_snapshot: RunModelSnapshotResponse | None = None
     prompt_template_version: str
     event_sequence: int
     execution_epoch: int
@@ -277,9 +303,11 @@ class RunToolCallListResponse(BaseModel):
 
 
 __all__ = [
+    "FormattedToolArgumentResponse",
     "PendingSubagentApprovalResponse",
     "PendingSubagentInputResponse",
     "RunAnswerRequest",
+    "RunModelSnapshotResponse",
     "SubagentTaskResponse",
     "RunAttemptUsageResponse",
     "RunEventListResponse",

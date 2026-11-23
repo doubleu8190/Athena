@@ -32,6 +32,7 @@ def mcp_server_to_response(server: McpServer) -> McpServerResponse:
             {"name": entry.name, "has_value": entry.has_value} for entry in server.secret_metadata
         ],
         config_version=server.config_version,
+        enabled=server.enabled,
         visibility_scope=scope,
         owner_department_id=server.owner_department_id,
         visibility_grants=grants_to_response(server.visibility_grants),

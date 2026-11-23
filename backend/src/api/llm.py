@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
 
 from api.converter.llm import (
     compression_policy_to_response,
@@ -19,12 +19,17 @@ from api.dto.llm import (
     ModelProfileEnabledRequest,
     ModelProfileListResponse,
     ModelProfileResponse,
+    ModelProfileUpdateRequest,
     UserModelCatalogResponse,
 )
 from api.security import AdminAuth, CurrentAuth, verify_request_origin
 from app.llm.profile_service import ModelProfileService
 from domain.llm.model.compression_policy import CompressionPolicyInput
-from domain.llm.model.profile import ModelProfileInput
+from domain.llm.model.profile import (
+    MODEL_PROFILE_UNSET,
+    ModelProfileInput,
+    ModelProfileUpdateInput,
+)
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
     ModelProfileConflictError,
@@ -85,6 +90,149 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
         except ModelProfileNotFoundError as error:
             raise HTTPException(404, error.code) from error
         return model_profile_to_response(item)
+
+    @profile_router.patch("/{profile_id}", response_model=ModelProfileResponse)
+    async def update_profile(
+        actor: AdminAuth,
+        profile_id: Annotated[str, Path(min_length=1, max_length=64)],
+        request: ModelProfileUpdateRequest,
+    ) -> ModelProfileResponse:
+        """局部更新模型配置；不传 api_key 或传 null 时保留原加密凭据。"""
+        fields_set = request.model_fields_set
+        updatable = fields_set - {"expected_version"}
+        if not updatable:
+            raise HTTPException(422, "llm_model_profile_invalid")
+        # 严禁将不可空配置项显式置为 null
+        # （temperature / scenario_label / scenario_description / api_key 除外）。
+        non_nullable = {
+            "name",
+            "base_url",
+            "model",
+            "context_window_tokens",
+            "tokenizer_encoding",
+            "supports_stream",
+            "supports_tools",
+            "supports_parallel_tool_calls",
+            "max_output_tokens",
+            "request_timeout_seconds",
+            "execution_timeout_seconds",
+            "max_concurrency",
+            "enabled",
+            "visible_to_users",
+            "supports_vision",
+        }
+        for field_name in updatable & non_nullable:
+            if getattr(request, field_name) is None:
+                raise HTTPException(422, "llm_model_profile_invalid")
+        patch = ModelProfileUpdateInput(
+            expected_version=request.expected_version,
+            name=(MODEL_PROFILE_UNSET if "name" not in fields_set else cast(str, request.name)),
+            base_url=(
+                MODEL_PROFILE_UNSET if "base_url" not in fields_set else cast(str, request.base_url)
+            ),
+            model=(MODEL_PROFILE_UNSET if "model" not in fields_set else cast(str, request.model)),
+            api_key=(MODEL_PROFILE_UNSET if "api_key" not in fields_set else request.api_key),
+            context_window_tokens=(
+                MODEL_PROFILE_UNSET
+                if "context_window_tokens" not in fields_set
+                else cast(int, request.context_window_tokens)
+            ),
+            tokenizer_encoding=(
+                MODEL_PROFILE_UNSET
+                if "tokenizer_encoding" not in fields_set
+                else cast(Literal["cl100k_base", "o200k_base"], request.tokenizer_encoding)
+            ),
+            supports_stream=(
+                MODEL_PROFILE_UNSET
+                if "supports_stream" not in fields_set
+                else cast(bool, request.supports_stream)
+            ),
+            supports_tools=(
+                MODEL_PROFILE_UNSET
+                if "supports_tools" not in fields_set
+                else cast(bool, request.supports_tools)
+            ),
+            supports_parallel_tool_calls=(
+                MODEL_PROFILE_UNSET
+                if "supports_parallel_tool_calls" not in fields_set
+                else cast(bool, request.supports_parallel_tool_calls)
+            ),
+            max_output_tokens=(
+                MODEL_PROFILE_UNSET
+                if "max_output_tokens" not in fields_set
+                else cast(int, request.max_output_tokens)
+            ),
+            request_timeout_seconds=(
+                MODEL_PROFILE_UNSET
+                if "request_timeout_seconds" not in fields_set
+                else cast(int, request.request_timeout_seconds)
+            ),
+            execution_timeout_seconds=(
+                MODEL_PROFILE_UNSET
+                if "execution_timeout_seconds" not in fields_set
+                else cast(int, request.execution_timeout_seconds)
+            ),
+            max_concurrency=(
+                MODEL_PROFILE_UNSET
+                if "max_concurrency" not in fields_set
+                else cast(int, request.max_concurrency)
+            ),
+            temperature=(
+                MODEL_PROFILE_UNSET if "temperature" not in fields_set else request.temperature
+            ),
+            enabled=(
+                MODEL_PROFILE_UNSET if "enabled" not in fields_set else cast(bool, request.enabled)
+            ),
+            visible_to_users=(
+                MODEL_PROFILE_UNSET
+                if "visible_to_users" not in fields_set
+                else cast(bool, request.visible_to_users)
+            ),
+            scenario_label=(
+                MODEL_PROFILE_UNSET
+                if "scenario_label" not in fields_set
+                else request.scenario_label
+            ),
+            scenario_description=(
+                MODEL_PROFILE_UNSET
+                if "scenario_description" not in fields_set
+                else request.scenario_description
+            ),
+            supports_vision=(
+                MODEL_PROFILE_UNSET
+                if "supports_vision" not in fields_set
+                else cast(bool, request.supports_vision)
+            ),
+        )
+        try:
+            item = await service.update(actor, profile_id, patch)
+        except ModelProfileAuthorizationError as error:
+            raise _authorization_error(error) from error
+        except ModelProfileNotFoundError as error:
+            raise HTTPException(404, error.code) from error
+        except ModelProfileConflictError as error:
+            raise HTTPException(409, error.code) from error
+        except ModelProfileError as error:
+            raise HTTPException(422, error.code) from error
+        return model_profile_to_response(item)
+
+    @profile_router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_profile(
+        actor: AdminAuth,
+        profile_id: Annotated[str, Path(min_length=1, max_length=64)],
+    ) -> Response:
+        """软删除未被默认指向、压缩策略或活跃子智能体强引用的模型配置。"""
+        try:
+            await service.delete(actor, profile_id)
+        except ModelProfileAuthorizationError as error:
+            raise _authorization_error(error) from error
+        except ModelProfileNotFoundError as error:
+            raise HTTPException(404, error.code) from error
+        except ModelProfileConflictError as error:
+            raise HTTPException(409, error.code) from error
+        except ModelProfileError as error:
+            raise HTTPException(422, error.code) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @profile_router.put("/default", response_model=ModelProfileResponse)
     async def set_default(

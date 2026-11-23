@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
-import unicodedata
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
-from urllib.parse import urlsplit
 
 from common.ids import now_utc
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
@@ -17,20 +14,19 @@ from domain.llm.model.compression_policy import (
     CompressionPolicyVersion,
 )
 from domain.llm.model.profile import (
-    MAX_CONTEXT_WINDOW_TOKENS,
-    MAX_OUTPUT_TOKENS,
-    MAX_SCENARIO_DESCRIPTION_LENGTH,
-    MAX_SCENARIO_LABEL_LENGTH,
+    MODEL_PROFILE_UNSET,
     ModelProfileInput,
+    ModelProfileUpdateInput,
     ModelProfileVersion,
+    validate_model_profile_api_key,
+    validate_model_profile_fields,
 )
 from domain.llm.model.profile_errors import ModelProfileAuthorizationError, ModelProfileError
 from domain.llm.profile_ports import ModelProfileRepository
-from domain.mcp import MAX_MCP_SECRET_BYTES
 
 
 class ModelProfileService:
-    """校验管理员输入并管理模型版本和默认指向。"""
+    """校验管理员输入并管理模型配置版本、局部编辑、软删除和默认指向。"""
 
     def __init__(
         self,
@@ -45,10 +41,10 @@ class ModelProfileService:
         self._clock = clock
 
     async def create(self, actor: AuthContext, value: ModelProfileInput) -> ModelProfileVersion:
-        """验证配置并创建不可变版本。"""
+        """验证配置并创建模型配置版本。"""
         await self._authorize(actor)
         normalized = _validate_and_normalize_input(value)
-        _validate_api_key(normalized.api_key)
+        validate_model_profile_api_key(normalized.api_key)
         return await self._repository.create(actor, normalized)
 
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
@@ -97,6 +93,30 @@ class ModelProfileService:
         await self._authorize(actor)
         return await self._repository.set_enabled(actor, profile_id, enabled)
 
+    async def update(
+        self, actor: AuthContext, profile_id: str, patch: ModelProfileUpdateInput
+    ) -> ModelProfileVersion:
+        """复核管理员权限后局部更新模型配置；不传 api_key 或传 None 时保留原加密凭据。"""
+        await self._authorize(actor)
+        if not profile_id or len(profile_id) > 64:
+            raise ModelProfileError()
+        if not patch.has_updates():
+            raise ModelProfileError()
+        if patch.expected_version is not None and (
+            type(patch.expected_version) is not int or patch.expected_version < 1
+        ):
+            raise ModelProfileError()
+        if patch.api_key is not MODEL_PROFILE_UNSET and patch.api_key is not None:
+            validate_model_profile_api_key(patch.api_key)
+        return await self._repository.update(actor, profile_id, patch)
+
+    async def delete(self, actor: AuthContext, profile_id: str) -> None:
+        """复核管理员权限后软删除闲置模型配置，受默认/压缩策略/子智能体强引用保护。"""
+        await self._authorize(actor)
+        if not profile_id or len(profile_id) > 64:
+            raise ModelProfileError()
+        await self._repository.delete(actor, profile_id)
+
     async def set_default(self, actor: AuthContext, profile_id: str) -> ModelProfileVersion:
         """将默认配置指向支持流式和工具调用的版本。"""
         await self._authorize(actor)
@@ -110,75 +130,33 @@ class ModelProfileService:
             raise ModelProfileAuthorizationError()
 
 
-def _normalize_optional_scenario_text(value: str | None, *, maximum: int) -> str | None:
-    """校验场景标签与说明：拒绝全部 Cc 控制字符、超长，空白字符串归一为 None。"""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ModelProfileError()
-    if any(unicodedata.category(character) == "Cc" for character in value):
-        raise ModelProfileError()
-    normalized = value.strip()
-    if not normalized:
-        return None
-    if len(normalized) > maximum:
-        raise ModelProfileError()
-    return normalized
-
-
 def _validate_and_normalize_input(value: ModelProfileInput) -> ModelProfileInput:
     """校验限制地址、密钥引用、场景元数据和执行参数，并返回规范化后的输入对象。"""
-    try:
-        parsed = urlsplit(value.base_url)
-        valid_url = (
-            parsed.scheme == "https"
-            and parsed.hostname is not None
-            and parsed.username is None
-            and parsed.password is None
-            and not parsed.query
-            and not parsed.fragment
-            and (parsed.port is None or 1 <= parsed.port <= 65535)
-        )
-    except ValueError:
-        valid_url = False
-    if (
-        not value.name.strip()
-        or len(value.name) > 120
-        or not value.model.strip()
-        or len(value.model) > 200
-        or not valid_url
-        or not 1 <= value.context_window_tokens <= MAX_CONTEXT_WINDOW_TOKENS
-        or value.tokenizer_encoding not in {"cl100k_base", "o200k_base"}
-        or type(value.supports_stream) is not bool
-        or type(value.supports_tools) is not bool
-        or type(value.supports_parallel_tool_calls) is not bool
-        or type(value.visible_to_users) is not bool
-        or type(value.supports_vision) is not bool
-        or (
-            value.supports_parallel_tool_calls
-            and not value.supports_tools
-        )
-        or not 1 <= value.max_output_tokens <= min(
-            value.context_window_tokens, MAX_OUTPUT_TOKENS
-        )
-        or not 1 <= value.request_timeout_seconds <= 3600
-        or not 1 <= value.execution_timeout_seconds <= 3600
-        or not 1 <= value.max_concurrency <= 128
-        or (value.temperature is not None and not 0 <= value.temperature <= 2)
-    ):
-        raise ModelProfileError()
-    normalized_label = _normalize_optional_scenario_text(
-        value.scenario_label,
-        maximum=MAX_SCENARIO_LABEL_LENGTH,
-    )
-    normalized_description = _normalize_optional_scenario_text(
-        value.scenario_description,
-        maximum=MAX_SCENARIO_DESCRIPTION_LENGTH,
+    validated = validate_model_profile_fields(
+        name=value.name,
+        base_url=value.base_url,
+        model=value.model,
+        context_window_tokens=value.context_window_tokens,
+        tokenizer_encoding=value.tokenizer_encoding,
+        supports_stream=value.supports_stream,
+        supports_tools=value.supports_tools,
+        supports_parallel_tool_calls=value.supports_parallel_tool_calls,
+        max_output_tokens=value.max_output_tokens,
+        request_timeout_seconds=value.request_timeout_seconds,
+        execution_timeout_seconds=value.execution_timeout_seconds,
+        max_concurrency=value.max_concurrency,
+        temperature=value.temperature,
+        enabled=True,
+        visible_to_users=value.visible_to_users,
+        scenario_label=value.scenario_label,
+        scenario_description=value.scenario_description,
+        supports_vision=value.supports_vision,
+        require_output_strictly_less_than_context=False,
     )
     return replace(
         value,
-        scenario_label=normalized_label,
-        scenario_description=normalized_description,
+        scenario_label=validated.scenario_label,
+        scenario_description=validated.scenario_description,
     )
 
 
@@ -199,23 +177,6 @@ def _validate_compression_policy(value: CompressionPolicyInput) -> None:
         or value.recent_ratio + value.summary_ratio >= 1
     ):
         raise ModelProfileError("llm_compression_policy_invalid")
-
-
-def _validate_api_key(value: str) -> None:
-    """验证 API Key 可放入加密信封，避免过大或非法输入触发存储错误。"""
-    if not value.strip() or "\x00" in value:
-        raise ModelProfileError("llm_model_credential_invalid")
-    try:
-        serialized = json.dumps(
-            {"api_key": value},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except UnicodeError:
-        raise ModelProfileError("llm_model_credential_invalid") from None
-    if len(serialized) > MAX_MCP_SECRET_BYTES:
-        raise ModelProfileError("llm_model_credential_invalid")
 
 
 __all__ = ["ModelProfileService"]

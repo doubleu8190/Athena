@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
+import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -30,6 +34,9 @@ MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
 MAX_TOOL_RESULT_BYTES = 64 * 1024
 MAX_TOOL_CALL_ID_LENGTH = 256
 MAX_LLM_REQUESTS_PER_RUN = 40
+MAX_FORMATTED_ARGUMENT_VALUE_CHARS = 500
+MAX_APPROVAL_SUMMARY_RENDERED_CHARS = 1000
+_SUMMARY_PLACEHOLDER_PATTERN = re.compile(r"\{([^{}]+)\}")
 
 
 class ToolKind(StrEnum):
@@ -300,6 +307,126 @@ class DecideToolApprovalCommand:
     auth_session_id: str | None = None
 
 
+class FormattedToolArgument(BaseModel):
+    """面向业务审批人的工具参数可读键值项。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str
+    label: str
+    value: str
+
+
+def _sanitize_display_text(value: str) -> str:
+    """剔除除换行和制表符外的 Cc 控制字符，防止前端渲染或事件流被注入控制符。"""
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(
+        ch for ch in normalized if ch in {"\n", "\t"} or unicodedata.category(ch) != "Cc"
+    )
+
+
+def _truncate_text(value: str, maximum: int) -> str:
+    """按字符上限安全截断超长展示文本。"""
+    if len(value) <= maximum:
+        return value
+    if maximum <= 1:
+        return "…"[:maximum]
+    return value[: maximum - 1] + "…"
+
+
+def format_argument_value(
+    value: Any,
+    *,
+    max_length: int = MAX_FORMATTED_ARGUMENT_VALUE_CHARS,
+) -> str:
+    """将工具原始 JSON 参数值格式化为面向业务用户的安全可读文本。"""
+    if value is None:
+        return "无"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return _truncate_text(_sanitize_display_text(value), max_length)
+    if isinstance(value, list):
+        if not value:
+            return "无"
+        if all(item is None or isinstance(item, (bool, int, float, str)) for item in value):
+            rendered = "、".join(
+                format_argument_value(item, max_length=max_length) for item in value
+            )
+            return _truncate_text(rendered, max_length)
+        try:
+            compact = json.dumps(value, ensure_ascii=False, separators=(", ", ": "))
+        except (TypeError, ValueError):
+            compact = str(value)
+        return _truncate_text(_sanitize_display_text(compact), max_length)
+    if isinstance(value, Mapping):
+        if not value:
+            return "无"
+        try:
+            compact = json.dumps(dict(value), ensure_ascii=False, separators=(", ", ": "))
+        except (TypeError, ValueError):
+            compact = str(value)
+        return _truncate_text(_sanitize_display_text(compact), max_length)
+    return _truncate_text(_sanitize_display_text(str(value)), max_length)
+
+
+def format_tool_arguments(
+    arguments: Mapping[str, Any],
+    parameter_labels: Mapping[str, str],
+) -> tuple[FormattedToolArgument, ...]:
+    """生成业务审批参数键值表：已配置中文标签的参数按配置顺序优先展示，未映射参数回退原字段名。"""
+    items: list[FormattedToolArgument] = []
+    emitted: set[str] = set()
+    # 1. 优先按管理员配置的 parameter_labels 顺序输出带中文标签的核心参数。
+    for key, label in parameter_labels.items():
+        if key in arguments:
+            items.append(
+                FormattedToolArgument(
+                    key=key,
+                    label=label,
+                    value=format_argument_value(arguments[key]),
+                )
+            )
+            emitted.add(key)
+    # 2. 未配置映射的其余参数优雅回退为原字段名并追加在后，确保审批信息完整。
+    for key, raw_value in arguments.items():
+        if key in emitted:
+            continue
+        items.append(
+            FormattedToolArgument(
+                key=key,
+                label=key,
+                value=format_argument_value(raw_value),
+            )
+        )
+    return tuple(items)
+
+
+def render_approval_summary(
+    template: str | None,
+    arguments: Mapping[str, Any],
+    *,
+    max_length: int = MAX_APPROVAL_SUMMARY_RENDERED_CHARS,
+) -> str | None:
+    """使用纯正则 {key} 字典查表安全渲染审批摘要，严禁使用 str.format 防止属性或索引注入。"""
+    if not template:
+        return None
+    cleaned = _sanitize_display_text(template).strip()
+    if not cleaned:
+        return None
+
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key in arguments:
+            return format_argument_value(arguments[key])
+        return match.group(0)
+
+    rendered = _SUMMARY_PLACEHOLDER_PATTERN.sub(_replace, cleaned)
+    return _truncate_text(rendered, max_length)
+
+
 @dataclass(frozen=True, slots=True)
 class PendingToolApproval:
     """Safe Run-detail projection for one call awaiting a decision."""
@@ -311,6 +438,9 @@ class PendingToolApproval:
     tool_kind: ToolKind | None
     requested_at: datetime
     safe_skill_projection: SafeSkillApprovalProjection | None = None
+    display_name: str | None = None
+    approval_summary: str | None = None
+    formatted_arguments: tuple[FormattedToolArgument, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,7 +545,10 @@ __all__ = [
     "ConvergeToolBatchCommand",
     "DecideToolApprovalCommand",
     "FinishToolCallCommand",
+    "FormattedToolArgument",
     "InitializeRunToolsCommand",
+    "MAX_APPROVAL_SUMMARY_RENDERED_CHARS",
+    "MAX_FORMATTED_ARGUMENT_VALUE_CHARS",
     "MAX_LLM_REQUESTS_PER_RUN",
     "MAX_TOOL_ARGUMENT_BYTES",
     "MAX_TOOL_CALL_ID_LENGTH",
@@ -437,6 +570,9 @@ __all__ = [
     "ToolOutcomeStatus",
     "ToolRetryContext",
     "bounded_outcome",
+    "format_argument_value",
+    "format_tool_arguments",
     "persisted_status_for_outcome",
     "protocol_status_for_outcome",
+    "render_approval_summary",
 ]

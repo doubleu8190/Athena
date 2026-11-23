@@ -967,6 +967,19 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             if metadata is None
             else metadata
         )
+        skill_projections = [
+            None
+            if call_row.safe_skill_projection is None
+            else SafeSkillApprovalProjection.model_validate(call_row.safe_skill_projection)
+            for call_row, _ in rows
+        ]
+        enriched = await cls._enrich_pending_approvals_in_session(
+            session,
+            [
+                (call_row, sub_run, skill_proj)
+                for (call_row, sub_run), skill_proj in zip(rows, skill_projections, strict=True)
+            ],
+        )
         return tuple(
             PendingSubagentApproval(
                 sub_run_id=sub_run.id,
@@ -980,11 +993,14 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                 model_name=call_row.model_name,
                 tool_kind=call_row.tool_kind,
                 requested_at=call_row.requested_at or sub_run.updated_at,
-                safe_skill_projection=(
-                    None
-                    if call_row.safe_skill_projection is None
-                    else SafeSkillApprovalProjection.model_validate(call_row.safe_skill_projection)
-                ),
+                safe_skill_projection=skill_proj,
+                display_name=display_name,
+                approval_summary=approval_summary,
+                formatted_arguments=formatted_arguments,
             )
-            for call_row, sub_run in rows
+            for (call_row, sub_run), skill_proj, (
+                display_name,
+                approval_summary,
+                formatted_arguments,
+            ) in zip(rows, skill_projections, enriched, strict=True)
         )

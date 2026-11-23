@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,6 +19,7 @@ from adapter.llm.model.profile import (
     DefaultModelProfileModel,
     ModelProfileVersionModel,
 )
+from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.message.converter.message import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository.message import SqlAlchemyMessageRepository
@@ -43,6 +45,7 @@ from domain.message import (
     MessageMetadata,
     SessionNotFoundError,
     TextPart,
+    ToolCallPart,
     ToolResultPart,
     ToolResultStatus,
 )
@@ -68,16 +71,57 @@ from domain.run.model.errors import (
     RunStateError,
 )
 from domain.skill import (
+    SKILL_EXECUTE_TOOL_ID,
+    SKILL_LOAD_TOOL_ID,
+    SKILL_READ_RESOURCE_TOOL_ID,
+    SafeSkillApprovalProjection,
     SkillExecutionStatus,
 )
 from domain.tool import (
+    FormattedToolArgument,
+    RuntimeToolSnapshot,
     ToolCallStatus,
+    ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
+    format_tool_arguments,
     persisted_status_for_outcome,
+    render_approval_summary,
 )
 
 logger = logging.getLogger(__name__)
+
+_SKILL_TOOL_IDS = frozenset(
+    {
+        SKILL_EXECUTE_TOOL_ID,
+        SKILL_LOAD_TOOL_ID,
+        SKILL_READ_RESOURCE_TOOL_ID,
+    }
+)
+_SKILL_MODEL_NAMES = frozenset(
+    {
+        "skill_execute",
+        "skill_load",
+        "skill_read_resource",
+    }
+)
+
+
+def _is_skill_tool_call(
+    tool_id: str | None,
+    model_name: str,
+    tool_kind: str | None = None,
+) -> bool:
+    """按工具 ID、工具类别与归一化 model_name 识别 Skill 调用，确保审批展示绝不读取原始脚本参数。"""
+    if tool_id in _SKILL_TOOL_IDS:
+        return True
+    # 显式标记为 MCP 工具时跳过名称后缀推断，避免与远端 MCP 工具命名发生语义混淆。
+    if tool_kind == ToolKind.MCP.value:
+        return False
+    normalized = model_name.strip().lower()
+    return normalized in _SKILL_MODEL_NAMES or any(
+        normalized.endswith(f"_{name}") for name in _SKILL_MODEL_NAMES
+    )
 
 
 def _purpose_total(attempts: tuple[RunAttemptUsage, ...], purpose: str) -> int | None:
@@ -608,7 +652,154 @@ class RunRepositorySupportMixin:
                         )
         return artifacts
 
-    async def _lock_default_profile_id(self, session: AsyncSession) -> str:
+    @staticmethod
+    def _build_model_snapshot_json(profile: ModelProfileVersionModel) -> dict[str, object]:
+        """构造创建 Run 时的非密钥模型元数据快照，严禁写入任何明文或密文 api_key。"""
+        return {
+            "id": profile.id,
+            "name": profile.name,
+            "protocol": profile.protocol,
+            "base_url": profile.base_url,
+            "model": profile.model,
+            "context_window_tokens": profile.context_window_tokens,
+            "tokenizer_encoding": profile.tokenizer_encoding,
+            "supports_stream": bool(profile.supports_stream),
+            "supports_tools": bool(profile.supports_tools),
+            "supports_parallel_tool_calls": bool(profile.supports_parallel_tool_calls),
+            "max_output_tokens": profile.max_output_tokens,
+            "request_timeout_seconds": profile.request_timeout_seconds,
+            "execution_timeout_seconds": profile.execution_timeout_seconds,
+            "max_concurrency": profile.max_concurrency,
+            "temperature": profile.temperature,
+            "scenario_label": profile.scenario_label,
+            "supports_vision": bool(profile.supports_vision),
+            "version": 1 if profile.version is None else int(profile.version),
+        }
+
+    @staticmethod
+    async def _enrich_pending_approvals_in_session(
+        session: AsyncSession,
+        entries: Sequence[tuple[RunToolCallModel, RunModel, SafeSkillApprovalProjection | None]],
+    ) -> list[tuple[str | None, str | None, tuple[FormattedToolArgument, ...]]]:
+        """批量组装待审批调用的业务展示名、安全摘要与可读键值参数表，避免 N+1 查询。
+
+        安全边界：
+        - Skill 脚本调用严禁读取原始 ExecutionMessageModel 参数，仅从已脱敏的
+          safe_skill_projection.parameter_summary 映射，防止隐藏脚本参数泄漏；
+        - MCP 调用优先读取实时未软删 McpToolModel 展示元信息，若工具或 Server 已变动
+          则优雅回退至 Run 创建时冻结的 tool_snapshot 元信息。
+        """
+        if not entries:
+            return []
+
+        non_skill_indices: set[int] = set()
+        call_message_ids: set[str] = set()
+        mcp_tool_ids: set[str] = set()
+        for idx, (call_row, _run_row, skill_proj) in enumerate(entries):
+            if skill_proj is not None or _is_skill_tool_call(
+                call_row.tool_id, call_row.model_name, call_row.tool_kind
+            ):
+                continue
+            non_skill_indices.add(idx)
+            call_message_ids.add(call_row.call_message_id)
+            if call_row.tool_id:
+                mcp_tool_ids.add(call_row.tool_id)
+
+        # 1. 一次性批量加载非 Skill 待审批调用对应的执行消息参数。
+        arguments_by_call: dict[tuple[str, str], dict[str, Any]] = {}
+        if call_message_ids:
+            exec_rows = (
+                await session.scalars(
+                    select(ExecutionMessageModel).where(
+                        ExecutionMessageModel.id.in_(tuple(call_message_ids))
+                    )
+                )
+            ).all()
+            for exec_row in exec_rows:
+                domain_msg = execution_to_domain(exec_row)
+                for part in domain_msg.parts:
+                    if isinstance(part, ToolCallPart):
+                        arguments_by_call[(exec_row.id, part.tool_call_id)] = dict(part.arguments)
+
+        # 2. 一次性批量加载未软删 Server 下的实时 MCP 工具审批展示元信息。
+        live_tools_by_id: dict[str, McpToolModel] = {}
+        if mcp_tool_ids:
+            live_rows = (
+                await session.scalars(
+                    select(McpToolModel)
+                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                    .where(
+                        McpToolModel.id.in_(tuple(mcp_tool_ids)),
+                        McpServerModel.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+            live_tools_by_id = {row.id: row for row in live_rows}
+
+        # 3. 缓存每个 Run 的冻结 tool_snapshot，作为 MCP 工具或 Server 变更后的优雅回退源。
+        snapshots_by_run_id: dict[str, RuntimeToolSnapshot | None] = {}
+        results: list[tuple[str | None, str | None, tuple[FormattedToolArgument, ...]]] = []
+        for idx, (call_row, run_row, skill_proj) in enumerate(entries):
+            if idx not in non_skill_indices:
+                # Skill 工具严格隔离原始参数，仅从冻结安全投影输出可见摘要项。
+                if skill_proj is not None:
+                    skill_display = skill_proj.script_label or call_row.model_name
+                    skill_args = tuple(
+                        FormattedToolArgument(
+                            key=item.name,
+                            label=item.label,
+                            value=item.value,
+                        )
+                        for item in skill_proj.parameter_summary
+                    )
+                    results.append((skill_display, None, skill_args))
+                else:
+                    results.append((call_row.model_name, None, ()))
+                continue
+
+            arguments = arguments_by_call.get((call_row.call_message_id, call_row.tool_call_id), {})
+            meta_display_name: str | None = None
+            meta_template: str | None = None
+            meta_labels: dict[str, str] = {}
+
+            live_tool = (
+                live_tools_by_id.get(call_row.tool_id) if call_row.tool_id is not None else None
+            )
+            if live_tool is not None:
+                meta_display_name = live_tool.display_name
+                meta_template = live_tool.approval_summary_template
+                meta_labels = dict(live_tool.parameter_labels_json or {})
+            else:
+                if run_row.id not in snapshots_by_run_id:
+                    snapshots_by_run_id[run_row.id] = (
+                        None
+                        if run_row.tool_snapshot is None
+                        else RuntimeToolSnapshot.model_validate(run_row.tool_snapshot)
+                    )
+                snapshot = snapshots_by_run_id[run_row.id]
+                if snapshot is not None:
+                    snap_tool = next(
+                        (
+                            item
+                            for item in snapshot.tools
+                            if (call_row.tool_id is not None and item.tool_id == call_row.tool_id)
+                            or item.model_name == call_row.model_name
+                        ),
+                        None,
+                    )
+                    if snap_tool is not None:
+                        meta_display_name = snap_tool.display_name
+                        meta_template = snap_tool.approval_summary_template
+                        meta_labels = dict(snap_tool.parameter_labels)
+
+            display_name = meta_display_name or call_row.model_name
+            approval_summary = render_approval_summary(meta_template, arguments)
+            formatted_arguments = format_tool_arguments(arguments, meta_labels)
+            results.append((display_name, approval_summary, formatted_arguments))
+
+        return results
+
+    async def _lock_default_profile_row(self, session: AsyncSession) -> ModelProfileVersionModel:
         profile_id = await session.scalar(
             select(DefaultModelProfileModel.profile_id).where(
                 DefaultModelProfileModel.singleton_id == 1
@@ -643,9 +834,14 @@ class RunRepositorySupportMixin:
             or profile.api_key_key_version is None
         ):
             raise RunStateError("llm_default_profile_unavailable")
-        return profile.id
+        return profile
 
-    async def _lock_selected_profile_id(self, session: AsyncSession, profile_id: str) -> str:
+    async def _lock_default_profile_id(self, session: AsyncSession) -> str:
+        return (await self._lock_default_profile_row(session)).id
+
+    async def _lock_selected_profile_row(
+        self, session: AsyncSession, profile_id: str
+    ) -> ModelProfileVersionModel:
         """在提交事务内共享锁定用户显式选择的模型版本，校验可见、启用、未删且能力完整。"""
         profile = await session.scalar(
             select(ModelProfileVersionModel)
@@ -666,9 +862,14 @@ class RunRepositorySupportMixin:
             or profile.api_key_key_version is None
         ):
             raise RunInputResourceError("model_profile_unavailable")
-        return profile.id
+        return profile
 
-    async def _lock_retry_profile_id(self, session: AsyncSession, profile_id: str) -> str:
+    async def _lock_selected_profile_id(self, session: AsyncSession, profile_id: str) -> str:
+        return (await self._lock_selected_profile_row(session, profile_id)).id
+
+    async def _lock_retry_profile_row(
+        self, session: AsyncSession, profile_id: str
+    ) -> ModelProfileVersionModel:
         """在重试事务内共享锁定原 Run 的模型版本，复核启用、未删、能力完整且仍对用户可用。
 
         遵循与 _lock_default_profile_id 一致的锁顺序（先模型行、再默认指针行）：
@@ -700,7 +901,10 @@ class RunRepositorySupportMixin:
             )
             if default is None or default.profile_id != profile.id:
                 raise RunInputResourceError("model_profile_unavailable")
-        return profile.id
+        return profile
+
+    async def _lock_retry_profile_id(self, session: AsyncSession, profile_id: str) -> str:
+        return (await self._lock_retry_profile_row(session, profile_id)).id
 
     async def _validate_explicit_knowledge_base_ids(
         self,

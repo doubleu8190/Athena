@@ -39,6 +39,7 @@ def server_to_domain(
         visibility_scope=VisibilityScope(row.visibility_scope),
         owner_department_id=row.owner_department_id,
         visibility_grants=grants,
+        enabled=True if row.enabled is None else bool(row.enabled),
     )
 
 
@@ -66,7 +67,7 @@ def tool_to_public(row: McpToolModel) -> PublicToolDefinition:
 
 
 def tool_to_admin(row: McpToolModel) -> AdminToolDefinition:
-    """生成含来源映射但不含配置和秘密的管理员工具投影。"""
+    """生成含来源映射与业务审批展示元信息但不含配置和秘密的管理员工具投影。"""
     return AdminToolDefinition(
         tool_id=row.id,
         model_name=row.model_name,
@@ -75,6 +76,9 @@ def tool_to_admin(row: McpToolModel) -> AdminToolDefinition:
         server_id=row.server_id,
         remote_name=row.remote_name,
         requires_approval=row.requires_approval,
+        display_name=row.display_name,
+        approval_summary_template=row.approval_summary_template,
+        parameter_labels=dict(row.parameter_labels_json or {}),
     )
 
 

@@ -49,6 +49,35 @@ class ModelProfileCreateRequest(BaseModel):
     supports_vision: bool = False
 
 
+class ModelProfileUpdateRequest(BaseModel):
+    """局部编辑模型配置请求；api_key 未传或为 null 时严格保留原加密凭据。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_version: int | None = Field(default=None, ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    api_key: str | None = Field(default=None, min_length=1, max_length=16384, repr=False)
+    context_window_tokens: int | None = Field(default=None, ge=1, le=MAX_CONTEXT_WINDOW_TOKENS)
+    tokenizer_encoding: str | None = Field(default=None, pattern="^(cl100k_base|o200k_base)$")
+    supports_stream: bool | None = None
+    supports_tools: bool | None = None
+    supports_parallel_tool_calls: bool | None = None
+    max_output_tokens: int | None = Field(default=None, ge=1, le=MAX_OUTPUT_TOKENS)
+    request_timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+    execution_timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+    max_concurrency: int | None = Field(default=None, ge=1, le=128)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    enabled: bool | None = None
+    visible_to_users: bool | None = None
+    scenario_label: str | None = Field(default=None, max_length=MAX_SCENARIO_LABEL_LENGTH)
+    scenario_description: str | None = Field(
+        default=None, max_length=MAX_SCENARIO_DESCRIPTION_LENGTH
+    )
+    supports_vision: bool | None = None
+
+
 class ModelProfileResponse(BaseModel):
     """不包含凭据明文的模型版本信息。"""
 
@@ -73,7 +102,9 @@ class ModelProfileResponse(BaseModel):
     scenario_label: str | None
     scenario_description: str | None
     supports_vision: bool
+    version: int
     created_at: datetime
+    updated_at: datetime
 
 
 class UserModelCatalogItemResponse(BaseModel):
@@ -158,6 +189,7 @@ class CompressionPolicyResponse(BaseModel):
 
 __all__ = [
     "ModelProfileCreateRequest",
+    "ModelProfileUpdateRequest",
     "CompressionPolicyRequest",
     "CompressionPolicyResponse",
     "ModelProfileDefaultRequest",

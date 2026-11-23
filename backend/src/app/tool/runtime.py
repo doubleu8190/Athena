@@ -104,6 +104,7 @@ class _KnowledgeScopeResolution:
     error_code: str | None = None
     error_message: str | None = None
 
+
 REQUEST_USER_INPUT_DEFINITION = RuntimeToolDefinition(
     tool_id=REQUEST_USER_INPUT_ID,
     model_name="request_user_input",
@@ -695,20 +696,28 @@ class RunToolRuntimeService(RunToolRuntime):
             or definition.tool_id != SKILL_EXECUTE_TOOL_ID
         ):
             validation = self.validate_call(definition, model_name, arguments)
-            if (
-                validation is None
-                and definition is not None
-                and definition.source.kind == "mcp"
-                and self._access_policy is not None
-            ):
-                # 审批/执行准备阶段实时复核 MCP Server 读权限，防止员工调岗后仍能进入审批或执行。
-                if not await self._access_policy.can_read_resource(
-                    context.owner_id,
-                    ResourceType.MCP_SERVER,
+            if validation is None and definition is not None and definition.source.kind == "mcp":
+                if self._access_policy is not None:
+                    # 审批/执行准备阶段实时复核 MCP 读权限，防员工调岗后仍进入审批或执行。
+                    if not await self._access_policy.can_read_resource(
+                        context.owner_id,
+                        ResourceType.MCP_SERVER,
+                        definition.source.server_id,
+                    ):
+                        return ToolCallPreparation(
+                            _error("tool_permission_denied", "当前用户无权使用该 MCP 工具。"),
+                            False,
+                        )
+                # 同步复核 MCP Server 是否仍处于启用且版本匹配状态；停用、软删或变更后即刻拦截。
+                target = await self._mcp_catalog.get_call_target(
+                    definition.tool_id,
                     definition.source.server_id,
-                ):
+                    definition.source.remote_name,
+                    definition.source.config_version,
+                )
+                if target is None:
                     return ToolCallPreparation(
-                        _error("tool_permission_denied", "当前用户无权使用该 MCP 工具。"),
+                        _error("tool_unavailable", "工具配置已变更或工具已不可用。"),
                         False,
                     )
             return ToolCallPreparation(

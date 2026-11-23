@@ -6,7 +6,12 @@ from typing import Protocol
 
 from domain.auth import AuthContext
 from domain.llm.model.compression_policy import CompressionPolicyInput, CompressionPolicyVersion
-from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, RuntimeModelProfile
+from domain.llm.model.profile import (
+    ModelProfileInput,
+    ModelProfileUpdateInput,
+    ModelProfileVersion,
+    RuntimeModelProfile,
+)
 
 
 class CompressionPolicyRepository(Protocol):
@@ -39,6 +44,12 @@ class ModelProfileRepository(CompressionPolicyRepository, Protocol):
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool
     ) -> ModelProfileVersion: ...
+
+    async def update(
+        self, actor: AuthContext, profile_id: str, patch: ModelProfileUpdateInput
+    ) -> ModelProfileVersion: ...
+
+    async def delete(self, actor: AuthContext, profile_id: str) -> None: ...
 
     async def set_default(self, actor: AuthContext, profile_id: str) -> ModelProfileVersion: ...
 

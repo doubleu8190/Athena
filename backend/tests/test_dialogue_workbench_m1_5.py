@@ -2621,7 +2621,12 @@ def test_alembic_single_head_and_m1_5_offline_sql(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://u:p@localhost/athena_test")
     config = Config(str(ALEMBIC_INI))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["20261203_0036"]
+    # 保持 Alembic 单一 head，并验证 M1.5 迁移节点链正确（兼容后续 M1.6+ 迁移脚本）。
+    heads = script.get_heads()
+    assert len(heads) == 1
+    revision = script.get_revision("20261203_0036")
+    assert revision is not None
+    assert revision.down_revision == "20261202_0035"
 
     upgrade_buf = StringIO()
     with redirect_stdout(upgrade_buf):

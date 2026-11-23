@@ -36,7 +36,9 @@ def model_profile_to_response(value: ModelProfileVersion) -> ModelProfileRespons
         scenario_label=value.scenario_label,
         scenario_description=value.scenario_description,
         supports_vision=value.supports_vision,
+        version=value.version,
         created_at=value.created_at,
+        updated_at=value.updated_at or value.created_at,
     )
 
 

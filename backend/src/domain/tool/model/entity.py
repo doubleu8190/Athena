@@ -1,16 +1,112 @@
-"""工具目录内部定义与安全投影。"""
+"""工具目录内部定义、审批展示元信息校验与安全投影。"""
 
 from __future__ import annotations
 
 import json
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Literal
 from uuid import UUID
 
 MAX_TOOL_DESCRIPTION_LENGTH = 8192
 MAX_TOOL_SCHEMA_BYTES = 256 * 1024
+MAX_TOOL_DISPLAY_NAME_LENGTH = 120
+MAX_APPROVAL_SUMMARY_TEMPLATE_LENGTH = 500
+MAX_PARAMETER_LABELS_COUNT = 50
+MAX_PARAMETER_LABEL_KEY_LENGTH = 128
+MAX_PARAMETER_LABEL_VALUE_LENGTH = 120
+
+
+class _ToolFieldUnset(Enum):
+    """工具局部更新中用于区分“未传字段”与显式传入 None 的哨兵枚举。"""
+
+    UNSET = "UNSET"
+
+
+type ToolFieldUnsetType = Literal[_ToolFieldUnset.UNSET]
+TOOL_FIELD_UNSET: ToolFieldUnsetType = _ToolFieldUnset.UNSET
+
+
+def validate_tool_display_name(value: str | None) -> str | None:
+    """校验工具中文展示名：显式 None 表示清空，非空字符串去首尾空白后 1–120 字且禁控制字符。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("mcp_tool_metadata_invalid")
+    if any(unicodedata.category(ch) == "Cc" for ch in value):
+        raise ValueError("mcp_tool_metadata_invalid")
+    normalized = value.strip()
+    if not normalized or len(normalized) > MAX_TOOL_DISPLAY_NAME_LENGTH:
+        raise ValueError("mcp_tool_metadata_invalid")
+    return normalized
+
+
+def validate_approval_summary_template(value: str | None) -> str | None:
+    """校验审批摘要模板：允许 \\n\\r\\t，禁其余 Cc 控制字符，去首尾空白后 1–500 字。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("mcp_tool_metadata_invalid")
+    if any(unicodedata.category(ch) == "Cc" and ch not in {"\n", "\r", "\t"} for ch in value):
+        raise ValueError("mcp_tool_metadata_invalid")
+    normalized = value.strip()
+    if not normalized or len(normalized) > MAX_APPROVAL_SUMMARY_TEMPLATE_LENGTH:
+        raise ValueError("mcp_tool_metadata_invalid")
+    return normalized
+
+
+def validate_parameter_labels(value: Mapping[str, str] | None) -> dict[str, str]:
+    """校验参数中文标签映射：显式 None 清空为 {}，最多 50 项，键值均禁止控制字符。"""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("mcp_tool_metadata_invalid")
+    if len(value) > MAX_PARAMETER_LABELS_COUNT:
+        raise ValueError("mcp_tool_metadata_invalid")
+    normalized: dict[str, str] = {}
+    for raw_key, raw_label in value.items():
+        if not isinstance(raw_key, str) or not isinstance(raw_label, str):
+            raise ValueError("mcp_tool_metadata_invalid")
+        if any(unicodedata.category(ch) == "Cc" for ch in raw_key) or any(
+            unicodedata.category(ch) == "Cc" for ch in raw_label
+        ):
+            raise ValueError("mcp_tool_metadata_invalid")
+        key = raw_key.strip()
+        label = raw_label.strip()
+        if (
+            not key
+            or len(key) > MAX_PARAMETER_LABEL_KEY_LENGTH
+            or not label
+            or len(label) > MAX_PARAMETER_LABEL_VALUE_LENGTH
+            or key in normalized
+        ):
+            raise ValueError("mcp_tool_metadata_invalid")
+        normalized[key] = label
+    return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class ToolMetadataPatch:
+    """管理员对单个 MCP 工具审批开关与业务展示元信息的局部更新补丁。"""
+
+    requires_approval: bool | ToolFieldUnsetType = TOOL_FIELD_UNSET
+    display_name: str | None | ToolFieldUnsetType = TOOL_FIELD_UNSET
+    approval_summary_template: str | None | ToolFieldUnsetType = TOOL_FIELD_UNSET
+    parameter_labels: Mapping[str, str] | None | ToolFieldUnsetType = TOOL_FIELD_UNSET
+
+    def has_updates(self) -> bool:
+        """判断是否至少提供一个更新字段。"""
+        return any(
+            item is not TOOL_FIELD_UNSET
+            for item in (
+                self.requires_approval,
+                self.display_name,
+                self.approval_summary_template,
+                self.parameter_labels,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,17 +178,30 @@ class PublicToolDefinition:
 
 @dataclass(frozen=True, slots=True)
 class AdminToolDefinition(PublicToolDefinition):
-    """管理员可见的工具目录来源映射，不含连接配置或秘密。"""
+    """管理员可见的工具目录来源映射与审批展示元信息，不含连接配置或秘密。"""
 
     server_id: str
     remote_name: str
     requires_approval: bool = False
+    display_name: str | None = None
+    approval_summary_template: str | None = None
+    parameter_labels: Mapping[str, str] = field(default_factory=dict)
 
 
 __all__ = [
     "AdminToolDefinition",
+    "MAX_APPROVAL_SUMMARY_TEMPLATE_LENGTH",
+    "MAX_PARAMETER_LABELS_COUNT",
+    "MAX_PARAMETER_LABEL_KEY_LENGTH",
+    "MAX_PARAMETER_LABEL_VALUE_LENGTH",
     "MAX_TOOL_DESCRIPTION_LENGTH",
+    "MAX_TOOL_DISPLAY_NAME_LENGTH",
     "MAX_TOOL_SCHEMA_BYTES",
     "PublicToolDefinition",
+    "TOOL_FIELD_UNSET",
     "ToolDefinition",
+    "ToolMetadataPatch",
+    "validate_approval_summary_template",
+    "validate_parameter_labels",
+    "validate_tool_display_name",
 ]

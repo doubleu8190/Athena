@@ -15,7 +15,12 @@ from domain.llm.model.compression_policy import (
     CompressionPolicyInput,
     CompressionPolicyVersion,
 )
-from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, RuntimeModelProfile
+from domain.llm.model.profile import (
+    ModelProfileInput,
+    ModelProfileUpdateInput,
+    ModelProfileVersion,
+    RuntimeModelProfile,
+)
 from domain.llm.model.profile_errors import ModelProfileAuthorizationError, ModelProfileError
 
 
@@ -82,6 +87,16 @@ class _ProfileRepository:
         self, actor: AuthContext, profile_id: str, enabled: bool
     ) -> ModelProfileVersion:
         raise AssertionError("test_repository_set_enabled_not_configured")
+
+    async def update(
+        self, actor: AuthContext, profile_id: str, patch: ModelProfileUpdateInput
+    ) -> ModelProfileVersion:
+        del actor, profile_id, patch
+        raise AssertionError("test_repository_update_not_configured")
+
+    async def delete(self, actor: AuthContext, profile_id: str) -> None:
+        del actor, profile_id
+        raise AssertionError("test_repository_delete_not_configured")
 
     async def set_default(self, actor: AuthContext, profile_id: str) -> ModelProfileVersion:
         raise AssertionError("test_repository_set_default_not_configured")
@@ -228,9 +243,7 @@ def test_model_profile_create_revalidates_current_admin() -> None:
     ("context_window_tokens", "valid"),
     [(1_048_576, True), (1_048_577, False)],
 )
-def test_model_profile_context_window_limit(
-    context_window_tokens: int, valid: bool
-) -> None:
+def test_model_profile_context_window_limit(context_window_tokens: int, valid: bool) -> None:
     """上下文窗口接受 1,048,576 tokens，并拒绝超过上限的值。"""
     repository = _ProfileRepository()
     service = ModelProfileService(repository, _AuthReader(actor().user))

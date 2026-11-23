@@ -18,13 +18,22 @@ from adapter.llm.model.profile import (
     DefaultModelProfileModel,
     ModelProfileVersionModel,
 )
+from adapter.subagent.model import SubagentModel
 from common.ids import new_id, now_utc
 from domain.auth import AuthContext, UserRole
 from domain.llm.model.compression_policy import (
     CompressionPolicyInput,
     CompressionPolicyVersion,
 )
-from domain.llm.model.profile import ModelProfileInput, ModelProfileVersion, RuntimeModelProfile
+from domain.llm.model.profile import (
+    MODEL_PROFILE_UNSET,
+    ModelProfileInput,
+    ModelProfileUpdateInput,
+    ModelProfileVersion,
+    RuntimeModelProfile,
+    validate_model_profile_api_key,
+    validate_model_profile_fields,
+)
 from domain.llm.model.profile_errors import (
     ModelProfileAuthorizationError,
     ModelProfileConflictError,
@@ -58,6 +67,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 await self._require_admin(session, actor)
                 if self._secret_cipher is None:
                     raise ModelProfileError("llm_secret_key_missing")
+                now = self._clock()
                 row = ModelProfileVersionModel(
                     id=new_id("llmprof"),
                     name=value.name,
@@ -83,7 +93,9 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                     scenario_description=value.scenario_description,
                     supports_vision=value.supports_vision,
                     deleted_at=None,
-                    created_at=self._clock(),
+                    version=1,
+                    created_at=now,
+                    updated_at=now,
                 )
                 try:
                     sealed = self._secret_cipher.seal(
@@ -195,19 +207,266 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 await self._require_admin(session, actor)
                 # 单条原子 UPDATE ... RETURNING 避免先 SELECT FOR UPDATE 再 UPDATE 的额外往返，
                 # 同时与并发读取该行的 FOR SHARE 事务在行锁层面保持互斥。
+                now = self._clock()
                 row = await session.scalar(
                     update(ModelProfileVersionModel)
                     .where(
                         ModelProfileVersionModel.id == profile_id,
                         ModelProfileVersionModel.deleted_at.is_(None),
                     )
-                    .values(enabled=enabled)
+                    .values(
+                        enabled=enabled,
+                        version=ModelProfileVersionModel.version + 1,
+                        updated_at=now,
+                    )
                     .returning(ModelProfileVersionModel)
                     .execution_options(synchronize_session=False, populate_existing=True)
                 )
                 if row is None:
                     raise ModelProfileNotFoundError()
                 return profile_to_domain(row)
+
+    async def update(
+        self,
+        actor: AuthContext,
+        profile_id: str,
+        patch: ModelProfileUpdateInput,
+    ) -> ModelProfileVersion:
+        """在行锁事务内局部编辑模型配置，严格按约定保留或重加密凭据并复核全部不变量。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_admin(session, actor)
+                row = await session.scalar(
+                    select(ModelProfileVersionModel)
+                    .where(
+                        ModelProfileVersionModel.id == profile_id,
+                        ModelProfileVersionModel.deleted_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if row is None:
+                    raise ModelProfileNotFoundError("model_profile_not_found")
+                if patch.expected_version is not None and row.version != patch.expected_version:
+                    raise ModelProfileConflictError("model_profile_version_conflict")
+
+                # 将局部补丁与锁内当前行合并，统一复核所有领域不变量（含输出窗口 < 上下文窗口）。
+                merged = validate_model_profile_fields(
+                    name=row.name if patch.name is MODEL_PROFILE_UNSET else patch.name,
+                    base_url=(
+                        row.base_url if patch.base_url is MODEL_PROFILE_UNSET else patch.base_url
+                    ),
+                    model=row.model if patch.model is MODEL_PROFILE_UNSET else patch.model,
+                    context_window_tokens=(
+                        row.context_window_tokens
+                        if patch.context_window_tokens is MODEL_PROFILE_UNSET
+                        else patch.context_window_tokens
+                    ),
+                    tokenizer_encoding=(
+                        row.tokenizer_encoding
+                        if patch.tokenizer_encoding is MODEL_PROFILE_UNSET
+                        else patch.tokenizer_encoding
+                    ),
+                    supports_stream=(
+                        bool(row.supports_stream)
+                        if patch.supports_stream is MODEL_PROFILE_UNSET
+                        else patch.supports_stream
+                    ),
+                    supports_tools=(
+                        bool(row.supports_tools)
+                        if patch.supports_tools is MODEL_PROFILE_UNSET
+                        else patch.supports_tools
+                    ),
+                    supports_parallel_tool_calls=(
+                        bool(row.supports_parallel_tool_calls)
+                        if patch.supports_parallel_tool_calls is MODEL_PROFILE_UNSET
+                        else patch.supports_parallel_tool_calls
+                    ),
+                    max_output_tokens=(
+                        row.max_output_tokens
+                        if patch.max_output_tokens is MODEL_PROFILE_UNSET
+                        else patch.max_output_tokens
+                    ),
+                    request_timeout_seconds=(
+                        row.request_timeout_seconds
+                        if patch.request_timeout_seconds is MODEL_PROFILE_UNSET
+                        else patch.request_timeout_seconds
+                    ),
+                    execution_timeout_seconds=(
+                        row.execution_timeout_seconds
+                        if patch.execution_timeout_seconds is MODEL_PROFILE_UNSET
+                        else patch.execution_timeout_seconds
+                    ),
+                    max_concurrency=(
+                        row.max_concurrency
+                        if patch.max_concurrency is MODEL_PROFILE_UNSET
+                        else patch.max_concurrency
+                    ),
+                    temperature=(
+                        row.temperature
+                        if patch.temperature is MODEL_PROFILE_UNSET
+                        else patch.temperature
+                    ),
+                    enabled=(
+                        bool(row.enabled) if patch.enabled is MODEL_PROFILE_UNSET else patch.enabled
+                    ),
+                    visible_to_users=(
+                        bool(row.visible_to_users)
+                        if patch.visible_to_users is MODEL_PROFILE_UNSET
+                        else patch.visible_to_users
+                    ),
+                    scenario_label=(
+                        row.scenario_label
+                        if patch.scenario_label is MODEL_PROFILE_UNSET
+                        else patch.scenario_label
+                    ),
+                    scenario_description=(
+                        row.scenario_description
+                        if patch.scenario_description is MODEL_PROFILE_UNSET
+                        else patch.scenario_description
+                    ),
+                    supports_vision=(
+                        bool(row.supports_vision)
+                        if patch.supports_vision is MODEL_PROFILE_UNSET
+                        else patch.supports_vision
+                    ),
+                    require_output_strictly_less_than_context=True,
+                )
+
+                # 活跃引用保护（保持与 delete() 一致的锁序：先 ModelProfile，再默认/压缩策略指针）：
+                # 1) 禁止通过局部编辑将当前默认模型降级为禁用或不支持流式/工具调用，
+                #    否则会令所有普通用户提交默认对话立即不可用；
+                if not merged.enabled or not merged.supports_stream or not merged.supports_tools:
+                    default_row = await session.scalar(
+                        select(DefaultModelProfileModel)
+                        .where(DefaultModelProfileModel.singleton_id == 1)
+                        .with_for_update()
+                    )
+                    if default_row is not None and default_row.profile_id == profile_id:
+                        raise ModelProfileConflictError("model_profile_in_use_as_default")
+                # 2) 禁止通过局部编辑禁用当前上下文压缩策略引用的模型，避免后台压缩任务失效。
+                if not merged.enabled:
+                    current_policy = await session.scalar(
+                        select(CurrentCompressionPolicyModel)
+                        .where(CurrentCompressionPolicyModel.singleton_id == 1)
+                        .with_for_update()
+                    )
+                    if current_policy is not None:
+                        compression_profile_id = await session.scalar(
+                            select(
+                                CompressionPolicyVersionModel.compression_model_profile_id
+                            ).where(
+                                CompressionPolicyVersionModel.id == current_policy.policy_version_id
+                            )
+                        )
+                        if compression_profile_id == profile_id:
+                            raise ModelProfileConflictError(
+                                "model_profile_in_use_by_compression_policy"
+                            )
+
+                # 密钥保留边界：未传 api_key 或显式传 None 时严禁改动原加密凭据；
+                # 仅当传入非空字符串时重新校验并加密替换。
+                if patch.api_key is not MODEL_PROFILE_UNSET and patch.api_key is not None:
+                    validate_model_profile_api_key(patch.api_key)
+                    if self._secret_cipher is None:
+                        raise ModelProfileError("llm_secret_key_missing")
+                    try:
+                        sealed = self._secret_cipher.seal(
+                            row.id,
+                            McpSecretPurpose.LLM_API_KEY,
+                            {"api_key": patch.api_key},
+                        )
+                    except McpSecretError:
+                        raise ModelProfileError("llm_model_credential_invalid") from None
+                    row.api_key_ciphertext = sealed.ciphertext
+                    row.api_key_nonce = sealed.nonce
+                    row.api_key_key_version = sealed.key_version
+
+                row.name = merged.name
+                row.base_url = merged.base_url
+                row.model = merged.model
+                row.context_window_tokens = merged.context_window_tokens
+                row.tokenizer_encoding = merged.tokenizer_encoding
+                row.supports_stream = merged.supports_stream
+                row.supports_tools = merged.supports_tools
+                row.supports_parallel_tool_calls = merged.supports_parallel_tool_calls
+                row.max_output_tokens = merged.max_output_tokens
+                row.request_timeout_seconds = merged.request_timeout_seconds
+                row.execution_timeout_seconds = merged.execution_timeout_seconds
+                row.max_concurrency = merged.max_concurrency
+                row.temperature = merged.temperature
+                row.enabled = merged.enabled
+                row.visible_to_users = merged.visible_to_users
+                row.scenario_label = merged.scenario_label
+                row.scenario_description = merged.scenario_description
+                row.supports_vision = merged.supports_vision
+                row.version += 1
+                row.updated_at = self._clock()
+                await session.flush()
+                return profile_to_domain(row)
+
+    async def delete(self, actor: AuthContext, profile_id: str) -> None:
+        """按统一锁序复核强引用保护后执行模型配置软删除，绝不物理删行以保持历史 Run 外键完好。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_admin(session, actor)
+                # 锁序约定：先锁模型配置行，再锁默认指针 / 当前压缩策略指针 / 活跃子智能体，
+                # 与 Run 提交锁序（ModelProfile -> DefaultModelProfile）严格一致以防死锁。
+                row = await session.scalar(
+                    select(ModelProfileVersionModel)
+                    .where(
+                        ModelProfileVersionModel.id == profile_id,
+                        ModelProfileVersionModel.deleted_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if row is None:
+                    raise ModelProfileNotFoundError("model_profile_not_found")
+
+                # 强引用保护 1：禁止删除当前默认模型。
+                default_row = await session.scalar(
+                    select(DefaultModelProfileModel)
+                    .where(DefaultModelProfileModel.singleton_id == 1)
+                    .with_for_update()
+                )
+                if default_row is not None and default_row.profile_id == profile_id:
+                    raise ModelProfileConflictError("model_profile_in_use_as_default")
+
+                # 强引用保护 2：禁止删除当前上下文压缩策略引用的模型。
+                current_policy = await session.scalar(
+                    select(CurrentCompressionPolicyModel)
+                    .where(CurrentCompressionPolicyModel.singleton_id == 1)
+                    .with_for_update()
+                )
+                if current_policy is not None:
+                    compression_profile_id = await session.scalar(
+                        select(CompressionPolicyVersionModel.compression_model_profile_id).where(
+                            CompressionPolicyVersionModel.id == current_policy.policy_version_id
+                        )
+                    )
+                    if compression_profile_id == profile_id:
+                        raise ModelProfileConflictError(
+                            "model_profile_in_use_by_compression_policy"
+                        )
+
+                # 强引用保护 3：禁止删除仍被未软删除子智能体显式绑定的模型。
+                bound_subagent = await session.scalar(
+                    select(SubagentModel.id)
+                    .where(
+                        SubagentModel.model_profile_id == profile_id,
+                        SubagentModel.deleted_at.is_(None),
+                    )
+                    .limit(1)
+                    .with_for_update()
+                )
+                if bound_subagent is not None:
+                    raise ModelProfileConflictError("model_profile_in_use_by_subagent")
+
+                now = self._clock()
+                row.deleted_at = now
+                row.enabled = False
+                row.updated_at = now
+                row.version += 1
+                await session.flush()
 
     async def set_default(self, actor: AuthContext, profile_id: str) -> ModelProfileVersion:
         """复核管理员并将默认指向切换为启用且未软删除的版本。"""

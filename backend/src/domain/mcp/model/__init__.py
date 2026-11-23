@@ -13,8 +13,11 @@ from domain.mcp.model.entity import (
     McpSecretMetadata,
     McpSecretPurpose,
     McpServer,
+    McpServerConnectionState,
     McpServerWrite,
     McpTransport,
+    extract_config_secret_placeholders,
+    validate_mcp_secret_placeholders,
 )
 from domain.mcp.model.errors import (
     McpAdminRequiredError,
@@ -63,6 +66,7 @@ __all__ = [
     "McpSecretMetadata",
     "McpSecretPurpose",
     "McpServer",
+    "McpServerConnectionState",
     "McpRuntimeToolTarget",
     "McpServerConfig",
     "McpServerNameConflictError",
@@ -73,7 +77,9 @@ __all__ = [
     "McpTransport",
     "StdioConfig",
     "StreamableHttpConfig",
+    "extract_config_secret_placeholders",
     "parse_server_config",
     "mcp_content_projection",
     "mcp_message_from_result",
+    "validate_mcp_secret_placeholders",
 ]

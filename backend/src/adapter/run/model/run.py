@@ -126,6 +126,10 @@ class RunModel(Base):
     context_cutoff_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     retry_of_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     model_config_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 固化创建 Run 时的非密钥模型元数据快照，严禁存放任何明文或密文 api_key。
+    model_snapshot_json: Mapped[dict[str, object] | None] = mapped_column(
+        _json_type(), nullable=True
+    )
     main_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -19,10 +20,18 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from adapter.base import Base
+from common.ids import now_utc
+
+
+def _default_updated_at(context: Any) -> datetime:
+    """兼容仅提供 created_at 的测试与构造路径，缺省时与 created_at 对齐。"""
+    params = context.get_current_parameters()
+    created = params.get("created_at") if isinstance(params, dict) else None
+    return created if isinstance(created, datetime) else now_utc()
 
 
 class ModelProfileVersionModel(Base):
-    """不可变连接设置和可单独停用的模型版本。"""
+    """支持局部编辑、乐观锁与软删除的 LLM 模型配置表。"""
 
     __tablename__ = "llm_model_profile_versions"
     __table_args__ = (
@@ -42,6 +51,7 @@ class ModelProfileVersionModel(Base):
         CheckConstraint("request_timeout_seconds > 0", name="ck_llm_profile_request_timeout"),
         CheckConstraint("execution_timeout_seconds > 0", name="ck_llm_profile_execution_timeout"),
         CheckConstraint("max_concurrency > 0", name="ck_llm_profile_concurrency"),
+        CheckConstraint("version >= 1", name="ck_llm_profile_version"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -81,7 +91,19 @@ class ModelProfileVersionModel(Base):
         server_default=text("false"),
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 乐观锁版本号与最近更新时间，支撑 M1.6 局部编辑与并发防覆盖。
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_default_updated_at,
+    )
 
 
 class DefaultModelProfileModel(Base):

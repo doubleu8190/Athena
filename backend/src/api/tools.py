@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 
 from api.converter.tool import (
     admin_tool_page_to_response,
@@ -13,15 +13,19 @@ from api.converter.tool import (
     public_tool_to_response,
 )
 from api.dto.tool import (
+    AdminToolBatchApprovalResponse,
     AdminToolListResponse,
     AdminToolResponse,
     PublicToolListResponse,
     PublicToolResponse,
     ToolApprovalPolicyRequest,
+    ToolBatchApprovalRequest,
 )
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
 from api.security import AdminAuth, CurrentAuth, verify_request_origin
 from app.tool import ToolManager
+from domain.mcp import McpServerNotFoundError
+from domain.tool import TOOL_FIELD_UNSET, ToolMetadataPatch
 
 
 def _ensure_pagination_query(request: Request) -> None:
@@ -105,6 +109,32 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
             raise mcp_error_to_http(error) from error
         return admin_tool_to_response(result)
 
+    # 静态路径 batch-approval 必须注册在动态路径 /{tool_id} 之前，避免被路径参数吞掉。
+    @router.patch(
+        "/api/v1/admin/tools/batch-approval",
+        response_model=AdminToolBatchApprovalResponse,
+        dependencies=[Depends(verify_request_origin)],
+    )
+    async def batch_update_admin_tool_approval(
+        actor: AdminAuth,
+        request: ToolBatchApprovalRequest,
+        response: Response,
+    ) -> AdminToolBatchApprovalResponse:
+        """单事务原子批量切换目标 MCP 工具的审批开关，任一工具不存在则整批回滚。"""
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            items = await manager.batch_update_tool_approval(
+                actor, request.tool_ids, request.requires_approval
+            )
+        except McpServerNotFoundError as error:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp_tool_not_found") from error
+        except Exception as error:
+            raise mcp_error_to_http(error) from error
+        return AdminToolBatchApprovalResponse(
+            updated_count=len(items),
+            items=[admin_tool_to_response(item) for item in items],
+        )
+
     @router.patch(
         "/api/v1/admin/tools/{tool_id}",
         response_model=AdminToolResponse,
@@ -116,12 +146,43 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         request: ToolApprovalPolicyRequest,
         response: Response,
     ) -> AdminToolResponse:
-        """Update only the administrator-owned approval policy."""
+        """局部更新工具审批开关及业务化展示元信息；仅传 requires_approval 时保持完全向后兼容。"""
         response.headers["Cache-Control"] = "no-store"
+        fields_set = request.model_fields_set
+        if not fields_set:
+            raise HTTPException(422, "mcp_request_invalid")
+        if "requires_approval" in fields_set and request.requires_approval is None:
+            raise HTTPException(422, "mcp_request_invalid")
         try:
-            result = await manager.update_tool_approval_policy(
-                actor, tool_id, request.requires_approval
-            )
+            if fields_set == {"requires_approval"}:
+                assert request.requires_approval is not None
+                result = await manager.update_tool_approval_policy(
+                    actor, tool_id, request.requires_approval
+                )
+            else:
+                patch = ToolMetadataPatch(
+                    requires_approval=(
+                        TOOL_FIELD_UNSET
+                        if "requires_approval" not in fields_set
+                        else cast(bool, request.requires_approval)
+                    ),
+                    display_name=(
+                        TOOL_FIELD_UNSET
+                        if "display_name" not in fields_set
+                        else request.display_name
+                    ),
+                    approval_summary_template=(
+                        TOOL_FIELD_UNSET
+                        if "approval_summary_template" not in fields_set
+                        else request.approval_summary_template
+                    ),
+                    parameter_labels=(
+                        TOOL_FIELD_UNSET
+                        if "parameter_labels" not in fields_set
+                        else request.parameter_labels
+                    ),
+                )
+                result = await manager.update_tool_metadata(actor, tool_id, patch)
         except Exception as error:
             raise mcp_error_to_http(error) from error
         return admin_tool_to_response(result)

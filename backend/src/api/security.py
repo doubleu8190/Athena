@@ -12,9 +12,13 @@ from domain.auth import AuthContext, Authenticator, UserRole
 NOT_AUTHENTICATED = "not_authenticated"
 ORIGIN_NOT_ALLOWED = "origin_not_allowed"
 DEFAULT_COOKIE_NAME = "athena_session"
+# 单次请求内复用前置鉴权中间件解析结果的状态键，避免路由依赖重复查库。
+PRE_AUTH_CONTEXT_STATE_KEY = "_pre_auth_context"
+PRE_AUTH_TOKEN_STATE_KEY = "_pre_auth_token"
+PRE_AUTH_AUTHENTICATOR_STATE_KEY = "_pre_auth_authenticator"
 
 
-def _normalize_origin(value: str) -> str | None:
+def normalize_origin(value: str) -> str | None:
     """把 http(s) origin 规范化为小写 scheme、host 和可选端口。"""
     try:
         parsed = urlsplit(value.strip())
@@ -37,24 +41,44 @@ def _normalize_origin(value: str) -> str | None:
 
 def _request_origin(request: Request) -> str | None:
     """从当前请求 URL 生成同源比较值。"""
-    return _normalize_origin(f"{request.url.scheme}://{request.url.netloc}")
+    return normalize_origin(f"{request.url.scheme}://{request.url.netloc}")
+
+
+def is_origin_allowed(
+    *,
+    method: str,
+    supplied_origin: str | None,
+    request_origin: str | None,
+    configured_public_origin: str | None,
+) -> bool:
+    """判断写请求携带的 Origin 是否与当前请求源或显式公开源同源。"""
+    if method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if supplied_origin is None:
+        return True
+    allowed = {
+        origin
+        for origin in (
+            normalize_origin(request_origin) if request_origin is not None else None,
+            normalize_origin(configured_public_origin) if configured_public_origin else None,
+        )
+        if origin is not None
+    }
+    submitted_origin = normalize_origin(supplied_origin)
+    return submitted_origin is not None and submitted_origin in allowed
 
 
 def verify_request_origin(request: Request) -> None:
     """拒绝带不匹配 Origin 的浏览器写请求。"""
-    if request.method in {"GET", "HEAD", "OPTIONS"}:
-        return
-    supplied = request.headers.get("origin")
-    if supplied is None:
-        return
-    allowed = {origin for origin in (_request_origin(request),) if origin is not None}
-    configured = cast(str | None, getattr(request.app.state, "public_origin", None))
-    if configured:
-        configured_origin = _normalize_origin(configured)
-        if configured_origin is not None:
-            allowed.add(configured_origin)
-    submitted_origin = _normalize_origin(supplied)
-    if submitted_origin is None or submitted_origin not in allowed:
+    if not is_origin_allowed(
+        method=request.method,
+        supplied_origin=request.headers.get("origin"),
+        request_origin=_request_origin(request),
+        configured_public_origin=cast(
+            str | None,
+            getattr(request.app.state, "public_origin", None),
+        ),
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ORIGIN_NOT_ALLOWED,
@@ -77,6 +101,16 @@ async def get_current_auth(request: Request) -> AuthContext:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=NOT_AUTHENTICATED,
         )
+    # 命中外层 AuthPrecheckMiddleware 在同一次请求内写入的缓存时直接复用，消除重复查库。
+    cached_context = getattr(request.state, PRE_AUTH_CONTEXT_STATE_KEY, None)
+    cached_token = getattr(request.state, PRE_AUTH_TOKEN_STATE_KEY, None)
+    cached_authenticator = getattr(request.state, PRE_AUTH_AUTHENTICATOR_STATE_KEY, None)
+    if (
+        isinstance(cached_context, AuthContext)
+        and cached_token == token
+        and cached_authenticator is authenticator
+    ):
+        return cached_context
     context = await authenticator.authenticate(token)
     if context is None:
         raise HTTPException(
@@ -112,7 +146,12 @@ __all__ = [
     "DEFAULT_COOKIE_NAME",
     "NOT_AUTHENTICATED",
     "ORIGIN_NOT_ALLOWED",
+    "PRE_AUTH_AUTHENTICATOR_STATE_KEY",
+    "PRE_AUTH_CONTEXT_STATE_KEY",
+    "PRE_AUTH_TOKEN_STATE_KEY",
     "get_current_auth",
+    "is_origin_allowed",
+    "normalize_origin",
     "require_admin",
     "verify_request_origin",
 ]

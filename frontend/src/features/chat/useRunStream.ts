@@ -8,6 +8,7 @@ import {
   type Dispatch,
 } from "react";
 
+import { ApiError, apiRequest } from "../../shared/api/client";
 import { runStreamUrl } from "./api";
 import {
   isTerminalRunStatus,
@@ -37,15 +38,29 @@ export interface RunEventSource {
 }
 
 export type RunEventSourceFactory = (url: string) => RunEventSource;
+export type RunStreamAuthProbe = (signal: AbortSignal) => Promise<void>;
+
+// SSE 断流后发起轻量身份探测的冷却时间，避免断网重连风暴重复刷 /auth/me。
+export const AUTH_PROBE_COOLDOWN_MS = 3_000;
 
 const defaultEventSourceFactory: RunEventSourceFactory = (url) =>
   new EventSource(url, { withCredentials: true }) as unknown as RunEventSource;
+
+const defaultProbeAuth: RunStreamAuthProbe = async (signal) => {
+  // 复用共享 apiRequest 以保持 authIdentityEpoch 校验与 AUTH_UNAUTHORIZED_EVENT 派发一致。
+  await apiRequest<unknown>("/auth/me", {
+    method: "GET",
+    cache: "no-store",
+    signal,
+  });
+};
 
 interface UseRunStreamOptions {
   enabled?: boolean;
   eventSourceFactory?: RunEventSourceFactory;
   onReconcile?: () => void;
   onSnapshot?: (snapshot: RunSnapshotPayload) => void;
+  probeAuth?: RunStreamAuthProbe;
   runId: string | null;
   sessionId: string;
   status: RunStatus | null;
@@ -221,6 +236,7 @@ export function useRunStream({
   eventSourceFactory = defaultEventSourceFactory,
   onReconcile,
   onSnapshot,
+  probeAuth = defaultProbeAuth,
   runId,
   sessionId,
   status,
@@ -231,8 +247,10 @@ export function useRunStream({
   );
   const [reconnectGeneration, setReconnectGeneration] = useState(0);
   const sourceRef = useRef<RunEventSource | null>(null);
+  const probeControllerRef = useRef<AbortController | null>(null);
   const reconcileRef = useRef(onReconcile);
   const snapshotRef = useRef(onSnapshot);
+  const probeAuthRef = useRef(probeAuth);
   const mode = runStreamMode(status);
   // 等待和终态由查询/快照承载；只有仍可能产生实时增量的状态才建立连接。
   const shouldConnect = Boolean(enabled && runId && mode === "live");
@@ -249,6 +267,10 @@ export function useRunStream({
     snapshotRef.current = onSnapshot;
   }, [onSnapshot]);
 
+  useEffect(() => {
+    probeAuthRef.current = probeAuth;
+  }, [probeAuth]);
+
   const syncStatus = useCallback(
     (targetRunId: string, nextStatus: RunStatus) => {
       dispatch({
@@ -262,8 +284,15 @@ export function useRunStream({
 
   const closeTerminal = useCallback(
     (targetRunId: string, nextStatus: RunStatus) => {
-      sourceRef.current?.close();
-      sourceRef.current = null;
+      // 终态关闭实时流时同步中止在途身份探测，避免旧连接回调继续操作已结束的 Run。
+      probeControllerRef.current?.abort();
+      probeControllerRef.current = null;
+      if (sourceRef.current) {
+        sourceRef.current.onopen = null;
+        sourceRef.current.onerror = null;
+        sourceRef.current.close();
+        sourceRef.current = null;
+      }
       dispatch({
         runId: targetRunId,
         status: nextStatus,
@@ -300,20 +329,83 @@ export function useRunStream({
     dispatch({ runId, status, type: "start" });
     let acceptEvents = true;
     let snapshotReceived = false;
+    // 为本次连接生命周期绑定独立 AbortController，卸载、切 Run、终态关闭或换线时统一取消探测。
+    const probeController = new AbortController();
+    probeControllerRef.current = probeController;
+    let probeInFlight = false;
+    let lastProbeFinishedAt: number | null = null;
+    let openGeneration = 0;
+
     let source: RunEventSource;
     try {
       source = eventSourceFactory(streamUrl);
     } catch {
+      probeController.abort();
+      if (probeControllerRef.current === probeController) {
+        probeControllerRef.current = null;
+      }
       dispatch({ type: "error" });
       return;
     }
     sourceRef.current = source;
 
+    const closeSource = (abortProbe: boolean) => {
+      acceptEvents = false;
+      if (abortProbe) {
+        probeController.abort();
+        if (probeControllerRef.current === probeController) {
+          probeControllerRef.current = null;
+        }
+      }
+      source.onopen = null;
+      source.onerror = null;
+      source.close();
+      if (sourceRef.current === source) {
+        sourceRef.current = null;
+      }
+    };
+
+    const probeAuthentication = async () => {
+      if (probeInFlight) {
+        return;
+      }
+      if (
+        lastProbeFinishedAt !== null &&
+        Date.now() - lastProbeFinishedAt < AUTH_PROBE_COOLDOWN_MS
+      ) {
+        return;
+      }
+      probeInFlight = true;
+      const probeOpenGeneration = openGeneration;
+      try {
+        await probeAuthRef.current(probeController.signal);
+      } catch (error) {
+        if (
+          acceptEvents &&
+          !probeController.signal.aborted &&
+          error instanceof ApiError &&
+          error.status === 401
+        ) {
+          // 探测确认 401 时，apiRequest 已派发全局未认证事件；立刻关闭 SSE 阻止浏览器自动重连。
+          closeSource(false);
+        }
+        // 其他错误（瞬态网络故障、5xx 或生命周期中止）均静默吞掉，保留断线提示与当前文本。
+      } finally {
+        probeInFlight = false;
+        if (
+          !probeController.signal.aborted &&
+          probeOpenGeneration === openGeneration
+        ) {
+          lastProbeFinishedAt = Date.now();
+        }
+      }
+    };
+
     const handleMessage = (
       eventName: string,
       event: MessageEvent<string>,
     ) => {
-      if (!acceptEvents) {
+      if (!acceptEvents || probeController.signal.aborted) {
         return;
       }
       const data = parseEventData(event.data);
@@ -337,9 +429,8 @@ export function useRunStream({
         outcome === "snapshot_terminal" ||
         outcome === "snapshot_waiting"
       ) {
-        // 服务端在这些状态会主动结束流；本地立刻关闭可阻止 EventSource 自动重连。
-        acceptEvents = false;
-        source.close();
+        // 服务端在这些状态会主动结束流；本地立刻关闭并中止探测，阻止 EventSource 自动重连。
+        closeSource(true);
         dispatch({ type: "closed" });
         reconcileRef.current?.();
         return;
@@ -351,18 +442,29 @@ export function useRunStream({
           return;
         }
         // 服务端在同代次内不会重复快照；收到中断后必须用全新连接请求
-        // 权威 snapshot。旧连接立即关闭，本地 guard 防止同一代次重复触发。
-        acceptEvents = false;
-        source.close();
-        if (sourceRef.current === source) {
-          sourceRef.current = null;
-        }
+        // 权威 snapshot。旧连接立即关闭并取消探测，本地 guard 防止同一代次重复触发。
+        closeSource(true);
         setReconnectGeneration((generation) => generation + 1);
       }
     };
 
-    source.onopen = () => dispatch({ type: "open" });
-    source.onerror = () => dispatch({ type: "error" });
+    source.onopen = () => {
+      if (!acceptEvents || probeController.signal.aborted) {
+        return;
+      }
+      // 连接恢复后重置冷却窗口，确保后续若再次会话过期可立即探测。
+      openGeneration += 1;
+      lastProbeFinishedAt = null;
+      dispatch({ type: "open" });
+    };
+    source.onerror = () => {
+      if (!acceptEvents || probeController.signal.aborted) {
+        return;
+      }
+      dispatch({ type: "error" });
+      // 原生 EventSource 不暴露 HTTP 状态码，断流后通过轻量身份探测识别 401 会话过期。
+      void probeAuthentication();
+    };
     for (const eventName of [
       "snapshot",
       "text_delta",
@@ -376,13 +478,7 @@ export function useRunStream({
     }
 
     return () => {
-      acceptEvents = false;
-      source.onopen = null;
-      source.onerror = null;
-      source.close();
-      if (sourceRef.current === source) {
-        sourceRef.current = null;
-      }
+      closeSource(true);
     };
   }, [
     eventSourceFactory,

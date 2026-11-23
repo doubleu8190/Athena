@@ -1,11 +1,16 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { AUTH_UNAUTHORIZED_EVENT } from "../../shared/api/client";
 import {
   FakeEventSource,
   fakeEventSourceFactory,
 } from "../../test/fakeEventSource";
-import { getRequestUrl, makeMessage } from "../../test/fixtures";
+import {
+  TEST_USER,
+  getRequestUrl,
+  makeMessage,
+} from "../../test/fixtures";
 import { jsonResponse } from "../../test/testUtils";
 import type {
   RunEvent,
@@ -19,7 +24,7 @@ import {
   runStreamReducer,
   type RunStreamAction,
 } from "./runStream";
-import { useRunStream } from "./useRunStream";
+import { AUTH_PROBE_COOLDOWN_MS, useRunStream } from "./useRunStream";
 
 beforeEach(() => {
   FakeEventSource.instances = [];
@@ -630,6 +635,337 @@ describe("原生 EventSource Run hook", () => {
     expect(result.current.state.transientText).toBe("断线前文本");
     expect(result.current.state.connection).toBe("error");
     expect(result.current.state.notice).toContain("实时连接中断");
+  });
+
+  it("EventSource error 后探测 /auth/me 返回 401 时派发未认证事件并立刻关闭连接", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        jsonResponse({ detail: "authentication_required" }, 401),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const unauthorizedListener = vi.fn();
+    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorizedListener);
+
+    try {
+      const { result } = renderHook(() =>
+        useRunStream({
+          eventSourceFactory: fakeEventSourceFactory,
+          runId: "run-1",
+          sessionId: "session-1",
+          status: "running",
+        }),
+      );
+      const source = FakeEventSource.instances.at(-1);
+
+      act(() => {
+        source?.emit("text_delta", {
+          payload: { text: "会话过期前文本" },
+        });
+        source?.emitError();
+      });
+
+      await waitFor(() => {
+        expect(source?.closed).toBe(true);
+      });
+      expect(unauthorizedListener).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [requestInput, requestInit] = fetchMock.mock.calls[0];
+      expect(getRequestUrl(requestInput)).toBe("/api/v1/auth/me");
+      expect(requestInit?.method).toBe("GET");
+      expect(requestInit?.cache).toBe("no-store");
+      expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
+      expect(result.current.state.connection).toBe("error");
+      expect(result.current.state.transientText).toBe("会话过期前文本");
+
+      // 关闭连接后继续收到迟到 error 或数据片段，不应重复探测或污染文本。
+      act(() => {
+        source?.emitError();
+        source?.emit("text_delta", {
+          payload: { text: "迟到片段" },
+        });
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(result.current.state.transientText).toBe("会话过期前文本");
+    } finally {
+      window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorizedListener);
+    }
+  });
+
+  it.each([
+    [
+      "200 身份仍有效",
+      async () => jsonResponse(TEST_USER, 200),
+    ],
+    [
+      "网络错误",
+      async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    ],
+    [
+      "503 服务端临时不可用",
+      async () => jsonResponse({ detail: "service_unavailable" }, 503),
+    ],
+  ])(
+    "EventSource error 后探测 /auth/me 返回%s时不误登出并保留文本与断线提示",
+    async (_label, respond) => {
+      let resolveProbeRequest: (() => void) | null = null;
+      const probeDone = new Promise<void>((resolve) => {
+        resolveProbeRequest = resolve;
+      });
+      const fetchMock = vi.fn(async () => {
+        try {
+          return await respond();
+        } finally {
+          resolveProbeRequest?.();
+        }
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const unauthorizedListener = vi.fn();
+      window.addEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorizedListener);
+
+      try {
+        const { result } = renderHook(() =>
+          useRunStream({
+            eventSourceFactory: fakeEventSourceFactory,
+            runId: "run-1",
+            sessionId: "session-1",
+            status: "running",
+          }),
+        );
+        const source = FakeEventSource.instances.at(-1);
+
+        act(() => {
+          source?.emit("text_delta", {
+            payload: { text: "瞬态断网保留文本" },
+          });
+          source?.emitError();
+        });
+
+        await probeDone;
+        // 等待探测 catch/finally 微任务结算完毕后再断言副作用。
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(unauthorizedListener).not.toHaveBeenCalled();
+        expect(source?.closed).toBe(false);
+        expect(result.current.state.transientText).toBe("瞬态断网保留文本");
+        expect(result.current.state.connection).toBe("error");
+        expect(result.current.state.notice).toContain("实时连接中断");
+      } finally {
+        window.removeEventListener(
+          AUTH_UNAUTHORIZED_EVENT,
+          unauthorizedListener,
+        );
+      }
+    },
+  );
+
+  it("连续高频触发 error 时在途去重与冷却窗口生效，onopen 恢复后可重新探测", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-23T00:00:00Z"));
+      const resolvers: (() => void)[] = [];
+      const probeAuth = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+
+      renderHook(() =>
+        useRunStream({
+          eventSourceFactory: fakeEventSourceFactory,
+          probeAuth,
+          runId: "run-1",
+          sessionId: "session-1",
+          status: "running",
+        }),
+      );
+      const source = FakeEventSource.instances.at(-1);
+
+      // 首次探测在途期间，重复触发 error 必须被去重。
+      act(() => {
+        source?.emitError();
+        source?.emitError();
+        source?.emitError();
+      });
+      expect(probeAuth).toHaveBeenCalledTimes(1);
+
+      // 首次探测完成后进入冷却窗口，冷却期内不会重复刷 /auth/me。
+      await act(async () => {
+        resolvers.shift()?.();
+        await Promise.resolve();
+      });
+      act(() => {
+        source?.emitError();
+      });
+      expect(probeAuth).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        vi.advanceTimersByTime(AUTH_PROBE_COOLDOWN_MS - 1);
+        source?.emitError();
+      });
+      expect(probeAuth).toHaveBeenCalledTimes(1);
+
+      // 超过冷却窗口后再次出错，允许发起下一轮探测。
+      act(() => {
+        vi.advanceTimersByTime(1);
+        source?.emitError();
+      });
+      expect(probeAuth).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        resolvers.shift()?.();
+        await Promise.resolve();
+      });
+
+      // 冷却期内连接重新 onopen 恢复，会清空冷却并在后续出错时立即探测。
+      act(() => {
+        source?.emitOpen();
+        source?.emitError();
+      });
+      expect(probeAuth).toHaveBeenCalledTimes(3);
+
+      // 在途探测期间如果连接先恢复 onopen，探测结束后不得重新套用旧冷却锁死后续探测。
+      act(() => {
+        source?.emitOpen();
+      });
+      await act(async () => {
+        resolvers.shift()?.();
+        await Promise.resolve();
+      });
+      act(() => {
+        source?.emitError();
+      });
+      expect(probeAuth).toHaveBeenCalledTimes(4);
+      await act(async () => {
+        resolvers.shift()?.();
+        await Promise.resolve();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("组件卸载时通过 AbortSignal 取消在途 /auth/me 探测", () => {
+    const signals: AbortSignal[] = [];
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal) {
+            signals.push(signal);
+            signal.addEventListener("abort", () => {
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+          }
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = renderHook(() =>
+      useRunStream({
+        eventSourceFactory: fakeEventSourceFactory,
+        runId: "run-1",
+        sessionId: "session-1",
+        status: "running",
+      }),
+    );
+    const source = FakeEventSource.instances.at(-1);
+
+    act(() => {
+      source?.emitError();
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+
+    unmount();
+
+    expect(signals[0].aborted).toBe(true);
+    expect(source?.closed).toBe(true);
+  });
+
+  it("切换 Run、换线重连或收到终态快照时取消旧连接的在途 /auth/me 探测", async () => {
+    const signals: AbortSignal[] = [];
+    const probeAuth = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<void>((_resolve, reject) => {
+          signals.push(signal);
+          signal.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+    );
+
+    const { rerender } = renderHook(
+      ({ runId }) =>
+        useRunStream({
+          eventSourceFactory: fakeEventSourceFactory,
+          probeAuth,
+          runId,
+          sessionId: "session-1",
+          status: "running",
+        }),
+      {
+        initialProps: { runId: "run-1" },
+      },
+    );
+    const firstSource = FakeEventSource.instances.at(-1);
+
+    act(() => {
+      firstSource?.emitError();
+    });
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+
+    // 切换 Run 时必须关闭旧连接并中止旧探测。
+    rerender({ runId: "run-2" });
+    expect(signals[0].aborted).toBe(true);
+    expect(firstSource?.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(2);
+
+    const secondSource = FakeEventSource.instances.at(-1);
+    act(() => {
+      secondSource?.emit("snapshot", {
+        payload: snapshot("running", "进行中"),
+      });
+      secondSource?.emitError();
+    });
+    expect(signals).toHaveLength(2);
+    expect(signals[1].aborted).toBe(false);
+
+    // 收到 stream_interrupted 主动换线时，旧连接的在途探测必须立刻中止。
+    act(() => {
+      secondSource?.emit("stream_interrupted", {
+        payload: { reason: "stream_gap" },
+      });
+    });
+    expect(signals[1].aborted).toBe(true);
+    expect(secondSource?.closed).toBe(true);
+    await waitFor(() => {
+      expect(FakeEventSource.instances).toHaveLength(3);
+    });
+
+    const thirdSource = FakeEventSource.instances.at(-1);
+    act(() => {
+      thirdSource?.emitError();
+    });
+    expect(signals).toHaveLength(3);
+    expect(signals[2].aborted).toBe(false);
+
+    // 收到终态快照主动关流时，也必须中止在途身份探测。
+    act(() => {
+      thirdSource?.emit("snapshot", {
+        payload: snapshot("completed", "最终回答"),
+      });
+    });
+    expect(signals[2].aborted).toBe(true);
+    expect(thirdSource?.closed).toBe(true);
   });
 });
 

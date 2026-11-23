@@ -65,6 +65,8 @@ export interface KnowledgeDocument {
   title: string;
   active_version_id: string | null;
   pending_version_id: string | null;
+  // 文档列表附带的最新版本摘要；缺省（undefined）时回退按行请求版本列表兼容旧接口/旧测例。
+  latest_version?: KnowledgeVersion | null;
   created_at: string;
   updated_at: string;
 }

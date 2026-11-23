@@ -47,6 +47,11 @@ def knowledge_document_to_response(item: Document) -> KnowledgeDocumentResponse:
         pending_version_id=item.pending_version_id,
         created_at=item.created_at.isoformat(),
         updated_at=item.updated_at.isoformat(),
+        latest_version=(
+            knowledge_version_to_response(item.latest_version)
+            if item.latest_version is not None
+            else None
+        ),
     )
 
 

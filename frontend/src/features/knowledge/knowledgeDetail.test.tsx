@@ -275,6 +275,205 @@ describe("知识库文档状态", () => {
     expect(await screen.findByText("排队中")).toBeInTheDocument();
     expect(screen.getByText("处理完成后才可检索。")).toBeInTheDocument();
   });
+
+  it(
+    "列表返回 latest_version 摘要时渲染 5 篇文档仅发 1 次列表请求、0 次 /versions 请求，并在列表轮询与重试后刷新",
+    async () => {
+      let documentListCalls = 0;
+      let versionCalls = 0;
+      let retriedFailed = false;
+      const docReady = makeKnowledgeDocument({
+        active_version_id: "ver-ready",
+        id: "doc-1",
+        latest_version: makeKnowledgeVersion({
+          chunk_count: 14,
+          document_id: "doc-1",
+          id: "ver-ready",
+          state: "ready",
+          warnings: ["ocr_fallback_used"],
+        }),
+        pending_version_id: null,
+        title: "就绪文档 A",
+      });
+      const docQueued = makeKnowledgeDocument({
+        active_version_id: "ver-q-old",
+        id: "doc-2",
+        latest_version: makeKnowledgeVersion({
+          chunk_count: 0,
+          completed_at: null,
+          document_id: "doc-2",
+          id: "ver-q-new",
+          state: "queued",
+        }),
+        pending_version_id: "ver-q-new",
+        title: "排队文档 B",
+      });
+      const docProcessing = makeKnowledgeDocument({
+        active_version_id: null,
+        id: "doc-3",
+        latest_version: makeKnowledgeVersion({
+          chunk_count: 0,
+          completed_at: null,
+          document_id: "doc-3",
+          id: "ver-p-new",
+          state: "processing",
+        }),
+        pending_version_id: "ver-p-new",
+        title: "处理中文档 C",
+      });
+      const failedVersion = makeKnowledgeVersion({
+        chunk_count: 0,
+        completed_at: "2026-11-10T04:32:00Z",
+        document_id: "doc-4",
+        error_code: "knowledge_document_text_empty",
+        id: "ver-failed",
+        state: "failed",
+      });
+      const docFailed = makeKnowledgeDocument({
+        active_version_id: null,
+        id: "doc-4",
+        latest_version: failedVersion,
+        pending_version_id: null,
+        title: "失败文档 D",
+      });
+      const docEmpty = makeKnowledgeDocument({
+        active_version_id: null,
+        id: "doc-5",
+        latest_version: null,
+        pending_version_id: null,
+        title: "空版本文档 E",
+      });
+
+      const fetchMock = createFetchMock((url, init) => {
+        if (
+          url.pathname === `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}`
+        ) {
+          return jsonResponse(KNOWLEDGE_BASE_A);
+        }
+        if (
+          url.pathname ===
+          `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}/documents`
+        ) {
+          documentListCalls += 1;
+          const polledReady = documentListCalls >= 2;
+          return jsonResponse(
+            knowledgeListResponse(
+              [
+                docReady,
+                polledReady
+                  ? {
+                      ...docQueued,
+                      active_version_id: "ver-q-new",
+                      latest_version: makeKnowledgeVersion({
+                        chunk_count: 9,
+                        document_id: "doc-2",
+                        id: "ver-q-new",
+                        state: "ready",
+                      }),
+                      pending_version_id: null,
+                    }
+                  : docQueued,
+                polledReady
+                  ? {
+                      ...docProcessing,
+                      active_version_id: "ver-p-new",
+                      latest_version: makeKnowledgeVersion({
+                        chunk_count: 5,
+                        document_id: "doc-3",
+                        id: "ver-p-new",
+                        state: "ready",
+                      }),
+                      pending_version_id: null,
+                    }
+                  : docProcessing,
+                retriedFailed
+                  ? {
+                      ...docFailed,
+                      latest_version: {
+                        ...failedVersion,
+                        completed_at: null,
+                        error_code: null,
+                        state: "queued",
+                      },
+                      pending_version_id: failedVersion.id,
+                    }
+                  : docFailed,
+                docEmpty,
+              ],
+              1,
+              10,
+            ),
+          );
+        }
+        if (
+          url.pathname.endsWith(
+            "/documents/doc-4/versions/ver-failed/retry",
+          ) &&
+          init?.method === "POST"
+        ) {
+          retriedFailed = true;
+          return jsonResponse({ ...failedVersion, state: "queued" }, 202);
+        }
+        if (url.pathname.includes("/versions")) {
+          versionCalls += 1;
+          return jsonResponse([docReady.latest_version!]);
+        }
+        throw new Error(
+          `Unexpected request: ${init?.method ?? "GET"} ${url}`,
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const user = userEvent.setup();
+
+      renderApp(`/knowledge/${KNOWLEDGE_BASE_A.id}`);
+
+      expect(await screen.findByText("就绪文档 A")).toBeInTheDocument();
+      expect(screen.getByText("排队文档 B")).toBeInTheDocument();
+      expect(screen.getByText("处理中文档 C")).toBeInTheDocument();
+      expect(screen.getByText("失败文档 D")).toBeInTheDocument();
+      expect(screen.getByText("空版本文档 E")).toBeInTheDocument();
+
+      // 首屏 5 篇文档全部由列表内联摘要渲染：仅 1 次列表请求、0 次 /versions 请求。
+      expect(documentListCalls).toBe(1);
+      expect(versionCalls).toBe(0);
+      expect(screen.getByText(/14 个检索片段/)).toBeInTheDocument();
+      expect(screen.getByText(/1 条警告/)).toBeInTheDocument();
+      expect(screen.getByText("排队中")).toBeInTheDocument();
+      expect(screen.getByText("处理中")).toBeInTheDocument();
+      expect(screen.getByText("处理失败")).toBeInTheDocument();
+      expect(screen.getByText("后端未返回版本记录。")).toBeInTheDocument();
+
+      // 列表自动轮询在 3 秒后将排队/处理中文档更新为就绪态，期间仍保持 0 次 /versions 请求。
+      await waitFor(
+        () => {
+          expect(screen.getByText("9 个检索片段")).toBeInTheDocument();
+          expect(screen.getByText("5 个检索片段")).toBeInTheDocument();
+        },
+        { timeout: 5_000 },
+      );
+      expect(versionCalls).toBe(0);
+
+      // 失败行点击重试后通过列表失效刷新状态。
+      await user.click(
+        screen.getByRole("button", { name: "重试失败版本" }),
+      );
+      expect(await screen.findByText("已重新排队")).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByText("排队中")).toBeInTheDocument();
+      });
+      expect(versionCalls).toBe(0);
+
+      // 显式打开「版本历史」弹窗时才按需拉取完整版本列表。
+      await user.click(
+        screen.getByRole("button", { name: "版本历史：就绪文档 A" }),
+      );
+      expect(
+        await screen.findByRole("dialog", { name: "版本历史" }),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(versionCalls).toBe(1));
+    },
+    10_000,
+  );
 });
 
 describe("知识库版本替换", () => {

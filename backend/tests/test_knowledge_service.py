@@ -369,3 +369,256 @@ def test_storage_unavailability_during_download_is_not_hidden_as_not_found() -> 
             await service.source("owner_a", base.id, "doc_a", "ver_a")
 
     asyncio.run(scenario())
+
+
+def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_when_empty() -> None:
+    """仓储 list_documents 应在列表为空时跳过版本查询，非空时用单次批量 SQL 装配最新版本。"""
+    from typing import Any
+
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from adapter.auth.model import UserModel
+    from adapter.knowledge.model import (
+        KnowledgeBaseModel,
+        KnowledgeDocumentModel,
+        KnowledgeVersionModel,
+    )
+    from adapter.knowledge.repository import KnowledgeRepository
+    from adapter.models import Base
+    from domain.knowledge.model import DocumentState
+
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        executed_sql: list[str] = []
+
+        def _record_sql(
+            conn: Any,
+            cursor: Any,
+            statement: str,
+            parameters: Any,
+            context: Any,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            executed_sql.append(statement)
+
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            repository = KnowledgeRepository(factory)
+            service = KnowledgeService(cast(KnowledgeRepositoryPort, repository), Tokenizer())
+            now = datetime(2026, 3, 1, 8, 0, tzinfo=UTC)
+            same_time = datetime(2026, 3, 1, 8, 5, tzinfo=UTC)
+
+            async with factory() as session, session.begin():
+                session.add_all(
+                    [
+                        UserModel(
+                            id="owner_a",
+                            email="owner_a@service.test",
+                            password_hash="unused",
+                            display_name=None,
+                            status="active",
+                            role="user",
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                        UserModel(
+                            id="owner_b",
+                            email="owner_b@service.test",
+                            password_hash="unused",
+                            display_name=None,
+                            status="active",
+                            role="user",
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                    ]
+                )
+                await session.flush()
+                session.add_all(
+                    [
+                        KnowledgeBaseModel(
+                            id="kb_empty",
+                            owner_id="owner_a",
+                            name="空知识库",
+                            description=None,
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                        KnowledgeBaseModel(
+                            id="kb_populated",
+                            owner_id="owner_a",
+                            name="多版本知识库",
+                            description=None,
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                    ]
+                )
+                await session.flush()
+                session.add_all(
+                    [
+                        KnowledgeDocumentModel(
+                            id="doc_multi",
+                            owner_id="owner_a",
+                            knowledge_base_id="kb_populated",
+                            title="多版本文档",
+                            active_version_id="ver_001",
+                            pending_version_id=None,
+                            created_at=now,
+                            updated_at=datetime(2026, 3, 1, 8, 10, tzinfo=UTC),
+                        ),
+                        KnowledgeDocumentModel(
+                            id="doc_tiebreak",
+                            owner_id="owner_a",
+                            knowledge_base_id="kb_populated",
+                            title="同时间戳按 ID 倒序文档",
+                            active_version_id=None,
+                            pending_version_id="ver_z",
+                            created_at=now,
+                            updated_at=datetime(2026, 3, 1, 8, 9, tzinfo=UTC),
+                        ),
+                        KnowledgeDocumentModel(
+                            id="doc_no_version",
+                            owner_id="owner_a",
+                            knowledge_base_id="kb_populated",
+                            title="无版本文档",
+                            active_version_id=None,
+                            pending_version_id=None,
+                            created_at=now,
+                            updated_at=datetime(2026, 3, 1, 8, 8, tzinfo=UTC),
+                        ),
+                    ]
+                )
+                await session.flush()
+                session.add_all(
+                    [
+                        KnowledgeVersionModel(
+                            id="ver_001",
+                            document_id="doc_multi",
+                            owner_id="owner_a",
+                            source_id=None,
+                            source_text="v1",
+                            content_hash="1" * 64,
+                            profile_id="bge-m3-default",
+                            processing_config={},
+                            state="ready",
+                            error_code=None,
+                            warnings=["w1"],
+                            chunk_count=4,
+                            created_at=datetime(2026, 3, 1, 8, 1, tzinfo=UTC),
+                            completed_at=datetime(2026, 3, 1, 8, 2, tzinfo=UTC),
+                        ),
+                        KnowledgeVersionModel(
+                            id="ver_002",
+                            document_id="doc_multi",
+                            owner_id="owner_a",
+                            source_id=None,
+                            source_text="v2",
+                            content_hash="2" * 64,
+                            profile_id="bge-m3-default",
+                            processing_config={},
+                            state="failed",
+                            error_code="embedding_timeout",
+                            warnings=["partial"],
+                            chunk_count=0,
+                            created_at=datetime(2026, 3, 1, 8, 3, tzinfo=UTC),
+                            completed_at=datetime(2026, 3, 1, 8, 4, tzinfo=UTC),
+                        ),
+                        # 相同 created_at 下必须按 id DESC 选取 ver_z，与 list_versions 保持一致。
+                        KnowledgeVersionModel(
+                            id="ver_a",
+                            document_id="doc_tiebreak",
+                            owner_id="owner_a",
+                            source_id=None,
+                            source_text="tie-a",
+                            content_hash="3" * 64,
+                            profile_id="bge-m3-default",
+                            processing_config={},
+                            state="ready",
+                            error_code=None,
+                            warnings=[],
+                            chunk_count=5,
+                            created_at=same_time,
+                            completed_at=same_time,
+                        ),
+                        KnowledgeVersionModel(
+                            id="ver_z",
+                            document_id="doc_tiebreak",
+                            owner_id="owner_a",
+                            source_id=None,
+                            source_text="tie-z",
+                            content_hash="4" * 64,
+                            profile_id="bge-m3-default",
+                            processing_config={},
+                            state="processing",
+                            error_code=None,
+                            warnings=[],
+                            chunk_count=0,
+                            created_at=same_time,
+                            completed_at=None,
+                        ),
+                    ]
+                )
+
+            event.listen(engine.sync_engine, "before_cursor_execute", _record_sql)
+            try:
+                # 1) 空列表分支：严禁对 knowledge_document_versions 发多余查询。
+                executed_sql.clear()
+                empty_docs = await repository.list_documents(
+                    "owner_a", "kb_empty", offset=0, limit=20
+                )
+                assert empty_docs == []
+                assert len(executed_sql) == 1
+                assert all("knowledge_document_versions" not in sql for sql in executed_sql)
+
+                # 2) 多文档分支：仓储层严格只发 2 条 SQL（1 条查文档、1 条单次批量查最新版本）。
+                executed_sql.clear()
+                docs = await repository.list_documents(
+                    "owner_a", "kb_populated", offset=0, limit=20
+                )
+                assert len(executed_sql) == 2
+                version_queries = [
+                    sql for sql in executed_sql if "knowledge_document_versions" in sql
+                ]
+                assert len(version_queries) == 1
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", _record_sql)
+
+            by_id = {doc.id: doc for doc in docs}
+            assert set(by_id) == {"doc_multi", "doc_tiebreak", "doc_no_version"}
+            assert by_id["doc_multi"].latest_version is not None
+            assert by_id["doc_multi"].latest_version.id == "ver_002"
+            assert by_id["doc_multi"].latest_version.state is DocumentState.FAILED
+            assert by_id["doc_multi"].latest_version.error_code == "embedding_timeout"
+            assert by_id["doc_multi"].latest_version.warnings == ("partial",)
+
+            assert by_id["doc_tiebreak"].latest_version is not None
+            assert by_id["doc_tiebreak"].latest_version.id == "ver_z"
+            assert by_id["doc_tiebreak"].latest_version.state is DocumentState.PROCESSING
+
+            assert by_id["doc_no_version"].latest_version is None
+
+            # 校验 latest_version 与 list_versions 首位 100% 一致，且通过 service 透传一致。
+            service_docs = await service.list_documents(
+                "owner_a", "kb_populated", page=1, page_size=20
+            )
+            assert service_docs == docs
+            for doc in docs:
+                versions = await service.list_versions("owner_a", "kb_populated", doc.id)
+                expected_latest = versions[0] if versions else None
+                assert doc.latest_version == expected_latest
+                fetched = await service.get_document("owner_a", "kb_populated", doc.id)
+                assert fetched.latest_version == expected_latest
+                renamed = await service.rename_document(
+                    "owner_a", "kb_populated", doc.id, f"{doc.title}（已重命名）"
+                )
+                assert renamed.title == f"{doc.title}（已重命名）"
+                assert renamed.latest_version == expected_latest
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

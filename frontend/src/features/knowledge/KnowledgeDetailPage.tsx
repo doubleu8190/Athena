@@ -58,9 +58,23 @@ function DocumentRow({
   onReplace,
   onVersions,
 }: DocumentRowProps) {
-  const versions = useKnowledgeVersions(baseId, document.id);
+  // 列表接口已附带 latest_version（含 null）时直接消费摘要，彻底关闭按行 /versions 请求与并发轮询；
+  // 仅当旧契约或历史单测未返回该字段（undefined）时回退按行请求版本列表。
+  const hasInlineLatestVersion = document.latest_version !== undefined;
+  const versions = useKnowledgeVersions(
+    baseId,
+    document.id,
+    !hasInlineLatestVersion,
+  );
   const retry = useRetryKnowledgeVersionMutation(baseId, document.id);
-  const latest = versions.data?.[0] ?? null;
+  const latest = hasInlineLatestVersion
+    ? (document.latest_version ?? null)
+    : (versions.data?.[0] ?? null);
+  const loadingStatus = !hasInlineLatestVersion && versions.isPending;
+  const statusError = !hasInlineLatestVersion && versions.isError;
+  const hasNoVersions = hasInlineLatestVersion
+    ? document.latest_version === null
+    : (versions.data?.length ?? 0) === 0;
   const canRetry =
     latest?.state === "failed" &&
     document.pending_version_id === null;
@@ -79,11 +93,11 @@ function DocumentRow({
       </div>
 
       <div className="knowledge-document-status" aria-live="polite">
-        {versions.isPending ? (
+        {loadingStatus ? (
           <span className="knowledge-status-loading" role="status">
             正在读取状态…
           </span>
-        ) : versions.isError ? (
+        ) : statusError ? (
           <span className="knowledge-inline-error" role="alert">
             状态读取失败
             <button
@@ -123,10 +137,10 @@ function DocumentRow({
                   : "处理完成后才可检索。"}
               </span>
             ) : null}
-            {versions.data.length === 0 ? (
+            {hasNoVersions ? (
               <span>后端未返回版本记录。</span>
             ) : null}
-            {canRetry ? (
+            {canRetry && latest ? (
               <button
                 className="text-button"
                 disabled={retry.isPending}

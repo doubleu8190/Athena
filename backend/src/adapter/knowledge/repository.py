@@ -1144,7 +1144,11 @@ class KnowledgeRepository:
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
             )
-            return _document(model) if model is not None else None
+            if model is None:
+                return None
+            # 在同一读取会话中装配最新版本摘要，保持单文档查询与文档列表契约一致。
+            latest_by_doc = await _load_latest_versions(session, owner_id, (model.id,))
+            return _document(model, latest_version=latest_by_doc.get(model.id))
 
     async def create_text_document(
         self,
@@ -1669,23 +1673,30 @@ class KnowledgeRepository:
         self, owner_id: str, base_id: str, *, offset: int, limit: int
     ) -> list[Document]:
         async with self._sessions() as session:
-            rows = await session.scalars(
-                select(KnowledgeDocumentModel)
-                .join(
-                    KnowledgeBaseModel,
-                    KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
+            rows = list(
+                await session.scalars(
+                    select(KnowledgeDocumentModel)
+                    .join(
+                        KnowledgeBaseModel,
+                        KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
+                    )
+                    .where(
+                        KnowledgeDocumentModel.owner_id == owner_id,
+                        KnowledgeDocumentModel.knowledge_base_id == base_id,
+                        KnowledgeDocumentModel.deleted_time.is_(None),
+                        KnowledgeBaseModel.deleted_time.is_(None),
+                    )
+                    .order_by(KnowledgeDocumentModel.updated_at.desc())
+                    .offset(offset)
+                    .limit(limit)
                 )
-                .where(
-                    KnowledgeDocumentModel.owner_id == owner_id,
-                    KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.deleted_time.is_(None),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .order_by(KnowledgeDocumentModel.updated_at.desc())
-                .offset(offset)
-                .limit(limit)
             )
-            return [_document(row) for row in rows]
+            # 文档页为空时直接返回，不额外发起版本表查询。
+            if not rows:
+                return []
+            # 使用单次批量窗口函数查询为本页全部文档装配最新版本摘要，消除前端 N+1 轮询。
+            latest_by_doc = await _load_latest_versions(session, owner_id, [row.id for row in rows])
+            return [_document(row, latest_version=latest_by_doc.get(row.id)) for row in rows]
 
     async def rename_document(
         self, owner_id: str, base_id: str, document_id: str, title: str, at: datetime
@@ -1715,7 +1726,9 @@ class KnowledgeRepository:
             if document is None:
                 return None
             document.title, document.updated_at = title, at
-            return _document(document)
+            # 在同一事务会话中装配最新版本摘要，保持重命名响应与 list/get 文档契约完全一致。
+            latest_by_doc = await _load_latest_versions(session, owner_id, (document.id,))
+            return _document(document, latest_version=latest_by_doc.get(document.id))
 
     async def delete_document(
         self, owner_id: str, base_id: str, document_id: str
@@ -2094,7 +2107,11 @@ def _base(model: KnowledgeBaseModel) -> KnowledgeBase:
     )
 
 
-def _document(model: KnowledgeDocumentModel) -> Document:
+def _document(
+    model: KnowledgeDocumentModel,
+    *,
+    latest_version: DocumentVersion | None = None,
+) -> Document:
     return Document(
         model.id,
         model.owner_id,
@@ -2105,7 +2122,46 @@ def _document(model: KnowledgeDocumentModel) -> Document:
         model.created_at,
         model.updated_at,
         model.deleted_time,
+        latest_version=latest_version,
     )
+
+
+async def _load_latest_versions(
+    session: AsyncSession, owner_id: str, document_ids: Sequence[str]
+) -> dict[str, DocumentVersion]:
+    """用单次批量 SQL 为给定文档集合取回各自最新版本，同时兼容 PostgreSQL 与 SQLite。"""
+    unique_ids = tuple(dict.fromkeys(document_ids))
+    if not unique_ids:
+        return {}
+    # 按 document_id 分区并按 created_at DESC, id DESC 排序取首条，
+    # 与 list_versions 顺序 100% 一致。
+    ranked_versions = (
+        select(
+            KnowledgeVersionModel.id.label("version_id"),
+            func.row_number()
+            .over(
+                partition_by=KnowledgeVersionModel.document_id,
+                order_by=(
+                    KnowledgeVersionModel.created_at.desc(),
+                    KnowledgeVersionModel.id.desc(),
+                ),
+            )
+            .label("row_num"),
+        )
+        .where(
+            KnowledgeVersionModel.owner_id == owner_id,
+            KnowledgeVersionModel.document_id.in_(unique_ids),
+        )
+        .subquery()
+    )
+    rows = await session.scalars(
+        select(KnowledgeVersionModel).join(
+            ranked_versions,
+            (KnowledgeVersionModel.id == ranked_versions.c.version_id)
+            & (ranked_versions.c.row_num == 1),
+        )
+    )
+    return {row.document_id: _version(row) for row in rows}
 
 
 def _version(model: KnowledgeVersionModel) -> DocumentVersion:

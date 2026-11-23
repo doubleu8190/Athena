@@ -105,6 +105,20 @@ class KnowledgeBase:
 
 
 @dataclass(frozen=True, slots=True)
+class DocumentVersion:
+    """文档历史版本的可见状态。"""
+
+    id: str
+    document_id: str
+    state: DocumentState
+    error_code: str | None
+    warnings: tuple[str, ...]
+    chunk_count: int
+    created_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class Document:
     """稳定文档身份及当前生效/待处理版本。"""
 
@@ -117,20 +131,8 @@ class Document:
     created_at: datetime
     updated_at: datetime
     deleted_time: datetime | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentVersion:
-    """文档历史版本的可见状态。"""
-
-    id: str
-    document_id: str
-    state: DocumentState
-    error_code: str | None
-    warnings: tuple[str, ...]
-    chunk_count: int
-    created_at: datetime
-    completed_at: datetime | None
+    # 文档列表或详情按需装配的最新版本摘要；保持默认 None 以兼容既有位置参数构造。
+    latest_version: DocumentVersion | None = None
 
 
 @dataclass(frozen=True, slots=True)

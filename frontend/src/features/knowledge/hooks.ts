@@ -105,7 +105,10 @@ export function useKnowledgeDocuments(
     enabled,
     refetchInterval: (queryState) =>
       queryState.state.data?.items.some(
-        (document) => document.pending_version_id !== null,
+        (document) =>
+          document.pending_version_id !== null ||
+          document.latest_version?.state === "queued" ||
+          document.latest_version?.state === "processing",
       )
         ? 3_000
         : false,
@@ -115,8 +118,10 @@ export function useKnowledgeDocuments(
 export function useKnowledgeVersions(
   baseId: string,
   documentId: string,
+  enabled = true,
 ) {
   return useQuery({
+    enabled,
     queryKey: knowledgeKeys.versions(baseId, documentId),
     queryFn: () => listKnowledgeVersions(baseId, documentId),
     refetchInterval: (queryState) => {

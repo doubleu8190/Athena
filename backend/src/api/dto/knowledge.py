@@ -42,16 +42,6 @@ class KnowledgeDocumentPatchRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
 
 
-class KnowledgeDocumentResponse(BaseModel):
-    id: str
-    knowledge_base_id: str
-    title: str
-    active_version_id: str | None
-    pending_version_id: str | None
-    created_at: str
-    updated_at: str
-
-
 class KnowledgeVersionResponse(BaseModel):
     id: str
     document_id: str
@@ -61,6 +51,17 @@ class KnowledgeVersionResponse(BaseModel):
     chunk_count: int
     created_at: str
     completed_at: str | None
+
+
+class KnowledgeDocumentResponse(BaseModel):
+    id: str
+    knowledge_base_id: str
+    title: str
+    active_version_id: str | None
+    pending_version_id: str | None
+    created_at: str
+    updated_at: str
+    latest_version: KnowledgeVersionResponse | None = None
 
 
 class KnowledgeDocumentListResponse(BaseModel):

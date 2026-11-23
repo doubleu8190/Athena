@@ -1,0 +1,213 @@
+@import "tailwindcss";
+
+/*
+ * Athena v2 现代企业清爽风 Design Tokens。
+ * 全站文字、状态色与三层可见性标签均按 WCAG 2.1 AA（>= 4.5:1）对比度约束配置。
+ */
+:root {
+  color-scheme: light;
+
+  /* 画布与表面层级 */
+  --bg-canvas: #ffffff;
+  --bg-subtle: #f6f7f8;
+  --bg-muted: #f1f3f5;
+  --bg-active: #e8ecea;
+
+  /* Athena 品牌深绿 */
+  --brand: #16362c;
+  --brand-hover: #1f6a52;
+  --brand-subtle: #ebf4f0;
+  --brand-border: #c3dfd2;
+  --brand-fg: #ffffff;
+
+  /* 文字层级 */
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-tertiary: #5e6775;
+  --text-placeholder: #6b7280;
+
+  /* 边框与聚焦 */
+  --border-subtle: #eaecef;
+  --border-default: #dde1e6;
+  --border-strong: #c5ccd4;
+  --ring-focus: #1f6a52;
+
+  /* 语义状态色 */
+  --success-fg: #15694b;
+  --success-bg: #ecfdf5;
+  --success-border: #a7f3d0;
+
+  --warning-fg: #9a4d06;
+  --warning-bg: #fffbeb;
+  --warning-border: #fde68a;
+
+  --danger-fg: #b42318;
+  --danger-bg: #fef3f2;
+  --danger-border: #fecdca;
+
+  --info-fg: #1d4ed8;
+  --info-bg: #eff6ff;
+  --info-border: #bfdbfe;
+
+  /* Toast 别名变量：供 Sonner 容器覆写 --success-bg 等同名变量时引用，规避同元素 CSS 变量自引用循环。 */
+  --toast-success-bg: var(--success-bg);
+  --toast-success-border: var(--success-border);
+  --toast-warning-bg: var(--warning-bg);
+  --toast-warning-border: var(--warning-border);
+  --toast-info-bg: var(--info-bg);
+  --toast-info-border: var(--info-border);
+
+  /* 三层可见性范围色（全公司 / 部门共享 / 个人） */
+  --scope-company-fg: #16362c;
+  --scope-company-bg: #ebf4f0;
+  --scope-company-border: #c3dfd2;
+
+  --scope-department-fg: #1d4ed8;
+  --scope-department-bg: #eff6ff;
+  --scope-department-border: #bfdbfe;
+
+  --scope-personal-fg: #374151;
+  --scope-personal-bg: #f3f4f6;
+  --scope-personal-border: #d1d5db;
+
+  /* Z-index 叠放阶梯 */
+  --z-sticky: 20;
+  --z-drawer: 40;
+  --z-dialog: 50;
+  --z-popover: 60;
+  --z-tooltip: 70;
+  --z-toast: 80;
+}
+
+/*
+ * 单一真实来源（@theme static）：
+ * 直接以字面量声明字体与阴影 Token，确保始终输出到 :root 供旧样式与原子类共享，
+ * 同时避免 :root 与 @theme inline 同名自引用导致的循环 CSS 变量。
+ */
+@theme static {
+  --font-sans: Inter, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --shadow-xs: 0 1px 2px rgba(17, 24, 39, 0.05);
+  --shadow-sm:
+    0 2px 6px rgba(17, 24, 39, 0.06),
+    0 1px 2px rgba(17, 24, 39, 0.04);
+  --shadow-md:
+    0 12px 32px -4px rgba(17, 24, 39, 0.12),
+    0 4px 12px -2px rgba(17, 24, 39, 0.06);
+}
+
+/* 将语义 CSS 变量映射为 Tailwind CSS v4 原子工具类（bg-brand、text-text-primary 等）。 */
+@theme inline {
+  --color-canvas: var(--bg-canvas);
+  --color-subtle: var(--bg-subtle);
+  --color-muted: var(--bg-muted);
+  --color-active: var(--bg-active);
+
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-subtle: var(--brand-subtle);
+  --color-brand-border: var(--brand-border);
+  --color-brand-fg: var(--brand-fg);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-text-placeholder: var(--text-placeholder);
+
+  --color-border-subtle: var(--border-subtle);
+  --color-border-default: var(--border-default);
+  --color-border-strong: var(--border-strong);
+  --color-ring-focus: var(--ring-focus);
+
+  --color-success: var(--success-fg);
+  --color-success-bg: var(--success-bg);
+  --color-success-border: var(--success-border);
+
+  --color-warning: var(--warning-fg);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-border: var(--warning-border);
+
+  --color-danger: var(--danger-fg);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-border: var(--danger-border);
+
+  --color-info: var(--info-fg);
+  --color-info-bg: var(--info-bg);
+  --color-info-border: var(--info-border);
+
+  --color-scope-company-fg: var(--scope-company-fg);
+  --color-scope-company-bg: var(--scope-company-bg);
+  --color-scope-company-border: var(--scope-company-border);
+
+  --color-scope-department-fg: var(--scope-department-fg);
+  --color-scope-department-bg: var(--scope-department-bg);
+  --color-scope-department-border: var(--scope-department-border);
+
+  --color-scope-personal-fg: var(--scope-personal-fg);
+  --color-scope-personal-bg: var(--scope-personal-bg);
+  --color-scope-personal-border: var(--scope-personal-border);
+}
+
+@layer base {
+  /* 全站统一键盘焦点可见环，绝不无替换地取消 focus outline。 */
+  :focus-visible {
+    outline: 2px solid var(--ring-focus);
+    outline-offset: 2px;
+  }
+
+  /* 兼容 Windows 高对比度模式（Forced Colors），使用系统高亮色呈现焦点环。 */
+  @media (forced-colors: active) {
+    :focus-visible {
+      outline: 2px solid Highlight;
+      outline-offset: 2px;
+    }
+  }
+
+  /* 尊重用户减少动态效果偏好，关闭非必要过渡与脉冲动画。 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+    }
+  }
+
+  /* 粗指针触控设备下保障可交互控件热区不小于 44px，避免误触。 */
+  @media (pointer: coarse) {
+    button:not([data-compact-control="true"]),
+    [role="button"]:not([data-compact-control="true"]),
+    [role="tab"],
+    [role="menuitem"],
+    [role="option"],
+    a[href] {
+      min-height: 44px;
+    }
+
+    button[data-icon-button="true"],
+    [role="button"][data-icon-button="true"] {
+      min-width: 44px;
+      min-height: 44px;
+    }
+
+    /* Switch / Checkbox 保持精致视觉本体，同时通过透明伪元素扩展触控点击区至 44×44px。 */
+    [role="switch"],
+    [role="checkbox"] {
+      position: relative;
+    }
+
+    [role="switch"]::after,
+    [role="checkbox"]::after {
+      content: "";
+      position: absolute;
+      inset: 50% auto auto 50%;
+      width: 44px;
+      height: 44px;
+      transform: translate(-50%, -50%);
+    }
+  }
+}

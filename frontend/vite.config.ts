@@ -1,8 +1,10 @@
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  plugins: [react()],
+  // 引入 Tailwind CSS v4 Vite 插件，与 React 插件并行编译原子样式与主题变量。
+  plugins: [tailwindcss(), react()],
   server: {
     proxy: {
       "/api": {

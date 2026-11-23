@@ -7,6 +7,8 @@ import {
 
 import { AuthProvider } from "../features/auth/AuthProvider";
 import { ErrorBoundary } from "../shared/ui/ErrorBoundary";
+import { Toaster } from "../shared/ui/Toast";
+import { TooltipProvider } from "../shared/ui/Tooltip";
 import { AppRoutes } from "./AppRoutes";
 import { queryClient as defaultQueryClient } from "./queryClient";
 
@@ -27,7 +29,11 @@ export function AppProviders({
 }: AppProvidersProps) {
   return (
     <QueryClientProvider client={client}>
-      <AuthProvider>{children}</AuthProvider>
+      {/* 全局挂载 TooltipProvider 与 Sonner Toaster，确保运行时与测试环境一致可用。 */}
+      <TooltipProvider>
+        <AuthProvider>{children}</AuthProvider>
+        <Toaster />
+      </TooltipProvider>
     </QueryClientProvider>
   );
 }

@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 
 import { App } from "./app/App";
+// 先引入 Design Tokens 与 Tailwind CSS v4，再加载旧样式桥接与各模块过渡样式。
+import "./shared/styles/tokens.css";
 import "./shared/styles/global.css";
 import "./features/auth/auth.css";
 import "./app/app.css";

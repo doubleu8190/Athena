@@ -464,7 +464,7 @@ describe("聊天技能选择与会话文件", () => {
     expect(
       screen.getByRole("button", { name: /本次技能/ }),
     ).toHaveTextContent("销售报表");
-    let skillDialog = await openSkillPicker(user);
+    const skillDialog = await openSkillPicker(user);
     expect(
       within(skillDialog).getByRole("checkbox", { name: /销售报表/ }),
     ).toBeChecked();

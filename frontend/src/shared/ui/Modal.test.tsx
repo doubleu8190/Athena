@@ -281,5 +281,67 @@ describe("Modal", () => {
     expect(programmaticButton).not.toHaveFocus();
     expect(fieldsetDisabledButton).not.toHaveFocus();
   });
+
+  it("嵌套或并发弹窗按非 LIFO 顺序卸载时保持滚动锁定，全部关闭后才恢复原始 overflow", async () => {
+    const user = userEvent.setup();
+    document.body.style.overflow = "auto";
+
+    function NonLifoModalHarness() {
+      const [firstOpen, setFirstOpen] = useState(true);
+      const [secondOpen, setSecondOpen] = useState(true);
+      return (
+        <>
+          <button onClick={() => setFirstOpen(false)} type="button">
+            先关弹窗 A
+          </button>
+          <Modal
+            onClose={() => setFirstOpen(false)}
+            open={firstOpen}
+            title="弹窗 A"
+          >
+            <p>A 内容</p>
+          </Modal>
+          <Modal
+            onClose={() => setSecondOpen(false)}
+            open={secondOpen}
+            title="弹窗 B"
+          >
+            <button onClick={() => setFirstOpen(false)} type="button">
+              从 B 中关闭 A
+            </button>
+            <button onClick={() => setSecondOpen(false)} type="button">
+              关闭 B
+            </button>
+          </Modal>
+        </>
+      );
+    }
+
+    try {
+      render(<NonLifoModalHarness />);
+      expect(document.body.style.overflow).toBe("hidden");
+
+      // 先关闭较早挂载的弹窗 A（非 LIFO），弹窗 B 仍打开，body 必须维持 hidden。
+      await user.click(
+        screen.getByRole("button", { name: "从 B 中关闭 A" }),
+      );
+      expect(
+        screen.queryByRole("dialog", { name: "弹窗 A" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("dialog", { name: "弹窗 B" }),
+      ).toBeInTheDocument();
+      expect(document.body.style.overflow).toBe("hidden");
+
+      // 最后一个活跃弹窗 B 关闭后，才恢复进入弹窗前的原始 overflow（"auto"）。
+      await user.click(screen.getByRole("button", { name: "关闭 B" }));
+      expect(
+        screen.queryByRole("dialog", { name: "弹窗 B" }),
+      ).not.toBeInTheDocument();
+      expect(document.body.style.overflow).toBe("auto");
+    } finally {
+      document.body.style.overflow = "";
+    }
+  });
 });
 

@@ -419,6 +419,30 @@ export function runResultIsStale(candidate: Run, current: Run): boolean {
   return false;
 }
 
+// 校验 SSE 快照是否满足单调推进，拒绝用过期序号、取消前状态或非终态覆盖已有更前进的 Run 缓存。
+export function shouldApplyStreamSnapshot(
+  existing: Run,
+  snapshot: RunSnapshotPayload,
+): boolean {
+  // 1. 终态不可逆：缓存已到达 completed / failed / cancelled 后禁止任何快照回写。
+  if (isTerminalRunStatus(existing.status)) {
+    return false;
+  }
+  // 2. 取消中不可回退：进入 cancelling 后拒绝旧的 running/queued/waiting_* 快照。
+  if (
+    existing.status === "cancelling" &&
+    snapshot.status !== "cancelling" &&
+    !isTerminalRunStatus(snapshot.status)
+  ) {
+    return false;
+  }
+  // 3. 同代次事件序号单调不减，低于现有缓存序号的旧快照一律丢弃。
+  if (snapshot.event_sequence < existing.event_sequence) {
+    return false;
+  }
+  return true;
+}
+
 export function selectRunProjection(
   currentRunId: string | null,
   latestRun: Run | null,

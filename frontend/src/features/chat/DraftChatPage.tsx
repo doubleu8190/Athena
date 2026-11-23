@@ -1,8 +1,9 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
+import { SelectDropdown } from "../../shared/ui/SelectDropdown";
 import { projectErrorMessage } from "../projects/errorMessages";
 import { useProject, useProjectDirectory } from "../projects/hooks";
 import { useCreateSessionMutation } from "../sessions/hooks";
@@ -50,7 +51,7 @@ export function DraftChatPage() {
     "idle" | "creating" | "uploading" | "submitting"
   >("idle");
 
-  const allProjects = projects.data ?? [];
+  const allProjects = useMemo(() => projects.data ?? [], [projects.data]);
   const selectedProject = allProjects.find(
     (project) => project.id === selectedProjectId,
   );
@@ -59,19 +60,25 @@ export function DraftChatPage() {
     (selectedProjectQuery.data?.id === selectedProjectId
       ? selectedProjectQuery.data.name
       : null);
-  const projectOptions = [
-    { id: "", name: "未归属项目" },
-    ...allProjects.map((project) => ({ id: project.id, name: project.name })),
-  ];
-  if (
-    selectedProjectQuery.data &&
-    !allProjects.some((project) => project.id === selectedProjectQuery.data?.id)
-  ) {
-    projectOptions.push({
-      id: selectedProjectQuery.data.id,
-      name: selectedProjectQuery.data.name,
-    });
-  }
+  const projectOptions = useMemo(() => {
+    const items = [
+      { label: "未归属项目", value: "" },
+      ...allProjects.map((project) => ({
+        label: project.name,
+        value: project.id,
+      })),
+    ];
+    if (
+      selectedProjectQuery.data &&
+      !allProjects.some((project) => project.id === selectedProjectQuery.data?.id)
+    ) {
+      items.push({
+        label: selectedProjectQuery.data.name,
+        value: selectedProjectQuery.data.id,
+      });
+    }
+    return items;
+  }, [allProjects, selectedProjectQuery.data]);
 
   const handleSubmit = async () => {
     const text = draft.trim();
@@ -232,11 +239,15 @@ export function DraftChatPage() {
         </div>
         <div className="chat-context-select">
           <span>更改项目</span>
-          <ProjectDropdown
+          <SelectDropdown
+            classPrefix="chat-project-dropdown"
             disabled={!contextReady || projects.isPending}
             id={selectId}
+            label="更改项目"
+            listboxLabel="项目"
             onChange={(projectId) => chooseProject(projectId || null)}
             options={projectOptions}
+            placeholder="未归属项目"
             value={selectedProjectId ?? ""}
           />
         </div>
@@ -398,163 +409,6 @@ export function DraftChatPage() {
           </button>
         </div>
       </form>
-    </div>
-  );
-}
-
-interface ProjectDropdownProps {
-  disabled: boolean;
-  id: string;
-  onChange: (projectId: string) => void;
-  options: Array<{ id: string; name: string }>;
-  value: string;
-}
-
-function ProjectDropdown({
-  disabled,
-  id,
-  onChange,
-  options,
-  value,
-}: ProjectDropdownProps) {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const [open, setOpen] = useState(false);
-  const selectedIndex = Math.max(
-    0,
-    options.findIndex((option) => option.id === value),
-  );
-  const [activeProjectId, setActiveProjectId] = useState(
-    () => options[selectedIndex]?.id ?? "",
-  );
-  const effectiveActiveProjectId =
-    options.find((option) => option.id === activeProjectId)?.id ??
-    options[selectedIndex]?.id ??
-    options[0]?.id ??
-    "";
-  const effectiveActiveIndex = Math.max(
-    0,
-    options.findIndex((option) => option.id === effectiveActiveProjectId),
-  );
-  const selected = options[selectedIndex];
-  const activeOptionId = `${id}-option-${effectiveActiveIndex}`;
-
-  useEffect(() => {
-    if (!options.some((option) => option.id === activeProjectId)) {
-      // 目录刷新移除了当前项时，回到已选项目，避免 Enter 落到无效项目。
-      setActiveProjectId(options[selectedIndex]?.id ?? options[0]?.id ?? "");
-    }
-  }, [activeProjectId, options, selectedIndex]);
-
-  useEffect(() => {
-    if (disabled && open) setOpen(false);
-  }, [disabled, open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const activeOption = rootRef.current?.querySelector<HTMLElement>(
-      `[id="${activeOptionId}"]`,
-    );
-    activeOption?.scrollIntoView?.({ block: "nearest" });
-  }, [activeOptionId, open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    // 只在点击控件外部时收起菜单，内部选择仍由选项自身处理。
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [open]);
-
-  const openAt = (index: number) => {
-    const boundedIndex = Math.min(options.length - 1, Math.max(0, index));
-    setActiveProjectId(options[boundedIndex]?.id ?? options[selectedIndex]?.id ?? "");
-    setOpen(true);
-  };
-
-  return (
-    <div className="chat-project-dropdown" ref={rootRef}>
-      <button
-        aria-activedescendant={open ? activeOptionId : undefined}
-        aria-controls={`${id}-listbox`}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        aria-label="更改项目"
-        className="chat-project-dropdown-trigger"
-        disabled={disabled}
-        id={id}
-        role="combobox"
-        onClick={() => (open ? setOpen(false) : openAt(selectedIndex))}
-        onBlur={(event) => {
-          if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
-            setOpen(false);
-          }
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown") {
-            event.preventDefault();
-            openAt(open ? effectiveActiveIndex + 1 : selectedIndex);
-          } else if (event.key === "ArrowUp") {
-            event.preventDefault();
-            openAt(open ? effectiveActiveIndex - 1 : selectedIndex);
-          } else if (event.key === "Home" && open) {
-            event.preventDefault();
-            setActiveProjectId(options[0]?.id ?? "");
-          } else if (event.key === "End" && open) {
-            event.preventDefault();
-            setActiveProjectId(options[options.length - 1]?.id ?? "");
-          } else if ((event.key === "Enter" || event.key === " ") && open) {
-            event.preventDefault();
-            onChange(effectiveActiveProjectId);
-            setOpen(false);
-          } else if (event.key === "Escape" && open) {
-            event.preventDefault();
-            setOpen(false);
-          }
-        }}
-        type="button"
-      >
-        <span>{selected?.name ?? "未归属项目"}</span>
-        <Icon className="chat-project-dropdown-chevron" name="chevron" size={12} />
-      </button>
-      {open ? (
-        <div
-          aria-label="项目"
-          className="chat-project-dropdown-menu"
-          id={`${id}-listbox`}
-          role="listbox"
-        >
-          {options.map((option, index) => (
-            <button
-              aria-selected={option.id === value}
-              className="chat-project-dropdown-option"
-              data-active={option.id === effectiveActiveProjectId}
-              id={`${id}-option-${index}`}
-              key={option.id || "unassigned"}
-              onClick={() => {
-                onChange(option.id);
-                setOpen(false);
-              }}
-              onMouseDown={(event) => {
-                // 保持焦点在触发器，选择后仍可继续使用键盘操作。
-                event.preventDefault();
-              }}
-              onMouseMove={() => setActiveProjectId(option.id)}
-              role="option"
-              tabIndex={-1}
-              type="button"
-            >
-              <span className="chat-project-dropdown-option-label">{option.name}</span>
-              {option.id === value ? (
-                <span aria-hidden="true" className="chat-project-dropdown-check">
-                  ✓
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { makeMessage } from "../../test/fixtures";
-import { mergeConversationMessages } from "./model";
+import { makeMessage, makeRun } from "../../test/fixtures";
+import {
+  mergeConversationMessages,
+  shouldApplyStreamSnapshot,
+  type RunSnapshotPayload,
+} from "./model";
 
 describe("会话消息合并", () => {
   it("按 sequence 跨页去重，并让当前 Run 快照覆盖同序号历史文本", () => {
@@ -140,6 +144,106 @@ describe("会话消息合并", () => {
         (part) => part.type === "text" && part.text === "旧的历史文本",
       ),
     ).toBe(false);
+  });
+});
+
+function makeSnapshot(
+  overrides: Partial<RunSnapshotPayload> = {},
+): RunSnapshotPayload {
+  return {
+    event_sequence: 5,
+    events: [],
+    events_after_sequence: null,
+    events_complete: true,
+    messages: [],
+    messages_before_sequence: null,
+    messages_complete: true,
+    report_message_id: null,
+    status: "running",
+    ...overrides,
+  };
+}
+
+describe("SSE 快照单调性保护", () => {
+  it("已有终态缓存时拒绝任何后续快照回退覆盖", () => {
+    const completed = makeRun({
+      event_sequence: 5,
+      id: "run-monotonic-1",
+      session_id: "session-1",
+      status: "completed",
+    });
+    expect(
+      shouldApplyStreamSnapshot(
+        completed,
+        makeSnapshot({ event_sequence: 6, status: "running" }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldApplyStreamSnapshot(
+        completed,
+        makeSnapshot({ event_sequence: 6, status: "completed" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("进入 cancelling 后拒绝旧的 running/queued 快照，但允许进入终态", () => {
+    const cancelling = makeRun({
+      event_sequence: 5,
+      id: "run-monotonic-2",
+      session_id: "session-1",
+      status: "cancelling",
+    });
+    expect(
+      shouldApplyStreamSnapshot(
+        cancelling,
+        makeSnapshot({ event_sequence: 6, status: "running" }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldApplyStreamSnapshot(
+        cancelling,
+        makeSnapshot({ event_sequence: 6, status: "queued" }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldApplyStreamSnapshot(
+        cancelling,
+        makeSnapshot({ event_sequence: 6, status: "cancelled" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldApplyStreamSnapshot(
+        cancelling,
+        makeSnapshot({ event_sequence: 5, status: "cancelling" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("同代次事件序号倒退时拒绝覆盖，单调推进时放行", () => {
+    const running = makeRun({
+      event_sequence: 5,
+      id: "run-monotonic-3",
+      session_id: "session-1",
+      status: "running",
+    });
+    expect(
+      shouldApplyStreamSnapshot(
+        running,
+        makeSnapshot({ event_sequence: 4, status: "running" }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldApplyStreamSnapshot(
+        running,
+        makeSnapshot({ event_sequence: 5, status: "waiting_for_subagents" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldApplyStreamSnapshot(
+        running,
+        makeSnapshot({ event_sequence: 6, status: "completed" }),
+      ),
+    ).toBe(true);
   });
 });
 

@@ -1,9 +1,11 @@
 import { useRef, type RefObject } from "react";
 
+import { formatBytes } from "../lib/format";
 import { Icon } from "./Icons";
 
 interface WorkspaceFilePickerProps {
   accept?: string;
+  buttonTrigger?: boolean;
   describedBy?: string;
   disabled?: boolean;
   file: File | null;
@@ -17,18 +19,9 @@ interface WorkspaceFilePickerProps {
   triggerLabel: string;
 }
 
-function formatFileSize(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export function WorkspaceFilePicker({
   accept,
+  buttonTrigger = false,
   describedBy,
   disabled = false,
   file,
@@ -69,20 +62,34 @@ export function WorkspaceFilePicker({
           onChange(event.target.files?.[0] ?? null)
         }
         ref={resolvedInputRef}
+        tabIndex={buttonTrigger ? -1 : undefined}
         type="file"
       />
       <div
         className={`workspace-file-picker${disabled ? " is-disabled" : ""}`}
         data-invalid={invalid ? "true" : undefined}
       >
-        <label
-          aria-disabled={disabled || undefined}
-          className="workspace-file-picker-trigger"
-          htmlFor={id}
-        >
-          <Icon name="upload" size={14} />
-          {triggerLabel}
-        </label>
+        {buttonTrigger ? (
+          // 外部已有显式 <label htmlFor={id}> 时使用按钮触发器，避免重复 Tab 停留在隐藏 input 上。
+          <button
+            className="workspace-file-picker-trigger"
+            disabled={disabled}
+            onClick={() => resolvedInputRef.current?.click()}
+            type="button"
+          >
+            <Icon name="upload" size={14} />
+            {triggerLabel}
+          </button>
+        ) : (
+          <label
+            aria-disabled={disabled || undefined}
+            className="workspace-file-picker-trigger"
+            htmlFor={id}
+          >
+            <Icon name="upload" size={14} />
+            {triggerLabel}
+          </label>
+        )}
         <span
           aria-live="polite"
           className={
@@ -93,7 +100,7 @@ export function WorkspaceFilePicker({
           title={file?.name}
         >
           {file
-            ? `${file.name} (${formatFileSize(file.size)})`
+            ? `${file.name} (${formatBytes(file.size)})`
             : placeholder}
         </span>
         {file ? (

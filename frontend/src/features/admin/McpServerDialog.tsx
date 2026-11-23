@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
+import { FieldError } from "../../shared/ui/FieldError";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import { adminErrorMessage, isMcpConflict } from "./errorMessages";
@@ -30,20 +31,6 @@ function newSecretRow(): McpSecretRow {
   };
 }
 
-function FieldError({
-  error,
-  id,
-}: {
-  error?: string;
-  id: string;
-}) {
-  return error ? (
-    <p className="field-error" id={id} role="alert">
-      {error}
-    </p>
-  ) : null;
-}
-
 interface McpServerDialogProps {
   onClose: () => void;
   open: boolean;
@@ -60,6 +47,8 @@ export function McpServerDialog({
   const detail = useMcpServer(serverId, open && editing);
   const createMutation = useCreateMcpServerMutation();
   const updateMutation = useUpdateMcpServerMutation(serverId ?? "");
+  const { reset: resetCreateMutation } = createMutation;
+  const { reset: resetUpdateMutation } = updateMutation;
   const [values, setValues] = useState<McpServerFormValues>(
     mcpServerForm,
   );
@@ -85,15 +74,15 @@ export function McpServerDialog({
     }
     setErrors({});
     setRequestError(null);
-    createMutation.reset();
-    updateMutation.reset();
+    resetCreateMutation();
+    resetUpdateMutation();
     submitLock.current = false;
     if (!serverId) {
       setValues(mcpServerForm());
       setConfigVersion(null);
       setLoadedIdentity("create");
     }
-  }, [open, serverId]);
+  }, [open, resetCreateMutation, resetUpdateMutation, serverId]);
 
   useEffect(() => {
     if (

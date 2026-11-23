@@ -1,9 +1,9 @@
 import { useId, useRef, useState } from "react";
 
+import { newRequestId } from "../../shared/lib/requestId";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
-import { newRequestId } from "../chat/requestId";
 import { skillErrorMessage } from "./errorMessages";
 import { useImportSkillMutation } from "./hooks";
 import { validateSkillZip } from "./model";

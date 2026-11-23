@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import { getAuthIdentityEpoch } from "../../shared/api/client";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
+import { FieldError } from "../../shared/ui/FieldError";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import {
@@ -28,14 +29,6 @@ import {
   type SubagentFormValues,
 } from "./model";
 
-function FieldError({ error, id }: { error?: string; id: string }) {
-  return error ? (
-    <p className="field-error" id={id} role="alert">
-      {error}
-    </p>
-  ) : null;
-}
-
 interface SubagentDialogProps {
   onClose: () => void;
   open: boolean;
@@ -50,10 +43,13 @@ export function SubagentDialog({
   const formId = useId();
   const editing = Boolean(subagentId);
   const detail = useSubagent(open && editing ? (subagentId ?? null) : null);
-  const models = useModelProfiles();
-  const availableTools = useSubagentAvailableTools();
+  // 仅在弹窗打开时按需拉取模型与可选工具目录，避免进入管理页未打开弹窗即触发全量请求。
+  const models = useModelProfiles(open);
+  const availableTools = useSubagentAvailableTools(open);
   const createMutation = useCreateSubagentMutation();
   const updateMutation = useUpdateSubagentMutation(subagentId ?? "");
+  const { reset: resetCreateMutation } = createMutation;
+  const { reset: resetUpdateMutation } = updateMutation;
 
   const [values, setValues] = useState<SubagentFormValues>(() =>
     subagentForm(),
@@ -75,13 +71,13 @@ export function SubagentDialog({
     setErrors({});
     setRequestError(null);
     setVersionConflict(false);
-    createMutation.reset();
-    updateMutation.reset();
+    resetCreateMutation();
+    resetUpdateMutation();
     submitLock.current = false;
     if (!editing) {
       setValues(subagentForm());
     }
-  }, [editing, open]);
+  }, [editing, open, resetCreateMutation, resetUpdateMutation]);
 
   useEffect(() => {
     if (!open || !editing || !detail.data) {

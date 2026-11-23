@@ -1,11 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
-import { formatDateTime } from "../../shared/lib/format";
+import { formatBytes, formatDateTime } from "../../shared/lib/format";
+import { newRequestId } from "../../shared/lib/requestId";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
+import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { Modal } from "../../shared/ui/Modal";
-import { MarkdownContent } from "../chat/MarkdownContent";
-import { newRequestId } from "../chat/requestId";
+import { SelectDropdown } from "../../shared/ui/SelectDropdown";
+import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
 import {
   isSkillRevisionConflict,
   skillErrorMessage,
@@ -66,16 +68,6 @@ function mergeVersions(
         .map((version) => [version.id, version] as const),
     ).values(),
   ).sort((left, right) => right.ordinal - left.ordinal);
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function DependencyBadge({ check }: { check: DependencyCheck | null }) {
@@ -200,207 +192,6 @@ function VersionContent({ version }: { version: SkillVersion }) {
   );
 }
 
-interface VersionOption {
-  dependencySatisfied: boolean;
-  id: string;
-  label: string;
-}
-
-interface VersionSelectDropdownProps {
-  disabled: boolean;
-  id: string;
-  onChange: (versionId: string) => void;
-  options: VersionOption[];
-  value: string;
-}
-
-// 自定义版本下拉框：视觉与交互对齐 DraftChatPage 的 combobox + listbox 模式
-function VersionSelectDropdown({
-  disabled,
-  id,
-  onChange,
-  options,
-  value,
-}: VersionSelectDropdownProps) {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const [open, setOpen] = useState(false);
-  const selectedIndex = Math.max(
-    0,
-    options.findIndex((option) => option.id === value),
-  );
-  const [activeId, setActiveId] = useState(
-    () => options[selectedIndex]?.id ?? "",
-  );
-  const effectiveActiveId =
-    options.find((option) => option.id === activeId)?.id ??
-    options[selectedIndex]?.id ??
-    options[0]?.id ??
-    "";
-  const effectiveActiveIndex = Math.max(
-    0,
-    options.findIndex((option) => option.id === effectiveActiveId),
-  );
-  const selected = options.find((option) => option.id === value);
-  const activeOptionId = `${id}-option-${effectiveActiveIndex}`;
-
-  useEffect(() => {
-    if (!options.some((option) => option.id === activeId)) {
-      // 版本列表刷新后若原激活项失效，回退到当前已选版本。
-      setActiveId(options[selectedIndex]?.id ?? options[0]?.id ?? "");
-    }
-  }, [activeId, options, selectedIndex]);
-
-  useEffect(() => {
-    if (disabled && open) {
-      setOpen(false);
-    }
-  }, [disabled, open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const activeOption = rootRef.current?.querySelector<HTMLElement>(
-      `[id="${activeOptionId}"]`,
-    );
-    activeOption?.scrollIntoView?.({ block: "nearest" });
-  }, [activeOptionId, open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    // 点击浮层外部时收起菜单，内部选项点击由选项自身处理。
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () =>
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [open]);
-
-  const openAt = (index: number) => {
-    if (options.length === 0) {
-      return;
-    }
-    const boundedIndex = Math.min(options.length - 1, Math.max(0, index));
-    setActiveId(
-      options[boundedIndex]?.id ?? options[selectedIndex]?.id ?? "",
-    );
-    setOpen(true);
-  };
-
-  return (
-    <div className="admin-skill-dropdown" ref={rootRef}>
-      <button
-        aria-activedescendant={
-          open && options.length > 0 ? activeOptionId : undefined
-        }
-        aria-controls={`${id}-listbox`}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        aria-label="当前版本"
-        className="admin-skill-dropdown-trigger"
-        data-modal-escape-owner={open ? "self" : undefined}
-        disabled={disabled}
-        id={id}
-        onBlur={(event) => {
-          if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
-            setOpen(false);
-          }
-        }}
-        onClick={() => (open ? setOpen(false) : openAt(selectedIndex))}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown") {
-            event.preventDefault();
-            openAt(open ? effectiveActiveIndex + 1 : selectedIndex);
-          } else if (event.key === "ArrowUp") {
-            event.preventDefault();
-            openAt(open ? effectiveActiveIndex - 1 : selectedIndex);
-          } else if (event.key === "Home" && open && options.length > 0) {
-            event.preventDefault();
-            setActiveId(options[0]?.id ?? "");
-          } else if (event.key === "End" && open && options.length > 0) {
-            event.preventDefault();
-            setActiveId(options[options.length - 1]?.id ?? "");
-          } else if (
-            (event.key === "Enter" || event.key === " ") &&
-            open &&
-            effectiveActiveId
-          ) {
-            event.preventDefault();
-            onChange(effectiveActiveId);
-            setOpen(false);
-          } else if (event.key === "Escape" && open) {
-            event.preventDefault();
-            setOpen(false);
-          }
-        }}
-        role="combobox"
-        type="button"
-      >
-        <span className="admin-skill-dropdown-value">
-          {selected?.label ?? "请选择版本"}
-        </span>
-        <Icon
-          className="admin-skill-dropdown-chevron"
-          name="chevron"
-          size={12}
-        />
-      </button>
-      {open ? (
-        <div
-          aria-label="当前版本列表"
-          className="admin-skill-dropdown-menu"
-          id={`${id}-listbox`}
-          role="listbox"
-        >
-          {options.map((option, index) => (
-            <button
-              aria-selected={option.id === value}
-              className="admin-skill-dropdown-option"
-              data-active={option.id === effectiveActiveId}
-              id={`${id}-option-${index}`}
-              key={option.id}
-              onClick={() => {
-                onChange(option.id);
-                setOpen(false);
-              }}
-              onMouseDown={(event) => {
-                // 保持焦点在触发器，选择后仍可继续使用键盘导航。
-                event.preventDefault();
-              }}
-              onMouseMove={() => setActiveId(option.id)}
-              role="option"
-              tabIndex={-1}
-              type="button"
-            >
-              <span className="admin-skill-dropdown-option-label">
-                {option.label}
-              </span>
-              {!option.dependencySatisfied ? (
-                <span className="admin-skill-dropdown-option-badge">
-                  依赖未满足
-                </span>
-              ) : null}
-              {option.id === value ? (
-                <span
-                  aria-hidden="true"
-                  className="admin-skill-dropdown-check"
-                >
-                  ✓
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function VersionUpload({
   disabled,
   onUploaded,
@@ -421,16 +212,6 @@ function VersionUpload({
   const [notice, setNotice] = useState<string | null>(null);
   const requestIdRef = useRef<string | null>(null);
   const mutation = useUploadSkillVersionMutation(skillId);
-
-  const clearFile = () => {
-    setFile(null);
-    setError(null);
-    setNotice(null);
-    requestIdRef.current = null;
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-  };
 
   const upload = async () => {
     const validation = validateSkillZip(file);
@@ -478,60 +259,26 @@ function VersionUpload({
           新包 slug 必须为 {slug}。上传只新增不可变版本，不自动切换。
         </p>
       </div>
-      {/* 显式展示文件选择器顶部标签，与右侧“版本标签（可选）”输入框保持同高对齐 */}
+      {/* 复用通用文件选择器并启用按钮触发模式，保持顶部标签对齐与跳过隐藏 input 的键盘焦点序 */}
       <div className="workspace-field admin-skill-file-picker-field">
-        <label htmlFor={inputId}>
-          选择新版本 ZIP
-        </label>
-        <input
+        <label htmlFor={inputId}>选择新版本 ZIP</label>
+        <WorkspaceFilePicker
           accept=".zip,application/zip"
-          className="sr-only"
+          buttonTrigger
           disabled={disabled || mutation.isPending}
+          file={file}
           id={inputId}
-          onChange={(event) => {
-            setFile(event.target.files?.[0] ?? null);
+          inputRef={fileInputRef}
+          label="选择新版本 ZIP"
+          onChange={(selected) => {
+            setFile(selected);
             setError(null);
             setNotice(null);
             requestIdRef.current = null;
           }}
-          ref={fileInputRef}
-          tabIndex={-1}
-          type="file"
+          placeholder="未选择 .zip 文件"
+          triggerLabel="选择 ZIP 文件"
         />
-        {/* 自定义文件选择器：保持原生 input 无障碍关联，统一 38px 高度与清除交互 */}
-        <div className="admin-skill-file-picker">
-          <button
-            className="admin-skill-file-picker-trigger"
-            disabled={disabled || mutation.isPending}
-            onClick={() => fileInputRef.current?.click()}
-            type="button"
-          >
-            <Icon name="upload" size={14} />
-            选择 ZIP 文件
-          </button>
-          <span
-            className={
-              file
-                ? "admin-skill-file-picker-name"
-                : "admin-skill-file-picker-placeholder"
-            }
-          >
-            {file
-              ? `${file.name} (${formatBytes(file.size)})`
-              : "未选择 .zip 文件"}
-          </span>
-          {file ? (
-            <button
-              aria-label="清除已选文件"
-              className="admin-skill-file-picker-clear"
-              disabled={disabled || mutation.isPending}
-              onClick={clearFile}
-              type="button"
-            >
-              <Icon name="close" size={13} />
-            </button>
-          ) : null}
-        </div>
       </div>
       <label className="workspace-field" htmlFor={labelId}>
         <span>版本标签（可选）</span>
@@ -893,9 +640,12 @@ export function AdminSkillDetailDialog({
                     <span className="admin-skill-dirty-badge">未保存变更</span>
                   ) : null}
                 </div>
-                <VersionSelectDropdown
+                <SelectDropdown
+                  classPrefix="admin-skill-dropdown"
                   disabled={pending}
                   id={versionSelectId}
+                  label="当前版本"
+                  listboxLabel="当前版本列表"
                   onChange={(nextVersionId) => {
                     setForm((current) =>
                       current
@@ -912,23 +662,26 @@ export function AdminSkillDetailDialog({
                     ...(!selectedVersion && form.currentVersionId
                       ? [
                           {
-                            dependencySatisfied: selectedDependencySatisfied,
-                            id: form.currentVersionId,
+                            badge: selectedDependencySatisfied
+                              ? undefined
+                              : "依赖未满足",
                             label: `${
                               detail.data.current_version_label ??
                               form.currentVersionId
                             } · 正在读取版本详情`,
+                            value: form.currentVersionId,
                           },
                         ]
                       : []),
                     ...versions.map((version) => ({
-                      dependencySatisfied: dependencySatisfied(
-                        version.dependency_check,
-                      ),
-                      id: version.id,
+                      badge: dependencySatisfied(version.dependency_check)
+                        ? undefined
+                        : "依赖未满足",
                       label: versionLabel(version),
+                      value: version.id,
                     })),
                   ]}
+                  placeholder="请选择版本"
                   value={form.currentVersionId}
                 />
                 <small>

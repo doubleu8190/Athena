@@ -524,13 +524,15 @@
     border-color 140ms ease;
 }
 
-.workspace-file-picker-trigger:hover {
+.workspace-file-picker-trigger:hover:not(:disabled) {
   border-color: #b8d1c3;
   background: #e8f3ec;
 }
 
+.workspace-file-picker-trigger:disabled,
 .workspace-file-picker-trigger[aria-disabled="true"] {
   cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .workspace-file-picker-placeholder,

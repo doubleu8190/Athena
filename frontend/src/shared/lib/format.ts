@@ -30,3 +30,14 @@ export function formatShortDateTime(value: string): string {
   return date ? SHORT_DATE_TIME_FORMATTER.format(date) : "时间未知";
 }
 
+// 统一文件体积格式化口径，与既有 B / KB / MB 文案和断言保持一致。
+export function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+

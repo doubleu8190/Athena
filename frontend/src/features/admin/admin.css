@@ -1632,94 +1632,17 @@
   min-width: 0;
 }
 
-/* 自定义 ZIP 文件选择器：与版本标签输入框、上传按钮统一为 38px 高度并底部对齐 */
-.admin-skill-file-picker {
-  display: flex;
-  min-width: 0;
+/* 复用 WorkspaceFilePicker 时在版本上传行内与标签输入框、上传按钮保持 38px 等高对齐 */
+.admin-skill-version-upload .workspace-file-picker {
   min-height: 38px;
-  align-items: center;
-  gap: 9px;
   padding: 3px 8px 3px 4px;
-  border: 1px solid #d5d2c8;
-  border-radius: 9px;
-  background: #fffefa;
-  transition: border-color 140ms ease;
 }
 
-.admin-skill-file-picker:hover {
-  border-color: #c7d4cb;
-}
-
-.admin-skill-file-picker-trigger {
-  display: inline-flex;
-  flex: 0 0 auto;
+.admin-skill-version-upload .workspace-file-picker-trigger {
   min-height: 30px;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  border: 1px solid #d7e2da;
-  border-radius: 6px;
-  background: #f2f7f3;
-  color: var(--green);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background-color 140ms ease,
-    border-color 140ms ease;
 }
 
-.admin-skill-file-picker-trigger:hover:not(:disabled) {
-  border-color: #b8d1c3;
-  background: #e8f3ec;
-}
-
-.admin-skill-file-picker-trigger:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.admin-skill-file-picker-placeholder,
-.admin-skill-file-picker-name {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-skill-file-picker-placeholder {
-  color: var(--muted-2);
-}
-
-.admin-skill-file-picker-name {
-  color: var(--ink-2);
-  font-weight: 500;
-}
-
-.admin-skill-file-picker-clear {
-  display: inline-flex;
-  flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted-2);
-  cursor: pointer;
-}
-
-.admin-skill-file-picker-clear:hover:not(:disabled) {
-  background: #f0ede6;
-  color: var(--ink-2);
-}
-
-.admin-skill-version-upload .workspace-field input {
+.admin-skill-version-upload .workspace-field input:not(.workspace-file-picker-input) {
   min-height: 38px;
 }
 

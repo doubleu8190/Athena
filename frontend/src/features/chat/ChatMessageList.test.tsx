@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import * as formatLib from "../../shared/lib/format";
 import { makeMessage } from "../../test/fixtures";
 import {
   ChatMessageList,
@@ -244,5 +245,55 @@ describe("会话消息滚动", () => {
     expect(
       screen.queryByRole("button", { name: "回到最新" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("流式 transientText 连续更新时已有历史消息行保持记忆化零重渲染", () => {
+    const formatDateTimeSpy = vi.spyOn(formatLib, "formatDateTime");
+    const messages = [
+      makeMessage({
+        id: "memo-1",
+        parts: [{ text: "历史用户消息", type: "text" }],
+        role: "user",
+        sequence: 1,
+        session_id: SESSION_ID,
+      }),
+      makeMessage({
+        id: "memo-2",
+        parts: [{ text: "历史助手回答", type: "text" }],
+        role: "assistant",
+        sequence: 2,
+        session_id: SESSION_ID,
+      }),
+    ];
+    const onLoadMore = vi.fn();
+    const onRetry = vi.fn();
+
+    const { rerender } = render(
+      makeMessageList({
+        messages,
+        onLoadMore,
+        onRetry,
+        transientText: "",
+      }),
+    );
+    expect(formatDateTimeSpy).toHaveBeenCalledTimes(2);
+    formatDateTimeSpy.mockClear();
+
+    for (const chunk of ["流式片段 1", "流式片段 1+2", "流式片段 1+2+3"]) {
+      rerender(
+        makeMessageList({
+          messages,
+          onLoadMore,
+          onRetry,
+          transientText: chunk,
+        }),
+      );
+    }
+
+    expect(
+      screen.getByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("流式片段 1+2+3");
+    // 历史消息数组引用未变时，流式更新不得触发历史 MessageRow 重渲染。
+    expect(formatDateTimeSpy).not.toHaveBeenCalled();
   });
 });

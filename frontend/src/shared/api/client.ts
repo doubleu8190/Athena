@@ -56,7 +56,7 @@ interface ApiRequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
 }
 
-interface ApiMultipartOptions extends Omit<RequestInit, "body"> {}
+type ApiMultipartOptions = Omit<RequestInit, "body">;
 
 interface PerformedRequest {
   identityEpoch: number;

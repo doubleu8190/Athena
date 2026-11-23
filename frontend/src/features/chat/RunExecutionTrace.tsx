@@ -205,7 +205,8 @@ export function RunExecutionTrace({
   runId,
   sessionId,
 }: RunExecutionTraceProps) {
-  const calls = useRunToolCalls(sessionId, runId);
+  // 仅在执行轨迹面板展开时请求工具调用列表，收起态或窄屏默认隐藏时不发提前请求。
+  const calls = useRunToolCalls(sessionId, runId, open);
   const items = (calls.data?.pages ?? []).flatMap((page) => page.items);
   const uniqueItems = Array.from(
     new Map(items.map((item) => [item.ordinal, item])).values(),

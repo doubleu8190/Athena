@@ -56,9 +56,6 @@ function WorkspaceSidebar() {
     return null;
   }
 
-  const name = getDisplayName(user.display_name, user.email);
-  const initial = getInitial(name);
-  const roleLabel = user.role === "admin" ? "管理员" : "普通用户";
   const isAdminPath = pathname.startsWith("/admin");
   const isProjectPath = pathname.startsWith("/projects");
   const isKnowledgePath = pathname.startsWith("/knowledge");

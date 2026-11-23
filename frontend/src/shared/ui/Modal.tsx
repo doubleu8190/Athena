@@ -36,6 +36,8 @@ const ModalDepthContext = createContext(-1);
 const modalStack: ModalLayer[] = [];
 const modalStackListeners = new Set<() => void>();
 let nextModalOrder = 0;
+// 记录首个弹窗打开前页面的原始 overflow；仅当所有活跃弹窗都关闭时才恢复，避免嵌套弹窗非 LIFO 卸载提前解锁或永久锁死滚动。
+let savedBodyOverflow: string | null = null;
 
 // 所有弹窗共享层级栈，只有栈顶弹窗处理关闭键、遮罩和焦点循环。
 function notifyModalStack() {
@@ -57,6 +59,7 @@ function isTopModal(modalId: string): boolean {
 }
 
 function registerModal(layer: ModalLayer) {
+  const wasEmpty = modalStack.length === 0;
   const existingIndex = modalStack.findIndex(
     (item) => item.id === layer.id,
   );
@@ -64,6 +67,10 @@ function registerModal(layer: ModalLayer) {
     modalStack.splice(existingIndex, 1);
   }
   modalStack.push(layer);
+  if (wasEmpty && modalStack.length > 0) {
+    savedBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
   notifyModalStack();
 }
 
@@ -71,6 +78,10 @@ function unregisterModal(modalId: string) {
   const index = modalStack.findIndex((layer) => layer.id === modalId);
   if (index >= 0) {
     modalStack.splice(index, 1);
+    if (modalStack.length === 0 && savedBodyOverflow !== null) {
+      document.body.style.overflow = savedBodyOverflow;
+      savedBodyOverflow = null;
+    }
     notifyModalStack();
   }
 }
@@ -130,8 +141,6 @@ export function Modal({
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
 
     const focusInitialControl = () => {
       const panel = panelRef.current;
@@ -190,7 +199,6 @@ export function Modal({
     return () => {
       window.clearTimeout(timer);
       document.removeEventListener("keydown", handleKeyDown, true);
-      document.body.style.overflow = originalOverflow;
       previousFocusRef.current?.focus();
     };
   }, [modalId, open]);

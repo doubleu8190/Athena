@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 
-import { formatDateTime } from "../../shared/lib/format";
+import { formatBytes, formatDateTime } from "../../shared/lib/format";
+import { newRequestId } from "../../shared/lib/requestId";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -13,17 +14,6 @@ import {
   type SessionFile,
 } from "./model";
 import { SessionFileDownloadButton } from "./SessionFileDownloadButton";
-import { newRequestId } from "../chat/requestId";
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function fileRequestCanBeReused(error: unknown): boolean {
   if (

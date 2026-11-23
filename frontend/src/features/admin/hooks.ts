@@ -52,8 +52,9 @@ import type {
 import { adminKeys } from "./queryKeys";
 import { isAdminForbidden } from "./errorMessages";
 
-export function useModelProfiles() {
+export function useModelProfiles(enabled = true) {
   return useQuery({
+    enabled,
     queryKey: adminKeys.modelProfiles(),
     queryFn: listModelProfiles,
   });
@@ -477,8 +478,9 @@ export function useSubagent(subagentId: string | null) {
   });
 }
 
-export function useSubagentAvailableTools() {
+export function useSubagentAvailableTools(enabled = true) {
   return useQuery({
+    enabled,
     queryKey: adminKeys.subagentAvailableTools(),
     queryFn: listSubagentAvailableTools,
   });

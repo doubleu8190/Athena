@@ -1,6 +1,7 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
+import { FieldError } from "../../shared/ui/FieldError";
 import { Modal } from "../../shared/ui/Modal";
 import { adminErrorMessage } from "./errorMessages";
 import {
@@ -27,20 +28,6 @@ import {
 } from "./model";
 import { formatTokenCount } from "./display";
 
-function FieldError({
-  error,
-  id,
-}: {
-  error?: string;
-  id: string;
-}) {
-  return error ? (
-    <p className="field-error" id={id} role="alert">
-      {error}
-    </p>
-  ) : null;
-}
-
 interface ModelProfileCreateDialogProps {
   onClose: () => void;
   onCreated: () => void;
@@ -61,15 +48,16 @@ export function ModelProfileCreateDialog({
   >({});
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useCreateModelProfileMutation();
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setValues(defaultModelProfileForm());
       setErrors({});
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open]);
+  }, [open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {
@@ -485,14 +473,15 @@ export function DisableDefaultModelDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useSetModelProfileEnabledMutation();
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setConfirmed(false);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open, profile.id]);
+  }, [open, profile.id, resetMutation]);
 
   const handleDisable = async () => {
     if (!confirmed) {
@@ -574,8 +563,12 @@ export function CompressionPolicyDialog({
   profiles,
 }: CompressionPolicyDialogProps) {
   const formId = useId();
-  const enabledProfiles = profiles.filter(
-    (profile) => profile.enabled && profile.has_api_key,
+  const enabledProfiles = useMemo(
+    () =>
+      profiles.filter(
+        (profile) => profile.enabled && profile.has_api_key,
+      ),
+    [profiles],
   );
   const [values, setValues] = useState<CompressionPolicyFormValues>(
     () => compressionPolicyForm(policy),
@@ -585,6 +578,7 @@ export function CompressionPolicyDialog({
   >({});
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useUpdateCompressionPolicyMutation();
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
@@ -600,9 +594,9 @@ export function CompressionPolicyDialog({
       setValues(initial);
       setErrors({});
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open, policy, profiles]);
+  }, [enabledProfiles, open, policy, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {

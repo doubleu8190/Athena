@@ -3,8 +3,8 @@ import { useState } from "react";
 import { formatDateTime } from "../../shared/lib/format";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
+import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { useRunDetails, useRunToolCalls } from "./hooks";
-import { MarkdownContent } from "./MarkdownContent";
 import type { SubagentTaskSummary } from "./model";
 import { RunStatusBadge } from "./RunStatusBadge";
 

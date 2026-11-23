@@ -483,4 +483,52 @@ describe("管理子智能体页", () => {
 
     expect(await screen.findByText("还没有子智能体")).toBeInTheDocument();
   });
+
+  it("未打开子智能体弹窗时不提前请求可选工具目录，打开后才按需请求", async () => {
+    let availableToolsCalls = 0;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/llm/model-profiles") {
+          return jsonResponse({
+            items: [MODEL_A],
+            default_profile_id: MODEL_A.id,
+          });
+        }
+        if (url.pathname === "/api/v1/admin/subagents/available-tools") {
+          availableToolsCalls += 1;
+          return jsonResponse(AVAILABLE_TOOLS);
+        }
+        if (
+          url.pathname === "/api/v1/admin/subagents" &&
+          method === "GET"
+        ) {
+          return jsonResponse({
+            items: [makeSubagent()],
+            total: 1,
+            offset: 0,
+            limit: 10,
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/subagents");
+
+    expect(await screen.findByText("调研助手")).toBeInTheDocument();
+    // 隐藏弹窗的 available-tools 查询必须保持禁用，进入管理页 0 次调用。
+    expect(availableToolsCalls).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "新建子智能体" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("内置工具")).toBeInTheDocument();
+    expect(availableToolsCalls).toBe(1);
+  });
 });

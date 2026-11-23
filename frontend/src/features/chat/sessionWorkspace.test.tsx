@@ -2,6 +2,8 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import * as formatLib from "../../shared/lib/format";
+
 import {
   getRequestUrl,
   listResponse,
@@ -2959,6 +2961,183 @@ describe("新草稿创建与提交部分失败", () => {
     });
     expect(submittedTexts).toHaveLength(2);
     expect(sessionComposer).toHaveValue("锁定期间不可发送");
+  });
+});
+
+describe("聊天热路径隔离、节流对账与隐藏轨迹按需加载", () => {
+  it("输入区高频击键不会触发已有历史消息行重渲染", async () => {
+    const completedRun = makeRun({
+      id: "run-typing-isolation",
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const historyMessage = makeMessage({
+      id: "msg-history-stable",
+      parts: [{ text: "稳定的历史回答", type: "text" }],
+      role: "assistant",
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    installWorkspaceFetch({
+      getRuns: () => [completedRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [historyMessage],
+        next_before_sequence: null,
+      }),
+    });
+    const user = userEvent.setup();
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(await screen.findByText("稳定的历史回答")).toBeInTheDocument();
+    const composer = screen.getByLabelText("对话草稿");
+    const formatSpy = vi.spyOn(formatLib, "formatDateTime");
+    formatSpy.mockClear();
+
+    await user.type(composer, "连续输入十个字符验证热路径隔离");
+
+    expect(composer).toHaveValue("连续输入十个字符验证热路径隔离");
+    // SessionComposer 独立承载草稿输入态，击键期间 SessionConversation 与 ChatMessageList 不应重渲染。
+    expect(formatSpy).not.toHaveBeenCalled();
+  });
+
+  it("窄屏默认收起执行轨迹时不提前请求 tool-calls，展开后才按需请求", async () => {
+    window.innerWidth = 800;
+    const completedRun = makeRun({
+      id: "run-trace-lazy",
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const toolCall = makeToolCall({
+      id: "call-lazy-1",
+      model_name: "lazy_search_tool",
+      ordinal: 1,
+      tool_call_id: "model-call-lazy-1",
+    });
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [completedRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({ items: [], next_before_sequence: null }),
+      toolCalls: () => [toolCall],
+    });
+    const user = userEvent.setup();
+
+    renderApp(`/chat/${SESSION.id}`);
+    expect(
+      await screen.findByRole("heading", { name: "真实前端会话" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("已完成")).toBeInTheDocument();
+
+    const countToolCallRequests = () =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/tool-calls",
+        ),
+      ).length;
+
+    expect(countToolCallRequests()).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: "展开执行轨迹" }));
+    expect(await screen.findByText(/lazy_search_tool/)).toBeInTheDocument();
+    expect(countToolCallRequests()).toBe(1);
+  });
+
+  it("高频连续 SSE run_event 在 200ms 窗口内合并为一次对账失效，并阻止旧快照回退缓存", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const running = makeRun({
+      event_sequence: 5,
+      id: "run-throttle-monotonic",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({ items: [], next_before_sequence: null }),
+    });
+
+    const view = renderApp(`/chat/${SESSION.id}`);
+    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    const source = FakeEventSource.instances[0];
+
+    const countRunDetailRequests = () =>
+      fetchMock.mock.calls.filter(([input]) => {
+        const pathname = new URL(
+          getRequestUrl(input),
+          "http://localhost",
+        ).pathname;
+        return pathname === `/api/v1/sessions/${SESSION.id}/runs/${running.id}`;
+      }).length;
+
+    const baselineDetailCalls = countRunDetailRequests();
+
+    // 同一 200ms 窗口内连续到达 5 个 run_event，应合并为 1 次失效而非 5 次。
+    act(() => {
+      for (let seq = 6; seq <= 10; seq += 1) {
+        source.emit("run_event", {
+          payload: {
+            event: {
+              created_at: `2026-11-10T03:00:0${seq - 5}Z`,
+              id: `event-burst-${seq}`,
+              payload: {},
+              run_id: running.id,
+              sequence: seq,
+              type: "started",
+            },
+          },
+        });
+      }
+    });
+
+    await waitFor(
+      () => {
+        expect(countRunDetailRequests()).toBe(baselineDetailCalls + 1);
+      },
+      { timeout: 1_500 },
+    );
+
+    // 将缓存推进到 cancelling (#10)，随后注入低序号与旧状态的 snapshot，必须被单调性守卫拒绝。
+    const cancellingRun = {
+      ...running,
+      event_sequence: 10,
+      status: "cancelling" as const,
+    };
+    view.client.setQueryData(
+      chatKeys.run(SESSION.id, running.id),
+      cancellingRun,
+    );
+    view.client.setQueryData(chatKeys.latestRun(SESSION.id), {
+      items: [cancellingRun],
+      next_cursor: null,
+    });
+
+    act(() => {
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: 8,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "running",
+        },
+      });
+    });
+
+    const cachedRun = view.client.getQueryData<Run>(
+      chatKeys.run(SESSION.id, running.id),
+    );
+    expect(cachedRun?.status).toBe("cancelling");
+    expect(cachedRun?.event_sequence).toBe(10);
   });
 });
 

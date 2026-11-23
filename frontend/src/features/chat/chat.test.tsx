@@ -630,7 +630,7 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const select = await screen.findByRole("combobox", { name: "更改项目" });
+    await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
       expectSelectedProject(PROJECT_A.id);
     });
@@ -680,7 +680,7 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const select = await screen.findByRole("combobox", { name: "更改项目" });
+    await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
       expectSelectedProject(PROJECT_A.id);
     });
@@ -709,7 +709,7 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const initialSelect = await screen.findByRole("combobox", { name: "更改项目" });
+    await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
       expectSelectedProject(PROJECT_A.id);
     });
@@ -757,7 +757,7 @@ describe("新对话草稿", () => {
 
     const view = renderApp(`/chat/new?project=${PROJECT_A.id}`);
 
-    const select = await screen.findByRole("combobox", { name: "更改项目" });
+    await screen.findByRole("combobox", { name: "更改项目" });
     await waitFor(() => {
       expectSelectedProject(PROJECT_A.id);
     });

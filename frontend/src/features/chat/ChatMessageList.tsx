@@ -1,15 +1,18 @@
 import {
+  memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 
-import { formatDateTime } from "../../shared/lib/format";
+import { formatBytes, formatDateTime } from "../../shared/lib/format";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
-import { MarkdownContent } from "./MarkdownContent";
+import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
 import { fileDisplayName } from "../files/model";
 import {
@@ -97,16 +100,6 @@ function revealElementIfNeeded(
   }
 }
 
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function MessagePart({
   part,
   sessionId,
@@ -189,25 +182,35 @@ function MessagePart({
   );
 }
 
-function MessageRow({
-  message,
-  rowRef,
-  sessionId,
-  skillToolCallIds,
-}: {
+interface MessageRowProps {
   message: ConversationMessage;
-  rowRef?: (node: HTMLElement | null) => void;
+  onNodeChange: (messageId: string, node: HTMLElement | null) => void;
   sessionId: string;
   skillToolCallIds: ReadonlySet<string>;
-}) {
+}
+
+// 记忆化历史消息行并配合稳定节点登记回调，确保流式输出更新 transientText 时已有历史消息零重渲染。
+const MessageRow = memo(function MessageRow({
+  message,
+  onNodeChange,
+  sessionId,
+  skillToolCallIds,
+}: MessageRowProps) {
   const isAssistant = message.role === "assistant";
+  const bindNode = useCallback(
+    (node: HTMLElement | null) => {
+      onNodeChange(message.id, node);
+    },
+    [message.id, onNodeChange],
+  );
+
   return (
     <article
       aria-label={`${isAssistant ? "Athena" : "你"}的消息，序号 ${
         message.sequence
       }`}
       className={`chat-message chat-message--${isAssistant ? "assistant" : "user"}`}
-      ref={rowRef}
+      ref={bindNode}
     >
       <header className="chat-message-meta">
         <strong>{isAssistant ? "Athena" : "你"}</strong>
@@ -233,7 +236,7 @@ function MessageRow({
       </div>
     </article>
   );
-}
+});
 
 interface ChatMessageListProps {
   autoScrollRequest: ChatAutoScrollRequest | null;
@@ -249,7 +252,7 @@ interface ChatMessageListProps {
   transientUnfinished: boolean;
 }
 
-export function ChatMessageList({
+export const ChatMessageList = memo(function ChatMessageList({
   autoScrollRequest,
   error,
   hasMore,
@@ -263,8 +266,9 @@ export function ChatMessageList({
   transientUnfinished,
 }: ChatMessageListProps) {
   const scrollContainerRef = useRef<HTMLElement | null>(null);
-  const autoScrollTargetRef = useRef<HTMLElement | null>(null);
-  const latestContentRef = useRef<HTMLElement | null>(null);
+  // 按消息 ID 登记已挂载 DOM 节点，避免为每条历史消息创建内联 ref 回调破坏 React.memo。
+  const rowNodesRef = useRef(new Map<string, HTMLElement>());
+  const transientNodeRef = useRef<HTMLElement | null>(null);
   const hasInitializedScrollRef = useRef(false);
   const followingLatestRef = useRef(true);
   const handledAutoScrollRequestRef = useRef<string | null>(null);
@@ -272,6 +276,30 @@ export function ChatMessageList({
   const autoScrollTargetMessage = autoScrollRequest
     ? findAutoScrollTargetMessage(messages, autoScrollRequest)
     : null;
+
+  const handleRowNodeChange = useCallback(
+    (messageId: string, node: HTMLElement | null) => {
+      if (node) {
+        rowNodesRef.current.set(messageId, node);
+      } else {
+        rowNodesRef.current.delete(messageId);
+      }
+    },
+    [],
+  );
+
+  // 仅当历史消息数组引用变化时重算技能工具调用 ID 集合，保持 MessageRow props 稳定。
+  const skillToolCallIds = useMemo(() => {
+    const ids = new Set<string>();
+    messages.forEach((message) => {
+      message.parts.forEach((part) => {
+        if (part.type === "tool_call" && isSkillTool(part.name)) {
+          ids.add(part.tool_call_id);
+        }
+      });
+    });
+    return ids;
+  }, [messages]);
 
   useLayoutEffect(() => {
     const node = scrollContainerRef.current;
@@ -305,7 +333,10 @@ export function ChatMessageList({
     followingLatestRef.current = true;
     setFollowingLatest(true);
     scrollNodeToLatest(node);
-    revealElementIfNeeded(autoScrollTargetRef.current, node);
+    revealElementIfNeeded(
+      rowNodesRef.current.get(autoScrollTargetMessage.id) ?? null,
+      node,
+    );
   }, [autoScrollRequest, autoScrollTargetMessage]);
 
   useLayoutEffect(() => {
@@ -338,15 +369,6 @@ export function ChatMessageList({
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
-
-  const skillToolCallIds = new Set<string>();
-  messages.forEach((message) => {
-    message.parts.forEach((part) => {
-      if (part.type === "tool_call" && isSkillTool(part.name)) {
-        skillToolCallIds.add(part.tool_call_id);
-      }
-    });
-  });
 
   if (isLoading && !transientText) {
     return (
@@ -386,7 +408,13 @@ export function ChatMessageList({
     setFollowingLatest(true);
     if (node) {
       scrollNodeToLatest(node);
-      revealElementIfNeeded(latestContentRef.current, node);
+      const lastMessage = messages[messages.length - 1];
+      const latestNode = transientText
+        ? transientNodeRef.current
+        : lastMessage
+          ? (rowNodesRef.current.get(lastMessage.id) ?? null)
+          : null;
+      revealElementIfNeeded(latestNode, node);
     }
   };
 
@@ -426,34 +454,20 @@ export function ChatMessageList({
           />
         ) : (
           <div className="chat-messages">
-            {messages.map((message, index) => {
-              const isLatestMessage = index === messages.length - 1;
-              const isAutoScrollTarget =
-                autoScrollTargetMessage?.id === message.id;
-              return (
-                <MessageRow
-                  key={`${message.sequence}-${message.id}`}
-                  message={message}
-                  rowRef={(node) => {
-                    if (isAutoScrollTarget) {
-                      autoScrollTargetRef.current = node;
-                    }
-                    if (isLatestMessage && !transientText) {
-                      latestContentRef.current = node;
-                    }
-                  }}
-                  sessionId={sessionId}
-                  skillToolCallIds={skillToolCallIds}
-                />
-              );
-            })}
+            {messages.map((message) => (
+              <MessageRow
+                key={`${message.sequence}-${message.id}`}
+                message={message}
+                onNodeChange={handleRowNodeChange}
+                sessionId={sessionId}
+                skillToolCallIds={skillToolCallIds}
+              />
+            ))}
             {transientText ? (
               <article
                 aria-label="Athena 的临时流式输出"
                 className="chat-message chat-message--assistant chat-message--transient"
-                ref={(node) => {
-                  latestContentRef.current = node;
-                }}
+                ref={transientNodeRef}
               >
                 <header className="chat-message-meta">
                   <strong>Athena</strong>
@@ -485,7 +499,7 @@ export function ChatMessageList({
       ) : null}
     </div>
   );
-}
+});
 
 export function findQuestionText(
   messages: ConversationMessage[],
@@ -498,4 +512,3 @@ export function findQuestionText(
   const text = messageText(question).trim();
   return text || null;
 }
-

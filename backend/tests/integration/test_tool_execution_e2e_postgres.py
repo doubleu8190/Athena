@@ -24,6 +24,7 @@ from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVers
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
+from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.project.model import ProjectModel
 from adapter.run.model import RunEventModel, RunToolCallModel
 from adapter.run.repository import SqlAlchemyRunRepository
@@ -32,6 +33,7 @@ from adapter.session.repository import SqlAlchemySessionRepository
 from adapter.system_prompt.repository import SqlAlchemySystemPromptRepository
 from api.runs import build_run_router
 from app.auth import AuthService
+from app.preference import PreferenceService
 from app.run.config import RunWorkerConfig
 from app.run.executor import RunExecutor
 from app.run.service import RunService
@@ -54,7 +56,6 @@ from domain.mcp import (
     McpRuntimeToolTarget,
     StreamableHttpConfig,
 )
-from domain.memory.model import Memory, MemoryHit, RecallRequest, RecallResult
 from domain.run.model import RunStatus
 from domain.tool import (
     McpToolSource,
@@ -81,34 +82,6 @@ async def _database() -> AsyncGenerator[
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
     async with isolated_postgres_schema(database_url, prefix="athena_v2_tool_e2e") as db:
         yield db.session_factory, db.engine, db.admin_engine, db.schema
-
-
-class _MemorySearch:
-    def __init__(self, owner_id: str) -> None:
-        self.owner_id = owner_id
-        self.requests: list[RecallRequest] = []
-
-    async def recall(self, request: RecallRequest) -> RecallResult:
-        self.requests.append(request)
-        now = datetime.now(UTC)
-        memory = Memory(
-            id="memory_e2e",
-            namespace_id=self.owner_id,
-            scope_key="personal",
-            content="The user prefers concise answers.",
-            status="active",
-            origin="explicit",
-            version=1,
-            expires_at=None,
-            sources=(),
-            created_at=now,
-            updated_at=now,
-        )
-        return RecallResult(
-            status="ok",
-            hits=(MemoryHit(memory, 0.9, ("keyword",)),),
-            used_tokens=8,
-        )
 
 
 class _ProjectKnowledge:
@@ -416,7 +389,7 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
             client = await _api_client(app, token)
             mcp_catalog = _McpCatalog()
             successful_mcp = _McpExecutor()
-            memory = _MemorySearch(owner_id)
+            preferences = PreferenceService(SqlAlchemyPreferenceRepository(factory))
             project_knowledge = _ProjectKnowledge(owner_id, project_id)
             knowledge = _KnowledgeSearch()
             runtime = RunToolRuntimeService(
@@ -424,10 +397,9 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                 sessions=session_repository,
                 mcp_catalog=mcp_catalog,
                 mcp_executor=successful_mcp,
-                memory=cast(Any, memory),
-                memory_enabled=True,
                 knowledge=cast(Any, knowledge),
                 project_knowledge=cast(Any, project_knowledge),
+                preferences=preferences,
             )
             provider = _ScriptedProvider(
                 [
@@ -436,7 +408,11 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                         attempt=1,
                     ),
                     _response(
-                        call=("call_memory", "memory_search", {"query": "preference"}),
+                        call=(
+                            "call_memory",
+                            "save_user_memory",
+                            {"content": "偏好简洁结论"},
+                        ),
                         attempt=2,
                     ),
                     _response(
@@ -452,6 +428,7 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                 provider,
                 system_prompts=SqlAlchemySystemPromptRepository(factory),
                 tool_runtime=runtime,
+                preferences=preferences,
                 config=RunWorkerConfig(),
             )
             try:
@@ -480,11 +457,10 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                 assert len(provider.requests) == 4
                 assert len(successful_mcp.calls) == 1
                 assert successful_mcp.calls[0] == {"query": "remote"}
-                assert len(memory.requests) == 1
-                assert {scope for scope in memory.requests[0].scope_keys} == {
-                    "personal",
-                    "project:prj_tool_e2e",
-                }
+                saved_memories = await preferences.list_memories(owner_id)
+                assert saved_memories.total == 1
+                assert saved_memories.items[0].content == "偏好简洁结论"
+                assert saved_memories.items[0].source.value == "chat_explicit"
                 assert knowledge.requests == [(owner_id, ("kbase_e2e",), "checklist")]
                 assert len(completed.usage.attempts) == 4
                 assert completed.usage.total_tokens == 48
@@ -536,7 +512,7 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                     ).all()
                 assert [call.model_name for call in calls] == [
                     "mcp_probe",
-                    "memory_search",
+                    "save_user_memory",
                     "knowledge_search",
                 ]
                 assert [call.status for call in calls] == [
@@ -593,10 +569,9 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                     sessions=session_repository,
                     mcp_catalog=mcp_catalog,
                     mcp_executor=unknown_mcp,
-                    memory=cast(Any, memory),
-                    memory_enabled=True,
                     knowledge=cast(Any, knowledge),
                     project_knowledge=cast(Any, project_knowledge),
+                    preferences=preferences,
                 )
                 unknown_executor = RunExecutor(
                     run_repository,

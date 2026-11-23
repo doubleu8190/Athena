@@ -8,8 +8,6 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from adapter.run.model import RunEventModel, RunInputRequestModel, RunModel, RunToolCallModel
-from domain.memory import ExtractionStatus
-from domain.memory.lifecycle import RunMemoryContextState
 from domain.run.model import (
     InputRequestStatus,
     Run,
@@ -123,17 +121,6 @@ def run_to_domain(row: RunModel) -> Run:
         skill_snapshot=skill_snapshot,
         input_files=RunInputFiles(file_ids=tuple(row.input_file_ids)),
         report_message_id=row.report_message_id,
-        memory_project_id=row.memory_project_id,
-        memory_input_message_ids=tuple(row.memory_input_message_ids or ()),
-        memory_context_state=RunMemoryContextState.model_validate(row.memory_context_state or {}),
-        memory_extraction_status=(
-            None
-            if row.memory_extraction_status is None
-            else ExtractionStatus(row.memory_extraction_status)
-        ),
-        memory_extracted_at=row.memory_extracted_at,
-        memory_extraction_batch_id=row.memory_extraction_batch_id,
-        memory_extraction_safe_error_code=row.memory_extraction_safe_error_code,
         parent_run_id=row.parent_run_id,
         root_run_id=row.root_run_id,
         parent_tool_call_id=row.parent_tool_call_id,

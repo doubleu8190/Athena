@@ -8,7 +8,6 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.knowledge.model import ProjectKnowledgeBaseModel
-from adapter.memory import disable_project_memory_scope, lock_user_memory_setting
 from adapter.project.converter.project import project_to_domain
 from adapter.project.model.project import ProjectModel
 from adapter.session.model import SessionModel
@@ -123,8 +122,6 @@ class SqlAlchemyProjectRepository(ProjectRepository):
         """锁定项目并拒绝删除仍有有效会话的项目。"""
         async with self._session_factory() as session:
             async with session.begin():
-                # 记忆 scope 失效必须先锁用户设置，避免与 control/extract 反锁。
-                await lock_user_memory_setting(session, owner_id)
                 row = await session.scalar(
                     select(ProjectModel)
                     .where(
@@ -136,12 +133,6 @@ class SqlAlchemyProjectRepository(ProjectRepository):
                 if row is None:
                     return False
                 if row.deleted_time is not None:
-                    await disable_project_memory_scope(
-                        session,
-                        owner_id=owner_id,
-                        project_id=project_id,
-                        disabled_at=row.deleted_time,
-                    )
                     return True
                 active_session_id = await session.scalar(
                     select(SessionModel.id)
@@ -162,13 +153,6 @@ class SqlAlchemyProjectRepository(ProjectRepository):
                 )
                 row.deleted_time = deleted_at
                 row.updated_at = deleted_at
-                # 项目可见性、知识关联、记忆 scope 禁用与清理任务必须在同一事务提交。
-                await disable_project_memory_scope(
-                    session,
-                    owner_id=owner_id,
-                    project_id=project_id,
-                    disabled_at=deleted_at,
-                )
                 await session.flush()
         return True
 

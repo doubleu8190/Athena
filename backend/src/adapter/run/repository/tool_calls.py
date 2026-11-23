@@ -463,7 +463,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     command.failed_at,
                 )
                 result = run_to_domain(row)
-        await self._wake_memory(result.owner_id)
         return result
 
     async def decide_tool_approval(self, command: DecideToolApprovalCommand) -> Run | None:
@@ -699,11 +698,8 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         return tuple(pending)
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
-        """对外入口：持久化工具调用结果并在失败终态时在事务外触发记忆唤醒。"""
-        result = await self._finish_tool_call_in_session(command)
-        if result is not None and result.status is RunStatus.FAILED and result.depth == 0:
-            await self._wake_memory(result.owner_id)
-        return result
+        """对外入口：原子持久化工具调用结果与产物发布。"""
+        return await self._finish_tool_call_in_session(command)
 
     async def _finish_tool_call_in_session(
         self,

@@ -1,7 +1,7 @@
 # ==============================================================================
 # Athena v2 生产环境容器编排配置 (Docker Compose)
 # ------------------------------------------------------------------------------
-# 业务范围：编排 Athena 自身的前端、API、Run Worker 与可选 Memory Worker。
+# 业务范围：编排 Athena 自身的前端、API、Run Worker 与可选知识库 Worker。
 # 外部依赖（PostgreSQL、Redis、MinIO）均由外部基础设施提供，并通过环境变量或 .env 注入连接
 # ==============================================================================
 
@@ -57,30 +57,8 @@ x-backend-environment: &backend-environment
   ATHENA_EMBEDDING_TIMEOUT_SECONDS: ${ATHENA_EMBEDDING_TIMEOUT_SECONDS:-30.0}
   ATHENA_EMBEDDING_BATCH_SIZE: ${ATHENA_EMBEDDING_BATCH_SIZE:-32}
 
-  # 长期记忆总开关、生命周期与固定模型身份
-  ATHENA_MEMORY_ENABLED: ${ATHENA_MEMORY_ENABLED:-false}
-  ATHENA_MEMORY_LIFECYCLE_ENABLED: ${ATHENA_MEMORY_LIFECYCLE_ENABLED:-false}
-  ATHENA_MEMORY_EMBEDDING_MODEL: ${ATHENA_MEMORY_EMBEDDING_MODEL:-BAAI/bge-m3}
-  ATHENA_MEMORY_EMBEDDING_REVISION: ${ATHENA_MEMORY_EMBEDDING_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
-  ATHENA_MEMORY_EMBEDDING_DEVICE: ${ATHENA_MEMORY_EMBEDDING_DEVICE:-cpu}
-  ATHENA_MEMORY_RERANKER_MODEL: ${ATHENA_MEMORY_RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
-  ATHENA_MEMORY_RERANKER_REVISION: ${ATHENA_MEMORY_RERANKER_REVISION:-953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e}
-  ATHENA_MEMORY_RERANKER_DEVICE: ${ATHENA_MEMORY_RERANKER_DEVICE:-cpu}
-  ATHENA_MEMORY_TOKENIZER: ${ATHENA_MEMORY_TOKENIZER:-BAAI/bge-m3}
-  ATHENA_MEMORY_TOKENIZER_REVISION: ${ATHENA_MEMORY_TOKENIZER_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
-  ATHENA_MEMORY_VECTOR_MIN_SCORE: ${ATHENA_MEMORY_VECTOR_MIN_SCORE:-0.70}
-  ATHENA_MEMORY_RERANK_MIN_SCORE: ${ATHENA_MEMORY_RERANK_MIN_SCORE:-0.30}
-  ATHENA_MEMORY_TIMEOUT_SECONDS: ${ATHENA_MEMORY_TIMEOUT_SECONDS:-60}
-  ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE: ${ATHENA_MEMORY_KEYWORD_FALLBACK_MIN_SCORE:-}
-  ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS: ${ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS:-1000}
-  ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS: ${ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS:-2000}
-  ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT: ${ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT:-200}
-
   # 结构化应用日志级别
   ATHENA_LOG_LEVEL: ${ATHENA_LOG_LEVEL:-INFO}
-
-  # HuggingFace 模型镜像加速端点（支持国内访问或网络受限环境）
-  HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
 
 services:
   # ============================================================================
@@ -125,10 +103,8 @@ services:
     environment:
       <<: *backend-environment
     volumes:
-      # 挂载工作运行时临时目录以持久化临时脚本输出与模型缓存
+      # 挂载工作运行时临时目录以持久化临时脚本输出
       - athena-var:/app/var
-      # 挂载宿主机 HuggingFace 模型缓存，避免重复下载与网络阻断
-      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
     healthcheck:
       # 检查存活端点 /health，确保进程就绪后前端再接入流量
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/health"]
@@ -166,8 +142,6 @@ services:
       ATHENA_RUN_RECLAIM_SECONDS: ${ATHENA_RUN_RECLAIM_SECONDS:-5}
     volumes:
       - athena-var:/app/var
-      # 挂载宿主机 HuggingFace 模型缓存，避免重复下载与网络阻断
-      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
     depends_on:
       backend-api:
         condition: service_healthy
@@ -176,43 +150,7 @@ services:
       - athena-network
 
   # ============================================================================
-  # 4. 长期记忆生命周期 Worker
-  # ============================================================================
-  # 两个记忆开关同时启用时由单个进程顺序消费提取、扫描、归档和清理任务。
-  backend-memory-worker:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.backend
-      args:
-        INSTALL_KNOWLEDGE: ${ATHENA_INSTALL_KNOWLEDGE:-false}
-    image: athena-backend:latest
-    container_name: athena-backend-memory-worker
-    command: ["memory-worker"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      <<: *backend-environment
-      ATHENA_MEMORY_WORKER_POLL_SECONDS: ${ATHENA_MEMORY_WORKER_POLL_SECONDS:-1}
-      ATHENA_MEMORY_EXTRACT_BATCH_RUNS: ${ATHENA_MEMORY_EXTRACT_BATCH_RUNS:-20}
-      ATHENA_MEMORY_EXTRACT_BATCH_TOKENS: ${ATHENA_MEMORY_EXTRACT_BATCH_TOKENS:-12000}
-      ATHENA_MEMORY_EXTRACTION_OUTPUT_TOKENS: ${ATHENA_MEMORY_EXTRACTION_OUTPUT_TOKENS:-4000}
-      ATHENA_MEMORY_DECISION_OUTPUT_TOKENS: ${ATHENA_MEMORY_DECISION_OUTPUT_TOKENS:-4000}
-      ATHENA_MEMORY_DECISION_CONTEXT_TOKENS: ${ATHENA_MEMORY_DECISION_CONTEXT_TOKENS:-8000}
-      ATHENA_MEMORY_FACT_ARCHIVE_DAYS: ${ATHENA_MEMORY_FACT_ARCHIVE_DAYS:-180}
-      ATHENA_MEMORY_OTHER_ARCHIVE_DAYS: ${ATHENA_MEMORY_OTHER_ARCHIVE_DAYS:-365}
-    volumes:
-      - athena-var:/app/var
-      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
-    depends_on:
-      backend-api:
-        condition: service_healthy
-    # 开关关闭时退出码为 0，不触发重启；真实崩溃时最多重试五次。
-    restart: on-failure:5
-    networks:
-      - athena-network
-
-  # ============================================================================
-  # 5. 可选知识库异步解析 Worker (Knowledge Worker Profile)
+  # 4. 可选知识库异步解析 Worker (Knowledge Worker Profile)
   # ============================================================================
   # 默认不随普通 docker compose up 启动；需开启知识库文档异步解析与向量化时使用：
   # docker compose --profile knowledge up -d backend-knowledge-worker
@@ -234,7 +172,6 @@ services:
       ATHENA_KNOWLEDGE_PARSE_MEMORY_MB: ${ATHENA_KNOWLEDGE_PARSE_MEMORY_MB:-4096}
     volumes:
       - athena-var:/app/var
-      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
     depends_on:
       backend-api:
         condition: service_healthy
@@ -245,7 +182,7 @@ services:
       - athena-network
 
   # ============================================================================
-  # 6. 可选数据库迁移辅助服务 (Database Migration Profile)
+  # 5. 可选数据库迁移辅助服务 (Database Migration Profile)
   # ============================================================================
   # 执行方式：docker compose run --rm backend-migration
   # 也可通过已有容器直接执行：docker compose run --rm backend-api migrate

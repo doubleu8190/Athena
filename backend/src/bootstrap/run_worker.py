@@ -13,6 +13,7 @@ from adapter.llm import OpenAIChatCompletionsAdapter
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
+from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
@@ -22,6 +23,7 @@ from adapter.skill.execution import PythonScriptExecutor
 from adapter.subagent import SqlAlchemySubagentRepository
 from adapter.system_prompt import SqlAlchemySystemPromptRepository
 from app.file import SessionFileService
+from app.preference import PreferenceService
 from app.project.service import ProjectService
 from app.run import (
     RunExecutor,
@@ -30,7 +32,7 @@ from app.run import (
 )
 from app.skill import DependencyChecker, SkillService
 from app.skill.execution_service import SkillExecutionService
-from bootstrap.config import env_flag, memory_enabled_from_env
+from bootstrap.config import env_flag
 from bootstrap.database import build_database
 from bootstrap.redis import build_run_transport
 from bootstrap.tool import (
@@ -65,20 +67,6 @@ def _files_enabled() -> bool:
     return has_object_storage_env()
 
 
-def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
-    """读取有界整数配置，空值回退默认，非法值在 Worker 启动时明确失败。"""
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = int(raw.strip())
-    except ValueError as error:
-        raise ValueError(f"{name.lower()}_invalid") from error
-    if isinstance(value, bool) or not minimum <= value <= maximum:
-        raise ValueError(f"{name.lower()}_invalid")
-    return value
-
-
 def build_run_worker_dependencies(
     bundle: RunWorkerBundle,
     *,
@@ -86,7 +74,7 @@ def build_run_worker_dependencies(
 ) -> None:
     """按依赖顺序组装 Run Worker，并把资源逐项写入 bundle。
 
-    query_services 的模型启动是异步的，由入口在调用本函数后执行。构造中途
+    query_services 的资源启动是异步的，由入口在调用本函数后执行。构造中途
     失败时，入口 finally 只清理 bundle 中已填充的字段，因此这里每完成一个
     资源就立即写回 bundle。
     """
@@ -107,6 +95,7 @@ def build_run_worker_dependencies(
     auth_repository = SqlAlchemyAuthRepository(database.session_factory)
     session_repository = SqlAlchemySessionRepository(database.session_factory)
     mcp_catalog = SqlAlchemyMcpRepository(database.session_factory, secret_cipher)
+    preferences = PreferenceService(SqlAlchemyPreferenceRepository(database.session_factory))
     projects = ProjectService(projects_repository)
     mcp_executor = build_mcp_executor(cleanup_timeout_seconds=config.tool_cleanup_seconds)
     query_services = build_query_services(
@@ -114,17 +103,7 @@ def build_run_worker_dependencies(
         projects=projects,
     )
     bundle.query_services = query_services
-    memory_lifecycle_enabled = memory_enabled_from_env()
-    repository = (
-        SqlAlchemyRunRepository(
-            database.session_factory,
-            messages,
-            memory_wakeup=query_services.memory_lifecycle,
-            memory_lifecycle_enabled=True,
-        )
-        if memory_lifecycle_enabled
-        else SqlAlchemyRunRepository(database.session_factory, messages)
-    )
+    repository = SqlAlchemyRunRepository(database.session_factory, messages)
     skills = None
     session_files = None
     skill_execution = None
@@ -166,6 +145,7 @@ def build_run_worker_dependencies(
         mcp_catalog=mcp_catalog,
         mcp_executor=mcp_executor,
         query_services=query_services,
+        preferences=preferences,
         skills=skills,
         session_files=session_files,
         skill_execution=skill_execution,
@@ -177,25 +157,6 @@ def build_run_worker_dependencies(
     # 仅失去实时推送，不影响 Run 的持久化与状态流转。
     run_transport = build_run_transport()
     bundle.run_transport = run_transport
-    # 接通 compose.yml 已声明的 Run 记忆上下文预算与单 scope 条目上限，启动期有界校验。
-    memory_personal_tokens = _bounded_env_int(
-        "ATHENA_MEMORY_CONTEXT_PERSONAL_TOKENS",
-        1_000,
-        minimum=1,
-        maximum=100_000,
-    )
-    memory_project_tokens = _bounded_env_int(
-        "ATHENA_MEMORY_CONTEXT_PROJECT_TOKENS",
-        2_000,
-        minimum=1,
-        maximum=100_000,
-    )
-    memory_per_scope_limit = _bounded_env_int(
-        "ATHENA_MEMORY_CONTEXT_PER_SCOPE_LIMIT",
-        200,
-        minimum=1,
-        maximum=200,
-    )
     # Executor 负责执行单个 Run；Worker 负责领取、续约并驱动执行。
     executor = RunExecutor(
         repository,
@@ -205,10 +166,7 @@ def build_run_worker_dependencies(
         publisher=run_transport,
         config=config,
         tool_runtime=tool_runtime,
-        memory_lifecycle=query_services.memory_lifecycle,
-        memory_personal_token_budget=memory_personal_tokens,
-        memory_project_token_budget=memory_project_tokens,
-        memory_per_scope_limit=memory_per_scope_limit,
+        preferences=preferences,
         subagents=subagents_repository,
     )
     bundle.worker = RunWorker(repository, executor, config, publisher=run_transport)

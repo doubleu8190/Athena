@@ -568,8 +568,6 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                     sessions=session_repository,
                     mcp_catalog=_EmptyMcpCatalog(),
                     mcp_executor=_UnusedMcpExecutor(),
-                    memory=None,
-                    memory_enabled=False,
                     knowledge=None,
                     project_knowledge=None,
                     skills=skill_service,

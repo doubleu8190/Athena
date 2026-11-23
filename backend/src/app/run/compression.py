@@ -116,7 +116,7 @@ async def _split_recent_suffix(
     tools: Sequence[LlmTool] | None = None,
     retry_context: Sequence[ToolRetryContext] = (),
     input_files: Sequence[RunInputFileContext] = (),
-    memory_context: str | None = None,
+    preference_context: str | None = None,
     summary_text: str | None = None,
     *,
     prefix_tokens: int | None = None,
@@ -140,7 +140,7 @@ async def _split_recent_suffix(
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
-            memory_context=memory_context,
+            preference_context=preference_context,
         )
         candidate_tokens = accumulated_recent_tokens + max(
             0, group_with_prefix_tokens - resolved_prefix
@@ -260,7 +260,7 @@ class ContextCompressor:
         retry_context: Sequence[ToolRetryContext] = (),
         skill_context: RunSkillPromptContext | None = None,
         input_files: Sequence[RunInputFileContext] = (),
-        memory_context: str | None = None,
+        preference_context: str | None = None,
         budget: RunLlmBudget | None = None,
         allow_compression: bool = True,
     ) -> ContextPreparation:
@@ -302,7 +302,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
-            memory_context=memory_context,
+            preference_context=preference_context,
         )
         feasible_history = max(
             0,
@@ -340,7 +340,7 @@ class ContextCompressor:
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
-                memory_context=memory_context,
+                preference_context=preference_context,
             )
             return ContextPreparation(
                 messages=current.messages,
@@ -367,7 +367,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
-            memory_context=memory_context,
+            preference_context=preference_context,
         )
         protected_tokens = (
             prefix_tokens
@@ -384,7 +384,7 @@ class ContextCompressor:
                     retry_context=retry_context,
                     skill_context=skill_context,
                     input_files=input_files,
-                    memory_context=memory_context,
+                    preference_context=preference_context,
                 )
             )[0]
         )
@@ -400,7 +400,7 @@ class ContextCompressor:
             tools,
             retry_context,
             input_files,
-            memory_context,
+            preference_context,
             summary_text,
             prefix_tokens=prefix_tokens,
         )
@@ -415,7 +415,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
-            memory_context=memory_context,
+            preference_context=preference_context,
         )
         if not remaining_groups:
             return ContextPreparation(
@@ -532,7 +532,7 @@ class ContextCompressor:
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
-                memory_context=memory_context,
+                preference_context=preference_context,
             )
             if (
                 final_context.input_tokens + final_context.output_tokens
@@ -779,7 +779,7 @@ class ContextCompressor:
         retry_context: Sequence[ToolRetryContext],
         skill_context: RunSkillPromptContext | None,
         input_files: Sequence[RunInputFileContext],
-        memory_context: str | None,
+        preference_context: str | None,
     ) -> ContextPreparation:
         """按完整主请求口径测量当前候选上下文。"""
         llm_messages, selected_tools, input_tokens, output_tokens = await measure_llm_request(
@@ -793,7 +793,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
-            memory_context=memory_context,
+            preference_context=preference_context,
         )
         return ContextPreparation(
             messages=llm_messages,

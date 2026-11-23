@@ -30,8 +30,6 @@ from adapter.skill.repository import build_run_skill_snapshot
 from adapter.subagent.model import SubagentModel
 from adapter.system_prompt.repository import current_system_prompts
 from common.ids import new_id, now_utc
-from domain.memory import ExtractionStatus
-from domain.memory.lifecycle import RunMemoryContextState
 from domain.message import (
     ConversationMessageDraft,
     ConversationRole,
@@ -50,7 +48,6 @@ from domain.run.model import (
     BeginSubagentBatchResult,
     FailRunCommand,
     FinishRunCommand,
-    InitializeRunMemoryContextCommand,
     InputRequestStatus,
     RequestRunInputCommand,
     Run,
@@ -180,8 +177,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         compression_policy_version_id=compression_policy_id,
                         skill_snapshot=skill_snapshot.model_dump(mode="json"),
                         input_file_ids=list(input_file_ids),
-                        memory_project_id=locked_session.project_id,
-                        memory_input_message_ids=[message.id],
                         prompt_template_version=command.prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -308,12 +303,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         row.auth_session_id = command.auth_session_id
                     row.status = RunStatus.QUEUED.value
                     row.input_file_ids = list(input_file_ids)
-                    # 仅主 Run 的用户回答参与记忆抽取；子 Run 定向回答不写入主 Run 记忆输入。
-                    if row.depth == 0 and answer.id not in row.memory_input_message_ids:
-                        row.memory_input_message_ids = [
-                            *row.memory_input_message_ids,
-                            answer.id,
-                        ]
                     row.queued_at = command.queued_at
                     row.worker_id = None
                     row.lease_expires_at = None
@@ -364,7 +353,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 )
             ).all()
         leases: list[RunLease] = []
-        memory_wake_owners: list[str] = []
         for candidate_id in candidate_ids:
             if len(leases) >= limit:
                 break
@@ -417,7 +405,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         row.safe_error_code = "model_profile_unavailable"
                         row.finished_at = db_now
                         row.updated_at = db_now
-                        self._mark_memory_pending(row, db_now)
                         await self._append_event(
                             session,
                             row,
@@ -425,8 +412,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                             db_now,
                         )
                         await self._try_wake_parent_run(session, locked_session, row, db_now)
-                        if row.depth == 0:
-                            memory_wake_owners.append(row.owner_id)
                         continue
                     row.status = RunStatus.RUNNING.value
                     row.execution_epoch += 1
@@ -459,8 +444,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                             else row.execution_deadline_at,
                         )
                     )
-        for owner_id in dict.fromkeys(memory_wake_owners):
-            await self._wake_memory(owner_id)
         return tuple(leases)
 
     async def heartbeat(
@@ -515,38 +498,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     row.updated_at = db_now or now_utc()
                     return snapshot
                 return RuntimeToolSnapshot.model_validate(row.tool_snapshot)
-
-    async def initialize_memory_context(
-        self, command: InitializeRunMemoryContextCommand
-    ) -> RunMemoryContextState | None:
-        """在当前有效租约下原子固定记忆引用；竞争时只返回先写入的快照。"""
-        proposed = RunMemoryContextState.model_validate(
-            command.context_state.model_dump(mode="json")
-        )
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = await self._lock_worker_run(
-                    session, command.run_id, command.worker_id, command.execution_epoch
-                )
-                db_now = await session.scalar(select(func.clock_timestamp()))
-                if (
-                    row.status != RunStatus.RUNNING.value
-                    or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                    or not self._work_deadline_is_valid(row, db_now)
-                ):
-                    return None
-                context_state = RunMemoryContextState.model_validate(row.memory_context_state or {})
-                if context_state.initialized:
-                    return context_state
-                if not proposed.initialized:
-                    raise ValueError("run_memory_context_state_invalid")
-                # 固定上下文独立持久化，后续终态提取不得清空已初始化的空快照。
-                row.memory_context_state = proposed.model_dump(mode="json")
-                row.updated_at = db_now or now_utc()
-                return proposed
 
     async def reserve_llm_request(self, command: ReserveLlmRequestCommand) -> int | None:
         """Atomically reserve one provider call under a live execution lease."""
@@ -728,7 +679,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     row.safe_error_code = "tool_outcome_unknown"
                     row.finished_at = command.finished_at
                     row.updated_at = command.finished_at
-                    self._mark_memory_pending(row, command.finished_at)
                     self._clear_lease(row)
                     await self._close_pending_input(session, row, command.finished_at)
                     await self._append_event(
@@ -783,7 +733,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     row.finished_at = command.finished_at
                     row.updated_at = command.finished_at
                     row.safe_error_code = None
-                    self._mark_memory_pending(row, command.finished_at)
                     row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
                     self._clear_lease(row)
                     await self._append_event(
@@ -796,8 +745,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         session, locked_session, row, command.finished_at
                     )
                     result = run_to_domain(row)
-        if result is not None and result.depth == 0:
-            await self._wake_memory(result.owner_id)
         return result
 
     async def fail(self, command: FailRunCommand) -> Run | None:
@@ -889,7 +836,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 row.safe_error_code = command.safe_error_code
                 row.finished_at = command.failed_at
                 row.updated_at = command.failed_at
-                self._mark_memory_pending(row, command.failed_at)
                 row.report_message_id = report_message_id
                 row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
                 self._clear_lease(row)
@@ -906,8 +852,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 )
                 await self._try_wake_parent_run(session, locked_session, row, command.failed_at)
                 result = run_to_domain(row)
-        if result is not None and result.depth == 0:
-            await self._wake_memory(result.owner_id)
         return result
 
     async def settle_cancelled(
@@ -936,14 +880,11 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 row.status = RunStatus.CANCELLED.value
                 row.finished_at = settled_at
                 row.updated_at = settled_at
-                self._mark_memory_pending(row, settled_at)
                 self._clear_lease(row)
                 await self._close_pending_input(session, row, settled_at)
                 await self._append_event(session, row, RunCancelledPayload(), settled_at)
                 await self._try_wake_parent_run(session, locked_session, row, settled_at)
                 result = run_to_domain(row)
-        if result is not None and result.depth == 0:
-            await self._wake_memory(result.owner_id)
         return result
 
     async def reclaim_expired(self, *, limit: int) -> tuple[Run, ...]:
@@ -1013,7 +954,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     row.safe_error_code = None if was_cancelling else "execution_interrupted"
                     row.finished_at = db_now
                     row.updated_at = db_now
-                    self._mark_memory_pending(row, db_now)
                     row.execution_epoch += 1
                     self._clear_lease(row)
                     await self._close_pending_input(session, row, db_now)
@@ -1025,9 +965,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     await self._append_event(session, row, payload, db_now)
                     await self._try_wake_parent_run(session, locked_session, row, db_now)
                     reclaimed.append(run_to_domain(row))
-        for reclaimed_run in reclaimed:
-            if reclaimed_run.depth == 0:
-                await self._wake_memory(reclaimed_run.owner_id)
         return tuple(reclaimed)
 
     async def cancel(
@@ -1064,7 +1001,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     row.status = RunStatus.CANCELLED.value
                     row.finished_at = now
                     row.updated_at = now
-                    self._mark_memory_pending(row, now)
                     await self._close_pending_input(session, row, now)
                     self._clear_lease(row)
                     payload: RunEventPayload = RunCancelledPayload()
@@ -1103,7 +1039,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                                 child.status = RunStatus.CANCELLED.value
                                 child.finished_at = now
                                 child.updated_at = now
-                                self._mark_memory_pending(child, now)
                                 await self._close_pending_input(session, child, now)
                                 self._clear_lease(child)
                                 await self._append_event(session, child, RunCancelledPayload(), now)
@@ -1118,8 +1053,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 if row.status == RunStatus.CANCELLED.value and row.parent_run_id is not None:
                     await self._try_wake_parent_run(session, locked_session, row, now)
                 result = run_to_domain(row)
-        if result is not None and result.status is RunStatus.CANCELLED and result.depth == 0:
-            await self._wake_memory(result.owner_id)
         return result
 
     async def retry(
@@ -1138,7 +1071,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
         """幂等重试 failed Run，沿用原 trigger 和 cutoff、绑定当前默认版本。"""
         async with self._session_factory() as session:
             async with session.begin():
-                locked_session = await self._lock_session(session, session_id, owner_id)
+                await self._lock_session(session, session_id, owner_id)
                 source = await session.scalar(
                     select(RunModel)
                     .where(
@@ -1218,9 +1151,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         existing=(),
                         incoming=tuple(source.input_file_ids),
                     )
-                    inherited_skip = (
-                        source.memory_extraction_status == ExtractionStatus.SKIPPED.value
-                    )
                     created_at = await self._next_run_created_at(session, session_id)
                     row = RunModel(
                         id=new_run_id,
@@ -1236,17 +1166,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         compression_policy_version_id=compression_policy_id,
                         skill_snapshot=skill_snapshot.model_dump(mode="json"),
                         input_file_ids=list(input_file_ids),
-                        memory_project_id=locked_session.project_id,
-                        memory_input_message_ids=[source.trigger_message_id],
-                        memory_extraction_status=(
-                            ExtractionStatus.SKIPPED.value if inherited_skip else None
-                        ),
-                        memory_extracted_at=now if inherited_skip else None,
-                        memory_extraction_safe_error_code=(
-                            source.memory_extraction_safe_error_code or "memory_source_invalidated"
-                            if inherited_skip
-                            else None
-                        ),
                         prompt_template_version=prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -1667,10 +1586,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                             else child_skill_snapshot.model_dump(mode="json")
                         ),
                         input_file_ids=list(validated_files),
-                        memory_project_id=None,
-                        memory_input_message_ids=[],
-                        memory_extraction_status=ExtractionStatus.SKIPPED.value,
-                        memory_extracted_at=command.requested_at,
                         tool_snapshot=item.tool_snapshot.model_dump(mode="json"),
                         auth_session_id=row.auth_session_id,
                         llm_request_count=0,

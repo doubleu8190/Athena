@@ -21,6 +21,7 @@ from api.knowledge import build_knowledge_router
 from api.llm import build_llm_admin_router
 from api.mcp import build_mcp_router
 from api.messages import build_message_router
+from api.preference import build_preference_router
 from api.project_knowledge import build_project_knowledge_router
 from api.projects import build_project_router
 from api.runs import build_run_router
@@ -39,8 +40,8 @@ from app.auth.service import AuthService
 from app.file import SessionFileService
 from app.knowledge.service import KnowledgeService
 from app.llm import ModelProfileService
-from app.memory.service import MemoryService
 from app.message.service import MessageService
+from app.preference import PreferenceService
 from app.project.service import ProjectService
 from app.run.service import RunService
 from app.session.service import SessionService
@@ -121,7 +122,7 @@ def create_app(
     tool_manager: ToolManager | None = None,
     model_profile_service: ModelProfileService | None = None,
     system_prompt_service: SystemPromptService | None = None,
-    memory_service: MemoryService | None = None,
+    preference_service: PreferenceService | None = None,
     knowledge_service: KnowledgeService | None = None,
     skill_service: SkillService | None = None,
     session_file_service: SessionFileService | None = None,
@@ -147,7 +148,7 @@ def create_app(
         tool_manager=tool_manager,
         model_profile_service=model_profile_service,
         system_prompt_service=system_prompt_service,
-        memory_service=memory_service,
+        preference_service=preference_service,
         knowledge_service=knowledge_service,
         skill_service=skill_service,
         session_file_service=session_file_service,
@@ -196,13 +197,15 @@ def create_app(
     app.state.skill_service = deps.skill_service
     app.state.session_file_service = deps.session_file_service
     app.state.run_service = deps.run_service
-    app.state.memory_service = deps.memory_service
+    app.state.preference_service = deps.preference_service
     app.state.knowledge_service = deps.knowledge_service
     app.include_router(health_router)
     if deps.model_profile_service is not None:
         app.include_router(build_llm_admin_router(deps.model_profile_service))
     if deps.system_prompt_service is not None:
         app.include_router(build_system_prompt_admin_router(deps.system_prompt_service))
+    if deps.preference_service is not None:
+        app.include_router(build_preference_router(deps.preference_service))
     if deps.subagent_service is not None:
         app.include_router(build_subagent_admin_router(deps.subagent_service))
     if deps.skill_service is not None:

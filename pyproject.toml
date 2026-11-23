@@ -28,9 +28,7 @@ dependencies = [
     "pwdlib[argon2]>=0.2,<1",
     "PyYAML>=6,<7",
     "sqlalchemy[asyncio]>=2,<3",
-    "sentence-transformers>=5.7,<6",
     "tiktoken>=0.12,<1",
-    "transformers>=4.57,<5",
     "uvicorn>=0.30,<1",
 ]
 

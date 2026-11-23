@@ -6,9 +6,9 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
@@ -19,7 +19,7 @@ from app.knowledge.service import (
     KnowledgeSearchUnavailableError,
     KnowledgeService,
 )
-from app.memory.service import MemoryService
+from app.preference import PreferenceService
 from app.project.knowledge import KnowledgeNotFoundError as ProjectKnowledgeNotFoundError
 from app.project.knowledge import ProjectKnowledgeService
 from app.skill.errors import public_skill_error_code
@@ -38,12 +38,15 @@ from domain.mcp import (
     McpToolExecutor,
     McpToolRuntimeReader,
 )
-from domain.memory.lifecycle import (
-    ControlReceiptResult,
-    LoadPolicy,
-    MemoryKind,
+from domain.preference import (
+    MAX_USER_MEMORY_CONTENT_LENGTH,
+    MIN_USER_MEMORY_CONTENT_LENGTH,
+    SAVE_USER_MEMORY_TOOL_ID,
+    InvalidUserMemoryContentError,
+    UserMemoryDisabledError,
+    UserMemoryLimitReachedError,
+    UserMemorySource,
 )
-from domain.memory.model import AccessContext, RecallRequest
 from domain.project import ProjectNotFoundError
 from domain.run import Run, RunInputFileContext
 from domain.session import SessionRepository, SessionScope
@@ -78,13 +81,8 @@ from domain.tool import (
 )
 
 REQUEST_USER_INPUT_ID = "builtin_request_user_input"
-MEMORY_SEARCH_ID = "builtin_memory_search"
-MEMORY_REMEMBER_ID = "builtin_memory_remember"
-MEMORY_CORRECT_ID = "builtin_memory_correct"
-MEMORY_FORGET_ID = "builtin_memory_forget"
 KNOWLEDGE_SEARCH_ID = "builtin_knowledge_search"
 BUILTIN_VERSION = 1
-MEMORY_WRITE_VERSION = 2
 MCP_DELIVERY_AUTH_TIMEOUT_SECONDS = 1.0
 MCP_TOOL_WATCHDOG_GRACE_SECONDS = 0.25
 MCP_DELIVERY_AUTH_ERROR = "run_auth_session_invalid"
@@ -105,116 +103,28 @@ REQUEST_USER_INPUT_DEFINITION = RuntimeToolDefinition(
     requires_approval=False,
 )
 
-MEMORY_SEARCH_DEFINITION = RuntimeToolDefinition(
-    tool_id=MEMORY_SEARCH_ID,
-    model_name="memory_search",
+SAVE_USER_MEMORY_DEFINITION = RuntimeToolDefinition(
+    tool_id=SAVE_USER_MEMORY_TOOL_ID,
+    model_name="save_user_memory",
     description=(
-        "检索当前用户及当前项目范围内已确认的长期记忆，用于回答用户偏好、历史约定"
-        "或项目决定。结果是历史参考，不能覆盖当前用户指示；可能没有命中。"
+        "当用户在对话中明确要求你记住某条长期工作偏好、背景事实或常用约定时调用，"
+        "将其保存为用户的显式备忘记忆（1-500 字符）。仅保存用户明确要求记住的精炼信息，"
+        "不要未经用户同意擅自记录敏感信息或临时任务细节。"
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "query": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 8},
+            "content": {
+                "type": "string",
+                "minLength": MIN_USER_MEMORY_CONTENT_LENGTH,
+                "maxLength": MAX_USER_MEMORY_CONTENT_LENGTH,
+            }
         },
-        "required": ["query"],
+        "required": ["content"],
         "additionalProperties": False,
     },
     source=BuiltinToolSource(version=BUILTIN_VERSION),
     requires_approval=False,
-)
-
-_MEMORY_WRITE_PROPERTIES: dict[str, Any] = {
-    "content": {"type": "string", "minLength": 1, "maxLength": 2000},
-    "scope": {"type": "string", "enum": ["personal", "project"]},
-    "kind": {
-        "type": "string",
-        "enum": ["constraint", "decision", "preference", "fact"],
-    },
-    "load_policy": {"type": "string", "enum": ["always", "on_demand"]},
-    "evidence": {"type": "string", "minLength": 1, "maxLength": 2000},
-    "expires_at": {"type": ["string", "null"], "format": "date-time"},
-}
-
-MEMORY_REMEMBER_DEFINITION = RuntimeToolDefinition(
-    tool_id=MEMORY_REMEMBER_ID,
-    model_name="memory_remember",
-    description=(
-        "仅当用户在本 Run 明确要求记住长期信息时调用。身份与来源由服务端注入；"
-        "content 必须保留用户原话中的否定和条件，evidence 必须逐字引用同一条直接"
-        "用户消息，控制意图也必须出现在该消息。普通偏好和事实默认 on_demand，"
-        "只有明确持续适用的规则才使用 always。"
-    ),
-    input_schema={
-        "type": "object",
-        "properties": dict(_MEMORY_WRITE_PROPERTIES),
-        "required": [
-            "content",
-            "scope",
-            "kind",
-            "load_policy",
-            "evidence",
-        ],
-        "additionalProperties": False,
-    },
-    source=BuiltinToolSource(version=MEMORY_WRITE_VERSION),
-    requires_approval=True,
-)
-
-MEMORY_CORRECT_DEFINITION = RuntimeToolDefinition(
-    tool_id=MEMORY_CORRECT_ID,
-    model_name="memory_correct",
-    description=(
-        "仅当用户明确纠正一条已有长期记忆时调用。必须提交当前唯一目标 ID、"
-        "版本和用户原话证据；目标 ID 和版本必须来自 memory_search 的结果。"
-        "content 必须保留用户原话中的否定和条件，evidence 必须逐字引用同一条"
-        "直接用户消息。服务端会复核身份、范围、来源和版本后替代正文。"
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            **_MEMORY_WRITE_PROPERTIES,
-            "target_memory_id": {"type": "string", "minLength": 1, "maxLength": 64},
-            "expected_version": {"type": "integer", "minimum": 1},
-        },
-        "required": [
-            "content",
-            "scope",
-            "kind",
-            "load_policy",
-            "evidence",
-            "target_memory_id",
-            "expected_version",
-        ],
-        "additionalProperties": False,
-    },
-    source=BuiltinToolSource(version=MEMORY_WRITE_VERSION),
-    requires_approval=True,
-)
-
-MEMORY_FORGET_DEFINITION = RuntimeToolDefinition(
-    tool_id=MEMORY_FORGET_ID,
-    model_name="memory_forget",
-    description=(
-        "仅当用户明确要求忘记或清空记忆时调用。默认必须提交唯一目标与版本；"
-        "证据与忘记意图必须来自同一条用户消息；clear_scope=true 只允许用户明确要求"
-        "清空当前 scope。"
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "scope": {"type": "string", "enum": ["personal", "project"]},
-            "evidence": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "target_memory_id": {"type": ["string", "null"], "maxLength": 64},
-            "expected_version": {"type": ["integer", "null"], "minimum": 1},
-            "clear_scope": {"type": "boolean", "default": False},
-        },
-        "required": ["scope", "evidence", "clear_scope"],
-        "additionalProperties": False,
-    },
-    source=BuiltinToolSource(version=BUILTIN_VERSION),
-    requires_approval=True,
 )
 
 KNOWLEDGE_SEARCH_DEFINITION = RuntimeToolDefinition(
@@ -465,10 +375,9 @@ class RunToolRuntimeService(RunToolRuntime):
         sessions: SessionRepository,
         mcp_catalog: McpToolRuntimeReader,
         mcp_executor: McpToolExecutor,
-        memory: MemoryService | None,
-        memory_enabled: bool,
         knowledge: KnowledgeService | None,
         project_knowledge: ProjectKnowledgeService | None,
+        preferences: PreferenceService | None = None,
         skills: SkillService | None = None,
         session_files: SessionFileService | None = None,
         skill_execution: SkillExecutionService | None = None,
@@ -479,10 +388,9 @@ class RunToolRuntimeService(RunToolRuntime):
         self._sessions = sessions
         self._mcp_catalog = mcp_catalog
         self._mcp_executor = mcp_executor
-        self._memory = memory
-        self._memory_enabled = memory_enabled
         self._knowledge = knowledge
         self._project_knowledge = project_knowledge
+        self._preferences = preferences
         self._skills = skills
         self._session_files = session_files
         self._skill_execution = skill_execution
@@ -536,16 +444,10 @@ class RunToolRuntimeService(RunToolRuntime):
             raise ValueError("run_prompt_template_unsupported")
 
         definitions: list[RuntimeToolDefinition] = [REQUEST_USER_INPUT_DEFINITION]
-        # 按部署开关与项目绑定关系逐步加入内置工具。
-        if self._memory_enabled and self._memory is not None:
-            definitions.extend(
-                (
-                    MEMORY_SEARCH_DEFINITION,
-                    MEMORY_REMEMBER_DEFINITION,
-                    MEMORY_CORRECT_DEFINITION,
-                    MEMORY_FORGET_DEFINITION,
-                )
-            )
+        # 仅主 Run 且用户开启显式记忆开关时，暴露免审批的 save_user_memory 工具。
+        if depth == 0 and self._preferences is not None:
+            if await self._preferences.is_memory_enabled(context.owner_id):
+                definitions.append(SAVE_USER_MEMORY_DEFINITION)
         # 只有绑定了项目且存在知识库时才暴露 knowledge_search。
         if (
             context.project_id
@@ -578,15 +480,16 @@ class RunToolRuntimeService(RunToolRuntime):
             if enabled_subagents:
                 definitions.append(build_dispatch_subagents_definition(enabled_subagents))
         elif depth >= 1:
-            # 子 Run 强制剔除 dispatch_subagents 防止嵌套调度，并与白名单求严格交集。
+            # 子 Run 强制剔除 dispatch_subagents 与 save_user_memory，并与白名单求严格交集。
+            forbidden_tool_ids = {DISPATCH_SUBAGENTS_TOOL_ID, SAVE_USER_MEMORY_TOOL_ID}
+            forbidden_names = {"dispatch_subagents", "save_user_memory"}
             definitions = [
                 item
                 for item in definitions
-                if item.tool_id != DISPATCH_SUBAGENTS_TOOL_ID
-                and item.model_name != "dispatch_subagents"
+                if item.tool_id not in forbidden_tool_ids and item.model_name not in forbidden_names
             ]
             if allowed_tool_ids is not None:
-                allowed_set = set(allowed_tool_ids) - {DISPATCH_SUBAGENTS_TOOL_ID}
+                allowed_set = set(allowed_tool_ids) - forbidden_tool_ids
                 definitions = [item for item in definitions if item.tool_id in allowed_set]
 
         return RuntimeToolSnapshot(tools=tuple(definitions))
@@ -770,11 +673,18 @@ class RunToolRuntimeService(RunToolRuntime):
             return _error("tool_arguments_invalid", validation_error)
         query = arguments.get("query")
         if (
-            definition.model_name in {"memory_search", "knowledge_search"}
+            definition.model_name == "knowledge_search"
             and isinstance(query, str)
             and not query.strip()
         ):
             return _error("tool_arguments_invalid", "查询内容不能为空。")
+        content = arguments.get("content")
+        if (
+            definition.tool_id == SAVE_USER_MEMORY_TOOL_ID
+            and isinstance(content, str)
+            and not content.strip()
+        ):
+            return _error("tool_arguments_invalid", "记忆内容不能为空。")
         return None
 
     async def abandon_artifacts(
@@ -962,20 +872,9 @@ class RunToolRuntimeService(RunToolRuntime):
                     terminate_run_error_code="run_auth_session_invalid",
                 )
             return result
-        # 内置工具按冻结名称分派到对应实现。
-        if definition.model_name == "memory_search":
-            outcome = await self._memory_search(before, arguments)
-        elif definition.model_name in {
-            "memory_remember",
-            "memory_correct",
-            "memory_forget",
-        }:
-            outcome = await self._memory_control(
-                before,
-                context,
-                definition.model_name,
-                arguments,
-            )
+        # 内置工具按冻结身份分派到对应实现。
+        if definition.tool_id == SAVE_USER_MEMORY_TOOL_ID:
+            outcome = await self._save_user_memory(before, arguments)
         elif definition.model_name == "knowledge_search":
             outcome = await self._knowledge_search(before, arguments, deadline_seconds)
         elif definition.tool_id == SKILL_LOAD_TOOL_ID:
@@ -1002,236 +901,52 @@ class RunToolRuntimeService(RunToolRuntime):
             )
         return ToolExecutionResult(bounded_outcome(outcome))
 
-    async def _memory_search(
-        self,
-        context: AuthorizedRunContext,
-        arguments: Mapping[str, Any],
-    ) -> ToolOutcome:
-        if not self._memory_enabled or self._memory is None:
-            return _error("memory_disabled", "记忆检索未启用。")
-        query = str(arguments["query"]).strip()
-        try:
-            limit = _bounded_limit(arguments.get("limit"), default=5)
-        except ValueError:
-            return _error("tool_arguments_invalid", "limit 必须是 1 到 8 之间的整数。")
-        scopes = ["personal"]
-        priority = ["personal"]
-        if context.project_id:
-            project_scope = f"project:{context.project_id}"
-            scopes.append(project_scope)
-            priority = [project_scope, "personal"]
-        try:
-            result = await self._memory.recall(
-                RecallRequest(
-                    access=AccessContext(
-                        namespace_id=context.owner_id,
-                        readable_scopes=tuple(scopes),
-                        writable_scopes=(),
-                    ),
-                    scope_keys=tuple(scopes),
-                    query=query,
-                    scope_priority=tuple(priority),
-                    limit=limit,
-                    token_budget=1200,
-                )
-            )
-        except Exception:
-            return _error("memory_unavailable", "记忆检索暂时不可用。")
-        if result.status == "disabled":
-            return _error("memory_disabled", "用户已关闭记忆读取。")
-        if result.status == "unavailable":
-            return _error("memory_unavailable", "记忆检索暂时不可用。")
-        items = [
-            {
-                "memory_id": hit.memory.id,
-                "version": hit.memory.version,
-                "content": hit.memory.content,
-                "scope": "project" if hit.memory.scope_key.startswith("project:") else "personal",
-            }
-            for hit in result.hits
-        ]
-        status = ToolOutcomeStatus.OK
-        message = (
-            "检索结果可能不完整。"
-            if result.status == "degraded"
-            else ("未找到相关的已确认记忆。" if not items else "已找到相关记忆。")
-        )
-        return ToolOutcome(
-            status=status,
-            code="memory_degraded" if result.status == "degraded" else "memory_search_ok",
-            message=message,
-            data={
-                "status": result.status,
-                "items": items,
-                "truncated": result.truncated,
-                "degradation_reasons": list(result.degradation_reasons),
-            },
-            truncated=result.truncated,
-        )
-
-    async def _memory_control(
+    async def _save_user_memory(
         self,
         authorized: AuthorizedRunContext,
-        execution: ToolExecutionContext,
-        model_name: str,
         arguments: Mapping[str, Any],
     ) -> ToolOutcome:
-        """执行一个需要审批的显式记忆控制，只有事务成功才返回完成。"""
-        if not self._memory_enabled or self._memory is None:
-            return _error("memory_disabled", "记忆能力未启用。")
-        scopes = ["personal"]
-        if authorized.project_id is not None:
-            scopes.append(f"project:{authorized.project_id}")
-        access = AccessContext(
-            namespace_id=authorized.owner_id,
-            readable_scopes=tuple(scopes),
-            writable_scopes=tuple(scopes),
-        )
-        tool_call_id = execution.tool_call_record_id
-        if tool_call_id is None:
-            return _error("memory_control_unavailable", "记忆控制缺少持久化调用身份。")
+        """响应对话中用户显式记住诉求，写入一条 chat_explicit 备忘记忆。"""
+        if self._preferences is None:
+            return _error("user_memory_unavailable", "显式记忆能力未启用。")
         try:
-            if model_name in {"memory_remember", "memory_correct"}:
-                content = str(arguments["content"]).strip()
-                scope = str(arguments["scope"])
-                kind = MemoryKind(str(arguments["kind"]))
-                load_policy = LoadPolicy(str(arguments["load_policy"]))
-                evidence = str(arguments["evidence"]).strip()
-                expires_at = _optional_datetime(arguments.get("expires_at"))
-                if model_name == "memory_correct":
-                    result = await self._memory.correct(
-                        access,
-                        run_id=execution.run_id,
-                        session_id=execution.chat_session_id,
-                        tool_call_id=tool_call_id,
-                        content=content,
-                        scope=scope,
-                        kind=kind,
-                        load_policy=load_policy,
-                        evidence=evidence,
-                        expires_at=expires_at,
-                        target_memory_id=str(arguments["target_memory_id"]),
-                        expected_version=int(arguments["expected_version"]),
-                    )
-                else:
-                    result = await self._memory.remember(
-                        access,
-                        run_id=execution.run_id,
-                        session_id=execution.chat_session_id,
-                        tool_call_id=tool_call_id,
-                        content=content,
-                        scope=scope,
-                        kind=kind,
-                        load_policy=load_policy,
-                        evidence=evidence,
-                        expires_at=expires_at,
-                    )
-            else:
-                result = await self._memory.forget(
-                    access,
-                    run_id=execution.run_id,
-                    session_id=execution.chat_session_id,
-                    tool_call_id=tool_call_id,
-                    scope=str(arguments["scope"]),
-                    evidence=str(arguments["evidence"]).strip(),
-                    target_memory_id=(
-                        None
-                        if arguments.get("target_memory_id") is None
-                        else str(arguments["target_memory_id"])
-                    ),
-                    expected_version=(
-                        None
-                        if arguments.get("expected_version") is None
-                        else int(arguments["expected_version"])
-                    ),
-                    clear_scope=bool(arguments.get("clear_scope", False)),
-                )
-        except ValueError as error:
+            memory = await self._preferences.create_memory(
+                authorized.owner_id,
+                str(arguments["content"]),
+                source=UserMemorySource.CHAT_EXPLICIT,
+            )
+        except UserMemoryDisabledError:
             return _error(
-                _memory_control_error_code(str(error)),
-                "记忆操作未执行：来源、范围或目标版本校验失败。",
+                "user_memory_disabled",
+                "用户已关闭显式记忆功能，未保存该条记忆。",
+            )
+        except UserMemoryLimitReachedError:
+            return _error(
+                "user_memory_limit_reached",
+                f"用户的显式记忆数量已达上限（{self._preferences.max_memories} 条），"
+                "请提示用户在个人设置中清理后再保存。",
+            )
+        except InvalidUserMemoryContentError:
+            return _error(
+                "user_memory_content_invalid",
+                "记忆内容不合法，需为 1 到 500 个字符且不能包含非法控制字符。",
             )
         except Exception:
-            try:
-                replay = await self._recover_memory_control(
-                    access,
-                    execution,
-                    model_name,
-                    arguments,
-                )
-            except Exception:
-                replay = None
-            if replay is not None:
-                return self._memory_control_success(replay)
-            return _unknown(
-                "memory_unavailable",
-                "记忆操作结果未确认，请勿重复提交；系统将按原操作键查询回执。",
+            return _error(
+                "user_memory_unavailable",
+                "显式记忆暂时不可用，未保存该条记忆。",
             )
-        return self._memory_control_success(result)
-
-    async def _recover_memory_control(
-        self,
-        access: AccessContext,
-        execution: ToolExecutionContext,
-        model_name: str,
-        arguments: Mapping[str, Any],
-    ) -> ControlReceiptResult | None:
-        """未知异常后只按原工具键和原参数摘要查询已完成回执。"""
-        memory = self._memory
-        tool_call_id = execution.tool_call_record_id
-        if memory is None or tool_call_id is None:
-            return None
-        if model_name in {"memory_remember", "memory_correct"}:
-            operation: Literal["remember", "correct"] = (
-                "correct" if model_name == "memory_correct" else "remember"
-            )
-            return await memory.recover_control(
-                access,
-                run_id=execution.run_id,
-                session_id=execution.chat_session_id,
-                tool_call_id=tool_call_id,
-                operation=operation,
-                content=str(arguments["content"]).strip(),
-                scope=str(arguments["scope"]),
-                kind=MemoryKind(str(arguments["kind"])),
-                load_policy=LoadPolicy(str(arguments["load_policy"])),
-                evidence=str(arguments["evidence"]).strip(),
-                expires_at=_optional_datetime(arguments.get("expires_at")),
-                target_memory_id=(
-                    str(arguments["target_memory_id"]) if operation == "correct" else None
-                ),
-                expected_version=(
-                    int(arguments["expected_version"]) if operation == "correct" else None
-                ),
-            )
-        return await memory.recover_forget_control(
-            access,
-            run_id=execution.run_id,
-            session_id=execution.chat_session_id,
-            tool_call_id=tool_call_id,
-            scope=str(arguments["scope"]),
-            evidence=str(arguments["evidence"]).strip(),
-            target_memory_id=(
-                None
-                if arguments.get("target_memory_id") is None
-                else str(arguments["target_memory_id"])
-            ),
-            expected_version=(
-                None
-                if arguments.get("expected_version") is None
-                else int(arguments["expected_version"])
-            ),
-            clear_scope=bool(arguments.get("clear_scope", False)),
-        )
-
-    @staticmethod
-    def _memory_control_success(result: ControlReceiptResult) -> ToolOutcome:
-        """把已完成控制回执投影为同一成功结果。"""
         return ToolOutcome(
             status=ToolOutcomeStatus.OK,
-            code="memory_control_ok",
-            message="记忆操作已在同一事务中完成。",
-            data=result.model_dump(mode="json"),
+            code="user_memory_saved",
+            message="已保存用户的显式备忘记忆。",
+            data={
+                "id": memory.id,
+                "content": memory.content,
+                "source": memory.source.value,
+                "created_at": memory.created_at.isoformat(),
+                "updated_at": memory.updated_at.isoformat(),
+            },
         )
 
     async def _knowledge_search(
@@ -1529,21 +1244,9 @@ def _error(code: str, message: str) -> ToolOutcome:
 
 
 def _current_builtin_version(definition: RuntimeToolDefinition) -> int:
-    """返回当前实现要求的内置工具版本，避免全局升级使无关工具失效。"""
-    if definition.tool_id in {MEMORY_REMEMBER_ID, MEMORY_CORRECT_ID} or (
-        definition.model_name in {"memory_remember", "memory_correct"}
-    ):
-        return MEMORY_WRITE_VERSION
+    """返回当前实现要求的内置工具版本。"""
+    del definition
     return BUILTIN_VERSION
-
-
-def _unknown(code: str, message: str) -> ToolOutcome:
-    """返回结果未确认的业务状态，调用方不得据此自动重发副作用操作。"""
-    return ToolOutcome(
-        status=ToolOutcomeStatus.UNKNOWN,
-        code=code,
-        message=message[:2000],
-    )
 
 
 def _skill_preparation_error(error: Exception) -> ToolOutcome:
@@ -1593,55 +1296,6 @@ def _bounded_limit(value: object, *, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 8:
         raise ValueError("tool_arguments_invalid")
     return value
-
-
-def _optional_datetime(value: object) -> datetime | None:
-    """解析带时区的可选 ISO 时间，拒绝含糊本地时间。"""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError("memory_control_datetime_invalid")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ValueError("memory_control_datetime_invalid") from error
-    if parsed.tzinfo is None:
-        raise ValueError("memory_control_datetime_invalid")
-    return parsed.astimezone(UTC)
-
-
-def _memory_control_error_code(error_code: str) -> str:
-    """只向模型投影稳定控制错误码，未知异常不携带内部文本。"""
-    allowed = {
-        "memory_scope_forbidden",
-        "memory_source_scope_invalid",
-        "memory_control_evidence_invalid",
-        "memory_control_intent_missing",
-        "memory_control_scope_invalid",
-        "memory_control_content_invalid",
-        "memory_sensitive_content",
-        "memory_control_target_required",
-        "memory_control_arguments_invalid",
-        "memory_control_version_conflict",
-        "memory_control_version_required",
-        "memory_control_operation_invalid",
-        "memory_control_project_invalid",
-        "memory_control_receipt_invalid",
-        "memory_control_receipt_unavailable",
-        "memory_control_run_invalid",
-        "memory_control_session_invalid",
-        "memory_control_source_changed",
-        "memory_control_source_invalid",
-        "memory_control_target_invalid",
-        "memory_control_unavailable",
-        "memory_control_generation_changed",
-        "memory_control_idempotency_conflict",
-        "memory_control_datetime_invalid",
-        "memory_scope_disabled",
-    }
-    if error_code in allowed:
-        return error_code
-    return "memory_control_invalid"
 
 
 def _bounded_integer(
@@ -1708,17 +1362,10 @@ __all__ = [
     "KNOWLEDGE_SEARCH_ID",
     "MCP_DELIVERY_AUTH_TIMEOUT_SECONDS",
     "MCP_TOOL_WATCHDOG_GRACE_SECONDS",
-    "MEMORY_CORRECT_DEFINITION",
-    "MEMORY_CORRECT_ID",
-    "MEMORY_FORGET_DEFINITION",
-    "MEMORY_FORGET_ID",
-    "MEMORY_REMEMBER_DEFINITION",
-    "MEMORY_REMEMBER_ID",
-    "MEMORY_WRITE_VERSION",
-    "MEMORY_SEARCH_DEFINITION",
-    "MEMORY_SEARCH_ID",
     "REQUEST_USER_INPUT_DEFINITION",
     "REQUEST_USER_INPUT_ID",
+    "SAVE_USER_MEMORY_DEFINITION",
+    "SAVE_USER_MEMORY_TOOL_ID",
     "SESSION_FILE_LIST_DEFINITION",
     "SESSION_FILE_LIST_TOOL_ID",
     "SESSION_FILE_READ_DEFINITION",

@@ -214,8 +214,6 @@ def test_api_dependencies_wire_shared_redis_auth_rate_limiters_and_close_once(
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://db.invalid/athena")
     monkeypatch.setenv("ATHENA_REDIS_URL", "redis://cache.invalid:6379/0")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_MEMORY_ENABLED", "false")
-    monkeypatch.setenv("ATHENA_MEMORY_LIFECYCLE_ENABLED", "false")
     monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
     monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
     monkeypatch.setattr(bootstrap_api, "build_database", lambda _url: FakeDatabase())

@@ -6,7 +6,6 @@ from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Protocol
 
-from domain.memory.lifecycle import RunMemoryContextState
 from domain.message import ConversationMessage, ExecutionMessage
 from domain.run.model import (
     AnswerRunCommand,
@@ -15,7 +14,6 @@ from domain.run.model import (
     ContextSummary,
     FailRunCommand,
     FinishRunCommand,
-    InitializeRunMemoryContextCommand,
     PendingSubagentApproval,
     PendingSubagentInput,
     RecordRunUsageCommand,
@@ -91,11 +89,6 @@ class RunRepository(Protocol):
         self, command: InitializeRunToolsCommand
     ) -> RuntimeToolSnapshot | None:
         """有效租约下固定快照；已固定时只返回原快照。"""
-
-    async def initialize_memory_context(
-        self, command: InitializeRunMemoryContextCommand
-    ) -> RunMemoryContextState | None:
-        """有效租约下首次固定记忆引用；已固定时只返回原快照。"""
 
     async def reserve_llm_request(self, command: ReserveLlmRequestCommand) -> int | None:
         """原子预留一次模型请求并返回 1–maximum_count 的序号。"""

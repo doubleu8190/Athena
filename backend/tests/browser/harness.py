@@ -967,7 +967,6 @@ def main() -> None:
                 "ATHENA_REDIS_URL": f"redis://127.0.0.1:{redis_port}/0",
                 "ATHENA_PUBLIC_ORIGIN": f"http://127.0.0.1:{frontend_port}",
                 "ATHENA_COOKIE_SECURE": "false",
-                "ATHENA_MEMORY_ENABLED": "false",
                 "ATHENA_KNOWLEDGE_ENABLED": "false",
                 "ATHENA_FILES_ENABLED": "true",
                 "ATHENA_STORAGE_BUCKET": bucket,

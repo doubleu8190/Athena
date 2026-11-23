@@ -52,14 +52,6 @@ from domain.mcp import (
     McpRuntimeToolTarget,
     StdioConfig,
 )
-from domain.memory.lifecycle import (
-    LoadPolicy,
-    MemoryContextItem,
-    MemoryContextSnapshot,
-    MemoryKind,
-    RunMemoryContextState,
-)
-from domain.memory.model import AccessContext, Memory
 from domain.message import (
     ArtifactFileRef,
     ConversationMessage,
@@ -370,10 +362,6 @@ class _Repository:
         self.run = replace(self.run, llm_request_count=self.run.llm_request_count + 1)
         return self.run.llm_request_count
 
-    async def initialize_memory_context(self, command: Any) -> RunMemoryContextState:
-        """测试执行器内固定记忆时直接返回当前候选快照。"""
-        return cast(RunMemoryContextState, command.context_state)
-
     async def record_usage(self, command: object) -> Run:
         return self.run
 
@@ -572,69 +560,6 @@ class _Repository:
         return self.run
 
 
-class _RunMemoryLifecycle:
-    """记录 Run 装配时的可信 scope，并返回固定项目 always 条目。"""
-
-    def __init__(self) -> None:
-        self.list_calls: list[tuple[AccessContext, str, int]] = []
-        self.revalidate_calls: list[tuple[AccessContext, tuple[tuple[str, int, str], ...]]] = []
-        self.read_enabled = True
-        self.memory = Memory(
-            id="memory_project_rule",
-            namespace_id="owner-tools",
-            scope_key="project:project-memory",
-            content="本项目始终使用 PostgreSQL。",
-            status="active",
-            origin="explicit",
-            version=3,
-            expires_at=None,
-            sources=(),
-            created_at=NOW,
-            updated_at=NOW,
-            kind=MemoryKind.CONSTRAINT,
-            load_policy=LoadPolicy.ALWAYS,
-            explicit_long_term=True,
-            last_evidenced_at=NOW,
-        )
-
-    async def list_context(
-        self,
-        access: AccessContext,
-        scope_key: str,
-        *,
-        limit: int,
-    ) -> tuple[Memory, ...]:
-        """只让当前固定项目 scope 返回 always 条目。"""
-        self.list_calls.append((access, scope_key, limit))
-        return (
-            (self.memory,)
-            if scope_key == "project:project-memory"
-            else ()
-        )
-
-    async def revalidate_context(
-        self,
-        access: AccessContext,
-        memories: tuple[tuple[str, int, str], ...],
-    ) -> MemoryContextSnapshot:
-        """返回固定条目的当前版本，供每轮请求装配复核。"""
-        self.revalidate_calls.append((access, memories))
-        if not self.read_enabled:
-            return MemoryContextSnapshot(read_enabled=False, items={})
-        items = {
-            self.memory.id: MemoryContextItem(
-                memory_id=self.memory.id,
-                version=self.memory.version,
-                scope_key=self.memory.scope_key,
-                content=self.memory.content,
-                kind=self.memory.kind,
-                load_policy=self.memory.load_policy,
-                expires_at=self.memory.expires_at,
-            )
-        }
-        return MemoryContextSnapshot(read_enabled=True, items=items)
-
-
 class _Profiles:
     def __init__(
         self,
@@ -797,8 +722,6 @@ def _delivery_runtime(
         sessions=cast(Any, _DeliverySessions()),
         mcp_catalog=cast(Any, _DeliveryMcpCatalog()),
         mcp_executor=mcp_executor,
-        memory=None,
-        memory_enabled=False,
         knowledge=None,
         project_knowledge=None,
     )
@@ -1058,89 +981,8 @@ def test_run_input_file_projection_is_in_the_actual_provider_request() -> None:
     asyncio.run(scenario())
 
 
-def test_no_tool_runtime_still_loads_project_always_memory_from_fixed_run_scope() -> None:
-    """未挂业务工具时仍按 Run 固定项目装配 always，并只暴露澄清工具。"""
-
-    async def scenario() -> None:
-        lease = _lease()
-        run = replace(lease.run, memory_project_id="project-memory")
-        lease = RunLease(run, lease.lease_expires_at, lease.execution_deadline_at)
-        repository = _Repository(run)
-        provider = _ScriptedProvider([_response(text="ok")])
-        lifecycle = _RunMemoryLifecycle()
-        executor = RunExecutor(
-            cast(RunRepository, repository),
-            cast(ModelProfileRepository, _Profiles()),
-            cast(LlmStreamProvider, provider),
-            memory_lifecycle=cast(Any, lifecycle),
-        )
-
-        await executor.execute(lease)
-
-        assert len(provider.requests) == 1
-        request = provider.requests[0]
-        assert tuple(tool.name for tool in request.tools) == ("request_user_input",)
-        assert any(
-            "本项目始终使用 PostgreSQL。" in message.content
-            and "<untrusted_long_term_memory>" in message.content
-            for message in request.messages
-        )
-        assert tuple(
-            scope_key for _, scope_key, _ in lifecycle.list_calls
-        ) == ("project:project-memory", "personal")
-        assert lifecycle.list_calls[0][0].readable_scopes == (
-            "personal",
-            "project:project-memory",
-        )
-        assert lifecycle.revalidate_calls
-        assert repository.run.status is RunStatus.COMPLETED
-
-    asyncio.run(scenario())
-
-
-def test_memory_present_disables_automatic_retry_of_stale_request() -> None:
-    """记忆变为不可读后不得复用含旧正文的同一请求再次调用供应商。"""
-
-    async def scenario() -> None:
-        lease = _lease()
-        run = replace(lease.run, memory_project_id="project-memory")
-        lease = RunLease(run, lease.lease_expires_at, lease.execution_deadline_at)
-        repository = _Repository(run)
-        lifecycle = _RunMemoryLifecycle()
-
-        def disable_read_after_request(index: int) -> None:
-            if index == 0:
-                lifecycle.read_enabled = False
-
-        provider = _ScriptedProvider(
-            [
-                LlmProviderError("llm_rate_limited", retry_safe=True),
-                _response(text="stale retry must not run"),
-            ],
-            on_request=disable_read_after_request,
-        )
-        executor = RunExecutor(
-            cast(RunRepository, repository),
-            cast(ModelProfileRepository, _Profiles()),
-            cast(LlmStreamProvider, provider),
-            memory_lifecycle=cast(Any, lifecycle),
-        )
-
-        await executor.execute(lease)
-
-        assert len(provider.requests) == 1
-        assert any(
-            "本项目始终使用 PostgreSQL。" in message.content
-            for message in provider.requests[0].messages
-        )
-        assert repository.failures == ["llm_rate_limited"]
-        assert len(provider.outcomes) == 1
-
-    asyncio.run(scenario())
-
-
-def test_transient_provider_error_still_retries_without_memory() -> None:
-    """无记忆的同一请求继续遵守三次上限内的自动重试。"""
+def test_transient_provider_error_still_retries() -> None:
+    """可恢复供应商错误在三次上限内继续自动重试。"""
 
     async def scenario() -> None:
         lease = _lease()

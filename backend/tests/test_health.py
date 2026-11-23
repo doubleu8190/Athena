@@ -14,32 +14,17 @@ import bootstrap.database as bootstrap_database
 import main
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from app.knowledge.service import KnowledgeService
-from app.memory.service import MemoryService
+from app.preference import PreferenceService
 from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
 from app.tool import ToolManager
 from bootstrap.tool import QueryServiceBundle, build_query_services
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.knowledge.model import OriginalStorageConfigurationError
-from domain.llm.ports import EmbeddingPort, TokenCounterPort
 from domain.mcp import McpServer, McpServerPage, StreamableHttpConfig
-from domain.memory.model import RerankerPort
-from domain.memory.ports import MemoryLifecycleRepositoryPort, MemoryRepositoryPort
+from domain.preference import PreferenceRepository
 from domain.tool import AdminToolDefinition, ToolPage
 from main import create_app
-
-
-class _TrackingMemoryService(MemoryService):
-    """使用未调用的明确端口替身构造真实记忆服务。"""
-
-    def __init__(self, lifecycle: MemoryLifecycleRepositoryPort | None) -> None:
-        super().__init__(
-            cast(MemoryRepositoryPort, object()),
-            cast(EmbeddingPort, object()),
-            cast(RerankerPort, object()),
-            cast(TokenCounterPort, object()),
-            lifecycle=lifecycle,
-        )
 
 
 def test_health() -> None:
@@ -73,41 +58,18 @@ def test_request_validation_errors_do_not_echo_sensitive_input() -> None:
     assert b"sensitive-key-value" not in response.body
 
 
-def test_memory_is_disabled_by_default_and_can_be_injected(
+def test_preference_service_is_none_without_database_and_can_be_injected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ATHENA_MEMORY_ENABLED", raising=False)
-    monkeypatch.delenv("ATHENA_MEMORY_LIFECYCLE_ENABLED", raising=False)
-    disabled_app = create_app()
-    assert disabled_app.state.memory_service is None
+    monkeypatch.delenv("ATHENA_DATABASE_URL", raising=False)
+    bare_app = create_app()
+    assert bare_app.state.preference_service is None
 
-    class FakeDatabase:
-        session_factory = object()
-
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            return None
-
-        async def dispose(self) -> None:
-            return None
-
-    lifecycle = cast(MemoryLifecycleRepositoryPort, object())
-    service = _TrackingMemoryService(lifecycle)
-    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
-    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
-
-    injected_app = create_app(memory_service=service)
-    assert injected_app.state.memory_service is service
-
-    monkeypatch.setenv("ATHENA_MEMORY_LIFECYCLE_ENABLED", "true")
-    enabled_service = _TrackingMemoryService(lifecycle)
-    bundle = build_query_services(
-        cast(Any, object()),
-        projects=cast(ProjectService, object()),
-        memory_service=enabled_service,
-    )
-    assert bundle.memory is enabled_service
-    assert bundle.memory_lifecycle is None
+    service = PreferenceService(cast(PreferenceRepository, object()))
+    injected_app = create_app(preference_service=service)
+    assert injected_app.state.preference_service is service
+    assert "/api/v1/me/preferences" in injected_app.openapi()["paths"]
+    assert "/api/v1/me/memories" in injected_app.openapi()["paths"]
 
 
 def test_disabled_knowledge_does_not_parse_minio_configuration(
@@ -248,12 +210,10 @@ def test_query_service_start_failure_closes_started_resources_and_database(
 
     resource = FailingResource()
     bundle = QueryServiceBundle(
-        memory=None,
         knowledge=None,
         project_knowledge=None,
         knowledge_repository=None,
         knowledge_original_store=None,
-        memory_enabled=False,
         knowledge_enabled=False,
         _startables=(resource,),
         _closables=(resource,),
@@ -415,8 +375,6 @@ def test_injected_tool_manager_keeps_mcp_tools_in_default_subagent_catalog(
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_MEMORY_ENABLED", "false")
-    monkeypatch.setenv("ATHENA_MEMORY_LIFECYCLE_ENABLED", "false")
     monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
     monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
     monkeypatch.setattr(bootstrap_api, "build_database", lambda _url: FakeDatabase())

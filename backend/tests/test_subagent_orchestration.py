@@ -44,8 +44,8 @@ from app.run.executor import RunExecutor
 from app.run.service import RunService
 from app.run.stream import RunStreamService
 from app.tool.runtime import (
-    MEMORY_REMEMBER_DEFINITION,
-    MEMORY_REMEMBER_ID,
+    KNOWLEDGE_SEARCH_DEFINITION,
+    KNOWLEDGE_SEARCH_ID,
     REQUEST_USER_INPUT_ID,
     RunToolRuntimeService,
 )
@@ -61,7 +61,6 @@ from domain.llm.model import (
 )
 from domain.llm.model.profile import RuntimeModelProfile
 from domain.mcp import McpCallResult
-from domain.memory import ExtractionStatus
 from domain.message import (
     ConversationMessageDraft,
     ConversationRole,
@@ -105,14 +104,6 @@ from domain.tool import (
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
-
-
-class _MemoryWakeupSpy:
-    def __init__(self) -> None:
-        self.woken_owners: list[str] = []
-
-    async def wake_user(self, owner_id: str) -> None:
-        self.woken_owners.append(owner_id)
 
 
 class _StubMcpCatalog:
@@ -194,9 +185,7 @@ class _FakeProvider:
 
 async def _setup_db(
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[
-    AsyncEngine, async_sessionmaker[AsyncSession], SqlAlchemyRunRepository, _MemoryWakeupSpy
-]:
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession], SqlAlchemyRunRepository]:
     clock_now = NOW
     monkeypatch.setattr(
         func,
@@ -207,12 +196,9 @@ async def _setup_db(
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    wakeup = _MemoryWakeupSpy()
     repo = SqlAlchemyRunRepository(
         factory,
         SqlAlchemyMessageRepository(factory),
-        memory_wakeup=wakeup,
-        memory_lifecycle_enabled=True,
     )
     async with factory() as session, session.begin():
         session.add_all(
@@ -298,7 +284,7 @@ async def _setup_db(
                     description="负责深度检索",
                     system_prompt="你是研究员子智能体",
                     model_profile_id="mp_1",
-                    allowed_tool_ids=[REQUEST_USER_INPUT_ID, MEMORY_REMEMBER_ID],
+                    allowed_tool_ids=[REQUEST_USER_INPUT_ID, KNOWLEDGE_SEARCH_ID],
                     enabled=True,
                     max_llm_requests=10,
                     timeout_seconds=120,
@@ -326,7 +312,7 @@ async def _setup_db(
         from adapter.llm.model.profile import DefaultModelProfileModel
 
         session.add(DefaultModelProfileModel(singleton_id=1, profile_id="mp_1"))
-    return engine, factory, repo, wakeup
+    return engine, factory, repo
 
 
 async def _submit_main_run(repo: SqlAlchemyRunRepository, run_id: str = "run_main") -> RunLease:
@@ -452,8 +438,6 @@ def test_tool_runtime_snapshot_injects_dispatch_and_filters_subagent_tools() -> 
             sessions=_StubSessionRepo(),  # type: ignore[arg-type]
             mcp_catalog=_StubMcpCatalog(),  # type: ignore[arg-type]
             mcp_executor=_StubMcpExecutor(),  # type: ignore[arg-type]
-            memory=None,
-            memory_enabled=False,
             knowledge=None,
             project_knowledge=None,
             subagents=_StubSubagentRepo(()),  # type: ignore[arg-type]
@@ -464,10 +448,8 @@ def test_tool_runtime_snapshot_injects_dispatch_and_filters_subagent_tools() -> 
         runtime = RunToolRuntimeService(
             auth=_StubAuthReader(),  # type: ignore[arg-type]
             sessions=_StubSessionRepo(),  # type: ignore[arg-type]
-            mcp_catalog=_StubMcpCatalog((MEMORY_REMEMBER_DEFINITION,)),  # type: ignore[arg-type]
+            mcp_catalog=_StubMcpCatalog((KNOWLEDGE_SEARCH_DEFINITION,)),  # type: ignore[arg-type]
             mcp_executor=_StubMcpExecutor(),  # type: ignore[arg-type]
-            memory=None,
-            memory_enabled=False,
             knowledge=None,
             project_knowledge=None,
             subagents=_StubSubagentRepo((profile,)),  # type: ignore[arg-type]
@@ -486,7 +468,7 @@ def test_tool_runtime_snapshot_injects_dispatch_and_filters_subagent_tools() -> 
         )
         assert snap_sub.by_model_name("dispatch_subagents") is None
         assert snap_sub.by_model_name("request_user_input") is not None
-        assert snap_sub.by_model_name("memory_remember") is None
+        assert snap_sub.by_model_name("knowledge_search") is None
 
     asyncio.run(scenario())
 
@@ -495,7 +477,7 @@ def test_executor_dispatch_subagents_releases_lease_and_rejects_mixed_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             sub_repo = SqlAlchemySubagentRepository(factory)
@@ -504,8 +486,6 @@ def test_executor_dispatch_subagents_releases_lease_and_rejects_mixed_calls(
                 sessions=SqlAlchemySessionRepository(factory),
                 mcp_catalog=_StubMcpCatalog(),  # type: ignore[arg-type]
                 mcp_executor=_StubMcpExecutor(),  # type: ignore[arg-type]
-                memory=None,
-                memory_enabled=False,
                 knowledge=None,
                 project_knowledge=None,
                 subagents=sub_repo,
@@ -646,7 +626,7 @@ def test_begin_subagent_batch_enforces_limits_and_file_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             async with factory() as s, s.begin():
@@ -764,7 +744,7 @@ def test_begin_subagent_batch_uses_parent_max_tool_ordinal(
     """普通工具已落库后，Subagent 批次必须续接父 Run 的最大工具序号。"""
 
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             await repo.begin_tool_call_batch(
@@ -836,7 +816,7 @@ def test_begin_subagent_batch_continues_after_previous_batch(
     """同一父 Run 完成首批子任务并恢复执行后，第二批必须继续递增 ordinal。"""
 
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             first_parent_lease = await _submit_main_run(repo)
             await repo.begin_subagent_batch(
@@ -915,11 +895,11 @@ def test_begin_subagent_batch_continues_after_previous_batch(
     asyncio.run(scenario())
 
 
-def test_subagent_context_isolation_and_no_memory_extraction(
+def test_subagent_context_isolation_without_conversation_pollution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        engine, factory, repo, wakeup = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             await repo.begin_subagent_batch(
@@ -1007,8 +987,7 @@ def test_subagent_context_isolation_and_no_memory_extraction(
                 )
             )
             assert finished is not None
-            assert finished.memory_extraction_status is ExtractionStatus.SKIPPED
-            assert wakeup.woken_owners == []
+            assert finished.status is RunStatus.COMPLETED
 
             async with factory() as s:
                 conv_count = len(
@@ -1032,7 +1011,7 @@ def test_concurrent_subagent_completion_wakes_parent_once_with_partial_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             items = tuple(
@@ -1200,7 +1179,7 @@ def test_concurrent_subagent_completion_wakes_parent_once_with_partial_failures(
 
 def test_reclaim_expired_subagent_wakes_parent_run(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             await repo.begin_subagent_batch(
@@ -1278,7 +1257,7 @@ def test_cancel_parent_cascades_to_active_subagents_and_blocks_session_mutations
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             items = tuple(
@@ -1437,7 +1416,7 @@ def test_subagent_hitl_routing_aggregation_and_stream_stays_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             items = tuple(
@@ -1553,7 +1532,7 @@ def test_subagent_hitl_routing_aggregation_and_stream_stays_open(
                         run_id="sub_h_1",
                         thread_id="sub_h_1",
                         role=ExecutionRole.ASSISTANT,
-                        parts=(ToolCallPart("tc_app_1", "memory_remember", {}),),
+                        parts=(ToolCallPart("tc_app_1", "knowledge_search", {}),),
                         tool_call_id=None,
                         source_message_id=None,
                         created_at=NOW,
@@ -1563,8 +1542,8 @@ def test_subagent_hitl_routing_aggregation_and_stream_stays_open(
                         BeginToolCallBatchItem(
                             record_id="call_rec_1",
                             tool_call_id="tc_app_1",
-                            model_name="memory_remember",
-                            tool_id=MEMORY_REMEMBER_ID,
+                            model_name="knowledge_search",
+                            tool_id=KNOWLEDGE_SEARCH_ID,
                             tool_kind=ToolKind.BUILTIN,
                             requires_approval=True,
                         ),
@@ -1641,7 +1620,7 @@ def test_same_subagent_concurrent_tasks_expose_task_index_and_summary(
     async def scenario() -> None:
         from api.converter.run import run_details_to_response
 
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             lease = await _submit_main_run(repo)
             long_task = "分析华南区" + ("超长任务细节" * 40)
@@ -1811,7 +1790,7 @@ def test_same_subagent_concurrent_tasks_expose_task_index_and_summary(
                         run_id="sub_idx_2",
                         thread_id="sub_idx_2",
                         role=ExecutionRole.ASSISTANT,
-                        parts=(ToolCallPart("tc_app_idx_2", "memory_remember", {}),),
+                        parts=(ToolCallPart("tc_app_idx_2", "knowledge_search", {}),),
                         tool_call_id=None,
                         source_message_id=None,
                         created_at=NOW,
@@ -1821,8 +1800,8 @@ def test_same_subagent_concurrent_tasks_expose_task_index_and_summary(
                         BeginToolCallBatchItem(
                             record_id="call_rec_idx_2",
                             tool_call_id="tc_app_idx_2",
-                            model_name="memory_remember",
-                            tool_id=MEMORY_REMEMBER_ID,
+                            model_name="knowledge_search",
+                            tool_id=KNOWLEDGE_SEARCH_ID,
                             tool_kind=ToolKind.BUILTIN,
                             requires_approval=True,
                         ),
@@ -1856,7 +1835,7 @@ def test_subagent_input_and_answer_isolated_from_conversation_and_main_context(
     """子 Run 的提问与回答必须彻底隔离出主聊天历史与主 Run 上下文。"""
 
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         msg_repo = SqlAlchemyMessageRepository(factory)
         try:
             lease = await _submit_main_run(repo)
@@ -1979,7 +1958,7 @@ def test_subagent_input_and_answer_isolated_from_conversation_and_main_context(
             answered_sub = await service.answer(
                 "sess_1", "usr_1", "sub_iso_1", "inp_iso_1", "req_ans_iso_1", "2025年"
             )
-            assert answered_sub.memory_input_message_ids == ()
+            assert answered_sub.status is RunStatus.QUEUED
 
             # 子 Run 详情应可回看完整的 question_text 与 answer_text（包括 DTO 序列化）
             from api.converter.run import run_details_to_response
@@ -2129,7 +2108,7 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
         from domain.llm.model.compression_policy import CompressionPolicyVersion
         from domain.llm.model.profile import ModelProfileVersion
 
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         sub_repo = SqlAlchemySubagentRepository(factory)
         try:
             lease = await _submit_main_run(repo)
@@ -2151,8 +2130,6 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
                 sessions=SqlAlchemySessionRepository(factory),
                 mcp_catalog=_StubMcpCatalog(),  # type: ignore[arg-type]
                 mcp_executor=_StubMcpExecutor(),  # type: ignore[arg-type]
-                memory=None,
-                memory_enabled=False,
                 knowledge=None,
                 project_knowledge=None,
                 subagents=sub_repo,
@@ -2322,7 +2299,7 @@ def test_subagent_artifact_finishes_without_delivery_message_and_parent_summariz
     )
 
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             main_lease = await _submit_main_run(repo, run_id="run_main_artifact")
             sub_run_id = "run_sub_artifact"
@@ -2541,7 +2518,7 @@ def test_subagent_max_llm_requests_50_runs_without_budget_error(
     from domain.tool import ToolExecutionContext
 
     async def scenario() -> None:
-        engine, factory, repo, _ = await _setup_db(monkeypatch)
+        engine, factory, repo = await _setup_db(monkeypatch)
         try:
             main_lease = await _submit_main_run(repo, run_id="run_main_budget50")
             sub_run_id = "run_sub_budget50"
@@ -2689,8 +2666,6 @@ def test_dispatch_subagents_catalog_bounds_description_and_preserves_newlines() 
             sessions=_StubSessionRepo(),  # type: ignore[arg-type]
             mcp_catalog=_StubMcpCatalog(),  # type: ignore[arg-type]
             mcp_executor=_StubMcpExecutor(),  # type: ignore[arg-type]
-            memory=None,
-            memory_enabled=False,
             knowledge=None,
             project_knowledge=None,
             subagents=_StubSubagentRepo(profiles),  # type: ignore[arg-type]
@@ -2721,7 +2696,7 @@ def test_get_stream_snapshot_deduplicates_subagent_metadata_queries(
     """同一主 Run 快照仅加载一次子任务元数据；无子任务时跳过下游 3 个查询。"""
 
     async def scenario() -> None:
-        engine, _factory, repo, _wakeup = await _setup_db(monkeypatch)
+        engine, _factory, repo = await _setup_db(monkeypatch)
         try:
             root_lease = await _submit_main_run(repo, "run_main_dedup")
             orig_meta = SqlAlchemyRunRepository._load_subagent_task_metadata_in_session

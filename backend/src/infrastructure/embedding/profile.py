@@ -3,25 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 
 MAX_PROFILE_ID_LENGTH = 128
-
-
-def embedding_profile_id(model: str, revision: str) -> str:
-    """Build the shared profile key used by legacy local embedding inference."""
-    profile = json.dumps(
-        {
-            "model": model,
-            "revision": revision,
-            "dimensions": 1024,
-            "normalize_embeddings": False,
-            "preprocessing": "sentence-transformers-default-v1",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return f"bge-{hashlib.sha256(profile.encode()).hexdigest()[:32]}"
 
 
 def remote_embedding_profile_id(model: str, dimensions: int) -> str:
@@ -42,4 +25,4 @@ def remote_embedding_profile_id(model: str, dimensions: int) -> str:
     return f"openai_compatible:sha256:{digest}:{dimensions}"
 
 
-__all__ = ["MAX_PROFILE_ID_LENGTH", "embedding_profile_id", "remote_embedding_profile_id"]
+__all__ = ["MAX_PROFILE_ID_LENGTH", "remote_embedding_profile_id"]

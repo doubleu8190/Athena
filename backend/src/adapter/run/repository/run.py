@@ -8,7 +8,6 @@ from adapter.message.repository.message import SqlAlchemyMessageRepository
 from adapter.run.repository.context_events import RunContextEventsMixin
 from adapter.run.repository.lifecycle import RunLifecycleMixin
 from adapter.run.repository.tool_calls import RunToolCallsMixin
-from domain.memory import MemoryRunWakeupPort
 from domain.run.ports import RunRepository
 
 
@@ -24,16 +23,11 @@ class SqlAlchemyRunRepository(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         message_repository: SqlAlchemyMessageRepository,
-        *,
-        memory_wakeup: MemoryRunWakeupPort | None = None,
-        memory_lifecycle_enabled: bool = False,
     ) -> None:
         """保存共享数据库工厂和消息事务内部写入端口。"""
         self._session_factory = session_factory
         # 统一使用 _message_repo 命名持有时效消息子仓储
         self._message_repo = message_repository
-        self._memory_wakeup = memory_wakeup
-        self._memory_lifecycle_enabled = memory_lifecycle_enabled
 
     @property
     def _messages(self) -> SqlAlchemyMessageRepository:

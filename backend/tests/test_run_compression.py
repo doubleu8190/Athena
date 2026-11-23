@@ -1025,19 +1025,19 @@ def _prepare_test_context(
     return base, lease, compression_runtime, policy, messages
 
 
-def test_memory_wrapper_is_counted_in_main_request_measurement(
+def test_preference_context_wrapper_is_counted_in_main_request_measurement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """长期记忆包装必须进入主请求 token 预算，而不是仅附加到消息。"""
+    """个人工作偏好与显式记忆包装必须进入主请求 token 预算，而不是仅附加到消息。"""
 
     async def scenario() -> None:
         base, _, _, _, messages = _prepare_test_context(
             previous_summary=None,
             provider=SimpleNamespace(),
         )
-        memory_context = (
-            "<untrusted_long_term_memory>\n本项目始终使用 PostgreSQL。"
-            "\n</untrusted_long_term_memory>"
+        preference_context = (
+            "【用户显式保存的备忘记忆】\n<user_explicit_memories>\n"
+            "- 本项目始终使用 PostgreSQL。\n</user_explicit_memories>"
         )
         captured: dict[str, Any] = {}
 
@@ -1049,7 +1049,7 @@ def test_memory_wrapper_is_counted_in_main_request_measurement(
         ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
             del run, active, profile
             captured.update(kwargs)
-            return (), (), 321 if kwargs["memory_context"] else 100, 50
+            return (), (), 321 if kwargs["preference_context"] else 100, 50
 
         monkeypatch.setattr(compression_module, "measure_llm_request", fake_measure)
         compressor = ContextCompressor(
@@ -1070,10 +1070,10 @@ def test_memory_wrapper_is_counted_in_main_request_measurement(
             retry_context=(),
             skill_context=None,
             input_files=(),
-            memory_context=memory_context,
+            preference_context=preference_context,
         )
 
-        assert captured["memory_context"] == memory_context
+        assert captured["preference_context"] == preference_context
         assert prepared.input_tokens == 321
         assert prepared.output_tokens == 50
 

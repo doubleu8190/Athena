@@ -33,7 +33,6 @@ from adapter.run.model import (
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
 from common.ids import new_id
-from domain.memory import ExtractionStatus, MemoryRunWakeupPort
 from domain.message import (
     ConversationMessage,
     ExecutionMessageDraft,
@@ -92,8 +91,6 @@ class RunRepositorySupportMixin:
 
     _session_factory: async_sessionmaker[AsyncSession]
     _message_repo: SqlAlchemyMessageRepository
-    _memory_wakeup: MemoryRunWakeupPort | None
-    _memory_lifecycle_enabled: bool
 
     @property
     def _messages(self) -> SqlAlchemyMessageRepository:
@@ -193,39 +190,6 @@ class RunRepositorySupportMixin:
                 }
             )
         return aggregate
-
-    def _mark_memory_pending(self, row: RunModel, terminal_at: datetime) -> None:
-        """在 Run 终态事务内标记待提取，并保留已失效输入和固定上下文。"""
-        if row.depth >= 1:
-            # 子 Run 不触发对话结束后自动记忆提取，统一固定为 skipped。
-            row.memory_extraction_status = ExtractionStatus.SKIPPED.value
-            row.memory_extracted_at = row.memory_extracted_at or terminal_at
-            row.updated_at = terminal_at
-            return
-        if not self._memory_lifecycle_enabled:
-            return
-        if row.memory_extraction_status == ExtractionStatus.SKIPPED.value:
-            row.memory_extracted_at = row.memory_extracted_at or terminal_at
-            row.updated_at = terminal_at
-            return
-        row.memory_extraction_status = ExtractionStatus.PENDING.value
-        row.memory_extracted_at = None
-        row.memory_extraction_batch_id = None
-        row.memory_extraction_safe_error_code = None
-        row.updated_at = terminal_at
-
-    async def _wake_memory(self, owner_id: str) -> None:
-        """在 Run 事务提交后尽力唤醒固定用户任务，失败由扫描补偿。"""
-        if self._memory_wakeup is None:
-            return
-        try:
-            await self._memory_wakeup.wake_user(owner_id)
-        except Exception as error:
-            logger.warning(
-                "memory_wakeup_failed owner_id=%s exception_type=%s",
-                owner_id,
-                type(error).__name__,
-            )
 
     @staticmethod
     async def _has_unsettled_tool_calls(session: AsyncSession, run_id: str) -> bool:
@@ -410,7 +374,6 @@ class RunRepositorySupportMixin:
         run.safe_error_code = safe_error_code
         run.finished_at = failed_at
         run.updated_at = failed_at
-        self._mark_memory_pending(run, failed_at)
         self._clear_lease(run)
         await self._close_pending_input(session, run, failed_at)
         await self._append_event(

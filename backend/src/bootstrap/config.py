@@ -70,11 +70,4 @@ def env_csv_set(name: str) -> frozenset[str]:
     return frozenset(parts)
 
 
-def memory_enabled_from_env() -> bool:
-    """统一记忆开关：同时兼容 ATHENA_MEMORY_ENABLED 与旧 ATHENA_MEMORY_LIFECYCLE_ENABLED。"""
-    return env_flag("ATHENA_MEMORY_ENABLED", default=False) or env_flag(
-        "ATHENA_MEMORY_LIFECYCLE_ENABLED", default=False
-    )
-
-
-__all__ = ["env_csv_set", "env_flag", "env_int", "memory_enabled_from_env"]
+__all__ = ["env_csv_set", "env_flag", "env_int"]

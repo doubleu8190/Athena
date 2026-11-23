@@ -64,7 +64,7 @@ class LlmRequestSpec:
     retry_context: Sequence[ToolRetryContext] = ()
     skill_context: RunSkillPromptContext | None = None
     input_files: Sequence[RunInputFileContext] = ()
-    memory_context: str | None = None
+    preference_context: str | None = None
 
 
 def _text_content(parts: Sequence[MessagePart]) -> str:
@@ -143,7 +143,7 @@ def messages_to_llm(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
-    memory_context: str | None = None,
+    preference_context: str | None = None,
 ) -> tuple[LlmMessage, ...]:
     """把固定 cutoff 的正式消息及本 Run 协议交互转换为模型上下文。"""
     return _messages_to_llm(
@@ -155,7 +155,7 @@ def messages_to_llm(
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
-            memory_context=memory_context,
+            preference_context=preference_context,
         )
     )
 
@@ -334,9 +334,9 @@ def _messages_to_llm(spec: LlmRequestSpec) -> tuple[LlmMessage, ...]:
                 ),
             )
         )
-    if spec.memory_context:
-        # 长期记忆始终以 USER 角色的不可信历史资料注入，不能获得系统指令权限。
-        result.append(LlmMessage(role=LlmRole.USER, content=spec.memory_context))
+    if spec.preference_context:
+        # 个人工作偏好与显式备忘记忆作为 USER 角色背景资料注入，不具备系统指令权限。
+        result.append(LlmMessage(role=LlmRole.USER, content=spec.preference_context))
     # 压缩摘要作为“历史资料”注入，并明确它不是新指令。
     if spec.summary_text:
         result.append(
@@ -467,7 +467,7 @@ async def measure_llm_request(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
-    memory_context: str | None = None,
+    preference_context: str | None = None,
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
     """生成完整请求并返回输入/输出预算，不在调用方裁决前拒绝超窗。"""
     spec = LlmRequestSpec(
@@ -479,7 +479,7 @@ async def measure_llm_request(
         retry_context=tuple(retry_context),
         skill_context=skill_context,
         input_files=tuple(input_files),
-        memory_context=memory_context,
+        preference_context=preference_context,
     )
     llm_messages, selected_tools, input_tokens, output_tokens = await _run_context_work(
         _measure_request,
@@ -512,7 +512,7 @@ async def estimate_llm_input_tokens(
     retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
-    memory_context: str | None = None,
+    preference_context: str | None = None,
 ) -> tuple[int, int]:
     """在线程边界内估算主请求输入 Token 和输出预留。"""
     spec = LlmRequestSpec(
@@ -524,7 +524,7 @@ async def estimate_llm_input_tokens(
         retry_context=tuple(retry_context),
         skill_context=skill_context,
         input_files=tuple(input_files),
-        memory_context=memory_context,
+        preference_context=preference_context,
     )
     _, input_tokens, output_tokens = await _run_context_work(
         _estimate_request,

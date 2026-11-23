@@ -16,6 +16,7 @@ from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
+from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
@@ -27,8 +28,8 @@ from app.auth.service import AuthService
 from app.file import SessionFileService
 from app.knowledge.service import KnowledgeService
 from app.llm import ModelProfileService
-from app.memory.service import MemoryService
 from app.message.service import MessageService
+from app.preference import PreferenceService
 from app.project.service import ProjectService
 from app.run.service import RunService
 from app.run.stream import RunStreamService
@@ -37,7 +38,7 @@ from app.skill import DependencyChecker, SkillService
 from app.subagent import DefaultSubagentToolCatalog, SubagentService
 from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
-from bootstrap.config import env_csv_set, env_flag, memory_enabled_from_env
+from bootstrap.config import env_csv_set, env_flag
 from bootstrap.database import build_database
 from bootstrap.knowledge import (
     validate_knowledge_embedding_configuration,
@@ -92,7 +93,7 @@ class ApiDependencies:
     tool_manager: ToolManager | None
     model_profile_service: ModelProfileService | None
     system_prompt_service: SystemPromptService | None
-    memory_service: MemoryService | None
+    preference_service: PreferenceService | None
     knowledge_service: KnowledgeService | None
     knowledge_repository: KnowledgeRepositoryPort | None
     knowledge_originals: OriginalStore | None
@@ -164,7 +165,7 @@ def build_api_dependencies(
     tool_manager: ToolManager | None = None,
     model_profile_service: ModelProfileService | None = None,
     system_prompt_service: SystemPromptService | None = None,
-    memory_service: MemoryService | None = None,
+    preference_service: PreferenceService | None = None,
     knowledge_service: KnowledgeService | None = None,
     skill_service: SkillService | None = None,
     session_file_service: SessionFileService | None = None,
@@ -186,8 +187,7 @@ def build_api_dependencies(
     model_profile_use_case = model_profile_service
     system_prompt_use_case = system_prompt_service
     subagent_use_case = subagent_service
-    memory_use_case = memory_service
-    memory_enabled = memory_service is not None or memory_enabled_from_env()
+    preference_use_case = preference_service
     knowledge_enabled = knowledge_service is not None or env_flag(
         "ATHENA_KNOWLEDGE_ENABLED", default=False
     )
@@ -196,7 +196,6 @@ def build_api_dependencies(
     knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
     knowledge_originals: OriginalStore | None = None
     query_services: QueryServiceBundle | None = None
-    memory_owned = memory_service is None and memory_enabled
     knowledge_owned = knowledge_service is None and knowledge_enabled
     run_stream_service: RunStreamService | None = None
     run_transport: RedisRunTransport | None = None
@@ -204,8 +203,6 @@ def build_api_dependencies(
     if auth_use_case is None:
         # 生产环境必须在启动初期拒绝缺失 Redis 限流的配置，避免分配数据库连接池后再失败。
         validate_auth_rate_limit_configuration()
-    if memory_owned and not database_url:
-        raise RuntimeError("memory_database_required")
     if knowledge_owned and not database_url:
         raise RuntimeError("knowledge_database_required")
     if knowledge_owned:
@@ -244,10 +241,10 @@ def build_api_dependencies(
         or session_use_case is None
         or run_use_case is None
         or mcp_use_case is None
-        or memory_owned
         # 注入 KnowledgeService 时，项目绑定与查询服务仍共享 API 数据库会话工厂。
         or knowledge_enabled
         or system_prompt_use_case is None
+        or preference_use_case is None
         or subagent_use_case is None
     ):
         database = build_database(database_url)
@@ -265,6 +262,10 @@ def build_api_dependencies(
             system_prompt_use_case = SystemPromptService(
                 SqlAlchemySystemPromptRepository(database.session_factory),
                 auth_repository,
+            )
+        if preference_use_case is None:
+            preference_use_case = PreferenceService(
+                SqlAlchemyPreferenceRepository(database.session_factory)
             )
         if session_use_case is None:
             session_use_case = SessionService(session_repository)
@@ -296,31 +297,16 @@ def build_api_dependencies(
                 model_checker=SqlAlchemySubagentModelChecker(database.session_factory),
                 tool_catalog=DefaultSubagentToolCatalog(mcp_repository),
             )
-        # API 进程无记忆检索或控制 HTTP 路由，不空载本地 Memory 向量与重排模型；
-        # 仍保留 memory_lifecycle 仓储供 Run 终态唤醒后台 Memory Worker。
         query_services = build_query_services(
             database.session_factory,
             projects=project_use_case,
-            memory_service=memory_use_case,
             knowledge_service=knowledge_use_case,
-            load_memory_models=False,
         )
-        memory_use_case = query_services.memory
         knowledge_use_case = query_services.knowledge
         knowledge_repository = query_services.knowledge_repository
         knowledge_upload_slots = query_services.knowledge_upload_slots
         knowledge_originals = query_services.knowledge_original_store
-        memory_lifecycle_enabled = memory_enabled_from_env()
-        run_repository = (
-            SqlAlchemyRunRepository(
-                database.session_factory,
-                message_repository,
-                memory_wakeup=query_services.memory_lifecycle,
-                memory_lifecycle_enabled=True,
-            )
-            if memory_lifecycle_enabled
-            else SqlAlchemyRunRepository(database.session_factory, message_repository)
-        )
+        run_repository = SqlAlchemyRunRepository(database.session_factory, message_repository)
         if run_use_case is None:
             run_use_case = RunService(run_repository)
         # 在数据库与查询服务均构建成功后再建立共享 Redis 客户端，供认证分布式限流与 Run SSE 共用，
@@ -393,7 +379,7 @@ def build_api_dependencies(
         tool_manager=mcp_use_case,
         model_profile_service=model_profile_use_case,
         system_prompt_service=system_prompt_use_case,
-        memory_service=memory_use_case,
+        preference_service=preference_use_case,
         knowledge_service=knowledge_use_case,
         knowledge_repository=knowledge_repository,
         knowledge_upload_slots=knowledge_upload_slots,

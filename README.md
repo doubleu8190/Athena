@@ -73,7 +73,6 @@ flowchart TB
 
     subgraph Workers["异步执行层 (Async Workers)"]
         RunWorker["run_worker (对话与工具执行)"]
-        MemWorker["memory_worker (长期记忆, 可选)"]
         KbWorker["knowledge_worker (文档解析与索引, 可选)"]
     end
 
@@ -81,7 +80,7 @@ flowchart TB
         LLM["LLM Providers (Chat Completions)"]
         MCP["MCP Servers (HTTP / stdio)"]
         SkillSubagent["Skills 脚本运行时 / Subagent 编排"]
-        LocalModels["本地 BGE / OCR 模型 (按需)"]
+        RemoteEmbedding["远程 Embedding / 可选 OCR (按需)"]
     end
 
     subgraph Infra["数据与基础设施层"]
@@ -100,7 +99,7 @@ flowchart TB
     SseStream -.->|"事件订阅"| Redis
     RestApi -.->|"文件 / 知识库"| MinIO
     RestApi -.->|"工具发现"| MCP
-    RestApi -.->|"检索向量"| LocalModels
+    RestApi -.->|"检索向量"| RemoteEmbedding
 
     RunWorker --> PG
     RunWorker -.->|"增量推送"| Redis
@@ -108,15 +107,11 @@ flowchart TB
     RunWorker --> LLM
     RunWorker -.->|"工具调用"| MCP
     RunWorker -.-> SkillSubagent
-    RunWorker -.-> LocalModels
-
-    MemWorker --> PG
-    MemWorker --> LLM
-    MemWorker --> LocalModels
+    RunWorker -.-> RemoteEmbedding
 
     KbWorker --> PG
     KbWorker --> MinIO
-    KbWorker --> LocalModels
+    KbWorker --> RemoteEmbedding
 ```
 
 > 实线为核心依赖路径，虚线为可选或按配置启用的扩展路径；API 与各 Worker 通过 PostgreSQL 队列解耦，并可选经 Redis Pub/Sub 推送实时 SSE 增量。
@@ -135,7 +130,7 @@ flowchart TB
 | **持久化与检索** | PostgreSQL + SQLAlchemy (asyncio) + Alembic + `pgvector` + `zhparser` | 业务状态、行锁并发、异步任务队列、向量与中文全文检索 |
 | **实时事件通道** | Redis (`redis-py`, 可选) | Run 增量事件 Pub/Sub，不可用时自动降级为数据库对账 |
 | **对象存储** | MinIO (`minio`, 按需) | 独立私有桶分别存储知识库原件与 Skills/会话文件 |
-| **模型与工具生态** | OpenAI SDK (Chat Completions) + MCP SDK + `sentence-transformers` + `tiktoken` | 外部模型调用、HTTP/stdio MCP 工具、本地 BGE 向量/重排与 token 计数 |
+| **模型与工具生态** | OpenAI SDK (Chat Completions) + MCP SDK + 远程 OpenAI 兼容 Embedding + `tiktoken` | 外部模型调用、HTTP/stdio MCP 工具、无状态远程向量化与 token 计数 |
 | **文档解析 (可选)** | PaddleOCR + `pypdfium2` + `python-docx` / `openpyxl` / `python-pptx` + `jieba` | PDF / Office / 图片多格式文本与 OCR 提取 |
 | **容器与 CI** | Docker Compose + GitHub Actions (`pytest` / `ruff` / `mypy` / `eslint` / `vitest` / `playwright`) | 本地测试栈、生产容器编排与自动化质量门禁 |
 
@@ -160,7 +155,6 @@ Athena_v2/
 │   │   ├── common/             # 共享基础工具（ID、时间等）
 │   │   ├── main.py             # FastAPI 应用入口
 │   │   ├── run_worker.py       # Run 异步执行 Worker 入口
-│   │   ├── memory_worker.py    # 长期记忆生命周期 Worker 入口
 │   │   └── knowledge_worker.py # 知识库解析与索引 Worker 入口
 │   └── tests/                  # 单元测试与 PostgreSQL / Redis / MinIO 集成测试
 ├── frontend/
@@ -248,7 +242,6 @@ cd frontend && npm run dev
 
 # 后台 Worker（按需另开终端启动）
 .venv/bin/python -m run_worker         # 必选：对话 Run 与工具执行
-.venv/bin/python -m memory_worker      # 可选：长期记忆生命周期
 .venv/bin/python -m knowledge_worker   # 可选：知识库文档解析与索引
 ```
 
@@ -279,8 +272,6 @@ ATHENA_PUBLIC_ORIGIN=http://127.0.0.1:8000
 
 # 可选扩展开关（详见 .env.example）
 ATHENA_REDIS_URL=redis://127.0.0.1:6379/0
-ATHENA_MEMORY_ENABLED=false
-ATHENA_MEMORY_LIFECYCLE_ENABLED=false
 ATHENA_FILES_ENABLED=false
 ATHENA_KNOWLEDGE_ENABLED=false
 ```
@@ -333,6 +324,7 @@ npm run build
 | **认证与账户** | `/api/v1/auth/*` | 注册、登录、登出、个人资料与改密 |
 | **项目与会话** | `/api/v1/projects`, `/api/v1/sessions` | 项目与会话 CRUD、消息历史（`/api/v1/sessions/{session_id}/messages`） |
 | **Run 与 SSE** | `/api/v1/sessions/{session_id}/runs` | 提交、取消、重试、补充输入、工具审批、轨迹与 SSE（`/{run_id}/stream`） |
+| **个人偏好与记忆** | `/api/v1/me/preferences`, `/api/v1/me/memories` | 个人工作偏好指令、显式记忆开关与 50 条备忘记忆 CRUD |
 | **文件与技能** | `/api/v1/sessions/{session_id}/files`, `/api/v1/skills`, `/api/v1/me/skills` | 会话文件上传/下载、可用技能目录与个人 Markdown Skills |
 | **知识库与检索** | `/api/v1/knowledge-bases`, `/api/v1/projects/{project_id}/knowledge-bases` | 知识库、文档版本、混合检索与项目关联 |
 | **公共工具目录** | `/api/v1/tools` | 已认证用户可见的安全工具目录查询 |

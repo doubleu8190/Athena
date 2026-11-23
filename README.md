@@ -1,18 +1,18 @@
-# Athena v2 — 面向多用户的通用 AI 智能助手
+# Athena v2 — 面向企业内部使用的智能工作台
 
 <p align="center">
   🏛️ <strong>Athena v2</strong> 🏛️
 </p>
 
 <p align="center">
-  <strong>基于模块化单体与异步 Worker 架构的多用户 AI Agent 平台</strong>
+  <strong>基于模块化单体与异步 Worker 架构的企业内部 AI 智能工作台</strong>
 </p>
 
 <p align="center">
   <a href="#-快速开始">快速开始</a> •
   <a href="#-功能概览">功能概览</a> •
   <a href="#-技术架构">技术架构</a> •
-  <a href="#-配置说明">配置说明</a> •
+  <a href="#-配置与运维速查">配置与运维</a> •
   <a href="#-api-与项目文档">API 与文档</a> •
   <a href="#-生产部署">生产部署</a>
 </p>
@@ -21,36 +21,40 @@
 
 ## 📖 项目简介
 
-Athena v2 是一个面向多用户的通用 AI 智能助手平台，采用 **SPA 前端 + 模块化单体 API + 独立异步 Worker** 架构，以 PostgreSQL（`pgvector` + `zhparser`）作为核心状态持久化与混合检索底座，按需扩展 Redis、MinIO 以及外部模型与工具生态。
+Athena v2 是一个面向企业内部使用的智能工作台，采用 **SPA 前端 + 模块化单体 API + 独立异步 Worker** 架构，以 PostgreSQL（`pgvector` HNSW + `zhparser`）作为核心状态持久化与混合检索底座，搭配统一单桶对象存储（MinIO/S3）、无状态远程 Embedding 服务与可选 Redis 实时事件通道，支撑多部门协同办公、资产隔离与安全可控的 Agent 执行。
 
 ### 核心设计理念
 
-- **计算与入口解耦**：API 专注鉴权、调度与流式推送，长耗时推理、记忆提取与文档解析由独立 Worker 异步消费
-- **Human-in-the-Loop (HITL)**：支持工具调用的运行期逐项审批与补充输入，确保关键操作可控、可恢复
-- **PostgreSQL 一体化底座**：统一承载业务状态、行锁并发控制、异步任务队列以及向量与中文全文检索
-- **可插拔能力扩展**：通过管理后台动态维护模型、MCP、Skills 与 Subagent，按需开启长期记忆与知识库
-- **实时可观测性**：基于 SSE 推送增量输出、工具调用轨迹与执行状态，断线后可基于持久化快照可靠对账
+- **企业身份与组织驱动**：关闭开放自助注册，原生支持**飞书 SSO 与通讯录组织树同步**（离职即刻吊销历史 Cookie 会话），并内置**非生产本地 Mock 多角色组织模式**（生产环境启动期硬阻断）
+- **统一三层权限引擎**：公司级（`company`）、部门级（`department` + `resource_visibility_grants` 精准授权）、个人级（`personal`）统一贯通知识库、Skills、MCP 与 Subagent，员工调岗后无需重新登录即可实时生效
+- **日常办公无项目对话与场景化模型**：无需强制建项目即可随时发起对话，默认检索公司公共库与本部门知识库，按场景化模型目录（`GET /api/v1/models`）透明选择模型并异步生成 ≤20 字会话标题
+- **轻量工作偏好与显式记忆**：下线重型自动记忆提取与后台归档 Worker，改由个人工作背景指令 + 最多 50 条显式备忘记忆（手动管理与对话中免审批 `save_user_memory` 工具）提供可控、透明的个性化上下文
+- **业务化审批与保密运维**：支持模型与 MCP 凭据局部保密更新、MCP 启停与独立重发现（无损保留工具 ID 与审批配置）、批量审批配置及面向业务人员的中文待审批卡片投影
+- **计算与存储轻量化**：无状态远程 OpenAI 兼容 Embedding 替代本地重量级模型权重，统一单桶 `ATHENA_STORAGE_*` 按业务前缀隔离知识库原件、Skills 与会话附件
 
 ---
 
 ## ✨ 功能概览
 
-### 🤖 Agent 执行与编排
-- **异步 Run 执行循环**：支持流式回答、并行工具批次、停止取消、补充输入与失败重试
-- **模型与提示词管理**：管理员配置不可变模型版本、系统提示词版本与上下文压缩策略
-- **自定义 Subagent**：支持按业务场景编排子代理并限定可用工具白名单
+### 🔐 企业身份、组织架构与三层权限
+- **多模式安全认证**：支持**飞书原生 OAuth SSO**（Redis 原子一次性 `state` 防重放）、**本地应急超级管理员登录**及**非生产 Mock 多角色快捷登录**；同源 HttpOnly Cookie 会话支持服务端即时撤销
+- **组织树与分权管理**：支持 `super_admin`（超级管理员）、`dept_admin`（部门管理员，按 `dept_admin_scopes` 管辖指定部门及子树）与 `member`（普通员工）三级角色，离职同步或后台停用同事务吊销全部活跃会话
+- **四条业务线统一隔离**：知识库、Skills、MCP Server、Subagent 共享 `AccessPolicyService` 实时权限引擎，跨部门越权遵循安全 403/404 边界，调岗后原 Cookie 与在途 Run 立即撤权
 
-### 🔧 工具与技能生态
-- **全局 MCP 集成**：支持 HTTP 与 stdio MCP Server 注册发现、加密凭据管理与安全工具目录
-- **Skills 与会话文件**：支持平台脚本技能包、个人 Markdown Skills 以及会话附件/产物隔离存储
+### 💬 日常对话工作台与 Agent 编排
+- **无项目知识库解耦**：会话不再强依赖项目绑定，未指定范围时默认按企业权限检索公司与本部门知识库，亦支持显式指定 `knowledge_base_ids` 或传 `[]` 关闭检索
+- **场景化模型目录与快照固化**：管理员可配置 `visible_to_users`、`scenario_label`、`scenario_description` 与 `supports_vision`；普通用户通过 `GET /api/v1/models` 获取脱敏目录，Run 创建时固化不含凭据的 `model_snapshot_json`
+- **异步 Run 与自动标题**：支持流式 SSE 回答、并行工具批次、停止取消、补充输入与失败重试；主 Run 完成后后台异步生成 ≤20 字中文会话标题，并严格保护用户手工标题不被覆盖
+- **项目增强与会话松绑**：项目支持简介、背景指令与默认技能列表，支持 `detach_sessions=true` 温和解绑后删除；会话支持按标题关键词检索（`GET /api/v1/sessions?q=`）与首条消息前灵活归属调整
 
-### 📚 知识库与长期记忆
-- **多格式知识库 RAG**：支持文本与常见文档/OCR 异步解析、向量与中文全文混合检索及项目关联
-- **全生命周期长期记忆**：自动从终态对话提取记忆并执行合并决策、按需召回与周期归档清理
+### 🧠 轻量个人偏好与显式记忆
+- **个人工作偏好（`/api/v1/me/preferences`）**：维护个人工作背景指令（`custom_instructions`）与显式记忆总开关（`memory_enabled`），主 Run 自动注入安全提示词上下文
+- **显式备忘记忆（`/api/v1/me/memories`）**：支持手动增删改查（上限 50 条）以及对话中调用免审批内置工具 `save_user_memory` 落库（`source="chat_explicit"`）
 
-### 🔒 多用户与安全审批
-- **同源认证与角色隔离**：邮箱密码认证、服务端可撤销 HttpOnly Cookie 会话、同源校验与 RBAC 管理权限
-- **运行期工具审批**：支持按工具维度配置审批策略，命中审批的批次暂停等待确认后原子恢复执行
+### 🔧 MCP 保密运维、Skills 与业务化审批
+- **MCP 运维增强**：支持 `PATCH` 保密局部更新（`secrets_upsert` / `secrets_remove` 保留未提及原密文）、独立启停开关（停用后工具即刻下线）、独立重发现（`POST /rediscover` 按 `remote_name` 增量对齐并无损保留工具 ID、审批策略与中文展示配置）及软删重名复用
+- **业务化待审批卡片**：支持为 MCP 工具配置 `display_name`、`approval_summary_template` 与 `parameter_labels`，以及原子批量切换审批开关（`PATCH /api/v1/admin/tools/batch-approval`）；命中审批时 Run 详情直接投影可读中文标题、安全渲染摘要与优先中文标签的 `formatted_arguments`
+- **Skills 与 Subagent**：支持公司/部门级脚本技能包、个人 Markdown Skills 与会话附件/产物隔离存储；支持自定义 Subagent 及其部门可见范围与工具白名单
 
 ---
 
@@ -66,27 +70,28 @@ flowchart TB
     end
 
     subgraph Gateway["应用网关层 (backend-api / FastAPI)"]
-        Middleware["前置鉴权与上传准入中间件"]
-        RestApi["REST API 与管理接口"]
+        Middleware["前置鉴权、同源校验与上传准入中间件"]
+        RestApi["REST API / 三层权限引擎 / 管理后台"]
         SseStream["SSE 实时事件流"]
     end
 
     subgraph Workers["异步执行层 (Async Workers)"]
-        RunWorker["run_worker (对话与工具执行)"]
-        KbWorker["knowledge_worker (文档解析与索引, 可选)"]
+        RunWorker["run_worker (对话、工具、子智能体与自动标题)"]
+        KbWorker["knowledge_worker (文档解析与远程向量索引, 可选)"]
     end
 
-    subgraph Ext["外部能力与扩展层"]
+    subgraph Ext["外部能力与企业集成层"]
+        Feishu["飞书开放平台 (SSO / 通讯录同步, 可选)"]
         LLM["LLM Providers (Chat Completions)"]
         MCP["MCP Servers (HTTP / stdio)"]
         SkillSubagent["Skills 脚本运行时 / Subagent 编排"]
-        RemoteEmbedding["远程 Embedding / 可选 OCR (按需)"]
+        RemoteEmbedding["远程 OpenAI 兼容 Embedding / 可选 OCR"]
     end
 
     subgraph Infra["数据与基础设施层"]
-        PG[("PostgreSQL (pgvector + zhparser)")]
-        Redis[("Redis (Pub/Sub, 可选)")]
-        MinIO[("MinIO (私有 S3 桶, 按需)")]
+        PG[("PostgreSQL (pgvector HNSW + zhparser)")]
+        Redis[("Redis (Pub/Sub / 限流 / OAuth State)")]
+        MinIO[("MinIO / S3 (统一单桶按前缀隔离)")]
     end
 
     SPA --> Proxy
@@ -96,14 +101,16 @@ flowchart TB
 
     RestApi --> PG
     SseStream --> PG
+    RestApi -.->|"限流 / OAuth State"| Redis
     SseStream -.->|"事件订阅"| Redis
-    RestApi -.->|"文件 / 知识库"| MinIO
+    RestApi -.->|"飞书 SSO / 组织同步"| Feishu
+    RestApi -.->|"统一单桶对象存储"| MinIO
     RestApi -.->|"工具发现"| MCP
-    RestApi -.->|"检索向量"| RemoteEmbedding
+    RestApi -.->|"查询向量"| RemoteEmbedding
 
     RunWorker --> PG
     RunWorker -.->|"增量推送"| Redis
-    RunWorker -.->|"文件 / 知识库"| MinIO
+    RunWorker -.->|"统一单桶对象存储"| MinIO
     RunWorker --> LLM
     RunWorker -.->|"工具调用"| MCP
     RunWorker -.-> SkillSubagent
@@ -114,23 +121,23 @@ flowchart TB
     KbWorker --> RemoteEmbedding
 ```
 
-> 实线为核心依赖路径，虚线为可选或按配置启用的扩展路径；API 与各 Worker 通过 PostgreSQL 队列解耦，并可选经 Redis Pub/Sub 推送实时 SSE 增量。
+> 实线为核心依赖路径，虚线为可选或按配置启用的扩展路径；API 与各 Worker 通过 PostgreSQL 队列解耦，生产环境强制启用 Redis 驱动分布式登录限流与飞书 OAuth 一次性 `state` 防重放。
 
 ### 后端代码分层
 
-后端采用模块化单体与 DDD 分层架构：`api`（HTTP/SSE 入口与鉴权/上传准入中间件）→ `app`（用例编排）→ `domain`（领域实体、事件与仓储端口）← `adapter`（ORM 仓储与外部适配）/ `infrastructure`（数据库、加密安全与底层驱动），由 `bootstrap` 组合根按进程统一装配，辅以 `cli`（运维命令）与 `common`（共享工具）。
+后端采用模块化单体与 DDD 分层架构：`api`（HTTP/SSE 路由、DTO 与前置鉴权/上传准入中间件）→ `app`（应用服务、三层权限策略与 Worker 消费逻辑）→ `domain`（纯领域实体、值对象、异常与仓储端口）← `adapter`（SQLAlchemy ORM 仓储与外部适配）/ `infrastructure`（数据库、AES-GCM 凭据加密、飞书客户端、MCP 传输与解析/远程 Embedding 驱动），由 `bootstrap` 组合根按进程统一装配，辅以 `cli`（运维 CLI）与 `common`（共享基础工具）。
 
 ### 技术栈
 
 | 层级 | 技术选型 | 职责 |
 | --- | --- | --- |
-| **前端界面** | React 18 + TypeScript + Vite + React Router + TanStack Query | 多用户 SPA 应用、SSE 实时渲染与状态缓存 |
+| **前端界面** | React 18 + TypeScript + Vite + React Router + TanStack Query | 多用户企业工作台 SPA、SSE 实时渲染与状态缓存 |
 | **网关与托管** | Nginx（生产）/ Vite Proxy（开发） | 静态资源托管、同源 `/api` 与 SSE 反向代理 |
-| **后端 API** | Python 3.12+ + FastAPI + Uvicorn + Pydantic | REST API、SSE 推送、同源 Cookie 鉴权与上传准入 |
-| **持久化与检索** | PostgreSQL + SQLAlchemy (asyncio) + Alembic + `pgvector` + `zhparser` | 业务状态、行锁并发、异步任务队列、向量与中文全文检索 |
-| **实时事件通道** | Redis (`redis-py`, 可选) | Run 增量事件 Pub/Sub，不可用时自动降级为数据库对账 |
-| **对象存储** | MinIO (`minio`, 按需) | 独立私有桶分别存储知识库原件与 Skills/会话文件 |
-| **模型与工具生态** | OpenAI SDK (Chat Completions) + MCP SDK + 远程 OpenAI 兼容 Embedding + `tiktoken` | 外部模型调用、HTTP/stdio MCP 工具、无状态远程向量化与 token 计数 |
+| **后端 API** | Python 3.12+ + FastAPI + Uvicorn + Pydantic | REST API、SSE 推送、同源 Cookie 鉴权、三层权限引擎与上传准入 |
+| **持久化与检索** | PostgreSQL + SQLAlchemy (asyncio) + Alembic + `pgvector` (HNSW) + `zhparser` | 业务状态、组织树物化路径、行锁并发队列、向量与中文全文混合检索 |
+| **缓存与事件通道** | Redis (`redis-py`) | Run SSE 增量 Pub/Sub、分布式认证限流与飞书 OAuth 一次性 `state`（生产必选） |
+| **统一对象存储** | MinIO / S3 (`ATHENA_STORAGE_*`, 单桶前缀隔离) | 单私有桶按 `knowledge/`、`session-files/`、`skills/` 等前缀隔离原件与附件 |
+| **模型与工具生态** | OpenAI SDK + MCP SDK + 无状态远程 OpenAI 兼容 Embedding + `tiktoken` | 外部模型调用、HTTP/stdio MCP 工具、无状态远程向量化与 Token 计数 |
 | **文档解析 (可选)** | PaddleOCR + `pypdfium2` + `python-docx` / `openpyxl` / `python-pptx` + `jieba` | PDF / Office / 图片多格式文本与 OCR 提取 |
 | **容器与 CI** | Docker Compose + GitHub Actions (`pytest` / `ruff` / `mypy` / `eslint` / `vitest` / `playwright`) | 本地测试栈、生产容器编排与自动化质量门禁 |
 
@@ -143,36 +150,31 @@ Athena_v2/
 ├── .github/workflows/          # GitHub Actions CI 工作流 (ci.yml)
 ├── backend/
 │   ├── alembic.ini             # Alembic 迁移配置
-│   ├── migrations/             # PostgreSQL 数据库迁移脚本
+│   ├── migrations/             # PostgreSQL 数据库迁移脚本（当前唯一 head: 20261204_0037）
 │   ├── src/                    # 后端源码（模块化单体）
-│   │   ├── api/                # HTTP/SSE 路由、DTO、鉴权与上传准入中间件
-│   │   ├── app/                # 应用服务、用例编排与 Worker 消费逻辑
-│   │   ├── domain/             # 领域实体、值对象、异常与仓储端口
+│   │   ├── api/                # HTTP/SSE 路由、DTO、转换器与前置鉴权/上传中间件
+│   │   ├── app/                # 应用服务（auth/org/access/preference/run/llm/tool/skill/knowledge/subagent）
+│   │   ├── domain/             # 纯领域实体、值对象、异常与仓储端口
 │   │   ├── adapter/            # SQLAlchemy 仓储与 LLM / Redis / MinIO 适配
-│   │   ├── infrastructure/     # 数据库连接、加密安全、MCP 与解析/向量驱动
-│   │   ├── bootstrap/          # API 与各 Worker 进程的依赖装配组合根
-│   │   ├── cli/                # 运维 CLI（管理员提权、文件离线维护）
+│   │   ├── infrastructure/     # 数据库连接、加密安全、飞书客户端、MCP 与解析/远程 Embedding 驱动
+│   │   ├── bootstrap/          # API 与各 Worker 进程的依赖装配组合根与生产安全护栏
+│   │   ├── cli/                # 运维 CLI（应急超管初始化、飞书同步、提权、文件离线维护）
 │   │   ├── common/             # 共享基础工具（ID、时间等）
 │   │   ├── main.py             # FastAPI 应用入口
 │   │   ├── run_worker.py       # Run 异步执行 Worker 入口
 │   │   └── knowledge_worker.py # 知识库解析与索引 Worker 入口
-│   └── tests/                  # 单元测试与 PostgreSQL / Redis / MinIO 集成测试
+│   └── tests/                  # 单元测试、端到端验收测试与 PostgreSQL / Redis / MinIO 集成测试
 ├── frontend/
-│   ├── src/
-│   │   ├── app/                # 应用入口、Providers、路由与受保护外壳
-│   │   ├── features/           # 业务域（auth/chat/projects/sessions/knowledge/skills/files/admin）
-│   │   ├── pages/              # 跨域通用页面
-│   │   ├── shared/             # API 客户端、通用 UI 组件与工具库
-│   │   └── test/               # Vitest 测试工具与 fixtures
+│   ├── src/                    # React SPA 源码
 │   └── e2e/                    # Playwright 浏览器 E2E 测试
 ├── mcp_servers/                # 随镜像构建部署的本地 stdio MCP Server 源码
 ├── docker/                     # Dockerfile、Nginx 网关配置、依赖镜像与测试模板
 ├── scripts/                    # Docker 测试栈启停、凭据初始化与环境加载脚本
-├── docs/                       # 架构、功能设计与运维手册文档
+├── docs/                       # 架构、第一期企业后端 API 契约与运维文档
 ├── compose.yml                 # 生产环境 Docker Compose 编排配置
 ├── compose.test.yml            # 本地测试依赖（PostgreSQL、Redis、MinIO）编排配置
 ├── pyproject.toml              # Python 依赖、打包元数据与 Ruff / Mypy / Pytest 配置
-└── .env.example                # 全量环境变量模板与生产安全自检清单
+└── .env.example                # 全量环境变量模板与生产上线安全自检清单
 ```
 
 ---
@@ -187,7 +189,7 @@ Athena_v2/
 
 ### 方式一：Docker 一键启动本地测试栈
 
-`docker/test.env` 与 `secrets/` 专用于 Docker 测试栈，与宿主机 `.env` 职责分离，不要互相复制。启动后默认访问 `http://localhost:8080`。
+`docker/test.env` 与 `secrets/` 专用于 Docker 测试栈，与宿主机 `.env` 职责分离，不要互相复制。`docker/test.env.example` 默认开启非生产 `ATHENA_AUTH_MOCK_ENABLED=true`，启动后访问 `http://localhost:8080` 即可使用预置的 6 个企业多角色 Mock 账号一键登录体验。
 
 ```bash
 # 1. 初始化本地测试配置与凭据
@@ -218,15 +220,16 @@ cp .env.example .env && chmod 600 .env
 python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
 ```
 
-#### 2. 加载 `.env` 并执行数据库迁移
+#### 2. 加载 `.env`、执行数据库迁移并准备登录账号
 
 ```bash
 set -a && source .env && set +a
 .venv/bin/alembic -c backend/alembic.ini upgrade head
 
-# 如需清空并重建本地开发数据库（可选）
-.venv/bin/alembic -c backend/alembic.ini downgrade base
-.venv/bin/alembic -c backend/alembic.ini upgrade head
+# 方案 A（推荐本地多部门联调）：在 .env 中设置 ATHENA_AUTH_MOCK_ENABLED=true，API 启动时自动幂等预置 5 部门与 6 角色账号
+# 方案 B（本地应急超管账号）：已关闭开放注册，通过运维 CLI 创建或重置本地 super_admin
+printf '%s\n' '<至少12位强密码>' | .venv/bin/python -m cli.bootstrap_super_admin \
+  --email admin@example.com --password-stdin --display-name "系统超管"
 ```
 
 #### 3. 启动后端 API、前端与后台 Worker
@@ -241,58 +244,83 @@ set -a && source .env && set +a
 cd frontend && npm run dev
 
 # 后台 Worker（按需另开终端启动）
-.venv/bin/python -m run_worker         # 必选：对话 Run 与工具执行
-.venv/bin/python -m knowledge_worker   # 可选：知识库文档解析与索引
+.venv/bin/python -m run_worker         # 必选：对话 Run、工具执行、子智能体与自动标题
+.venv/bin/python -m knowledge_worker   # 可选：知识库文档解析与远程向量索引
 ```
-
-#### 4. 访问应用与首个管理员提权
 
 - **前端界面**：`http://localhost:5173`（Vite 开发服务器自动代理 `/api` 到 `127.0.0.1:8000`，保持同源 Cookie 校验）
 - **后端 API / 存活探针 / OpenAPI 文档**：`http://127.0.0.1:8000` / `/health` / `/docs`
-- **首个管理员提权**（先注册普通账号，再在已加载 `ATHENA_DATABASE_URL` 的仓库根目录执行；不会自动创建账号或设置密码）：
-
-```bash
-.venv/bin/python -m cli.promote_admin --email <email>
-```
 
 ---
 
-## ⚙️ 配置说明
+## ⚙️ 配置与运维速查
 
-复制 [`.env.example`](.env.example) 为 `.env` 按需配置。模型版本、供应商 API Key 与上下文压缩策略均通过管理员后台动态管理，并由 `ATHENA_MCP_SECRET_KEY` 加密落库，无需通过环境变量注入模型密钥。
+### 核心环境变量概览
+
+复制 [`.env.example`](.env.example) 为 `.env` 按需配置。模型配置、供应商 API Key、MCP 凭据与压缩策略均由超管在后台动态管理，并由 `ATHENA_MCP_SECRET_KEY` 以 AES-GCM 加密落库，无需在环境变量中明文存放模型密钥。
+
+| 分类 | 核心变量 | 说明 |
+| --- | --- | --- |
+| **数据库与加密** | `ATHENA_DATABASE_URL`, `ATHENA_MCP_SECRET_KEY` | PostgreSQL 16+（含 `pgvector` 与 `zhparser`）与 32 字节 Base64 主密钥 |
+| **环境与安全护栏** | `ATHENA_ENV`, `ATHENA_COOKIE_SECURE`, `ATHENA_PUBLIC_ORIGIN`, `ATHENA_REDIS_URL` | `ATHENA_ENV=production` 时**强制要求**配置 `ATHENA_REDIS_URL` 且**严禁**开启 `ATHENA_AUTH_MOCK_ENABLED=true` |
+| **飞书原生 SSO** | `ATHENA_FEISHU_ENABLED`, `ATHENA_FEISHU_APP_ID`, `ATHENA_FEISHU_APP_SECRET`, `ATHENA_FEISHU_REDIRECT_URI`, `ATHENA_FEISHU_BASE_URL` | 生产开启时强制依赖 Redis（一次性 `state` 防重放）且接口与回调地址须为 HTTPS |
+| **非生产 Mock** | `ATHENA_AUTH_MOCK_ENABLED` | 仅限开发/测试联调；开启后启动自动幂等预置多部门组织树与 6 个典型角色测试账号 |
+| **统一对象存储** | `ATHENA_STORAGE_ENDPOINT`, `ATHENA_STORAGE_ACCESS_KEY`, `ATHENA_STORAGE_SECRET_KEY`, `ATHENA_STORAGE_BUCKET`, `ATHENA_STORAGE_SECURE` | 单私有桶统一承载知识库原件（`knowledge/`）与 Skills/会话文件（`skills/`、`session-files/`） |
+| **知识库与远程 Embedding** | `ATHENA_KNOWLEDGE_ENABLED`, `ATHENA_EMBEDDING_BASE_URL`, `ATHENA_EMBEDDING_API_KEY`, `ATHENA_EMBEDDING_MODEL`, `ATHENA_EMBEDDING_DIMENSIONS`, `ATHENA_EMBEDDING_SEND_DIMENSIONS` | 无状态远程 OpenAI 兼容向量服务（默认 1024 维 `BAAI/bge-m3`），不加载本地模型权重 |
+| **文件与技能** | `ATHENA_FILES_ENABLED`, `ATHENA_SKILL_TEMP_ROOT`, `ATHENA_SKILL_PYTHON_EXECUTABLE` | 复用统一 `ATHENA_STORAGE_*` 单桶，配置技能脚本运行环境与临时目录 |
+
+> 完整环境变量清单、Worker 并发/租约调优参数及生产上线前 9 项安全自检清单见 [`.env.example`](.env.example)。
+
+### 运维 CLI 速查
+
+以下命令均需先加载环境变量（`set -a && source .env && set +a`）并在仓库根目录执行：
 
 ```bash
-# 核心必填（PostgreSQL 需启用 pgvector 与 zhparser 扩展）
-ATHENA_DATABASE_URL=postgresql+asyncpg://user:password@127.0.0.1:5432/athena
-ATHENA_MCP_SECRET_KEY=<32 字节 Base64 随机主密钥>
+# 1. 幂等创建或重置本地应急 super_admin 账号（重置密码时自动撤销其全部历史会话）
+printf '%s\n' '<至少12位强密码>' | .venv/bin/python -m cli.bootstrap_super_admin \
+  --email admin@example.com --password-stdin --display-name "系统超管"
 
-# 同源与认证 Cookie（HTTPS 生产环境须设 ATHENA_COOKIE_SECURE=true 与公网规范 Origin）
-ATHENA_COOKIE_SECURE=false
-ATHENA_PUBLIC_ORIGIN=http://127.0.0.1:8000
+# 2. 手动或定时任务触发飞书通讯录全量原子同步（更新部门物化 path、在职员工，并自动停用离职员工且吊销其全部会话）
+.venv/bin/python -m cli.sync_feishu_org
 
-# 可选扩展开关（详见 .env.example）
-ATHENA_REDIS_URL=redis://127.0.0.1:6379/0
-ATHENA_FILES_ENABLED=false
-ATHENA_KNOWLEDGE_ENABLED=false
+# 3. 将已有且活跃的账号提升为 super_admin
+.venv/bin/python -m cli.promote_admin --email user@example.com
+
+# 4. Skills / 会话文件孤儿对象离线维护
+.venv/bin/python -m cli.file_maintenance
 ```
 
-> 完整环境变量、统一对象存储参数（`ATHENA_STORAGE_*`）、远程 Embedding 服务（`ATHENA_EMBEDDING_*`）、Worker 调优与生产上线安全自检清单见 [`.env.example`](.env.example)。
+### 生产环境安全护栏（`ATHENA_ENV=production`）
+
+当 `ATHENA_ENV=production` 时，API 进程在分配任何连接池前强制执行以下启动期门禁，违反任一项将立即抛出 `RuntimeError` 拒绝启动：
+1. **严禁开启本地 Mock 登录**：`ATHENA_AUTH_MOCK_ENABLED=true` 立即抛出 `auth_mock_forbidden_in_production`；
+2. **强制启用分布式 Redis**：缺失 `ATHENA_REDIS_URL` 拒绝启动（防止误用单进程内存认证限流）；
+3. **飞书 SSO 强安全约束**：开启 `ATHENA_FEISHU_ENABLED=true` 时强制要求 Redis 驱动一次性 `state` 原子防重放，且 `ATHENA_FEISHU_BASE_URL` 与 `ATHENA_FEISHU_REDIRECT_URI` 必须使用 `https://`。
 
 ---
 
-## 🧪 测试与检查
+## 🧪 测试与质量门禁
 
-### 后端单元测试与静态检查
+### 后端静态检查、迁移核验与全量测试
 
 ```bash
-.venv/bin/python -m pytest
+# 1. Ruff 代码风格与语法检查
 .venv/bin/python -m ruff check backend/src backend/tests
+
+# 2. Mypy 严格类型检查
 .venv/bin/python -m mypy --strict backend/src
+
+# 3. 核验 Alembic 单一迁移 head（20261204_0037）
+.venv/bin/alembic -c backend/alembic.ini heads
+
+# 4. 运行第一期端到端验收测试剧本
+.venv/bin/python -m pytest -v backend/tests/test_phase1_e2e_acceptance.py
+
+# 5. 运行后端全量单元测试
+.venv/bin/python -m pytest -q
 ```
 
-### 后端集成测试
-
-需先完成测试栈凭据初始化并启动 [`compose.test.yml`](compose.test.yml) 中的 PostgreSQL、Redis 与 MinIO（或先运行 `scripts/test-docker.sh`）；PostgreSQL 测试会创建并在结束后删除独立临时 schema，不影响业务数据：
+### 后端集成测试（真实 PostgreSQL / Redis / MinIO）
 
 ```bash
 docker compose --env-file docker/test.env -f compose.test.yml up -d
@@ -314,42 +342,47 @@ npm run build
 
 ## 📚 API 与项目文档
 
-### REST API 与 SSE
+### 二期前端交接与核心 API 契约
 
-启动后端后访问 `http://127.0.0.1:8000/docs` 查看完整 OpenAPI（Swagger）文档。主要模块路由前缀如下：
+- **权威接口契约文档**：[`docs/phase1-enterprise-backend-api-contract.md`](docs/phase1-enterprise-backend-api-contract.md)（完整整理第一期全部新增与变更接口的请求/响应字段、权限角色矩阵、403/404 约定、错误码及旧版差异）
+- **交互式 OpenAPI 文档**：启动后端后访问 `http://127.0.0.1:8000/docs`
+
+主要模块路由前缀速查：
 
 | 模块 | 路由前缀 / 端点 | 说明 |
 | --- | --- | --- |
 | **健康检查** | `GET /health` | 进程存活探针 |
-| **认证与账户** | `/api/v1/auth/*` | 注册、登录、登出、个人资料与改密 |
-| **项目与会话** | `/api/v1/projects`, `/api/v1/sessions` | 项目与会话 CRUD、消息历史（`/api/v1/sessions/{session_id}/messages`） |
-| **Run 与 SSE** | `/api/v1/sessions/{session_id}/runs` | 提交、取消、重试、补充输入、工具审批、轨迹与 SSE（`/{run_id}/stream`） |
-| **个人偏好与记忆** | `/api/v1/me/preferences`, `/api/v1/me/memories` | 个人工作偏好指令、显式记忆开关与 50 条备忘记忆 CRUD |
-| **文件与技能** | `/api/v1/sessions/{session_id}/files`, `/api/v1/skills`, `/api/v1/me/skills` | 会话文件上传/下载、可用技能目录与个人 Markdown Skills |
-| **知识库与检索** | `/api/v1/knowledge-bases`, `/api/v1/projects/{project_id}/knowledge-bases` | 知识库、文档版本、混合检索与项目关联 |
-| **公共工具目录** | `/api/v1/tools` | 已认证用户可见的安全工具目录查询 |
-| **模型与提示词管理** | `/api/v1/admin/llm/*`, `/api/v1/admin/system-prompts` | 模型版本、压缩策略与系统提示词版本（管理员） |
-| **生态扩展管理** | `/api/v1/admin/mcp/servers`, `/api/v1/admin/tools`, `/api/v1/admin/skills`, `/api/v1/admin/subagents` | MCP 发现、工具审批策略、技能包导入与 Subagent 编排（管理员） |
+| **企业认证与 Mock** | `/api/v1/auth/*` | 能力声明、本地登录、飞书 SSO（`feishu/authorize`、`feishu/callback`）、登出、`/me` 组织投影、改密、非生产 `/mock/*`（开放注册已下线） |
+| **组织通讯录管理** | `/api/v1/admin/org/*` | 部门树查询、企业用户分页筛选、任命 `dept_admin` 与管辖范围、停用吊销会话、手动触发飞书同步（超管） |
+| **项目与会话** | `/api/v1/projects`, `/api/v1/sessions` | 项目简介/背景指令/默认技能、`detach_sessions=true` 温和删项、无项目会话、按标题检索（`?q=`）、消息历史 |
+| **场景化模型目录** | `GET /api/v1/models` | 普通用户可见、已启用且脱敏的场景化可对话模型列表 |
+| **Run 与 SSE** | `/api/v1/sessions/{session_id}/runs` | 提交（支持 `knowledge_base_ids` 与 `model_profile_id`）、取消、重试、补充输入、业务化待审批卡片、工具审批与 SSE |
+| **个人偏好与显式记忆** | `/api/v1/me/preferences`, `/api/v1/me/memories` | 个人工作背景指令、显式记忆开关与最多 50 条备忘记忆 CRUD（旧自动记忆接口已下线） |
+| **文件与技能** | `/api/v1/sessions/{session_id}/files`, `/api/v1/skills`, `/api/v1/me/skills` | 会话文件、当前用户可见技能目录与个人 Markdown Skills |
+| **知识库与检索** | `/api/v1/knowledge-bases`, `/api/v1/projects/{project_id}/knowledge-bases` | 三层可见性知识库、文档版本、混合检索与项目关联 |
+| **安全工具目录** | `/api/v1/tools` | 已认证用户按部门权限可见的安全工具目录 |
+| **模型与提示词运维** | `/api/v1/admin/llm/*`, `/api/v1/admin/system-prompts` | 模型创建/局部保密编辑（`PATCH`）/强引用保护软删（`DELETE`）、默认指向、压缩策略与系统提示词（超管） |
+| **MCP / 工具 / 技能 / 子智能体运维** | `/api/v1/admin/mcp/servers`, `/api/v1/admin/tools`, `/api/v1/admin/skills`, `/api/v1/admin/subagents` | MCP 保密 `PATCH`/启停/独立重发现/软删、工具中文审批映射与批量审批、三层分权技能包、Subagent 编排 |
 
 ### 核心文档
 
 | 文档 | 说明 |
 | --- | --- |
-| [`.env.example`](.env.example) | 全量环境变量说明与生产安全自检清单 |
+| [`docs/phase1-enterprise-backend-api-contract.md`](docs/phase1-enterprise-backend-api-contract.md) | **第一期企业级后端重构 API 契约与二期前端交接文档** |
+| [`.env.example`](.env.example) | 全量环境变量说明与生产上线前安全自检清单 |
 | [`docs/architecture.md`](docs/architecture.md) | 架构起点与模块边界 |
 | [`frontend/README.md`](frontend/README.md) | 前端架构、路由、认证边界与开发说明 |
 | [`mcp_servers/README.md`](mcp_servers/README.md) | 本地 stdio MCP Server 约定与镜像构建 |
-| [`docs/knowledge-base-operations.md`](docs/knowledge-base-operations.md) | 知识库运行环境、MinIO 与 OCR 运维手册 |
+| [`docs/knowledge-base-operations.md`](docs/knowledge-base-operations.md) | 知识库运行环境、对象存储与 OCR 运维手册 |
 | [`docs/skills-files-operations.md`](docs/skills-files-operations.md) | Skills 与会话文件运行手册及离线维护 |
 | [`docs/run-design.md`](docs/run-design.md) | Run 执行模型与状态机设计 |
 | [`docs/tools-mcp-design.md`](docs/tools-mcp-design.md) | 全局 MCP 与工具管理设计 |
-| [`docs/memory-lifecycle-design.md`](docs/memory-lifecycle-design.md) | 长期记忆提取、检索与生命周期设计 |
 
 ---
 
 ## 📦 生产部署
 
-参考 [`compose.yml`](compose.yml) 与 [`.env.example`](.env.example)，复制 `.env.example` 为 `.env.prod`（`chmod 600 .env.prod`）并填写外部 PostgreSQL、Redis、MinIO 及主密钥配置。HTTPS 生产环境必须设置 `ATHENA_COOKIE_SECURE=true` 并配置规范公网 `ATHENA_PUBLIC_ORIGIN`。
+参考 [`compose.yml`](compose.yml) 与 [`.env.example`](.env.example)，复制 `.env.example` 为 `.env.prod`（`chmod 600 .env.prod`）并填写外部 PostgreSQL、Redis、统一单桶对象存储（`ATHENA_STORAGE_*`）及强随机主密钥。生产环境务必设置 `ATHENA_ENV=production`、`ATHENA_COOKIE_SECURE=true`、`ATHENA_AUTH_MOCK_ENABLED=false` 并配置规范公网 `ATHENA_PUBLIC_ORIGIN`。
 
 ```bash
 # 1. 预构建后端基础依赖镜像（如需启用知识库 OCR，加 --build-arg INSTALL_KNOWLEDGE=true）
@@ -358,9 +391,13 @@ docker build -f docker/Dockerfile.backend-base -t athena-backend-base:latest .
 # 2. 执行数据库迁移
 docker compose --env-file .env.prod run --rm backend-migration
 
-# 3. 启动生产服务（如需启动知识库 Worker，在 up 前加 --profile knowledge）
+# 3. 启动生产服务（如需启动知识库解析 Worker，在 up 前加 --profile knowledge）
 docker compose --env-file .env.prod up -d
 
-# 4. 注册首个账号后执行管理员提权
-docker compose --env-file .env.prod run --rm backend-api python -m cli.promote_admin --email <email>
+# 4. 初始化本地应急 super_admin 账号（开放自助注册已下线）
+printf '%s\n' '<至少12位强密码>' | docker compose --env-file .env.prod run --rm -T backend-api \
+  python -m cli.bootstrap_super_admin --email admin@example.com --password-stdin --display-name "系统超管"
+
+# 5. 若启用飞书原生 SSO，执行首次通讯录组织树同步
+docker compose --env-file .env.prod run --rm backend-api python -m cli.sync_feishu_org
 ```

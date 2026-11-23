@@ -242,6 +242,8 @@ class KnowledgeRepositoryPort(Protocol):
         vector: list[float],
         limit: int,
         profile_id: str | None = None,
+        *,
+        min_score: float = 0.0,
     ) -> tuple[SearchHit, ...]: ...
 
     async def has_incompatible_profile(

@@ -10,8 +10,10 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -57,6 +59,13 @@ class SkillExecutionModel(Base):
             ["skill_versions.id"],
             name="fk_skill_executions_version",
             ondelete="RESTRICT",
+        ),
+        # 与迁移 20261123_0032 对齐：加速离线回收 CLI 按 log_object_key 核验日志对象引用。
+        Index(
+            "ix_skill_executions_log_object_key",
+            "log_object_key",
+            postgresql_where=text("log_object_key IS NOT NULL"),
+            sqlite_where=text("log_object_key IS NOT NULL"),
         ),
     )
 

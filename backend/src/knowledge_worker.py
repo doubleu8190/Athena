@@ -6,7 +6,9 @@ import asyncio
 import logging
 import os
 import random
+import signal
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
@@ -71,8 +73,17 @@ async def _run_consumers(worker: KnowledgeWorker, concurrency: int) -> None:
             tasks.create_task(_consume(worker), name=f"knowledge-consumer-{index}")
 
 
-async def run_worker() -> None:
-    """装配共享 PostgreSQL、MinIO 和模型资源并运行有界消费协程。"""
+def _log_level() -> str:
+    """统一日志级别解析：优先 ATHENA_LOG_LEVEL，其次兼容 LOG_LEVEL，默认 INFO。"""
+    return (
+        (os.getenv("ATHENA_LOG_LEVEL") or "").strip()
+        or (os.getenv("LOG_LEVEL") or "").strip()
+        or "INFO"
+    ).upper()
+
+
+async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
+    """装配共享 PostgreSQL、MinIO 和模型资源并运行有界消费协程；支持停机信号优雅退出。"""
     # 资源由 bundle 持有；两阶段构造保证启动顺序不变，失败时只清理已创建部分。
     bundle = KnowledgeWorkerBundle()
     failure: BaseException | None = None
@@ -87,7 +98,32 @@ async def run_worker() -> None:
         concurrency = build_knowledge_worker(bundle)
         worker = bundle.worker
         assert worker is not None
-        await _run_consumers(worker, concurrency)
+        if stop_event is None:
+            await _run_consumers(worker, concurrency)
+        elif not stop_event.is_set():
+            # 启动加载模型期间若已收到停机信号，跳过消费循环直接进入 finally 逆序清理。
+            consumers_task = asyncio.create_task(_run_consumers(worker, concurrency))
+            stop_task = asyncio.create_task(stop_event.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (consumers_task, stop_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if consumers_task in done:
+                    await consumers_task
+                else:
+                    consumers_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await consumers_task
+            finally:
+                if not stop_task.done():
+                    stop_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await stop_task
+                if not consumers_task.done():
+                    consumers_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await consumers_task
     except BaseException as error:
         failure = error
     finally:
@@ -138,9 +174,30 @@ async def run_worker() -> None:
         raise failure
 
 
+async def _main() -> None:
+    """安装 SIGINT/SIGTERM 信号处理并运行 Knowledge Worker 生命周期。"""
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    installed_signals: list[signal.Signals] = []
+    for signal_name in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signal_name, stop_event.set)
+        except NotImplementedError:
+            continue
+        installed_signals.append(signal_name)
+    try:
+        await run_worker(stop_event=stop_event)
+    finally:
+        # 退出前解绑信号处理器，避免复用事件循环时回调残留。
+        for signal_name in installed_signals:
+            with suppress(NotImplementedError):
+                loop.remove_signal_handler(signal_name)
+
+
 def main() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-    asyncio.run(run_worker())
+    """配置日志并以正常信号语义运行异步入口。"""
+    logging.basicConfig(level=_log_level())
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":

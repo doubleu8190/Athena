@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import zipfile
 from pathlib import Path, PurePath
 from typing import Any
@@ -18,6 +19,10 @@ from domain.knowledge.ports import (
 
 # 解析器与工厂共用同一 OCR 默认语言，避免默认配置漂移。
 DEFAULT_OCR_LANGUAGES = "en"
+_MAX_CONTENT_TYPES_BYTES = 10 * 1024 * 1024
+_MIN_PDF_OCR_IMAGE_DIMENSION = 32
+
+logger = logging.getLogger(__name__)
 
 
 class LocalDocumentParser(DocumentParser, DocumentFileValidator):
@@ -65,9 +70,22 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                 raise ValueError("knowledge_file_signature_invalid")
             import pypdfium2 as pdfium  # type: ignore[import-untyped]
 
-            pdf = pdfium.PdfDocument(str(path))
             try:
-                if len(pdf) > 500:
+                pdf = pdfium.PdfDocument(str(path))
+            except ValueError:
+                raise
+            except Exception as error:
+                # 将损坏或加密 PDF 触发的 Pdfium 底层异常转译为稳定业务错误码，
+                # 避免上传接口返回 HTTP 500。
+                raise ValueError("knowledge_pdf_invalid") from error
+            try:
+                try:
+                    page_count = len(pdf)
+                except ValueError:
+                    raise
+                except Exception as error:
+                    raise ValueError("knowledge_pdf_invalid") from error
+                if page_count > 500:
                     raise ValueError("knowledge_pdf_page_limit")
             finally:
                 pdf.close()
@@ -107,12 +125,21 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                 if any(
                     "vbaproject" in name or name.endswith((".xlsm", ".docm", ".pptm"))
                     for name in names
-                ) or any(
-                    "macroenabled" in archive.read(member).decode("utf-8", "ignore").lower()
-                    for member in members
-                    if member.filename.lower() == "[content_types].xml"
                 ):
                     raise ValueError("knowledge_office_macro_unsupported")
+                for member in members:
+                    if member.filename.lower() != "[content_types].xml":
+                        continue
+                    # 对 [Content_Types].xml 实施声明大小与实际解压流双边界检查，
+                    # 防范伪造 ZIP 头炸弹。
+                    if member.file_size > _MAX_CONTENT_TYPES_BYTES:
+                        raise ValueError("knowledge_archive_expanded_size_limit")
+                    with archive.open(member) as stream:
+                        raw = stream.read(_MAX_CONTENT_TYPES_BYTES + 1)
+                    if len(raw) > _MAX_CONTENT_TYPES_BYTES:
+                        raise ValueError("knowledge_archive_expanded_size_limit")
+                    if "macroenabled" in raw.decode("utf-8", "ignore").lower():
+                        raise ValueError("knowledge_office_macro_unsupported")
                 if "[content_types].xml" not in names:
                     raise ValueError("knowledge_file_signature_invalid")
                 required_members = {
@@ -215,10 +242,17 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                     for image_object in page.get_objects():
                         if not hasattr(image_object, "get_bitmap"):
                             continue
-                        image_no += 1
                         bitmap = image_object.get_bitmap()
+                        pil_image = bitmap.to_pil()
+                        # 跳过极小装饰图或 1px 细线，避免对无效图元空跑 OCR 引擎。
+                        if (
+                            pil_image.width < _MIN_PDF_OCR_IMAGE_DIMENSION
+                            or pil_image.height < _MIN_PDF_OCR_IMAGE_DIMENSION
+                        ):
+                            continue
+                        image_no += 1
                         image_buffer = io.BytesIO()
-                        bitmap.to_pil().save(image_buffer, format="PNG")
+                        pil_image.save(image_buffer, format="PNG")
                         ocr_blocks = self._ocr_image(
                             image_buffer.getvalue(),
                             page=number + 1,
@@ -281,11 +315,25 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                             "table",
                         )
                     )
+        from PIL import UnidentifiedImageError
+
         seen: set[str] = set()
         for rel in doc.part.rels.values():
+            # 外链图片没有内嵌 target_part，跳过以避免解析抛错或产生外网依赖。
+            if getattr(rel, "is_external", False):
+                continue
             if "image" in rel.reltype and rel.target_ref not in seen:
                 seen.add(rel.target_ref)
-                blocks.extend(self._ocr_image(rel.target_part.blob, media_id=rel.target_ref))
+                try:
+                    blocks.extend(self._ocr_image(rel.target_part.blob, media_id=rel.target_ref))
+                except (UnidentifiedImageError, OSError) as error:
+                    # 跳过 EMF/WMF/SVG 等 PIL 不支持的矢量图或单张损坏图，不阻断整篇文档导入。
+                    logger.warning(
+                        "docx_unsupported_image_skipped media_id=%s exception_type=%s",
+                        rel.target_ref,
+                        type(error).__name__,
+                    )
+                    continue
         return ParsedDocument(tuple(blocks))
 
     def _xlsx(self, content: bytes) -> ParsedDocument:
@@ -330,22 +378,36 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
         finally:
             workbook.close()
             value_workbook.close()
-        # Image drawings are unavailable in read_only mode, so inspect them in a
-        # second bounded open while preserving streaming row extraction above.
-        image_workbook = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
-        try:
-            for sheet in image_workbook.worksheets:
-                for image_no, image in enumerate(getattr(sheet, "_images", ()), 1):
-                    anchor = image.anchor._from
-                    cell = f"{anchor.col + 1}:{anchor.row + 1}"
-                    blocks.extend(
-                        self._ocr_image(
-                            image._data(),
-                            media_id=f"sheet-{sheet.title}-image-{image_no}-cell-{cell}",
+        # 先低成本扫描 ZIP 目录判断是否存在嵌入式图片或绘图；
+        # 纯表格工作簿直接跳过 read_only=False 二次全量 DOM 加载以大幅降低内存峰值。
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            has_embedded_media = any(
+                name.lower().startswith(("xl/media/", "xl/drawings/"))
+                for name in archive.namelist()
+            )
+        if has_embedded_media:
+            image_workbook = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
+            try:
+                for sheet in image_workbook.worksheets:
+                    for image_no, image in enumerate(getattr(sheet, "_images", ()), 1):
+                        # 兼容 AbsoluteAnchor 等不含 _from 单元格坐标的锚点，避免属性缺失崩溃。
+                        anchor_from = getattr(getattr(image, "anchor", None), "_from", None)
+                        if (
+                            anchor_from is not None
+                            and hasattr(anchor_from, "col")
+                            and hasattr(anchor_from, "row")
+                        ):
+                            location = f"cell-{anchor_from.col + 1}:{anchor_from.row + 1}"
+                        else:
+                            location = f"pos-{image_no}"
+                        blocks.extend(
+                            self._ocr_image(
+                                image._data(),
+                                media_id=f"sheet-{sheet.title}-image-{image_no}-{location}",
+                            )
                         )
-                    )
-        finally:
-            image_workbook.close()
+            finally:
+                image_workbook.close()
         return ParsedDocument(tuple(blocks), tuple(dict.fromkeys(warnings)))
 
     def _pptx(self, content: bytes) -> ParsedDocument:

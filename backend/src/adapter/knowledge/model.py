@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
@@ -119,6 +120,14 @@ class KnowledgeChunkModel(Base):
         ),
         Index("ix_knowledge_chunks_version", "version_id"),
         Index("ix_knowledge_chunks_fts", "search_document", postgresql_using="gin"),
+        # 与迁移 20261123_0032 对齐：PostgreSQL 上使用 pgvector HNSW 余弦距离部分索引。
+        Index(
+            "ix_knowledge_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_where=text("embedding IS NOT NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     document_id: Mapped[str] = mapped_column(String(64), nullable=False)

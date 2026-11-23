@@ -208,3 +208,162 @@ def test_tsquery_token_escapes_backslashes_and_single_quotes(token: str, expecte
     from adapter.knowledge.repository import _tsquery_token
 
     assert _tsquery_token(token) == expected
+
+
+def test_knowledge_service_passes_semantic_min_score_when_supported_and_validates_bounds() -> None:
+    """支持 min_score 参数的仓储应收到相关性阈值，且非法阈值在构造期被拒绝。"""
+
+    class _ThresholdRepository(_Repository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.received_min_score: float | None = None
+
+        async def search_semantic(
+            self,
+            owner_id: str,
+            base_ids: list[str],
+            vector: list[float],
+            limit: int,
+            profile_id: str | None = None,
+            *,
+            min_score: float = 0.0,
+        ) -> tuple[SearchHit, ...]:
+            self.received_min_score = min_score
+            return await super().search_semantic(owner_id, base_ids, vector, limit, profile_id)
+
+    repo = _ThresholdRepository()
+    repo.semantic_hits = (_hit("chunk-1", 0, "relevant", "semantic", 1),)
+    service = KnowledgeService(
+        cast(KnowledgeRepositoryPort, repo),
+        _Tokenizer(),
+        _Embedding(),
+        counter=_Counter(),
+        semantic_min_score=0.42,
+    )
+
+    result = asyncio.run(service.search("owner", ["base"], "query"))
+    assert repo.received_min_score == pytest.approx(0.42)
+    assert len(result.hits) == 1
+
+    for invalid_score in (-0.01, 1.01, math.nan, math.inf):
+        with pytest.raises(ValueError, match="knowledge_semantic_min_score_invalid"):
+            KnowledgeService(
+                cast(KnowledgeRepositoryPort, repo),
+                _Tokenizer(),
+                _Embedding(),
+                semantic_min_score=invalid_score,
+            )
+
+
+def test_knowledge_repository_search_semantic_adds_distance_filter_for_min_score() -> None:
+    """min_score > 0 时语义检索 SQL 应下推 cosine_distance <= 1 - min_score 过滤低相关噪声。"""
+    from types import TracebackType
+    from typing import Any, Self
+
+    from sqlalchemy.dialects import postgresql
+
+    from adapter.knowledge.repository import KnowledgeRepository
+
+    compiled_sql: list[str] = []
+
+    class _Session:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, traceback
+
+        async def execute(self, statement: Any) -> list[object]:
+            compiled = str(
+                statement.compile(
+                    dialect=cast(Any, postgresql).dialect(),
+                    compile_kwargs={"literal_binds": False},
+                )
+            )
+            compiled_sql.append(compiled)
+            return []
+
+    async def scenario() -> None:
+        repo = KnowledgeRepository(cast(Any, lambda: _Session()))
+        await repo.search_semantic("owner", ["base"], [0.1] * 1024, 10, "prof", min_score=0.0)
+        await repo.search_semantic("owner", ["base"], [0.1] * 1024, 10, "prof", min_score=0.35)
+
+    asyncio.run(scenario())
+    assert "<=>" in compiled_sql[0]
+    assert "<=" not in compiled_sql[0].split("ORDER BY")[0]
+    assert "<=" in compiled_sql[1].split("ORDER BY")[0]
+
+
+def test_mixed_profile_min_score_empty_hit_keeps_semantic_channel_when_compatible_exists() -> None:
+    """混合 profile 下因 min_score 合法过滤为空但存在兼容切片时，保留 semantic 通道并记降级。"""
+    compatible_hit = _hit("chunk_compat", 0, "低相关性兼容切片", "semantic", 1)
+
+    class _MixedProfileRepo(_Repository):
+        def __init__(self, *, has_compatible_chunk: bool, keyword_fails: bool) -> None:
+            super().__init__()
+            self.incompatible_profile = True
+            self.has_compatible_chunk = has_compatible_chunk
+            self.keyword_fails = keyword_fails
+            self.semantic_calls_log: list[tuple[int, float]] = []
+
+        async def search_keyword(
+            self,
+            owner_id: str,
+            base_ids: list[str],
+            tokens: tuple[str, ...],
+            limit: int,
+        ) -> tuple[SearchHit, ...]:
+            del owner_id, base_ids, tokens, limit
+            if self.keyword_fails:
+                raise RuntimeError("keyword_down")
+            return (_hit("chunk_kw", 0, "关键词命中", "keyword", 1),)
+
+        async def search_semantic(
+            self,
+            owner_id: str,
+            base_ids: list[str],
+            vector: list[float],
+            limit: int,
+            profile_id: str | None = None,
+            *,
+            min_score: float = 0.0,
+        ) -> tuple[SearchHit, ...]:
+            del owner_id, base_ids, vector, profile_id
+            self.semantic_calls_log.append((limit, min_score))
+            if min_score == 0.0 and self.has_compatible_chunk:
+                return (compatible_hit,)
+            return ()
+
+    # 存在兼容切片但分数低于 0.35：即使 keyword 不可用，semantic 通道仍存活并只记降级。
+    repo_with_compat = _MixedProfileRepo(has_compatible_chunk=True, keyword_fails=True)
+    service_with_compat = KnowledgeService(
+        cast(KnowledgeRepositoryPort, repo_with_compat),
+        _Tokenizer(),
+        _Embedding(),
+        counter=_Counter(),
+        semantic_min_score=0.35,
+    )
+    result = asyncio.run(service_with_compat.search("owner", ["base"], "无关查询"))
+    assert result.hits == ()
+    assert result.channels == ("semantic",)
+    assert "semantic_profile_incompatible" in result.degraded_reasons
+    assert repo_with_compat.semantic_calls_log == [(40, 0.35), (1, 0.0)]
+
+    # 确实没有任何兼容切片：semantic 通道按不兼容降级排除，仅保留 keyword 通道。
+    repo_no_compat = _MixedProfileRepo(has_compatible_chunk=False, keyword_fails=False)
+    service_no_compat = KnowledgeService(
+        cast(KnowledgeRepositoryPort, repo_no_compat),
+        _Tokenizer(),
+        _Embedding(),
+        counter=_Counter(),
+        semantic_min_score=0.35,
+    )
+    degraded_result = asyncio.run(service_no_compat.search("owner", ["base"], "查询"))
+    assert degraded_result.channels == ("keyword",)
+    assert "semantic_profile_incompatible" in degraded_result.degraded_reasons
+    assert repo_no_compat.semantic_calls_log == [(40, 0.35), (1, 0.0)]

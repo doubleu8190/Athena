@@ -319,3 +319,179 @@ def test_listing_failure_never_deletes_candidates() -> None:
         assert repository.queries == []
 
     asyncio.run(scenario())
+
+
+def test_orphan_scan_batches_reference_lookups_and_throttles_interval_in_run_once() -> None:
+    """孤儿扫描优先按 100 条/页批量查库，且在 run_once 中按单调时钟周期降频执行。"""
+    from collections.abc import Sequence
+
+    class _BatchRepository(_MaintenanceRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batch_calls: list[list[str]] = []
+            self.reservation_checks = 0
+
+        async def list_expired_upload_reservations(
+            self, *, limit: int = 20
+        ) -> tuple[FileUploadReservation, ...]:
+            self.reservation_checks += 1
+            return await super().list_expired_upload_reservations(limit=limit)
+
+        async def find_referenced_storage_keys(self, storage_keys: Sequence[str]) -> set[str]:
+            batch = list(storage_keys)
+            self.batch_calls.append(batch)
+            return {key for key in batch if key in self.referenced}
+
+        async def is_storage_key_referenced(self, storage_key: str) -> bool:
+            raise AssertionError("batch lookup should be preferred over per-key query")
+
+        async def claim_job(
+            self, *, lease_seconds: int, owner_concurrency: int = 2
+        ) -> ClaimedKnowledgeJob | None:
+            del lease_seconds, owner_concurrency
+            return None
+
+    async def scenario() -> None:
+        now = datetime(2026, 11, 9, tzinfo=UTC)
+        store = MemoryOriginalStore(clock=lambda: now)
+        referenced_keys: set[str] = set()
+        orphan_keys: list[str] = []
+        for idx in range(105):
+            key = _key(f"payload-{idx}".encode(), f"ksrc_{idx:03d}")
+            store.seed(key, b"payload", modified_at=now - timedelta(days=2))
+            if idx % 10 == 0:
+                referenced_keys.add(key)
+            else:
+                orphan_keys.append(key)
+
+        repo = _BatchRepository()
+        repo.referenced = referenced_keys
+        clock = [1000.0]
+        worker = KnowledgeWorker(
+            cast(Any, repo),
+            cast(Any, _Unused()),
+            store,
+            _Unused(),
+            _Unused(),
+            _Unused(),
+            isolate_parsing=False,
+            orphan_sweep_interval_seconds=3600.0,
+            monotonic=lambda: clock[0],
+        )
+
+        # 第 100 次 run_once：执行过期预留回收 + 首次全桶孤儿扫描（分 100 + 5 两批查询）。
+        for _ in range(100):
+            assert await worker.run_once() is False
+        assert repo.reservation_checks == 1
+        assert [len(batch) for batch in repo.batch_calls] == [100, 5]
+        assert all(store.contains(key) for key in referenced_keys)
+        assert all(not store.contains(key) for key in orphan_keys)
+
+        # 未满 3600s 再次触发维护（第 200 次 run_once）：仍清理过期预留，但跳过全桶孤儿扫描。
+        late_orphan = _key(b"late-orphan", "ksrc_late")
+        store.seed(late_orphan, b"late", modified_at=now - timedelta(days=2))
+        clock[0] = 2000.0
+        for _ in range(100):
+            assert await worker.run_once() is False
+        assert repo.reservation_checks == 2
+        assert len(repo.batch_calls) == 2
+        assert store.contains(late_orphan)
+
+        # 超过 3600s（第 300 次 run_once）：再次执行孤儿扫描并回收新孤儿。
+        clock[0] = 4601.0
+        for _ in range(100):
+            assert await worker.run_once() is False
+        assert repo.reservation_checks == 3
+        assert len(repo.batch_calls) == 3
+        assert not store.contains(late_orphan)
+
+    asyncio.run(scenario())
+
+
+def test_knowledge_repository_find_referenced_storage_keys_checks_both_tables() -> None:
+    """find_referenced_storage_keys 应以单次 UNION 查询同时命中来源表与上传预留表。"""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from adapter.auth.model import UserModel
+    from adapter.base import Base
+    from adapter.knowledge.model import (
+        KnowledgeSourceModel,
+        KnowledgeUploadReservationModel,
+    )
+    from adapter.knowledge.repository import KnowledgeRepository
+
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(
+                    lambda sync: Base.metadata.create_all(
+                        sync,
+                        tables=cast(
+                            Any,
+                            [
+                                UserModel.__table__,
+                                KnowledgeSourceModel.__table__,
+                                KnowledgeUploadReservationModel.__table__,
+                            ],
+                        ),
+                    )
+                )
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            now = datetime.now(UTC)
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="usr_ref",
+                        email="ref@example.test",
+                        password_hash="unused",
+                        display_name=None,
+                        status="active",
+                        role="user",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    KnowledgeSourceModel(
+                        id="ksrc_1",
+                        owner_id="usr_ref",
+                        storage_key="key/from/source",
+                        filename="a.txt",
+                        media_type="text/plain",
+                        size_bytes=10,
+                        sha256="a" * 64,
+                        created_at=now,
+                    )
+                )
+                session.add(
+                    KnowledgeUploadReservationModel(
+                        owner_id="usr_ref",
+                        operation="create",
+                        request_key="req_1",
+                        reservation_token="tok_1",
+                        request_hash="h" * 64,
+                        base_id="kb_1",
+                        document_id="doc_1",
+                        version_id="ver_1",
+                        source_id="ksrc_2",
+                        job_id="job_1",
+                        storage_key="key/from/reservation",
+                        size_bytes=20,
+                        state="reserved",
+                        fencing_token=0,
+                        created_at=now,
+                        expires_at=now + timedelta(hours=1),
+                    )
+                )
+            repo = KnowledgeRepository(factory)
+            assert await repo.find_referenced_storage_keys([]) == set()
+            found = await repo.find_referenced_storage_keys(
+                ["key/from/source", "key/from/reservation", "key/orphan"]
+            )
+            assert found == {"key/from/source", "key/from/reservation"}
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

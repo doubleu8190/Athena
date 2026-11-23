@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import math
 import unicodedata
@@ -34,6 +35,7 @@ MAX_PAGE_SIZE = 100
 MAX_TEXT_LENGTH = 1_000_000
 MAX_FILE_BYTES = MAX_ORIGINAL_BYTES
 DEFAULT_CONTEXT_BUDGET = 4000
+DEFAULT_SEMANTIC_MIN_SCORE = 0.35
 _MEDIA_TYPES = {
     ".txt": "text/plain",
     ".md": "text/markdown",
@@ -71,16 +73,25 @@ class KnowledgeService:
         counter: TokenCounterPort | None = None,
         *,
         profile_id: str = "bge-m3-default",
+        semantic_min_score: float = DEFAULT_SEMANTIC_MIN_SCORE,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
         """保存持久化、分词及可替换的模型档案、ID 和时钟来源。"""
+        if not math.isfinite(semantic_min_score) or not 0.0 <= semantic_min_score <= 1.0:
+            raise ValueError("knowledge_semantic_min_score_invalid")
         self._repository = repository
         self._tokenizer = tokenizer
         self._embedding = embedding
         self._originals = originals
         self._counter = counter
         self._profile_id = profile_id
+        self._semantic_min_score = semantic_min_score
+        # 检测仓储是否支持 min_score 关键字参数，兼容既有测试中的旧版 fake 仓储签名。
+        self._semantic_supports_min_score = _accepts_keyword_argument(
+            getattr(repository, "search_semantic", None),
+            "min_score",
+        )
         self._id_factory = id_factory
         self._clock = clock
 
@@ -557,11 +568,34 @@ class KnowledgeService:
                 if callable(incompatible_check)
                 else False
             )
-            hits = await self._repository.search_semantic(
-                owner_id, base_ids, vector, 40, self._profile_id
-            )
+            if self._semantic_supports_min_score:
+                hits = await self._repository.search_semantic(
+                    owner_id,
+                    base_ids,
+                    vector,
+                    40,
+                    self._profile_id,
+                    min_score=self._semantic_min_score,
+                )
+            else:
+                hits = await self._repository.search_semantic(
+                    owner_id, base_ids, vector, 40, self._profile_id
+                )
             profile_degraded = has_incompatible
             if has_incompatible and not hits:
+                # 混合 profile 且启用相关性下限时，低频探测是否仍存在兼容切片：
+                # 若仅因相似度低于 min_score 返回空命中，保留 semantic 通道并记录降级提示。
+                if self._semantic_supports_min_score and self._semantic_min_score > 0.0:
+                    compatible_probe = await self._repository.search_semantic(
+                        owner_id,
+                        base_ids,
+                        vector,
+                        1,
+                        self._profile_id,
+                        min_score=0.0,
+                    )
+                    if compatible_probe:
+                        return ()
                 raise RuntimeError("semantic_profile_incompatible")
             return hits
 
@@ -757,6 +791,22 @@ def _clean_text(value: str, *, maximum: int, code: str) -> str:
     ):
         raise KnowledgeInputError(code)
     return normalized
+
+
+def _accepts_keyword_argument(func: object, name: str) -> bool:
+    """判断可调用对象是否接受指定关键字参数，兼容旧测试替身签名。"""
+    if not callable(func):
+        return False
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return parameters[name].kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
 
 
 def _utc(value: datetime) -> datetime:

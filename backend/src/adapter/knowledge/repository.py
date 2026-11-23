@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import delete, exists, func, select, text, update
+from sqlalchemy import delete, exists, func, select, text, union, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
@@ -101,6 +102,24 @@ class KnowledgeRepository:
                 KnowledgeUploadReservationModel.storage_key == storage_key
             )
             return bool(await session.scalar(select(source_reference | reservation_reference)))
+
+    async def find_referenced_storage_keys(self, storage_keys: Sequence[str]) -> set[str]:
+        """单条 SQL 批量核验一组对象 key 的引用状态，避免孤儿扫描 N+1 查库。"""
+        unique_keys = tuple(dict.fromkeys(storage_keys))
+        if not unique_keys:
+            return set()
+        # 使用 UNION 在同一语句快照内同时查来源表与上传预留表，保持与单条检查一致的引用语义。
+        query = union(
+            select(KnowledgeSourceModel.storage_key).where(
+                KnowledgeSourceModel.storage_key.in_(unique_keys)
+            ),
+            select(KnowledgeUploadReservationModel.storage_key).where(
+                KnowledgeUploadReservationModel.storage_key.in_(unique_keys)
+            ),
+        )
+        async with self._sessions() as session:
+            rows = await session.scalars(query)
+            return set(rows)
 
     async def reserve_file_upload(
         self,
@@ -1977,6 +1996,8 @@ class KnowledgeRepository:
         vector: list[float],
         limit: int,
         profile_id: str | None = None,
+        *,
+        min_score: float = 0.0,
     ) -> tuple[SearchHit, ...]:
         distance = KnowledgeChunkModel.embedding.cosine_distance(vector)
         query = _visible_chunks_query(owner_id, base_ids).where(
@@ -1984,6 +2005,9 @@ class KnowledgeRepository:
         )
         if profile_id is not None:
             query = query.where(KnowledgeVersionModel.profile_id == profile_id)
+        if min_score > 0.0:
+            # 余弦相似度 = 1 - cosine_distance，过滤相关性低于阈值的噪声片段。
+            query = query.where(distance <= (1.0 - min_score))
         query = query.order_by(distance).limit(min(limit, 40))
         async with self._sessions() as session:
             rows = await session.execute(query)

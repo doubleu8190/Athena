@@ -48,6 +48,7 @@ x-backend-environment: &backend-environment
   ATHENA_KNOWLEDGE_MINIO_SECRET_KEY: ${ATHENA_KNOWLEDGE_MINIO_SECRET_KEY:-}
   ATHENA_KNOWLEDGE_MINIO_BUCKET: ${ATHENA_KNOWLEDGE_MINIO_BUCKET:-}
   ATHENA_KNOWLEDGE_MINIO_SECURE: ${ATHENA_KNOWLEDGE_MINIO_SECURE:-false}
+  ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE: ${ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE:-0.35}
 
   # 长期记忆总开关、生命周期与固定模型身份
   ATHENA_MEMORY_ENABLED: ${ATHENA_MEMORY_ENABLED:-false}
@@ -204,7 +205,40 @@ services:
       - athena-network
 
   # ============================================================================
-  # 5. 可选数据库迁移辅助服务 (Database Migration Profile)
+  # 5. 可选知识库异步解析 Worker (Knowledge Worker Profile)
+  # ============================================================================
+  # 默认不随普通 docker compose up 启动；需开启知识库文档异步解析与向量化时使用：
+  # docker compose --profile knowledge up -d backend-knowledge-worker
+  backend-knowledge-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+      args:
+        INSTALL_KNOWLEDGE: ${ATHENA_INSTALL_KNOWLEDGE:-false}
+    image: athena-backend:latest
+    container_name: athena-backend-knowledge-worker
+    command: ["knowledge-worker"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      <<: *backend-environment
+      ATHENA_KNOWLEDGE_WORKER_CONCURRENCY: ${ATHENA_KNOWLEDGE_WORKER_CONCURRENCY:-2}
+      ATHENA_KNOWLEDGE_OWNER_CONCURRENCY: ${ATHENA_KNOWLEDGE_OWNER_CONCURRENCY:-2}
+      ATHENA_KNOWLEDGE_PARSE_MEMORY_MB: ${ATHENA_KNOWLEDGE_PARSE_MEMORY_MB:-4096}
+    volumes:
+      - athena-var:/app/var
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    profiles:
+      - knowledge
+    restart: unless-stopped
+    networks:
+      - athena-network
+
+  # ============================================================================
+  # 6. 可选数据库迁移辅助服务 (Database Migration Profile)
   # ============================================================================
   # 执行方式：docker compose run --rm backend-migration
   # 也可通过已有容器直接执行：docker compose run --rm backend-api migrate

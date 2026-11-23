@@ -444,3 +444,196 @@ def test_parser_rejects_extracted_text_over_limit(monkeypatch: pytest.MonkeyPatc
     )
     with pytest.raises(ValueError, match="knowledge_extracted_text_limit"):
         parser._parse_bounded("large.txt", b"")
+
+
+def test_validate_file_translates_corrupted_pdf_to_business_error(tmp_path: Any) -> None:
+    """带 %PDF- 头但内容损坏的文件应返回 knowledge_pdf_invalid，避免触发 HTTP 500。"""
+    corrupted = tmp_path / "broken.pdf"
+    corrupted.write_bytes(b"%PDF-1.7\ncorrupted binary payload")
+    with pytest.raises(ValueError, match="knowledge_pdf_invalid"):
+        LocalDocumentParser().validate_file(corrupted.name, corrupted)
+
+
+def test_validate_office_archive_enforces_content_types_size_limit(tmp_path: Any) -> None:
+    """超过 10 MiB 的 [Content_Types].xml 应被有界拦截并返回扩展大小超限错误。"""
+    oversized = tmp_path / "huge-ct.docx"
+    with zipfile.ZipFile(oversized, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            b"<Types>" + b" " * (10 * 1024 * 1024 + 16) + b"</Types>",
+        )
+        archive.writestr("word/document.xml", b"<root/>")
+    with pytest.raises(ValueError, match="knowledge_archive_expanded_size_limit"):
+        LocalDocumentParser().validate_file(oversized.name, oversized)
+
+
+def test_xlsx_without_embedded_media_skips_full_dom_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不含图片/绘图的纯表格工作簿仅以 read_only=True 读取，绝不触发 read_only=False 全量加载。"""
+    import openpyxl
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "字段"
+    sheet["B1"] = "值"
+    output = io.BytesIO()
+    workbook.save(output)
+
+    real_load_workbook = openpyxl.load_workbook
+    read_only_flags: list[bool] = []
+
+    def tracking_load_workbook(*args: Any, **kwargs: Any) -> Any:
+        read_only_flags.append(bool(kwargs.get("read_only", False)))
+        return real_load_workbook(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", tracking_load_workbook)
+    result = asyncio.run(LocalDocumentParser().parse("plain.xlsx", output.getvalue()))
+
+    assert len(result.blocks) == 1
+    assert read_only_flags == [True, True]
+
+
+def test_xlsx_handles_absolute_anchor_image_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不含 _from 属性的 AbsoluteAnchor 嵌入式图片应回退 pos-N 定位而不崩溃。"""
+    import openpyxl
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "数据"
+    image_data = io.BytesIO()
+    Image.new("RGB", (40, 40), "white").save(image_data, format="PNG")
+    from openpyxl.drawing.image import Image as SpreadsheetImage
+
+    sheet.add_image(SpreadsheetImage(io.BytesIO(image_data.getvalue())), "B2")
+    output = io.BytesIO()
+    workbook.save(output)
+
+    real_load_workbook = openpyxl.load_workbook
+
+    def patched_load_workbook(*args: Any, **kwargs: Any) -> Any:
+        loaded = real_load_workbook(*args, **kwargs)
+        if not kwargs.get("read_only", False):
+            for ws in loaded.worksheets:
+                for image in getattr(ws, "_images", ()):
+                    image.anchor = SimpleNamespace(pos="absolute")
+        return loaded
+
+    monkeypatch.setattr(openpyxl, "load_workbook", patched_load_workbook)
+    result = asyncio.run(
+        LocalDocumentParser(ocr_engine=_FakeOcr()).parse("abs.xlsx", output.getvalue())
+    )
+    assert any(
+        block.locator.media_id and block.locator.media_id.endswith("pos-1")
+        for block in result.blocks
+    )
+
+
+def test_docx_skips_external_and_unsupported_vector_images(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DOCX 外链图片与 PIL 不支持的矢量图（如 EMF/SVG）应跳过并记录告警，不影响正文解析。"""
+    doc = Document()
+    doc.add_paragraph("保留的正文段落")
+    # 添加内嵌外链图片关系（is_external=True）与无法被 PIL 解码的非光栅图片。
+    doc.part.rels.add_relationship(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "https://example.invalid/external.png",
+        "rIdExternalImg",
+        is_external=True,
+    )
+    output = io.BytesIO()
+    doc.save(output)
+    # 注入一个非光栅 SVG 图片字节与内部关系，模拟真实 Word 文档中的矢量图。
+    patched_zip = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(output.getvalue()), "r") as src,
+        zipfile.ZipFile(patched_zip, "w", zipfile.ZIP_DEFLATED) as dst,
+    ):
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                xml = data.decode("utf-8").replace(
+                    "</Types>",
+                    '<Default Extension="svg" ContentType="image/svg+xml"/></Types>',
+                )
+                data = xml.encode("utf-8")
+            elif item.filename == "word/_rels/document.xml.rels":
+                rel_type = (
+                    "http://schemas.openxmlformats.org/"
+                    "officeDocument/2006/relationships/image"
+                )
+                xml = data.decode("utf-8").replace(
+                    "</Relationships>",
+                    f'<Relationship Id="rIdSvgImg" Type="{rel_type}" '
+                    'Target="media/vector.svg"/></Relationships>',
+                )
+                data = xml.encode("utf-8")
+            dst.writestr(item, data)
+        dst.writestr("word/media/vector.svg", b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(
+            LocalDocumentParser(ocr_engine=_FakeOcr()).parse("mixed.docx", patched_zip.getvalue())
+        )
+
+    assert any("保留的正文段落" in block.text for block in result.blocks)
+    assert any("docx_unsupported_image_skipped" in record.message for record in caplog.records)
+
+
+def test_pdf_skips_tiny_decorative_images_before_ocr() -> None:
+    """PDF 内宽或高小于 32px 的装饰/细线图应直接跳过，不触发 OCR 引擎调用。"""
+    tiny = io.BytesIO()
+    Image.new("RGB", (16, 16), "white").save(tiny, format="JPEG")
+    tiny_bytes = tiny.getvalue()
+    stream = (
+        b"BT /F1 12 Tf 40 760 Td (Enough native PDF text to skip page OCR) Tj ET\n"
+        b"q 16 0 0 16 40 500 cm /Im1 Do Q"
+    )
+    image_stream = (
+        b"<< /Type /XObject /Subtype /Image /Width 16 /Height 16 "
+        b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length "
+        + str(len(tiny_bytes)).encode()
+        + b" >>\nstream\n"
+        + tiny_bytes
+        + b"\nendstream"
+    )
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources "
+            b"<< /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >> /Contents 4 0 R >>"
+        ),
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        image_stream,
+    ]
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
+    xref = len(output)
+    output.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode())
+    output.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    )
+
+    class _CountingOcr(_FakeOcr):
+        calls = 0
+
+        def predict(self, *, input: Any) -> list[SimpleNamespace]:
+            self.calls += 1
+            return super().predict(input=input)
+
+    ocr = _CountingOcr()
+    parser = LocalDocumentParser(min_pdf_chars=10, ocr_engine=ocr)
+    result = asyncio.run(parser.parse("tiny.pdf", bytes(output)))
+    assert ocr.calls == 0
+    assert len(result.blocks) == 1
+    assert result.blocks[0].locator.kind == "pdf"

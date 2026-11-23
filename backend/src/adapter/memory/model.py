@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.ext.compiler import compiles
@@ -76,6 +77,14 @@ class MemoryModel(Base):
             "ix_memories_content_fts",
             "search_document",
             postgresql_using="gin",
+        ),
+        # 与迁移 20261123_0032 对齐：只为未软删且具备向量的记忆建立 pgvector HNSW 余弦索引。
+        Index(
+            "ix_memories_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_where=text("embedding IS NOT NULL AND deleted_time IS NULL"),
         ),
     )
 

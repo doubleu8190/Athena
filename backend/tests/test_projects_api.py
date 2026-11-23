@@ -68,12 +68,46 @@ class InMemoryProjectRepository:
         self.items[project_id] = renamed
         return renamed
 
+    async def update(
+        self,
+        owner_id: str,
+        project_id: str,
+        *,
+        update_name: bool,
+        name: str | None,
+        update_description: bool,
+        description: str | None,
+        update_instructions: bool,
+        instructions: str | None,
+        update_default_skills: bool,
+        default_skill_ids: tuple[str, ...] | None,
+        updated_at: datetime,
+    ) -> Project | None:
+        project = await self.get(owner_id, project_id)
+        if project is None:
+            return None
+        updated = replace(
+            project,
+            name=name if update_name and name is not None else project.name,
+            description=description if update_description else project.description,
+            instructions=instructions if update_instructions else project.instructions,
+            default_skill_ids=(
+                default_skill_ids or () if update_default_skills else project.default_skill_ids
+            ),
+            updated_at=updated_at,
+        )
+        self.items[project_id] = updated
+        return updated
+
     async def soft_delete(
         self,
         owner_id: str,
         project_id: str,
         deleted_at: datetime,
+        *,
+        detach_sessions: bool = False,
     ) -> bool:
+        del detach_sessions
         project = self.items.get(project_id)
         if project is None or project.owner_id != owner_id:
             return False
@@ -121,12 +155,32 @@ class FailingProjectRepository:
     ) -> Project | None:
         self._raise_database_error()
 
+    async def update(
+        self,
+        owner_id: str,
+        project_id: str,
+        *,
+        update_name: bool,
+        name: str | None,
+        update_description: bool,
+        description: str | None,
+        update_instructions: bool,
+        instructions: str | None,
+        update_default_skills: bool,
+        default_skill_ids: tuple[str, ...] | None,
+        updated_at: datetime,
+    ) -> Project | None:
+        self._raise_database_error()
+
     async def soft_delete(
         self,
         owner_id: str,
         project_id: str,
         deleted_at: datetime,
+        *,
+        detach_sessions: bool = False,
     ) -> bool:
+        del detach_sessions
         self._raise_database_error()
 
 
@@ -198,6 +252,9 @@ def test_create_returns_201_location_and_normalized_name() -> None:
     assert response.json() == {
         "id": "project_fixed",
         "name": "新项目",
+        "description": None,
+        "instructions": None,
+        "default_skill_ids": [],
         "created_at": "2026-02-01T08:30:00Z",
         "updated_at": "2026-02-01T08:30:00Z",
     }
@@ -460,12 +517,18 @@ def test_list_returns_active_projects_in_updated_order_with_pagination() -> None
             {
                 "id": "project_new",
                 "name": "新项目",
+                "description": None,
+                "instructions": None,
+                "default_skill_ids": [],
                 "created_at": "2026-01-01T12:02:00Z",
                 "updated_at": "2026-01-01T12:02:00Z",
             },
             {
                 "id": "project_middle",
                 "name": "中间项目",
+                "description": None,
+                "instructions": None,
+                "default_skill_ids": [],
                 "created_at": "2026-01-01T12:01:00Z",
                 "updated_at": "2026-01-01T12:01:00Z",
             },

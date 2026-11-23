@@ -258,8 +258,15 @@ class _ToolRuntime:
         return AuthorizedRunContext(owner_id, chat_session_id, None, auth_session_id or "")
 
     async def build_snapshot(
-        self, prompt_template_version: str, context: AuthorizedRunContext
+        self,
+        prompt_template_version: str,
+        context: AuthorizedRunContext,
+        *,
+        depth: int = 0,
+        allowed_tool_ids: Any = None,
+        knowledge_base_ids: tuple[str, ...] | None = None,
     ) -> RuntimeToolSnapshot:
+        del prompt_template_version, context, depth, allowed_tool_ids, knowledge_base_ids
         return _snapshot()
 
     def validate_call(

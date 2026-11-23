@@ -72,21 +72,21 @@ class AccessPolicyService:
             return False
         return await self._can_read_with_snapshot(snapshot, target)
 
-    async def filter_readable_ids(
+    async def filter_readable_targets(
         self,
         user_id: str,
         resource_type: ResourceType,
         resource_ids: Sequence[str] | None = None,
-    ) -> set[str]:
-        """批量实时过滤出当前用户拥有读权限的资源 ID 集合。"""
+    ) -> tuple[ResourceAccessTarget, ...]:
+        """批量实时过滤并返回当前用户拥有读权限的资源目标元数据（含可见层级）。"""
         if resource_ids is not None and not resource_ids:
-            return set()
+            return ()
         snapshot = await self.get_user_snapshot(user_id)
         if snapshot is None or not snapshot.is_active:
-            return set()
+            return ()
         targets = await self._repository.list_resource_targets(resource_type, resource_ids)
         if not targets:
-            return set()
+            return ()
 
         # 仅对 department 级且尚未通过超管/部门管理员快速放行的目标批量加载 grants。
         dept_resource_ids = [
@@ -114,16 +114,26 @@ class AccessPolicyService:
                     dept_target_ids
                 )
 
-        readable: set[str] = set()
-        for target in targets:
+        return tuple(
+            target
+            for target in targets
             if evaluate_can_read(
                 snapshot,
                 target,
                 grants_by_id.get(target.resource_id, ()),
                 active_grant_department_ids=active_grant_depts,
-            ):
-                readable.add(target.resource_id)
-        return readable
+            )
+        )
+
+    async def filter_readable_ids(
+        self,
+        user_id: str,
+        resource_type: ResourceType,
+        resource_ids: Sequence[str] | None = None,
+    ) -> set[str]:
+        """批量实时过滤出当前用户拥有读权限的资源 ID 集合。"""
+        targets = await self.filter_readable_targets(user_id, resource_type, resource_ids)
+        return {target.resource_id for target in targets}
 
     async def can_create_resource(
         self,

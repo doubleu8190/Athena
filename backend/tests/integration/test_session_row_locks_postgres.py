@@ -42,7 +42,6 @@ from domain.message import (
     TextPart,
 )
 from domain.project import ProjectHasSessionsError, ProjectNotFoundError
-from domain.session import SessionProjectLockedError
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 LOCK_WAIT_TIMEOUT = 30.0
@@ -272,7 +271,7 @@ async def _conversation_count(
 def test_session_rebind_and_first_message_serialize_on_session_row(
     migrated_schema: str,
 ) -> None:
-    """首条消息先锁 Session 时，改绑必须等待并在提交后返回 409 对应错误。"""
+    """首条消息先锁 Session 时，改绑必须等待其释放行锁；无活跃 Run 时随后可成功改绑。"""
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
@@ -323,12 +322,12 @@ def test_session_rebind_and_first_message_serialize_on_session_row(
 
             message_repository.release_session.set()
             await asyncio.wait_for(message_task, timeout=TASK_TIMEOUT)
-            with pytest.raises(SessionProjectLockedError):
-                await asyncio.wait_for(update_task, timeout=TASK_TIMEOUT)
+            rebound = await asyncio.wait_for(update_task, timeout=TASK_TIMEOUT)
+            assert rebound.project_id == project_id
 
             row = await _session_row(session_factory, created.id)
             assert row.last_message_sequence == 1
-            assert row.project_id is None
+            assert row.project_id == project_id
             assert await _conversation_count(session_factory, created.id) == 1
         finally:
             message_repository.release_session.set()

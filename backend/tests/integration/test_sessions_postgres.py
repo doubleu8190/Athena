@@ -18,7 +18,6 @@ from adapter.session.repository import SqlAlchemySessionRepository
 from domain.project import Project, ProjectNotFoundError
 from domain.session import (
     Session,
-    SessionProjectLockedError,
     SessionScope,
 )
 
@@ -188,15 +187,17 @@ def test_session_migration_constraints_and_repository_round_trip() -> None:
                     assert row is not None
                     row.last_message_sequence = 1
 
-            with pytest.raises(SessionProjectLockedError):
-                await repository.update(
-                    SessionScope(session_id="session_unbound", owner_id="user_1"),
-                    update_title=False,
-                    title=None,
-                    update_project=True,
-                    project_id="project_2",
-                    updated_at=timestamp,
-                )
+            # M1.5：无活跃 Run 时，即使已有历史消息也允许自由改绑项目。
+            rebound = await repository.update(
+                SessionScope(session_id="session_unbound", owner_id="user_1"),
+                update_title=False,
+                title=None,
+                update_project=True,
+                project_id="project_2",
+                updated_at=timestamp,
+            )
+            assert rebound is not None
+            assert rebound.project_id == "project_2"
 
             assert await repository.soft_delete(
                 "user_1",

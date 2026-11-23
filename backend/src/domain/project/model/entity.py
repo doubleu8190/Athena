@@ -16,6 +16,9 @@ class Project:
     created_at: datetime
     updated_at: datetime
     deleted_time: datetime | None = None
+    description: str | None = None
+    instructions: str | None = None
+    default_skill_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

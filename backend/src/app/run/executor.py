@@ -13,6 +13,13 @@ from pydantic import ValidationError
 
 from app.access import AccessPolicyService
 from app.preference import PreferenceService, render_preference_context
+from app.run.auto_title import (
+    AUTO_TITLE_PROMPT_INPUT_MAX_CHARS,
+    AUTO_TITLE_SYSTEM_PROMPT,
+    AUTO_TITLE_TIMEOUT_SECONDS,
+    fallback_title_from_message,
+    sanitize_generated_title,
+)
 from app.run.budget import RunLlmBudget
 from app.run.compression import ContextCompressor, ContextPreparation
 from app.run.config import RunWorkerConfig
@@ -22,6 +29,7 @@ from app.run.context import (
     measure_llm_request,
 )
 from app.run.events import publish_pending_events
+from app.run.prompt import render_project_instructions_context
 from app.run.safe_stop import (
     SafeStopReporter,
     is_context_report_text_valid,
@@ -39,9 +47,11 @@ from domain.access import ResourceType
 from domain.file import PendingSessionFile
 from domain.llm.model import (
     LlmError,
+    LlmMessage,
     LlmProviderError,
     LlmRequest,
     LlmResponse,
+    LlmRole,
     LlmText,
     LlmTool,
     LlmToolCall,
@@ -70,6 +80,7 @@ from domain.message import (
     ToolResultPart,
 )
 from domain.preference import DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET
+from domain.project import ProjectReader
 from domain.run.model import (
     DISPATCH_SUBAGENTS_TOOL_ID,
     BeginSubagentBatchCommand,
@@ -82,10 +93,12 @@ from domain.run.model import (
     Run,
     RunContextSafetyCommitError,
     RunLease,
+    RunStatus,
     RunUsage,
 )
 from domain.run.model.errors import RunConflictError, RunInputResourceError, RunStateError
 from domain.run.ports import RunEventTransport, RunRepository
+from domain.session import SessionRepository, SessionScope
 from domain.skill import SKILL_EXECUTE_TOOL_ID, RunSkillPromptContext, SkillExecutionStatus
 from domain.subagent import SubagentRepository
 from domain.system_prompt import SystemPromptRepository
@@ -140,6 +153,7 @@ class _ExecutionState:
     event_cursor: int
     round: int = 0
     publish_disabled: bool = False
+    trigger_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,13 +181,16 @@ class RunExecutor:
         config: RunWorkerConfig | None = None,
         preferences: PreferenceService | None = None,
         preference_memory_token_budget: int = DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET,
+        projects: ProjectReader | None = None,
+        sessions: SessionRepository | None = None,
         subagents: SubagentRepository | None = None,
         access_policy: AccessPolicyService | None = None,
+        auto_title_timeout_seconds: float = AUTO_TITLE_TIMEOUT_SECONDS,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        """保存持久化命令、模型配置、工具运行目录、权限引擎和有界执行参数。"""
+        """保存持久化命令、模型配置、工具运行目录、项目/会话端口、权限引擎和有界执行参数。"""
         self._repository = repository
         self._profiles = profiles
         self._provider = provider
@@ -181,10 +198,14 @@ class RunExecutor:
         self._tool_runtime = tool_runtime
         self._publisher = publisher
         self._config = config or RunWorkerConfig()
+        self._projects = projects
+        self._sessions = sessions
         self._subagents = subagents
         self._access_policy = access_policy
         self._preferences = preferences
         self._preference_memory_token_budget = preference_memory_token_budget
+        self._auto_title_timeout_seconds = max(0.01, float(auto_title_timeout_seconds))
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._id_factory = id_factory
         self._clock = clock
         self._sleep = sleep
@@ -200,6 +221,12 @@ class RunExecutor:
             id_factory=id_factory,
             now=self._now,
         )
+
+    async def wait_background_tasks(self) -> None:
+        """等待受控后台任务（如首轮自动标题生成）全部安全退出，供测试与优雅停机使用。"""
+        while self._background_tasks:
+            pending = tuple(self._background_tasks)
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def execute(self, lease: RunLease) -> None:
         """执行一次领取；终态、等待与资源清理由原子仓储命令完成。"""
@@ -281,6 +308,7 @@ class RunExecutor:
             auth_session_id=run.auth_session_id or "",
             deadline_at=lease.execution_deadline_at,
             skill_snapshot=run.skill_snapshot,
+            knowledge_base_ids=run.knowledge_base_ids,
         )
         # 预算从数据库已用次数继续，跨进程重试也不会超发模型请求。
         budget = RunLlmBudget(
@@ -337,11 +365,13 @@ class RunExecutor:
                         authorized,
                         depth=run.depth,
                         allowed_tool_ids=(),
+                        knowledge_base_ids=run.knowledge_base_ids,
                     )
                 else:
                     snapshot = await self._tool_runtime.build_snapshot(
                         run.prompt_template_version,
                         authorized,
+                        knowledge_base_ids=run.knowledge_base_ids,
                     )
         except ValidationError as error:
             code = (
@@ -478,12 +508,47 @@ class RunExecutor:
         )
         if messages is None:
             raise LlmError("run_context_unavailable")
+        # 缓存本次触发消息正文，供主 Run 完成后异步生成首轮标题（不触发额外查库）。
+        if state.trigger_text is None:
+            trigger_msg = next(
+                (
+                    item
+                    for item in messages
+                    if isinstance(item, ConversationMessage) and item.id == run.trigger_message_id
+                ),
+                None,
+            )
+            if trigger_msg is not None:
+                state.trigger_text = "".join(
+                    part.text if isinstance(part, TextPart) else f"[附件：{part.filename}]"
+                    for part in trigger_msg.parts
+                    if isinstance(part, (TextPart, FileRefPart))
+                )
         loaded_skill_ids = await self._repository.list_successfully_loaded_skill_ids(run.id)
         skill_context = (
             None
             if self._tool_runtime is None
             else await self._tool_runtime.build_skill_context(run, loaded_skill_ids)
         )
+        if run.depth >= 1 or self._projects is None:
+            # 子 Run 保持严格上下文隔离，不注入项目专属背景指令。
+            project_content: str | None = None
+        else:
+            project_id = None if state.authorized is None else state.authorized.project_id
+            if project_id is None and state.authorized is None and self._sessions is not None:
+                visible_session = await self._sessions.get_visible(
+                    SessionScope(session_id=run.session_id, owner_id=run.owner_id)
+                )
+                project_id = None if visible_session is None else visible_session.project_id
+            if project_id is None:
+                project_content = None
+            else:
+                project = await self._projects.get(run.owner_id, project_id)
+                project_content = (
+                    None
+                    if project is None or not project.instructions
+                    else render_project_instructions_context(project.name, project.instructions)
+                )
         if run.depth >= 1 or self._preferences is None:
             # 子 Run 保持严格上下文隔离，不注入个人工作偏好或显式备忘记忆。
             preference_content: str | None = None
@@ -515,6 +580,7 @@ class RunExecutor:
                     business_tools,
                     skill_context,
                     preference_content,
+                    project_content,
                     remaining,
                     ContextStopReason.COMPRESSION_NOT_CONFIGURED,
                 )
@@ -532,6 +598,7 @@ class RunExecutor:
                     skill_context=skill_context,
                     input_files=state.input_files,
                     preference_context=preference_content,
+                    project_context=project_content,
                     budget=state.budget,
                     allow_compression=state.budget.can_compress,
                 )
@@ -548,6 +615,7 @@ class RunExecutor:
                 business_tools,
                 skill_context,
                 preference_content,
+                project_content,
                 remaining,
                 stop_hint,
             )
@@ -606,6 +674,7 @@ class RunExecutor:
         tools: tuple[LlmTool, ...],
         skill_context: RunSkillPromptContext | None,
         preference_context: str | None,
+        project_context: str | None,
         timeout_seconds: float,
         stop_hint: ContextStopReason,
     ) -> ContextPreparation:
@@ -621,6 +690,7 @@ class RunExecutor:
             skill_context=skill_context,
             input_files=state.input_files,
             preference_context=preference_context,
+            project_context=project_context,
         )
         return ContextPreparation(
             messages=llm_messages,
@@ -1387,6 +1457,7 @@ class RunExecutor:
             deadline_at=self._now() + timedelta(seconds=deadline_seconds),
             tool_call_record_id=record_id,
             skill_snapshot=state.run.skill_snapshot,
+            knowledge_base_ids=state.run.knowledge_base_ids,
         )
         # MCP 内部按业务、清理、交付认证三段收敛；外层守护必须完整包住该 envelope
         # 并留调度余量，否则已确定结果会被抢先误报为 unknown。内置工具不加额外预算。
@@ -1584,6 +1655,7 @@ class RunExecutor:
                     state.authorized,
                     depth=1,
                     allowed_tool_ids=profile.allowed_tool_ids,
+                    knowledge_base_ids=run.knowledge_base_ids,
                 )
             else:
                 sub_snapshot = RuntimeToolSnapshot(tools=())
@@ -1699,6 +1771,132 @@ class RunExecutor:
         if finished is None:
             raise LlmError("run_execution_lease_lost")
         await self._publish_pending_events(state)
+        # 仅在主 Run 成功落库 completed 并推送事件后异步触发轻量标题生成，
+        # 全程与主 Run 终态隔离，超时或失败绝不回滚主 Run。
+        if finished.status is RunStatus.COMPLETED and run.depth == 0 and self._sessions is not None:
+            self._schedule_auto_title(
+                owner_id=run.owner_id,
+                session_id=run.session_id,
+                run_model_profile_id=run.model_config_version_id,
+                trigger_text=state.trigger_text or "",
+            )
+
+    def _schedule_auto_title(
+        self,
+        *,
+        owner_id: str,
+        session_id: str,
+        run_model_profile_id: str,
+        trigger_text: str,
+    ) -> None:
+        """登记受控异步后台任务生成首轮标题，避免未回收 Task 警告。"""
+        task = asyncio.create_task(
+            self._run_auto_title_task(
+                owner_id=owner_id,
+                session_id=session_id,
+                run_model_profile_id=run_model_profile_id,
+                trigger_text=trigger_text,
+            )
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_auto_title_task(
+        self,
+        *,
+        owner_id: str,
+        session_id: str,
+        run_model_profile_id: str,
+        trigger_text: str,
+    ) -> None:
+        """仅当未删除会话仍无标题时生成并条件写入自动标题，异常全量兜底隔离。"""
+        if self._sessions is None:
+            return
+        try:
+            visible = await self._sessions.get_visible(
+                SessionScope(session_id=session_id, owner_id=owner_id)
+            )
+            if visible is None or visible.title is not None:
+                return
+            title = await self._generate_auto_title(
+                run_model_profile_id=run_model_profile_id,
+                trigger_text=trigger_text,
+            )
+            if not title:
+                return
+            await self._sessions.set_title_if_empty(owner_id, session_id, title)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning(
+                "session_auto_title_failed session_id=%s exception_type=%s",
+                session_id,
+                type(error).__name__,
+            )
+
+    async def _generate_auto_title(
+        self,
+        *,
+        run_model_profile_id: str,
+        trigger_text: str,
+    ) -> str:
+        """优先调用压缩模型（否则复用本次 Run 模型）限时生成 <=20 字标题，
+        失败或超时则降级截取前 24 字。
+        """
+        fallback = fallback_title_from_message(trigger_text)
+        excerpt = trigger_text.strip()[:AUTO_TITLE_PROMPT_INPUT_MAX_CHARS]
+        if not excerpt:
+            return fallback
+
+        runtime: RuntimeModelProfile | None = None
+        try:
+            policy = await self._profiles.get_current_compression_policy()
+            if policy is not None:
+                runtime = await self._profiles.get_runtime(policy.compression_model_profile_id)
+        except Exception:
+            runtime = None
+        if runtime is None:
+            try:
+                runtime = await self._profiles.get_runtime(run_model_profile_id)
+            except Exception:
+                runtime = None
+        if runtime is None:
+            return fallback
+
+        request = LlmRequest(
+            model_profile=runtime.version.id,
+            messages=(
+                LlmMessage(role=LlmRole.SYSTEM, content=AUTO_TITLE_SYSTEM_PROMPT),
+                LlmMessage(role=LlmRole.USER, content=excerpt),
+            ),
+            tool_choice="none",
+            max_output_tokens=min(64, runtime.version.max_output_tokens),
+            temperature=(
+                0.2 if runtime.version.temperature is None else runtime.version.temperature
+            ),
+            timeout_seconds=min(
+                float(runtime.version.request_timeout_seconds),
+                self._auto_title_timeout_seconds,
+            ),
+        )
+        try:
+            async with asyncio.timeout(self._auto_title_timeout_seconds):
+                response = await self._provider.complete(runtime, request)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning(
+                "session_auto_title_llm_fallback model_profile_id=%s exception_type=%s",
+                runtime.version.id,
+                type(error).__name__,
+            )
+            return fallback
+
+        if response.status != "completed":
+            return fallback
+        raw_text = "".join(part.text for part in response.output if isinstance(part, LlmText))
+        cleaned = sanitize_generated_title(raw_text)
+        return cleaned or fallback
 
     async def _stop_for_context_safety(
         self,

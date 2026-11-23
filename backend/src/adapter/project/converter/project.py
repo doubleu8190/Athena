@@ -24,6 +24,9 @@ def project_to_domain(row: ProjectModel) -> Project:
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
         deleted_time=_as_utc(row.deleted_time) if row.deleted_time is not None else None,
+        description=row.description,
+        instructions=row.instructions,
+        default_skill_ids=tuple(row.default_skill_ids or ()),
     )
 
 

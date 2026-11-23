@@ -316,6 +316,7 @@ class SqlAlchemySubagentModelChecker(SubagentModelChecker):
                 select(ModelProfileVersionModel.id).where(
                     ModelProfileVersionModel.id == model_profile_id,
                     ModelProfileVersionModel.enabled.is_(True),
+                    ModelProfileVersionModel.deleted_at.is_(None),
                 )
             )
         return found_id is not None

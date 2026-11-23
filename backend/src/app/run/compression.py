@@ -120,6 +120,7 @@ async def _split_recent_suffix(
     summary_text: str | None = None,
     *,
     prefix_tokens: int | None = None,
+    project_context: str | None = None,
 ) -> tuple[list[tuple[ConversationMessage, ...]], tuple[ConversationMessage, ...]]:
     """按完整主请求计数保留不超过近期预算的连续轮次后缀。"""
     # 增量累加每组消息的 token 增量，避免每轮重拼接并重算固定前缀与已选后缀。
@@ -141,6 +142,7 @@ async def _split_recent_suffix(
             skill_context=skill_context,
             input_files=input_files,
             preference_context=preference_context,
+            project_context=project_context,
         )
         candidate_tokens = accumulated_recent_tokens + max(
             0, group_with_prefix_tokens - resolved_prefix
@@ -261,6 +263,7 @@ class ContextCompressor:
         skill_context: RunSkillPromptContext | None = None,
         input_files: Sequence[RunInputFileContext] = (),
         preference_context: str | None = None,
+        project_context: str | None = None,
         budget: RunLlmBudget | None = None,
         allow_compression: bool = True,
     ) -> ContextPreparation:
@@ -303,6 +306,7 @@ class ContextCompressor:
             skill_context=skill_context,
             input_files=input_files,
             preference_context=preference_context,
+            project_context=project_context,
         )
         feasible_history = max(
             0,
@@ -341,6 +345,7 @@ class ContextCompressor:
                 skill_context=skill_context,
                 input_files=input_files,
                 preference_context=preference_context,
+                project_context=project_context,
             )
             return ContextPreparation(
                 messages=current.messages,
@@ -368,6 +373,7 @@ class ContextCompressor:
             skill_context=skill_context,
             input_files=input_files,
             preference_context=preference_context,
+            project_context=project_context,
         )
         protected_tokens = (
             prefix_tokens
@@ -385,6 +391,7 @@ class ContextCompressor:
                     skill_context=skill_context,
                     input_files=input_files,
                     preference_context=preference_context,
+                    project_context=project_context,
                 )
             )[0]
         )
@@ -403,6 +410,7 @@ class ContextCompressor:
             preference_context,
             summary_text,
             prefix_tokens=prefix_tokens,
+            project_context=project_context,
         )
         current = await self._measure_context(
             run,
@@ -416,6 +424,7 @@ class ContextCompressor:
             skill_context=skill_context,
             input_files=input_files,
             preference_context=preference_context,
+            project_context=project_context,
         )
         if not remaining_groups:
             return ContextPreparation(
@@ -533,6 +542,7 @@ class ContextCompressor:
                 skill_context=skill_context,
                 input_files=input_files,
                 preference_context=preference_context,
+                project_context=project_context,
             )
             if (
                 final_context.input_tokens + final_context.output_tokens
@@ -780,6 +790,7 @@ class ContextCompressor:
         skill_context: RunSkillPromptContext | None,
         input_files: Sequence[RunInputFileContext],
         preference_context: str | None,
+        project_context: str | None = None,
     ) -> ContextPreparation:
         """按完整主请求口径测量当前候选上下文。"""
         llm_messages, selected_tools, input_tokens, output_tokens = await measure_llm_request(
@@ -794,6 +805,7 @@ class ContextCompressor:
             skill_context=skill_context,
             input_files=input_files,
             preference_context=preference_context,
+            project_context=project_context,
         )
         return ContextPreparation(
             messages=llm_messages,

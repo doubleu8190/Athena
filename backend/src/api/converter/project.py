@@ -11,6 +11,9 @@ def project_to_response(project: ProjectResult) -> ProjectResponse:
     return ProjectResponse(
         id=project.id,
         name=project.name,
+        description=project.description,
+        instructions=project.instructions,
+        default_skill_ids=list(project.default_skill_ids),
         created_at=project.created_at,
         updated_at=project.updated_at,
     )

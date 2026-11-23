@@ -136,6 +136,8 @@ class RunModel(Base):
         default=list,
         server_default=text("'[]'"),
     )
+    # NULL 表示默认企业工作台范围；[] 表示显式关闭知识库检索；非空表示显式限定知识库 ID 列表。
+    knowledge_base_ids: Mapped[list[str] | None] = mapped_column(_json_type(), nullable=True)
     tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
     auth_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     llm_request_count: Mapped[int] = mapped_column(

@@ -9,6 +9,8 @@ from typing import Literal
 # 上下文窗口与单次输出有各自的上限，扩大上下文容量不改变输出保护边界。
 MAX_CONTEXT_WINDOW_TOKENS = 1_048_576
 MAX_OUTPUT_TOKENS = 1_000_000
+MAX_SCENARIO_LABEL_LENGTH = 64
+MAX_SCENARIO_DESCRIPTION_LENGTH = 255
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +35,10 @@ class ModelProfileVersion:
     enabled: bool
     created_at: datetime
     supports_parallel_tool_calls: bool = False
+    visible_to_users: bool = True
+    scenario_label: str | None = None
+    scenario_description: str | None = None
+    supports_vision: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,11 +67,17 @@ class ModelProfileInput:
     max_concurrency: int = 4
     temperature: float | None = None
     supports_parallel_tool_calls: bool = False
+    visible_to_users: bool = True
+    scenario_label: str | None = None
+    scenario_description: str | None = None
+    supports_vision: bool = False
 
 
 __all__ = [
     "MAX_CONTEXT_WINDOW_TOKENS",
     "MAX_OUTPUT_TOKENS",
+    "MAX_SCENARIO_DESCRIPTION_LENGTH",
+    "MAX_SCENARIO_LABEL_LENGTH",
     "ModelProfileInput",
     "ModelProfileVersion",
     "RuntimeModelProfile",

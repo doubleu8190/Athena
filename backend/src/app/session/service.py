@@ -153,8 +153,9 @@ class SessionService:
         page_size: int = 20,
         project_id: str | None = None,
         unbound: bool = False,
+        q: str | None = None,
     ) -> SessionPageResult:
-        """分页读取当前用户的未删除会话。"""
+        """分页读取当前用户的未删除会话，支持按标题关键字搜索。"""
         owner = _normalized_owner_id(owner_id)
         if page < 1 or not 1 <= page_size <= MAX_PAGE_SIZE:
             raise ValueError("invalid_pagination")
@@ -163,12 +164,19 @@ class SessionService:
         normalized_project_id = (
             None if project_id is None else _normalized_filter_project_id(project_id)
         )
+        normalized_query: str | None = None
+        if q is not None:
+            if not isinstance(q, str) or len(q) > MAX_SESSION_TITLE_LENGTH:
+                raise InvalidSessionFilterError("invalid_session_filter")
+            stripped = q.strip()
+            normalized_query = stripped or None
         result = await self._repository.list_active(
             owner,
             project_id=normalized_project_id,
             unbound=unbound,
             offset=(page - 1) * page_size,
             limit=page_size,
+            query=normalized_query,
         )
         return session_page_to_result(result)
 

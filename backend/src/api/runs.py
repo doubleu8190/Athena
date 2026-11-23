@@ -36,6 +36,7 @@ from domain.run.model import MAX_RUN_SSE_EVENT_BYTES, MAX_RUN_SSE_SNAPSHOT_BYTES
 from domain.run.model.errors import (
     RunConflictError,
     RunInputResourceError,
+    RunKnowledgeBaseNotFoundError,
     RunNotFoundError,
     RunStateError,
     ToolRetryConfirmationRequiredError,
@@ -56,9 +57,15 @@ class _RunEventSourceResponse(StreamingResponse):
 
 
 def _not_found(error: Exception) -> HTTPException:
+    if isinstance(error, RunKnowledgeBaseNotFoundError):
+        detail = "knowledge_base_not_found"
+    elif isinstance(error, RunNotFoundError):
+        detail = "run_not_found"
+    else:
+        detail = "session_not_found"
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail="run_not_found" if isinstance(error, RunNotFoundError) else "session_not_found",
+        detail=detail,
     )
 
 
@@ -93,8 +100,19 @@ def build_run_router(
                 request.text,
                 skill_ids=tuple(request.skill_ids),
                 input_file_ids=tuple(request.input_file_ids),
+                knowledge_base_ids=(
+                    None
+                    if request.knowledge_base_ids is None
+                    else tuple(request.knowledge_base_ids)
+                ),
+                model_profile_id=request.model_profile_id,
                 auth_session_id=current_auth.session_id,
             )
+        except RunKnowledgeBaseNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="knowledge_base_not_found",
+            ) from error
         except (RunNotFoundError, SessionNotFoundError) as error:
             raise _not_found(error) from error
         except (RunConflictError, RunStateError) as error:
@@ -168,7 +186,7 @@ def build_run_router(
                     auth_session_id=current_auth.session_id,
                 )
             )
-        except (RunNotFoundError, SessionNotFoundError) as error:
+        except (RunNotFoundError, SessionNotFoundError, RunKnowledgeBaseNotFoundError) as error:
             raise _not_found(error) from error
         except ToolRetryConfirmationRequiredError as error:
             raise HTTPException(

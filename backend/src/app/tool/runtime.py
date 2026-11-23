@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC
 from functools import lru_cache
 from typing import Any, cast
@@ -30,7 +31,7 @@ from app.skill.tooling import summarize_parameters
 from app.tool.ports import RunToolRuntime
 from common.date import utc_now
 from common.json import utf8_size
-from domain.access import ResourceType
+from domain.access import ResourceType, VisibilityScope
 from domain.auth.ports import CurrentSessionReader
 from domain.file import PendingSessionFile, SessionFile, TextFileReadError
 from domain.knowledge.model import SearchResult
@@ -85,12 +86,23 @@ from domain.tool import (
 
 REQUEST_USER_INPUT_ID = "builtin_request_user_input"
 KNOWLEDGE_SEARCH_ID = "builtin_knowledge_search"
+MAX_KNOWLEDGE_SEARCH_BASES = 20
 BUILTIN_VERSION = 1
 MCP_DELIVERY_AUTH_TIMEOUT_SECONDS = 1.0
 MCP_TOOL_WATCHDOG_GRACE_SECONDS = 0.25
 MCP_DELIVERY_AUTH_ERROR = "run_auth_session_invalid"
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _KnowledgeScopeResolution:
+    """统一知识库范围解析结果：effective_ids 为实际待检集合，allowed_ids 为交付复核全集。"""
+
+    effective_ids: tuple[str, ...]
+    allowed_ids: frozenset[str]
+    error_code: str | None = None
+    error_message: str | None = None
 
 REQUEST_USER_INPUT_DEFINITION = RuntimeToolDefinition(
     tool_id=REQUEST_USER_INPUT_ID,
@@ -134,8 +146,8 @@ KNOWLEDGE_SEARCH_DEFINITION = RuntimeToolDefinition(
     tool_id=KNOWLEDGE_SEARCH_ID,
     model_name="knowledge_search",
     description=(
-        "检索当前聊天项目已关联且当前用户仍有权访问的知识库。只返回安全的文档标题、"
-        "片段和来源标识；零命中与检索不可用必须区分。"
+        "检索当前对话范围内且当前用户仍有权访问的知识库（含项目关联库及公司/部门共享知识库）。"
+        "只返回安全的文档标题、片段和来源标识；零命中与检索不可用必须区分。"
     ),
     input_schema={
         "type": "object",
@@ -445,6 +457,129 @@ class RunToolRuntimeService(RunToolRuntime):
             auth_session_id=auth_session_id,
         )
 
+    async def _resolve_knowledge_scope(
+        self,
+        owner_id: str,
+        project_id: str | None,
+        knowledge_base_ids: tuple[str, ...] | None,
+        *,
+        strict_project_limit: bool,
+        ignore_missing_project: bool = False,
+    ) -> _KnowledgeScopeResolution:
+        """统一解析本次对话的有效知识库集合，供 build_snapshot 与 _knowledge_search 共用。
+
+        模式说明：
+        1. 显式模式（knowledge_base_ids is not None）：
+           - 空元组表示显式关闭知识库检索；
+           - 非空列表经 AccessPolicyService 实时过滤为当前仍未删除且可读的集合（上限 20）。
+        2. 默认企业工作台模式（knowledge_base_ids is None）：
+           - 计算并集：当前项目关联的可读知识库（若 project_id 非空）
+             ∪ 当前用户有权访问的 company 与 department 共享知识库（不自动混入未绑项目的个人库）；
+           - 按确定优先级去重排序（项目绑定库 > 部门库 > 公司库），超过 20 个时截取前 20 个。
+        """
+        if self._knowledge is None:
+            return _KnowledgeScopeResolution(
+                (),
+                frozenset(),
+                "knowledge_unavailable",
+                "当前部署未启用知识库检索能力。",
+            )
+
+        if knowledge_base_ids is not None:
+            ordered_ids = tuple(dict.fromkeys(knowledge_base_ids))
+            if not ordered_ids:
+                return _KnowledgeScopeResolution(
+                    (),
+                    frozenset(),
+                    "knowledge_unavailable",
+                    "当前对话已关闭知识库检索。",
+                )
+            if len(ordered_ids) > MAX_KNOWLEDGE_SEARCH_BASES:
+                return _KnowledgeScopeResolution(
+                    (),
+                    frozenset(),
+                    "knowledge_scope_unavailable",
+                    "指定的知识库数量超过单次检索上限。",
+                )
+            if self._access_policy is not None:
+                readable_ids = await self._access_policy.filter_readable_ids(
+                    owner_id,
+                    ResourceType.KNOWLEDGE_BASE,
+                    ordered_ids,
+                )
+                effective = tuple(kb_id for kb_id in ordered_ids if kb_id in readable_ids)
+            else:
+                get_base = getattr(self._knowledge, "get_base", None)
+                if callable(get_base):
+                    filtered: list[str] = []
+                    for kb_id in ordered_ids:
+                        try:
+                            await get_base(owner_id, kb_id)
+                        except KnowledgeNotFoundError:
+                            continue
+                        filtered.append(kb_id)
+                    effective = tuple(filtered)
+                else:
+                    effective = ordered_ids
+            if not effective:
+                return _KnowledgeScopeResolution(
+                    (),
+                    frozenset(),
+                    "knowledge_scope_unavailable",
+                    "指定的知识库已不可用或当前用户已失去访问权限。",
+                )
+            return _KnowledgeScopeResolution(effective, frozenset(effective))
+
+        # 默认企业工作台模式：先收集项目绑定库，再合并企业共享库（部门库 > 公司库）。
+        project_ids: list[str] = []
+        if project_id is not None and self._project_knowledge is not None:
+            try:
+                project_bases = await self._project_knowledge.list(owner_id, project_id)
+            except (ProjectNotFoundError, ProjectKnowledgeNotFoundError):
+                if not ignore_missing_project:
+                    raise
+                project_bases = []
+            if strict_project_limit and len(project_bases) > MAX_KNOWLEDGE_SEARCH_BASES:
+                return _KnowledgeScopeResolution(
+                    (),
+                    frozenset(),
+                    "knowledge_scope_unavailable",
+                    "项目关联的知识库超过单次检索上限。",
+                )
+            project_ids = [base.id for base in project_bases]
+
+        dept_ids: list[str] = []
+        company_ids: list[str] = []
+        if self._access_policy is not None:
+            readable_targets = await self._access_policy.filter_readable_targets(
+                owner_id,
+                ResourceType.KNOWLEDGE_BASE,
+            )
+            # 仅自动纳入 company 与 department 共享知识库，未绑定项目的个人库不自动混入。
+            dept_ids = sorted(
+                target.resource_id
+                for target in readable_targets
+                if target.visibility_scope is VisibilityScope.DEPARTMENT
+            )
+            company_ids = sorted(
+                target.resource_id
+                for target in readable_targets
+                if target.visibility_scope is VisibilityScope.COMPANY
+            )
+
+        all_ordered = tuple(dict.fromkeys((*project_ids, *dept_ids, *company_ids)))
+        if not all_ordered:
+            return _KnowledgeScopeResolution(
+                (),
+                frozenset(),
+                "knowledge_unavailable",
+                "当前对话没有可查询的知识库。",
+            )
+        return _KnowledgeScopeResolution(
+            all_ordered[:MAX_KNOWLEDGE_SEARCH_BASES],
+            frozenset(all_ordered),
+        )
+
     async def build_snapshot(
         self,
         prompt_template_version: str,
@@ -452,6 +587,7 @@ class RunToolRuntimeService(RunToolRuntime):
         *,
         depth: int = 0,
         allowed_tool_ids: Sequence[str] | None = None,
+        knowledge_base_ids: tuple[str, ...] | None = None,
     ) -> RuntimeToolSnapshot:
         """Freeze the complete v2 tool catalog."""
         # 只支持当前模板版本；其余版本（含历史 v1）统一拒绝。
@@ -463,17 +599,20 @@ class RunToolRuntimeService(RunToolRuntime):
         if depth == 0 and self._preferences is not None:
             if await self._preferences.is_memory_enabled(context.owner_id):
                 definitions.append(SAVE_USER_MEMORY_DEFINITION)
-        # 只有绑定了项目且存在知识库时才暴露 knowledge_search。
-        if (
-            context.project_id
-            and self._knowledge is not None
-            and self._project_knowledge is not None
-        ):
+        # 统一解析有效知识库范围：无项目对话只要存在可读共享库或显式指定库，
+        # 同样自动暴露 knowledge_search。
+        if self._knowledge is not None:
             try:
-                bases = await self._project_knowledge.list(context.owner_id, context.project_id)
-            except (ProjectNotFoundError, ProjectKnowledgeNotFoundError):
-                bases = []
-            if bases:
+                scope = await self._resolve_knowledge_scope(
+                    context.owner_id,
+                    context.project_id,
+                    knowledge_base_ids,
+                    strict_project_limit=False,
+                    ignore_missing_project=True,
+                )
+            except Exception:
+                scope = _KnowledgeScopeResolution((), frozenset())
+            if scope.effective_ids:
                 definitions.append(KNOWLEDGE_SEARCH_DEFINITION)
         # Skill 与文件工具由独立能力开关启用，不依赖知识库或嵌入模型。
         if self._skills is not None:
@@ -1000,7 +1139,12 @@ class RunToolRuntimeService(RunToolRuntime):
         if definition.tool_id == SAVE_USER_MEMORY_TOOL_ID:
             outcome = await self._save_user_memory(before, arguments)
         elif definition.model_name == "knowledge_search":
-            outcome = await self._knowledge_search(before, arguments, deadline_seconds)
+            outcome = await self._knowledge_search(
+                before,
+                arguments,
+                deadline_seconds,
+                knowledge_base_ids=context.knowledge_base_ids,
+            )
         elif definition.tool_id == SKILL_LOAD_TOOL_ID:
             outcome = await self._skill_load(context, arguments)
         elif definition.tool_id == SKILL_READ_RESOURCE_TOOL_ID:
@@ -1078,21 +1222,29 @@ class RunToolRuntimeService(RunToolRuntime):
         context: AuthorizedRunContext,
         arguments: Mapping[str, Any],
         deadline_seconds: float,
+        *,
+        knowledge_base_ids: tuple[str, ...] | None = None,
     ) -> ToolOutcome:
-        if self._knowledge is None or self._project_knowledge is None or context.project_id is None:
-            return _error("knowledge_unavailable", "当前聊天没有可查询的项目知识库。")
+        del deadline_seconds
+        if self._knowledge is None:
+            return _error("knowledge_unavailable", "当前部署未启用知识库检索能力。")
+        # 执行前实时解析并鉴权有效知识库集合（支持无项目共享库、项目并集与显式限定）。
         try:
-            bases = await self._project_knowledge.list(context.owner_id, context.project_id)
-        except Exception:
-            return _error("knowledge_unavailable", "项目知识库权限暂时不可用。")
-        if len(bases) > 20:
-            return _error(
-                "knowledge_scope_unavailable",
-                "项目关联的知识库超过单次检索上限。",
+            before_scope = await self._resolve_knowledge_scope(
+                context.owner_id,
+                context.project_id,
+                knowledge_base_ids,
+                strict_project_limit=True,
+                ignore_missing_project=False,
             )
-        base_ids = [base.id for base in bases]
-        if not base_ids:
-            return _error("knowledge_unavailable", "当前项目没有关联知识库。")
+        except Exception:
+            return _error("knowledge_unavailable", "知识库权限范围暂时不可用。")
+        if before_scope.error_code is not None or not before_scope.effective_ids:
+            return _error(
+                before_scope.error_code or "knowledge_unavailable",
+                before_scope.error_message or "当前对话没有可查询的知识库。",
+            )
+        base_ids = list(before_scope.effective_ids)
         query = str(arguments["query"]).strip()
         try:
             limit = _bounded_limit(arguments.get("limit"), default=5)
@@ -1112,24 +1264,28 @@ class RunToolRuntimeService(RunToolRuntime):
             return _error("knowledge_unavailable", "知识检索暂时不可用。")
         except Exception:
             return _error("knowledge_unavailable", "知识检索暂时不可用。")
+        # 交付前再次实时复核知识库权限范围（含无项目共享库与显式模式），
+        # 防止检索期间员工调岗、部门撤权或解绑导致结果越权交付。
         try:
-            current_bases = await self._project_knowledge.list(
+            after_scope = await self._resolve_knowledge_scope(
                 context.owner_id,
                 context.project_id,
+                knowledge_base_ids,
+                strict_project_limit=True,
+                ignore_missing_project=False,
             )
         except Exception:
             return _error(
                 "knowledge_scope_unavailable",
-                "项目知识库权限复核失败，检索结果已丢弃。",
+                "知识库权限复核失败，检索结果已丢弃。",
             )
         searched_ids = set(base_ids)
-        current_ids = {base.id for base in current_bases}
-        if not searched_ids <= current_ids or any(
+        if not searched_ids <= after_scope.allowed_ids or any(
             hit.knowledge_base_id not in searched_ids for hit in result.hits
         ):
             return _error(
                 "knowledge_scope_unavailable",
-                "项目知识库范围已变化，检索结果已丢弃。",
+                "知识库访问范围已变化，检索结果已丢弃。",
             )
         return _knowledge_outcome(result)
 

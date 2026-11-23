@@ -42,6 +42,7 @@ class RunToolRuntime(Protocol):
         *,
         depth: int = 0,
         allowed_tool_ids: Sequence[str] | None = None,
+        knowledge_base_ids: tuple[str, ...] | None = None,
     ) -> RuntimeToolSnapshot:
         """Build a bounded catalog without relying on a default page size."""
 

@@ -29,8 +29,9 @@ class SessionRepository(Protocol):
         unbound: bool,
         offset: int,
         limit: int,
+        query: str | None = None,
     ) -> SessionPage:
-        """分页读取未删除会话。"""
+        """分页读取未删除会话，支持按标题关键字不区分大小写子串搜索。"""
 
     async def update(
         self,
@@ -44,9 +45,18 @@ class SessionRepository(Protocol):
     ) -> Session | None:
         """在行锁内更新会话标题或项目绑定。
 
-        修改或解绑项目时，已有消息的会话必须抛出 SessionProjectLockedError。
+        修改或解绑项目时，仅当会话存在活跃 Run 时拒绝（抛出 SessionHasActiveRunError）；
+        无活跃 Run 时即便已有历史消息也允许自由改绑或解绑。
         新绑定的项目必须在同一事务内属于同一 owner 且未删除。
         """
+
+    async def set_title_if_empty(
+        self,
+        owner_id: str,
+        session_id: str,
+        title: str,
+    ) -> bool:
+        """仅当未删除会话的标题为空时原子写入自动标题，绝不覆盖用户手动标题。"""
 
     async def soft_delete(
         self,

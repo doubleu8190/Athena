@@ -203,6 +203,9 @@ def run_to_response(
             )
         ),
         input_file_ids=run.input_files.ids,
+        knowledge_base_ids=(
+            None if run.knowledge_base_ids is None else list(run.knowledge_base_ids)
+        ),
         pending_input=None if pending_input is None else _input_to_response(pending_input),
         pending_approvals=[
             RunPendingToolApprovalResponse(

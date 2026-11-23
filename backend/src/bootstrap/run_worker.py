@@ -175,6 +175,8 @@ def build_run_worker_dependencies(
         config=config,
         tool_runtime=tool_runtime,
         preferences=preferences,
+        projects=projects_repository,
+        sessions=session_repository,
         subagents=subagents_repository,
         access_policy=access_policy,
     )

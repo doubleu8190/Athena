@@ -39,16 +39,36 @@ class ProjectRepository(ProjectReader, Protocol):
     ) -> Project | None:
         """原子修改未删除项目的名称。"""
 
+    async def update(
+        self,
+        owner_id: str,
+        project_id: str,
+        *,
+        update_name: bool,
+        name: str | None,
+        update_description: bool,
+        description: str | None,
+        update_instructions: bool,
+        instructions: str | None,
+        update_default_skills: bool,
+        default_skill_ids: tuple[str, ...] | None,
+        updated_at: datetime,
+    ) -> Project | None:
+        """原子局部更新未删除项目的名称、简介、背景指令或默认技能。"""
+
     async def soft_delete(
         self,
         owner_id: str,
         project_id: str,
         deleted_at: datetime,
+        *,
+        detach_sessions: bool = False,
     ) -> bool:
         """软删除项目；已删除项目仍视为存在。
 
-        删除事务必须锁定项目并拒绝仍存在未删除绑定会话的删除，避免与会话
-        创建或改绑并发时破坏占用不变量。
+        删除事务必须锁定项目行：
+        - detach_sessions=False 时拒绝仍存在未删除绑定会话的删除；
+        - detach_sessions=True 时先检查项目下不存在活跃 Run，随后批量解绑会话并清理关联知识库。
         """
 
 

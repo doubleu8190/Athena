@@ -32,6 +32,10 @@ class ModelProfileRepository(CompressionPolicyRepository, Protocol):
         self, actor: AuthContext
     ) -> tuple[tuple[ModelProfileVersion, ...], str | None]: ...
 
+    async def list_user_visible_with_default(
+        self,
+    ) -> tuple[tuple[ModelProfileVersion, ...], str | None]: ...
+
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool
     ) -> ModelProfileVersion: ...

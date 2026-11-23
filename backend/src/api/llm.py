@@ -6,7 +6,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 
-from api.converter.llm import compression_policy_to_response, model_profile_to_response
+from api.converter.llm import (
+    compression_policy_to_response,
+    model_profile_to_response,
+    user_model_catalog_to_response,
+)
 from api.dto.llm import (
     CompressionPolicyRequest,
     CompressionPolicyResponse,
@@ -15,8 +19,9 @@ from api.dto.llm import (
     ModelProfileEnabledRequest,
     ModelProfileListResponse,
     ModelProfileResponse,
+    UserModelCatalogResponse,
 )
-from api.security import AdminAuth, verify_request_origin
+from api.security import AdminAuth, CurrentAuth, verify_request_origin
 from app.llm.profile_service import ModelProfileService
 from domain.llm.model.compression_policy import CompressionPolicyInput
 from domain.llm.model.profile import ModelProfileInput
@@ -141,9 +146,27 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
     return router
 
 
+def build_llm_user_router(service: ModelProfileService) -> APIRouter:
+    """创建面向已登录普通用户的场景化只读模型目录路由。"""
+    router = APIRouter(
+        prefix="/api/v1/models",
+        tags=["models"],
+        dependencies=[Depends(verify_request_origin)],
+    )
+
+    @router.get("", response_model=UserModelCatalogResponse)
+    async def list_user_models(current_auth: CurrentAuth) -> UserModelCatalogResponse:
+        """返回对普通用户可见、已启用且未软删除的安全模型目录。"""
+        del current_auth
+        profiles, default_model_id = await service.list_user_catalog()
+        return user_model_catalog_to_response(profiles, default_model_id)
+
+    return router
+
+
 def _authorization_error(error: ModelProfileAuthorizationError) -> HTTPException:
     """将最终身份复核失败映射为统一禁止响应。"""
     return HTTPException(status_code=403, detail="admin_required")
 
 
-__all__ = ["build_llm_admin_router"]
+__all__ = ["build_llm_admin_router", "build_llm_user_router"]

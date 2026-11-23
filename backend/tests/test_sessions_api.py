@@ -75,23 +75,66 @@ class InMemoryProjectRepository:
         self.items[project_id] = renamed
         return renamed
 
+    async def update(
+        self,
+        owner_id: str,
+        project_id: str,
+        *,
+        update_name: bool,
+        name: str | None,
+        update_description: bool,
+        description: str | None,
+        update_instructions: bool,
+        instructions: str | None,
+        update_default_skills: bool,
+        default_skill_ids: tuple[str, ...] | None,
+        updated_at: datetime,
+    ) -> Project | None:
+        project = await self.get(owner_id, project_id)
+        if project is None:
+            return None
+        updated = replace(
+            project,
+            name=name if update_name and name is not None else project.name,
+            description=description if update_description else project.description,
+            instructions=instructions if update_instructions else project.instructions,
+            default_skill_ids=(
+                default_skill_ids or () if update_default_skills else project.default_skill_ids
+            ),
+            updated_at=updated_at,
+        )
+        self.items[project_id] = updated
+        return updated
+
     async def soft_delete(
         self,
         owner_id: str,
         project_id: str,
         deleted_at: datetime,
+        *,
+        detach_sessions: bool = False,
     ) -> bool:
         project = self.items.get(project_id)
         if project is None or project.owner_id != owner_id:
             return False
         if project.deleted_time is None:
-            if self.session_repository is not None and any(
-                session.owner_id == owner_id
-                and session.project_id == project_id
-                and session.deleted_time is None
-                for session in self.session_repository.items.values()
-            ):
-                raise ProjectHasSessionsError("project_has_sessions")
+            if self.session_repository is not None:
+                bound_ids = [
+                    session.id
+                    for session in self.session_repository.items.values()
+                    if session.owner_id == owner_id
+                    and session.project_id == project_id
+                    and session.deleted_time is None
+                ]
+                if bound_ids:
+                    if not detach_sessions:
+                        raise ProjectHasSessionsError("project_has_sessions")
+                    for session_id in bound_ids:
+                        existing = self.session_repository.items[session_id]
+                        self.session_repository.items[session_id] = replace(
+                            existing,
+                            project_id=None,
+                        )
             self.items[project_id] = replace(
                 project,
                 updated_at=deleted_at,
@@ -131,6 +174,7 @@ class InMemorySessionRepository:
         unbound: bool,
         offset: int,
         limit: int,
+        query: str | None = None,
     ) -> SessionPage:
         active = [
             session
@@ -141,11 +185,35 @@ class InMemorySessionRepository:
             active = [session for session in active if session.project_id == project_id]
         if unbound:
             active = [session for session in active if session.project_id is None]
+        if query is not None:
+            lowered = query.lower()
+            active = [
+                session
+                for session in active
+                if session.title is not None and lowered in session.title.lower()
+            ]
         active.sort(key=lambda session: (session.updated_at, session.id), reverse=True)
         return SessionPage(
             items=tuple(active[offset : offset + limit]),
             total=len(active),
         )
+
+    async def set_title_if_empty(
+        self,
+        owner_id: str,
+        session_id: str,
+        title: str,
+    ) -> bool:
+        session = self.items.get(session_id)
+        if (
+            session is None
+            or session.owner_id != owner_id
+            or session.deleted_time is not None
+            or session.title is not None
+        ):
+            return False
+        self.items[session_id] = replace(session, title=title)
+        return True
 
     async def update(
         self,

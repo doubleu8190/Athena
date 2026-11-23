@@ -78,6 +78,11 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                     max_concurrency=value.max_concurrency,
                     temperature=value.temperature,
                     enabled=True,
+                    visible_to_users=value.visible_to_users,
+                    scenario_label=value.scenario_label,
+                    scenario_description=value.scenario_description,
+                    supports_vision=value.supports_vision,
+                    deleted_at=None,
                     created_at=self._clock(),
                 )
                 try:
@@ -97,13 +102,15 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 return profile_to_domain(row)
 
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
-        """复核管理员后按创建顺序读取不含秘密的配置。"""
+        """复核管理员后按创建顺序读取未软删除且不含秘密的配置。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
                 rows = (
                     await session.scalars(
-                        select(ModelProfileVersionModel).order_by(
+                        select(ModelProfileVersionModel)
+                        .where(ModelProfileVersionModel.deleted_at.is_(None))
+                        .order_by(
                             ModelProfileVersionModel.created_at,
                             ModelProfileVersionModel.id,
                         )
@@ -114,29 +121,75 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
     async def list_with_default(
         self, actor: AuthContext
     ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
-        """同一事务内复核管理员并读取配置列表与当前默认版本标识，避免两次往返。"""
+        """同一事务内复核管理员并读取未软删除配置列表与当前默认版本标识，避免两次往返。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
                 rows = (
                     await session.scalars(
-                        select(ModelProfileVersionModel).order_by(
+                        select(ModelProfileVersionModel)
+                        .where(ModelProfileVersionModel.deleted_at.is_(None))
+                        .order_by(
                             ModelProfileVersionModel.created_at,
                             ModelProfileVersionModel.id,
                         )
                     )
                 ).all()
                 default_id = await session.scalar(
-                    select(DefaultModelProfileModel.profile_id).where(
-                        DefaultModelProfileModel.singleton_id == 1
+                    select(DefaultModelProfileModel.profile_id)
+                    .join(
+                        ModelProfileVersionModel,
+                        ModelProfileVersionModel.id == DefaultModelProfileModel.profile_id,
+                    )
+                    .where(
+                        DefaultModelProfileModel.singleton_id == 1,
+                        ModelProfileVersionModel.deleted_at.is_(None),
                     )
                 )
                 return tuple(profile_to_domain(row) for row in rows), default_id
 
+    async def list_user_visible_with_default(
+        self,
+    ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
+        """面向普通用户读取可对话、已启用、对用户可见且未软删除的模型目录及默认模型标识。"""
+        async with self._session_factory() as session:
+            # 与 Run 提交校验（_lock_selected_profile_id / get_default_runtime）保持严格一致：
+            # 仅暴露支持流式、支持工具调用且已配置完整加密凭据的模型，避免前端选出不可提交的模型。
+            rows = (
+                await session.scalars(
+                    select(ModelProfileVersionModel)
+                    .where(
+                        ModelProfileVersionModel.enabled.is_(True),
+                        ModelProfileVersionModel.visible_to_users.is_(True),
+                        ModelProfileVersionModel.deleted_at.is_(None),
+                        ModelProfileVersionModel.supports_stream.is_(True),
+                        ModelProfileVersionModel.supports_tools.is_(True),
+                        ModelProfileVersionModel.api_key_ciphertext.is_not(None),
+                        ModelProfileVersionModel.api_key_nonce.is_not(None),
+                        ModelProfileVersionModel.api_key_key_version.is_not(None),
+                    )
+                    .order_by(
+                        ModelProfileVersionModel.created_at,
+                        ModelProfileVersionModel.id,
+                    )
+                )
+            ).all()
+            default_id = await session.scalar(
+                select(DefaultModelProfileModel.profile_id).where(
+                    DefaultModelProfileModel.singleton_id == 1
+                )
+            )
+            items = tuple(profile_to_domain(row) for row in rows)
+            visible_ids = {item.id for item in items}
+            # 若默认模型当前不可见、已停用、已软删除或不满足对话能力/凭据前置条件，
+            # 则不向普通用户暴露该默认 ID。
+            effective_default_id = default_id if default_id in visible_ids else None
+            return items, effective_default_id
+
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool
     ) -> ModelProfileVersion:
-        """复核管理员并以单条原子 UPDATE 切换单个版本的可用状态。"""
+        """复核管理员并以单条原子 UPDATE 切换单个未软删除版本的可用状态。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
@@ -144,7 +197,10 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 # 同时与并发读取该行的 FOR SHARE 事务在行锁层面保持互斥。
                 row = await session.scalar(
                     update(ModelProfileVersionModel)
-                    .where(ModelProfileVersionModel.id == profile_id)
+                    .where(
+                        ModelProfileVersionModel.id == profile_id,
+                        ModelProfileVersionModel.deleted_at.is_(None),
+                    )
                     .values(enabled=enabled)
                     .returning(ModelProfileVersionModel)
                     .execution_options(synchronize_session=False, populate_existing=True)
@@ -154,13 +210,16 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 return profile_to_domain(row)
 
     async def set_default(self, actor: AuthContext, profile_id: str) -> ModelProfileVersion:
-        """复核管理员并将默认指向切换为启用版本。"""
+        """复核管理员并将默认指向切换为启用且未软删除的版本。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
                 row = await session.scalar(
                     select(ModelProfileVersionModel)
-                    .where(ModelProfileVersionModel.id == profile_id)
+                    .where(
+                        ModelProfileVersionModel.id == profile_id,
+                        ModelProfileVersionModel.deleted_at.is_(None),
+                    )
                     .with_for_update()
                 )
                 if (
@@ -183,7 +242,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 return profile_to_domain(row)
 
     async def get_default_runtime(self) -> RuntimeModelProfile | None:
-        """读取当前启用默认版本，并在调用时解封数据库凭据。"""
+        """读取当前启用且未软删除的默认版本，并在调用时解封数据库凭据。"""
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(ModelProfileVersionModel)
@@ -191,7 +250,10 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                     DefaultModelProfileModel,
                     DefaultModelProfileModel.profile_id == ModelProfileVersionModel.id,
                 )
-                .where(DefaultModelProfileModel.singleton_id == 1)
+                .where(
+                    DefaultModelProfileModel.singleton_id == 1,
+                    ModelProfileVersionModel.deleted_at.is_(None),
+                )
             )
             runtime = self._runtime(row)
             if (
@@ -229,12 +291,13 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
-                # 仅校验压缩模型启用状态，使用 FOR SHARE 允许并发策略提交，仍与禁用互斥。
+                # 仅校验压缩模型启用且未软删除状态，使用 FOR SHARE 允许并发策略提交，仍与禁用互斥。
                 profile = await session.scalar(
                     select(ModelProfileVersionModel)
                     .where(
                         ModelProfileVersionModel.id == value.compression_model_profile_id,
                         ModelProfileVersionModel.enabled.is_(True),
+                        ModelProfileVersionModel.deleted_at.is_(None),
                     )
                     .with_for_update(read=True)
                 )
@@ -266,29 +329,36 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 return result
 
     async def get_default_id(self, actor: AuthContext) -> str | None:
-        """复核管理员后返回当前默认版本标识。"""
+        """复核管理员后返回当前未软删除的默认版本标识。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
                 return await session.scalar(
-                    select(DefaultModelProfileModel.profile_id).where(
-                        DefaultModelProfileModel.singleton_id == 1
+                    select(DefaultModelProfileModel.profile_id)
+                    .join(
+                        ModelProfileVersionModel,
+                        ModelProfileVersionModel.id == DefaultModelProfileModel.profile_id,
+                    )
+                    .where(
+                        DefaultModelProfileModel.singleton_id == 1,
+                        ModelProfileVersionModel.deleted_at.is_(None),
                     )
                 )
 
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile | None:
-        """读取指定启用版本并解封数据库凭据。"""
+        """读取指定启用且未软删除版本并解封数据库凭据。"""
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(ModelProfileVersionModel).where(
                     ModelProfileVersionModel.id == profile_id,
                     ModelProfileVersionModel.enabled.is_(True),
+                    ModelProfileVersionModel.deleted_at.is_(None),
                 )
             )
             return self._runtime(row)
 
     def _runtime(self, row: ModelProfileVersionModel | None) -> RuntimeModelProfile | None:
-        if row is None or not row.enabled:
+        if row is None or not row.enabled or row.deleted_at is not None:
             return None
         if (
             self._secret_cipher is None

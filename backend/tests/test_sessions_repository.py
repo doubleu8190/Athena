@@ -14,13 +14,14 @@ from sqlalchemy.pool import StaticPool
 from adapter.auth.model import UserModel
 from adapter.models import Base
 from adapter.project.model import ProjectModel
+from adapter.run.model import RunModel
 from adapter.session.converter import session_to_domain
 from adapter.session.model import SessionModel
 from adapter.session.repository import SqlAlchemySessionRepository
 from domain.project import ProjectNotFoundError
+from domain.run import RunStatus, SessionHasActiveRunError
 from domain.session import (
     Session,
-    SessionProjectLockedError,
     SessionScope,
 )
 
@@ -259,13 +260,50 @@ def test_repository_updates_binding_only_before_first_message() -> None:
                     assert row is not None
                     row.last_message_sequence = 1
 
-            with pytest.raises(SessionProjectLockedError):
+            # M1.5：无活跃 Run 时，即使已有历史消息也允许自由改绑项目或解绑。
+            rebound = await repository.update(
+                scope,
+                update_title=False,
+                title=None,
+                update_project=True,
+                project_id="project_2",
+                updated_at=timestamp,
+            )
+            assert rebound is not None
+            assert rebound.project_id == "project_2"
+
+            # 当存在活跃 Run 时，必须拒绝变更项目归属并返回 SessionHasActiveRunError。
+            async with session_factory() as session:
+                async with session.begin():
+                    session.add(
+                        RunModel(
+                            id="run_active_1",
+                            session_id="session_1",
+                            owner_id="user_1",
+                            status=RunStatus.RUNNING.value,
+                            trigger_message_id="msg_1",
+                            context_cutoff_sequence=1,
+                            retry_of_run_id=None,
+                            model_config_version_id="llmprof_1",
+                            main_prompt_version_id="sp_main",
+                            compression_prompt_version_id="sp_comp",
+                            prompt_template_version="run-v2",
+                            event_sequence=0,
+                            execution_epoch=1,
+                            queued_at=timestamp,
+                            created_at=timestamp,
+                            updated_at=timestamp,
+                            usage={},
+                        )
+                    )
+
+            with pytest.raises(SessionHasActiveRunError):
                 await repository.update(
                     scope,
                     update_title=False,
                     title=None,
                     update_project=True,
-                    project_id="project_2",
+                    project_id="project_1",
                     updated_at=timestamp,
                 )
 
@@ -278,7 +316,7 @@ def test_repository_updates_binding_only_before_first_message() -> None:
                 updated_at=timestamp,
             )
             assert title_only is not None
-            assert title_only.project_id == "project_1"
+            assert title_only.project_id == "project_2"
             assert title_only.title == "消息后改名"
         finally:
             await engine.dispose()

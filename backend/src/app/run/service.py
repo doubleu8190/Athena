@@ -31,7 +31,11 @@ from domain.run.model import (
     SubmitRunCommand,
     SubmitRunResult,
 )
-from domain.run.model.errors import RunConflictError, RunNotFoundError, RunStateError
+from domain.run.model.errors import (
+    RunConflictError,
+    RunNotFoundError,
+    RunStateError,
+)
 from domain.run.ports import RunRepository
 from domain.session import SessionNotFoundError
 from domain.skill import SkillConflictError
@@ -47,6 +51,8 @@ MAX_RUN_TEXT_LENGTH = 32_000
 MAX_RUN_REQUEST_ID_LENGTH = 128
 MAX_RUN_LIST_SIZE = 100
 MAX_EVENT_PAGE_SIZE = 100
+MAX_RUN_KNOWLEDGE_BASES = 20
+MAX_MODEL_PROFILE_ID_LENGTH = 64
 CURRENT_PROMPT_TEMPLATE_VERSION = "run-v2"
 
 
@@ -109,6 +115,44 @@ def _validate_resource_ids(values: tuple[str, ...], *, code: str) -> tuple[str, 
     return values
 
 
+def _validate_knowledge_base_ids(
+    values: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """规范化并去重显式知识库 ID 列表（区分 None 与空列表，最多 20 个，拒绝控制字符）。"""
+    if values is None:
+        return None
+    if len(values) > MAX_RUN_KNOWLEDGE_BASES:
+        raise InvalidRunInputError("run_knowledge_base_ids_invalid")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or any(
+            unicodedata.category(character) == "Cc" for character in value
+        ):
+            raise InvalidRunInputError("run_knowledge_base_ids_invalid")
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) > 128:
+            raise InvalidRunInputError("run_knowledge_base_ids_invalid")
+        if cleaned not in seen:
+            seen.add(cleaned)
+            normalized.append(cleaned)
+    return tuple(normalized)
+
+
+def _validate_model_profile_id(value: str | None) -> str | None:
+    """校验可选模型配置版本 ID，拒绝空白、超长与控制字符。"""
+    if value is None:
+        return None
+    if not isinstance(value, str) or any(
+        unicodedata.category(character) == "Cc" for character in value
+    ):
+        raise InvalidRunInputError("run_model_profile_id_invalid")
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > MAX_MODEL_PROFILE_ID_LENGTH:
+        raise InvalidRunInputError("run_model_profile_id_invalid")
+    return cleaned
+
+
 def _encode_cursor(run: Run) -> str:
     value = f"{run.created_at.isoformat()}|{run.id}".encode()
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
@@ -154,6 +198,8 @@ class RunService:
         *,
         skill_ids: tuple[str, ...] = (),
         input_file_ids: tuple[str, ...] = (),
+        knowledge_base_ids: tuple[str, ...] | None = None,
+        model_profile_id: str | None = None,
         auth_session_id: str | None = None,
     ) -> SubmitRunResult:
         request_id = _validate_request_id(request_id)
@@ -163,6 +209,10 @@ class RunService:
             input_file_ids,
             code="run_input_file_ids_invalid",
         )
+        normalized_kb_ids = _validate_knowledge_base_ids(knowledge_base_ids)
+        normalized_model_profile_id = _validate_model_profile_id(model_profile_id)
+        # 显式 knowledge_base_ids 的实时存在性与读权限校验下沉至仓储 submit 事务的非重放分支，
+        # 与 skill_ids / input_file_ids / model_profile_id 保持一致，避免阻断幂等重放与重复查库。
         run_id = self._id_factory("run")
         message_id = self._id_factory("msg")
         now = _utc_value(self._clock())
@@ -203,6 +253,17 @@ class RunService:
                                 ensure_ascii=False,
                                 separators=(",", ":"),
                             ),
+                            # 显式区分 None（null，企业默认）与 []（关闭检索），纳入幂等指纹。
+                            "knowledge_base_ids": json.dumps(
+                                None if normalized_kb_ids is None else list(normalized_kb_ids),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            "model_profile_id": json.dumps(
+                                normalized_model_profile_id,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
                         },
                     ),
                     prompt_template_version=CURRENT_PROMPT_TEMPLATE_VERSION,
@@ -210,6 +271,8 @@ class RunService:
                     queued_at=now,
                     selected_skill_ids=skill_ids,
                     input_files=RunInputFiles(file_ids=input_file_ids),
+                    knowledge_base_ids=normalized_kb_ids,
+                    model_profile_id=normalized_model_profile_id,
                     auth_session_id=auth_session_id,
                 ),
             )

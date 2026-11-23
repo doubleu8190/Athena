@@ -347,6 +347,7 @@ class Run:
     llm_request_count: int = 0
     skill_snapshot: RunSkillSnapshot | None = None
     input_files: RunInputFiles = RunInputFiles()
+    knowledge_base_ids: tuple[str, ...] | None = None
     report_message_id: str | None = None
     parent_run_id: str | None = None
     root_run_id: str | None = None
@@ -434,6 +435,8 @@ class SubmitRunCommand:
     queued_at: datetime
     selected_skill_ids: tuple[str, ...] = ()
     input_files: RunInputFiles = RunInputFiles()
+    knowledge_base_ids: tuple[str, ...] | None = None
+    model_profile_id: str | None = None
     auth_session_id: str | None = None
 
 

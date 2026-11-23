@@ -1,6 +1,13 @@
 """模型版本安全投影到 HTTP DTO 的转换。"""
 
-from api.dto.llm import CompressionPolicyResponse, ModelProfileResponse
+from collections.abc import Sequence
+
+from api.dto.llm import (
+    CompressionPolicyResponse,
+    ModelProfileResponse,
+    UserModelCatalogItemResponse,
+    UserModelCatalogResponse,
+)
 from domain.llm.model.compression_policy import CompressionPolicyVersion
 from domain.llm.model.profile import ModelProfileVersion
 
@@ -25,7 +32,32 @@ def model_profile_to_response(value: ModelProfileVersion) -> ModelProfileRespons
         max_concurrency=value.max_concurrency,
         temperature=value.temperature,
         enabled=value.enabled,
+        visible_to_users=value.visible_to_users,
+        scenario_label=value.scenario_label,
+        scenario_description=value.scenario_description,
+        supports_vision=value.supports_vision,
         created_at=value.created_at,
+    )
+
+
+def user_model_catalog_to_response(
+    profiles: Sequence[ModelProfileVersion],
+    default_model_id: str | None,
+) -> UserModelCatalogResponse:
+    """将用户侧可见模型列表投影为不含运维参数的安全目录响应。"""
+    return UserModelCatalogResponse(
+        items=[
+            UserModelCatalogItemResponse(
+                id=item.id,
+                name=item.name,
+                scenario_label=item.scenario_label,
+                scenario_description=item.scenario_description,
+                is_default=(item.id == default_model_id),
+                supports_vision=item.supports_vision,
+            )
+            for item in profiles
+        ],
+        default_model_id=default_model_id,
     )
 
 
@@ -48,4 +80,8 @@ def compression_policy_to_response(
     )
 
 
-__all__ = ["compression_policy_to_response", "model_profile_to_response"]
+__all__ = [
+    "compression_policy_to_response",
+    "model_profile_to_response",
+    "user_model_catalog_to_response",
+]

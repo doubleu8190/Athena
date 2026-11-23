@@ -28,11 +28,15 @@ class RunContextSafetyCommitError(RunError):
 
 
 class RunInputResourceError(RunError):
-    """提交或澄清附带的技能/文件资源已不可用或越权。"""
+    """提交或澄清附带的技能/文件/模型资源已不可用或越权。"""
+
+
+class RunKnowledgeBaseNotFoundError(LookupError):
+    """显式指定的知识库不存在、已删除或当前用户无读权限（按 404 防跨部门探测）。"""
 
 
 class SessionHasActiveRunError(RunConflictError):
-    """会话存在未结束 Run，不能删除。"""
+    """会话存在未结束 Run，不能删除或变更项目归属。"""
 
 
 class ToolRetryConfirmationRequiredError(RunConflictError):
@@ -44,6 +48,7 @@ __all__ = [
     "RunContextSafetyCommitError",
     "RunError",
     "RunInputResourceError",
+    "RunKnowledgeBaseNotFoundError",
     "RunNotFoundError",
     "RunStateError",
     "SessionHasActiveRunError",

@@ -59,6 +59,10 @@ class _ProfileRepository:
             enabled=True,
             created_at=timestamp,
             supports_parallel_tool_calls=value.supports_parallel_tool_calls,
+            visible_to_users=value.visible_to_users,
+            scenario_label=value.scenario_label,
+            scenario_description=value.scenario_description,
+            supports_vision=value.supports_vision,
         )
 
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
@@ -68,6 +72,11 @@ class _ProfileRepository:
         self, actor: AuthContext
     ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
         return await self.list(actor), await self.get_default_id(actor)
+
+    async def list_user_visible_with_default(
+        self,
+    ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
+        return (), None
 
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool

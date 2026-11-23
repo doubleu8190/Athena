@@ -13,6 +13,9 @@ def project_to_result(project: Project) -> ProjectResult:
         name=project.name,
         created_at=project.created_at,
         updated_at=project.updated_at,
+        description=project.description,
+        instructions=project.instructions,
+        default_skill_ids=project.default_skill_ids,
     )
 
 

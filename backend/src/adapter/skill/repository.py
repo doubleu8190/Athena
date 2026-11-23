@@ -62,8 +62,14 @@ async def build_run_skill_snapshot(
     selected_skill_ids: tuple[str, ...],
     *,
     owner_id: str,
+    fallback_selected_skill_ids: tuple[str, ...] = (),
 ) -> RunSkillSnapshot:
-    """在当前 Run 事务中按统一三层权限引擎实时过滤并固定一致 Skill 目录。"""
+    """在当前 Run 事务中按统一三层权限引擎实时过滤并固定一致 Skill 目录。
+
+    - selected_skill_ids：用户显式指定，任一不可用/无权均抛出 SkillConflictError；
+    - fallback_selected_skill_ids：仅在用户未显式指定时生效（如项目默认技能），
+      只保留当前用户仍可读且已启用的子集，失效项自动静默忽略。
+    """
     if len(selected_skill_ids) != len(set(selected_skill_ids)):
         raise SkillConflictError("skill_selection_invalid")
     rows = (
@@ -121,9 +127,13 @@ async def build_run_skill_snapshot(
         if version.manifest.slug != skill_row.slug:
             raise SkillConflictError("skill_catalog_integrity_invalid")
     available_ids = {skill.id for skill, _ in available}
-    if not set(selected_skill_ids) <= available_ids:
-        raise SkillConflictError("skill_selection_unavailable")
-    selected_set = set(selected_skill_ids)
+    if selected_skill_ids:
+        if not set(selected_skill_ids) <= available_ids:
+            raise SkillConflictError("skill_selection_unavailable")
+        selected_set = set(selected_skill_ids)
+    else:
+        # 项目默认技能仅做安全交集过滤，失效/已删/无权项自动静默忽略，绝不阻断对话。
+        selected_set = set(fallback_selected_skill_ids) & available_ids
     catalog = tuple(
         RunSkillEntry(
             skill_id=skill.id,

@@ -110,6 +110,7 @@ class ToolExecutionContext:
     deadline_at: datetime
     tool_call_record_id: str | None = None
     skill_snapshot: RunSkillSnapshot | None = None
+    knowledge_base_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

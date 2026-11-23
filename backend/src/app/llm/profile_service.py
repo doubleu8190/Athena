@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -17,6 +19,8 @@ from domain.llm.model.compression_policy import (
 from domain.llm.model.profile import (
     MAX_CONTEXT_WINDOW_TOKENS,
     MAX_OUTPUT_TOKENS,
+    MAX_SCENARIO_DESCRIPTION_LENGTH,
+    MAX_SCENARIO_LABEL_LENGTH,
     ModelProfileInput,
     ModelProfileVersion,
 )
@@ -43,9 +47,9 @@ class ModelProfileService:
     async def create(self, actor: AuthContext, value: ModelProfileInput) -> ModelProfileVersion:
         """验证配置并创建不可变版本。"""
         await self._authorize(actor)
-        _validate_input(value)
-        _validate_api_key(value.api_key)
-        return await self._repository.create(actor, value)
+        normalized = _validate_and_normalize_input(value)
+        _validate_api_key(normalized.api_key)
+        return await self._repository.create(actor, normalized)
 
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
         """读取管理员可见的安全配置投影。"""
@@ -58,6 +62,12 @@ class ModelProfileService:
         """单次查询读取管理员可见的安全配置投影与当前默认版本标识。"""
         await self._authorize(actor)
         return await self._repository.list_with_default(actor)
+
+    async def list_user_catalog(
+        self,
+    ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
+        """面向已登录普通用户返回启用、可见且未软删除的场景化模型目录与默认模型标识。"""
+        return await self._repository.list_user_visible_with_default()
 
     async def get_default_id(self, actor: AuthContext) -> str | None:
         """读取当前默认配置版本标识。"""
@@ -100,8 +110,24 @@ class ModelProfileService:
             raise ModelProfileAuthorizationError()
 
 
-def _validate_input(value: ModelProfileInput) -> None:
-    """校验限制地址、密钥引用和执行参数。"""
+def _normalize_optional_scenario_text(value: str | None, *, maximum: int) -> str | None:
+    """校验场景标签与说明：拒绝全部 Cc 控制字符、超长，空白字符串归一为 None。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ModelProfileError()
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        raise ModelProfileError()
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > maximum:
+        raise ModelProfileError()
+    return normalized
+
+
+def _validate_and_normalize_input(value: ModelProfileInput) -> ModelProfileInput:
+    """校验限制地址、密钥引用、场景元数据和执行参数，并返回规范化后的输入对象。"""
     try:
         parsed = urlsplit(value.base_url)
         valid_url = (
@@ -126,6 +152,8 @@ def _validate_input(value: ModelProfileInput) -> None:
         or type(value.supports_stream) is not bool
         or type(value.supports_tools) is not bool
         or type(value.supports_parallel_tool_calls) is not bool
+        or type(value.visible_to_users) is not bool
+        or type(value.supports_vision) is not bool
         or (
             value.supports_parallel_tool_calls
             and not value.supports_tools
@@ -139,6 +167,19 @@ def _validate_input(value: ModelProfileInput) -> None:
         or (value.temperature is not None and not 0 <= value.temperature <= 2)
     ):
         raise ModelProfileError()
+    normalized_label = _normalize_optional_scenario_text(
+        value.scenario_label,
+        maximum=MAX_SCENARIO_LABEL_LENGTH,
+    )
+    normalized_description = _normalize_optional_scenario_text(
+        value.scenario_description,
+        maximum=MAX_SCENARIO_DESCRIPTION_LENGTH,
+    )
+    return replace(
+        value,
+        scenario_label=normalized_label,
+        scenario_description=normalized_description,
+    )
 
 
 def _validate_compression_policy(value: CompressionPolicyInput) -> None:

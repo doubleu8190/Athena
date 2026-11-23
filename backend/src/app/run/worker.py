@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
@@ -71,10 +72,18 @@ class RunWorker:
             raise RuntimeError("run_worker_already_started")
         self._started = True
         await self._repository.reclaim_expired(limit=32)
-        async with asyncio.TaskGroup() as tasks:
-            for index in range(self._config.concurrency):
-                tasks.create_task(self._consume(index))
-            tasks.create_task(self._reclaim())
+        try:
+            async with asyncio.TaskGroup() as tasks:
+                for index in range(self._config.concurrency):
+                    tasks.create_task(self._consume(index))
+                tasks.create_task(self._reclaim())
+        finally:
+            # 优雅停机时等待执行器登记的轻量后台任务（如首轮自动标题）限时收敛，避免未回收 Task。
+            wait_background = getattr(self._executor, "wait_background_tasks", None)
+            if callable(wait_background):
+                with suppress(Exception):
+                    async with asyncio.timeout(10.0):
+                        await wait_background()
 
     async def stop(self) -> None:
         """停止新领取并等待活跃 Run 完成或按自身控制流程收尾。"""

@@ -18,7 +18,7 @@ from api.auth_middleware import AuthPrecheckMiddleware
 from api.file import build_session_file_router
 from api.health import router as health_router
 from api.knowledge import build_knowledge_router
-from api.llm import build_llm_admin_router
+from api.llm import build_llm_admin_router, build_llm_user_router
 from api.mcp import build_mcp_router
 from api.messages import build_message_router
 from api.org import build_org_admin_router
@@ -66,6 +66,7 @@ _DATABASE_BACKED_ROUTE_PREFIXES = (
     "/api/v1/knowledge-bases",
     "/api/v1/me",
     "/api/v1/skills",
+    "/api/v1/models",
 )
 
 
@@ -209,6 +210,7 @@ def create_app(
         app.include_router(build_org_admin_router(deps.org_service))
     if deps.model_profile_service is not None:
         app.include_router(build_llm_admin_router(deps.model_profile_service))
+        app.include_router(build_llm_user_router(deps.model_profile_service))
     if deps.system_prompt_service is not None:
         app.include_router(build_system_prompt_admin_router(deps.system_prompt_service))
     if deps.preference_service is not None:

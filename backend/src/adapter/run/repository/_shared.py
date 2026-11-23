@@ -10,7 +10,9 @@ from typing import cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.access.repository import filter_readable_targets_in_session
 from adapter.file.model import SessionFileModel
+from adapter.knowledge.model import KnowledgeBaseModel
 from adapter.llm.model.profile import (
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,
@@ -33,6 +35,7 @@ from adapter.run.model import (
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
 from common.ids import new_id
+from domain.access import ResourceAccessTarget, ResourceType, VisibilityScope
 from domain.message import (
     ConversationMessage,
     ExecutionMessageDraft,
@@ -60,6 +63,7 @@ from domain.run.model import (
 from domain.run.model.errors import (
     RunConflictError,
     RunInputResourceError,
+    RunKnowledgeBaseNotFoundError,
     RunNotFoundError,
     RunStateError,
 )
@@ -617,6 +621,7 @@ class RunRepositorySupportMixin:
             select(ModelProfileVersionModel)
             .where(
                 ModelProfileVersionModel.id == profile_id,
+                ModelProfileVersionModel.deleted_at.is_(None),
             )
             .with_for_update(read=True)
         )
@@ -639,6 +644,107 @@ class RunRepositorySupportMixin:
         ):
             raise RunStateError("llm_default_profile_unavailable")
         return profile.id
+
+    async def _lock_selected_profile_id(self, session: AsyncSession, profile_id: str) -> str:
+        """在提交事务内共享锁定用户显式选择的模型版本，校验可见、启用、未删且能力完整。"""
+        profile = await session.scalar(
+            select(ModelProfileVersionModel)
+            .where(
+                ModelProfileVersionModel.id == profile_id,
+                ModelProfileVersionModel.deleted_at.is_(None),
+            )
+            .with_for_update(read=True)
+        )
+        if (
+            profile is None
+            or not profile.enabled
+            or not profile.visible_to_users
+            or not profile.supports_stream
+            or not profile.supports_tools
+            or profile.api_key_ciphertext is None
+            or profile.api_key_nonce is None
+            or profile.api_key_key_version is None
+        ):
+            raise RunInputResourceError("model_profile_unavailable")
+        return profile.id
+
+    async def _lock_retry_profile_id(self, session: AsyncSession, profile_id: str) -> str:
+        """在重试事务内共享锁定原 Run 的模型版本，复核启用、未删、能力完整且仍对用户可用。
+
+        遵循与 _lock_default_profile_id 一致的锁顺序（先模型行、再默认指针行）：
+        除常规能力与凭据校验外，要求目标模型仍满足 visible_to_users=True 或恰为当前默认模型。
+        """
+        profile = await session.scalar(
+            select(ModelProfileVersionModel)
+            .where(
+                ModelProfileVersionModel.id == profile_id,
+                ModelProfileVersionModel.deleted_at.is_(None),
+            )
+            .with_for_update(read=True)
+        )
+        if (
+            profile is None
+            or not profile.enabled
+            or not profile.supports_stream
+            or not profile.supports_tools
+            or profile.api_key_ciphertext is None
+            or profile.api_key_nonce is None
+            or profile.api_key_key_version is None
+        ):
+            raise RunInputResourceError("model_profile_unavailable")
+        if not profile.visible_to_users:
+            default = await session.scalar(
+                select(DefaultModelProfileModel)
+                .where(DefaultModelProfileModel.singleton_id == 1)
+                .with_for_update(read=True)
+            )
+            if default is None or default.profile_id != profile.id:
+                raise RunInputResourceError("model_profile_unavailable")
+        return profile.id
+
+    async def _validate_explicit_knowledge_base_ids(
+        self,
+        session: AsyncSession,
+        owner_id: str,
+        knowledge_base_ids: tuple[str, ...] | None,
+    ) -> list[str] | None:
+        """在同一提交事务内实时校验显式知识库存在、未删除且当前用户可读，防止跨部门 ID 探测。"""
+        if knowledge_base_ids is None:
+            return None
+        ordered_ids = tuple(dict.fromkeys(knowledge_base_ids))
+        if len(ordered_ids) > 20:
+            raise RunInputResourceError("run_knowledge_base_ids_invalid")
+        if not ordered_ids:
+            return []
+        kb_rows = (
+            await session.execute(
+                select(
+                    KnowledgeBaseModel.id,
+                    KnowledgeBaseModel.visibility_scope,
+                    KnowledgeBaseModel.owner_id,
+                    KnowledgeBaseModel.owner_department_id,
+                ).where(
+                    KnowledgeBaseModel.id.in_(ordered_ids),
+                    KnowledgeBaseModel.deleted_time.is_(None),
+                )
+            )
+        ).all()
+        if len(kb_rows) != len(ordered_ids):
+            raise RunKnowledgeBaseNotFoundError("knowledge_base_not_found")
+        targets = tuple(
+            ResourceAccessTarget(
+                resource_type=ResourceType.KNOWLEDGE_BASE,
+                resource_id=row[0],
+                visibility_scope=VisibilityScope(row[1]),
+                owner_id=row[2],
+                owner_department_id=row[3],
+            )
+            for row in kb_rows
+        )
+        readable_ids = await filter_readable_targets_in_session(session, owner_id, targets)
+        if readable_ids != set(ordered_ids):
+            raise RunKnowledgeBaseNotFoundError("knowledge_base_not_found")
+        return list(ordered_ids)
 
     @staticmethod
     async def _current_compression_policy_id(session: AsyncSession) -> str | None:

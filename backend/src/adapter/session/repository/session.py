@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.project.model import ProjectModel
@@ -16,10 +16,23 @@ from domain.run import RunStatus, SessionHasActiveRunError
 from domain.session import (
     Session,
     SessionPage,
-    SessionProjectLockedError,
     SessionRepository,
     SessionScope,
 )
+
+_ACTIVE_RUN_STATUSES = (
+    RunStatus.QUEUED.value,
+    RunStatus.RUNNING.value,
+    RunStatus.WAITING_FOR_INPUT.value,
+    RunStatus.WAITING_FOR_APPROVAL.value,
+    RunStatus.WAITING_FOR_SUBAGENTS.value,
+    RunStatus.CANCELLING.value,
+)
+
+
+def _escape_like_pattern(value: str) -> str:
+    """对 SQL LIKE 通配符 %、_ 与转义符 \\ 做安全转义。"""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _monotonic_updated_at(current: datetime, candidate: datetime) -> datetime:
@@ -83,8 +96,9 @@ class SqlAlchemySessionRepository(SessionRepository):
         unbound: bool,
         offset: int,
         limit: int,
+        query: str | None = None,
     ) -> SessionPage:
-        """分页读取当前 owner 的未删除会话。"""
+        """分页读取当前 owner 的未删除会话，支持转义后的不区分大小写标题子串搜索。"""
         filters = [
             SessionModel.owner_id == owner_id,
             SessionModel.deleted_time.is_(None),
@@ -93,6 +107,10 @@ class SqlAlchemySessionRepository(SessionRepository):
             filters.append(SessionModel.project_id == project_id)
         if unbound:
             filters.append(SessionModel.project_id.is_(None))
+        if query is not None:
+            escaped = _escape_like_pattern(query)
+            filters.append(SessionModel.title.is_not(None))
+            filters.append(SessionModel.title.ilike(f"%{escaped}%", escape="\\"))
 
         async with self._session_factory() as database_session:
             total = int(
@@ -124,7 +142,7 @@ class SqlAlchemySessionRepository(SessionRepository):
         project_id: str | None,
         updated_at: datetime,
     ) -> Session | None:
-        """在同一事务内锁定会话并更新目录字段。"""
+        """在同一事务内锁定会话并更新目录字段；仅在存在活跃 Run 时禁止变更项目归属。"""
         async with self._session_factory() as database_session:
             async with database_session.begin():
                 row = await database_session.scalar(
@@ -143,8 +161,18 @@ class SqlAlchemySessionRepository(SessionRepository):
                 if not title_changed and not project_changed:
                     return session_to_domain(row)
                 if project_changed:
-                    if row.last_message_sequence > 0:
-                        raise SessionProjectLockedError("session_project_locked")
+                    # 在会话行锁内检查活跃 Run：允许已有历史消息的会话自由改绑/解绑项目，
+                    # 但执行中或等待中的 Run 未结束前禁止变更项目归属。
+                    active_run_id = await database_session.scalar(
+                        select(RunModel.id)
+                        .where(
+                            RunModel.session_id == scope.session_id,
+                            RunModel.status.in_(_ACTIVE_RUN_STATUSES),
+                        )
+                        .limit(1)
+                    )
+                    if active_run_id is not None:
+                        raise SessionHasActiveRunError("session_has_active_run")
                     if project_id is not None:
                         await self._lock_active_project(
                             database_session,
@@ -158,6 +186,30 @@ class SqlAlchemySessionRepository(SessionRepository):
                 await database_session.flush()
                 result = session_to_domain(row)
         return result
+
+    async def set_title_if_empty(
+        self,
+        owner_id: str,
+        session_id: str,
+        title: str,
+    ) -> bool:
+        """条件更新会话标题：仅当未软删除且 title IS NULL 时写入，绝不覆盖用户手动标题。"""
+        async with self._session_factory() as database_session:
+            async with database_session.begin():
+                updated_id = (
+                    await database_session.execute(
+                        update(SessionModel)
+                        .where(
+                            SessionModel.id == session_id,
+                            SessionModel.owner_id == owner_id,
+                            SessionModel.deleted_time.is_(None),
+                            SessionModel.title.is_(None),
+                        )
+                        .values(title=title)
+                        .returning(SessionModel.id)
+                    )
+                ).scalar_one_or_none()
+                return updated_id is not None
 
     async def _lock_active_project(
         self,
@@ -201,16 +253,7 @@ class SqlAlchemySessionRepository(SessionRepository):
                     active_run_id = await database_session.scalar(
                         select(RunModel.id).where(
                             RunModel.session_id == session_id,
-                            RunModel.status.in_(
-                                [
-                                    RunStatus.QUEUED.value,
-                                    RunStatus.RUNNING.value,
-                                    RunStatus.WAITING_FOR_INPUT.value,
-                                    RunStatus.WAITING_FOR_APPROVAL.value,
-                                    RunStatus.WAITING_FOR_SUBAGENTS.value,
-                                    RunStatus.CANCELLING.value,
-                                ]
-                            ),
+                            RunModel.status.in_(_ACTIVE_RUN_STATUSES),
                         )
                     )
                     if active_run_id is not None:

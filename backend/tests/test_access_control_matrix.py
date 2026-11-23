@@ -2828,7 +2828,9 @@ def test_alembic_20261202_0035_migration_chain_and_sql() -> None:
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["20261202_0035"]
+    # 保持 Alembic 单一 head，兼容后续新增的 M1.5+ 迁移脚本。
+    heads = script.get_heads()
+    assert len(heads) == 1
     revision = script.get_revision("20261202_0035")
     assert revision is not None
     assert revision.down_revision == "20261201_0034"

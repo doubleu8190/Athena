@@ -17,6 +17,8 @@ class RunSubmitRequest(BaseModel):
     text: str = Field(min_length=1, max_length=32_000)
     skill_ids: list[str] = Field(default_factory=list, max_length=100)
     input_file_ids: list[str] = Field(default_factory=list, max_length=100)
+    knowledge_base_ids: list[str] | None = Field(default=None, max_length=20)
+    model_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class RunAnswerRequest(BaseModel):
@@ -201,6 +203,7 @@ class RunResponse(BaseModel):
     usage: RunUsageResponse
     skill_snapshot: RunSkillSnapshotResponse | None
     input_file_ids: list[str]
+    knowledge_base_ids: list[str] | None = None
     pending_input: RunInputRequestResponse | None = None
     pending_approvals: list[RunPendingToolApprovalResponse] = Field(default_factory=list)
     parent_run_id: str | None = None

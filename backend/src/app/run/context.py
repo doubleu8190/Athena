@@ -65,6 +65,7 @@ class LlmRequestSpec:
     skill_context: RunSkillPromptContext | None = None
     input_files: Sequence[RunInputFileContext] = ()
     preference_context: str | None = None
+    project_context: str | None = None
 
 
 def _text_content(parts: Sequence[MessagePart]) -> str:
@@ -144,6 +145,7 @@ def messages_to_llm(
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
     preference_context: str | None = None,
+    project_context: str | None = None,
 ) -> tuple[LlmMessage, ...]:
     """把固定 cutoff 的正式消息及本 Run 协议交互转换为模型上下文。"""
     return _messages_to_llm(
@@ -156,6 +158,7 @@ def messages_to_llm(
             skill_context=skill_context,
             input_files=input_files,
             preference_context=preference_context,
+            project_context=project_context,
         )
     )
 
@@ -334,6 +337,10 @@ def _messages_to_llm(spec: LlmRequestSpec) -> tuple[LlmMessage, ...]:
                 ),
             )
         )
+    if spec.project_context:
+        # 项目专属背景指令作为独立安全上下文块（USER 角色）注入，
+        # 完整计入上下文窗口度量，但不具备系统指令权限。
+        result.append(LlmMessage(role=LlmRole.USER, content=spec.project_context))
     if spec.preference_context:
         # 个人工作偏好与显式备忘记忆作为 USER 角色背景资料注入，不具备系统指令权限。
         result.append(LlmMessage(role=LlmRole.USER, content=spec.preference_context))
@@ -468,6 +475,7 @@ async def measure_llm_request(
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
     preference_context: str | None = None,
+    project_context: str | None = None,
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
     """生成完整请求并返回输入/输出预算，不在调用方裁决前拒绝超窗。"""
     spec = LlmRequestSpec(
@@ -480,6 +488,7 @@ async def measure_llm_request(
         skill_context=skill_context,
         input_files=tuple(input_files),
         preference_context=preference_context,
+        project_context=project_context,
     )
     llm_messages, selected_tools, input_tokens, output_tokens = await _run_context_work(
         _measure_request,
@@ -513,6 +522,7 @@ async def estimate_llm_input_tokens(
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
     preference_context: str | None = None,
+    project_context: str | None = None,
 ) -> tuple[int, int]:
     """在线程边界内估算主请求输入 Token 和输出预留。"""
     spec = LlmRequestSpec(
@@ -525,6 +535,7 @@ async def estimate_llm_input_tokens(
         skill_context=skill_context,
         input_files=tuple(input_files),
         preference_context=preference_context,
+        project_context=project_context,
     )
     _, input_tokens, output_tokens = await _run_context_work(
         _estimate_request,

@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, text
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from adapter.base import Base
+
+
+def _json_type() -> JSON:
+    """在 PostgreSQL 使用 JSONB，在 SQLite 测试中使用 JSON。"""
+    return JSON().with_variant(JSONB(), "postgresql")
 
 
 class ProjectModel(Base):
@@ -23,6 +29,14 @@ class ProjectModel(Base):
         nullable=False,
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_skill_ids: Mapped[list[str]] = mapped_column(
+        _json_type(),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     deleted_time: Mapped[datetime | None] = mapped_column(

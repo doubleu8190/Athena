@@ -86,8 +86,9 @@ def build_session_router(service: SessionService) -> APIRouter:
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
         project_id: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
         unbound: bool = False,
+        q: Annotated[str | None, Query(max_length=120)] = None,
     ) -> SessionListResponse:
-        """分页查询当前用户的未删除会话。"""
+        """分页查询当前用户的未删除会话，支持按标题关键字搜索。"""
         try:
             result = await service.list(
                 current_auth.user.id,
@@ -95,6 +96,7 @@ def build_session_router(service: SessionService) -> APIRouter:
                 page_size=page_size,
                 project_id=project_id,
                 unbound=unbound,
+                q=q,
             )
         except InvalidSessionFilterError as error:
             raise HTTPException(
@@ -150,6 +152,11 @@ def build_session_router(service: SessionService) -> APIRouter:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=PROJECT_NOT_FOUND,
+            ) from error
+        except SessionHasActiveRunError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="session_has_active_run",
             ) from error
         except SessionProjectLockedError as error:
             raise HTTPException(

@@ -15,6 +15,7 @@ from adapter.llm.model.profile import (
 )
 from adapter.message.converter.message import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
+from adapter.project.model import ProjectModel
 from adapter.run.converter import (
     input_request_to_domain,
     run_to_domain,
@@ -124,10 +125,29 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     run, message = await self._load_submit_result(session, replay)
                     result = SubmitRunResult(run, message, True)
                 else:
+                    # 当会话归属项目且本次未显式传 skill_ids 时，安全回退为项目默认技能集合。
+                    project_default_skill_ids: tuple[str, ...] = ()
+                    if not command.selected_skill_ids and locked_session.project_id is not None:
+                        project_row = await session.scalar(
+                            select(ProjectModel).where(
+                                ProjectModel.id == locked_session.project_id,
+                                ProjectModel.owner_id == owner_id,
+                                ProjectModel.deleted_time.is_(None),
+                            )
+                        )
+                        if project_row is not None and project_row.default_skill_ids:
+                            project_default_skill_ids = tuple(
+                                dict.fromkeys(
+                                    item
+                                    for item in project_row.default_skill_ids
+                                    if isinstance(item, str) and item.strip()
+                                )
+                            )
                     skill_snapshot = await build_run_skill_snapshot(
                         session,
                         command.selected_skill_ids,
                         owner_id=owner_id,
+                        fallback_selected_skill_ids=project_default_skill_ids,
                     )
                     input_file_ids = await self._validate_and_merge_input_file_ids(
                         session,
@@ -135,6 +155,11 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         owner_id,
                         existing=(),
                         incoming=command.input_files.file_ids,
+                    )
+                    validated_knowledge_base_ids = await self._validate_explicit_knowledge_base_ids(
+                        session,
+                        owner_id,
+                        command.knowledge_base_ids,
                     )
                     if (
                         command.message.session_id != session_id
@@ -151,7 +176,11 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     if active is not None:
                         raise RunConflictError("run_already_active")
-                    profile_id = await self._lock_default_profile_id(session)
+                    profile_id = (
+                        await self._lock_selected_profile_id(session, command.model_profile_id)
+                        if command.model_profile_id is not None
+                        else await self._lock_default_profile_id(session)
+                    )
                     compression_policy_id = await self._current_compression_policy_id(session)
                     system_prompts = await current_system_prompts(session)
                     if system_prompts is None:
@@ -177,6 +206,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         compression_policy_version_id=compression_policy_id,
                         skill_snapshot=skill_snapshot.model_dump(mode="json"),
                         input_file_ids=list(input_file_ids),
+                        knowledge_base_ids=validated_knowledge_base_ids,
                         prompt_template_version=command.prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -397,6 +427,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         db_now = db_now.replace(tzinfo=UTC)
                     if (
                         profile is None
+                        or profile.deleted_at is not None
                         or not profile.enabled
                         or not profile.supports_stream
                         or not profile.supports_tools
@@ -1068,7 +1099,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
         confirm_unknown: bool = False,
         auth_session_id: str | None = None,
     ) -> Run | None:
-        """幂等重试 failed Run，沿用原 trigger 和 cutoff、绑定当前默认版本。"""
+        """幂等重试 failed Run，沿用原 trigger、cutoff、场景模型与显式知识库范围并在事务内复核。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._lock_session(session, session_id, owner_id)
@@ -1127,7 +1158,12 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     if active is not None:
                         raise RunConflictError("run_already_active")
-                    profile_id = await self._lock_default_profile_id(session)
+                    # 重试继承原 Run 绑定的模型版本并在同一事务内共享锁定复核其可用性，
+                    # 防止失败重试静默漂移回默认模型或绕过停用/隐藏/软删除限制。
+                    profile_id = await self._lock_retry_profile_id(
+                        session,
+                        source.model_config_version_id,
+                    )
                     compression_policy_id = await self._current_compression_policy_id(session)
                     system_prompts = await current_system_prompts(session)
                     if system_prompts is None:
@@ -1151,6 +1187,15 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         existing=(),
                         incoming=tuple(source.input_file_ids),
                     )
+                    # 重试前在同一事务内实时复核显式 knowledge_base_ids 的存在性与读权限，
+                    # 防止员工调岗或知识库被删后通过 retry 沿用失效/越权范围。
+                    validated_knowledge_base_ids = await self._validate_explicit_knowledge_base_ids(
+                        session,
+                        owner_id,
+                        None
+                        if source.knowledge_base_ids is None
+                        else tuple(source.knowledge_base_ids),
+                    )
                     created_at = await self._next_run_created_at(session, session_id)
                     row = RunModel(
                         id=new_run_id,
@@ -1166,6 +1211,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         compression_policy_version_id=compression_policy_id,
                         skill_snapshot=skill_snapshot.model_dump(mode="json"),
                         input_file_ids=list(input_file_ids),
+                        knowledge_base_ids=validated_knowledge_base_ids,
                         prompt_template_version=prompt_template_version,
                         event_sequence=0,
                         execution_epoch=0,
@@ -1497,6 +1543,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     if (
                         profile_row is None
+                        or profile_row.deleted_at is not None
                         or not profile_row.enabled
                         or not profile_row.supports_stream
                         or not profile_row.supports_tools
@@ -1586,6 +1633,10 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                             else child_skill_snapshot.model_dump(mode="json")
                         ),
                         input_file_ids=list(validated_files),
+                        # 子 Run 继承主 Run 显式或默认的知识库限定范围，确保执行期不越界。
+                        knowledge_base_ids=(
+                            None if row.knowledge_base_ids is None else list(row.knowledge_base_ids)
+                        ),
                         tool_snapshot=item.tool_snapshot.model_dump(mode="json"),
                         auth_session_id=row.auth_session_id,
                         llm_request_count=0,

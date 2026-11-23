@@ -14,7 +14,12 @@ from domain.llm.model.compression_policy import (
     DEFAULT_TRIGGER_TOKENS,
     MAX_COMPRESSION_TOKEN_BUDGET,
 )
-from domain.llm.model.profile import MAX_CONTEXT_WINDOW_TOKENS, MAX_OUTPUT_TOKENS
+from domain.llm.model.profile import (
+    MAX_CONTEXT_WINDOW_TOKENS,
+    MAX_OUTPUT_TOKENS,
+    MAX_SCENARIO_DESCRIPTION_LENGTH,
+    MAX_SCENARIO_LABEL_LENGTH,
+)
 
 
 class ModelProfileCreateRequest(BaseModel):
@@ -36,6 +41,12 @@ class ModelProfileCreateRequest(BaseModel):
     execution_timeout_seconds: int = Field(default=300, ge=1, le=3600)
     max_concurrency: int = Field(default=4, ge=1, le=128)
     temperature: float | None = Field(default=None, ge=0, le=2)
+    visible_to_users: bool = True
+    scenario_label: str | None = Field(default=None, max_length=MAX_SCENARIO_LABEL_LENGTH)
+    scenario_description: str | None = Field(
+        default=None, max_length=MAX_SCENARIO_DESCRIPTION_LENGTH
+    )
+    supports_vision: bool = False
 
 
 class ModelProfileResponse(BaseModel):
@@ -58,7 +69,29 @@ class ModelProfileResponse(BaseModel):
     max_concurrency: int
     temperature: float | None
     enabled: bool
+    visible_to_users: bool
+    scenario_label: str | None
+    scenario_description: str | None
+    supports_vision: bool
     created_at: datetime
+
+
+class UserModelCatalogItemResponse(BaseModel):
+    """用户侧只读场景化模型目录项，严格隐藏供应商地址、密钥状态及运维参数。"""
+
+    id: str
+    name: str
+    scenario_label: str | None
+    scenario_description: str | None
+    is_default: bool
+    supports_vision: bool
+
+
+class UserModelCatalogResponse(BaseModel):
+    """用户侧可用模型目录及系统默认模型标识。"""
+
+    items: list[UserModelCatalogItemResponse]
+    default_model_id: str | None
 
 
 class ModelProfileListResponse(BaseModel):
@@ -131,4 +164,6 @@ __all__ = [
     "ModelProfileEnabledRequest",
     "ModelProfileListResponse",
     "ModelProfileResponse",
+    "UserModelCatalogItemResponse",
+    "UserModelCatalogResponse",
 ]

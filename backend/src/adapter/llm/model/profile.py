@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -64,6 +65,22 @@ class ModelProfileVersionModel(Base):
     max_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
     temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 面向普通用户的场景化模型目录展示属性及 M1.6 软删除铺垫列。
+    visible_to_users: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+    )
+    scenario_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scenario_description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    supports_vision: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

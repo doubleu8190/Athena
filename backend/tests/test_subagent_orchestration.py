@@ -2713,3 +2713,153 @@ def test_dispatch_subagents_catalog_bounds_description_and_preserves_newlines() 
         assert "个子智能体已省略" in dispatch_def.description
 
     asyncio.run(scenario())
+
+
+def test_get_stream_snapshot_deduplicates_subagent_metadata_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一主 Run 快照仅加载一次子任务元数据；无子任务时跳过下游 3 个查询。"""
+
+    async def scenario() -> None:
+        engine, _factory, repo, _wakeup = await _setup_db(monkeypatch)
+        try:
+            root_lease = await _submit_main_run(repo, "run_main_dedup")
+            orig_meta = SqlAlchemyRunRepository._load_subagent_task_metadata_in_session
+            orig_tasks = SqlAlchemyRunRepository._load_subagent_tasks_in_session
+            orig_inputs = SqlAlchemyRunRepository._load_pending_subagent_inputs_in_session
+            orig_approvals = SqlAlchemyRunRepository._load_pending_subagent_approvals_in_session
+            counts = {"meta": 0, "tasks": 0, "inputs": 0, "approvals": 0}
+
+            async def spy_meta(
+                session: AsyncSession, session_id: str, parent_run_id: str
+            ) -> tuple[dict[str, int], dict[str, str]]:
+                counts["meta"] += 1
+                return await orig_meta(session, session_id, parent_run_id)
+
+            async def spy_tasks(
+                session: AsyncSession,
+                session_id: str,
+                parent_run_id: str,
+                *,
+                metadata: tuple[dict[str, int], dict[str, str]] | None = None,
+            ) -> Any:
+                counts["tasks"] += 1
+                return await orig_tasks(session, session_id, parent_run_id, metadata=metadata)
+
+            async def spy_inputs(
+                session: AsyncSession,
+                session_id: str,
+                parent_run_id: str,
+                *,
+                metadata: tuple[dict[str, int], dict[str, str]] | None = None,
+            ) -> Any:
+                counts["inputs"] += 1
+                return await orig_inputs(session, session_id, parent_run_id, metadata=metadata)
+
+            async def spy_approvals(
+                session: AsyncSession,
+                session_id: str,
+                parent_run_id: str,
+                *,
+                metadata: tuple[dict[str, int], dict[str, str]] | None = None,
+            ) -> Any:
+                counts["approvals"] += 1
+                return await orig_approvals(session, session_id, parent_run_id, metadata=metadata)
+
+            monkeypatch.setattr(
+                SqlAlchemyRunRepository,
+                "_load_subagent_task_metadata_in_session",
+                staticmethod(spy_meta),
+            )
+            monkeypatch.setattr(
+                SqlAlchemyRunRepository,
+                "_load_subagent_tasks_in_session",
+                staticmethod(spy_tasks),
+            )
+            monkeypatch.setattr(
+                SqlAlchemyRunRepository,
+                "_load_pending_subagent_inputs_in_session",
+                staticmethod(spy_inputs),
+            )
+            monkeypatch.setattr(
+                SqlAlchemyRunRepository,
+                "_load_pending_subagent_approvals_in_session",
+                staticmethod(spy_approvals),
+            )
+
+            # 无子任务时只查 1 次元数据，后续 3 个子任务查询全部短路跳过。
+            empty_snapshot = await repo.get_stream_snapshot("sess_1", "usr_1", root_lease.run.id)
+            assert empty_snapshot is not None
+            assert empty_snapshot.subagent_tasks == ()
+            assert counts == {"meta": 1, "tasks": 0, "inputs": 0, "approvals": 0}
+
+            # 派发一个子任务并进入待输入状态，验证元数据仍仅查询 1 次且三处摘要一致。
+            await repo.begin_subagent_batch(
+                _subagent_batch_command(root_lease, sequence=1, sub_run_id="run_sub_dedup_1")
+            )
+            sub_leases = await repo.claim(
+                "worker-sub", lease_seconds=60, execution_seconds=300, limit=1
+            )
+            assert len(sub_leases) == 1
+            sub_lease = sub_leases[0]
+            await repo.request_input(
+                RequestRunInputCommand(
+                    run_id=sub_lease.run.id,
+                    worker_id=sub_lease.run.worker_id or "",
+                    execution_epoch=sub_lease.run.execution_epoch,
+                    input_request_id="req_input_dedup",
+                    question_message=ConversationMessageDraft(
+                        id="msg_q_dedup",
+                        session_id="sess_1",
+                        owner_id="usr_1",
+                        role=ConversationRole.ASSISTANT,
+                        status=MessageStatus.COMPLETED,
+                        parts=(TextPart("请补充参数"),),
+                        reply_to_message_id=sub_lease.run.trigger_message_id,
+                        run_id=sub_lease.run.id,
+                        client_message_id=None,
+                        created_at=NOW,
+                        completed_at=NOW,
+                        metadata=MessageMetadata(),
+                        context_turn_id=sub_lease.run.trigger_message_id,
+                    ),
+                    execution_messages=(
+                        ExecutionMessageDraft(
+                            id="exec_ask_dedup",
+                            session_id="sess_1",
+                            owner_id="usr_1",
+                            run_id=sub_lease.run.id,
+                            thread_id=sub_lease.run.id,
+                            role=ExecutionRole.ASSISTANT,
+                            parts=(
+                                ToolCallPart(
+                                    tool_call_id="call_ask_1",
+                                    name="request_user_input",
+                                    arguments={"question": "请补充参数"},
+                                ),
+                            ),
+                            tool_call_id=None,
+                            source_message_id="msg_q_dedup",
+                            created_at=NOW,
+                            metadata=MessageMetadata(),
+                        ),
+                    ),
+                    usage=RunUsage(),
+                    created_at=NOW,
+                )
+            )
+
+            counts = {"meta": 0, "tasks": 0, "inputs": 0, "approvals": 0}
+            populated = await repo.get_stream_snapshot("sess_1", "usr_1", root_lease.run.id)
+            assert populated is not None
+            assert counts == {"meta": 1, "tasks": 1, "inputs": 1, "approvals": 1}
+            assert len(populated.subagent_tasks) == 1
+            assert populated.subagent_tasks[0].task_index == 1
+            assert populated.subagent_tasks[0].task_summary == "任务 run_sub_dedup_1"
+            assert len(populated.pending_subagent_inputs) == 1
+            assert populated.pending_subagent_inputs[0].task_index == 1
+            assert populated.pending_subagent_inputs[0].task_summary == "任务 run_sub_dedup_1"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

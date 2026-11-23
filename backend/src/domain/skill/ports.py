@@ -34,8 +34,16 @@ class SkillRepository(Protocol):
     async def get_public_directory(self) -> tuple[Skill, ...]:
         """返回已启用候选，当前依赖状态由服务层实时探测。"""
 
+    async def get_public_directory_entries(self) -> tuple[tuple[Skill, SkillVersion], ...]:
+        """单次 JOIN 返回已启用公共候选及其当前不可变版本，消除目录 N+1 查询。"""
+
     async def get_user_directory(self, owner_id: str) -> tuple[Skill, ...]:
         """返回公共及该用户本人已启用且未删除的 Skill 候选。"""
+
+    async def get_user_directory_entries(
+        self, owner_id: str
+    ) -> tuple[tuple[Skill, SkillVersion], ...]:
+        """单次 JOIN 返回公共及本人已启用候选及其当前版本，消除目录 N+1 查询。"""
 
     async def list_personal_skills(self, owner_id: str) -> tuple[Skill, ...]:
         """按稳定顺序读取指定用户未删除的个人 Skill。"""

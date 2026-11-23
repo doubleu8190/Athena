@@ -8,10 +8,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.security import require_admin
-from api.skill import build_skill_admin_router
+from api.security import get_current_auth, require_admin
+from api.skill import build_skill_admin_router, build_skill_user_router
 from app.skill.service import SkillAuthorizationError
-from domain.skill import SkillPackageError
+from domain.skill import SkillConflictError, SkillPackageError
 
 
 class _PackageService:
@@ -145,3 +145,85 @@ def test_configure_transaction_authorization_failure_returns_403() -> None:
 
     assert response.status_code == 403
     assert response.json() == {"detail": "admin_required"}
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_detail"),
+    (
+        (
+            SkillPackageError("skill_dependency_environment_unavailable"),
+            503,
+            "skill_dependency_environment_unavailable",
+        ),
+        (
+            SkillPackageError("skill_dependency_python_invalid"),
+            422,
+            "skill_dependency_python_invalid",
+        ),
+        (
+            SkillConflictError("skill_revision_conflict"),
+            409,
+            "skill_revision_conflict",
+        ),
+    ),
+)
+def test_user_skill_directory_maps_package_and_conflict_errors(
+    error: Exception,
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    """GET /api/v1/skills 对依赖探测与冲突错误返回结构化 503/422/409，不裸抛 500。"""
+
+    class _DirectoryErrorService:
+        async def user_directory(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise error
+
+    app = FastAPI()
+    app.dependency_overrides[get_current_auth] = lambda: object()
+    app.include_router(build_skill_user_router(cast(Any, _DirectoryErrorService())))
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/skills")
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": expected_detail}
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_status"),
+    (
+        ("skill_dependency_environment_unavailable", 503),
+        ("skill_dependency_python_invalid", 422),
+    ),
+)
+def test_admin_configure_maps_skill_package_error(
+    error_code: str,
+    expected_status: int,
+) -> None:
+    """PATCH /api/v1/admin/skills/{skill_id} 将依赖环境错误映射为 503/422。"""
+
+    class _ConfigurePackageErrorService:
+        async def configure(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise SkillPackageError(error_code)
+
+    app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: object()
+    app.include_router(
+        build_skill_admin_router(cast(Any, _ConfigurePackageErrorService()))
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/v1/admin/skills/skill_one",
+            json={
+                "expected_revision": 1,
+                "enabled": True,
+                "current_version_id": "skillver_one",
+                "script_requires_approval": False,
+            },
+        )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": error_code}

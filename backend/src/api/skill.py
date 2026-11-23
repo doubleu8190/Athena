@@ -64,7 +64,12 @@ def build_skill_user_router(service: SkillService) -> APIRouter:
     @router.get("", response_model=SkillDirectoryResponse)
     async def list_skills(actor: CurrentAuth) -> SkillDirectoryResponse:
         """返回当前仍可用的启用目录，不暴露管理员版本正文。"""
-        return directory_to_response(await service.user_directory(actor))
+        try:
+            return directory_to_response(await service.user_directory(actor))
+        except SkillConflictError as error:
+            raise HTTPException(409, error.code) from error
+        except SkillPackageError as error:
+            raise _skill_package_http_error(error) from error
 
     return router
 
@@ -432,6 +437,8 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             raise HTTPException(409, error.code) from error
         except SkillDependencyUnsatisfiedError as error:
             raise HTTPException(422, error.code) from error
+        except SkillPackageError as error:
+            raise _skill_package_http_error(error) from error
 
     @router.get(
         "/skill-executions/{call_id}",
@@ -521,6 +528,13 @@ def _safe_code(error: Exception) -> str:
     """只向外返回领域稳定错误码，不回显原始异常文本。"""
     value = getattr(error, "code", None)
     return value if isinstance(value, str) else "skill_package_invalid"
+
+
+def _skill_package_http_error(error: SkillPackageError) -> HTTPException:
+    """将 Skill 依赖环境不可用映射为 503，其余包与依赖配置错误映射为 422。"""
+    if error.code == "skill_dependency_environment_unavailable":
+        return HTTPException(status_code=503, detail=error.code)
+    return HTTPException(status_code=422, detail=_package_error_detail(error))
 
 
 def _package_error_detail(error: Exception) -> str | dict[str, str]:

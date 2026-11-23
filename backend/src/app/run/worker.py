@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
 from app.run.config import RunWorkerConfig
 from app.run.events import publish_pending_events
@@ -20,6 +24,20 @@ from domain.run.model import (
 from domain.run.ports import RunEventTransport, RunRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _is_recoverable_worker_error(error: Exception) -> bool:
+    """判定是否为可恢复的瞬态数据库/网络连接错误，避免单次闪断打崩整个 TaskGroup。"""
+    if isinstance(error, (OperationalError, InterfaceError, SqlAlchemyTimeoutError, OSError)):
+        return True
+    if not isinstance(error, DBAPIError):
+        return False
+    if error.connection_invalidated:
+        return True
+    sqlstate = getattr(error.orig, "sqlstate", None)
+    return isinstance(sqlstate, str) and (
+        sqlstate.startswith("08") or sqlstate in {"57P01", "57P02", "57P03", "53300"}
+    )
 
 
 class RunWorker:
@@ -63,19 +81,58 @@ class RunWorker:
         self._stop.set()
 
     async def _consume(self, index: int) -> None:
-        """每次只领取一个 Run，完成当前执行后再申请下一项。"""
+        """每次只领取一个 Run，完成当前执行后再申请下一项；瞬态 DB 故障仅局部退避重试。"""
         worker_id = f"{self._worker_id}-{index}"
+        consecutive_failures = 0
         while not self._stop.is_set():
-            leases = await self._repository.claim(
-                worker_id,
-                lease_seconds=self._config.lease_seconds,
-                execution_seconds=self._config.execution_seconds,
-                limit=1,
-            )
+            try:
+                leases = await self._repository.claim(
+                    worker_id,
+                    lease_seconds=self._config.lease_seconds,
+                    execution_seconds=self._config.execution_seconds,
+                    limit=1,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if not _is_recoverable_worker_error(error):
+                    raise
+                # 瞬态数据库连接/网络异常仅当前 consumer 有界抖动退避（上限 30s），
+                # 避免抛出到 asyncio.TaskGroup 误杀并发在途的其他 Run。
+                consecutive_failures += 1
+                ceiling = min(30.0, 0.5 * (2 ** min(consecutive_failures - 1, 6)))
+                retry_after = random.uniform(0.0, ceiling)
+                logger.warning(
+                    "run_worker_database_retry worker_id=%s error_type=%s retry_after=%.2f",
+                    worker_id,
+                    type(error).__name__,
+                    retry_after,
+                )
+                await self._wait_or_stop(retry_after)
+                continue
+            consecutive_failures = 0
             if not leases:
                 await self._wait_or_stop(self._config.queue_poll_seconds)
                 continue
-            await self._drive_lease(leases[0])
+            try:
+                await self._drive_lease(leases[0])
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if not _is_recoverable_worker_error(error):
+                    raise
+                consecutive_failures += 1
+                ceiling = min(30.0, 0.5 * (2 ** min(consecutive_failures - 1, 6)))
+                retry_after = random.uniform(0.0, ceiling)
+                logger.warning(
+                    "run_worker_drive_database_retry worker_id=%s run_id=%s "
+                    "error_type=%s retry_after=%.2f",
+                    worker_id,
+                    leases[0].run.id,
+                    type(error).__name__,
+                    retry_after,
+                )
+                await self._wait_or_stop(retry_after)
 
     async def _drive_lease(self, lease: RunLease) -> None:
         """独立轮询状态并续约；取消、超时或失租后先关闭模型流。"""
@@ -206,6 +263,10 @@ class RunWorker:
             # 监督协程被取消（如 Worker 关闭）：先关闭执行与上游资源，再继续传播取消。
             await self._cancel_and_join(execution, lease)
             raise
+        except BaseException:
+            # 监督循环内出现瞬态数据库等异常时同样须先清理执行任务，避免孤儿协程泄漏。
+            await self._cancel_and_join(execution, lease)
+            raise
 
     async def _finalize_execution(self, lease: RunLease, execution: asyncio.Task[None]) -> None:
         """收敛已清理协程与取消并发，避免迟到状态提交挂起 Run。"""
@@ -233,6 +294,7 @@ class RunWorker:
             current = await self._repository.get(
                 lease.run.session_id, lease.run.owner_id, lease.run.id
             )
+            target_event_sequence = None if current is None else current.event_sequence
             if (
                 current is not None
                 and current.worker_id == lease.run.worker_id
@@ -249,7 +311,7 @@ class RunWorker:
             ):
                 worker_id = lease.run.worker_id
                 if worker_id is not None:
-                    await self._repository.fail(
+                    failed_run = await self._repository.fail(
                         FailRunCommand(
                             run_id=lease.run.id,
                             worker_id=worker_id,
@@ -258,8 +320,12 @@ class RunWorker:
                             failed_at=self._now(),
                         )
                     )
-            if current is not None:
-                await self._publish_new_events(lease, current.event_sequence)
+                    if failed_run is not None:
+                        # 兜底失败会新增 failed 事件并推进 event_sequence，
+                        # 必须使用新序号推送避免漏推终态。
+                        target_event_sequence = failed_run.event_sequence
+            if target_event_sequence is not None:
+                await self._publish_new_events(lease, target_event_sequence)
         except Exception as error:
             logger.error(
                 "run_execution_finalize_failed run_id=%s exception_type=%s",
@@ -380,14 +446,29 @@ class RunWorker:
                 except asyncio.CancelledError:
                     if task.done():
                         break
+                except Exception:
+                    # 被取消的执行任务在清理阶段抛出的异常交由下方统一记录收敛，
+                    # 避免穿透 _cancel_and_join 覆盖外层瞬态数据库异常并击穿 TaskGroup。
+                    if task.done():
+                        break
+                    raise
                 if task.done() or loop.time() < next_heartbeat:
                     continue
-                heartbeat = await self._repository.heartbeat(
-                    lease.run.id,
-                    worker_id,
-                    lease.run.execution_epoch,
-                    lease_seconds=self._config.lease_seconds,
-                )
+                try:
+                    heartbeat = await self._repository.heartbeat(
+                        lease.run.id,
+                        worker_id,
+                        lease.run.execution_epoch,
+                        lease_seconds=self._config.lease_seconds,
+                    )
+                except Exception as error:
+                    # 清理阶段数据库暂不可用时停止续租循环，仍继续等待被取消的执行任务完成清理。
+                    logger.warning(
+                        "run_cancel_heartbeat_failed run_id=%s exception_type=%s",
+                        lease.run.id,
+                        type(error).__name__,
+                    )
+                    break
                 if heartbeat is None:
                     break
                 next_heartbeat = loop.time() + self._config.heartbeat_seconds

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
@@ -38,6 +39,7 @@ DATABASE_RECONCILE_SECONDS = 5.0
 AUTH_RECHECK_SECONDS = 5.0
 REDIS_RECONNECT_SECONDS = 2.0
 STREAM_SEND_TIMEOUT_SECONDS = 1.0
+LIVE_EXECUTION_CACHE_TTL_SECONDS = 1.0
 MAX_STREAM_EVENT_BYTES = 64 * 1024
 
 
@@ -49,10 +51,15 @@ class RunStreamService:
         repository: RunRepository,
         authenticator: Authenticator,
         transport: RunEventTransport | None,
+        *,
+        live_check_ttl_seconds: float = LIVE_EXECUTION_CACHE_TTL_SECONDS,
     ) -> None:
+        if not math.isfinite(live_check_ttl_seconds) or live_check_ttl_seconds < 0.0:
+            raise ValueError("run_stream_live_check_ttl_invalid")
         self._repository = repository
         self._authenticator = authenticator
         self._transport = transport
+        self._live_check_ttl_seconds = live_check_ttl_seconds
 
     async def authorize(self, session_id: str, owner_id: str, run_id: str) -> bool:
         """在返回 SSE 响应前执行 owner 与 soft-delete 检查。"""
@@ -81,6 +88,9 @@ class RunStreamService:
         current_epoch = 0
         current_status = None
         seen_message_ids: set[str] = set()
+        # 仅在极短单调时钟窗口内缓存同一 execution_epoch 的存活校验，避免每 token 查库。
+        verified_live_epoch: int | None = None
+        verified_live_at = 0.0
         try:
             subscription = await self._connect(exit_stack, run_id)
             if subscription is None and self._transport is not None:
@@ -195,6 +205,8 @@ class RunStreamService:
                     incoming = None
 
                 if isinstance(incoming, RunInterruptedEvent):
+                    # 收到中断事件强制立即复核数据库执行存活状态，并失效短 TTL 缓存。
+                    verified_live_epoch = None
                     if incoming.run_id != run_id or not await self._repository.is_live_execution(
                         run_id, incoming.execution_epoch
                     ):
@@ -220,9 +232,25 @@ class RunStreamService:
                         yield incoming.model_copy(update={"stream_sequence": output_sequence})
                         output_sequence += 1
                 elif isinstance(incoming, RunTextDeltaEvent):
-                    is_live = await self._repository.is_live_execution(
-                        run_id, incoming.execution_epoch
-                    )
+                    if incoming.run_id != run_id:
+                        is_live = False
+                    else:
+                        check_now = loop.time()
+                        if (
+                            verified_live_epoch == incoming.execution_epoch
+                            and self._live_check_ttl_seconds > 0.0
+                            and (check_now - verified_live_at) < self._live_check_ttl_seconds
+                        ):
+                            is_live = True
+                        else:
+                            is_live = await self._repository.is_live_execution(
+                                run_id, incoming.execution_epoch
+                            )
+                            if is_live:
+                                verified_live_epoch = incoming.execution_epoch
+                                verified_live_at = loop.time()
+                            else:
+                                verified_live_epoch = None
                     if incoming.run_id == run_id and is_live:
                         if incoming.execution_epoch > current_epoch:
                             current_epoch = incoming.execution_epoch
@@ -262,7 +290,8 @@ class RunStreamService:
                             )
                             output_sequence += 1
                     if incoming.run_id == run_id:
-                        # 正式通知只负责触发 DB 对账，状态快照必须先于本地状态更新发出。
+                        # 正式通知只负责触发 DB 对账，同时失效短 TTL 缓存避免状态切换前延迟感知。
+                        verified_live_epoch = None
                         last_reconcile = 0.0
 
                 now = loop.time()
@@ -316,6 +345,12 @@ class RunStreamService:
                             ),
                         )
                         output_sequence += 1
+                        if (
+                            snapshot.run.execution_epoch != current_epoch
+                            or snapshot.run.status != current_status
+                        ):
+                            # 数据库对账发现状态或执行轮次变化时，立即清空存活缓存强制重新复核。
+                            verified_live_epoch = None
                         if snapshot.run.execution_epoch != current_epoch:
                             transport_epoch = snapshot.run.execution_epoch
                             transport_cursor = None

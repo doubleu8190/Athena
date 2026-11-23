@@ -592,17 +592,25 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                 pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
                 pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
                 if row.depth == 0:
-                    subagent_tasks = await self._load_subagent_tasks_in_session(
+                    # 同一快照事务内仅预查一次子任务序号与摘要并透传，消除三项聚合重复查库；
+                    # 无任何子任务的主 Run 直接跳过后续三组子任务查询。
+                    subagent_metadata = await self._load_subagent_task_metadata_in_session(
                         session, session_id, row.id
                     )
-                    pending_subagent_inputs = await self._load_pending_subagent_inputs_in_session(
-                        session, session_id, row.id
-                    )
-                    pending_subagent_approvals = (
-                        await self._load_pending_subagent_approvals_in_session(
-                            session, session_id, row.id
+                    if subagent_metadata[0]:
+                        subagent_tasks = await self._load_subagent_tasks_in_session(
+                            session, session_id, row.id, metadata=subagent_metadata
                         )
-                    )
+                        pending_subagent_inputs = (
+                            await self._load_pending_subagent_inputs_in_session(
+                                session, session_id, row.id, metadata=subagent_metadata
+                            )
+                        )
+                        pending_subagent_approvals = (
+                            await self._load_pending_subagent_approvals_in_session(
+                                session, session_id, row.id, metadata=subagent_metadata
+                            )
+                        )
 
                 # 步骤 7：模拟完整 SSE 序列化，在 512KB 硬预算内执行两级优雅降级裁剪
                 # （先裁旧消息，后裁事件），同步推进排他游标。
@@ -834,7 +842,12 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
 
     @classmethod
     async def _load_subagent_tasks_in_session(
-        cls, session: AsyncSession, session_id: str, parent_run_id: str
+        cls,
+        session: AsyncSession,
+        session_id: str,
+        parent_run_id: str,
+        *,
+        metadata: tuple[dict[str, int], dict[str, str]] | None = None,
     ) -> tuple[SubagentTaskSummary, ...]:
         rows = (
             await session.scalars(
@@ -848,8 +861,10 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         ).all()
         if not rows:
             return ()
-        task_index_by_id, task_summary_by_id = await cls._load_subagent_task_metadata_in_session(
-            session, session_id, parent_run_id
+        task_index_by_id, task_summary_by_id = (
+            await cls._load_subagent_task_metadata_in_session(session, session_id, parent_run_id)
+            if metadata is None
+            else metadata
         )
         return tuple(
             SubagentTaskSummary(
@@ -871,7 +886,12 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
 
     @classmethod
     async def _load_pending_subagent_inputs_in_session(
-        cls, session: AsyncSession, session_id: str, parent_run_id: str
+        cls,
+        session: AsyncSession,
+        session_id: str,
+        parent_run_id: str,
+        *,
+        metadata: tuple[dict[str, int], dict[str, str]] | None = None,
     ) -> tuple[PendingSubagentInput, ...]:
         rows = (
             await session.execute(
@@ -892,8 +912,10 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         ).all()
         if not rows:
             return ()
-        task_index_by_id, task_summary_by_id = await cls._load_subagent_task_metadata_in_session(
-            session, session_id, parent_run_id
+        task_index_by_id, task_summary_by_id = (
+            await cls._load_subagent_task_metadata_in_session(session, session_id, parent_run_id)
+            if metadata is None
+            else metadata
         )
         items: list[PendingSubagentInput] = []
         for req, sub_run, msg_row in rows:
@@ -918,7 +940,12 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
 
     @classmethod
     async def _load_pending_subagent_approvals_in_session(
-        cls, session: AsyncSession, session_id: str, parent_run_id: str
+        cls,
+        session: AsyncSession,
+        session_id: str,
+        parent_run_id: str,
+        *,
+        metadata: tuple[dict[str, int], dict[str, str]] | None = None,
     ) -> tuple[PendingSubagentApproval, ...]:
         rows = (
             await session.execute(
@@ -935,8 +962,10 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         ).all()
         if not rows:
             return ()
-        task_index_by_id, task_summary_by_id = await cls._load_subagent_task_metadata_in_session(
-            session, session_id, parent_run_id
+        task_index_by_id, task_summary_by_id = (
+            await cls._load_subagent_task_metadata_in_session(session, session_id, parent_run_id)
+            if metadata is None
+            else metadata
         )
         return tuple(
             PendingSubagentApproval(

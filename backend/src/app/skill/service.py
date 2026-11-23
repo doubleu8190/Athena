@@ -815,11 +815,18 @@ class SkillService:
 
     async def public_directory(self) -> tuple[Skill, ...]:
         """返回实时满足当前解释器依赖的已启用 Skill。"""
+        # 优先通过批量 JOIN 接口一次读取 Skill 与当前版本，未实现时回退旧接口以兼容测试替身。
+        if callable(getattr(self._repository, "get_public_directory_entries", None)):
+            entries = await self._repository.get_public_directory_entries()
+            return await self._available_directory_entries(entries)
         candidates = await self._repository.get_public_directory()
         return await self._available_directory(candidates)
 
     async def user_directory(self, actor: AuthContext) -> tuple[Skill, ...]:
         """返回公共及当前用户本人的启用可用 Skill。"""
+        if callable(getattr(self._repository, "get_user_directory_entries", None)):
+            entries = await self._repository.get_user_directory_entries(actor.user.id)
+            return await self._available_directory_entries(entries)
         candidates = await self._repository.get_user_directory(actor.user.id)
         return await self._available_directory(candidates)
 
@@ -827,13 +834,25 @@ class SkillService:
         self,
         candidates: tuple[Skill, ...],
     ) -> tuple[Skill, ...]:
-        """过滤失效公共依赖，个人 Markdown 不触发解释器探测。"""
-        available: list[Skill] = []
+        """降级路径：逐项补齐当前版本后复用统一目录过滤逻辑。"""
+        entries: list[tuple[Skill, SkillVersion]] = []
         for skill in candidates:
             if skill.current_version_id is None:
                 continue
             version = await self._repository.get_version(skill.current_version_id)
             if version is None or version.skill_id != skill.id:
+                continue
+            entries.append((skill, version))
+        return await self._available_directory_entries(tuple(entries))
+
+    async def _available_directory_entries(
+        self,
+        entries: tuple[tuple[Skill, SkillVersion], ...],
+    ) -> tuple[Skill, ...]:
+        """过滤失效公共依赖，个人 Markdown 不触发解释器探测；仅依赖语义变更时才写库。"""
+        available: list[Skill] = []
+        for skill, version in entries:
+            if skill.current_version_id is None or version.skill_id != skill.id:
                 continue
             if skill.scope is SkillScope.PERSONAL:
                 if (
@@ -848,7 +867,9 @@ class SkillService:
                 self._dependency_checker.check_cached,
                 version.dependency_requirements,
             )
-            if check != version.dependency_check:
+            # 忽略仅因 60s 探测缓存 TTL 刷新而变动的 checked_at，
+            # 消除 GET 目录周期性 FOR UPDATE 写放大。
+            if _dependency_check_changed(version.dependency_check, check):
                 await self._repository.record_dependency_check(version.id, check)
             if check.status is DependencyCheckStatus.SATISFIED:
                 available.append(skill)
@@ -1094,6 +1115,21 @@ class SkillService:
     @staticmethod
     def _package_key(sha256: str, version_id: str) -> str:
         return f"skills/{sha256[:2]}/{sha256}/{version_id}.zip"
+
+
+def _dependency_check_changed(
+    current: DependencyCheck | None,
+    fresh: DependencyCheck,
+) -> bool:
+    """比较依赖检查是否发生实质语义变化；仅 checked_at 刷新不触发数据库写回。"""
+    if current is None:
+        return True
+    return (
+        current.status != fresh.status
+        or current.python_version != fresh.python_version
+        or current.python_implementation != fresh.python_implementation
+        or current.items != fresh.items
+    )
 
 
 def _validate_idempotency_key(value: str) -> str:

@@ -468,8 +468,9 @@ def test_public_directory_restores_previously_unsatisfied_skill_after_probe_reco
 
     assert first == ()
     assert second == (skill,)
+    # 首次探测结果与旧持久化结论实质语义一致（仅 checked_at 推进），不再重复写库；
+    # 依赖恢复为 SATISFIED 后立即写回一次。
     assert [write.status for write in repository.dependency_writes] == [
-        DependencyCheckStatus.UNSATISFIED,
         DependencyCheckStatus.SATISFIED,
     ]
 
@@ -636,3 +637,106 @@ def test_check_fails_closed_when_target_probe_returns_invalid_output(
         match="skill_dependency_environment_unavailable",
     ):
         checker.check(("any-package==1",))
+
+
+def test_directory_uses_joined_entries_and_skips_noop_writes_after_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """目录读取复用单次 JOIN 避免 N+1，且 TTL 过期后语义未变时零写库。"""
+    clock = _ManualMonotonicClock()
+    wall_clock_value = [CHECKED_AT]
+    probe = _ProbeRecorder("2.0", "2.0", "1.0")
+    monkeypatch.setattr(dependency_module, "_probe_target_environment", probe)
+
+    initial_check = DependencyCheck(
+        status=DependencyCheckStatus.SATISFIED,
+        python_version="3.14.0",
+        python_implementation="CPython",
+        items=(
+            DependencyCheckItem(
+                requirement="demo-package>=2",
+                package="demo-package",
+                satisfied=True,
+                installed_version="2.0",
+                detail_code=None,
+            ),
+        ),
+        checked_at=CHECKED_AT - timedelta(hours=2),
+    )
+    version = SimpleNamespace(
+        id="skillver_joined",
+        skill_id="skill_joined",
+        dependency_requirements=("demo-package>=2",),
+        dependency_check=initial_check,
+    )
+    skill = Skill(
+        id="skill_joined",
+        slug="skill-joined",
+        current_version_id=version.id,
+        enabled=True,
+        script_requires_approval=False,
+        revision=1,
+        created_by="usr_admin",
+        created_at=CHECKED_AT,
+        updated_at=CHECKED_AT,
+        name="Joined Skill",
+        description="joined directory check",
+    )
+
+    class _JoinedDirectoryRepository(_DirectoryRepository):
+        def __init__(self) -> None:
+            super().__init__((skill,), (version,))
+            self.get_version_calls = 0
+
+        async def get_public_directory_entries(
+            self,
+        ) -> tuple[tuple[Skill, SimpleNamespace], ...]:
+            return ((skill, version),)
+
+        async def get_user_directory_entries(
+            self,
+            owner_id: str,
+        ) -> tuple[tuple[Skill, SimpleNamespace], ...]:
+            del owner_id
+            return ((skill, version),)
+
+        async def get_version(self, version_id: str) -> SimpleNamespace | None:
+            self.get_version_calls += 1
+            return await super().get_version(version_id)
+
+    repository = _JoinedDirectoryRepository()
+    checker = DependencyChecker(
+        python_executable=sys.executable,
+        clock=lambda: wall_clock_value[0],
+        monotonic_clock=clock,
+    )
+    service = SkillService(
+        cast(Any, repository),
+        cast(Any, object()),
+        cast(Any, object()),
+        dependency_checker=checker,
+        clock=lambda: wall_clock_value[0],
+    )
+    actor = SimpleNamespace(user=SimpleNamespace(id="usr_member"))
+
+    async def scenario() -> tuple[tuple[Skill, ...], tuple[Skill, ...], tuple[Skill, ...]]:
+        # 首次读取与 TTL 过期后第二次读取，仅 checked_at 推进、依赖语义未变，不应写库。
+        first = await service.public_directory()
+        clock.advance(61)
+        wall_clock_value[0] = CHECKED_AT + timedelta(minutes=5)
+        second = await service.user_directory(cast(Any, actor))
+        # 第三次探测版本降级为 1.0，语义变为 UNSATISFIED，此时应落库一次。
+        clock.advance(61)
+        wall_clock_value[0] = CHECKED_AT + timedelta(minutes=10)
+        third = await service.public_directory()
+        return first, second, third
+
+    first, second, third = asyncio.run(scenario())
+
+    assert first == (skill,)
+    assert second == (skill,)
+    assert third == ()
+    assert repository.get_version_calls == 0
+    assert [write.status for write in repository.dependency_writes] == [
+        DependencyCheckStatus.UNSATISFIED,
+    ]

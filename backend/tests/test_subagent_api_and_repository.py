@@ -28,7 +28,8 @@ from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID
 from infrastructure.security.password import Argon2PasswordHasher
 from main import create_app
 
-NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+# 使用相对当前 UTC 时间构造测试认证会话有效期，避免日期推移后会话过期导致回归老化。
+NOW = datetime.now(UTC)
 
 
 async def _build_subagent_app() -> tuple[

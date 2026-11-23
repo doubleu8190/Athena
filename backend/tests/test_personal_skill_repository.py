@@ -28,7 +28,14 @@ from domain.skill import (
     SkillScope,
 )
 
-NOW = datetime(2026, 11, 19, tzinfo=UTC)
+
+# 使用相对当前 UTC 时间作为测试基准时钟，避免硬编码历史日期导致认证会话随时间老化过期。
+def _current_utc() -> datetime:
+    """返回相对当前系统时间的 UTC 时间戳，保证测试会话永不过期。"""
+    return datetime.now(UTC)
+
+
+NOW = _current_utc()
 
 
 class _MemoryObjects:
@@ -132,6 +139,15 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
         assert created_a.versions[0].package_sha256 == created_b.versions[0].package_sha256
 
         await _insert_public_skill(factory)
+        public_entries = await repository.get_public_directory_entries()
+        assert [(s.id, v.id) for s, v in public_entries] == [
+            ("skill_public", "skillver_public")
+        ]
+        user_entries = await repository.get_user_directory_entries(actor_a.user.id)
+        assert {(s.id, v.id) for s, v in user_entries} == {
+            ("skill_public", "skillver_public"),
+            (created_a.skill.id, created_a.versions[0].id),
+        }
         assert [item.id for item in await service.list_personal(actor_a)] == [
             created_a.skill.id
         ]

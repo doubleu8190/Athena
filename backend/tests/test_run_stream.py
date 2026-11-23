@@ -1058,3 +1058,109 @@ def test_redis_subscribe_translates_client_errors_to_transport_error() -> None:
         await transport.aclose()
 
     asyncio.run(scenario())
+
+
+def test_stream_caches_live_execution_within_ttl_and_invalidates_on_interrupt_or_epoch() -> None:
+    """短 TTL 内同代次增量复用存活校验；中断或代次切换立即重新查库。"""
+    from domain.run.model import RunInterruptedPayload
+
+    for invalid_ttl in (-0.1, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="run_stream_live_check_ttl_invalid"):
+            RunStreamService(
+                cast(RunRepository, _FakeRepository()),
+                cast(Authenticator, _FakeAuthenticator()),
+                None,
+                live_check_ttl_seconds=invalid_ttl,
+            )
+
+    class CountingRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.RUNNING, epoch=1, valid_epochs={1, 2})
+            self.live_checks: list[int] = []
+
+        async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
+            del run_id
+            self.live_checks.append(execution_epoch)
+            return execution_epoch in (self.valid_epochs or set())
+
+    incoming: list[RunStreamEvent] = [
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="a"),
+        ),
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=2,
+            payload=RunTextDeltaPayload(text="b"),
+        ),
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=3,
+            payload=RunTextDeltaPayload(text="c"),
+        ),
+        RunInterruptedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=4,
+            payload=RunInterruptedPayload(reason="publisher_error"),
+        ),
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=2,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="d"),
+        ),
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=2,
+            stream_sequence=2,
+            payload=RunTextDeltaPayload(text="e"),
+        ),
+    ]
+    repository = CountingRepository()
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository, incoming)),
+        live_check_ttl_seconds=1.0,
+    )
+
+    async def collect() -> list[RunStreamEvent]:
+        iterator = service.events(
+            "session_stream_test", "user_stream_test", "run_stream_test", "token"
+        )
+        # 1 snapshot + 3 deltas(epoch=1) + 1 interrupted(epoch=1) + 2 deltas(epoch=2) = 7
+        items = [await anext(iterator) for _ in range(7)]
+        await iterator.aclose()
+        return items
+
+    events = asyncio.run(collect())
+    assert [
+        event.payload.text for event in events if isinstance(event, RunTextDeltaEvent)
+    ] == ["a", "b", "c", "d", "e"]
+    # epoch=1 连续 3 条增量只查库 1 次；收到中断强制复核 1 次；切到 epoch=2 后 2 条增量只查库 1 次。
+    assert repository.live_checks == [1, 1, 2]
+
+    # TTL=0 时禁用缓存，每条增量都实时查库。
+    no_cache_repo = CountingRepository()
+    no_cache_service = RunStreamService(
+        cast(RunRepository, no_cache_repo),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(no_cache_repo, incoming[:3])),
+        live_check_ttl_seconds=0.0,
+    )
+
+    async def collect_no_cache() -> None:
+        iterator = no_cache_service.events(
+            "session_stream_test", "user_stream_test", "run_stream_test", "token"
+        )
+        for _ in range(4):
+            await anext(iterator)
+        await iterator.aclose()
+
+    asyncio.run(collect_no_cache())
+    assert no_cache_repo.live_checks == [1, 1, 1]

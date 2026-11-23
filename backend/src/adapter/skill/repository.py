@@ -157,8 +157,8 @@ class SqlAlchemySkillRepository(SkillRepository):
             ).one_or_none()
         return None if row is None else skill_to_domain(row[0], row[1])
 
-    async def get_public_directory(self) -> tuple[Skill, ...]:
-        """读取全部已启用候选，依赖状态由服务层实时探测。"""
+    async def get_public_directory_entries(self) -> tuple[tuple[Skill, SkillVersion], ...]:
+        """单次 JOIN 读取全部已启用公共候选及其当前不可变版本，避免服务层逐项 N+1 查版本。"""
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
@@ -175,10 +175,20 @@ class SqlAlchemySkillRepository(SkillRepository):
                     .order_by(SkillModel.slug, SkillModel.id)
                 )
             ).all()
-        return tuple(skill_to_domain(row, version) for row, version in rows)
+        return tuple(
+            (skill_to_domain(row, version), skill_version_to_domain(version))
+            for row, version in rows
+        )
 
-    async def get_user_directory(self, owner_id: str) -> tuple[Skill, ...]:
-        """读取公共和本人已启用且未删除的 Skill 候选。"""
+    async def get_public_directory(self) -> tuple[Skill, ...]:
+        """读取全部已启用候选，依赖状态由服务层实时探测。"""
+        entries = await self.get_public_directory_entries()
+        return tuple(skill for skill, _ in entries)
+
+    async def get_user_directory_entries(
+        self, owner_id: str
+    ) -> tuple[tuple[Skill, SkillVersion], ...]:
+        """单次 JOIN 读取公共及本人已启用候选及其当前版本，避免目录查询 N+1。"""
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
@@ -201,7 +211,15 @@ class SqlAlchemySkillRepository(SkillRepository):
                     .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
                 )
             ).all()
-        return tuple(skill_to_domain(row, version) for row, version in rows)
+        return tuple(
+            (skill_to_domain(row, version), skill_version_to_domain(version))
+            for row, version in rows
+        )
+
+    async def get_user_directory(self, owner_id: str) -> tuple[Skill, ...]:
+        """读取公共和本人已启用且未删除的 Skill 候选。"""
+        entries = await self.get_user_directory_entries(owner_id)
+        return tuple(skill for skill, _ in entries)
 
     async def list_personal_skills(self, owner_id: str) -> tuple[Skill, ...]:
         """读取一人未删除的个人 Skill，包含停用项。"""

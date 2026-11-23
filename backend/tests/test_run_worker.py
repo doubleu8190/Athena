@@ -763,3 +763,331 @@ def test_executor_does_not_start_provider_after_context_work_deadline() -> None:
             yield TextDelta(0, 0, "")
 
     asyncio.run(scenario())
+
+
+def test_worker_isolates_transient_db_error_without_stopping_sibling_consumer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """单个 consumer 遇到瞬态数据库错误只做局部退避，不拖垮同进程并发在途的 Run。"""
+    from sqlalchemy.exc import OperationalError
+
+    async def scenario() -> None:
+        lease = _lease()
+        in_flight_started = asyncio.Event()
+        in_flight_release = asyncio.Event()
+        in_flight_finished = asyncio.Event()
+        sibling_recovered = asyncio.Event()
+
+        class Repository(_CleanupRepository):
+            def __init__(self) -> None:
+                super().__init__()
+                self.claim_calls: dict[str, int] = {}
+                self.status = RunStatus.RUNNING
+                self.owner_worker: str | None = None
+
+            async def claim(self, worker_id: str, **kwargs: object) -> tuple[RunLease, ...]:
+                del kwargs
+                call_no = self.claim_calls.get(worker_id, 0) + 1
+                self.claim_calls[worker_id] = call_no
+                if worker_id.endswith("-0") and call_no == 1:
+                    self.owner_worker = worker_id
+                    return (
+                        replace(
+                            lease,
+                            run=replace(lease.run, worker_id=worker_id),
+                        ),
+                    )
+                if worker_id.endswith("-1"):
+                    if call_no <= 2:
+                        raise OperationalError(
+                            "SELECT 1",
+                            {},
+                            Exception("connection reset by peer"),
+                        )
+                    sibling_recovered.set()
+                return ()
+
+            async def get(self, *args: object, **kwargs: object) -> Run:
+                del args, kwargs
+                return replace(
+                    lease.run,
+                    worker_id=self.owner_worker,
+                    status=self.status,
+                )
+
+            async def heartbeat(self, *args: object, **kwargs: object) -> Run:
+                del args, kwargs
+                return replace(lease.run, worker_id=self.owner_worker)
+
+        repository = Repository()
+
+        class Executor:
+            async def execute(self, active_lease: RunLease) -> None:
+                del active_lease
+                in_flight_started.set()
+                await in_flight_release.wait()
+                repository.status = RunStatus.COMPLETED
+                in_flight_finished.set()
+
+        worker = RunWorker(
+            cast(RunRepository, repository),
+            cast(RunExecutor, Executor()),
+            RunWorkerConfig(
+                concurrency=2,
+                lease_seconds=3,
+                heartbeat_seconds=1,
+                execution_seconds=30,
+                cancel_poll_seconds=0.05,
+                queue_poll_seconds=0.05,
+                reclaim_seconds=5,
+            ),
+            worker_id="worker-resilient",
+        )
+        with caplog.at_level("WARNING"):
+            task = asyncio.create_task(worker.run())
+            try:
+                await asyncio.wait_for(in_flight_started.wait(), timeout=2)
+                await asyncio.wait_for(sibling_recovered.wait(), timeout=5)
+                # 兄弟 consumer 触发 2 次瞬态 DB 异常并恢复期间，在途 Run 未被取消。
+                in_flight_release.set()
+                await asyncio.wait_for(in_flight_finished.wait(), timeout=2)
+            finally:
+                await worker.stop()
+                await asyncio.wait_for(task, timeout=2)
+
+        assert repository.status is RunStatus.COMPLETED
+        assert repository.claim_calls["worker-resilient-1"] >= 3
+        retry_logs = [
+            record.message
+            for record in caplog.records
+            if "run_worker_database_retry" in record.message
+        ]
+        assert len(retry_logs) == 2
+
+    asyncio.run(scenario())
+
+
+def test_worker_propagates_non_recoverable_error_in_consumer() -> None:
+    """非瞬态编程错误仍按致命异常抛出，不静默吞错。"""
+
+    async def scenario() -> None:
+        class BrokenRepository(_CleanupRepository):
+            async def claim(self, worker_id: str, **kwargs: object) -> tuple[RunLease, ...]:
+                del worker_id, kwargs
+                raise ValueError("unexpected_programming_bug")
+
+        worker = RunWorker(
+            cast(RunRepository, BrokenRepository()),
+            cast(RunExecutor, _FinishedExecutor()),
+            RunWorkerConfig(
+                concurrency=1,
+                lease_seconds=3,
+                heartbeat_seconds=1,
+                execution_seconds=30,
+                cancel_poll_seconds=0.05,
+                queue_poll_seconds=0.05,
+                reclaim_seconds=5,
+            ),
+        )
+        with pytest.raises(ExceptionGroup) as exc_info:
+            await worker.run()
+        assert any(isinstance(err, ValueError) for err in exc_info.value.exceptions)
+
+    asyncio.run(scenario())
+
+
+def test_worker_finalize_publishes_events_through_failed_run_sequence() -> None:
+    """兜底 fail() 推进 event_sequence 后，必须使用 failed_run.event_sequence 推送终态事件。"""
+    from domain.run.model import RunEvent, RunFailedPayload
+    from domain.run.ports import RunEventTransport
+
+    async def scenario() -> None:
+        base_lease = _lease()
+        # 领取时 event_sequence=2，崩溃前未写入新事件；若仍用旧 current.event_sequence=2
+        # 作为目标序号，publish_pending_events 会直接短路漏推 fail() 新增的 sequence=3 事件。
+        lease = replace(base_lease, run=replace(base_lease.run, event_sequence=2))
+        failed_event = RunEvent(
+            id="evt_failed_3",
+            run_id=lease.run.id,
+            sequence=3,
+            type="failed",
+            created_at=datetime.now(UTC),
+            payload=RunFailedPayload(safe_error_code="execution_failed"),
+        )
+        published_sequences: list[int] = []
+        queried_limits: list[tuple[int, int]] = []
+
+        class Repository:
+            async def get(self, *args: object, **kwargs: object) -> Run:
+                del args, kwargs
+                # 兜底前 event_sequence 为 2，fail() 写入新事件后推进至 3。
+                return replace(lease.run, status=RunStatus.RUNNING, event_sequence=2)
+
+            async def fail(self, command: FailRunCommand) -> Run:
+                assert command.safe_error_code == "execution_failed"
+                return replace(lease.run, status=RunStatus.FAILED, event_sequence=3)
+
+            async def list_events(
+                self,
+                session_id: str,
+                owner_id: str,
+                run_id: str,
+                *,
+                after_sequence: int,
+                limit: int,
+                through_sequence: int | None = None,
+            ) -> tuple[RunEvent, ...]:
+                del session_id, owner_id, run_id, through_sequence
+                queried_limits.append((after_sequence, limit))
+                if after_sequence < failed_event.sequence:
+                    return (failed_event,)
+                return ()
+
+        class Publisher:
+            async def publish_persisted(
+                self,
+                run_id: str,
+                execution_epoch: int,
+                event: RunEvent,
+            ) -> None:
+                del run_id, execution_epoch
+                published_sequences.append(event.sequence)
+
+        worker = RunWorker(
+            cast(RunRepository, Repository()),
+            cast(RunExecutor, _FinishedExecutor()),
+            RunWorkerConfig(),
+            publisher=cast(RunEventTransport, Publisher()),
+        )
+
+        async def crashing_execution() -> None:
+            raise RuntimeError("boom")
+
+        task = asyncio.create_task(crashing_execution())
+        with pytest.raises(RuntimeError, match="boom"):
+            await asyncio.gather(task)
+        await worker._finalize_execution(lease, task)
+
+        assert queried_limits == [(2, 1)]
+        assert published_sequences == [3]
+
+    asyncio.run(scenario())
+
+
+def test_worker_drive_lease_cleanup_exception_does_not_crash_sibling_consumer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """瞬态 DB 异常触发 _cancel_and_join 时，清理阶段抛错须被收敛且不击穿兄弟 consumer。"""
+    from sqlalchemy.exc import OperationalError
+
+    async def scenario() -> None:
+        failing_lease = _lease()
+        sibling_lease = replace(
+            failing_lease,
+            run=replace(failing_lease.run, id="run_worker_sibling"),
+        )
+        sibling_started = asyncio.Event()
+        sibling_release = asyncio.Event()
+        sibling_finished = asyncio.Event()
+        cleanup_logged = asyncio.Event()
+
+        class Repository(_CleanupRepository):
+            def __init__(self) -> None:
+                super().__init__()
+                self.claimed_by_worker: dict[str, int] = {}
+                self.owners: dict[str, str] = {}
+                self.states = {
+                    failing_lease.run.id: RunStatus.RUNNING,
+                    sibling_lease.run.id: RunStatus.RUNNING,
+                }
+                self.get_calls: dict[str, int] = {}
+
+            async def claim(self, worker_id: str, **kwargs: object) -> tuple[RunLease, ...]:
+                del kwargs
+                count = self.claimed_by_worker.get(worker_id, 0) + 1
+                self.claimed_by_worker[worker_id] = count
+                if worker_id.endswith("-0") and count == 1:
+                    self.owners[failing_lease.run.id] = worker_id
+                    return (
+                        replace(
+                            failing_lease,
+                            run=replace(failing_lease.run, worker_id=worker_id),
+                        ),
+                    )
+                if worker_id.endswith("-1") and count == 1:
+                    self.owners[sibling_lease.run.id] = worker_id
+                    return (
+                        replace(
+                            sibling_lease,
+                            run=replace(sibling_lease.run, worker_id=worker_id),
+                        ),
+                    )
+                return ()
+
+            async def get(self, *args: object, **kwargs: object) -> Run:
+                del kwargs
+                run_id = cast(str, args[2])
+                self.get_calls[run_id] = self.get_calls.get(run_id, 0) + 1
+                if run_id == failing_lease.run.id:
+                    raise OperationalError("SELECT 1", {}, Exception("db connection dropped"))
+                return replace(
+                    sibling_lease.run,
+                    worker_id=self.owners.get(run_id),
+                    status=self.states[run_id],
+                )
+
+            async def heartbeat(self, *args: object, **kwargs: object) -> Run:
+                del args, kwargs
+                return sibling_lease.run
+
+        repository = Repository()
+
+        class Executor:
+            async def execute(self, active_lease: RunLease) -> None:
+                if active_lease.run.id == failing_lease.run.id:
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cleanup_logged.set()
+                        raise RuntimeError("cleanup_boom")
+                sibling_started.set()
+                await sibling_release.wait()
+                repository.states[sibling_lease.run.id] = RunStatus.COMPLETED
+                sibling_finished.set()
+
+        worker = RunWorker(
+            cast(RunRepository, repository),
+            cast(RunExecutor, Executor()),
+            RunWorkerConfig(
+                concurrency=2,
+                lease_seconds=3,
+                heartbeat_seconds=1,
+                execution_seconds=30,
+                cancel_poll_seconds=0.02,
+                queue_poll_seconds=0.05,
+                reclaim_seconds=5,
+            ),
+            worker_id="worker-cleanup-guard",
+        )
+        with caplog.at_level("WARNING"):
+            task = asyncio.create_task(worker.run())
+            try:
+                await asyncio.wait_for(sibling_started.wait(), timeout=2)
+                await asyncio.wait_for(cleanup_logged.wait(), timeout=2)
+                # 等待短暂时间确认兄弟 consumer 未因 cleanup_boom 被 TaskGroup 取消。
+                await asyncio.sleep(0.05)
+                sibling_release.set()
+                await asyncio.wait_for(sibling_finished.wait(), timeout=2)
+            finally:
+                await worker.stop()
+                await asyncio.wait_for(task, timeout=2)
+
+        assert repository.states[sibling_lease.run.id] is RunStatus.COMPLETED
+        assert any(
+            "run_execution_cleanup_failed" in record.message for record in caplog.records
+        )
+        assert any(
+            "run_worker_drive_database_retry" in record.message for record in caplog.records
+        )
+
+    asyncio.run(scenario())

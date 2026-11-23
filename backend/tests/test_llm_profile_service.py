@@ -132,7 +132,7 @@ class _CompressionPolicyRepository(_ProfileRepository):
         )
 
 
-def actor(role: UserRole = UserRole.ADMIN) -> AuthContext:
+def actor(role: UserRole = UserRole.SUPER_ADMIN) -> AuthContext:
     """创建测试身份。"""
     timestamp = datetime.now(UTC)
     return AuthContext(
@@ -209,7 +209,7 @@ def test_model_profile_create_validates_encrypted_api_key_payload(
 def test_model_profile_create_revalidates_current_admin() -> None:
     """认证上下文虽携带管理员角色，当前账号降权后仍拒绝写入。"""
     repository = _ProfileRepository()
-    service = ModelProfileService(repository, _AuthReader(actor(UserRole.USER).user))
+    service = ModelProfileService(repository, _AuthReader(actor(UserRole.MEMBER).user))
     with pytest.raises(ModelProfileAuthorizationError):
         asyncio.run(service.create(actor(), profile_input()))
     assert repository.created == []
@@ -464,9 +464,9 @@ def test_compression_policy_admin_api_and_user_denial() -> None:
     class _Authenticator:
         async def authenticate(self, token: str) -> AuthContext | None:
             if token == "admin":
-                return actor(UserRole.ADMIN)
+                return actor(UserRole.SUPER_ADMIN)
             if token == "user":
-                return actor(UserRole.USER)
+                return actor(UserRole.MEMBER)
             return None
 
     repository = _PolicyRepository()

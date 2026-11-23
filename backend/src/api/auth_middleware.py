@@ -33,9 +33,13 @@ _ADMIN_PREFIX = "/api/v1/admin"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _PUBLIC_AUTH_ROUTES = frozenset(
     {
-        ("POST", "/api/v1/auth/register"),
+        ("GET", "/api/v1/auth/providers"),
         ("POST", "/api/v1/auth/login"),
         ("POST", "/api/v1/auth/logout"),
+        ("GET", "/api/v1/auth/feishu/authorize"),
+        ("GET", "/api/v1/auth/feishu/callback"),
+        ("GET", "/api/v1/auth/mock/users"),
+        ("POST", "/api/v1/auth/mock/login"),
     }
 )
 
@@ -197,7 +201,7 @@ class AuthPrecheckMiddleware:
                     await _send_json(send, 403, ORIGIN_NOT_ALLOWED)
                     return
 
-        # 公开认证白名单在通过 Origin 校验后直接放行，保持登录、注册和幂等登出语义。
+        # 公开认证白名单通过 Origin 校验后直接放行，保持登录、SSO/Mock 回调与幂等登出语义。
         if (method, path) in _PUBLIC_AUTH_ROUTES:
             await self.app(scope, receive, send)  # type: ignore[operator]
             return
@@ -231,7 +235,7 @@ class AuthPrecheckMiddleware:
             await _send_json(send, 401, NOT_AUTHENTICATED)
             return
 
-        if is_admin_path and context.user.role is not UserRole.ADMIN:
+        if is_admin_path and context.user.role is not UserRole.SUPER_ADMIN:
             await _send_json(send, 403, "admin_required")
             return
 

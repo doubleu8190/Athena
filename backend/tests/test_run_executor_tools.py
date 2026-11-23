@@ -606,7 +606,7 @@ class _DeliveryAuth:
             status=UserStatus.ACTIVE,
             created_at=NOW,
             updated_at=NOW,
-            role=UserRole.USER,
+            role=UserRole.MEMBER,
         )
 
 

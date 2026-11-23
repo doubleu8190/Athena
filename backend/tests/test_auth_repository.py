@@ -252,6 +252,7 @@ def test_display_name_update_only_changes_name_and_requires_active_session() -> 
                 now,
             )
             assert rejected is None
+            assert user.email is not None
             stored = await repository.get_user_by_email(user.email)
             assert stored is not None
             assert stored.display_name == "New Name"
@@ -290,11 +291,11 @@ def test_repository_revalidates_current_role_and_session_state() -> None:
                 async with db_session.begin():
                     row = await db_session.get(UserModel, user.id)
                     assert row is not None
-                    row.role = UserRole.ADMIN.value
+                    row.role = UserRole.SUPER_ADMIN.value
 
             context = await repository.get_active_session(auth_session.token_hash, now)
             assert context is not None
-            assert context.user.role is UserRole.ADMIN
+            assert context.user.role is UserRole.SUPER_ADMIN
             assert (
                 await repository.get_current_session_user(user.id, auth_session.id, now)
             ) == context.user
@@ -325,8 +326,11 @@ def test_repository_promotes_only_active_non_deleted_users_idempotently() -> Non
                     _session(f"ses_{user.id}", user.id, (user.id * 64)[:64]),
                 )
 
+            assert active.email is not None
+            assert disabled.email is not None
+            assert deleted.email is not None
             promoted = await repository.promote_active_user_by_email(active.email, timestamp)
-            assert promoted is not None and promoted.role is UserRole.ADMIN
+            assert promoted is not None and promoted.role is UserRole.SUPER_ADMIN
             assert (
                 await repository.promote_active_user_by_email(
                     active.email,
@@ -393,7 +397,7 @@ def test_transaction_guard_checks_locked_user_and_session_state() -> None:
                         async with db_session.begin():
                             row = await db_session.get(UserModel, user.id)
                             assert row is not None
-                            row.role = UserRole.ADMIN.value
+                            row.role = UserRole.SUPER_ADMIN.value
                 statements: list[str] = []
 
                 def record_statement(
@@ -430,7 +434,7 @@ def test_transaction_guard_checks_locked_user_and_session_state() -> None:
                             auth_session.id,
                         )
                         if suffix == "admin":
-                            assert actual is not None and actual.role is UserRole.ADMIN
+                            assert actual is not None and actual.role is UserRole.SUPER_ADMIN
                         else:
                             assert actual is None
                         assert (

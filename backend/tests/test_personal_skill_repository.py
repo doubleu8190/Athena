@@ -403,7 +403,7 @@ async def _seed_users(
                         password_hash="unused",
                         display_name=None,
                         status=UserStatus.ACTIVE.value,
-                        role=UserRole.USER.value,
+                        role=UserRole.MEMBER.value,
                         created_at=NOW,
                         updated_at=NOW,
                         deleted_time=None,
@@ -431,7 +431,7 @@ async def _seed_users(
                     status=UserStatus.ACTIVE,
                     created_at=NOW,
                     updated_at=NOW,
-                    role=UserRole.USER,
+                    role=UserRole.MEMBER,
                 ),
                 session_id=session_id,
             )
@@ -671,7 +671,7 @@ async def _seed_admin(factory: async_sessionmaker[Any]) -> AuthContext:
         status=UserStatus.ACTIVE,
         created_at=NOW,
         updated_at=NOW,
-        role=UserRole.ADMIN,
+        role=UserRole.SUPER_ADMIN,
     )
     async with factory() as session:
         async with session.begin():

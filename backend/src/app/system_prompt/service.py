@@ -123,7 +123,7 @@ class SystemPromptService:
             actor.session_id,
             self._clock(),
         )
-        if user is None or user.role is not UserRole.ADMIN:
+        if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise SystemPromptAuthorizationError()
 
 

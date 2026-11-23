@@ -62,7 +62,7 @@ class _Auth:
             status=UserStatus.ACTIVE,
             created_at=NOW,
             updated_at=NOW,
-            role=UserRole.USER,
+            role=UserRole.MEMBER,
         )
 
     def allow_next_calls(self, count: int) -> None:

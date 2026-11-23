@@ -13,7 +13,7 @@ class PasswordHasher(Protocol):
 
     @property
     def dummy_hash(self) -> str:
-        """返回用于未知账号的固定哈希。"""
+        """返回用于未知账号或非本地账号的固定哈希。"""
 
     def hash_password(self, password: str) -> str:
         """生成不可逆密码哈希。"""
@@ -37,6 +37,9 @@ class CurrentSessionReader(Protocol):
 class AuthRepository(CurrentSessionReader, Protocol):
     """用户与登录会话的一致性持久化端口。"""
 
+    async def create_user(self, user: User) -> User:
+        """受控创建单个用户记录（邮箱冲突时抛 EmailAlreadyRegisteredError）。"""
+
     async def create_user_with_session(
         self,
         user: User,
@@ -44,11 +47,43 @@ class AuthRepository(CurrentSessionReader, Protocol):
     ) -> User:
         """在同一事务中创建用户与首个登录会话。"""
 
+    async def upsert_local_super_admin(
+        self,
+        *,
+        user_id: str,
+        email: str,
+        password_hash: str,
+        display_name: str | None,
+        now: datetime,
+    ) -> tuple[User, bool]:
+        """创建或重置本地应急 super_admin 账号，并在重置密码时撤销其既有全部会话。"""
+
+    async def get_user_by_id(self, user_id: str) -> User | None:
+        """按主键读取用户（包含停用/已删除状态供调用方判别）。"""
+
     async def get_user_by_email(self, email: str) -> User | None:
-        """按规范化邮箱读取用户，包括不可用账号。"""
+        """按规范化邮箱读取未删除用户（包含停用账号）。"""
 
     async def create_session(self, auth_session: AuthSession) -> AuthSession:
         """为已有用户创建新的登录会话。"""
+
+    async def upsert_feishu_user_and_create_session(
+        self,
+        *,
+        user_id: str,
+        union_id: str | None,
+        open_id: str | None,
+        display_name: str | None,
+        email: str | None,
+        avatar_url: str | None,
+        employee_no: str | None,
+        job_title: str | None,
+        auth_session_id: str,
+        token_hash: str,
+        expires_at: datetime,
+        now: datetime,
+    ) -> User:
+        """按 union_id/open_id 同步飞书用户并签发会话；停用或已删除用户吊销全部会话后拒绝。"""
 
     async def get_active_session(
         self,
@@ -62,7 +97,7 @@ class AuthRepository(CurrentSessionReader, Protocol):
         email: str,
         updated_at: datetime,
     ) -> User | None:
-        """锁定账号行，将现存 active 且未删除账号设为管理员。"""
+        """锁定账号行，将现存 active 且未删除账号设为超级管理员。"""
 
     async def revoke_session(
         self,
@@ -80,7 +115,7 @@ class AuthRepository(CurrentSessionReader, Protocol):
         keep_session_id: str,
         revoked_at: datetime,
     ) -> bool:
-        """原子修改密码并撤销当前会话之外的其他会话。"""
+        """原子修改本地账号密码并撤销当前会话之外的其他会话。"""
 
     async def update_display_name(
         self,

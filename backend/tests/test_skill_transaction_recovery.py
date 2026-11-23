@@ -174,7 +174,7 @@ def _context() -> AuthContext:
         status=UserStatus.ACTIVE,
         created_at=NOW,
         updated_at=NOW,
-        role=UserRole.ADMIN,
+        role=UserRole.SUPER_ADMIN,
     )
     return AuthContext(user, "auth_admin")
 

@@ -136,7 +136,7 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                             password_hash="not-used",
                             display_name=None,
                             status="active",
-                            role="user",
+                            role="member",
                             created_at=now,
                             updated_at=now,
                             deleted_time=None,

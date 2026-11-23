@@ -1,4 +1,4 @@
-"""用户注册、登录、登出与密码管理用例。"""
+"""企业级本地应急认证、飞书原生 SSO、非生产 Mock 登录与会话管理用例。"""
 
 from __future__ import annotations
 
@@ -9,32 +9,45 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from email_validator import EmailNotValidError, validate_email
 
 from app.auth.converter.result import user_to_result
 from app.auth.model.result import IssuedAuthResult, UserResult
+from app.auth.oauth_state import (
+    InMemoryOAuthStateStore,
+    OAuthStateStore,
+    validate_safe_return_to,
+)
 from app.auth.rate_limit import FixedWindowRateLimiter, RateLimiter
 from common.ids import new_id, now_utc
 from domain.auth import (
     AdminPromotionError,
     AuthContext,
+    AuthProvider,
+    AuthProviderDisabledError,
     AuthRepository,
     AuthSession,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
     InvalidDisplayNameError,
     InvalidEmailError,
+    InvalidOAuthStateError,
     InvalidPasswordError,
     InvalidSessionError,
+    MockUserNotFoundError,
+    PasswordChangeNotSupportedError,
     PasswordHasher,
     RateLimitExceededError,
     RateLimitUnavailableError,
+    SsoAuthenticationError,
     User,
     UserRole,
     UserStatus,
 )
+from domain.org import OrgMembershipReader, OrgUserDetail
+from infrastructure.feishu import FeishuError, FeishuUserIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +61,16 @@ PASSWORD_OPERATION_LIMIT = 4
 DEFAULT_SESSION_SECONDS = 7 * 24 * 60 * 60
 REMEMBER_SESSION_SECONDS = 30 * 24 * 60 * 60
 _PasswordResult = TypeVar("_PasswordResult")
+
+
+class FeishuSsoClient(Protocol):
+    """认证服务所需的飞书 SSO 最小能力端口。"""
+
+    def build_authorize_url(self, state: str) -> str:
+        """构造飞书 OAuth2 授权跳转地址。"""
+
+    async def exchange_code_for_user(self, code: str) -> FeishuUserIdentity:
+        """用一次性 OAuth code 换取飞书用户身份信息。"""
 
 
 def _default_user_id() -> str:
@@ -87,6 +110,16 @@ def _normalize_email(email: str) -> str:
     return normalized
 
 
+def _normalize_optional_email(email: str | None) -> str | None:
+    """规范化第三方 SSO 返回的可选邮箱，格式非法时安全降级为 None。"""
+    if email is None:
+        return None
+    try:
+        return _normalize_email(email)
+    except InvalidEmailError:
+        return None
+
+
 def _login_email_key(email: str) -> str:
     """为无效邮箱也生成稳定的限流键。"""
     candidate = email.strip().lower()
@@ -114,6 +147,18 @@ def _normalize_display_name(display_name: str | None) -> str | None:
     return normalized
 
 
+def _normalize_optional_display_name(display_name: str | None) -> str | None:
+    """容错清洗第三方 SSO 姓名：剔除 Unicode Cc 控制字符、去首尾空白并截断至列上限。"""
+    if display_name is None:
+        return None
+    sanitized = "".join(
+        character for character in display_name if unicodedata.category(character) != "Cc"
+    ).strip()
+    if not sanitized:
+        return None
+    return sanitized[:MAX_DISPLAY_NAME_LENGTH]
+
+
 def _normalize_client_key(client_key: str) -> str:
     """限制入口 key 长度并保证非空。"""
     normalized = client_key.strip()
@@ -126,25 +171,36 @@ def _hash_token(token: str) -> str:
 
 
 class AuthService:
-    """管理用户凭据与服务端可撤销登录会话。"""
+    """管理本地应急凭据、飞书原生 SSO、非生产 Mock 登录与服务端可撤销会话。"""
 
     def __init__(
         self,
         repository: AuthRepository,
         password_hasher: PasswordHasher,
         *,
+        org_reader: OrgMembershipReader | None = None,
+        feishu_client: FeishuSsoClient | None = None,
+        oauth_state_store: OAuthStateStore | None = None,
+        mock_enabled: bool = False,
         user_id_factory: Callable[[], str] = _default_user_id,
         auth_session_id_factory: Callable[[], str] = _default_auth_session_id,
         token_factory: Callable[[], str] = _default_token,
         clock: Callable[[], datetime] = now_utc,
         login_account_limiter: RateLimiter | None = None,
         login_ip_limiter: RateLimiter | None = None,
-        register_limiter: RateLimiter | None = None,
         change_password_limiter: RateLimiter | None = None,
     ) -> None:
-        """保存仓储、密码哈希器、限流器及可替换来源。"""
+        """保存仓储、密码哈希器、SSO/组织依赖、限流器及可替换时钟与工厂。"""
         self._repository = repository
         self._password_hasher = password_hasher
+        self._org_reader = org_reader
+        self._feishu_client = feishu_client
+        self._oauth_state_store = (
+            oauth_state_store
+            if oauth_state_store is not None
+            else (InMemoryOAuthStateStore() if feishu_client is not None else None)
+        )
+        self._mock_enabled = mock_enabled
         self._password_operation_slots = asyncio.Semaphore(PASSWORD_OPERATION_LIMIT)
         self._user_id_factory = user_id_factory
         self._auth_session_id_factory = auth_session_id_factory
@@ -158,31 +214,33 @@ class AuthService:
             limit=30,
             window_seconds=15 * 60,
         )
-        self._register_limiter = register_limiter or FixedWindowRateLimiter(
-            limit=10,
-            window_seconds=60 * 60,
-        )
         self._change_password_limiter = change_password_limiter or FixedWindowRateLimiter(
             limit=5,
             window_seconds=15 * 60,
         )
 
-    async def register(
+    @property
+    def feishu_enabled(self) -> bool:
+        """指示当前实例是否启用了飞书原生 SSO。"""
+        return self._feishu_client is not None
+
+    @property
+    def mock_enabled(self) -> bool:
+        """指示当前实例是否启用了非生产本地 Mock 快捷登录。"""
+        return self._mock_enabled
+
+    async def provision_local_user(
         self,
         email: str,
         password: str,
         *,
         display_name: str | None = None,
-        client_key: str = "unknown",
-    ) -> IssuedAuthResult:
-        """开放注册并直接签发登录会话。"""
+        role: UserRole = UserRole.MEMBER,
+    ) -> UserResult:
+        """内部受控置备本地密码账号（不对外开放自助注册 HTTP 接口）。"""
         normalized_email = _normalize_email(email)
         normalized_password = _validate_password(password)
         normalized_display_name = _normalize_display_name(display_name)
-        normalized_client = _normalize_client_key(client_key)
-        if not await self._register_limiter.consume(f"register:{normalized_client}"):
-            raise RateLimitExceededError("rate_limited")
-
         current = _utc_value(self._clock())
         user = User(
             id=self._user_id_factory(),
@@ -193,21 +251,36 @@ class AuthService:
             ),
             display_name=normalized_display_name,
             status=UserStatus.ACTIVE,
-            role=UserRole.USER,
+            role=role,
+            auth_provider=AuthProvider.LOCAL,
             created_at=current,
             updated_at=current,
         )
-        auth_session, token, max_age_seconds = self._new_session(
-            user.id,
-            current,
-            DEFAULT_SESSION_SECONDS,
+        created = await self._repository.create_user(user)
+        return await self._enrich_user(created)
+
+    async def bootstrap_super_admin(
+        self,
+        email: str,
+        password: str,
+        *,
+        display_name: str | None = None,
+    ) -> tuple[User, bool]:
+        """创建或重置本地应急 super_admin 账号（供运维 CLI 调用）。"""
+        normalized_email = _normalize_email(email)
+        normalized_password = _validate_password(password)
+        normalized_display_name = _normalize_display_name(display_name)
+        password_hash = await self._run_password_operation(
+            self._password_hasher.hash_password,
+            normalized_password,
         )
-        created = await self._repository.create_user_with_session(user, auth_session)
-        return IssuedAuthResult(
-            user=user_to_result(created),
-            token=token,
-            expires_at=auth_session.expires_at,
-            max_age_seconds=max_age_seconds,
+        current = _utc_value(self._clock())
+        return await self._repository.upsert_local_super_admin(
+            user_id=self._user_id_factory(),
+            email=normalized_email,
+            password_hash=password_hash,
+            display_name=normalized_display_name,
+            now=current,
         )
 
     async def login(
@@ -218,7 +291,7 @@ class AuthService:
         remember_me: bool = False,
         client_key: str = "unknown",
     ) -> IssuedAuthResult:
-        """校验邮箱密码并签发固定期限会话。"""
+        """仅允许活跃本地账号校验邮箱密码并签发固定期限会话。"""
         normalized_client = _normalize_client_key(client_key)
         email_key = _login_email_key(email)
         ip_key = f"login:ip:{normalized_client}"
@@ -241,7 +314,13 @@ class AuthService:
             raise InvalidCredentialsError("invalid_credentials") from error
 
         user = await self._repository.get_user_by_email(normalized_email)
-        if user is None:
+        # 未知账号、非 local 账号（飞书/Mock）或无密码哈希时一律执行 dummy_hash 校验，
+        # 统一返回 InvalidCredentialsError 防止通过计时或错误差异枚举账号来源。
+        if (
+            user is None
+            or user.auth_provider is not AuthProvider.LOCAL
+            or user.password_hash is None
+        ):
             await self._run_password_operation(
                 self._password_hasher.verify_password,
                 password,
@@ -270,11 +349,110 @@ class AuthService:
         )
         await self._repository.create_session(auth_session)
         return IssuedAuthResult(
-            user=user_to_result(user),
+            user=await self._enrich_user(user),
             token=token,
             expires_at=auth_session.expires_at,
             max_age_seconds=max_age_seconds,
         )
+
+    async def start_feishu_authorize(self, *, return_to: str | None = None) -> str:
+        """校验回跳路径、签发一次性防重放 state 并生成飞书授权页跳转地址。"""
+        if self._feishu_client is None or self._oauth_state_store is None:
+            raise AuthProviderDisabledError("feishu_not_enabled")
+        safe_return_to = validate_safe_return_to(return_to)
+        state = await self._oauth_state_store.issue(
+            provider="feishu",
+            return_to=safe_return_to,
+        )
+        return self._feishu_client.build_authorize_url(state)
+
+    async def complete_feishu_callback(
+        self,
+        *,
+        code: str,
+        state: str,
+    ) -> tuple[IssuedAuthResult, str]:
+        """原子消费一次性 state，向飞书换取身份并签发同源会话 Cookie。"""
+        if self._feishu_client is None or self._oauth_state_store is None:
+            raise AuthProviderDisabledError("feishu_not_enabled")
+
+        # 必须先原子消费 state，确保即便后续上游换码失败也不存在重放窗口。
+        state_payload = await self._oauth_state_store.consume(state, provider="feishu")
+        if state_payload is None:
+            raise InvalidOAuthStateError("invalid_oauth_state")
+        safe_return_to = validate_safe_return_to(state_payload.return_to)
+
+        try:
+            identity = await self._feishu_client.exchange_code_for_user(code)
+        except FeishuError:
+            # 截断底层异常链，防止任何 code/app_secret/access_token 逸出到上层。
+            raise SsoAuthenticationError("feishu_auth_failed") from None
+
+        current = _utc_value(self._clock())
+        token = self._token_factory()
+        auth_session_id = self._auth_session_id_factory()
+        expires_at = current + timedelta(seconds=DEFAULT_SESSION_SECONDS)
+        user = await self._repository.upsert_feishu_user_and_create_session(
+            user_id=self._user_id_factory(),
+            union_id=identity.union_id,
+            open_id=identity.open_id,
+            display_name=_normalize_optional_display_name(identity.name),
+            email=_normalize_optional_email(identity.email),
+            avatar_url=identity.avatar_url,
+            employee_no=identity.employee_no,
+            job_title=identity.job_title,
+            auth_session_id=auth_session_id,
+            token_hash=_hash_token(token),
+            expires_at=expires_at,
+            now=current,
+        )
+        issued = IssuedAuthResult(
+            user=await self._enrich_user(user),
+            token=token,
+            expires_at=expires_at,
+            max_age_seconds=DEFAULT_SESSION_SECONDS,
+        )
+        return issued, safe_return_to
+
+    async def list_mock_users(self) -> tuple[OrgUserDetail, ...]:
+        """返回非生产本地 Mock 模式下全部可用测试账号及其组织信息。"""
+        if not self._mock_enabled or self._org_reader is None:
+            raise AuthProviderDisabledError("auth_mock_not_enabled")
+        return await self._org_reader.list_active_mock_users()
+
+    async def login_mock_user(self, user_id: str) -> IssuedAuthResult:
+        """非生产 Mock 快捷登录：校验目标为活跃 mock 账号后签发真实服务端会话。"""
+        if not self._mock_enabled:
+            raise AuthProviderDisabledError("auth_mock_not_enabled")
+        cleaned_id = user_id.strip()
+        if not cleaned_id:
+            raise MockUserNotFoundError("mock_user_not_found")
+        user = await self._repository.get_user_by_id(cleaned_id)
+        if (
+            user is None
+            or user.auth_provider is not AuthProvider.MOCK
+            or user.deleted_time is not None
+        ):
+            raise MockUserNotFoundError("mock_user_not_found")
+        if user.status is not UserStatus.ACTIVE:
+            raise InvalidCredentialsError("invalid_credentials")
+        current = _utc_value(self._clock())
+        auth_session, token, max_age_seconds = self._new_session(
+            user.id,
+            current,
+            DEFAULT_SESSION_SECONDS,
+        )
+        await self._repository.create_session(auth_session)
+        return IssuedAuthResult(
+            user=await self._enrich_user(user),
+            token=token,
+            expires_at=auth_session.expires_at,
+            max_age_seconds=max_age_seconds,
+        )
+
+    async def get_me(self, context: AuthContext) -> UserResult:
+        """返回当前登录用户的安全资料，并附带部门归属与部门管理范围。"""
+        return await self._enrich_user(context.user)
 
     async def authenticate(self, token: str) -> AuthContext | None:
         """验证原始 token 并返回有效登录上下文。"""
@@ -286,26 +464,16 @@ class AuthService:
         )
 
     async def revalidate_admin(self, context: AuthContext) -> User | None:
-        """按会话 ID 从数据库复核当前有效用户及管理员角色。
-
-        参数：context 是认证依赖提供的用户与会话标识。
-        返回：当前仍有效且为管理员的用户；否则返回 None。
-        异常：仓储故障会原样传播。
-        """
+        """按会话 ID 从数据库复核当前有效用户及超级管理员角色。"""
         user = await self._repository.get_current_session_user(
             context.user.id,
             context.session_id,
             _utc_value(self._clock()),
         )
-        return user if user is not None and user.role is UserRole.ADMIN else None
+        return user if user is not None and user.role is UserRole.SUPER_ADMIN else None
 
     async def promote_admin_by_email(self, email: str) -> User:
-        """将已有 active 且未删除账号提升为管理员。
-
-        参数：email 是待提升账号的邮箱地址。
-        返回：角色更新后的用户。
-        异常：邮箱无效或账号不存在、停用、已删除时抛 AdminPromotionError。
-        """
+        """将已有 active 且未删除账号提升为超级管理员。"""
         try:
             normalized_email = _normalize_email(email)
         except InvalidEmailError as error:
@@ -333,7 +501,12 @@ class AuthService:
         current_password: str,
         new_password: str,
     ) -> None:
-        """校验当前密码并撤销其他设备会话。"""
+        """仅允许本地密码账号修改密码，并撤销其他设备会话。"""
+        if (
+            context.user.auth_provider is not AuthProvider.LOCAL
+            or context.user.password_hash is None
+        ):
+            raise PasswordChangeNotSupportedError("password_change_not_supported")
         rate_limit_key = f"change_password:user:{context.user.id}"
         # 按 user_id 限制改密失败次数，在进入 Argon2 校验前拦截暴力猜测。
         if not await self._change_password_limiter.consume(rate_limit_key):
@@ -373,13 +546,7 @@ class AuthService:
         context: AuthContext,
         display_name: str | None,
     ) -> UserResult:
-        """更新当前用户显示名，并在持久化边界复核会话。
-
-        参数：context 是请求认证得到的用户与会话；display_name 是允许清空的原始输入。
-        返回：持久化后的用户安全结果。
-        异常：名称含控制字符或过长时抛出 InvalidDisplayNameError；
-        会话失效时抛出 InvalidSessionError。
-        """
+        """更新当前用户显示名，并在持久化边界复核会话。"""
         normalized_display_name = _normalize_display_name(display_name)
         updated = await self._repository.update_display_name(
             context.user.id,
@@ -389,7 +556,18 @@ class AuthService:
         )
         if updated is None:
             raise InvalidSessionError("invalid_session")
-        return user_to_result(updated)
+        return await self._enrich_user(updated)
+
+    async def _enrich_user(self, user: User) -> UserResult:
+        """按需附加用户所属活跃部门及已授权管辖部门 ID。"""
+        if self._org_reader is None:
+            return user_to_result(user)
+        membership = await self._org_reader.get_user_org_membership(user.id)
+        return user_to_result(
+            user,
+            departments=membership.departments,
+            managed_department_ids=membership.managed_department_ids,
+        )
 
     def _new_session(
         self,
@@ -414,12 +592,7 @@ class AuthService:
         operation: Callable[..., _PasswordResult],
         *arguments: str,
     ) -> _PasswordResult:
-        """在线程中执行密码运算，并限制同时运行的任务数量。
-
-        参数：operation 是同步哈希或验证函数；arguments 是传给该函数的字符串参数。
-        返回：operation 在线程中的计算结果。
-        异常：传播 operation 抛出的异常；调用任务取消时传播 CancelledError。
-        """
+        """在线程中执行密码运算，并限制同时运行的任务数量。"""
         await self._password_operation_slots.acquire()
         task = asyncio.create_task(asyncio.to_thread(operation, *arguments))
         try:
@@ -438,12 +611,7 @@ class AuthService:
         return result
 
     def _release_password_operation_slot(self, task: asyncio.Task[object]) -> None:
-        """在线程任务结束后释放名额并读取异常，避免取消后的警告。
-
-        参数：task 是已完成的后台线程任务。
-        返回：无。
-        异常：不主动抛出业务异常。
-        """
+        """在线程任务结束后释放名额并读取异常，避免取消后的警告。"""
         self._password_operation_slots.release()
         if not task.cancelled():
             task.exception()
@@ -452,6 +620,7 @@ class AuthService:
 __all__ = [
     "AuthService",
     "DEFAULT_SESSION_SECONDS",
+    "FeishuSsoClient",
     "MAX_PASSWORD_LENGTH",
     "MIN_PASSWORD_LENGTH",
     "REMEMBER_SESSION_SECONDS",

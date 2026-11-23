@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
-from auth_support import TEST_PASSWORD, make_auth_service
+from auth_support import TEST_PASSWORD, make_auth_service, provision_local_user_sync
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
@@ -51,9 +51,9 @@ class _CountingAuthenticator:
         if token == "db_os_error":
             raise OSError("socket reset")
         if token == "member_token":
-            return _make_context("usr_member", UserRole.USER)
+            return _make_context("usr_member", UserRole.MEMBER)
         if token == "admin_token":
-            return _make_context("usr_admin", UserRole.ADMIN)
+            return _make_context("usr_admin", UserRole.SUPER_ADMIN)
         return None
 
 
@@ -79,9 +79,13 @@ def test_public_whitelist_and_health_and_options_pass_through() -> None:
         allowed_cases = (
             ("GET", "/health"),
             ("OPTIONS", "/api/v1/projects"),
-            ("POST", "/api/v1/auth/register"),
+            ("GET", "/api/v1/auth/providers"),
             ("POST", "/api/v1/auth/login"),
             ("POST", "/api/v1/auth/logout"),
+            ("GET", "/api/v1/auth/feishu/authorize"),
+            ("GET", "/api/v1/auth/feishu/callback"),
+            ("GET", "/api/v1/auth/mock/users"),
+            ("POST", "/api/v1/auth/mock/login"),
         )
         for method, path in allowed_cases:
             responses: list[dict[str, object]] = []
@@ -459,9 +463,11 @@ def test_dependency_overrides_bypass_precheck_while_keeping_origin_check() -> No
         return {"admin": admin_auth.user.id}
 
     app.dependency_overrides[get_current_auth] = lambda: _make_context(
-        "usr_override", UserRole.USER
+        "usr_override", UserRole.MEMBER
     )
-    app.dependency_overrides[require_admin] = lambda: _make_context("usr_boss", UserRole.ADMIN)
+    app.dependency_overrides[require_admin] = lambda: _make_context(
+        "usr_boss", UserRole.SUPER_ADMIN
+    )
 
     with TestClient(app) as client:
         # 1. 无 Cookie 时依赖覆盖生效
@@ -501,7 +507,9 @@ def test_create_app_runs_auth_precheck_before_upload_admission(
         ),
     )
 
-    app = create_app(auth_service=make_auth_service())
+    auth_service = make_auth_service()
+    provision_local_user_sync(auth_service, email="member@example.com", password=TEST_PASSWORD)
+    app = create_app(auth_service=auth_service)
 
     with TestClient(app) as client:
         # 1. 未登录上传即使携带超限 Content-Length，也必须先被外层鉴权拦截为 401（而非内层 413）
@@ -515,12 +523,12 @@ def test_create_app_runs_auth_precheck_before_upload_admission(
         assert unauth_upload.status_code == 401
         assert unauth_upload.json() == {"detail": "not_authenticated"}
 
-        # 2. 注册并登录普通用户
-        registered = client.post(
-            "/api/v1/auth/register",
+        # 2. 登录普通成员账号
+        logged_in = client.post(
+            "/api/v1/auth/login",
             json={"email": "member@example.com", "password": TEST_PASSWORD},
         )
-        assert registered.status_code == 201
+        assert logged_in.status_code == 200
 
         # 3. 普通用户请求管理员技能上传，即使携带超限 Content-Length 也先被外层角色预检为 403
         non_admin_upload = client.post(

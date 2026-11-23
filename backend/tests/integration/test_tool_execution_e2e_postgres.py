@@ -289,7 +289,7 @@ async def _seed(
                 password_hash="unused",
                 display_name=None,
                 status="active",
-                role="user",
+                role="member",
                 created_at=now,
                 updated_at=now,
                 deleted_time=None,

@@ -114,7 +114,7 @@ async def _seed_user_and_profile(
                 password_hash=password_hash,
                 display_name=None,
                 status="active",
-                role="user",
+                role="member",
                 created_at=now,
                 updated_at=now,
                 deleted_time=None,

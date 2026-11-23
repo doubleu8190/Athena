@@ -31,7 +31,7 @@ from domain.system_prompt import (
 NOW = datetime(2026, 11, 11, 8, 0, tzinfo=UTC)
 
 
-def _user(role: UserRole = UserRole.ADMIN) -> User:
+def _user(role: UserRole = UserRole.SUPER_ADMIN) -> User:
     """构造当前认证用户。"""
     return User(
         id="usr_system_prompt",
@@ -45,7 +45,7 @@ def _user(role: UserRole = UserRole.ADMIN) -> User:
     )
 
 
-def _actor(role: UserRole = UserRole.ADMIN) -> AuthContext:
+def _actor(role: UserRole = UserRole.SUPER_ADMIN) -> AuthContext:
     """构造认证上下文；服务仍会通过会话读取器复核当前角色。"""
     return AuthContext(user=_user(role), session_id="auth_system_prompt")
 
@@ -215,7 +215,7 @@ class _Repository:
 def test_service_rechecks_current_admin_before_each_operation() -> None:
     """认证上下文携带管理员角色但当前账号降权时，所有操作都被拒绝。"""
     repository = _Repository()
-    reader = _AuthReader(_user(UserRole.USER))
+    reader = _AuthReader(_user(UserRole.MEMBER))
     service = SystemPromptService(repository, reader, clock=lambda: NOW)
 
     operations = (
@@ -320,7 +320,7 @@ def test_admin_api_contract_permission_validation_and_error_mapping() -> None:
             if token == "admin":
                 return _actor()
             if token == "user":
-                return _actor(UserRole.USER)
+                return _actor(UserRole.MEMBER)
             return None
 
     repository = _Repository()
@@ -431,7 +431,7 @@ def test_admin_api_contract_permission_validation_and_error_mapping() -> None:
         assert unavailable.status_code == 503
         assert unavailable.json() == {"detail": "system_prompt_unavailable"}
 
-        reader.user = replace(admin_user, role=UserRole.USER)
+        reader.user = replace(admin_user, role=UserRole.MEMBER)
         demoted = client.get(current_path)
         assert demoted.status_code == 403
         assert demoted.json() == {"detail": "admin_required"}

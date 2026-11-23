@@ -75,7 +75,7 @@ async def _setup() -> tuple[
         status=UserStatus.ACTIVE,
         created_at=_NOW,
         updated_at=_NOW,
-        role=UserRole.ADMIN,
+        role=UserRole.SUPER_ADMIN,
     )
     auth_session = AuthSession(
         id="ses_mcp_admin",

@@ -895,7 +895,9 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
             async with holder_factory() as database_session:
                 async with database_session.begin():
                     await database_session.execute(
-                        text("UPDATE users SET role = 'admin' WHERE id IN (:first, :second)"),
+                        text(
+                            "UPDATE users SET role = 'super_admin' WHERE id IN (:first, :second)"
+                        ),
                         {"first": role_guard_user, "second": role_first_user},
                     )
 
@@ -918,7 +920,7 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
             )
             release_guard.set()
             await asyncio.wait_for(holder_task, timeout=TASK_TIMEOUT)
-            assert observed["revoke_guard"].role.value == "user"
+            assert observed["revoke_guard"].role.value == "member"
             assert await asyncio.wait_for(operation_task, timeout=TASK_TIMEOUT) is True
 
             # 撤销先提交时，后续事务 guard 不得返回用户。
@@ -947,7 +949,7 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
                 async with worker_factory() as database_session:
                     async with database_session.begin():
                         await database_session.execute(
-                            text("UPDATE users SET role = 'user' WHERE id = :user_id"),
+                            text("UPDATE users SET role = 'member' WHERE id = :user_id"),
                             {"user_id": user_id},
                         )
 
@@ -960,7 +962,7 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
             )
             release_guard.set()
             await asyncio.wait_for(holder_task, timeout=TASK_TIMEOUT)
-            assert observed["role_guard"].role.value == "admin"
+            assert observed["role_guard"].role.value == "super_admin"
             await asyncio.wait_for(operation_task, timeout=TASK_TIMEOUT)
 
             # 角色变更先提交时，guard 读取已变更的普通用户角色。
@@ -970,7 +972,7 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
                     demoted = await SqlAlchemyAuthTransactionGuard(
                         database_session
                     ).lock_current_session_user(role_first_user, role_first_session)
-                    assert demoted is not None and demoted.role.value == "user"
+                    assert demoted is not None and demoted.role.value == "member"
 
             # 会话在 guard 等待 user 行锁期间过期，锁后 clock 必须使最终复核拒绝。
             expiring_user = f"user_expiring_guard_{suffix}"

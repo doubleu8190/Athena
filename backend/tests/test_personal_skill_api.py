@@ -230,7 +230,7 @@ def _client(
         status=UserStatus.ACTIVE,
         created_at=NOW,
         updated_at=NOW,
-        role=UserRole.USER,
+        role=UserRole.MEMBER,
     )
     actor = AuthContext(user=user, session_id="auth_demo")
     service = service or _PersonalService()

@@ -124,12 +124,12 @@ CurrentAuth = Annotated[AuthContext, Depends(get_current_auth)]
 
 
 async def require_admin(current_auth: CurrentAuth) -> AuthContext:
-    """基于本次数据库认证结果预检查管理员角色。
+    """基于本次数据库认证结果预检查超级管理员角色。
 
-    管理操作服务仍须调用 AuthService.revalidate_admin，避免把依赖层检查当作
+    管理操作服务仍须调用 AuthService.revalidate_admin 及事务守卫，避免把依赖层检查当作
     事务内最终授权。此依赖不读取任何管理资源。
     """
-    if current_auth.user.role is not UserRole.ADMIN:
+    if current_auth.user.role is not UserRole.SUPER_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="admin_required",

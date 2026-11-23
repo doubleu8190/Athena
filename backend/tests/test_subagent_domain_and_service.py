@@ -43,7 +43,7 @@ from domain.tool import AdminToolDefinition, ToolPage
 NOW = datetime(2026, 11, 15, 10, 0, tzinfo=UTC)
 
 
-def _actor(role: UserRole = UserRole.ADMIN) -> AuthContext:
+def _actor(role: UserRole = UserRole.SUPER_ADMIN) -> AuthContext:
     user = User(
         id="usr_admin_1",
         email="admin@example.com",
@@ -333,7 +333,7 @@ def test_domain_allowed_tools_dedup_and_forbid_dispatch() -> None:
 
 def test_service_authorization_and_external_checks() -> None:
     async def scenario() -> None:
-        actor = _actor(UserRole.ADMIN)
+        actor = _actor(UserRole.SUPER_ADMIN)
         repo = _InMemorySubagentRepo()
         mcp_tool = AdminToolDefinition(
             tool_id="tool_mcp_1",
@@ -357,7 +357,7 @@ def test_service_authorization_and_external_checks() -> None:
         # 非管理员 / 失效会话拦截
         non_admin_service = SubagentService(
             repo,
-            _StubAuthReader(_actor(UserRole.USER).user),
+            _StubAuthReader(_actor(UserRole.MEMBER).user),
         )
         with pytest.raises(SubagentAdminRequiredError):
             await non_admin_service.list_subagents(actor)

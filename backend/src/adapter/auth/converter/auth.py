@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from adapter.auth.model.auth import AuthSessionModel, UserModel
-from domain.auth import AuthSession, User, UserRole, UserStatus
+from domain.auth import AuthProvider, AuthSession, User, UserRole, UserStatus
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -24,6 +24,13 @@ def user_to_domain(row: UserModel) -> User:
         display_name=row.display_name,
         status=UserStatus(row.status),
         role=UserRole(row.role),
+        auth_provider=AuthProvider(row.auth_provider),
+        external_union_id=row.external_union_id,
+        external_open_id=row.external_open_id,
+        employee_no=row.employee_no,
+        avatar_url=row.avatar_url,
+        job_title=row.job_title,
+        last_synced_at=(_as_utc(row.last_synced_at) if row.last_synced_at is not None else None),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
         deleted_time=(_as_utc(row.deleted_time) if row.deleted_time is not None else None),

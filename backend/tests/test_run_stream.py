@@ -177,7 +177,7 @@ class _FakeAuthenticator:
             status=UserStatus.ACTIVE,
             created_at=now,
             updated_at=now,
-            role=UserRole.USER,
+            role=UserRole.MEMBER,
         )
         return AuthContext(user=user, session_id="auth-session")
 

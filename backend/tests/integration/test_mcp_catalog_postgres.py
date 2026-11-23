@@ -72,7 +72,7 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
                 status=UserStatus.ACTIVE,
                 created_at=now,
                 updated_at=now,
-                role=UserRole.ADMIN,
+                role=UserRole.SUPER_ADMIN,
             )
             auth_session = AuthSession(
                 id=f"ses_mcp_{suffix}",

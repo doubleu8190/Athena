@@ -302,7 +302,7 @@ def test_injected_tool_manager_keeps_mcp_tools_in_default_subagent_catalog(
         status=UserStatus.ACTIVE,
         created_at=now,
         updated_at=now,
-        role=UserRole.ADMIN,
+        role=UserRole.SUPER_ADMIN,
     )
     actor = AuthContext(user=admin, session_id="sess_admin")
     created_repositories: list[SqlAlchemyMcpRepository] = []

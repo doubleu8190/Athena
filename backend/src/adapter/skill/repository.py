@@ -1097,7 +1097,7 @@ class SqlAlchemySkillRepository(SkillRepository):
         """在管理写事务内重新锁定并校验当前管理员身份。"""
         guard = SqlAlchemyAuthTransactionGuard(session)
         user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
-        if user is None or user.role is not UserRole.ADMIN:
+        if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise PermissionError("admin_required")
 
     @staticmethod

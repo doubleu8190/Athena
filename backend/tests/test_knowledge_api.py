@@ -217,7 +217,7 @@ def _context(owner_id: str) -> AuthContext:
             UserStatus.ACTIVE,
             now,
             now,
-            UserRole.USER,
+            UserRole.MEMBER,
         ),
         "session_test",
     )
@@ -535,7 +535,7 @@ def test_list_documents_endpoint_serializes_latest_version_summary_and_null(
                     password_hash="unused",
                     display_name=None,
                     status="active",
-                    role="user",
+                    role="member",
                     created_at=now,
                     updated_at=now,
                 )

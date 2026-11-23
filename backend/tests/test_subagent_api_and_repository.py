@@ -50,7 +50,7 @@ async def _build_subagent_app() -> tuple[
                         email="admin@example.com",
                         password_hash="unused",
                         display_name="Admin",
-                        role=UserRole.ADMIN.value,
+                        role=UserRole.SUPER_ADMIN.value,
                         status=UserStatus.ACTIVE.value,
                         created_at=NOW,
                         updated_at=NOW,
@@ -60,7 +60,7 @@ async def _build_subagent_app() -> tuple[
                         email="member@example.com",
                         password_hash="unused",
                         display_name="Member",
-                        role=UserRole.USER.value,
+                        role=UserRole.MEMBER.value,
                         status=UserStatus.ACTIVE.value,
                         created_at=NOW,
                         updated_at=NOW,
@@ -379,7 +379,7 @@ def test_subagent_admin_crud_lifecycle_and_errors() -> None:
                                 select(UserModel).where(UserModel.id == "usr_admin")
                             )
                             assert user_row is not None
-                            user_row.role = UserRole.USER.value
+                            user_row.role = UserRole.MEMBER.value
 
                     demoted_resp = await client.post(
                         "/api/v1/admin/subagents",

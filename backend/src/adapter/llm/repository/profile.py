@@ -316,7 +316,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
         """在写事务中锁定并复核当前管理员身份。"""
         guard = SqlAlchemyAuthTransactionGuard(session, clock=self._clock)
         user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
-        if user is None or user.role is not UserRole.ADMIN:
+        if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise ModelProfileAuthorizationError()
 
 

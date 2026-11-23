@@ -23,6 +23,7 @@ from adapter.llm.model import (
 )
 from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
+from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from adapter.preference.model import UserMemoryModel, UserWorkProfileModel
 from adapter.project.model import ProjectModel
 from adapter.run.model import (
@@ -45,6 +46,8 @@ __all__ = [
     "AuthSessionModel",
     "Base",
     "ConversationMessageModel",
+    "DepartmentModel",
+    "DeptAdminScopeModel",
     "ExecutionMessageModel",
     "DefaultModelProfileModel",
     "CompressionPolicyVersionModel",
@@ -77,6 +80,7 @@ __all__ = [
     "SubagentModel",
     "SystemPromptSettingModel",
     "SystemPromptVersionModel",
+    "UserDepartmentModel",
     "UserMemoryModel",
     "UserModel",
     "UserWorkProfileModel",

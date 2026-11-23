@@ -66,7 +66,7 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                             password_hash="unused",
                             display_name=None,
                             status="active",
-                            role="admin",
+                            role="super_admin",
                             created_at=now,
                             updated_at=now,
                             deleted_time=None,
@@ -90,7 +90,7 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                     password_hash="unused",
                     display_name=None,
                     status=UserStatus.ACTIVE,
-                    role=UserRole.ADMIN,
+                    role=UserRole.SUPER_ADMIN,
                     created_at=now,
                     updated_at=now,
                 ),
@@ -213,7 +213,9 @@ def test_model_profile_migration_admin_and_runtime_credentials(
             async with factory() as session:
                 async with session.begin():
                     await session.execute(
-                        update(UserModel).where(UserModel.id == "usr_llm_admin").values(role="user")
+                        update(UserModel)
+                        .where(UserModel.id == "usr_llm_admin")
+                        .values(role="member")
                     )
             with pytest.raises(ModelProfileAuthorizationError):
                 user_actor = AuthContext(
@@ -223,7 +225,7 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                         password_hash="unused",
                         display_name=None,
                         status=UserStatus.ACTIVE,
-                        role=UserRole.USER,
+                        role=UserRole.MEMBER,
                         created_at=now,
                         updated_at=now,
                     ),

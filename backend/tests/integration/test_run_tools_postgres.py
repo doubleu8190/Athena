@@ -214,7 +214,7 @@ async def _seed_owner_and_profile(
                 password_hash="unused",
                 display_name=None,
                 status="active",
-                role="user",
+                role="member",
                 created_at=now,
                 updated_at=now,
                 deleted_time=None,
@@ -1417,7 +1417,7 @@ def test_project_knowledge_limit_is_atomic_and_repeat_bind_is_idempotent() -> No
                         password_hash="unused",
                         display_name=None,
                         status="active",
-                        role="user",
+                        role="member",
                         created_at=now,
                         updated_at=now,
                         deleted_time=None,
@@ -2375,7 +2375,7 @@ def test_pool_size_one_maintenance_imports_and_publishes_without_nested_connecti
             )
             async with factory() as session, session.begin():
                 await session.execute(
-                    update(UserModel).where(UserModel.id == owner_id).values(role="admin")
+                    update(UserModel).where(UserModel.id == owner_id).values(role="super_admin")
                 )
                 session.add(
                     AuthSessionModel(
@@ -2396,7 +2396,7 @@ def test_pool_size_one_maintenance_imports_and_publishes_without_nested_connecti
                 status=UserStatus.ACTIVE,
                 created_at=now,
                 updated_at=now,
-                role=UserRole.ADMIN,
+                role=UserRole.SUPER_ADMIN,
             )
             actor = AuthContext(actor_user, "auth_pool_one")
             store = PoolStore()

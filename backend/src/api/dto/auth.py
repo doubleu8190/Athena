@@ -4,23 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from domain.auth import UserRole
-
-
-class RegisterRequest(BaseModel):
-    """开放注册请求。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    email: str
-    password: str
-    display_name: str | None = None
+from domain.auth import AuthProvider, UserRole
 
 
 class LoginRequest(BaseModel):
-    """邮箱密码登录请求。"""
+    """本地应急账号邮箱密码登录请求。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -30,7 +20,7 @@ class LoginRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    """已登录用户修改密码请求。"""
+    """已登录本地账号修改密码请求。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -46,20 +36,75 @@ class UpdateCurrentUserRequest(BaseModel):
     display_name: str | None
 
 
-class UserResponse(BaseModel):
-    """可安全返回给当前用户的账号字段。"""
+class UserDepartmentItem(BaseModel):
+    """用户所属部门摘要。"""
 
     id: str
-    email: str
+    name: str
+    path: str
+    is_primary: bool
+
+
+class UserResponse(BaseModel):
+    """可安全返回给当前用户的账号与组织身份字段。"""
+
+    id: str
+    email: str | None
     display_name: str | None
     created_at: datetime
     role: UserRole
+    auth_provider: AuthProvider = AuthProvider.LOCAL
+    employee_no: str | None = None
+    job_title: str | None = None
+    avatar_url: str | None = None
+    departments: list[UserDepartmentItem] = Field(default_factory=list)
+    managed_department_ids: list[str] = Field(default_factory=list)
+
+
+class AuthProvidersResponse(BaseModel):
+    """当前部署启用的登录入口能力声明。"""
+
+    feishu_enabled: bool
+    local_login_enabled: bool = True
+    mock_enabled: bool
+
+
+class MockUserResponse(BaseModel):
+    """非生产 Mock 快捷登录可选账号投影。"""
+
+    id: str
+    display_name: str | None
+    email: str | None
+    role: UserRole
+    employee_no: str | None = None
+    job_title: str | None = None
+    avatar_url: str | None = None
+    departments: list[UserDepartmentItem] = Field(default_factory=list)
+    managed_department_ids: list[str] = Field(default_factory=list)
+
+
+class MockUserListResponse(BaseModel):
+    """非生产 Mock 账号清单响应。"""
+
+    items: list[MockUserResponse]
+
+
+class MockLoginRequest(BaseModel):
+    """非生产 Mock 快捷登录请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(min_length=1, max_length=128)
 
 
 __all__ = [
+    "AuthProvidersResponse",
     "ChangePasswordRequest",
     "LoginRequest",
-    "RegisterRequest",
-    "UserResponse",
+    "MockLoginRequest",
+    "MockUserListResponse",
+    "MockUserResponse",
     "UpdateCurrentUserRequest",
+    "UserDepartmentItem",
+    "UserResponse",
 ]

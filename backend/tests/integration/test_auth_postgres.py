@@ -76,10 +76,11 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                 created_at=timestamp,
             )
             await repository.create_user_with_session(user, first)
-            assert user.role is UserRole.USER
+            assert user.role is UserRole.MEMBER
             await repository.create_session(second)
+            assert user.email is not None
             promoted = await repository.promote_active_user_by_email(user.email, timestamp)
-            assert promoted is not None and promoted.role is UserRole.ADMIN
+            assert promoted is not None and promoted.role is UserRole.SUPER_ADMIN
             assert (
                 await repository.get_current_session_user(user.id, first.id, timestamp)
             ) == promoted
@@ -190,7 +191,7 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                         text("SELECT role FROM users WHERE id = :user_id"),
                         {"user_id": user.id},
                     )
-                    == UserRole.USER.value
+                    == UserRole.MEMBER.value
                 )
             with pytest.raises(IntegrityError):
                 async with test_engine.begin() as connection:

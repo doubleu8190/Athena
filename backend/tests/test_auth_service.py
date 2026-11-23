@@ -10,6 +10,7 @@ from threading import Event, Lock
 from typing import Any
 
 import pytest
+from auth_support import InMemoryAuthRepository
 
 from app.auth.rate_limit import FixedWindowRateLimiter
 from app.auth.service import (
@@ -19,15 +20,14 @@ from app.auth.service import (
 )
 from domain.auth import (
     AdminPromotionError,
-    AuthContext,
-    AuthRepository,
-    AuthSession,
+    AuthProvider,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
     InvalidDisplayNameError,
     InvalidEmailError,
     InvalidPasswordError,
+    PasswordChangeNotSupportedError,
     PasswordHasher,
     RateLimitExceededError,
     User,
@@ -57,141 +57,6 @@ class FakePasswordHasher(PasswordHasher):
         return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 
-class InMemoryAuthRepository(AuthRepository):
-    """用于服务测试的内存用户与会话仓储。"""
-
-    def __init__(self) -> None:
-        self.users: dict[str, User] = {}
-        self.sessions: dict[str, AuthSession] = {}
-
-    async def create_user_with_session(
-        self,
-        user: User,
-        auth_session: AuthSession,
-    ) -> User:
-        if any(existing.email == user.email for existing in self.users.values()):
-            raise EmailAlreadyRegisteredError("email_exists")
-        self.users[user.id] = user
-        self.sessions[auth_session.token_hash] = auth_session
-        return user
-
-    async def get_user_by_email(self, email: str) -> User | None:
-        return next(
-            (user for user in self.users.values() if user.email == email),
-            None,
-        )
-
-    async def create_session(self, auth_session: AuthSession) -> AuthSession:
-        self.sessions[auth_session.token_hash] = auth_session
-        return auth_session
-
-    async def get_active_session(
-        self,
-        token_hash: str,
-        now: datetime,
-    ) -> AuthContext | None:
-        auth_session = self.sessions.get(token_hash)
-        if (
-            auth_session is None
-            or auth_session.revoked_time is not None
-            or auth_session.expires_at <= now
-        ):
-            return None
-        user = self.users.get(auth_session.user_id)
-        if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
-            return None
-        return AuthContext(user=user, session_id=auth_session.id)
-
-    async def get_current_session_user(
-        self,
-        user_id: str,
-        session_id: str,
-        now: datetime,
-    ) -> User | None:
-        session = next((item for item in self.sessions.values() if item.id == session_id), None)
-        user = self.users.get(user_id)
-        if session is None or session.user_id != user_id or session.revoked_time is not None:
-            return None
-        if session.expires_at <= now or user is None:
-            return None
-        if user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
-            return None
-        return user
-
-    async def promote_active_user_by_email(
-        self,
-        email: str,
-        updated_at: datetime,
-    ) -> User | None:
-        user = await self.get_user_by_email(email)
-        if user is None or user.status is not UserStatus.ACTIVE or user.deleted_time is not None:
-            return None
-        promoted = replace(user, role=UserRole.ADMIN, updated_at=updated_at)
-        self.users[user.id] = promoted
-        return promoted
-
-    async def revoke_session(
-        self,
-        token_hash: str,
-        revoked_at: datetime,
-    ) -> bool:
-        auth_session = self.sessions.get(token_hash)
-        if auth_session is None or auth_session.revoked_time is not None:
-            return False
-        self.sessions[token_hash] = replace(auth_session, revoked_time=revoked_at)
-        return True
-
-    async def change_password_and_revoke_sessions(
-        self,
-        user_id: str,
-        password_hash: str,
-        updated_at: datetime,
-        *,
-        keep_session_id: str,
-        revoked_at: datetime,
-    ) -> bool:
-        user = self.users.get(user_id)
-        if user is None or user.deleted_time is not None:
-            return False
-        self.users[user_id] = replace(
-            user,
-            password_hash=password_hash,
-            updated_at=updated_at,
-        )
-        for token_hash, auth_session in tuple(self.sessions.items()):
-            if (
-                auth_session.user_id == user_id
-                and auth_session.id != keep_session_id
-                and auth_session.revoked_time is None
-            ):
-                self.sessions[token_hash] = replace(
-                    auth_session,
-                    revoked_time=revoked_at,
-                )
-        return True
-
-    async def update_display_name(
-        self,
-        user_id: str,
-        session_id: str,
-        display_name: str | None,
-        updated_at: datetime,
-    ) -> User | None:
-        user = self.users.get(user_id)
-        session = next((item for item in self.sessions.values() if item.id == session_id), None)
-        if (
-            user is None
-            or session is None
-            or session.user_id != user_id
-            or session.revoked_time is not None
-            or session.expires_at <= updated_at
-        ):
-            return None
-        updated = replace(user, display_name=display_name, updated_at=updated_at)
-        self.users[user_id] = updated
-        return updated
-
-
 class MutableClock:
     """可以推进的 UTC 时钟。"""
 
@@ -205,11 +70,21 @@ class MutableClock:
         self.value += timedelta(**kwargs)
 
 
+def _incrementing_factory(prefix: str) -> Any:
+    counter = 0
+
+    def create() -> str:
+        nonlocal counter
+        counter += 1
+        return f"{prefix}{counter}"
+
+    return create
+
+
 def _service(
     *,
     clock: MutableClock | None = None,
     login_limit: int = 5,
-    register_limit: int = 10,
 ) -> tuple[AuthService, InMemoryAuthRepository, FakePasswordHasher, MutableClock]:
     repository = InMemoryAuthRepository()
     hasher = FakePasswordHasher()
@@ -231,43 +106,26 @@ def _service(
             window_seconds=60,
             clock=lambda: current_clock.value.timestamp(),
         ),
-        register_limiter=FixedWindowRateLimiter(
-            limit=register_limit,
-            window_seconds=60,
-            clock=lambda: current_clock.value.timestamp(),
-        ),
     )
     return service, repository, hasher, current_clock
 
 
-def _incrementing_factory(prefix: str) -> Any:
-    counter = 0
-
-    def create() -> str:
-        nonlocal counter
-        counter += 1
-        return f"{prefix}{counter}"
-
-    return create
-
-
-def test_register_normalizes_email_and_never_returns_password_hash() -> None:
+def test_provision_local_user_normalizes_email_and_never_returns_password_hash() -> None:
     async def scenario() -> None:
-        service, repository, _, clock = _service()
-        issued = await service.register(
+        service, repository, _, _ = _service()
+        created = await service.provision_local_user(
             "  User@Example.COM ",
             "long-enough-password",
             display_name="  Athena  ",
         )
 
-        assert issued.user.email == "user@example.com"
-        assert issued.user.display_name == "Athena"
-        assert issued.token == "token_1"
-        assert issued.expires_at == clock.value + timedelta(seconds=DEFAULT_SESSION_SECONDS)
-        assert issued.max_age_seconds == DEFAULT_SESSION_SECONDS
+        assert created.email == "user@example.com"
+        assert created.display_name == "Athena"
+        assert created.role is UserRole.MEMBER
+        assert created.auth_provider is AuthProvider.LOCAL
         stored = repository.users["usr_1"]
         assert stored.password_hash == "fake:long-enough-password"
-        assert "password" not in issued.user.__dataclass_fields__
+        assert "password" not in created.__dataclass_fields__
 
     _run(scenario())
 
@@ -294,7 +152,6 @@ def test_password_operation_does_not_block_loop_and_cancelled_work_keeps_slot() 
         first = asyncio.create_task(service._run_password_operation(slow_operation, "first"))
         assert await asyncio.to_thread(started[0].wait, 2)
 
-        # 阻塞中的密码计算不应妨碍事件循环，也不能因调用方取消而提前释放并发名额。
         loop_progressed = asyncio.Event()
         asyncio.get_running_loop().call_soon(loop_progressed.set)
         await asyncio.wait_for(loop_progressed.wait(), timeout=0.5)
@@ -313,23 +170,73 @@ def test_password_operation_does_not_block_loop_and_cancelled_work_keeps_slot() 
     _run(scenario())
 
 
-def test_register_rejects_invalid_input_and_duplicate_email() -> None:
+def test_provision_local_user_rejects_invalid_input_and_duplicate_email() -> None:
     async def scenario() -> None:
         service, _, _, _ = _service()
         with pytest.raises(InvalidEmailError):
-            await service.register("not-an-email", "long-enough-password")
+            await service.provision_local_user("not-an-email", "long-enough-password")
         with pytest.raises(InvalidPasswordError):
-            await service.register("user@example.com", "too-short")
+            await service.provision_local_user("user@example.com", "too-short")
         with pytest.raises(InvalidDisplayNameError):
-            await service.register(
+            await service.provision_local_user(
                 "user@example.com",
                 "long-enough-password",
                 display_name="first\nsecond",
             )
 
-        await service.register("user@example.com", "long-enough-password")
+        await service.provision_local_user("user@example.com", "long-enough-password")
         with pytest.raises(EmailAlreadyRegisteredError):
-            await service.register("user@example.com", "long-enough-password")
+            await service.provision_local_user("user@example.com", "long-enough-password")
+
+    _run(scenario())
+
+
+def test_bootstrap_super_admin_creates_resets_and_rejects_external_provider() -> None:
+    """应急 super_admin 创建、密码重置撤销旧会话，且拒绝覆盖外部 SSO 账号。"""
+
+    async def scenario() -> None:
+        service, repository, _, _ = _service()
+        admin, created = await service.bootstrap_super_admin(
+            "Admin@Example.com",
+            "initial-super-password",
+            display_name="应急超管",
+        )
+        assert created is True
+        assert admin.role is UserRole.SUPER_ADMIN
+        assert admin.auth_provider is AuthProvider.LOCAL
+        assert admin.email == "admin@example.com"
+
+        issued = await service.login("admin@example.com", "initial-super-password")
+        assert await service.authenticate(issued.token) is not None
+
+        reset_admin, created_again = await service.bootstrap_super_admin(
+            "admin@example.com",
+            "rotated-super-password",
+        )
+        assert created_again is False
+        assert reset_admin.id == admin.id
+        # 密码重置必须立即撤销旧会话，旧密码不可再登录，新密码可正常登录。
+        assert await service.authenticate(issued.token) is None
+        with pytest.raises(InvalidCredentialsError):
+            await service.login("admin@example.com", "initial-super-password")
+        relogged = await service.login("admin@example.com", "rotated-super-password")
+        assert relogged.user.role is UserRole.SUPER_ADMIN
+
+        # 外部飞书账号占用邮箱时，拒绝通过 bootstrap 劫持。
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        repository.users["usr_feishu"] = User(
+            id="usr_feishu",
+            email="feishu-boss@example.com",
+            password_hash=None,
+            display_name="飞书老板",
+            status=UserStatus.ACTIVE,
+            role=UserRole.MEMBER,
+            auth_provider=AuthProvider.FEISHU,
+            created_at=now,
+            updated_at=now,
+        )
+        with pytest.raises(AdminPromotionError):
+            await service.bootstrap_super_admin("feishu-boss@example.com", "another-long-password")
 
     _run(scenario())
 
@@ -337,11 +244,12 @@ def test_register_rejects_invalid_input_and_duplicate_email() -> None:
 def test_update_display_name_normalizes_clear_and_rejects_invalid_values() -> None:
     async def scenario() -> None:
         service, repository, _, _ = _service()
-        issued = await service.register(
+        await service.provision_local_user(
             "user@example.com",
             "long-enough-password",
             display_name="Original",
         )
+        issued = await service.login("user@example.com", "long-enough-password")
         context = await service.authenticate(issued.token)
         assert context is not None
         original_password_hash = repository.users[context.user.id].password_hash
@@ -358,17 +266,36 @@ def test_update_display_name_normalizes_clear_and_rejects_invalid_values() -> No
     _run(scenario())
 
 
-def test_login_uses_dummy_hash_for_unknown_user_and_generic_error() -> None:
+def test_login_uses_dummy_hash_for_unknown_and_non_local_users() -> None:
+    """未知账号、飞书账号、Mock 账号或无密码哈希账号登录时均执行 dummy_hash 校验防枚举。"""
+
     async def scenario() -> None:
-        service, _, hasher, _ = _service()
+        service, repository, hasher, _ = _service()
         with pytest.raises(InvalidCredentialsError):
             await service.login("missing@example.com", "long-enough-password")
-        assert hasher.verify_calls[-1] == (
-            "long-enough-password",
-            hasher.dummy_hash,
-        )
+        assert hasher.verify_calls[-1] == ("long-enough-password", hasher.dummy_hash)
 
-        await service.register("user@example.com", "long-enough-password")
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        for provider, email in (
+            (AuthProvider.FEISHU, "feishu@example.com"),
+            (AuthProvider.MOCK, "mock@example.com"),
+        ):
+            repository.users[f"usr_{provider.value}"] = User(
+                id=f"usr_{provider.value}",
+                email=email,
+                password_hash=None,
+                display_name=provider.value,
+                status=UserStatus.ACTIVE,
+                role=UserRole.MEMBER,
+                auth_provider=provider,
+                created_at=now,
+                updated_at=now,
+            )
+            with pytest.raises(InvalidCredentialsError):
+                await service.login(email, "long-enough-password")
+            assert hasher.verify_calls[-1] == ("long-enough-password", hasher.dummy_hash)
+
+        await service.provision_local_user("user@example.com", "long-enough-password")
         with pytest.raises(InvalidCredentialsError):
             await service.login("user@example.com", "wrong-password-value")
 
@@ -378,7 +305,7 @@ def test_login_uses_dummy_hash_for_unknown_user_and_generic_error() -> None:
 def test_disabled_or_deleted_user_cannot_login() -> None:
     async def scenario() -> None:
         service, repository, _, _ = _service()
-        await service.register("user@example.com", "long-enough-password")
+        await service.provision_local_user("user@example.com", "long-enough-password")
         user = repository.users["usr_1"]
 
         repository.users["usr_1"] = replace(user, status=UserStatus.DISABLED)
@@ -398,7 +325,8 @@ def test_disabled_or_deleted_user_cannot_login() -> None:
 def test_session_expiry_and_logout_are_enforced_server_side() -> None:
     async def scenario() -> None:
         service, _, _, clock = _service()
-        issued = await service.register("user@example.com", "long-enough-password")
+        await service.provision_local_user("user@example.com", "long-enough-password")
+        issued = await service.login("user@example.com", "long-enough-password")
 
         context = await service.authenticate(issued.token)
         assert context is not None
@@ -408,10 +336,8 @@ def test_session_expiry_and_logout_are_enforced_server_side() -> None:
         assert await service.authenticate(issued.token) is None
 
         second_service, _, _, _ = _service()
-        second_issued = await second_service.register(
-            "user@example.com",
-            "long-enough-password",
-        )
+        await second_service.provision_local_user("user@example.com", "long-enough-password")
+        second_issued = await second_service.login("user@example.com", "long-enough-password")
         await second_service.logout(second_issued.token)
         assert await second_service.authenticate(second_issued.token) is None
 
@@ -421,7 +347,8 @@ def test_session_expiry_and_logout_are_enforced_server_side() -> None:
 def test_login_remember_me_and_password_change_revokes_other_sessions() -> None:
     async def scenario() -> None:
         service, _, _, _ = _service()
-        first = await service.register("user@example.com", "long-enough-password")
+        await service.provision_local_user("user@example.com", "long-enough-password")
+        first = await service.login("user@example.com", "long-enough-password")
         second = await service.login(
             "user@example.com",
             "long-enough-password",
@@ -452,36 +379,51 @@ def test_login_remember_me_and_password_change_revokes_other_sessions() -> None:
     _run(scenario())
 
 
-def test_login_and_registration_rate_limits() -> None:
-    async def scenario() -> None:
-        login_service, _, _, _ = _service(login_limit=1)
-        await login_service.register("user@example.com", "long-enough-password")
-        with pytest.raises(InvalidCredentialsError):
-            await login_service.login("user@example.com", "wrong-password-value")
-        with pytest.raises(RateLimitExceededError):
-            await login_service.login("user@example.com", "long-enough-password")
+def test_change_password_rejects_sso_and_mock_users() -> None:
+    """飞书与 Mock 账号调用 change_password 直接抛出 PasswordChangeNotSupportedError。"""
 
-        register_service, _, _, _ = _service(register_limit=1)
-        await register_service.register("first@example.com", "long-enough-password")
-        with pytest.raises(RateLimitExceededError):
-            await register_service.register("second@example.com", "long-enough-password")
+    async def scenario() -> None:
+        service, repository, _, clock = _service()
+        now = clock()
+        for provider in (AuthProvider.FEISHU, AuthProvider.MOCK):
+            user = User(
+                id=f"usr_{provider.value}",
+                email=f"{provider.value}@example.com",
+                password_hash=None,
+                display_name=provider.value,
+                status=UserStatus.ACTIVE,
+                role=UserRole.MEMBER,
+                auth_provider=provider,
+                created_at=now,
+                updated_at=now,
+            )
+            repository.users[user.id] = user
+            auth_session, token, _ = service._new_session(user.id, now, DEFAULT_SESSION_SECONDS)
+            await repository.create_session(auth_session)
+            ctx = await service.authenticate(token)
+            assert ctx is not None
+            with pytest.raises(PasswordChangeNotSupportedError):
+                await service.change_password(
+                    ctx,
+                    "long-enough-password",
+                    "new-long-enough-password",
+                )
 
     _run(scenario())
 
 
-def test_login_account_limit_cannot_be_bypassed_by_rotating_client_keys() -> None:
+def test_login_rate_limits_and_account_limit_cannot_be_bypassed() -> None:
     async def scenario() -> None:
-        service, _, _, _ = _service(login_limit=1)
-        await service.register("user@example.com", "long-enough-password")
-
+        login_service, _, _, _ = _service(login_limit=1)
+        await login_service.provision_local_user("user@example.com", "long-enough-password")
         with pytest.raises(InvalidCredentialsError):
-            await service.login(
+            await login_service.login(
                 "user@example.com",
                 "wrong-password-value",
                 client_key="198.51.100.1",
             )
         with pytest.raises(RateLimitExceededError):
-            await service.login(
+            await login_service.login(
                 "user@example.com",
                 "long-enough-password",
                 client_key="198.51.100.2",
@@ -504,11 +446,14 @@ def test_argon2_hasher_produces_salted_hashes() -> None:
 def test_admin_promotion_is_idempotent_and_requires_active_existing_account() -> None:
     async def scenario() -> None:
         service, repository, _, _ = _service()
-        registered = await service.register("admin@example.com", "long-enough-password")
+        provisioned = await service.provision_local_user(
+            "admin@example.com",
+            "long-enough-password",
+        )
         promoted = await service.promote_admin_by_email("ADMIN@example.com")
-        assert promoted.role is UserRole.ADMIN
+        assert promoted.role is UserRole.SUPER_ADMIN
         assert await service.promote_admin_by_email("admin@example.com") == promoted
-        assert registered.user.role is UserRole.USER
+        assert provisioned.role is UserRole.MEMBER
 
         repository.users["usr_2"] = replace(
             repository.users["usr_1"],
@@ -532,16 +477,21 @@ def test_admin_promotion_is_idempotent_and_requires_active_existing_account() ->
 def test_admin_revalidation_reads_current_role_and_rejects_revoked_session() -> None:
     async def scenario() -> None:
         service, repository, _, _ = _service()
-        registered = await service.register("user@example.com", "long-enough-password")
-        context = await service.authenticate(registered.token)
+        await service.provision_local_user("user@example.com", "long-enough-password")
+        issued = await service.login("user@example.com", "long-enough-password")
+        context = await service.authenticate(issued.token)
         assert context is not None
         assert await service.revalidate_admin(context) is None
 
-        repository.users[context.user.id] = replace(context.user, role=UserRole.ADMIN)
-        current = await service.revalidate_admin(context)
-        assert current is not None and current.role is UserRole.ADMIN
+        # dept_admin 不得通过 super_admin 复核。
+        repository.users[context.user.id] = replace(context.user, role=UserRole.DEPT_ADMIN)
+        assert await service.revalidate_admin(context) is None
 
-        await service.logout(registered.token)
+        repository.users[context.user.id] = replace(context.user, role=UserRole.SUPER_ADMIN)
+        current = await service.revalidate_admin(context)
+        assert current is not None and current.role is UserRole.SUPER_ADMIN
+
+        await service.logout(issued.token)
         assert await service.revalidate_admin(context) is None
 
     _run(scenario())
@@ -552,11 +502,11 @@ def test_change_password_rate_limits_failures_and_resets_on_success() -> None:
 
     async def scenario() -> None:
         service, _, _, _ = _service()
-        issued = await service.register("user@example.com", "long-enough-password")
+        await service.provision_local_user("user@example.com", "long-enough-password")
+        issued = await service.login("user@example.com", "long-enough-password")
         context = await service.authenticate(issued.token)
         assert context is not None
 
-        # 前 4 次错密码均报 InvalidCurrentPasswordError，第 5 次正确改密后应重置计数窗口。
         for _ in range(4):
             with pytest.raises(InvalidCurrentPasswordError):
                 await service.change_password(
@@ -570,7 +520,6 @@ def test_change_password_rate_limits_failures_and_resets_on_success() -> None:
             "next-long-enough-password",
         )
 
-        # 刷新上下文，验证重置后仍拥有完整的 5 次尝试额度，第 6 次触发 RateLimitExceededError。
         refreshed = await service.authenticate(issued.token)
         assert refreshed is not None
         for _ in range(5):

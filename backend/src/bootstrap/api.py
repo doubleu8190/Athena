@@ -16,6 +16,7 @@ from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
+from adapter.org import SqlAlchemyOrgRepository
 from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
@@ -29,6 +30,7 @@ from app.file import SessionFileService
 from app.knowledge.service import KnowledgeService
 from app.llm import ModelProfileService
 from app.message.service import MessageService
+from app.org import FeishuOrgSyncService, OrgService, seed_mock_organization
 from app.preference import PreferenceService
 from app.project.service import ProjectService
 from app.run.service import RunService
@@ -46,9 +48,12 @@ from bootstrap.knowledge import (
 )
 from bootstrap.redis import (
     build_auth_rate_limiters,
+    build_oauth_state_store,
     build_redis_client,
     build_run_transport,
+    is_production_environment,
     validate_auth_rate_limit_configuration,
+    validate_feishu_state_store_configuration,
 )
 from bootstrap.tool import QueryServiceBundle, build_query_services
 from domain.file.ports import FileObjectStore
@@ -59,7 +64,9 @@ from domain.knowledge.ports import (
     OriginalStore,
 )
 from domain.mcp import McpSecretError
+from domain.org import OrgRepository
 from infrastructure.database import Database
+from infrastructure.feishu import FeishuClient, FeishuConfig
 from infrastructure.knowledge.parsers import LocalDocumentParser
 from infrastructure.mcp.discovery import McpDiscoveryClient
 from infrastructure.security.mcp_secrets import McpSecretCipher
@@ -104,10 +111,16 @@ class ApiDependencies:
     session_file_service: SessionFileService | None
     knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
     subagent_service: SubagentService | None = None
+    org_service: OrgService | None = None
+    org_repository: OrgRepository | None = None
+    feishu_client: FeishuClient | None = None
+    auth_mock_enabled: bool = False
     redis_client: Redis | None = None
 
     async def start(self) -> None:
-        """在首个请求前启动共享查询资源。"""
+        """在首个请求前启动共享查询资源，并在非生产 Mock 模式下幂等预置组织与账号种子。"""
+        if self.auth_mock_enabled and self.org_repository is not None:
+            await seed_mock_organization(self.org_repository)
         if self.file_object_store is not None:
             await self.file_object_store.start()
         if self.query_services is not None:
@@ -115,6 +128,14 @@ class ApiDependencies:
 
     async def aclose(self) -> None:
         """按依赖逆序释放资源；单项失败不阻断后续清理。"""
+        if self.feishu_client is not None:
+            try:
+                await self.feishu_client.aclose()
+            except Exception as error:
+                logger.error(
+                    "feishu_client_shutdown_failed exception_type=%s",
+                    type(error).__name__,
+                )
         if self.run_transport is not None:
             try:
                 await self.run_transport.aclose()
@@ -170,18 +191,36 @@ def build_api_dependencies(
     skill_service: SkillService | None = None,
     session_file_service: SessionFileService | None = None,
     subagent_service: SubagentService | None = None,
+    org_service: OrgService | None = None,
 ) -> ApiDependencies:
     """按环境变量与注入参数组装 API 进程依赖。
 
     注入的用例保持调用方所有权，不在此关闭；只有本函数自行创建的资源
     进入返回值的清理生命周期。
     """
+    # 强制生产安全护栏：生产环境严禁开启本地 Mock 快捷登录，在分配任何连接池前立即阻断启动。
+    auth_mock_enabled = env_flag("ATHENA_AUTH_MOCK_ENABLED", default=False)
+    if is_production_environment() and auth_mock_enabled:
+        raise RuntimeError("auth_mock_forbidden_in_production")
+
+    feishu_enabled = env_flag("ATHENA_FEISHU_ENABLED", default=False)
+    feishu_config: FeishuConfig | None = None
+    if feishu_enabled:
+        # 生产环境开启飞书 SSO 必须提供 Redis 一次性 state 存储，并校验凭据与 HTTPS 配置。
+        validate_feishu_state_store_configuration()
+        feishu_config = FeishuConfig.from_environment(
+            is_production=is_production_environment(),
+        )
+
     database: Database | None = None
     project_use_case = project_service
     message_use_case = message_service
     session_use_case = session_service
     run_use_case = run_service
     auth_use_case = auth_service
+    org_use_case = org_service
+    org_repository: OrgRepository | None = None
+    feishu_client: FeishuClient | None = None
     database_url = os.getenv("ATHENA_DATABASE_URL")
     mcp_use_case = tool_manager
     model_profile_use_case = model_profile_service
@@ -236,6 +275,7 @@ def build_api_dependencies(
             secret_cipher = None
     if database_url and (
         auth_use_case is None
+        or org_use_case is None
         or project_use_case is None
         or message_use_case is None
         or session_use_case is None
@@ -258,6 +298,20 @@ def build_api_dependencies(
             )
         session_repository = SqlAlchemySessionRepository(database.session_factory)
         auth_repository = SqlAlchemyAuthRepository(database.session_factory)
+        org_repository = SqlAlchemyOrgRepository(database.session_factory)
+        if feishu_config is not None:
+            feishu_client = FeishuClient(feishu_config)
+        feishu_sync_service = (
+            FeishuOrgSyncService(feishu_client, org_repository)
+            if feishu_client is not None
+            else None
+        )
+        if org_use_case is None:
+            org_use_case = OrgService(
+                org_repository,
+                auth_repository,
+                feishu_sync_service=feishu_sync_service,
+            )
         if system_prompt_use_case is None:
             system_prompt_use_case = SystemPromptService(
                 SqlAlchemySystemPromptRepository(database.session_factory),
@@ -313,18 +367,31 @@ def build_api_dependencies(
         # 所有权统一归 ApiDependencies.aclose() 释放。
         redis_client = build_redis_client()
         if auth_use_case is None:
+            oauth_state_store = (
+                build_oauth_state_store(redis_client) if feishu_client is not None else None
+            )
             if redis_client is not None:
                 rate_limiters = build_auth_rate_limiters(redis_client)
                 auth_use_case = AuthService(
                     auth_repository,
                     Argon2PasswordHasher(),
+                    org_reader=org_repository,
+                    feishu_client=feishu_client,
+                    oauth_state_store=oauth_state_store,
+                    mock_enabled=auth_mock_enabled,
                     login_account_limiter=rate_limiters.login_account,
                     login_ip_limiter=rate_limiters.login_ip,
-                    register_limiter=rate_limiters.register,
                     change_password_limiter=rate_limiters.change_password,
                 )
             else:
-                auth_use_case = AuthService(auth_repository, Argon2PasswordHasher())
+                auth_use_case = AuthService(
+                    auth_repository,
+                    Argon2PasswordHasher(),
+                    org_reader=org_repository,
+                    feishu_client=feishu_client,
+                    oauth_state_store=oauth_state_store,
+                    mock_enabled=auth_mock_enabled,
+                )
         if auth_use_case is not None:
             # Redis 未配置时保持为 None，Run 流式服务降级为仅持久化事件。
             run_transport = (
@@ -390,6 +457,10 @@ def build_api_dependencies(
         skill_service=skill_use_case,
         session_file_service=session_file_use_case,
         subagent_service=subagent_use_case,
+        org_service=org_use_case,
+        org_repository=org_repository,
+        feishu_client=feishu_client,
+        auth_mock_enabled=auth_mock_enabled,
         redis_client=redis_client,
     )
 

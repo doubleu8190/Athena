@@ -33,6 +33,16 @@ x-backend-environment: &backend-environment
   # 允许跨域写请求的规范 Origin，未设置时后端默认使用请求自身的 scheme://netloc
   ATHENA_PUBLIC_ORIGIN: ${ATHENA_PUBLIC_ORIGIN:-http://localhost}
 
+  # 飞书原生 SSO 与通讯录组织树同步（生产开启时强制依赖 ATHENA_REDIS_URL 与 HTTPS）
+  ATHENA_FEISHU_ENABLED: ${ATHENA_FEISHU_ENABLED:-false}
+  ATHENA_FEISHU_APP_ID: ${ATHENA_FEISHU_APP_ID:-}
+  ATHENA_FEISHU_APP_SECRET: ${ATHENA_FEISHU_APP_SECRET:-}
+  ATHENA_FEISHU_REDIRECT_URI: ${ATHENA_FEISHU_REDIRECT_URI:-}
+  ATHENA_FEISHU_BASE_URL: ${ATHENA_FEISHU_BASE_URL:-https://open.feishu.cn}
+
+  # 非生产本地 Mock 组织与快捷登录开关（ATHENA_ENV=production 时开启将强制拒绝启动）
+  ATHENA_AUTH_MOCK_ENABLED: ${ATHENA_AUTH_MOCK_ENABLED:-false}
+
   # 技能脚本运行时可写目录
   ATHENA_SKILL_TEMP_ROOT: ${ATHENA_SKILL_TEMP_ROOT:-/app/var/skill-executions}
 

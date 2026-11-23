@@ -254,7 +254,7 @@ class SubagentService:
         )
         if user is None:
             raise SubagentInvalidSessionError()
-        if user.role is not UserRole.ADMIN:
+        if user.role is not UserRole.SUPER_ADMIN:
             raise SubagentAdminRequiredError()
 
     async def _validate_external_references(

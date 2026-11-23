@@ -1,4 +1,4 @@
-"""用户、认证会话和已认证上下文。"""
+"""用户、认证方式、登录会话和已认证上下文。"""
 
 from __future__ import annotations
 
@@ -15,24 +15,40 @@ class UserStatus(StrEnum):
 
 
 class UserRole(StrEnum):
-    """用户可拥有的基础权限角色。"""
+    """企业分权角色枚举：超级管理员、部门管理员与普通成员。"""
 
-    ADMIN = "admin"
-    USER = "user"
+    SUPER_ADMIN = "super_admin"
+    DEPT_ADMIN = "dept_admin"
+    MEMBER = "member"
+
+
+class AuthProvider(StrEnum):
+    """用户身份认证来源：本地应急账号、飞书原生 SSO 或非生产 Mock 账号。"""
+
+    LOCAL = "local"
+    FEISHU = "feishu"
+    MOCK = "mock"
 
 
 @dataclass(frozen=True, slots=True)
 class User:
-    """平台用户及其密码凭据。"""
+    """平台用户及其身份来源、企业组织资料与可选本地密码凭据。"""
 
     id: str
-    email: str
-    password_hash: str
+    email: str | None
+    password_hash: str | None
     display_name: str | None
     status: UserStatus
     created_at: datetime
     updated_at: datetime
-    role: UserRole = UserRole.USER
+    role: UserRole = UserRole.MEMBER
+    auth_provider: AuthProvider = AuthProvider.LOCAL
+    external_union_id: str | None = None
+    external_open_id: str | None = None
+    employee_no: str | None = None
+    avatar_url: str | None = None
+    job_title: str | None = None
+    last_synced_at: datetime | None = None
     deleted_time: datetime | None = None
 
 
@@ -56,4 +72,11 @@ class AuthContext:
     session_id: str
 
 
-__all__ = ["AuthContext", "AuthSession", "User", "UserRole", "UserStatus"]
+__all__ = [
+    "AuthContext",
+    "AuthProvider",
+    "AuthSession",
+    "User",
+    "UserRole",
+    "UserStatus",
+]

@@ -96,7 +96,7 @@ class ModelProfileService:
         user = await self._auth_reader.get_current_session_user(
             actor.user.id, actor.session_id, self._clock()
         )
-        if user is None or user.role is not UserRole.ADMIN:
+        if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise ModelProfileAuthorizationError()
 
 

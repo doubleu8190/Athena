@@ -10,7 +10,12 @@ from unittest.mock import ANY, AsyncMock
 
 import anyio
 import pytest
-from auth_support import TEST_PASSWORD, InMemoryAuthRepository, make_auth_service
+from auth_support import (
+    TEST_PASSWORD,
+    InMemoryAuthRepository,
+    make_auth_service,
+    provision_local_user_sync,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError  # type: ignore[import-untyped]
@@ -205,14 +210,15 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
     )
     auth_service = make_auth_service()
     repository = cast(InMemoryAuthRepository, auth_service._repository)
+    provision_local_user_sync(auth_service, email="mcp-admin@example.com", password=TEST_PASSWORD)
     app = create_app(auth_service=auth_service, tool_manager=cast(ToolManager, manager))
 
     with TestClient(app) as client:
-        registered = client.post(
-            "/api/v1/auth/register",
+        logged_in = client.post(
+            "/api/v1/auth/login",
             json={"email": "mcp-admin@example.com", "password": TEST_PASSWORD},
         )
-        assert registered.status_code == 201
+        assert logged_in.status_code == 200
         anyio.run(repository.promote_active_user_by_email, "mcp-admin@example.com", now)
         created = client.post(
             "/api/v1/admin/mcp/servers",
@@ -291,16 +297,20 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
 def test_regular_user_cannot_update_tool_approval_policy() -> None:
     """普通用户即使提交合法 DTO 也不能修改管理员工具策略。"""
 
+    auth_service = make_auth_service()
+    provision_local_user_sync(
+        auth_service, email="regular-policy@example.com", password=TEST_PASSWORD
+    )
     app = create_app(
-        auth_service=make_auth_service(),
+        auth_service=auth_service,
         tool_manager=cast(ToolManager, _PublicOnlyManager()),
     )
     with TestClient(app) as client:
-        registered = client.post(
-            "/api/v1/auth/register",
+        logged_in = client.post(
+            "/api/v1/auth/login",
             json={"email": "regular-policy@example.com", "password": TEST_PASSWORD},
         )
-        assert registered.status_code == 201
+        assert logged_in.status_code == 200
         denied = client.patch(
             "/api/v1/admin/tools/tool_0123456789abcdef0123456789abcdef",
             json={"requires_approval": True},
@@ -316,8 +326,10 @@ def test_mcp_routes_require_login_and_admin_precheck() -> None:
         description="public description",
         input_schema={"type": "object"},
     )
+    auth_service = make_auth_service()
+    provision_local_user_sync(auth_service, email="api-user@example.com", password=TEST_PASSWORD)
     app = create_app(
-        auth_service=make_auth_service(),
+        auth_service=auth_service,
         tool_manager=cast(ToolManager, _PublicOnlyManager(public_tool)),
     )
     with TestClient(app) as client:
@@ -330,7 +342,7 @@ def test_mcp_routes_require_login_and_admin_precheck() -> None:
             headers={"content-type": "application/json"},
         )
         registered = client.post(
-            "/api/v1/auth/register",
+            "/api/v1/auth/login",
             json={"email": "api-user@example.com", "password": TEST_PASSWORD},
         )
         user_invalid_json = client.post(
@@ -348,7 +360,7 @@ def test_mcp_routes_require_login_and_admin_precheck() -> None:
                 password_hash="unused",
                 display_name=None,
                 status=UserStatus.ACTIVE,
-                role=UserRole.ADMIN,
+                role=UserRole.SUPER_ADMIN,
                 created_at=datetime.now(UTC),
                 updated_at=datetime.now(UTC),
             ),
@@ -384,7 +396,7 @@ def test_mcp_routes_require_login_and_admin_precheck() -> None:
     assert anonymous_tools.status_code == 401
     assert anonymous_expanded_query.status_code == 401
     assert anonymous_invalid_json.status_code == 401
-    assert registered.status_code == 201
+    assert registered.status_code == 200
     assert user_invalid_json.status_code == 403
     assert user_expanded_query.status_code == user_repeated_query.status_code == 422
     assert (

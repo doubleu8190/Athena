@@ -1076,7 +1076,7 @@ class SkillService:
             actor.session_id,
             self._clock(),
         )
-        if user is None or user.role is not UserRole.ADMIN:
+        if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise SkillAuthorizationError("admin_required")
 
     async def _discard_prepared_package(self, object_key: str) -> None:

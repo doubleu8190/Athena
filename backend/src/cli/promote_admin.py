@@ -1,4 +1,4 @@
-"""将一个已有且可用的账号提升为管理员。"""
+"""将一个已有且可用的账号提升为 super_admin 超级管理员。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from infrastructure.security.password import Argon2PasswordHasher
 
 
 async def _promote(email: str, database_url: str) -> None:
-    """组装认证用例并执行本地管理员提权。
+    """组装认证用例并执行本地超级管理员提权。
 
     参数：email 是目标账号邮箱；database_url 是部署配置的数据库连接。
     返回：成功时不返回值。
@@ -32,13 +32,13 @@ async def _promote(email: str, database_url: str) -> None:
 
 
 def main() -> int:
-    """读取唯一目标邮箱并执行管理员提权。
+    """读取唯一目标邮箱并执行 super_admin 提权。
 
     参数：无。
     返回：成功返回 0；配置或目标账号无效时返回 1。
     异常：命令行参数错误由 argparse 显示并以非零状态退出。
     """
-    parser = argparse.ArgumentParser(description="提升现有 Athena 账号为管理员")
+    parser = argparse.ArgumentParser(description="提升现有 Athena 账号为 super_admin 超级管理员")
     parser.add_argument("--email", required=True, help="已有账号的邮箱")
     arguments = parser.parse_args()
     database_url = os.getenv("ATHENA_DATABASE_URL", "").strip()

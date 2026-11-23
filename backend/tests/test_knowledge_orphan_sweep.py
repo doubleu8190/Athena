@@ -447,7 +447,7 @@ def test_knowledge_repository_find_referenced_storage_keys_checks_both_tables() 
                         password_hash="unused",
                         display_name=None,
                         status="active",
-                        role="user",
+                        role="member",
                         created_at=now,
                         updated_at=now,
                     )

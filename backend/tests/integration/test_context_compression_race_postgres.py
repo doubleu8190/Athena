@@ -86,7 +86,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                             password_hash="unused",
                             display_name=None,
                             status="active",
-                            role="user",
+                            role="member",
                             created_at=now,
                             updated_at=now,
                             deleted_time=None,

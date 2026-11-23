@@ -114,7 +114,7 @@ def test_public_submit_worker_redis_sse_and_persisted_reply() -> None:
                             password_hash="not-used",
                             display_name=None,
                             status="active",
-                            role="user",
+                            role="member",
                             created_at=now,
                             updated_at=now,
                             deleted_time=None,

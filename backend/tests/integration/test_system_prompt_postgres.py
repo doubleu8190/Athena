@@ -104,7 +104,7 @@ def _auth_context(
     user_id: str,
     session_id: str,
     now: datetime,
-    role: UserRole = UserRole.ADMIN,
+    role: UserRole = UserRole.SUPER_ADMIN,
 ) -> AuthContext:
     """构造带管理员或普通用户角色的认证上下文。"""
     return AuthContext(
@@ -134,7 +134,7 @@ async def _seed_admins(
             user_id="usr_prompt_user",
             session_id="auth_prompt_user",
             now=now,
-            role=UserRole.USER,
+            role=UserRole.MEMBER,
         ),
     )
     async with factory() as session, session.begin():
@@ -851,7 +851,7 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
                 await session.execute(
                     update(UserModel)
                     .where(UserModel.id == admin_one.user.id)
-                    .values(role=UserRole.USER.value)
+                    .values(role=UserRole.MEMBER.value)
                 )
             with pytest.raises(SystemPromptAuthorizationError):
                 await repository.save(
@@ -860,7 +860,7 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
                     expected_current_version_id=main_after_retry.id,
                     actor=replace(
                         admin_one,
-                        user=replace(admin_one.user, role=UserRole.ADMIN),
+                        user=replace(admin_one.user, role=UserRole.SUPER_ADMIN),
                     ),
                     created_at=now + timedelta(seconds=11),
                 )

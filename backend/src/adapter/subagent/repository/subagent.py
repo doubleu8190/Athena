@@ -235,7 +235,7 @@ class SqlAlchemySubagentRepository(SubagentRepository):
         user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
         if user is None:
             raise SubagentInvalidSessionError()
-        if user.role is not UserRole.ADMIN:
+        if user.role is not UserRole.SUPER_ADMIN:
             raise SubagentAdminRequiredError()
 
 

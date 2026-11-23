@@ -225,8 +225,8 @@ def test_api_dependencies_wire_shared_redis_auth_rate_limiters_and_close_once(
     assert deps.auth_service is not None
     assert isinstance(deps.auth_service._login_account_limiter, RedisFixedWindowRateLimiter)
     assert isinstance(deps.auth_service._login_ip_limiter, RedisFixedWindowRateLimiter)
-    assert isinstance(deps.auth_service._register_limiter, RedisFixedWindowRateLimiter)
     assert isinstance(deps.auth_service._change_password_limiter, RedisFixedWindowRateLimiter)
+    assert deps.org_service is not None
     assert deps.auth_service._login_account_limiter._client is shared_redis
     assert deps.run_transport is not None
     assert deps.run_transport._client is shared_redis

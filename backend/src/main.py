@@ -21,6 +21,7 @@ from api.knowledge import build_knowledge_router
 from api.llm import build_llm_admin_router
 from api.mcp import build_mcp_router
 from api.messages import build_message_router
+from api.org import build_org_admin_router
 from api.preference import build_preference_router
 from api.project_knowledge import build_project_knowledge_router
 from api.projects import build_project_router
@@ -41,6 +42,7 @@ from app.file import SessionFileService
 from app.knowledge.service import KnowledgeService
 from app.llm import ModelProfileService
 from app.message.service import MessageService
+from app.org import OrgService
 from app.preference import PreferenceService
 from app.project.service import ProjectService
 from app.run.service import RunService
@@ -127,6 +129,7 @@ def create_app(
     skill_service: SkillService | None = None,
     session_file_service: SessionFileService | None = None,
     subagent_service: SubagentService | None = None,
+    org_service: OrgService | None = None,
     auth_cookie_secure: bool | None = None,
     public_origin: str | None = None,
 ) -> FastAPI:
@@ -153,6 +156,7 @@ def create_app(
         skill_service=skill_service,
         session_file_service=session_file_service,
         subagent_service=subagent_service,
+        org_service=org_service,
     )
     if auth_cookie_secure is None:
         auth_cookie_secure = env_flag("ATHENA_COOKIE_SECURE", default=False)
@@ -199,7 +203,10 @@ def create_app(
     app.state.run_service = deps.run_service
     app.state.preference_service = deps.preference_service
     app.state.knowledge_service = deps.knowledge_service
+    app.state.org_service = deps.org_service
     app.include_router(health_router)
+    if deps.org_service is not None:
+        app.include_router(build_org_admin_router(deps.org_service))
     if deps.model_profile_service is not None:
         app.include_router(build_llm_admin_router(deps.model_profile_service))
     if deps.system_prompt_service is not None:

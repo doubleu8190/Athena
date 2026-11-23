@@ -400,7 +400,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             actor.user.id,
             actor.session_id,
         )
-        if user is None or user.role is not UserRole.ADMIN:
+        if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise McpAuthorizationChangedError("mcp_authorization_changed")
 
     def _seal(self, server: McpServerWrite) -> SealedMcpSecrets | None:

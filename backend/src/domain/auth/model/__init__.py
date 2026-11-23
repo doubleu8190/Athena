@@ -1,33 +1,57 @@
 """认证领域模型与异常。"""
 
-from domain.auth.model.entity import AuthContext, AuthSession, User, UserRole, UserStatus
+from domain.auth.model.entity import (
+    AuthContext,
+    AuthProvider,
+    AuthSession,
+    User,
+    UserRole,
+    UserStatus,
+)
 from domain.auth.model.errors import (
     AdminPromotionError,
+    AuthProviderDisabledError,
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
     InvalidDisplayNameError,
     InvalidEmailError,
+    InvalidOAuthStateError,
     InvalidPasswordError,
+    InvalidReturnToError,
     InvalidSessionError,
+    MockUserNotFoundError,
+    OAuthStateUnavailableError,
+    PasswordChangeNotSupportedError,
     RateLimitExceededError,
     RateLimitUnavailableError,
+    SsoAuthenticationError,
+    UserDisabledError,
 )
 
 __all__ = [
     "AdminPromotionError",
     "AuthContext",
+    "AuthProvider",
+    "AuthProviderDisabledError",
     "AuthSession",
     "EmailAlreadyRegisteredError",
     "InvalidCredentialsError",
     "InvalidCurrentPasswordError",
     "InvalidDisplayNameError",
     "InvalidEmailError",
+    "InvalidOAuthStateError",
     "InvalidPasswordError",
+    "InvalidReturnToError",
     "InvalidSessionError",
+    "MockUserNotFoundError",
+    "OAuthStateUnavailableError",
+    "PasswordChangeNotSupportedError",
     "RateLimitExceededError",
     "RateLimitUnavailableError",
+    "SsoAuthenticationError",
     "User",
+    "UserDisabledError",
     "UserRole",
     "UserStatus",
 ]

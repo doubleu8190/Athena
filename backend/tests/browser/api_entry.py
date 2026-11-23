@@ -24,22 +24,19 @@ async def _probe_database(probe_file: Path, expected_password: str) -> None:
     try:
         async with database.session_factory() as session:
             search_path = str(await session.scalar(text("show search_path")))
-            users = int(
-                await session.scalar(select(func.count()).select_from(UserModel)) or 0
-            )
+            users = int(await session.scalar(select(func.count()).select_from(UserModel)) or 0)
             rows = (
                 await session.execute(
                     select(UserModel.email, UserModel.status, UserModel.password_hash)
                 )
             ).all()
         hasher = Argon2PasswordHasher()
-        checks = [
-            (
-                f"{email}:status={status}:password="
-                f"{str(hasher.verify_password(expected_password, password_hash)).lower()}"
+        checks = []
+        for email, status, password_hash in rows:
+            matched = password_hash is not None and hasher.verify_password(
+                expected_password, password_hash
             )
-            for email, status, password_hash in rows
-        ]
+            checks.append(f"{email}:status={status}:password={str(matched).lower()}")
         probe_file.write_text(
             f"search_path={search_path}\nusers={users}\n" + "\n".join(checks) + "\n",
             encoding="utf-8",

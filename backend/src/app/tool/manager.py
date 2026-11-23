@@ -190,7 +190,7 @@ class ToolManager:
         )
         if current is None:
             raise McpInvalidSessionError("mcp_session_invalid")
-        if admin and current.role is not UserRole.ADMIN:
+        if admin and current.role is not UserRole.SUPER_ADMIN:
             raise McpAdminRequiredError("mcp_admin_required")
 
     def _map_tools(

@@ -37,7 +37,7 @@ def _run[T](coroutine: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coroutine)
 
 
-def _user(role: UserRole = UserRole.ADMIN) -> User:
+def _user(role: UserRole = UserRole.SUPER_ADMIN) -> User:
     return User(
         id="usr_manager",
         email="manager@example.test",
@@ -196,7 +196,7 @@ def _server(server_id: str, name: str, version: int) -> McpServer:
 
 
 def _manager(
-    *, role: UserRole | None = UserRole.ADMIN, discovery: FakeDiscovery | None = None
+    *, role: UserRole | None = UserRole.SUPER_ADMIN, discovery: FakeDiscovery | None = None
 ) -> tuple[ToolManager, FakeAuth, FakeServers, FakeTools, FakeDiscovery]:
     auth = FakeAuth(None if role is None else _user(role))
     servers = FakeServers()
@@ -231,7 +231,7 @@ def _manager(
 
 
 def test_invalid_session_or_non_admin_is_rejected_before_resource_reads() -> None:
-    actor = AuthContext(_user(UserRole.USER), "ses_user")
+    actor = AuthContext(_user(UserRole.MEMBER), "ses_user")
     manager, _, servers, _, discovery = _manager(role=None)
     with pytest.raises(McpInvalidSessionError, match="mcp_session_invalid"):
         _run(manager.get_mcp_server(actor, "missing"))
@@ -240,7 +240,7 @@ def test_invalid_session_or_non_admin_is_rejected_before_resource_reads() -> Non
     assert servers.read_count == 0
     assert discovery.calls == []
 
-    manager, _, servers, _, discovery = _manager(role=UserRole.USER)
+    manager, _, servers, _, discovery = _manager(role=UserRole.MEMBER)
     with pytest.raises(McpAdminRequiredError, match="mcp_admin_required"):
         _run(manager.list_mcp_servers(actor))
     with pytest.raises(McpAdminRequiredError):
@@ -283,8 +283,8 @@ def test_update_failure_preserves_catalog_and_version_conflict_propagates() -> N
 
 
 def test_reads_authorize_first_and_user_tool_lists_never_discover() -> None:
-    actor = AuthContext(_user(UserRole.USER), "ses_user")
-    manager, _, servers, tools, discovery = _manager(role=UserRole.USER)
+    actor = AuthContext(_user(UserRole.MEMBER), "ses_user")
+    manager, _, servers, tools, discovery = _manager(role=UserRole.MEMBER)
     public = _run(manager.list_public_tools(actor, limit=1))
     assert public.items[0] == tools.public
     assert not hasattr(public.items[0], "server_id")
@@ -293,7 +293,7 @@ def test_reads_authorize_first_and_user_tool_lists_never_discover() -> None:
     with pytest.raises(ValueError, match="mcp_page_invalid"):
         _run(manager.list_public_tools(actor, limit=101))
 
-    manager, _, servers, tools, _ = _manager(role=UserRole.USER)
+    manager, _, servers, tools, _ = _manager(role=UserRole.MEMBER)
     with pytest.raises(McpAdminRequiredError):
         _run(manager.list_admin_tools(actor))
     assert tools.reads == []
@@ -301,9 +301,11 @@ def test_reads_authorize_first_and_user_tool_lists_never_discover() -> None:
 
 
 def test_another_admin_can_manage_global_catalog() -> None:
-    actor = AuthContext(_user(UserRole.ADMIN), "ses_admin")
-    second_admin = AuthContext(replace(_user(UserRole.ADMIN), id="usr_other_admin"), "ses_other")
-    manager, auth, servers, tools, _ = _manager(role=UserRole.ADMIN)
+    actor = AuthContext(_user(UserRole.SUPER_ADMIN), "ses_admin")
+    second_admin = AuthContext(
+        replace(_user(UserRole.SUPER_ADMIN), id="usr_other_admin"), "ses_other"
+    )
+    manager, auth, servers, tools, _ = _manager(role=UserRole.SUPER_ADMIN)
     servers.server = _server("mcp_global", "Global", 1)
     assert _run(manager.list_mcp_servers(second_admin)).items[0].id == "mcp_global"
     assert _run(manager.get_mcp_server(second_admin, "mcp_global")).id == "mcp_global"
@@ -312,8 +314,8 @@ def test_another_admin_can_manage_global_catalog() -> None:
 
 
 def test_only_admin_can_update_approval_policy_with_a_real_bool() -> None:
-    user_actor = AuthContext(_user(UserRole.USER), "ses_user")
-    manager, _, servers, _, _ = _manager(role=UserRole.USER)
+    user_actor = AuthContext(_user(UserRole.MEMBER), "ses_user")
+    manager, _, servers, _, _ = _manager(role=UserRole.MEMBER)
     with pytest.raises(McpAdminRequiredError):
         _run(manager.update_tool_approval_policy(user_actor, "tool_x", True))
     assert servers.policy_calls == []

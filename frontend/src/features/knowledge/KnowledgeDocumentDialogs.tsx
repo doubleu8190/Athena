@@ -384,15 +384,16 @@ export function RenameKnowledgeDocumentDialog({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useRenameKnowledgeDocumentMutation(baseId);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setTitle(document.title);
       setValidationError(null);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open, document.title]);
+  }, [document.title, open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {
@@ -504,14 +505,15 @@ export function DeleteKnowledgeDocumentDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useDeleteKnowledgeDocumentMutation(baseId);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setConfirmed(false);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open]);
+  }, [open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {

@@ -29,14 +29,15 @@ function DeleteProjectDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useDeleteProjectMutation(project.id);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setConfirmed(false);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open]);
+  }, [open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {

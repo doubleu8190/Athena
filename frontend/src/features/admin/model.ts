@@ -913,6 +913,7 @@ export const RESERVED_SUBAGENT_SLUGS: ReadonlySet<string> = new Set([
 // 后端使用 Python str.strip()；它包含 Unicode White_Space 与 U+001C–U+001F，
 // 但不把 U+FEFF 视为首尾空白，因此不能直接复用 JavaScript trim()。
 const PYTHON_STRIP_PATTERN =
+  // eslint-disable-next-line no-control-regex
   /^[\p{White_Space}\u001c-\u001f]+|[\p{White_Space}\u001c-\u001f]+$/gu;
 
 function stripSubagentWhitespace(value: string): string {

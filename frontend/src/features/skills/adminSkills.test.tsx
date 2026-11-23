@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   makeDependencyCheck,
-  makeSkill,
   makeSkillDetails,
   makeSkillVersion,
   TEST_ADMIN,
@@ -17,8 +16,6 @@ import type { SkillAdminDetails, SkillVersion } from "./model";
 function requestUrl(input: RequestInfo | URL): URL {
   return new URL(getRequestUrl(input), "http://localhost");
 }
-
-const BASE_DETAILS = makeSkillDetails();
 
 function versionListResponse(
   details: SkillAdminDetails,

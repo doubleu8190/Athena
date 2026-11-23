@@ -34,6 +34,7 @@ function AssociateKnowledgeDialog({
 }: AssociateKnowledgeDialogProps) {
   const bases = useKnowledgeDirectory(open);
   const bind = useBindProjectKnowledgeMutation(projectId);
+  const { reset: resetBind } = bind;
   const [requestError, setRequestError] = useState<string | null>(null);
   const limitReached = boundIds.size >= PROJECT_KNOWLEDGE_LIMIT;
   const available =
@@ -42,9 +43,9 @@ function AssociateKnowledgeDialog({
   useEffect(() => {
     if (open) {
       setRequestError(null);
-      bind.reset();
+      resetBind();
     }
-  }, [open]);
+  }, [open, resetBind]);
 
   const handleBind = async (baseId: string) => {
     setRequestError(null);
@@ -141,14 +142,15 @@ function UnbindKnowledgeDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useUnbindProjectKnowledgeMutation(projectId);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setConfirmed(false);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open]);
+  }, [open, resetMutation]);
 
   const handleUnbind = async () => {
     if (!confirmed) {

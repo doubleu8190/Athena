@@ -130,6 +130,7 @@ export function makeDependencyCheck(
     python_implementation: "CPython",
     python_version: "3.14.0",
     status: "satisfied",
+    ...overrides,
   };
 }
 

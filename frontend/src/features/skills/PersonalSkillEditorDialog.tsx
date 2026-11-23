@@ -85,6 +85,9 @@ export function PersonalSkillEditorDialog({
   const parseMutation = useParsePersonalSkillMutation();
   const createMutation = useCreatePersonalSkillMutation();
   const saveMutation = useSavePersonalSkillVersionMutation(skillId ?? "");
+  const { reset: resetParseMutation } = parseMutation;
+  const { reset: resetCreateMutation } = createMutation;
+  const { reset: resetSaveMutation } = saveMutation;
   const savePending = createMutation.isPending || saveMutation.isPending;
   const fieldsDisabled = savePending || parseMutation.isPending;
 
@@ -101,9 +104,9 @@ export function PersonalSkillEditorDialog({
     setFieldErrors({});
     setSelectedFile(null);
     requestIdRef.current = null;
-    parseMutation.reset();
-    createMutation.reset();
-    saveMutation.reset();
+    resetParseMutation();
+    resetCreateMutation();
+    resetSaveMutation();
     if (mode === "create") {
       setValues(EMPTY_INPUT);
       setBaselineRevision(null);
@@ -112,7 +115,13 @@ export function PersonalSkillEditorDialog({
       initializedRef.current = false;
     }
     // 弹窗每次打开都从独立草稿开始，失败输入只保留在当前打开周期内。
-  }, [mode, open]);
+  }, [
+    mode,
+    open,
+    resetCreateMutation,
+    resetParseMutation,
+    resetSaveMutation,
+  ]);
 
   useEffect(() => {
     if (

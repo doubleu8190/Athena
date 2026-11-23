@@ -127,8 +127,11 @@ export interface PersonalSkillFieldErrors {
   guide?: string;
 }
 
+// 显式匹配 C0 控制字符与 DEL，确保单行/多行输入校验与后端规则严格对齐。
+// eslint-disable-next-line no-control-regex
 const INVALID_SINGLE_LINE_CONTROL = /[\u0000-\u001f\u007f]/u;
 const INVALID_MULTILINE_CONTROL =
+  // eslint-disable-next-line no-control-regex
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
 
 function codePointLength(value: string): number {

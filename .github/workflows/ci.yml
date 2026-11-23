@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          python - <<'PY'
+          import re
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          knowledge_deps = data["project"]["optional-dependencies"]["knowledge"]
+          # 从 pyproject.toml 单一事实源读取轻量解析依赖，仅排除重型 PaddleOCR 运行时，
+          # 确保非 real_ocr 单元测试在全新 Runner 上完整运行且版本零漂移。
+          lightweight_deps = [
+              dep
+              for dep in knowledge_deps
+              if re.split(r"[<>=!~;\s\[]", dep, maxsplit=1)[0].strip().lower()
+              not in {"paddlepaddle", "paddleocr"}
+          ]
+          if not lightweight_deps:
+              raise SystemExit("No lightweight knowledge dependencies found in pyproject.toml")
+          print("Installing lightweight knowledge dependencies:", lightweight_deps)
+          subprocess.check_call([sys.executable, "-m", "pip", "install", *lightweight_deps])
+          PY
+
+      - name: Lint with Ruff
+        run: ruff check backend/src backend/tests
+
+      - name: Typecheck with Mypy
+        run: mypy --strict backend/src
+
+      - name: Verify single Alembic head
+        run: |
+          HEADS=$(alembic -c backend/alembic.ini heads)
+          echo "$HEADS"
+          HEAD_COUNT=$(printf '%s\n' "$HEADS" | grep -c '(head)')
+          if [ "$HEAD_COUNT" -ne 1 ]; then
+            echo "Expected exactly 1 Alembic head, found $HEAD_COUNT" >&2
+            exit 1
+          fi
+
+      - name: Run backend unit tests
+        run: >
+          pytest -q backend/tests
+          --ignore=backend/tests/integration
+          --ignore=backend/tests/browser
+          -m "not integration and not llm_live and not real_ocr"
+
+  frontend:
+    name: Frontend Checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint with ESLint
+        run: npm run lint
+
+      - name: Typecheck with TypeScript
+        run: npm run typecheck
+
+      - name: Run Vitest unit tests
+        run: npm run test
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright mock E2E tests
+        run: npx playwright test

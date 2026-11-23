@@ -123,6 +123,7 @@ export function KnowledgeSearchDialog({
     null,
   );
   const search = useSearchKnowledgeMutation(baseId);
+  const { reset: resetSearch } = search;
 
   useEffect(() => {
     if (open) {
@@ -130,9 +131,9 @@ export function KnowledgeSearchDialog({
       setLimit(KNOWLEDGE_SEARCH_DEFAULT_LIMIT);
       setQueryError(null);
       setSelectedChunkId(null);
-      search.reset();
+      resetSearch();
     }
-  }, [open]);
+  }, [open, resetSearch]);
 
   const handleSubmit = () => {
     const validation = validateKnowledgeSearchQuery(query);

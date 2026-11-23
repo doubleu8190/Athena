@@ -33,15 +33,16 @@ export function SessionRenameDialog({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useRenameSessionMutation(session.id);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setTitle(session.title ?? "");
       setValidationError(null);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open, session.id, session.title]);
+  }, [open, resetMutation, session.id, session.title]);
 
   const close = () => {
     if (!mutation.isPending) {
@@ -149,13 +150,14 @@ export function SessionDeleteDialog({
   const navigate = useNavigate();
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useDeleteSessionMutation(session.id);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open, session.id]);
+  }, [open, resetMutation, session.id]);
 
   const close = () => {
     if (!mutation.isPending) {

@@ -42,6 +42,7 @@ export function NewKnowledgeBaseDialog({
   );
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useCreateKnowledgeBaseMutation();
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
@@ -50,10 +51,10 @@ export function NewKnowledgeBaseDialog({
       setNameError(null);
       setDescriptionError(null);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
     // 每次打开都从干净表单开始，避免把上一次失败内容误带入新知识库。
-  }, [open]);
+  }, [open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {
@@ -208,6 +209,7 @@ export function EditKnowledgeBaseDialog({
   );
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useUpdateKnowledgeBaseMutation(base.id);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
@@ -216,9 +218,9 @@ export function EditKnowledgeBaseDialog({
       setNameError(null);
       setDescriptionError(null);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [base.description, base.name, open]);
+  }, [base.description, base.name, open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {
@@ -377,14 +379,15 @@ export function DeleteKnowledgeBaseDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useDeleteKnowledgeBaseMutation(base.id);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setConfirmed(false);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open]);
+  }, [open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {

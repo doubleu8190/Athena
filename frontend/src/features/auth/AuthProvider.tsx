@@ -95,34 +95,28 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
   }, [query.data, query.dataUpdatedAt, query.isSuccess]);
 
+  const { data, error, isError, isPending, refetch } = query;
   const value = useMemo<AuthContextValue>(() => {
     let status: AuthStatus = "loading";
-    if (query.data !== undefined) {
+    if (data !== undefined) {
       // 后台复核失败时仍可使用已核验的身份快照；只有首轮无身份且请求失败才阻断工作区。
-      status = query.data ? "authenticated" : "anonymous";
-    } else if (query.isError) {
+      status = data ? "authenticated" : "anonymous";
+    } else if (isError) {
       status = "error";
-    } else if (!query.isPending) {
+    } else if (!isPending) {
       status = "anonymous";
     }
 
     return {
       adminAccessDenied,
-      error: query.error,
+      error,
       refetch: () => {
-        void query.refetch();
+        void refetch();
       },
       status,
-      user: query.data ?? null,
+      user: data ?? null,
     };
-  }, [
-    adminAccessDenied,
-    query.data,
-    query.error,
-    query.isError,
-    query.isPending,
-    query.refetch,
-  ]);
+  }, [adminAccessDenied, data, error, isError, isPending, refetch]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

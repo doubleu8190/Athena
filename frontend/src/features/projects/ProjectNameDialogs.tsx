@@ -30,16 +30,17 @@ export function NewProjectDialog({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useCreateProjectMutation();
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setName("");
       setValidationError(null);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
     // 每次打开都从干净表单开始，不复用上一次的失败状态。
-  }, [open]);
+  }, [open, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {
@@ -153,15 +154,16 @@ export function RenameProjectDialog({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useRenameProjectMutation(project.id);
+  const { reset: resetMutation } = mutation;
 
   useEffect(() => {
     if (open) {
       setName(project.name);
       setValidationError(null);
       setRequestError(null);
-      mutation.reset();
+      resetMutation();
     }
-  }, [open, project.name]);
+  }, [open, project.name, resetMutation]);
 
   const close = () => {
     if (!mutation.isPending) {

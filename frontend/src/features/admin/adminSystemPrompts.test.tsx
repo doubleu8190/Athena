@@ -680,7 +680,6 @@ describe("管理员系统提示词页", () => {
         },
       ),
     );
-    const user = userEvent.setup();
     const app = renderApp("/admin/system-prompts");
 
     const editor = await screen.findByLabelText(/完整正文/);
@@ -1411,7 +1410,6 @@ describe("管理员系统提示词页", () => {
       kind: "main",
     });
     installSimplePromptFetch(main);
-    const user = userEvent.setup();
     const app = renderApp("/admin/system-prompts");
 
     const editor = await screen.findByLabelText(/完整正文/);
@@ -1462,7 +1460,6 @@ describe("管理员系统提示词页", () => {
         },
       ),
     );
-    const user = userEvent.setup();
     renderApp("/admin/system-prompts");
 
     const editor = await screen.findByLabelText(/完整正文/);

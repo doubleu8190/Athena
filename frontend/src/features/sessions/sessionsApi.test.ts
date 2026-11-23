@@ -15,13 +15,17 @@ import {
   updateSession,
 } from "./api";
 import { sessionErrorMessage } from "./errorMessages";
+import { groupSessionsByTime } from "./model";
+import { sessionKeys } from "./queryKeys";
 
 const SESSION = makeSession({ id: "session-1" });
 
 describe("Session API 契约", () => {
-  it("序列化项目、未归属和分页查询参数", async () => {
+  it("序列化项目、未归属、搜索词 q 和分页查询参数", async () => {
     const fetchMock = vi
       .fn()
+      .mockResolvedValueOnce(jsonResponse(listResponse([SESSION])))
+      .mockResolvedValueOnce(jsonResponse(listResponse([SESSION])))
       .mockResolvedValueOnce(jsonResponse(listResponse([SESSION])))
       .mockResolvedValueOnce(jsonResponse(listResponse([SESSION])));
     vi.stubGlobal("fetch", fetchMock);
@@ -32,12 +36,28 @@ describe("Session API 契约", () => {
       projectId: "project-a",
     });
     await listSessions({ page: 1, pageSize: 1, unbound: true });
+    await listSessions({ page: 1, pageSize: 30, q: "  季度复盘  " });
+    await listSessions({ page: 1, pageSize: 30, q: "   " });
 
     expect(getRequestUrl(fetchMock.mock.calls[0][0])).toBe(
       "/api/v1/sessions?page=3&page_size=5&project_id=project-a",
     );
     expect(getRequestUrl(fetchMock.mock.calls[1][0])).toBe(
       "/api/v1/sessions?page=1&page_size=1&unbound=true",
+    );
+    expect(getRequestUrl(fetchMock.mock.calls[2][0])).toBe(
+      "/api/v1/sessions?page=1&page_size=30&q=%E5%AD%A3%E5%BA%A6%E5%A4%8D%E7%9B%98",
+    );
+    expect(getRequestUrl(fetchMock.mock.calls[3][0])).toBe(
+      "/api/v1/sessions?page=1&page_size=30",
+    );
+
+    // 验证搜索词归一化后纳入查询缓存键，隔离搜索与默认列表缓存。
+    expect(sessionKeys.list({ page: 1, pageSize: 30, q: " 复盘 " })).not.toEqual(
+      sessionKeys.list({ page: 1, pageSize: 30 }),
+    );
+    expect(sessionKeys.list({ page: 1, pageSize: 30, q: "   " })).toEqual(
+      sessionKeys.list({ page: 1, pageSize: 30 }),
     );
   });
 
@@ -86,7 +106,13 @@ describe("Session API 契约", () => {
     ).toContain("不能再更改");
     expect(
       sessionErrorMessage(new ApiError(409, "session_has_active_run")),
-    ).toContain("运行中的任务");
+    ).toBe("当前对话有正在执行的任务，请等待完成或停止后再操作。");
+    expect(
+      sessionErrorMessage(new ApiError(400, "constructor")),
+    ).toBe("会话操作未完成，请稍后重试。");
+    expect(
+      sessionErrorMessage(new ApiError(400, "toString")),
+    ).toBe("会话操作未完成，请稍后重试。");
     expect(
       sessionErrorMessage(new ApiError(404, "session_not_found")),
     ).toContain("不存在");
@@ -96,6 +122,50 @@ describe("Session API 契约", () => {
     expect(
       sessionErrorMessage(new ApiError(500, "http_error")),
     ).toContain("服务器拒绝");
+  });
+
+  it("按本地日历日期将会话分为今天 / 昨天 / 近 7 天 / 更早并省略空组", () => {
+    const now = new Date(2026, 10, 23, 15, 30, 0);
+    const sessions = [
+      makeSession({
+        id: "s-today",
+        title: "今天会议",
+        updated_at: new Date(2026, 10, 23, 9, 0, 0).toISOString(),
+      }),
+      makeSession({
+        id: "s-yesterday",
+        title: "昨天复盘",
+        updated_at: new Date(2026, 10, 22, 23, 59, 0).toISOString(),
+      }),
+      makeSession({
+        id: "s-week",
+        title: "五天前调研",
+        updated_at: new Date(2026, 10, 17, 0, 1, 0).toISOString(),
+      }),
+      makeSession({
+        id: "s-earlier",
+        title: "更早归档",
+        updated_at: new Date(2026, 10, 16, 23, 59, 0).toISOString(),
+      }),
+      makeSession({
+        id: "s-invalid",
+        title: "时间异常记录",
+        updated_at: "not-a-date",
+      }),
+    ];
+
+    const groups = groupSessionsByTime(sessions, now);
+    expect(groups.map((group) => [group.key, group.label, group.items.map((item) => item.id)])).toEqual([
+      ["today", "今天", ["s-today"]],
+      ["yesterday", "昨天", ["s-yesterday"]],
+      ["last7Days", "近 7 天", ["s-week"]],
+      ["earlier", "更早", ["s-earlier", "s-invalid"]],
+    ]);
+
+    expect(groupSessionsByTime([sessions[0]], now).map((group) => group.label)).toEqual([
+      "今天",
+    ]);
+    expect(groupSessionsByTime([], now)).toEqual([]);
   });
 });
 

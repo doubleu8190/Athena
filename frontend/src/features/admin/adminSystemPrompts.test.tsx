@@ -254,7 +254,7 @@ describe("管理员系统提示词页", () => {
     expect(saveCalls).toBe(1);
 
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
+    await user.click(screen.getByRole("menuitem", { name: "个人资料与安全" }));
 
     expect(
       screen.getByRole("heading", {
@@ -346,7 +346,7 @@ describe("管理员系统提示词页", () => {
     );
     await screen.findByRole("button", { name: "正在保存…" });
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
+    await user.click(screen.getByRole("menuitem", { name: "个人资料与安全" }));
     expect(
       screen.getByRole("heading", {
         name: "保存请求处理中，仍要离开？",
@@ -428,7 +428,7 @@ describe("管理员系统提示词页", () => {
     );
     await screen.findByRole("button", { name: "正在保存…" });
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
+    await user.click(screen.getByRole("menuitem", { name: "个人资料与安全" }));
 
     act(() => {
       saveGate.reject(new TypeError("Failed to fetch"));
@@ -444,7 +444,7 @@ describe("管理员系统提示词页", () => {
       target: { value: laterDraft },
     });
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
+    await user.click(screen.getByRole("menuitem", { name: "个人资料与安全" }));
 
     expect(
       screen.getByRole("heading", {
@@ -513,7 +513,7 @@ describe("管理员系统提示词页", () => {
     );
     await screen.findByRole("button", { name: "正在保存…" });
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
+    await user.click(screen.getByRole("menuitem", { name: "个人资料与安全" }));
     act(() => {
       saveGate.reject(new TypeError("Failed to fetch"));
     });
@@ -540,7 +540,7 @@ describe("管理员系统提示词页", () => {
       target: { value: laterDraft },
     });
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
+    await user.click(screen.getByRole("menuitem", { name: "个人资料与安全" }));
 
     expect(
       screen.getByRole("heading", {
@@ -1260,7 +1260,7 @@ describe("管理员系统提示词页", () => {
       target: { value: "离开前必须确认的草稿" },
     });
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
+    await user.click(screen.getByRole("menuitem", { name: "个人资料与安全" }));
 
     expect(
       screen.getByRole("heading", {
@@ -1522,8 +1522,9 @@ describe("管理员系统提示词页", () => {
       screen.queryByRole("heading", { name: "系统提示词" }),
     ).not.toBeInTheDocument();
     expect(
-      fetchMock.mock.calls.every(([input]) =>
-        requestUrl(input).pathname.endsWith("/auth/me"),
+      fetchMock.mock.calls.every(
+        ([input]) =>
+          !requestUrl(input).pathname.startsWith("/api/v1/admin"),
       ),
     ).toBe(true);
   });

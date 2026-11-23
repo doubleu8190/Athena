@@ -198,7 +198,7 @@ async function waitForStableAdminModelsPage(
       }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("navigation", { name: "管理子导航" }),
+      screen.getByRole("group", { name: "管理后台" }),
     ).toBeInTheDocument();
   });
 }
@@ -595,8 +595,9 @@ describe("企业登录页动态状态机（飞书 SSO + Mock 快捷切换 + 应�
 
     // 验证无邮箱账号打开账户菜单不崩溃且显示工号与角色。
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    expect(screen.getByText("财务主管")).toBeInTheDocument();
-    expect(screen.getByText("部门管理员")).toBeInTheDocument();
+    const accountMenu = screen.getByRole("menu");
+    expect(within(accountMenu).getByText("财务主管")).toBeInTheDocument();
+    expect(within(accountMenu).getByText("部门管理员")).toBeInTheDocument();
   });
 
   it.each(["__proto__", "constructor", "toString"])(
@@ -832,8 +833,9 @@ describe("认证流程与本地应急登录", () => {
 
     await waitForStableChatWorkspace(app);
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    expect(screen.getByText("林知远")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "管理" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("menu")).getByText("林知远")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "管理后台" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "部门管理" })).not.toBeInTheDocument();
 
     const loginCall = fetchMock.mock.calls.find(([input]) =>
       getRequestUrl(input).endsWith("/auth/login"),
@@ -1051,30 +1053,50 @@ describe("认证流程与本地应急登录", () => {
     const trigger = await screen.findByRole("button", { name: "账户菜单" });
     await user.click(trigger);
     const menu = screen.getByRole("menu");
-    const profileItem = screen.getByRole("menuitem", { name: "个人页面" });
-    expect(profileItem).toHaveFocus();
+    const preferencesItem = within(menu).getByRole("menuitem", {
+      name: "工作偏好与记忆",
+    });
+    const profileItem = within(menu).getByRole("menuitem", {
+      name: "个人资料与安全",
+    });
+    const logoutItem = within(menu).getByRole("menuitem", {
+      name: "退出登录",
+    });
     expect(
-      screen.queryByRole("menuitem", { name: "我的技能" }),
+      within(menu).queryByRole("menuitem", { name: "我的技能" }),
     ).not.toBeInTheDocument();
+
     await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("menuitem", { name: "退出登录" })).toHaveFocus();
+    expect(preferencesItem).toHaveFocus();
     await user.keyboard("{ArrowDown}");
     expect(profileItem).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(logoutItem).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
 
     await user.click(trigger);
-    await user.click(screen.getByRole("heading", { name: "对话工作台" }));
-    expect(menu).not.toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await user.pointer({
+      keys: "[MouseLeft]",
+      target: document.body,
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    });
 
     await user.click(trigger);
-    await user.click(screen.getByRole("menuitem", { name: "个人页面" }));
-    expect(await screen.findByRole("heading", { name: "个人资料" })).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("menuitem", { name: "个人资料与安全" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "个人资料" }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
-  it("Tab 和 Shift+Tab 离开账户控件时收起菜单并保留目标焦点", async () => {
+  it("账户菜单可跳转工作偏好与记忆占位页且不会回跳 /chat", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
@@ -1084,7 +1106,7 @@ describe("认证流程与本地应急登录", () => {
           return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
         }
         if (url.includes("/api/v1/sessions")) {
-          return jsonResponse({ items: [], page: 1, page_size: 8, total: 0 });
+          return jsonResponse({ items: [], page: 1, page_size: 30, total: 0 });
         }
         if (url.endsWith("/api/v1/skills")) {
           return jsonResponse({ items: [] });
@@ -1093,23 +1115,17 @@ describe("认证流程与本地应急登录", () => {
       }),
     );
     const user = userEvent.setup();
-    renderApp("/chat");
+    const app = renderApp("/chat");
     const trigger = await screen.findByRole("button", { name: "账户菜单" });
 
     await user.click(trigger);
-    await user.tab();
-    expect(screen.getByRole("menuitem", { name: "退出登录" })).toHaveFocus();
-    await user.tab();
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "新建对话" })).toHaveFocus();
-
-    await user.click(trigger);
-    await user.keyboard("{Shift>}{Tab}{/Shift}");
-    expect(trigger).toHaveFocus();
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-    await user.keyboard("{Shift>}{Tab}{/Shift}");
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "技能库" })).toHaveFocus();
+    await user.click(
+      screen.getByRole("menuitem", { name: "工作偏好与记忆" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "工作偏好与记忆" }),
+    ).toBeInTheDocument();
+    expect(app.getLocation().pathname).toBe("/preferences");
   });
 
   it("退出接口失败时留在工作区并显示错误", async () => {
@@ -1175,7 +1191,7 @@ describe("认证流程与本地应急登录", () => {
     await user.click(screen.getByRole("button", { name: "保存显示名" }));
     expect(await screen.findByRole("status")).toHaveTextContent("显示名已更新");
     await user.click(screen.getByRole("button", { name: "账户菜单" }));
-    expect(screen.getByText("更新后的名字")).toBeInTheDocument();
+    expect(within(screen.getByRole("menu")).getByText("更新后的名字")).toBeInTheDocument();
     expect(app.client.getQueryData<User>(["auth", "current-user"])?.display_name).toBe("更新后的名字");
 
     await user.type(screen.getByLabelText("当前密码"), "current-password");
@@ -1444,7 +1460,7 @@ describe("认证流程与本地应急登录", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: "管理" }),
+      screen.getByRole("button", { name: "管理后台" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "重试刷新" }),
@@ -1574,13 +1590,19 @@ describe("认证流程与本地应急登录", () => {
 });
 
 describe("全站三级角色与分级路由守卫", () => {
-  it("超级管理员访问 /admin 自动重定向至 /admin/models 并显示完整管理子导航", async () => {
+  it("超级管理员访问 /admin 自动重定向至 /admin/models 并在侧栏展示完整 6 项管理后台入口", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = getRequestUrl(input);
         if (url.endsWith("/auth/me")) {
           return jsonResponse(SUPER_ADMIN);
+        }
+        if (url.includes("/api/v1/projects")) {
+          return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+        }
+        if (url.includes("/api/v1/sessions")) {
+          return jsonResponse({ items: [], page: 1, page_size: 30, total: 0 });
         }
         if (url.endsWith("/admin/llm/model-profiles")) {
           return jsonResponse({
@@ -1608,33 +1630,43 @@ describe("全站三级角色与分级路由守卫", () => {
     const app = renderApp("/admin");
 
     await waitForStableAdminModelsPage(app);
-    const subnav = screen.getByRole("navigation", { name: "管理子导航" });
-    expect(subnav.closest(".workspace-sidebar")).toBeNull();
-    expect(subnav.closest(".main-column")).not.toBeNull();
     expect(
-      within(subnav).getByRole("link", { name: "模型与压缩策略" }),
+      screen.queryByRole("navigation", { name: "管理子导航" }),
+    ).not.toBeInTheDocument();
+    const adminGroup = screen.getByRole("group", { name: "管理后台" });
+    expect(
+      within(adminGroup).getByRole("link", { name: "模型与压缩策略" }),
     ).toHaveAttribute("href", "/admin/models");
     expect(
-      within(subnav).getByRole("link", { name: "MCP Server" }),
-    ).toHaveAttribute("href", "/admin/mcp");
-    expect(
-      within(subnav).getByRole("link", { name: "工具审批策略" }),
-    ).toHaveAttribute("href", "/admin/tools");
-    expect(
-      within(subnav).getByRole("link", { name: "系统提示词" }),
+      within(adminGroup).getByRole("link", { name: "系统提示词" }),
     ).toHaveAttribute("href", "/admin/system-prompts");
     expect(
-      within(subnav).getByRole("link", { name: "公共技能" }),
+      within(adminGroup).getByRole("link", { name: "MCP 服务" }),
+    ).toHaveAttribute("href", "/admin/mcp");
+    expect(
+      within(adminGroup).getByRole("link", { name: "工具审批策略" }),
+    ).toHaveAttribute("href", "/admin/tools");
+    expect(
+      within(adminGroup).getByRole("link", { name: "企业与部门技能" }),
     ).toHaveAttribute("href", "/admin/skills");
+    expect(
+      within(adminGroup).getByRole("link", { name: "子智能体" }),
+    ).toHaveAttribute("href", "/admin/subagents");
   });
 
-  it("部门管理员访问 /admin 自动重定向至 /admin/skills 且仅展示技能管理导航", async () => {
+  it("部门管理员访问 /admin 自动重定向至 /admin/skills 且仅展示部门管理两项入口", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = getRequestUrl(input);
         if (url.endsWith("/auth/me")) {
           return jsonResponse(DEPT_ADMIN);
+        }
+        if (url.includes("/api/v1/projects")) {
+          return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+        }
+        if (url.includes("/api/v1/sessions")) {
+          return jsonResponse({ items: [], page: 1, page_size: 30, total: 0 });
         }
         if (url.includes("/api/v1/admin/skills")) {
           return jsonResponse({ items: [] });
@@ -1648,13 +1680,15 @@ describe("全站三级角色与分级路由守卫", () => {
     await waitFor(() => {
       expect(app.getLocation().pathname).toBe("/admin/skills");
     });
-    expect(screen.getByRole("link", { name: "管理" })).toBeInTheDocument();
-    const subnav = screen.getByRole("navigation", { name: "管理子导航" });
+    const deptGroup = screen.getByRole("group", { name: "部门管理" });
     expect(
-      within(subnav).getByRole("link", { name: "公共技能" }),
+      within(deptGroup).getByRole("link", { name: "部门技能" }),
     ).toHaveAttribute("href", "/admin/skills");
     expect(
-      within(subnav).queryByRole("link", { name: "模型与压缩策略" }),
+      within(deptGroup).getByRole("link", { name: "部门知识库" }),
+    ).toHaveAttribute("href", "/knowledge?visibility_scope=department");
+    expect(
+      screen.queryByRole("link", { name: "模型与压缩策略" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1663,6 +1697,12 @@ describe("全站三级角色与分级路由守卫", () => {
       const url = getRequestUrl(input);
       if (url.endsWith("/auth/me")) {
         return jsonResponse(DEPT_ADMIN);
+      }
+      if (url.includes("/api/v1/projects")) {
+        return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+      }
+      if (url.includes("/api/v1/sessions")) {
+        return jsonResponse({ items: [], page: 1, page_size: 30, total: 0 });
       }
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1674,8 +1714,8 @@ describe("全站三级角色与分级路由守卫", () => {
       await screen.findByRole("heading", { name: "当前账号没有管理员权限" }),
     ).toBeInTheDocument();
     expect(
-      fetchMock.mock.calls.every(([input]) =>
-        getRequestUrl(input).endsWith("/auth/me"),
+      fetchMock.mock.calls.every(
+        ([input]) => !getRequestUrl(input).includes("/api/v1/admin"),
       ),
     ).toBe(true);
   });
@@ -1685,6 +1725,12 @@ describe("全站三级角色与分级路由守卫", () => {
       const url = getRequestUrl(input);
       if (url.endsWith("/auth/me")) {
         return jsonResponse(USER);
+      }
+      if (url.includes("/api/v1/projects")) {
+        return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+      }
+      if (url.includes("/api/v1/sessions")) {
+        return jsonResponse({ items: [], page: 1, page_size: 30, total: 0 });
       }
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1701,10 +1747,15 @@ describe("全站三级角色与分级路由守卫", () => {
     expect(
       await screen.findByRole("heading", { name: "当前账号没有管理员权限" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "管理" })).not.toBeInTheDocument();
     expect(
-      fetchMock.mock.calls.every(([input]) =>
-        getRequestUrl(input).endsWith("/auth/me"),
+      screen.queryByRole("group", { name: "管理后台" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "部门管理" }),
+    ).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.every(
+        ([input]) => !getRequestUrl(input).includes("/api/v1/admin"),
       ),
     ).toBe(true);
   });
@@ -1734,7 +1785,7 @@ describe("全站三级角色与分级路由守卫", () => {
     );
 
     const app = renderApp("/admin/skills");
-    await screen.findByRole("navigation", { name: "管理子导航" });
+    await screen.findByRole("group", { name: "部门管理" });
     app.client.setQueryData(adminKeys.skills(), []);
     app.client.setQueryData(adminKeys.modelProfiles(), {
       default_profile_id: null,
@@ -1789,7 +1840,7 @@ describe("全站三级角色与分级路由守卫", () => {
     );
 
     renderApp("/admin/skills");
-    await screen.findByRole("navigation", { name: "管理子导航" });
+    await screen.findByRole("group", { name: "部门管理" });
     currentIdentity = USER;
     await act(async () => {
       await apiRequest("/admin/skills/skill-99").catch(() => undefined);
@@ -1893,7 +1944,7 @@ describe("全站三级角色与分级路由守卫", () => {
     );
     const user = userEvent.setup();
     const app = renderApp("/admin/skills");
-    await screen.findByRole("navigation", { name: "管理子导航" });
+    await screen.findByRole("group", { name: "部门管理" });
 
     // 先触发 superAdminAccessDenied = true。
     await act(async () => {

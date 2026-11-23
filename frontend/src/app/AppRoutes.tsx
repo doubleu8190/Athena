@@ -12,7 +12,10 @@ import {
 import { canManageSkills, isSuperAdmin } from "../features/auth/model";
 import { DraftChatPage } from "../features/chat/DraftChatPage";
 import { SessionChatPage } from "../features/chat/SessionChatPage";
-import { AccessDeniedPage } from "../pages/PlaceholderPages";
+import {
+  AccessDeniedPage,
+  PreferencesPlaceholderPage,
+} from "../pages/PlaceholderPages";
 import { AppShell } from "./AppShell";
 
 // 非首屏路由页面按路由级代码分割懒加载，减小首屏主包体积同时保留认证与聊天主链路即开即用。
@@ -132,6 +135,10 @@ export function AppRoutes() {
             <Route element={<SessionChatPage />} path="/chat/:sessionId" />
 
             <Route element={<LazyRouteBoundary />}>
+              <Route
+                element={<PreferencesPlaceholderPage />}
+                path="/preferences"
+              />
               <Route element={<ProfilePage />} path="/profile" />
               <Route element={<ProjectsPage />} path="/projects" />
               <Route

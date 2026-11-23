@@ -14,10 +14,10 @@ import { projectKeys } from "../projects/queryKeys";
 import { jsonResponse, renderApp } from "../../test/testUtils";
 
 const INITIAL_WINDOW_WIDTH = window.innerWidth;
-const RECENT_SECTION_STORAGE_KEY = "athena.chat.recent-collapsed";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "athena.shell.sidebar-collapsed";
 
 beforeEach(() => {
-  window.localStorage.removeItem(RECENT_SECTION_STORAGE_KEY);
+  window.localStorage.removeItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
 });
 
 afterEach(() => {
@@ -131,9 +131,15 @@ function installChatFetch(options: ChatFetchOptions = {}) {
             listResponse(items, 1, 5, items.length),
           );
         }
-        if (pageSize === 8) {
+        if (pageSize === 8 || pageSize === 30) {
+          const q = url.searchParams.get("q")?.trim().toLowerCase() ?? "";
+          const matched = q
+            ? recent.filter((item) =>
+                (item.title ?? "").toLowerCase().includes(q),
+              )
+            : recent;
           return jsonResponse(
-            listResponse(recent, 1, 8, recent.length),
+            listResponse(matched, 1, pageSize, matched.length),
           );
         }
       }
@@ -160,235 +166,95 @@ function installChatFetch(options: ChatFetchOptions = {}) {
   return fetchMock;
 }
 
-describe("对话侧栏项目树", () => {
-  it("最近列表默认展开，点击与键盘折叠状态跨路由和重新挂载保留", async () => {
-    const recent = [
-      makeSession({ id: "recent-one", title: "最近对话一" }),
-      makeSession({ id: "recent-two", title: "最近对话二" }),
-    ];
-    installChatFetch({ recent });
-    const user = userEvent.setup();
-    const view = renderApp("/chat");
-
-    const section = await screen.findByRole("region", { name: "最近" });
-    const toggle = within(section).getByRole("button", { name: "最近" });
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(await within(section).findByText("最近对话一")).toBeVisible();
-
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(section.querySelector("#recent-sessions-content")).not.toBeVisible();
-
-    toggle.focus();
-    await user.keyboard("{Enter}");
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(toggle).toHaveFocus();
-    await user.keyboard(" ");
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    view.navigateTo("/chat/recent-one");
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-
-    view.unmount();
-    installChatFetch({ recent });
-    renderApp("/chat");
-    const reloadedSection = await screen.findByRole("region", { name: "最近" });
-    expect(
-      within(reloadedSection).getByRole("button", { name: "最近" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    expect(reloadedSection.querySelector("#recent-sessions-content")).not.toBeVisible();
-  });
-
-  it("本地存储读取或写入失败时仍可正常展开收起", async () => {
-    installChatFetch({ recent: [makeSession({ id: "recent-one", title: "最近对话一" })] });
-    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-      throw new Error("storage unavailable");
-    });
-    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("storage unavailable");
-    });
-    const user = userEvent.setup();
-
-    renderApp("/chat");
-    const section = await screen.findByRole("region", { name: "最近" });
-    const toggle = within(section).getByRole("button", { name: "最近" });
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(section.querySelector("#recent-sessions-content")).not.toBeVisible();
-
-    getItemSpy.mockRestore();
-    setItemSpy.mockRestore();
-  });
-
-  it("点击项目只展开会话，多个项目可同时展开且不会导航", async () => {
-    installChatFetch({
-      projectSessions: {
-        [PROJECT_A.id]: [
-          makeSession({ id: "session-a1", title: "增长会话一" }),
-          makeSession({ id: "session-a2", title: "增长会话二" }),
-        ],
-        [PROJECT_B.id]: [
-          makeSession({
-            id: "session-b1",
-            project_id: PROJECT_B.id,
-            title: "产品会话一",
-          }),
-        ],
-      },
-    });
-    const user = userEvent.setup();
-
-    renderApp("/chat");
-
-    await screen.findByRole("heading", { name: "对话工作台" });
-    const projectAButton = await screen.findByRole("button", {
-      name: `项目 ${PROJECT_A.name}`,
-    });
-    const projectBButton = screen.getByRole("button", {
-      name: `项目 ${PROJECT_B.name}`,
-    });
-
-    await user.click(projectAButton);
-    expect(await screen.findByText("增长会话一")).toBeInTheDocument();
-    expect(projectAButton).toHaveAttribute("aria-expanded", "true");
-
-    await user.click(projectBButton);
-    expect(await screen.findByText("产品会话一")).toBeInTheDocument();
-    expect(screen.getByText("增长会话一")).toBeInTheDocument();
-    expect(projectBButton).toHaveAttribute("aria-expanded", "true");
-    expect(
-      screen.queryByRole("navigation", { name: "项目页面" }),
-    ).not.toBeInTheDocument();
-
-    await user.click(projectAButton);
-    expect(screen.queryByText("增长会话一")).not.toBeInTheDocument();
-    expect(screen.getByText("产品会话一")).toBeInTheDocument();
-  });
-
-  it("未归属项目总数为 0 时隐藏入口", async () => {
-    installChatFetch({ unboundTotal: 0 });
-
-    renderApp("/chat");
-
-    await screen.findByRole("button", {
-      name: `项目 ${PROJECT_A.name}`,
-    });
-    expect(
-      screen.queryByRole("button", { name: "未归属项目" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("未归属项目有总数时才显示，并在展开后加载真实会话", async () => {
-    const unboundSession = makeSession({
-      id: "session-unbound",
-      project_id: null,
-      title: "未归属真实会话",
-    });
-    installChatFetch({
-      unboundTotal: 1,
-      unboundSessions: [unboundSession],
-    });
-    const user = userEvent.setup();
-
-    renderApp("/chat");
-
-    const unboundButton = await screen.findByRole("button", {
-      name: "未归属项目",
-    });
-    expect(screen.queryByText("未归属真实会话")).not.toBeInTheDocument();
-    await user.click(unboundButton);
-    expect(await screen.findByText("未归属真实会话")).toBeInTheDocument();
-    expect(unboundButton).toHaveAttribute("aria-expanded", "true");
-  });
-
-  it("最近列表只展示接口返回的 8 条真实会话，空标题统一命名", async () => {
-    const recent = Array.from({ length: 9 }, (_, index) =>
+describe("单层侧栏会话历史与项目上下文", () => {
+  it("会话历史展示接口返回的真实会话，空标题统一显示未命名对话", async () => {
+    const now = new Date();
+    const recent = Array.from({ length: 4 }, (_, index) =>
       makeSession({
         id: `recent-${index}`,
-        project_id:
-          index % 2 === 0 ? PROJECT_A.id : null,
+        project_id: index % 2 === 0 ? PROJECT_A.id : null,
         title: index === 0 ? null : `真实最近会话 ${index}`,
+        updated_at: new Date(now.getTime() - index * 60_000).toISOString(),
       }),
-    ).slice(0, 8);
-    installChatFetch({ recent, unboundTotal: 0 });
+    );
+    installChatFetch({ recent });
 
     renderApp("/chat");
 
-    const recentSection = await screen.findByRole("region", {
-      name: "最近",
-    });
-    await waitFor(() => {
-      expect(within(recentSection).getAllByRole("link")).toHaveLength(8);
+    const sidebar = await screen.findByRole("complementary", {
+      name: "工作区侧栏",
     });
     expect(
-      within(recentSection).getByText("未命名对话"),
+      await within(sidebar).findByRole("link", { name: "未命名对话" }),
     ).toBeInTheDocument();
     expect(
-      within(recentSection).getAllByText(/未归属项目/).length,
-    ).toBeGreaterThan(0);
+      within(sidebar).getByRole("link", { name: "真实最近会话 1" }),
+    ).toBeInTheDocument();
     expect(
-      within(recentSection).queryByText("示例会话"),
+      within(sidebar).queryByText("示例会话"),
     ).not.toBeInTheDocument();
   });
 
-  it("活动 Session 所属项目默认展开", async () => {
+  it("活动 Session 在侧栏高亮且新建对话继承其所属项目", async () => {
+    const activeSession = makeSession({
+      id: "session-active",
+      project_id: PROJECT_A.id,
+      title: "当前会话",
+      updated_at: new Date().toISOString(),
+    });
     installChatFetch({
-      activeSession: makeSession({
-        id: "session-active",
-        title: "当前会话",
-      }),
-      projectSessions: {
-        [PROJECT_A.id]: [
-          makeSession({ id: "session-active", title: "当前会话" }),
-        ],
-      },
+      activeSession,
+      recent: [activeSession],
     });
 
     renderApp("/chat/session-active");
 
-    const projectButton = await screen.findByRole("button", {
-      name: `项目 ${PROJECT_A.name}`,
-    });
+    const activeLink = await screen.findByRole("link", { name: "当前会话" });
+    expect(activeLink).toHaveAttribute("aria-current", "page");
     await waitFor(() => {
-      expect(projectButton).toHaveAttribute("aria-expanded", "true");
+      expect(
+        screen.getByRole("link", { name: "新建对话" }),
+      ).toHaveAttribute("href", `/chat/new?project=${PROJECT_A.id}`);
     });
+  });
+
+  it("项目分区可折叠收起并展示最近项目与查看全部入口", async () => {
+    installChatFetch({});
+    const user = userEvent.setup();
+
+    renderApp("/chat");
+
+    const nav = await screen.findByRole("navigation", { name: "主导航" });
     expect(
-      await screen.findByRole("link", { name: "新建对话" }),
-    ).toHaveAttribute(
-      "href",
-      `/chat/new?project=${PROJECT_A.id}`,
-    );
+      await within(nav).findByRole("link", { name: PROJECT_A.name }),
+    ).toHaveAttribute("href", `/projects/${PROJECT_A.id}/overview`);
     expect(
-      await screen.findByRole("link", { name: "当前会话" }),
-    ).toBeInTheDocument();
-    const mainNavigation = screen.getByRole("navigation", {
-      name: "主导航",
-    });
+      within(nav).getByRole("link", { name: "查看全部项目 →" }),
+    ).toHaveAttribute("href", "/projects");
+
+    const toggle = within(nav).getByRole("button", { name: "项目" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(
-      within(mainNavigation).getByRole("link", { name: "对话" }),
-    ).toHaveAttribute("aria-current", "page");
+      within(nav).queryByRole("link", { name: PROJECT_A.name }),
+    ).not.toBeInTheDocument();
   });
 });
 
-describe("窄屏工作区目录", () => {
+describe("窄屏移动导航抽屉", () => {
   it.each([920, 390])(
-    "在 %ipx 视口可打开目录、访问未归属与最近记录，并在关闭后恢复主内容",
+    "在 %ipx 视口可打开左侧 Sheet 抽屉、访问历史会话并在关闭后恢复主内容编辑",
     async (width) => {
       window.innerWidth = width;
-      const unboundSession = makeSession({
-        id: "session-unbound",
-        project_id: null,
-        title: "窄屏未归属会话",
-      });
       const recentSession = makeSession({
         id: "session-recent",
         project_id: null,
         title: "窄屏最近会话",
+        updated_at: new Date().toISOString(),
       });
       installChatFetch({
         recent: [recentSession],
-        unboundSessions: [unboundSession],
-        unboundTotal: 1,
       });
       const user = userEvent.setup();
 
@@ -396,55 +262,46 @@ describe("窄屏工作区目录", () => {
 
       await screen.findByRole("heading", { name: "对话工作台" });
       const trigger = screen.getByRole("button", {
-        name: "工作区目录",
+        name: "打开导航菜单",
       });
       expect(trigger).toHaveAttribute("aria-expanded", "false");
       expect(trigger).toHaveAttribute(
         "aria-controls",
-        "mobile-workspace-directory",
+        "mobile-navigation-drawer",
       );
 
       await user.click(trigger);
-      const dialog = screen.getByRole("dialog", {
-        name: "工作区目录",
+      const drawer = screen.getByRole("dialog", {
+        name: "工作区导航",
       });
       expect(trigger).toHaveAttribute("aria-expanded", "true");
       expect(
-        within(dialog).getByRole("link", {
-          name: /窄屏最近会话/,
+        await within(drawer).findByRole("link", {
+          name: "窄屏最近会话",
         }),
       ).toBeInTheDocument();
 
       await user.click(
-        within(dialog).getByRole("button", {
-          name: "未归属项目",
+        within(drawer).getByRole("button", {
+          name: "关闭",
         }),
       );
-      expect(
-        await within(dialog).findByRole("link", {
-          name: "窄屏未归属会话",
-        }),
-      ).toBeInTheDocument();
-
-      await user.click(
-        within(dialog).getByRole("button", {
-          name: "关闭弹窗",
-        }),
-      );
-      expect(
-        screen.queryByRole("dialog", { name: "工作区目录" }),
-      ).not.toBeInTheDocument();
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("dialog", { name: "工作区导航" }),
+        ).not.toBeInTheDocument();
+      });
       await user.type(
         screen.getByLabelText("对话草稿"),
-        `目录关闭后可编辑 ${width}`,
+        `抽屉关闭后可编辑 ${width}`,
       );
       expect(screen.getByLabelText("对话草稿")).toHaveValue(
-        `目录关闭后可编辑 ${width}`,
+        `抽屉关闭后可编辑 ${width}`,
       );
     },
   );
 
-  it("目录内打开新建项目后，Escape 只关闭内层弹窗并保留目录", async () => {
+  it("抽屉内打开新建项目后可正常输入，Escape 只关闭内层弹窗并恢复抽屉触发钮焦点", async () => {
     window.innerWidth = 390;
     installChatFetch({});
     const user = userEvent.setup();
@@ -452,25 +309,29 @@ describe("窄屏工作区目录", () => {
     renderApp("/chat");
 
     await user.click(
-      await screen.findByRole("button", { name: "工作区目录" }),
+      await screen.findByRole("button", { name: "打开导航菜单" }),
     );
-    const directory = screen.getByRole("dialog", {
-      name: "工作区目录",
+    const drawer = screen.getByRole("dialog", {
+      name: "工作区导航",
     });
-    const newProjectTrigger = within(directory).getByRole("button", {
+    const newProjectTrigger = within(drawer).getByRole("button", {
       name: "新建项目",
     });
     await user.click(newProjectTrigger);
-    expect(
-      screen.getByRole("dialog", { name: "新建项目" }),
-    ).toBeInTheDocument();
+    const createDialog = screen.getByRole("dialog", { name: "新建项目" });
+    const nameInput = within(createDialog).getByLabelText("项目名称");
+    await waitFor(() => expect(nameInput).toHaveFocus());
+    await user.type(nameInput, "抽屉内新建项目");
+    expect(nameInput).toHaveValue("抽屉内新建项目");
 
     await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "新建项目" }),
+      ).not.toBeInTheDocument();
+    });
     expect(
-      screen.queryByRole("dialog", { name: "新建项目" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("dialog", { name: "工作区目录" }),
+      screen.getByRole("dialog", { name: "工作区导航" }),
     ).toBeInTheDocument();
     await waitFor(() => expect(newProjectTrigger).toHaveFocus());
   });

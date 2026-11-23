@@ -168,7 +168,7 @@ describe("项目会话管理", () => {
 
     expect(
       await within(dialog).findByText(
-        "该会话仍有运行中的任务，暂时不能删除。",
+        "当前对话有正在执行的任务，请等待完成或停止后再操作。",
       ),
     ).toBeInTheDocument();
     expect(

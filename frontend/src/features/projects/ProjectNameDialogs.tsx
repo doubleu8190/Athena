@@ -1,8 +1,18 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Modal } from "../../shared/ui/Modal";
+import {
+  Button,
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  InlineAlert,
+  Input,
+} from "../../shared/ui";
 import { projectErrorMessage } from "./errorMessages";
 import {
   useCreateProjectMutation,
@@ -19,6 +29,7 @@ interface NewProjectDialogProps {
   open: boolean;
 }
 
+/** 新建项目弹窗：采用设计系统统一 Radix Dialog，确保在移动端 Sheet 抽屉内嵌套打开时共享 FocusScope 与 DismissableLayer。 */
 export function NewProjectDialog({
   onClose,
   open,
@@ -26,6 +37,9 @@ export function NewProjectDialog({
   const navigate = useNavigate();
   const formId = useId();
   const errorId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  // 受控 Dialog 未包裹 DialogTrigger 时，显式记录打开前焦点并在关闭后归还（如抽屉内的「新建项目」按钮）。
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [name, setName] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -42,8 +56,8 @@ export function NewProjectDialog({
     // 每次打开都从干净表单开始，不复用上一次的失败状态。
   }, [open, resetMutation]);
 
-  const close = () => {
-    if (!mutation.isPending) {
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen && !mutation.isPending) {
       onClose();
     }
   };
@@ -52,6 +66,7 @@ export function NewProjectDialog({
     const error = validateProjectName(name);
     if (error) {
       setValidationError(error);
+      inputRef.current?.focus();
       return;
     }
 
@@ -61,6 +76,8 @@ export function NewProjectDialog({
       const project = await mutation.mutateAsync({
         name: normalizeProjectName(name),
       });
+      // 创建成功后即将跳转到新项目页，清空归还目标避免把焦点拉回旧触发钮。
+      previousFocusRef.current = null;
       onClose();
       navigate(`/projects/${encodeURIComponent(project.id)}/overview`);
     } catch (requestFailure) {
@@ -69,71 +86,109 @@ export function NewProjectDialog({
   };
 
   return (
-    <Modal
-      closeDisabled={mutation.isPending}
-      description="项目用于组织同一主题下的对话。名称可在创建后修改。"
-      footer={
-        <>
-          <button
-            className="button-quiet"
+    <Dialog onOpenChange={handleOpenChange} open={open}>
+      <DialogContent
+        closeDisabled={mutation.isPending}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const target = previousFocusRef.current;
+          previousFocusRef.current = null;
+          if (target?.isConnected) {
+            target.focus();
+          }
+        }}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          previousFocusRef.current =
+            document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
+          inputRef.current?.focus();
+        }}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>新建项目</DialogTitle>
+          <DialogDescription>
+            项目用于组织同一主题下的对话。名称可在创建后修改。
+          </DialogDescription>
+        </DialogHeader>
+
+        <DialogBody>
+          <form
+            className="space-y-3"
+            id={formId}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleSubmit();
+            }}
+          >
+            <div className="space-y-1.5">
+              <label
+                className="block text-xs font-medium text-text-secondary"
+                htmlFor={`${formId}-name`}
+              >
+                项目名称
+              </label>
+              <Input
+                aria-describedby={validationError ? errorId : undefined}
+                aria-label="项目名称"
+                autoComplete="off"
+                disabled={mutation.isPending}
+                error={Boolean(validationError)}
+                id={`${formId}-name`}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  if (validationError) {
+                    setValidationError(null);
+                  }
+                  if (requestError) {
+                    setRequestError(null);
+                  }
+                }}
+                placeholder="例如：产品研究"
+                ref={inputRef}
+                value={name}
+              />
+              <p className="text-xs text-text-tertiary">
+                1–120 个 Unicode 码点，不能包含控制字符。
+              </p>
+              {validationError ? (
+                <p
+                  className="text-xs leading-snug text-danger"
+                  id={errorId}
+                  role="alert"
+                >
+                  {validationError}
+                </p>
+              ) : null}
+            </div>
+
+            {requestError ? (
+              <InlineAlert description={requestError} variant="danger" />
+            ) : null}
+          </form>
+        </DialogBody>
+
+        <DialogFooter>
+          <Button
             disabled={mutation.isPending}
-            onClick={close}
-            type="button"
+            onClick={onClose}
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
-            disabled={mutation.isPending}
+          </Button>
+          <Button
             form={formId}
+            loading={mutation.isPending}
             type="submit"
+            variant="primary"
           >
-            {mutation.isPending ? "正在创建…" : "创建项目"}
-          </button>
-        </>
-      }
-      onClose={close}
-      open={open}
-      title="新建项目"
-    >
-      <form
-        id={formId}
-        onSubmit={(event) => {
-          event.preventDefault();
-          void handleSubmit();
-        }}
-      >
-        <label className="workspace-field" htmlFor={`${formId}-name`}>
-          <span>项目名称</span>
-          <input
-            aria-label="项目名称"
-            aria-describedby={validationError ? errorId : undefined}
-            aria-invalid={Boolean(validationError)}
-            autoComplete="off"
-            data-autofocus
-            id={`${formId}-name`}
-            onChange={(event) => {
-              setName(event.target.value);
-              if (validationError) {
-                setValidationError(null);
-              }
-              if (requestError) {
-                setRequestError(null);
-              }
-            }}
-            placeholder="例如：产品研究"
-            value={name}
-          />
-          <small>1–120 个 Unicode 码点，不能包含控制字符。</small>
-        </label>
-        {validationError ? (
-          <p className="field-error" id={errorId} role="alert">
-            {validationError}
-          </p>
-        ) : null}
-        {requestError ? <ErrorBanner message={requestError} /> : null}
-      </form>
-    </Modal>
+            创建项目
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -143,6 +198,7 @@ interface RenameProjectDialogProps {
   project: Project;
 }
 
+/** 重命名项目弹窗：复用统一 Radix Dialog 原语。 */
 export function RenameProjectDialog({
   onClose,
   open,
@@ -150,6 +206,8 @@ export function RenameProjectDialog({
 }: RenameProjectDialogProps) {
   const formId = useId();
   const errorId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [name, setName] = useState(project.name);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -165,8 +223,8 @@ export function RenameProjectDialog({
     }
   }, [open, project.name, resetMutation]);
 
-  const close = () => {
-    if (!mutation.isPending) {
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen && !mutation.isPending) {
       onClose();
     }
   };
@@ -175,6 +233,7 @@ export function RenameProjectDialog({
     const error = validateProjectName(name);
     if (error) {
       setValidationError(error);
+      inputRef.current?.focus();
       return;
     }
 
@@ -191,65 +250,104 @@ export function RenameProjectDialog({
   };
 
   return (
-    <Modal
-      closeDisabled={mutation.isPending}
-      footer={
-        <>
-          <button
-            className="button-quiet"
+    <Dialog onOpenChange={handleOpenChange} open={open}>
+      <DialogContent
+        closeDisabled={mutation.isPending}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const target = previousFocusRef.current;
+          previousFocusRef.current = null;
+          if (target?.isConnected) {
+            target.focus();
+          }
+        }}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          previousFocusRef.current =
+            document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
+          inputRef.current?.focus();
+          inputRef.current?.select();
+        }}
+        size="sm"
+      >
+        <DialogHeader>
+          <DialogTitle>重命名项目</DialogTitle>
+          <DialogDescription>
+            修改后将同步更新侧栏与项目中心中的显示名称。
+          </DialogDescription>
+        </DialogHeader>
+
+        <DialogBody>
+          <form
+            className="space-y-3"
+            id={formId}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleSubmit();
+            }}
+          >
+            <div className="space-y-1.5">
+              <label
+                className="block text-xs font-medium text-text-secondary"
+                htmlFor={`${formId}-name`}
+              >
+                项目名称
+              </label>
+              <Input
+                aria-describedby={validationError ? errorId : undefined}
+                aria-label="项目名称"
+                autoComplete="off"
+                disabled={mutation.isPending}
+                error={Boolean(validationError)}
+                id={`${formId}-name`}
+                onChange={(event) => {
+                  setName(event.target.value);
+                  setValidationError(null);
+                  setRequestError(null);
+                }}
+                ref={inputRef}
+                value={name}
+              />
+              <p className="text-xs text-text-tertiary">
+                1–120 个 Unicode 码点，不能包含控制字符。
+              </p>
+              {validationError ? (
+                <p
+                  className="text-xs leading-snug text-danger"
+                  id={errorId}
+                  role="alert"
+                >
+                  {validationError}
+                </p>
+              ) : null}
+            </div>
+
+            {requestError ? (
+              <InlineAlert description={requestError} variant="danger" />
+            ) : null}
+          </form>
+        </DialogBody>
+
+        <DialogFooter>
+          <Button
             disabled={mutation.isPending}
-            onClick={close}
-            type="button"
+            onClick={onClose}
+            variant="outline"
           >
             取消
-          </button>
-          <button
-            className="button-primary"
-            disabled={mutation.isPending}
+          </Button>
+          <Button
             form={formId}
+            loading={mutation.isPending}
             type="submit"
+            variant="primary"
           >
-            {mutation.isPending ? "正在保存…" : "保存名称"}
-          </button>
-        </>
-      }
-      onClose={close}
-      open={open}
-      title="重命名项目"
-    >
-      <form
-        id={formId}
-        onSubmit={(event) => {
-          event.preventDefault();
-          void handleSubmit();
-        }}
-      >
-        <label className="workspace-field" htmlFor={`${formId}-name`}>
-          <span>项目名称</span>
-          <input
-            aria-label="项目名称"
-            aria-describedby={validationError ? errorId : undefined}
-            aria-invalid={Boolean(validationError)}
-            autoComplete="off"
-            data-autofocus
-            id={`${formId}-name`}
-            onChange={(event) => {
-              setName(event.target.value);
-              setValidationError(null);
-              setRequestError(null);
-            }}
-            value={name}
-          />
-          <small>1–120 个 Unicode 码点，不能包含控制字符。</small>
-        </label>
-        {validationError ? (
-          <p className="field-error" id={errorId} role="alert">
-            {validationError}
-          </p>
-        ) : null}
-        {requestError ? <ErrorBanner message={requestError} /> : null}
-      </form>
-    </Modal>
+            保存名称
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
-

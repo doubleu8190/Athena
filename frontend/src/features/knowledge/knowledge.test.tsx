@@ -58,15 +58,15 @@ describe("知识库目录", () => {
     expect(within(main).queryByText(/共\s*\d+\s*个知识库/)).not.toBeInTheDocument();
     expect(within(main).queryByText(/份文档/)).not.toBeInTheDocument();
 
+    expect(
+      await within(main).findByRole("link", { name: /市场资料库/ }),
+    ).toHaveAttribute("href", `/knowledge/${KNOWLEDGE_BASE_B.id}`);
     const sidebar = screen.getByRole("complementary", {
       name: "工作区侧栏",
     });
     expect(
-      within(sidebar).getByRole("link", { name: "产品研究库" }),
-    ).toHaveAttribute("href", `/knowledge/${KNOWLEDGE_BASE_A.id}`);
-    expect(
-      within(sidebar).getByRole("link", { name: "市场资料库" }),
-    ).toHaveAttribute("href", `/knowledge/${KNOWLEDGE_BASE_B.id}`);
+      within(sidebar).getByRole("link", { name: "知识库" }),
+    ).toHaveAttribute("aria-current", "page");
     expect(fetchMock).toHaveBeenCalled();
   });
 

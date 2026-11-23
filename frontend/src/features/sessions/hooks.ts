@@ -61,6 +61,27 @@ export function useCreateSessionMutation() {
   });
 }
 
+export interface UpdateSessionVariables {
+  input: SessionUpdateInput;
+  sessionId: string;
+}
+
+/** 动态更新任意会话的标题或项目归属，供侧栏内联重命名与项目移动弹窗共用。 */
+export function useUpdateSessionMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ input, sessionId }: UpdateSessionVariables) =>
+      updateSession(sessionId, input),
+    onSuccess: async (session: Session, variables) => {
+      queryClient.setQueryData(
+        sessionKeys.detail(variables.sessionId),
+        session,
+      );
+      await invalidateSessionCaches(queryClient);
+    },
+  });
+}
+
 export function useRenameSessionMutation(sessionId: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -68,6 +89,20 @@ export function useRenameSessionMutation(sessionId: string) {
       updateSession(sessionId, input),
     onSuccess: async (session: Session) => {
       queryClient.setQueryData(sessionKeys.detail(sessionId), session);
+      await invalidateSessionCaches(queryClient);
+    },
+  });
+}
+
+/** 动态删除任意会话，供侧栏直接操作多条会话行而无需预先绑定单个 sessionId。 */
+export function useDeleteAnySessionMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) => deleteSession(sessionId),
+    onSuccess: async (_data, sessionId) => {
+      queryClient.removeQueries({
+        queryKey: sessionKeys.detail(sessionId),
+      });
       await invalidateSessionCaches(queryClient);
     },
   });

@@ -67,16 +67,16 @@ describe("技能库一级页面", () => {
     expect(
       screen.getAllByText(/公共技能由管理员发布/).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByText(/我的技能只对你本人可见/)).toBeInTheDocument();
+    expect(screen.getByText(/个人技能仅本人可见/)).toBeInTheDocument();
 
-    const libraryNav = screen.getByRole("navigation", {
-      name: "技能库导航",
+    const viewNav = screen.getByRole("navigation", {
+      name: "技能库视图",
     });
     expect(
-      within(libraryNav).getByRole("link", { name: "可用技能" }),
+      within(viewNav).getByRole("link", { name: "可用技能" }),
     ).toHaveAttribute("aria-current", "page");
     expect(
-      within(libraryNav).getByRole("link", { name: "我的技能" }),
+      within(viewNav).getByRole("link", { name: "我的技能" }),
     ).not.toHaveAttribute("aria-current");
     expect(screen.queryByText("返回对话")).not.toBeInTheDocument();
 
@@ -107,9 +107,6 @@ describe("技能库一级页面", () => {
       within(publicCard as HTMLElement).queryByRole("button"),
     ).not.toBeInTheDocument();
 
-    const viewNav = screen.getByRole("navigation", {
-      name: "技能库视图",
-    });
     const mineLink = within(viewNav).getByRole("link", {
       name: "我的技能",
     });
@@ -126,15 +123,10 @@ describe("技能库一级页面", () => {
       search: "?view=mine",
     });
     expect(
-      within(
-        screen.getByRole("navigation", { name: "技能库导航" }),
-      ).getByRole("link", { name: "我的技能" }),
+      within(viewNav).getByRole("link", { name: "我的技能" }),
     ).toHaveAttribute("aria-current", "page");
-    const mineLibraryNav = screen.getByRole("navigation", {
-      name: "技能库导航",
-    });
     expect(
-      within(mineLibraryNav).getByRole("link", { name: "可用技能" }),
+      within(viewNav).getByRole("link", { name: "可用技能" }),
     ).not.toHaveAttribute("aria-current");
     expect(mineLink).toHaveFocus();
     expect(

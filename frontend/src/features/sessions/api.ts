@@ -1,10 +1,11 @@
 import { apiRequest } from "../../shared/api/client";
-import type {
-  Session,
-  SessionCreateInput,
-  SessionListQuery,
-  SessionListResponse,
-  SessionUpdateInput,
+import {
+  normalizeSessionSearchQuery,
+  type Session,
+  type SessionCreateInput,
+  type SessionListQuery,
+  type SessionListResponse,
+  type SessionUpdateInput,
 } from "./model";
 
 function toSessionListQuery(query: SessionListQuery): string {
@@ -20,6 +21,10 @@ function toSessionListQuery(query: SessionListQuery): string {
   }
   if (query.unbound) {
     params.set("unbound", "true");
+  }
+  const normalizedQ = normalizeSessionSearchQuery(query.q);
+  if (normalizedQ) {
+    params.set("q", normalizedQ);
   }
   const serialized = params.toString();
   return serialized ? `?${serialized}` : "";

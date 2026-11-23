@@ -117,7 +117,7 @@ describe("项目中心", () => {
     expect(
       within(
         screen.getByRole("navigation", { name: "主导航" }),
-      ).getByRole("link", { name: "项目" }),
+      ).getByRole("link", { name: PROJECT_A.name }),
     ).toHaveAttribute("aria-current", "page");
 
     await user.click(within(tabs).getByRole("link", { name: "会话" }));

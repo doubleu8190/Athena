@@ -7,6 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from adapter.access import SqlAlchemyAccessControlRepository
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
 from adapter.llm import OpenAIChatCompletionsAdapter
@@ -22,6 +23,7 @@ from adapter.skill import SqlAlchemySkillRepository
 from adapter.skill.execution import PythonScriptExecutor
 from adapter.subagent import SqlAlchemySubagentRepository
 from adapter.system_prompt import SqlAlchemySystemPromptRepository
+from app.access import AccessPolicyService
 from app.file import SessionFileService
 from app.preference import PreferenceService
 from app.project.service import ProjectService
@@ -88,6 +90,9 @@ def build_run_worker_dependencies(
     secret_cipher = McpSecretCipher.from_environment()
     database = build_database(configured_url)
     bundle.database = database
+    access_policy = AccessPolicyService(
+        SqlAlchemyAccessControlRepository(database.session_factory)
+    )
     profiles = SqlAlchemyModelProfileRepository(database.session_factory, secret_cipher)
     projects_repository = SqlAlchemyProjectRepository(database.session_factory)
     messages = SqlAlchemyMessageRepository(database.session_factory)
@@ -101,6 +106,7 @@ def build_run_worker_dependencies(
     query_services = build_query_services(
         database.session_factory,
         projects=projects,
+        access_policy=access_policy,
     )
     bundle.query_services = query_services
     repository = SqlAlchemyRunRepository(database.session_factory, messages)
@@ -116,6 +122,7 @@ def build_run_worker_dependencies(
             skill_repository,
             object_store,
             auth_repository,
+            access_policy=access_policy,
             dependency_checker=DependencyChecker(python_executable=python_executable),
         )
         file_repository = SqlAlchemySessionFileRepository(database.session_factory)
@@ -150,6 +157,7 @@ def build_run_worker_dependencies(
         session_files=session_files,
         skill_execution=skill_execution,
         subagents=subagents_repository,
+        access_policy=access_policy,
     )
     provider = OpenAIChatCompletionsAdapter()
     bundle.provider = provider
@@ -168,6 +176,7 @@ def build_run_worker_dependencies(
         tool_runtime=tool_runtime,
         preferences=preferences,
         subagents=subagents_repository,
+        access_policy=access_policy,
     )
     bundle.worker = RunWorker(repository, executor, config, publisher=run_transport)
 

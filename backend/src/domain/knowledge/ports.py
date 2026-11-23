@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from domain.access import VisibilityGrantInput, VisibilityScope
 from domain.knowledge.model import (
     Document,
     DocumentVersion,
@@ -81,9 +82,16 @@ class OriginalStore(Protocol):
 class KnowledgeRepositoryPort(Protocol):
     """知识库应用服务使用的持久化边界。"""
 
-    async def create_base(self, item: KnowledgeBase) -> KnowledgeBase: ...
+    async def create_base(
+        self,
+        item: KnowledgeBase,
+        *,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
+    ) -> KnowledgeBase: ...
 
     async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None: ...
+
+    async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None: ...
 
     async def is_storage_key_referenced(self, storage_key: str) -> bool: ...
 
@@ -110,8 +118,30 @@ class KnowledgeRepositoryPort(Protocol):
         self, owner_id: str, *, offset: int, limit: int
     ) -> list[KnowledgeBase]: ...
 
+    async def list_bases_by_ids(
+        self,
+        base_ids: Sequence[str],
+        *,
+        offset: int,
+        limit: int,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+    ) -> list[KnowledgeBase]: ...
+
     async def rename_base(
         self, owner_id: str, base_id: str, name: str, description: str | None, at: datetime
+    ) -> KnowledgeBase | None: ...
+
+    async def update_base(
+        self,
+        base_id: str,
+        *,
+        name: str,
+        description: str | None,
+        visibility_scope: VisibilityScope,
+        owner_department_id: str | None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None,
+        at: datetime,
     ) -> KnowledgeBase | None: ...
 
     async def soft_delete_base(self, owner_id: str, base_id: str, at: datetime) -> bool: ...

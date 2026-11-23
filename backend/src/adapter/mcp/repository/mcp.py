@@ -10,6 +10,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.access.repository import (
+    delete_resource_grants_in_session,
+    load_grants_map_in_session,
+    sync_resource_grants_in_session,
+)
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
 from adapter.mcp.converter.mcp import (
     server_to_domain,
@@ -18,6 +23,7 @@ from adapter.mcp.converter.mcp import (
 )
 from adapter.mcp.model import McpServerModel, McpToolModel
 from common.ids import now_utc
+from domain.access import ResourceType, VisibilityGrant, VisibilityScope
 from domain.auth import AuthContext, UserRole
 from domain.mcp import (
     McpAuthorizationChangedError,
@@ -97,6 +103,8 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         secrets_nonce=sealed.nonce if sealed else None,
                         key_version=sealed.key_version if sealed else None,
                         config_version=1,
+                        visibility_scope=server.visibility_scope.value,
+                        owner_department_id=server.owner_department_id,
                         created_by=actor.user.id,
                         created_at=now,
                         updated_at=now,
@@ -105,8 +113,19 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     session.add(row)
                     await session.flush()
                     self._insert_tools(session, server.id, tools, now)
+                    grants = await sync_resource_grants_in_session(
+                        session,
+                        ResourceType.MCP_SERVER,
+                        server.id,
+                        (
+                            server.visibility_grants
+                            if server.visibility_scope is VisibilityScope.DEPARTMENT
+                            else ()
+                        ),
+                        now=now,
+                    )
                     await session.flush()
-                    return self._server_projection(row)
+                    return self._server_projection(row, grants=grants)
         except IntegrityError as error:
             self._raise_integrity_domain_error(error)
         except SQLAlchemyError:
@@ -161,6 +180,8 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     row.secrets_ciphertext = sealed.ciphertext if sealed else None
                     row.secrets_nonce = sealed.nonce if sealed else None
                     row.key_version = sealed.key_version if sealed else None
+                    row.visibility_scope = replacement.visibility_scope.value
+                    row.owner_department_id = replacement.owner_department_id
                     row.config_version += 1
                     row.updated_at = now
                     row.tools_discovered_at = now
@@ -175,8 +196,19 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         existing_by_remote,
                         now,
                     )
+                    grants = await sync_resource_grants_in_session(
+                        session,
+                        ResourceType.MCP_SERVER,
+                        server_id,
+                        (
+                            replacement.visibility_grants
+                            if replacement.visibility_scope is VisibilityScope.DEPARTMENT
+                            else ()
+                        ),
+                        now=now,
+                    )
                     await session.flush()
-                    return self._server_projection(row)
+                    return self._server_projection(row, grants=grants)
         except IntegrityError as error:
             self._raise_integrity_domain_error(error)
         except SQLAlchemyError:
@@ -200,6 +232,9 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     )
                     if row is None:
                         raise McpServerNotFoundError("mcp_server_not_found")
+                    await delete_resource_grants_in_session(
+                        session, ResourceType.MCP_SERVER, server_id
+                    )
                     await session.delete(row)
         except SQLAlchemyError:
             raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
@@ -237,7 +272,12 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         """
         async with self._session_factory() as session:
             row = await session.get(McpServerModel, server_id)
-        return None if row is None else self._server_projection(row)
+            if row is None:
+                return None
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.MCP_SERVER, (row.id,)
+            )
+            return self._server_projection(row, grants=grants_map.get(row.id, ()))
 
     async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         """Read catalog rows and their Server config version in one DB snapshot."""
@@ -326,16 +366,29 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     )
                 ).all()
             )
-        return McpServerPage(items=tuple(self._server_projection(row) for row in rows), total=total)
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.MCP_SERVER, [row.id for row in rows]
+            )
+        return McpServerPage(
+            items=tuple(
+                self._server_projection(row, grants=grants_map.get(row.id, ())) for row in rows
+            ),
+            total=total,
+        )
 
     async def list_public(
         self,
         *,
         offset: int,
         limit: int,
+        allowed_server_ids: Sequence[str] | None = None,
     ) -> ToolPage[PublicToolDefinition]:
-        """读取不包含 Server 来源信息的工具投影分页。"""
-        rows, total = await self._tool_page(offset, limit)
+        """读取不包含 Server 来源信息的工具投影分页，支持按有权限 Server 过滤。"""
+        if allowed_server_ids is not None and not allowed_server_ids:
+            return ToolPage(items=(), total=0)
+        rows, total = await self._tool_page(
+            offset, limit, allowed_server_ids=allowed_server_ids
+        )
         return ToolPage(items=tuple(tool_to_public(row) for row in rows), total=total)
 
     async def list_admin(
@@ -373,6 +426,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         limit: int,
         *,
         server_id: str | None = None,
+        allowed_server_ids: Sequence[str] | None = None,
     ) -> tuple[list[McpToolModel], int]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("mcp_page_invalid")
@@ -382,6 +436,10 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             if server_id is not None:
                 count_query = count_query.where(McpToolModel.server_id == server_id)
                 rows_query = rows_query.where(McpToolModel.server_id == server_id)
+            if allowed_server_ids is not None:
+                unique_ids = tuple(dict.fromkeys(allowed_server_ids))
+                count_query = count_query.where(McpToolModel.server_id.in_(unique_ids))
+                rows_query = rows_query.where(McpToolModel.server_id.in_(unique_ids))
             total = int(await session.scalar(count_query) or 0)
             rows = list(
                 (
@@ -410,10 +468,15 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             else None
         )
 
-    def _server_projection(self, row: McpServerModel) -> McpServer:
+    def _server_projection(
+        self,
+        row: McpServerModel,
+        *,
+        grants: tuple[VisibilityGrant, ...] = (),
+    ) -> McpServer:
         """先认证解密秘密，再把经过验证的名称交给纯转换器。"""
         secrets = self._decrypt_secrets(row)
-        return server_to_domain(row, tuple(sorted(secrets)))
+        return server_to_domain(row, tuple(sorted(secrets)), grants=grants)
 
     def _decrypt_secrets(self, row: McpServerModel) -> dict[str, str]:
         """校验密文三元组并认证解密；缺失或损坏时失败关闭。"""

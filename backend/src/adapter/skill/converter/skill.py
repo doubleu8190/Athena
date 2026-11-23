@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from domain.access import VisibilityGrant
 from domain.skill.model import (
     DependencyCheck,
     Skill,
@@ -41,8 +42,13 @@ def skill_version_to_domain(row: SkillVersionModel) -> SkillVersion:
     )
 
 
-def skill_to_domain(row: SkillModel, version: SkillVersionModel | None = None) -> Skill:
-    """转换 Skill 身份；调用方可附带当前版本以填充展示元数据。"""
+def skill_to_domain(
+    row: SkillModel,
+    version: SkillVersionModel | None = None,
+    *,
+    grants: tuple[VisibilityGrant, ...] = (),
+) -> Skill:
+    """转换 Skill 身份；调用方可附带当前版本及可见性授权列表。"""
     current = None if version is None else skill_version_to_domain(version)
     return Skill(
         id=row.id,
@@ -61,6 +67,8 @@ def skill_to_domain(row: SkillModel, version: SkillVersionModel | None = None) -
         scope=SkillScope(row.scope),
         owner_id=row.owner_id,
         deleted_at=None if row.deleted_at is None else _utc(row.deleted_at),
+        owner_department_id=row.owner_department_id,
+        visibility_grants=grants,
     )
 
 

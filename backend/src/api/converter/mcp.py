@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, cast
 
+from api.dto.access import grants_to_response
 from api.dto.mcp import McpServerListResponse, McpServerResponse
 from domain.mcp import McpServer, McpServerPage, StdioConfig, StreamableHttpConfig
 
@@ -21,6 +22,7 @@ def mcp_server_to_response(server: McpServer) -> McpServerResponse:
         }
     else:
         raise ValueError("mcp_config_invalid")
+    scope = cast(Literal["company", "department"], server.visibility_scope.value)
     return McpServerResponse(
         id=server.id,
         name=server.name,
@@ -30,6 +32,9 @@ def mcp_server_to_response(server: McpServer) -> McpServerResponse:
             {"name": entry.name, "has_value": entry.has_value} for entry in server.secret_metadata
         ],
         config_version=server.config_version,
+        visibility_scope=scope,
+        owner_department_id=server.owner_department_id,
+        visibility_grants=grants_to_response(server.visibility_grants),
         created_by=server.created_by,
         created_at=server.created_at,
         updated_at=server.updated_at,

@@ -23,6 +23,7 @@ from api.dto.tool import AdminToolListResponse
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
 from api.security import AdminAuth, verify_request_origin
 from app.tool import ToolManager
+from domain.access import VisibilityScope
 
 _CREATE_ADAPTER: TypeAdapter[
     HttpServerCreateRequest | StdioServerCreateRequest
@@ -74,10 +75,29 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _CREATE_ADAPTER)
+        has_visibility = bool(
+            request.model_fields_set
+            & {"visibility_scope", "owner_department_id", "visibility_grants"}
+        )
         try:
-            server = await manager.register_mcp(
-                actor, request.name, request.to_domain_config(), request.secrets
-            )
+            if has_visibility:
+                server = await manager.register_mcp(
+                    actor,
+                    request.name,
+                    request.to_domain_config(),
+                    request.secrets,
+                    visibility_scope=VisibilityScope(request.visibility_scope),
+                    owner_department_id=request.owner_department_id,
+                    visibility_grants=(
+                        None
+                        if request.visibility_grants is None
+                        else tuple(item.to_domain() for item in request.visibility_grants)
+                    ),
+                )
+            else:
+                server = await manager.register_mcp(
+                    actor, request.name, request.to_domain_config(), request.secrets
+                )
         except Exception as error:
             raise mcp_error_to_http(error) from error
         response.headers["Location"] = f"/api/v1/admin/mcp/servers/{server.id}"
@@ -126,15 +146,36 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _UPDATE_ADAPTER)
+        has_visibility = bool(
+            request.model_fields_set
+            & {"visibility_scope", "owner_department_id", "visibility_grants"}
+        )
         try:
-            result = await manager.update_mcp(
-                actor,
-                server_id,
-                request.expected_config_version,
-                request.name,
-                request.to_domain_config(),
-                request.secrets,
-            )
+            if has_visibility:
+                result = await manager.update_mcp(
+                    actor,
+                    server_id,
+                    request.expected_config_version,
+                    request.name,
+                    request.to_domain_config(),
+                    request.secrets,
+                    visibility_scope=VisibilityScope(request.visibility_scope),
+                    owner_department_id=request.owner_department_id,
+                    visibility_grants=(
+                        None
+                        if request.visibility_grants is None
+                        else tuple(item.to_domain() for item in request.visibility_grants)
+                    ),
+                )
+            else:
+                result = await manager.update_mcp(
+                    actor,
+                    server_id,
+                    request.expected_config_version,
+                    request.name,
+                    request.to_domain_config(),
+                    request.secrets,
+                )
         except Exception as error:
             raise mcp_error_to_http(error) from error
         response.headers["Cache-Control"] = "no-store"

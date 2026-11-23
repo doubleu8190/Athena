@@ -11,6 +11,7 @@ from pathlib import Path
 
 from redis.asyncio import Redis
 
+from adapter.access import SqlAlchemyAccessControlRepository
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
@@ -25,6 +26,7 @@ from adapter.session import SqlAlchemySessionRepository
 from adapter.skill import SqlAlchemySkillRepository
 from adapter.subagent import SqlAlchemySubagentModelChecker, SqlAlchemySubagentRepository
 from adapter.system_prompt import SqlAlchemySystemPromptRepository
+from app.access import AccessPolicyService
 from app.auth.service import AuthService
 from app.file import SessionFileService
 from app.knowledge.service import KnowledgeService
@@ -213,6 +215,7 @@ def build_api_dependencies(
         )
 
     database: Database | None = None
+    access_policy: AccessPolicyService | None = None
     project_use_case = project_service
     message_use_case = message_service
     session_use_case = session_service
@@ -288,6 +291,10 @@ def build_api_dependencies(
         or subagent_use_case is None
     ):
         database = build_database(database_url)
+        # 在 API 进程内共享同一统一权限引擎，确保四条业务线实时共用组织树与授权表判定。
+        access_policy = AccessPolicyService(
+            SqlAlchemyAccessControlRepository(database.session_factory)
+        )
         project_repository = SqlAlchemyProjectRepository(database.session_factory)
         model_profile_repository = SqlAlchemyModelProfileRepository(
             database.session_factory, secret_cipher
@@ -343,11 +350,13 @@ def build_api_dependencies(
                 mcp_repository,
                 mcp_discovery,
                 auth_repository,
+                access_policy=access_policy,
             )
         if subagent_use_case is None:
             subagent_use_case = SubagentService(
                 SqlAlchemySubagentRepository(database.session_factory),
                 auth_repository,
+                access_policy=access_policy,
                 model_checker=SqlAlchemySubagentModelChecker(database.session_factory),
                 tool_catalog=DefaultSubagentToolCatalog(mcp_repository),
             )
@@ -355,6 +364,7 @@ def build_api_dependencies(
             database.session_factory,
             projects=project_use_case,
             knowledge_service=knowledge_use_case,
+            access_policy=access_policy,
         )
         knowledge_use_case = query_services.knowledge
         knowledge_repository = query_services.knowledge_repository
@@ -423,6 +433,7 @@ def build_api_dependencies(
                 SqlAlchemySkillRepository(database.session_factory),
                 file_object_store,
                 auth_repository,
+                access_policy=access_policy,
                 dependency_checker=DependencyChecker(
                     python_executable=Path(
                         os.getenv("ATHENA_SKILL_PYTHON_EXECUTABLE", sys.executable)

@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
+from app.access import AccessPolicyService
 from app.file.service import FileInputError, SessionFileService
 from app.knowledge.service import (
     KnowledgeInputError,
@@ -29,6 +30,7 @@ from app.skill.tooling import summarize_parameters
 from app.tool.ports import RunToolRuntime
 from common.date import utc_now
 from common.json import utf8_size
+from domain.access import ResourceType
 from domain.auth.ports import CurrentSessionReader
 from domain.file import PendingSessionFile, SessionFile, TextFileReadError
 from domain.knowledge.model import SearchResult
@@ -57,6 +59,7 @@ from domain.skill import (
     SKILL_LOAD_TOOL_ID,
     SKILL_READ_RESOURCE_TOOL_ID,
     RunSkillPromptContext,
+    RunSkillSnapshot,
     SafeSkillApprovalProjection,
     SafeSkillInputFile,
     SkillDependencyUnsatisfiedError,
@@ -382,6 +385,7 @@ class RunToolRuntimeService(RunToolRuntime):
         session_files: SessionFileService | None = None,
         skill_execution: SkillExecutionService | None = None,
         subagents: SubagentRepository | None = None,
+        access_policy: AccessPolicyService | None = None,
         clock: Any = utc_now,
     ) -> None:
         self._auth = auth
@@ -395,7 +399,18 @@ class RunToolRuntimeService(RunToolRuntime):
         self._session_files = session_files
         self._skill_execution = skill_execution
         self._subagents = subagents
+        self._access_policy = access_policy
         self._clock = clock
+
+    async def can_read_subagent(self, user_id: str, subagent_id: str) -> bool:
+        """供 RunExecutor 调度子智能体前复核当前用户对目标 Subagent 的实时读权限。"""
+        if self._access_policy is None:
+            return True
+        return await self._access_policy.can_read_resource(
+            user_id,
+            ResourceType.SUBAGENT,
+            subagent_id,
+        )
 
     async def authorize(
         self,
@@ -472,15 +487,40 @@ class RunToolRuntimeService(RunToolRuntime):
                     SESSION_FILE_READ_DEFINITION,
                 )
             )
-        # 合并 MCP 目录中的工具定义（仓储已直接构造不可变 RuntimeToolDefinition，无需二次拷贝）。
-        definitions.extend(await self._mcp_catalog.list_runtime_tools(limit=201))
+        # 合并 MCP 目录中的工具定义，并按统一三层权限引擎实时过滤掉无权访问的部门 MCP 工具。
+        mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
+        if self._access_policy is not None and mcp_tools:
+            server_ids = tuple(
+                dict.fromkeys(cast(McpToolSource, item.source).server_id for item in mcp_tools)
+            )
+            readable_server_ids = await self._access_policy.filter_readable_ids(
+                context.owner_id,
+                ResourceType.MCP_SERVER,
+                server_ids,
+            )
+            mcp_tools = tuple(
+                item
+                for item in mcp_tools
+                if cast(McpToolSource, item.source).server_id in readable_server_ids
+            )
+        definitions.extend(mcp_tools)
 
         if depth == 0 and self._subagents is not None:
             enabled_subagents = await self._subagents.list_enabled()
+            if self._access_policy is not None and enabled_subagents:
+                readable_subagent_ids = await self._access_policy.filter_readable_ids(
+                    context.owner_id,
+                    ResourceType.SUBAGENT,
+                    [item.id for item in enabled_subagents],
+                )
+                enabled_subagents = tuple(
+                    item for item in enabled_subagents if item.id in readable_subagent_ids
+                )
             if enabled_subagents:
                 definitions.append(build_dispatch_subagents_definition(enabled_subagents))
         elif depth >= 1:
-            # 子 Run 强制剔除 dispatch_subagents 与 save_user_memory，并与白名单求严格交集。
+            # 子 Run 强制剔除 dispatch_subagents 与 save_user_memory，
+            # 并与子智能体白名单求严格交集（白名单 ∩ 当前员工实时有权限的 MCP 工具）。
             forbidden_tool_ids = {DISPATCH_SUBAGENTS_TOOL_ID, SAVE_USER_MEMORY_TOOL_ID}
             forbidden_names = {"dispatch_subagents", "save_user_memory"}
             definitions = [
@@ -516,6 +556,22 @@ class RunToolRuntimeService(RunToolRuntime):
             or definition.tool_id != SKILL_EXECUTE_TOOL_ID
         ):
             validation = self.validate_call(definition, model_name, arguments)
+            if (
+                validation is None
+                and definition is not None
+                and definition.source.kind == "mcp"
+                and self._access_policy is not None
+            ):
+                # 审批/执行准备阶段实时复核 MCP Server 读权限，防止员工调岗后仍能进入审批或执行。
+                if not await self._access_policy.can_read_resource(
+                    context.owner_id,
+                    ResourceType.MCP_SERVER,
+                    definition.source.server_id,
+                ):
+                    return ToolCallPreparation(
+                        _error("tool_permission_denied", "当前用户无权使用该 MCP 工具。"),
+                        False,
+                    )
             return ToolCallPreparation(
                 outcome=validation,
                 requires_approval=(
@@ -553,6 +609,17 @@ class RunToolRuntimeService(RunToolRuntime):
                 _error("skill_parameters_invalid", "脚本调用参数结构不合法。"),
                 False,
             )
+        if self._access_policy is not None:
+            # 脚本审批准备阶段实时复核用户是否仍对该 Skill 拥有读权限（防调岗后沿用旧快照）。
+            if not await self._access_policy.can_read_resource(
+                context.owner_id,
+                ResourceType.SKILL,
+                skill_id,
+            ):
+                return ToolCallPreparation(
+                    _error("tool_permission_denied", "当前用户已失去该 Skill 的访问权限。"),
+                    False,
+                )
         try:
             entry, version, script, _dependency_check = await self._skills.prepare_script_target(
                 snapshot,
@@ -607,19 +674,38 @@ class RunToolRuntimeService(RunToolRuntime):
         run: Run,
         loaded_skill_ids: tuple[str, ...],
     ) -> RunSkillPromptContext:
-        """从 Run 固定快照和持久化成功加载证据重建指南。"""
+        """从 Run 固定快照和持久化成功加载证据重建指南，并按实时权限剔除已失权技能。"""
         # 空固定目录表示 Run 未启用 Skill，不要求装配 SkillService。
         if run.skill_snapshot is None or not run.skill_snapshot.skills:
             return RunSkillPromptContext()
         if self._skills is None:
             raise ValueError("skill_runtime_unavailable")
-        selected = set(run.skill_snapshot.selected_skill_ids)
+        effective_snapshot = run.skill_snapshot
+        if self._access_policy is not None:
+            readable_ids = await self._access_policy.filter_readable_ids(
+                run.owner_id,
+                ResourceType.SKILL,
+                [item.skill_id for item in effective_snapshot.skills],
+            )
+            filtered_skills = tuple(
+                item for item in effective_snapshot.skills if item.skill_id in readable_ids
+            )
+            if not filtered_skills:
+                return RunSkillPromptContext()
+            effective_snapshot = RunSkillSnapshot(
+                skills=filtered_skills,
+                selected_skill_ids=tuple(
+                    sid for sid in effective_snapshot.selected_skill_ids if sid in readable_ids
+                ),
+            )
+        selected = set(effective_snapshot.selected_skill_ids)
+        loaded = set(loaded_skill_ids)
         active_ids = tuple(
             item.skill_id
-            for item in run.skill_snapshot.skills
-            if item.skill_id in selected or item.skill_id in set(loaded_skill_ids)
+            for item in effective_snapshot.skills
+            if item.skill_id in selected or item.skill_id in loaded
         )
-        return await self._skills.prompt_context(run.skill_snapshot, active_ids)
+        return await self._skills.prompt_context(effective_snapshot, active_ids)
 
     async def build_run_input_file_context(
         self,
@@ -754,6 +840,16 @@ class RunToolRuntimeService(RunToolRuntime):
                 "run_auth_session_invalid",
             )
         source = cast(McpToolSource, definition.source)
+        # 调用前实时复核 MCP Server 组织可见性，员工调岗或撤权时立即阻断外部调用。
+        if self._access_policy is not None:
+            if not await self._access_policy.can_read_resource(
+                context.owner_id,
+                ResourceType.MCP_SERVER,
+                source.server_id,
+            ):
+                return ToolExecutionResult(
+                    _error("tool_permission_denied", "当前用户已失去该 MCP 工具的访问权限。")
+                )
         # 按冻结的 server/remote/config 版本重新解析调用目标，配置变更即视为不可用。
         target = await self._mcp_catalog.get_call_target(
             definition.tool_id,
@@ -779,7 +875,7 @@ class RunToolRuntimeService(RunToolRuntime):
             _error("tool_permission_revoked", "Tool permission revoked before delivery."),
             MCP_DELIVERY_AUTH_ERROR,
         )
-        # 结果返回后再鉴权：交付前权限失效、超时或复核异常时一律丢弃原始结果并终止 Run。
+        # 结果返回后再鉴权：登录态失效或 MCP 部门授权在执行期间被撤回时一律丢弃结果。
         remaining_after_result = run_deadline - loop.time()
         if remaining_after_result <= 0:
             return revoked_result
@@ -793,6 +889,15 @@ class RunToolRuntimeService(RunToolRuntime):
                     context.run_id,
                     context.auth_session_id,
                 )
+                mcp_allowed = (
+                    True
+                    if self._access_policy is None
+                    else await self._access_policy.can_read_resource(
+                        context.owner_id,
+                        ResourceType.MCP_SERVER,
+                        source.server_id,
+                    )
+                )
         except TimeoutError:
             return revoked_result
         except Exception as error:
@@ -801,7 +906,7 @@ class RunToolRuntimeService(RunToolRuntime):
                 type(error).__name__,
             )
             return revoked_result
-        if authorized is None:
+        if authorized is None or not mcp_allowed:
             return revoked_result
         return ToolExecutionResult(outcome)
 
@@ -845,6 +950,16 @@ class RunToolRuntimeService(RunToolRuntime):
         if definition.tool_id == SKILL_EXECUTE_TOOL_ID:
             if self._skill_execution is None:
                 return ToolExecutionResult(_error("tool_unavailable", "脚本执行能力未启用。"))
+            skill_id = str(arguments.get("skill_id", ""))
+            # 执行前实时复核用户是否仍对该 Skill 拥有读权限（防调岗或部门撤权后继续执行）。
+            if self._access_policy is not None and not await self._access_policy.can_read_resource(
+                context.owner_id,
+                ResourceType.SKILL,
+                skill_id,
+            ):
+                return ToolExecutionResult(
+                    _error("tool_permission_denied", "当前用户已失去该 Skill 的访问权限。")
+                )
             result = await self._skill_execution.execute(arguments, context)
             after = await self.authorize(
                 context.owner_id,
@@ -852,7 +967,16 @@ class RunToolRuntimeService(RunToolRuntime):
                 context.run_id,
                 context.auth_session_id,
             )
-            if after is None:
+            skill_still_allowed = (
+                True
+                if self._access_policy is None
+                else await self._access_policy.can_read_resource(
+                    context.owner_id,
+                    ResourceType.SKILL,
+                    skill_id,
+                )
+            )
+            if after is None or not skill_still_allowed:
                 completion = result.skill_execution_completion
                 if completion is not None:
                     completion = completion.model_copy(
@@ -1017,6 +1141,13 @@ class RunToolRuntimeService(RunToolRuntime):
         if self._skills is None or context.skill_snapshot is None:
             return _error("skill_snapshot_unavailable", "当前 Run 没有固定 Skill 目录。")
         skill_id = str(arguments["skill_id"])
+        # 执行期复核部门/角色权限，确保员工调岗后无法加载旧快照中的原部门 Skill。
+        if self._access_policy is not None and not await self._access_policy.can_read_resource(
+            context.owner_id,
+            ResourceType.SKILL,
+            skill_id,
+        ):
+            return _error("tool_permission_denied", "当前用户已失去该 Skill 的访问权限。")
         try:
             entry, version = await self._skills.resolve_run_entry(
                 context.skill_snapshot,
@@ -1062,10 +1193,18 @@ class RunToolRuntimeService(RunToolRuntime):
     ) -> ToolOutcome:
         if self._skills is None or context.skill_snapshot is None:
             return _error("skill_snapshot_unavailable", "当前 Run 没有固定 Skill 目录。")
+        skill_id = str(arguments["skill_id"])
+        # 执行期复核权限，员工调岗后不得再读取原部门 Skill 包内资源文件。
+        if self._access_policy is not None and not await self._access_policy.can_read_resource(
+            context.owner_id,
+            ResourceType.SKILL,
+            skill_id,
+        ):
+            return _error("tool_permission_denied", "当前用户已失去该 Skill 的访问权限。")
         try:
             resource = await self._skills.read_resource(
                 context.skill_snapshot,
-                skill_id=str(arguments["skill_id"]),
+                skill_id=skill_id,
                 path=str(arguments["path"]),
                 offset=int(arguments.get("offset", 0)),
                 limit_bytes=int(arguments.get("limit_bytes", 65536)),

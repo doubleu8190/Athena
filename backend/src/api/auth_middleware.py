@@ -22,6 +22,7 @@ from api.security import (
     is_origin_allowed,
     normalize_origin,
     require_admin,
+    require_skill_manager,
     verify_request_origin,
 )
 from domain.auth import Authenticator, UserRole
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 _API_PREFIX = "/api/v1"
 _ADMIN_PREFIX = "/api/v1/admin"
+# /api/v1/admin/skills 面向超管与部门管理员开放，由 SkillService 与权限引擎执行细粒度部门范围鉴权。
+_SKILL_MANAGER_PREFIX = "/api/v1/admin/skills"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _PUBLIC_AUTH_ROUTES = frozenset(
     {
@@ -207,8 +210,13 @@ class AuthPrecheckMiddleware:
             return
 
         is_admin_path = _is_path_under_prefix(path, _ADMIN_PREFIX)
+        is_skill_manager_path = _is_path_under_prefix(path, _SKILL_MANAGER_PREFIX)
         # 兼容测试中通过 FastAPI dependency_overrides 注入伪登录态或伪管理员依赖。
-        if get_current_auth in overrides or (is_admin_path and require_admin in overrides):
+        if (
+            get_current_auth in overrides
+            or (is_admin_path and require_admin in overrides)
+            or (is_skill_manager_path and require_skill_manager in overrides)
+        ):
             await self.app(scope, receive, send)  # type: ignore[operator]
             return
 
@@ -235,7 +243,12 @@ class AuthPrecheckMiddleware:
             await _send_json(send, 401, NOT_AUTHENTICATED)
             return
 
-        if is_admin_path and context.user.role is not UserRole.SUPER_ADMIN:
+        if is_skill_manager_path:
+            # 技能管理端允许超管与部门管理员进入，普通成员在此前置拒绝。
+            if context.user.role not in {UserRole.SUPER_ADMIN, UserRole.DEPT_ADMIN}:
+                await _send_json(send, 403, "admin_required")
+                return
+        elif is_admin_path and context.user.role is not UserRole.SUPER_ADMIN:
             await _send_json(send, 403, "admin_required")
             return
 

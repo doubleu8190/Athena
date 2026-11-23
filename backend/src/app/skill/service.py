@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import re
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
+from app.access import AccessPolicyService
 from app.skill.dependency import DependencyChecker
 from app.skill.model import SkillAdminDetails, SkillResourceSlice
 from app.skill.package import SkillPackageValidator, validate_parameter_schema
@@ -23,7 +25,15 @@ from app.skill.personal import (
     validate_personal_content,
 )
 from common.ids import new_id, now_utc
-from domain.auth import AuthContext, CurrentSessionReader, UserRole
+from domain.access import (
+    AccessPermissionDeniedError,
+    InvalidVisibilityConfigError,
+    ResourceAccessTarget,
+    ResourceType,
+    VisibilityGrantInput,
+    VisibilityScope,
+)
+from domain.auth import AuthContext, CurrentSessionReader, User, UserRole
 from domain.file import FileObjectStore
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
@@ -60,8 +70,32 @@ class SkillUserAuthorizationError(PermissionError):
 _IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")
 
 
+def _skill_access_target(skill: Skill) -> ResourceAccessTarget:
+    """构造 Skill 的统一权限引擎判定目标。"""
+    return ResourceAccessTarget(
+        resource_type=ResourceType.SKILL,
+        resource_id=skill.id,
+        visibility_scope=VisibilityScope(skill.scope.value),
+        owner_id=skill.owner_id,
+        owner_department_id=skill.owner_department_id,
+    )
+
+
+def _supports_kwarg(func: object, name: str) -> bool:
+    """判断仓储方法是否支持指定关键字参数，兼容既有测试替身签名。"""
+    if not callable(func):
+        return False
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
+    )
+
+
 class SkillService:
-    """管理不可变包版本，并在目标环境复核依赖。"""
+    """管理不可变包版本，按三层权限引擎分权管控，并在目标环境复核依赖。"""
 
     def __init__(
         self,
@@ -69,31 +103,43 @@ class SkillService:
         object_store: FileObjectStore,
         auth_reader: CurrentSessionReader,
         *,
+        access_policy: AccessPolicyService | None = None,
         package_validator: SkillPackageValidator | None = None,
         dependency_checker: DependencyChecker | None = None,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
-        """保存持久化、私有对象存储、认证和目标环境检查依赖。"""
+        """保存持久化、私有对象存储、认证、权限引擎和目标环境检查依赖。"""
         self._repository = repository
         self._object_store = object_store
         self._auth_reader = auth_reader
+        self._access_policy = access_policy
         self._package_validator = package_validator or SkillPackageValidator()
         self._dependency_checker = dependency_checker or DependencyChecker(clock=clock)
         self._id_factory = id_factory
         self._clock = clock
 
     async def list_admin(self, actor: AuthContext) -> tuple[Skill, ...]:
-        """读取全部管理目录项。"""
-        await self._authorize_admin(actor)
-        return await self._repository.list_skills()
+        """读取当前管理员可维护目录项（超管全量，部门管理员仅管辖部门）。"""
+        user = await self._authorize_skill_manager(actor)
+        skills = await self._repository.list_skills()
+        if user.role is UserRole.SUPER_ADMIN:
+            return skills
+        if self._access_policy is None:
+            return ()
+        snapshot = await self._access_policy.get_user_snapshot(user.id)
+        if snapshot is None or not snapshot.is_active:
+            return ()
+        return tuple(
+            skill
+            for skill in skills
+            if skill.scope is SkillScope.DEPARTMENT
+            and skill.owner_department_id in snapshot.managed_department_ids
+        )
 
     async def get_admin(self, actor: AuthContext, skill_id: str) -> SkillAdminDetails:
-        """读取管理员详情和历史版本。"""
-        await self._authorize_admin(actor)
-        skill = await self._repository.get_skill(skill_id)
-        if skill is None:
-            raise SkillNotFoundError()
+        """读取管理员详情和历史版本（不可读返回 404，可读但不可管理返回 403）。"""
+        skill = await self._require_manageable_admin_skill(actor, skill_id)
         page = await self._repository.list_versions(skill_id, page=1, page_size=100)
         if page is None:
             raise SkillNotFoundError()
@@ -264,10 +310,7 @@ class SkillService:
         self, actor: AuthContext, skill_id: str, version_id: str
     ) -> SkillVersion:
         """读取目标 Skill 下不可变版本的完整正文。"""
-        await self._authorize_admin(actor)
-        skill = await self._repository.get_skill(skill_id)
-        if skill is None:
-            raise SkillNotFoundError()
+        await self._require_manageable_admin_skill(actor, skill_id)
         version = await self._repository.get_version(version_id)
         if version is None or version.skill_id != skill_id:
             raise SkillNotFoundError("skill_version_not_found")
@@ -282,7 +325,7 @@ class SkillService:
         page_size: int,
     ) -> SkillVersionPage:
         """读取管理员历史版本分页。"""
-        await self._authorize_admin(actor)
+        await self._require_manageable_admin_skill(actor, skill_id)
         result = await self._repository.list_versions(
             skill_id,
             page=page,
@@ -298,9 +341,44 @@ class SkillService:
         path: Path,
         *,
         idempotency_key: str,
+        scope: SkillScope = SkillScope.COMPANY,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> SkillAdminDetails:
-        """首发导入完整 ZIP；成功版本保持未启用且不切换指针。"""
-        await self._authorize_admin(actor)
+        """首发导入完整 ZIP；支持 company 与 department 级三层分权校验。"""
+        user = await self._authorize_skill_manager(actor)
+        if scope is SkillScope.PERSONAL:
+            raise SkillPackageError("skill_scope_invalid")
+
+        resolved_scope: SkillScope = scope
+        resolved_department_id = owner_department_id
+        resolved_grants: tuple[VisibilityGrantInput, ...] = ()
+        if self._access_policy is not None:
+            try:
+                (
+                    vis_scope,
+                    resolved_department_id,
+                    maybe_grants,
+                ) = await self._access_policy.resolve_and_validate_visibility(
+                    user_id=user.id,
+                    resource_type=ResourceType.SKILL,
+                    visibility_scope=VisibilityScope(scope.value),
+                    owner_department_id=owner_department_id,
+                    visibility_grants=visibility_grants,
+                    for_create=True,
+                )
+            except AccessPermissionDeniedError as error:
+                raise SkillAuthorizationError(error.code) from error
+            except InvalidVisibilityConfigError as error:
+                raise SkillPackageError(error.code) from error
+            resolved_scope = SkillScope(vis_scope.value)
+            resolved_grants = maybe_grants or ()
+        else:
+            if user.role is not UserRole.SUPER_ADMIN:
+                raise SkillAuthorizationError("admin_required")
+            if scope is not SkillScope.COMPANY or owner_department_id is not None:
+                raise SkillPackageError("skill_scope_requires_access_policy")
+
         idempotency_key = _validate_idempotency_key(idempotency_key)
         validated = self._package_validator.validate(path)
         fingerprint = _import_fingerprint(
@@ -309,6 +387,9 @@ class SkillService:
             target_skill_id=None,
             package_sha256=validated.package_sha256,
             label=None,
+            scope=resolved_scope.value,
+            owner_department_id=resolved_department_id,
+            visibility_grants=resolved_grants,
         )
         try:
             replay = await self._repository.find_import_result(
@@ -336,6 +417,9 @@ class SkillService:
             manifest=validated.manifest,
             package_sha256=validated.package_sha256,
             dependency_check=dependency_check,
+            scope=resolved_scope,
+            owner_department_id=resolved_department_id,
+            visibility_grants=resolved_grants,
         )
 
     async def _publish_personal_create(
@@ -564,8 +648,11 @@ class SkillService:
         manifest: SkillPackageManifest,
         package_sha256: str,
         dependency_check: DependencyCheck,
+        scope: SkillScope = SkillScope.COMPANY,
+        owner_department_id: str | None = None,
+        visibility_grants: tuple[VisibilityGrantInput, ...] = (),
     ) -> SkillAdminDetails:
-        """先写入首发包，再提交 Skill 身份和版本引用。"""
+        """先写入首发包，再提交 Skill 身份、可见性授权和版本引用。"""
         skill_id = self._id_factory("skill")
         version_id = self._id_factory("skillver")
         object_key = self._package_key(package_sha256, version_id)
@@ -579,19 +666,37 @@ class SkillService:
             await self._discard_prepared_package(object_key)
             raise
         try:
-            skill, version = await self._repository.create_skill(
-                skill_id=skill_id,
-                version_id=version_id,
-                label="v1",
-                manifest=manifest,
-                object_key=object_key,
-                package_sha256=package_sha256,
-                dependency_check=dependency_check,
-                actor=actor,
-                idempotency_key=idempotency_key,
-                request_fingerprint=request_fingerprint,
-                created_at=self._clock(),
-            )
+            if _supports_kwarg(self._repository.create_skill, "scope"):
+                skill, version = await self._repository.create_skill(
+                    skill_id=skill_id,
+                    version_id=version_id,
+                    label="v1",
+                    manifest=manifest,
+                    object_key=object_key,
+                    package_sha256=package_sha256,
+                    dependency_check=dependency_check,
+                    actor=actor,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    created_at=self._clock(),
+                    scope=scope,
+                    owner_department_id=owner_department_id,
+                    visibility_grants=visibility_grants,
+                )
+            else:
+                skill, version = await self._repository.create_skill(
+                    skill_id=skill_id,
+                    version_id=version_id,
+                    label="v1",
+                    manifest=manifest,
+                    object_key=object_key,
+                    package_sha256=package_sha256,
+                    dependency_check=dependency_check,
+                    actor=actor,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    created_at=self._clock(),
+                )
             if version.id != version_id:
                 # 并发首发由唯一约束选出胜者，败者只清理自己写入的对象。
                 await self._discard_prepared_package(object_key)
@@ -641,16 +746,15 @@ class SkillService:
         idempotency_key: str,
         label: str | None = None,
     ) -> SkillVersion:
-        """上传完整更新包；slug 不符时不写数据库、不改变当前指针。"""
-        await self._authorize_admin(actor)
+        """上传完整更新包；slug 不符或越权时不写数据库、不改变当前指针。"""
         idempotency_key = _validate_idempotency_key(idempotency_key)
         try:
-            skill = await self._repository.get_skill(skill_id)
+            skill = await self._require_manageable_admin_skill(actor, skill_id)
         except PermissionError as error:
+            if isinstance(error, SkillAuthorizationError):
+                raise
             # add_version 的初始目标读取也可能在事务内发现管理员撤权。
             raise SkillAuthorizationError("admin_required") from error
-        if skill is None:
-            raise SkillNotFoundError()
         validated = self._package_validator.validate(path)
         if validated.manifest.slug != skill.slug:
             raise SkillConflictError("skill_slug_mismatch")
@@ -660,6 +764,8 @@ class SkillService:
             target_skill_id=skill_id,
             package_sha256=validated.package_sha256,
             label=label,
+            scope=skill.scope.value,
+            owner_department_id=skill.owner_department_id,
         )
         try:
             replay = await self._repository.find_import_result(
@@ -777,9 +883,30 @@ class SkillService:
         enabled: bool,
         current_version_id: str,
         script_requires_approval: bool,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> Skill:
-        """按目标环境最新检查结果 CAS 切换版本、启停和审批。"""
-        await self._authorize_admin(actor)
+        """按目标环境最新检查结果 CAS 切换版本、启停、审批及部门可见性授权。"""
+        skill = await self._require_manageable_admin_skill(actor, skill_id)
+        resolved_grants: tuple[VisibilityGrantInput, ...] | None = None
+        if visibility_grants is not None:
+            if self._access_policy is None:
+                raise SkillPackageError("skill_scope_requires_access_policy")
+            try:
+                _, _, resolved_grants = await self._access_policy.resolve_and_validate_visibility(
+                    user_id=actor.user.id,
+                    resource_type=ResourceType.SKILL,
+                    visibility_scope=VisibilityScope(skill.scope.value),
+                    owner_department_id=skill.owner_department_id,
+                    visibility_grants=visibility_grants,
+                    for_create=False,
+                    existing_target=_skill_access_target(skill),
+                    preserve_existing_grants_when_none=False,
+                )
+            except AccessPermissionDeniedError as error:
+                raise SkillAuthorizationError(error.code) from error
+            except InvalidVisibilityConfigError as error:
+                raise SkillPackageError(error.code) from error
+
         version = await self._repository.get_version(current_version_id)
         if version is None or version.skill_id != skill_id:
             raise SkillNotFoundError("skill_version_not_found")
@@ -796,16 +923,29 @@ class SkillService:
             # 即使目标解释器已损坏也允许管理员先关闭 Skill。
             dependency_check = version.dependency_check
         try:
-            result = await self._repository.update_configuration(
-                skill_id,
-                expected_revision=expected_revision,
-                enabled=enabled,
-                current_version_id=current_version_id,
-                script_requires_approval=script_requires_approval,
-                dependency_check=dependency_check,
-                actor=actor,
-                updated_at=self._clock(),
-            )
+            if _supports_kwarg(self._repository.update_configuration, "visibility_grants"):
+                result = await self._repository.update_configuration(
+                    skill_id,
+                    expected_revision=expected_revision,
+                    enabled=enabled,
+                    current_version_id=current_version_id,
+                    script_requires_approval=script_requires_approval,
+                    dependency_check=dependency_check,
+                    actor=actor,
+                    updated_at=self._clock(),
+                    visibility_grants=resolved_grants,
+                )
+            else:
+                result = await self._repository.update_configuration(
+                    skill_id,
+                    expected_revision=expected_revision,
+                    enabled=enabled,
+                    current_version_id=current_version_id,
+                    script_requires_approval=script_requires_approval,
+                    dependency_check=dependency_check,
+                    actor=actor,
+                    updated_at=self._clock(),
+                )
         except PermissionError as error:
             # 事务内会再次锁定当前登录态；管理员失效统一收敛为 403 业务异常。
             raise SkillAuthorizationError("admin_required") from error
@@ -813,8 +953,33 @@ class SkillService:
             raise SkillNotFoundError()
         return result
 
+    async def delete_admin(
+        self,
+        actor: AuthContext,
+        skill_id: str,
+        *,
+        expected_revision: int,
+    ) -> None:
+        """软删除部门级 Skill（company 级只允许停用，不可删除；越权按 403/404 隔离）。"""
+        if expected_revision < 1:
+            raise SkillPackageError("skill_revision_invalid")
+        skill = await self._require_manageable_admin_skill(actor, skill_id)
+        if skill.scope is SkillScope.COMPANY:
+            raise SkillPackageError("company_skill_delete_unsupported")
+        try:
+            await self._repository.delete_admin_skill(
+                skill_id,
+                expected_revision=expected_revision,
+                actor=actor,
+                deleted_at=self._clock(),
+            )
+        except PermissionError as error:
+            raise SkillAuthorizationError("admin_required") from error
+        except ValueError as error:
+            raise SkillPackageError(str(error)) from error
+
     async def public_directory(self) -> tuple[Skill, ...]:
-        """返回实时满足当前解释器依赖的已启用 Skill。"""
+        """返回实时满足当前解释器依赖的已启用公司级 Skill。"""
         # 优先通过批量 JOIN 接口一次读取 Skill 与当前版本，未实现时回退旧接口以兼容测试替身。
         if callable(getattr(self._repository, "get_public_directory_entries", None)):
             entries = await self._repository.get_public_directory_entries()
@@ -823,12 +988,81 @@ class SkillService:
         return await self._available_directory(candidates)
 
     async def user_directory(self, actor: AuthContext) -> tuple[Skill, ...]:
-        """返回公共及当前用户本人的启用可用 Skill。"""
+        """返回对当前用户实时可读的 company、department 及本人 personal 启用 Skill。"""
         if callable(getattr(self._repository, "get_user_directory_entries", None)):
             entries = await self._repository.get_user_directory_entries(actor.user.id)
+            if self._access_policy is not None and entries:
+                readable_ids = await self._access_policy.filter_readable_ids(
+                    actor.user.id,
+                    ResourceType.SKILL,
+                    [skill.id for skill, _ in entries],
+                )
+                entries = tuple(pair for pair in entries if pair[0].id in readable_ids)
             return await self._available_directory_entries(entries)
         candidates = await self._repository.get_user_directory(actor.user.id)
+        if self._access_policy is not None and candidates:
+            readable_ids = await self._access_policy.filter_readable_ids(
+                actor.user.id,
+                ResourceType.SKILL,
+                [skill.id for skill in candidates],
+            )
+            candidates = tuple(skill for skill in candidates if skill.id in readable_ids)
         return await self._available_directory(candidates)
+
+    async def build_run_snapshot(
+        self,
+        user_id: str,
+        selected_skill_ids: Sequence[str] = (),
+    ) -> RunSkillSnapshot:
+        """基于当前用户实时三层权限构建 Run Skill 快照，拒绝无权访问的选中项。"""
+        selected_tuple = tuple(selected_skill_ids)
+        if len(selected_tuple) != len(set(selected_tuple)):
+            raise SkillConflictError("skill_selection_invalid")
+        if callable(getattr(self._repository, "get_user_directory_entries", None)):
+            entries = await self._repository.get_user_directory_entries(user_id)
+        else:
+            candidates = await self._repository.get_user_directory(user_id)
+            resolved: list[tuple[Skill, SkillVersion]] = []
+            for skill in candidates:
+                if skill.current_version_id is None:
+                    continue
+                version = await self._repository.get_version(skill.current_version_id)
+                if version is not None and version.skill_id == skill.id:
+                    resolved.append((skill, version))
+            entries = tuple(resolved)
+
+        if self._access_policy is not None and entries:
+            readable_ids = await self._access_policy.filter_readable_ids(
+                user_id,
+                ResourceType.SKILL,
+                [skill.id for skill, _ in entries],
+            )
+            entries = tuple(pair for pair in entries if pair[0].id in readable_ids)
+
+        available_ids = {skill.id for skill, _ in entries}
+        if not set(selected_tuple) <= available_ids:
+            raise SkillConflictError("skill_selection_unavailable")
+
+        selected_set = set(selected_tuple)
+        catalog = tuple(
+            RunSkillEntry(
+                skill_id=skill.id,
+                slug=skill.slug,
+                name=version.manifest.name,
+                description=version.manifest.description,
+                version_id=version.id,
+                version_label=version.label,
+                requires_approval=skill.script_requires_approval,
+                scope=skill.scope,
+            )
+            for skill, version in entries
+        )
+        return RunSkillSnapshot(
+            skills=catalog,
+            selected_skill_ids=tuple(
+                item.skill_id for item in catalog if item.skill_id in selected_set
+            ),
+        )
 
     async def _available_directory(
         self,
@@ -1079,6 +1313,35 @@ class SkillService:
         if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise SkillAuthorizationError("admin_required")
 
+    async def _authorize_skill_manager(self, actor: AuthContext) -> User:
+        """校验当前登录态为活跃超级管理员或部门管理员。"""
+        user = await self._auth_reader.get_current_session_user(
+            actor.user.id,
+            actor.session_id,
+            self._clock(),
+        )
+        if user is None or user.role not in {UserRole.SUPER_ADMIN, UserRole.DEPT_ADMIN}:
+            raise SkillAuthorizationError("admin_required")
+        return user
+
+    async def _require_manageable_admin_skill(self, actor: AuthContext, skill_id: str) -> Skill:
+        """校验管理端对目标 Skill 的访问权：不可读返回 404，可读但不可管理返回 403。"""
+        user = await self._authorize_skill_manager(actor)
+        skill = await self._repository.get_skill(skill_id)
+        if skill is None:
+            raise SkillNotFoundError()
+        if user.role is UserRole.SUPER_ADMIN:
+            return skill
+        if self._access_policy is None:
+            raise SkillAuthorizationError("admin_required")
+        target = _skill_access_target(skill)
+        if await self._access_policy.can_manage_resource(user.id, target):
+            return skill
+        # 对不可读的他部门技能返回 404 防止探测存在性；对可读但无管理权（如 company 级）返回 403。
+        if await self._access_policy.can_read_target(user.id, target):
+            raise SkillAuthorizationError("admin_required")
+        raise SkillNotFoundError()
+
     async def _discard_prepared_package(self, object_key: str) -> None:
         """删除已确认未发布的包对象。"""
         try:
@@ -1146,8 +1409,19 @@ def _import_fingerprint(
     target_skill_id: str | None,
     package_sha256: str,
     label: str | None,
+    scope: str = SkillScope.COMPANY.value,
+    owner_department_id: str | None = None,
+    visibility_grants: Sequence[VisibilityGrantInput] = (),
 ) -> str:
-    """摘要覆盖管理员、操作、目标、包正文和展示标签。"""
+    """摘要覆盖管理员、操作、目标、可见范围、归属部门、规范化授权、包正文和展示标签。"""
+    normalized_grants = sorted(
+        (
+            grant.target_type.value,
+            grant.target_id,
+            grant.include_subdepartments,
+        )
+        for grant in visibility_grants
+    )
     payload = json.dumps(
         {
             "operation": operation,
@@ -1155,6 +1429,9 @@ def _import_fingerprint(
             "target_skill_id": target_skill_id,
             "package_sha256": package_sha256,
             "label": label,
+            "scope": scope,
+            "owner_department_id": owner_department_id,
+            "visibility_grants": normalized_grants,
         },
         sort_keys=True,
         separators=(",", ":"),

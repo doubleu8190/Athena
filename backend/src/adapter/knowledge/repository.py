@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import random
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from sqlalchemy import delete, exists, func, select, text, union, update
+from sqlalchemy import ColumnElement, delete, exists, func, or_, select, text, union, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
+from adapter.access.repository import (
+    delete_resource_grants_in_session,
+    load_grants_map_in_session,
+    sync_resource_grants_in_session,
+)
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import (
     KnowledgeBaseModel,
@@ -27,6 +32,7 @@ from adapter.knowledge.model import (
 )
 from adapter.project.model import ProjectModel
 from common.ids import new_id
+from domain.access import ResourceType, VisibilityGrant, VisibilityGrantInput, VisibilityScope
 from domain.knowledge.model import (
     MAX_PROJECT_KNOWLEDGE_BASES,
     ChunkLocator,
@@ -39,6 +45,14 @@ from domain.knowledge.model import (
     SourceReference,
 )
 from domain.knowledge.ports import ClaimedKnowledgeJob, FileUploadReservation
+
+
+def _personal_privacy_guard(actor_id: str) -> ColumnElement[bool]:
+    """个人私有知识库始终强制 owner_id 纵深防御；公司/部门库由上层权限引擎鉴权。"""
+    return or_(
+        KnowledgeBaseModel.visibility_scope != VisibilityScope.PERSONAL.value,
+        KnowledgeBaseModel.owner_id == actor_id,
+    )
 
 
 class KnowledgeRepository:
@@ -156,10 +170,10 @@ class KnowledgeRepository:
             if existing is not None:
                 if existing.request_hash != request_hash:
                     raise ValueError("idempotency_conflict")
+                # 协作场景下文档创建者可能与替换操作者不同，幂等重放只按 document_id 查找。
                 existing_document = await session.scalar(
                     select(KnowledgeDocumentModel).where(
                         KnowledgeDocumentModel.id == existing.document_id,
-                        KnowledgeDocumentModel.owner_id == owner_id,
                     )
                 )
                 if existing_document is None:
@@ -205,7 +219,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -213,12 +227,12 @@ class KnowledgeRepository:
             if base is None:
                 raise LookupError("knowledge_base_not_found")
             if operation == "replace":
+                # 部门/公司库允许不同管理员替换既有文档，不按 KnowledgeDocumentModel.owner_id 过滤。
                 document = await session.scalar(
                     select(KnowledgeDocumentModel)
                     .where(
                         KnowledgeDocumentModel.id == document_id,
                         KnowledgeDocumentModel.knowledge_base_id == base_id,
-                        KnowledgeDocumentModel.owner_id == owner_id,
                         KnowledgeDocumentModel.deleted_time.is_(None),
                     )
                     .with_for_update()
@@ -441,7 +455,6 @@ class KnowledgeRepository:
                         KnowledgeDocumentModel.id == KnowledgeVersionModel.document_id,
                     )
                     .where(
-                        KnowledgeDocumentModel.owner_id == job.owner_id,
                         (
                             KnowledgeDocumentModel.id == cleanup_document_id
                             if cleanup_document_id is not None
@@ -494,10 +507,10 @@ class KnowledgeRepository:
                 job.state = "failed"
                 job.error_code = "version_missing"
                 return None
+            # 协作管理员替换/重试他人上传的文档时，job.owner_id 可能不同于文档/源创建者。
             document = await session.scalar(
                 select(KnowledgeDocumentModel).where(
                     KnowledgeDocumentModel.id == version.document_id,
-                    KnowledgeDocumentModel.owner_id == job.owner_id,
                 )
             )
             if (
@@ -512,7 +525,6 @@ class KnowledgeRepository:
                 await session.scalar(
                     select(KnowledgeSourceModel).where(
                         KnowledgeSourceModel.id == version.source_id,
-                        KnowledgeSourceModel.owner_id == job.owner_id,
                     )
                 )
                 if version.source_id
@@ -568,10 +580,10 @@ class KnowledgeRepository:
     ) -> bool:
         """短事务重建片段并发布活动版本，拒绝过期 worker 写入。"""
         async with self._sessions() as session, session.begin():
+            # 后台发布任务不限制 owner_id 与文档/知识库创建者一致，支持跨管理员替换版本。
             base_id = await session.scalar(
                 select(KnowledgeDocumentModel.knowledge_base_id).where(
                     KnowledgeDocumentModel.id == job.document_id,
-                    KnowledgeDocumentModel.owner_id == job.owner_id,
                 )
             )
             if base_id is None:
@@ -580,7 +592,6 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == job.owner_id,
                 )
                 .with_for_update()
             )
@@ -588,7 +599,6 @@ class KnowledgeRepository:
                 select(KnowledgeDocumentModel)
                 .where(
                     KnowledgeDocumentModel.id == job.document_id,
-                    KnowledgeDocumentModel.owner_id == job.owner_id,
                 )
                 .with_for_update()
             )
@@ -672,7 +682,6 @@ class KnowledgeRepository:
                             if job.kind == "cleanup"
                             else job.document_id
                         ),
-                        KnowledgeDocumentModel.owner_id == job.owner_id,
                     )
                 )
             )
@@ -681,7 +690,6 @@ class KnowledgeRepository:
                     select(KnowledgeBaseModel)
                     .where(
                         KnowledgeBaseModel.id == base_id,
-                        KnowledgeBaseModel.owner_id == job.owner_id,
                     )
                     .with_for_update()
                 )
@@ -689,7 +697,6 @@ class KnowledgeRepository:
                 select(KnowledgeDocumentModel)
                 .where(
                     KnowledgeDocumentModel.id == job.document_id,
-                    KnowledgeDocumentModel.owner_id == job.owner_id,
                 )
                 .with_for_update()
             )
@@ -731,14 +738,13 @@ class KnowledgeRepository:
                     document.pending_version_id = None
 
     async def finish_cleanup_job(self, job: ClaimedKnowledgeJob) -> bool:
-        """fencing 校验后清除已软删除知识库的数据库记录。"""
+        """fencing 校验后清除已软删除文档或知识库的数据库记录。"""
         async with self._sessions() as session, session.begin():
             if job.target_id.startswith("doc:"):
                 document_id = job.target_id.removeprefix("doc:")
                 base_id = await session.scalar(
                     select(KnowledgeDocumentModel.knowledge_base_id).where(
                         KnowledgeDocumentModel.id == document_id,
-                        KnowledgeDocumentModel.owner_id == job.owner_id,
                     )
                 )
                 if base_id is None:
@@ -747,7 +753,6 @@ class KnowledgeRepository:
                     select(KnowledgeBaseModel)
                     .where(
                         KnowledgeBaseModel.id == base_id,
-                        KnowledgeBaseModel.owner_id == job.owner_id,
                     )
                     .with_for_update()
                 )
@@ -755,7 +760,6 @@ class KnowledgeRepository:
                     select(KnowledgeDocumentModel)
                     .where(
                         KnowledgeDocumentModel.id == document_id,
-                        KnowledgeDocumentModel.owner_id == job.owner_id,
                     )
                     .with_for_update()
                 )
@@ -775,20 +779,22 @@ class KnowledgeRepository:
                     or task.lease_until <= now
                 ):
                     return False
-                version_ids = list(
-                    await session.scalars(
-                        select(KnowledgeVersionModel.id).where(
+                version_rows = (
+                    await session.execute(
+                        select(KnowledgeVersionModel.id, KnowledgeVersionModel.source_id).where(
                             KnowledgeVersionModel.document_id == document_id,
                         )
                     )
-                )
-                await session.execute(
-                    delete(KnowledgeJobModel).where(
-                        KnowledgeJobModel.id != task.id,
-                        KnowledgeJobModel.owner_id == job.owner_id,
-                        KnowledgeJobModel.target_id.in_(version_ids),
+                ).all()
+                version_ids = [row[0] for row in version_rows]
+                candidate_source_ids = [row[1] for row in version_rows if row[1] is not None]
+                if version_ids:
+                    await session.execute(
+                        delete(KnowledgeJobModel).where(
+                            KnowledgeJobModel.id != task.id,
+                            KnowledgeJobModel.target_id.in_(version_ids),
+                        )
                     )
-                )
                 await session.execute(
                     delete(KnowledgeVersionModel).where(
                         KnowledgeVersionModel.document_id == document_id,
@@ -799,24 +805,26 @@ class KnowledgeRepository:
                         KnowledgeRequestModel.document_id == document_id,
                     )
                 )
-                unused_sources = list(
-                    await session.scalars(
-                        select(KnowledgeSourceModel).where(
-                            KnowledgeSourceModel.owner_id == job.owner_id,
-                            ~exists(
-                                select(KnowledgeVersionModel.id).where(
-                                    KnowledgeVersionModel.source_id == KnowledgeSourceModel.id,
-                                )
-                            ),
+                # 仅回收当前文档曾经引用且已无任何其他版本引用的原件记录（跨管理员删除同样生效）。
+                if candidate_source_ids:
+                    unused_sources = list(
+                        await session.scalars(
+                            select(KnowledgeSourceModel.id).where(
+                                KnowledgeSourceModel.id.in_(candidate_source_ids),
+                                ~exists(
+                                    select(KnowledgeVersionModel.id).where(
+                                        KnowledgeVersionModel.source_id == KnowledgeSourceModel.id,
+                                    )
+                                ),
+                            )
                         )
                     )
-                )
-                if unused_sources:
-                    await session.execute(
-                        delete(KnowledgeSourceModel).where(
-                            KnowledgeSourceModel.id.in_([source.id for source in unused_sources]),
+                    if unused_sources:
+                        await session.execute(
+                            delete(KnowledgeSourceModel).where(
+                                KnowledgeSourceModel.id.in_(unused_sources),
+                            )
                         )
-                    )
                 task.state = "done"
                 task.lease_until = None
                 task.updated_at = func.clock_timestamp()
@@ -825,7 +833,6 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == job.target_id,
-                    KnowledgeBaseModel.owner_id == job.owner_id,
                 )
                 .with_for_update()
             )
@@ -851,75 +858,78 @@ class KnowledgeRepository:
                 await session.scalars(
                     select(KnowledgeDocumentModel.id).where(
                         KnowledgeDocumentModel.knowledge_base_id == base.id,
-                        KnowledgeDocumentModel.owner_id == job.owner_id,
                     )
                 )
             )
-            version_ids = (
-                list(
-                    await session.scalars(
-                        select(KnowledgeVersionModel.id).where(
+            version_rows = (
+                (
+                    await session.execute(
+                        select(KnowledgeVersionModel.id, KnowledgeVersionModel.source_id).where(
                             KnowledgeVersionModel.document_id.in_(document_ids),
                         )
                     )
-                )
+                ).all()
                 if document_ids
                 else []
             )
-            await session.execute(
-                delete(KnowledgeJobModel).where(
-                    KnowledgeJobModel.id != task.id,
-                    KnowledgeJobModel.owner_id == job.owner_id,
-                    KnowledgeJobModel.target_id.in_(version_ids),
+            version_ids = [row[0] for row in version_rows]
+            candidate_source_ids = [row[1] for row in version_rows if row[1] is not None]
+            if version_ids:
+                await session.execute(
+                    delete(KnowledgeJobModel).where(
+                        KnowledgeJobModel.id != task.id,
+                        KnowledgeJobModel.target_id.in_(version_ids),
+                    )
                 )
-            )
-            await session.execute(
-                delete(KnowledgeJobModel).where(
-                    KnowledgeJobModel.id != task.id,
-                    KnowledgeJobModel.owner_id == job.owner_id,
-                    KnowledgeJobModel.kind == "cleanup",
-                    KnowledgeJobModel.target_id.in_([f"doc:{item}" for item in document_ids]),
+            if document_ids:
+                await session.execute(
+                    delete(KnowledgeJobModel).where(
+                        KnowledgeJobModel.id != task.id,
+                        KnowledgeJobModel.kind == "cleanup",
+                        KnowledgeJobModel.target_id.in_([f"doc:{item}" for item in document_ids]),
+                    )
                 )
-            )
-            await session.execute(
-                delete(KnowledgeVersionModel).where(
-                    KnowledgeVersionModel.document_id.in_(document_ids),
+                await session.execute(
+                    delete(KnowledgeVersionModel).where(
+                        KnowledgeVersionModel.document_id.in_(document_ids),
+                    )
                 )
-            )
-            await session.execute(
-                delete(KnowledgeRequestModel).where(
-                    KnowledgeRequestModel.document_id.in_(document_ids),
+                await session.execute(
+                    delete(KnowledgeRequestModel).where(
+                        KnowledgeRequestModel.document_id.in_(document_ids),
+                    )
                 )
-            )
             await session.execute(
                 delete(ProjectKnowledgeBaseModel).where(
                     ProjectKnowledgeBaseModel.knowledge_base_id == base.id,
-                    ProjectKnowledgeBaseModel.owner_id == job.owner_id,
                 )
             )
-            await session.execute(
-                delete(KnowledgeDocumentModel).where(
-                    KnowledgeDocumentModel.id.in_(document_ids),
-                )
-            )
-            source_ids = list(
-                await session.scalars(
-                    select(KnowledgeSourceModel.id).where(
-                        KnowledgeSourceModel.owner_id == job.owner_id,
-                        ~exists(
-                            select(KnowledgeVersionModel.id).where(
-                                KnowledgeVersionModel.source_id == KnowledgeSourceModel.id,
-                            )
-                        ),
-                    )
-                )
-            )
-            if source_ids:
+            await delete_resource_grants_in_session(session, ResourceType.KNOWLEDGE_BASE, base.id)
+            if document_ids:
                 await session.execute(
-                    delete(KnowledgeSourceModel).where(
-                        KnowledgeSourceModel.id.in_(source_ids),
+                    delete(KnowledgeDocumentModel).where(
+                        KnowledgeDocumentModel.id.in_(document_ids),
                     )
                 )
+            if candidate_source_ids:
+                source_ids = list(
+                    await session.scalars(
+                        select(KnowledgeSourceModel.id).where(
+                            KnowledgeSourceModel.id.in_(candidate_source_ids),
+                            ~exists(
+                                select(KnowledgeVersionModel.id).where(
+                                    KnowledgeVersionModel.source_id == KnowledgeSourceModel.id,
+                                )
+                            ),
+                        )
+                    )
+                )
+                if source_ids:
+                    await session.execute(
+                        delete(KnowledgeSourceModel).where(
+                            KnowledgeSourceModel.id.in_(source_ids),
+                        )
+                    )
             await session.delete(base)
             task.state = "done"
             task.lease_until = None
@@ -927,27 +937,32 @@ class KnowledgeRepository:
             return True
 
     async def list_project_bases(self, owner_id: str, project_id: str) -> list[KnowledgeBase]:
-        """读取用户项目关联且当前有效的知识库。"""
+        """读取用户项目关联且当前未删除的知识库（含可见性授权信息）。"""
         async with self._sessions() as session:
-            rows = await session.scalars(
-                select(KnowledgeBaseModel)
-                .join(
-                    ProjectKnowledgeBaseModel,
-                    ProjectKnowledgeBaseModel.knowledge_base_id == KnowledgeBaseModel.id,
+            rows = list(
+                await session.scalars(
+                    select(KnowledgeBaseModel)
+                    .join(
+                        ProjectKnowledgeBaseModel,
+                        ProjectKnowledgeBaseModel.knowledge_base_id == KnowledgeBaseModel.id,
+                    )
+                    .where(
+                        ProjectKnowledgeBaseModel.owner_id == owner_id,
+                        ProjectKnowledgeBaseModel.project_id == project_id,
+                        KnowledgeBaseModel.deleted_time.is_(None),
+                    )
+                    .order_by(KnowledgeBaseModel.name, KnowledgeBaseModel.id)
                 )
-                .where(
-                    ProjectKnowledgeBaseModel.owner_id == owner_id,
-                    ProjectKnowledgeBaseModel.project_id == project_id,
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .order_by(KnowledgeBaseModel.name, KnowledgeBaseModel.id)
             )
-            return [_base(row) for row in rows]
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.KNOWLEDGE_BASE, [row.id for row in rows]
+            )
+            return [_base(row, grants=grants_map.get(row.id, ())) for row in rows]
 
     async def bind_project_base(
         self, owner_id: str, project_id: str, base_id: str, at: datetime
     ) -> bool:
-        """按项目→知识库锁顺序幂等关联同一用户的资源。"""
+        """按项目→知识库锁顺序幂等关联用户项目与有权限的知识库。"""
         async with self._sessions() as session, session.begin():
             project = await session.scalar(
                 select(ProjectModel)
@@ -960,11 +975,12 @@ class KnowledgeRepository:
             )
             if project is None:
                 return False
+            # 复合外键已拆除：支持绑定 company/department 知识库及本人 personal 知识库。
             base = await session.scalar(
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1002,7 +1018,7 @@ class KnowledgeRepository:
             return True
 
     async def unbind_project_base(self, owner_id: str, project_id: str, base_id: str) -> bool:
-        """按项目→知识库锁顺序幂等解除关联。"""
+        """按项目→知识库锁顺序幂等解除关联（即使调岗后仍允许解绑旧部门库）。"""
         async with self._sessions() as session, session.begin():
             project = await session.scalar(
                 select(ProjectModel)
@@ -1018,7 +1034,6 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
                 )
                 .with_for_update()
             )
@@ -1027,43 +1042,121 @@ class KnowledgeRepository:
                 await session.delete(link)
             return True
 
-    async def create_base(self, item: KnowledgeBase) -> KnowledgeBase:
+    async def create_base(
+        self,
+        item: KnowledgeBase,
+        *,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
+    ) -> KnowledgeBase:
+        """在单事务内原子创建知识库并写入关联的可见性授权。"""
         model = KnowledgeBaseModel(
             id=item.id,
             owner_id=item.owner_id,
             name=item.name,
             description=item.description,
+            visibility_scope=item.visibility_scope.value,
+            owner_department_id=item.owner_department_id,
             created_at=item.created_at,
             updated_at=item.updated_at,
         )
         async with self._sessions() as session, session.begin():
             session.add(model)
-        return item
+            await session.flush()
+            grants = await sync_resource_grants_in_session(
+                session,
+                ResourceType.KNOWLEDGE_BASE,
+                item.id,
+                visibility_grants,
+                now=item.created_at,
+            )
+            return _base(model, grants=grants)
 
     async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None:
         async with self._sessions() as session:
             model = await session.scalar(
                 select(KnowledgeBaseModel).where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
             )
-            return _base(model) if model is not None else None
+            if model is None:
+                return None
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.KNOWLEDGE_BASE, (model.id,)
+            )
+            return _base(model, grants=grants_map.get(model.id, ()))
+
+    async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None:
+        """按主键读取未软删除的知识库（供权限引擎统一鉴权使用）。"""
+        async with self._sessions() as session:
+            model = await session.scalar(
+                select(KnowledgeBaseModel).where(
+                    KnowledgeBaseModel.id == base_id,
+                    KnowledgeBaseModel.deleted_time.is_(None),
+                )
+            )
+            if model is None:
+                return None
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.KNOWLEDGE_BASE, (model.id,)
+            )
+            return _base(model, grants=grants_map.get(model.id, ()))
 
     async def list_bases(self, owner_id: str, *, offset: int, limit: int) -> list[KnowledgeBase]:
         async with self._sessions() as session:
-            result = await session.scalars(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.owner_id == owner_id,
-                    KnowledgeBaseModel.deleted_time.is_(None),
+            rows = list(
+                await session.scalars(
+                    select(KnowledgeBaseModel)
+                    .where(
+                        KnowledgeBaseModel.owner_id == owner_id,
+                        KnowledgeBaseModel.deleted_time.is_(None),
+                    )
+                    .order_by(KnowledgeBaseModel.updated_at.desc(), KnowledgeBaseModel.id.desc())
+                    .offset(offset)
+                    .limit(limit)
                 )
-                .order_by(KnowledgeBaseModel.updated_at.desc(), KnowledgeBaseModel.id.desc())
-                .offset(offset)
-                .limit(limit)
             )
-            return [_base(item) for item in result]
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.KNOWLEDGE_BASE, [row.id for row in rows]
+            )
+            return [_base(item, grants=grants_map.get(item.id, ())) for item in rows]
+
+    async def list_bases_by_ids(
+        self,
+        base_ids: Sequence[str],
+        *,
+        offset: int,
+        limit: int,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+    ) -> list[KnowledgeBase]:
+        """按已通过权限引擎过滤的可读 ID 集合与可选筛选条件稳定分页。"""
+        unique_ids = tuple(dict.fromkeys(base_ids))
+        if not unique_ids:
+            return []
+        conditions: list[ColumnElement[bool]] = [
+            KnowledgeBaseModel.id.in_(unique_ids),
+            KnowledgeBaseModel.deleted_time.is_(None),
+        ]
+        if visibility_scope is not None:
+            conditions.append(KnowledgeBaseModel.visibility_scope == visibility_scope.value)
+        if owner_department_id is not None:
+            conditions.append(KnowledgeBaseModel.owner_department_id == owner_department_id)
+        async with self._sessions() as session:
+            rows = list(
+                await session.scalars(
+                    select(KnowledgeBaseModel)
+                    .where(*conditions)
+                    .order_by(KnowledgeBaseModel.updated_at.desc(), KnowledgeBaseModel.id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+            )
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.KNOWLEDGE_BASE, [row.id for row in rows]
+            )
+            return [_base(item, grants=grants_map.get(item.id, ())) for item in rows]
 
     async def rename_base(
         self, owner_id: str, base_id: str, name: str, description: str | None, at: datetime
@@ -1073,7 +1166,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1082,29 +1175,81 @@ class KnowledgeRepository:
                 return None
             model.name, model.description, model.updated_at = name, description, at
             await session.flush()
-            return _base(model)
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.KNOWLEDGE_BASE, (model.id,)
+            )
+            return _base(model, grants=grants_map.get(model.id, ()))
+
+    async def update_base(
+        self,
+        base_id: str,
+        *,
+        name: str,
+        description: str | None,
+        visibility_scope: VisibilityScope,
+        owner_department_id: str | None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None,
+        at: datetime,
+    ) -> KnowledgeBase | None:
+        """在单事务内原子更新知识库元数据、三层可见性及授权清单。"""
+        async with self._sessions() as session, session.begin():
+            model = await session.scalar(
+                select(KnowledgeBaseModel)
+                .where(
+                    KnowledgeBaseModel.id == base_id,
+                    KnowledgeBaseModel.deleted_time.is_(None),
+                )
+                .with_for_update()
+            )
+            if model is None:
+                return None
+            model.name = name
+            model.description = description
+            model.visibility_scope = visibility_scope.value
+            model.owner_department_id = owner_department_id
+            model.updated_at = at
+            await session.flush()
+            if visibility_grants is not None:
+                grants = await sync_resource_grants_in_session(
+                    session,
+                    ResourceType.KNOWLEDGE_BASE,
+                    model.id,
+                    visibility_grants,
+                    now=at,
+                )
+            else:
+                grants_map = await load_grants_map_in_session(
+                    session, ResourceType.KNOWLEDGE_BASE, (model.id,)
+                )
+                grants = grants_map.get(model.id, ())
+            return _base(model, grants=grants)
 
     async def soft_delete_base(self, owner_id: str, base_id: str, at: datetime) -> bool:
+        """在单事务内软删除知识库、清理全部项目绑定及可见性授权并入队清理任务。"""
         async with self._sessions() as session, session.begin():
             item = await session.scalar(
                 select(KnowledgeBaseModel)
-                .where(KnowledgeBaseModel.id == base_id, KnowledgeBaseModel.owner_id == owner_id)
+                .where(
+                    KnowledgeBaseModel.id == base_id,
+                    _personal_privacy_guard(owner_id),
+                )
                 .with_for_update()
             )
             if item is None:
                 return False
             item.deleted_time = item.deleted_time or at
             item.updated_at = at
+            # 删除所有用户项目对该已删知识库的绑定，不再按 owner_id 限定。
             await session.execute(
                 delete(ProjectKnowledgeBaseModel).where(
                     ProjectKnowledgeBaseModel.knowledge_base_id == base_id,
-                    ProjectKnowledgeBaseModel.owner_id == owner_id,
                 )
             )
+            # 同步清理该知识库的所有可见性授权，杜绝残留孤儿记录。
+            await delete_resource_grants_in_session(session, ResourceType.KNOWLEDGE_BASE, base_id)
             cleanup = await session.scalar(
                 select(KnowledgeJobModel)
                 .where(
-                    KnowledgeJobModel.owner_id == owner_id,
                     KnowledgeJobModel.kind == "cleanup",
                     KnowledgeJobModel.target_id == base_id,
                     KnowledgeJobModel.state.in_(("queued", "retry", "processing")),
@@ -1139,15 +1284,15 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeDocumentModel.id == document_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.owner_id == owner_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
                     KnowledgeBaseModel.deleted_time.is_(None),
+                    _personal_privacy_guard(owner_id),
                 )
             )
             if model is None:
                 return None
-            # 在同一读取会话中装配最新版本摘要，保持单文档查询与文档列表契约一致。
-            latest_by_doc = await _load_latest_versions(session, owner_id, (model.id,))
+            # 在同一读取会话中装配最新版本摘要，不按版本创建者过滤以支持跨管理员协作。
+            latest_by_doc = await _load_latest_versions(session, (model.id,))
             return _document(model, latest_version=latest_by_doc.get(model.id))
 
     async def create_text_document(
@@ -1182,7 +1327,6 @@ class KnowledgeRepository:
                 found = await session.scalar(
                     select(KnowledgeDocumentModel).where(
                         KnowledgeDocumentModel.id == existing.document_id,
-                        KnowledgeDocumentModel.owner_id == owner_id,
                     )
                 )
                 if found is None:
@@ -1195,7 +1339,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1288,7 +1432,6 @@ class KnowledgeRepository:
                 document = await session.scalar(
                     select(KnowledgeDocumentModel).where(
                         KnowledgeDocumentModel.id == existing.document_id,
-                        KnowledgeDocumentModel.owner_id == owner_id,
                     )
                 )
                 if document is None:
@@ -1330,7 +1473,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1436,7 +1579,6 @@ class KnowledgeRepository:
                 prior = await session.scalar(
                     select(KnowledgeDocumentModel).where(
                         KnowledgeDocumentModel.id == existing.document_id,
-                        KnowledgeDocumentModel.owner_id == owner_id,
                     )
                 )
                 if prior is None:
@@ -1449,7 +1591,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1461,7 +1603,6 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeDocumentModel.id == document_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.owner_id == owner_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1549,7 +1690,6 @@ class KnowledgeRepository:
                 document = await session.scalar(
                     select(KnowledgeDocumentModel).where(
                         KnowledgeDocumentModel.id == existing.document_id,
-                        KnowledgeDocumentModel.owner_id == owner_id,
                     )
                 )
                 if document is None:
@@ -1588,7 +1728,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1600,7 +1740,6 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeDocumentModel.id == document_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.owner_id == owner_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1681,10 +1820,10 @@ class KnowledgeRepository:
                         KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
                     )
                     .where(
-                        KnowledgeDocumentModel.owner_id == owner_id,
                         KnowledgeDocumentModel.knowledge_base_id == base_id,
                         KnowledgeDocumentModel.deleted_time.is_(None),
                         KnowledgeBaseModel.deleted_time.is_(None),
+                        _personal_privacy_guard(owner_id),
                     )
                     .order_by(KnowledgeDocumentModel.updated_at.desc())
                     .offset(offset)
@@ -1695,7 +1834,7 @@ class KnowledgeRepository:
             if not rows:
                 return []
             # 使用单次批量窗口函数查询为本页全部文档装配最新版本摘要，消除前端 N+1 轮询。
-            latest_by_doc = await _load_latest_versions(session, owner_id, [row.id for row in rows])
+            latest_by_doc = await _load_latest_versions(session, [row.id for row in rows])
             return [_document(row, latest_version=latest_by_doc.get(row.id)) for row in rows]
 
     async def rename_document(
@@ -1706,7 +1845,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1718,7 +1857,6 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeDocumentModel.id == document_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.owner_id == owner_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1727,7 +1865,7 @@ class KnowledgeRepository:
                 return None
             document.title, document.updated_at = title, at
             # 在同一事务会话中装配最新版本摘要，保持重命名响应与 list/get 文档契约完全一致。
-            latest_by_doc = await _load_latest_versions(session, owner_id, (document.id,))
+            latest_by_doc = await _load_latest_versions(session, (document.id,))
             return _document(document, latest_version=latest_by_doc.get(document.id))
 
     async def delete_document(
@@ -1739,7 +1877,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                 )
                 .with_for_update()
             )
@@ -1750,7 +1888,6 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeDocumentModel.id == document_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.owner_id == owner_id,
                 )
                 .with_for_update()
             )
@@ -1784,11 +1921,11 @@ class KnowledgeRepository:
         if await self.get_document(owner_id, base_id, document_id) is None:
             return None
         async with self._sessions() as session:
+            # 文档已通过归属知识库校验，版本列表按 document_id 完整展示（不限上传者）。
             versions = await session.scalars(
                 select(KnowledgeVersionModel)
                 .where(
                     KnowledgeVersionModel.document_id == document_id,
-                    KnowledgeVersionModel.owner_id == owner_id,
                 )
                 .order_by(KnowledgeVersionModel.created_at.desc(), KnowledgeVersionModel.id.desc())
             )
@@ -1809,7 +1946,7 @@ class KnowledgeRepository:
                 select(KnowledgeBaseModel)
                 .where(
                     KnowledgeBaseModel.id == base_id,
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1821,7 +1958,6 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeDocumentModel.id == document_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
-                    KnowledgeDocumentModel.owner_id == owner_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
                 )
                 .with_for_update()
@@ -1835,7 +1971,6 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeVersionModel.id == version_id,
                     KnowledgeVersionModel.document_id == document_id,
-                    KnowledgeVersionModel.owner_id == owner_id,
                 )
                 .with_for_update()
             )
@@ -1893,12 +2028,12 @@ class KnowledgeRepository:
         self, owner_id: str, base_id: str, document_id: str, version_id: str
     ) -> SourceReference | None:
         async with self._sessions() as session:
+            # 原件下载以所属知识库权限为准，支持普通成员读取公司/部门库文档原文。
             row = await session.execute(
                 select(KnowledgeVersionModel, KnowledgeSourceModel)
                 .outerjoin(
                     KnowledgeSourceModel,
-                    (KnowledgeSourceModel.id == KnowledgeVersionModel.source_id)
-                    & (KnowledgeSourceModel.owner_id == KnowledgeVersionModel.owner_id),
+                    KnowledgeSourceModel.id == KnowledgeVersionModel.source_id,
                 )
                 .join(
                     KnowledgeDocumentModel,
@@ -1911,11 +2046,10 @@ class KnowledgeRepository:
                 .where(
                     KnowledgeVersionModel.id == version_id,
                     KnowledgeVersionModel.document_id == document_id,
-                    KnowledgeVersionModel.owner_id == owner_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
-                    KnowledgeBaseModel.owner_id == owner_id,
                     KnowledgeBaseModel.deleted_time.is_(None),
+                    _personal_privacy_guard(owner_id),
                 )
             )
             result = row.one_or_none()
@@ -1949,11 +2083,10 @@ class KnowledgeRepository:
                 )
                 .where(
                     KnowledgeChunkModel.id == chunk_id,
-                    KnowledgeVersionModel.owner_id == owner_id,
                     KnowledgeDocumentModel.knowledge_base_id == base_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
-                    KnowledgeBaseModel.owner_id == owner_id,
                     KnowledgeBaseModel.deleted_time.is_(None),
+                    _personal_privacy_guard(owner_id),
                 )
             )
             item = row.one_or_none()
@@ -1977,7 +2110,7 @@ class KnowledgeRepository:
             visible = await session.scalars(
                 select(KnowledgeBaseModel.id).where(
                     KnowledgeBaseModel.id.in_(base_ids),
-                    KnowledgeBaseModel.owner_id == owner_id,
+                    _personal_privacy_guard(owner_id),
                     KnowledgeBaseModel.deleted_time.is_(None),
                 )
             )
@@ -2046,10 +2179,10 @@ class KnowledgeRepository:
                 KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id,
             )
             .where(
-                KnowledgeDocumentModel.owner_id == owner_id,
                 KnowledgeDocumentModel.knowledge_base_id.in_(base_ids),
                 KnowledgeDocumentModel.deleted_time.is_(None),
                 KnowledgeBaseModel.deleted_time.is_(None),
+                _personal_privacy_guard(owner_id),
                 KnowledgeDocumentModel.active_version_id == KnowledgeVersionModel.id,
                 KnowledgeVersionModel.state == "ready",
                 KnowledgeVersionModel.profile_id != profile_id,
@@ -2084,9 +2217,9 @@ class KnowledgeRepository:
                 )
                 .where(
                     KnowledgeChunkModel.id.in_(ids),
-                    KnowledgeDocumentModel.owner_id == owner_id,
                     KnowledgeDocumentModel.deleted_time.is_(None),
                     KnowledgeBaseModel.deleted_time.is_(None),
+                    _personal_privacy_guard(owner_id),
                     KnowledgeDocumentModel.active_version_id == KnowledgeChunkModel.version_id,
                     KnowledgeVersionModel.state == "ready",
                 )
@@ -2095,7 +2228,11 @@ class KnowledgeRepository:
         return tuple(hit for hit in hits if hit.chunk_id in active)
 
 
-def _base(model: KnowledgeBaseModel) -> KnowledgeBase:
+def _base(
+    model: KnowledgeBaseModel,
+    *,
+    grants: tuple[VisibilityGrant, ...] = (),
+) -> KnowledgeBase:
     return KnowledgeBase(
         model.id,
         model.owner_id,
@@ -2104,6 +2241,9 @@ def _base(model: KnowledgeBaseModel) -> KnowledgeBase:
         model.created_at,
         model.updated_at,
         model.deleted_time,
+        visibility_scope=VisibilityScope(model.visibility_scope),
+        owner_department_id=model.owner_department_id,
+        visibility_grants=grants,
     )
 
 
@@ -2127,14 +2267,14 @@ def _document(
 
 
 async def _load_latest_versions(
-    session: AsyncSession, owner_id: str, document_ids: Sequence[str]
+    session: AsyncSession, document_ids: Sequence[str]
 ) -> dict[str, DocumentVersion]:
     """用单次批量 SQL 为给定文档集合取回各自最新版本，同时兼容 PostgreSQL 与 SQLite。"""
     unique_ids = tuple(dict.fromkeys(document_ids))
     if not unique_ids:
         return {}
     # 按 document_id 分区并按 created_at DESC, id DESC 排序取首条，
-    # 与 list_versions 顺序 100% 一致。
+    # 与 list_versions 顺序 100% 一致，不按版本上传者过滤以支持跨管理员协作。
     ranked_versions = (
         select(
             KnowledgeVersionModel.id.label("version_id"),
@@ -2149,7 +2289,6 @@ async def _load_latest_versions(
             .label("row_num"),
         )
         .where(
-            KnowledgeVersionModel.owner_id == owner_id,
             KnowledgeVersionModel.document_id.in_(unique_ids),
         )
         .subquery()
@@ -2219,10 +2358,10 @@ def _visible_chunks_query(
         .join(KnowledgeDocumentModel, KnowledgeDocumentModel.id == KnowledgeChunkModel.document_id)
         .join(KnowledgeBaseModel, KnowledgeBaseModel.id == KnowledgeDocumentModel.knowledge_base_id)
         .where(
-            KnowledgeDocumentModel.owner_id == owner_id,
             KnowledgeDocumentModel.knowledge_base_id.in_(base_ids),
             KnowledgeDocumentModel.deleted_time.is_(None),
             KnowledgeBaseModel.deleted_time.is_(None),
+            _personal_privacy_guard(owner_id),
             KnowledgeDocumentModel.active_version_id == KnowledgeVersionModel.id,
             KnowledgeVersionModel.state == "ready",
         )
@@ -2260,8 +2399,14 @@ async def _next_version_time(
             KnowledgeVersionModel.document_id == document_id,
         )
     )
-    if latest is not None and latest >= requested:
-        return latest + timedelta(microseconds=1)
+    if latest is not None:
+        # 兼容 SQLite 返回无时区时间：补齐 UTC 后再与带时区时间比较。
+        normalized_latest = latest.replace(tzinfo=UTC) if latest.tzinfo is None else latest
+        normalized_requested = (
+            requested.replace(tzinfo=UTC) if requested.tzinfo is None else requested
+        )
+        if normalized_latest >= normalized_requested:
+            return normalized_latest + timedelta(microseconds=1)
     return requested
 
 

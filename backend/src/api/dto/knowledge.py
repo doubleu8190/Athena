@@ -2,25 +2,38 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+from api.dto.access import VisibilityGrantRequest, VisibilityGrantResponse
 
 
 class KnowledgeBaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
+    visibility_scope: Literal["company", "department", "personal"] = "personal"
+    owner_department_id: str | None = Field(default=None, min_length=1, max_length=64)
+    visibility_grants: list[VisibilityGrantRequest] | None = None
 
 
 class KnowledgeBasePatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
+    visibility_scope: Literal["company", "department", "personal"] | None = None
+    owner_department_id: str | None = Field(default=None, min_length=1, max_length=64)
+    visibility_grants: list[VisibilityGrantRequest] | None = None
 
 
 class KnowledgeBaseResponse(BaseModel):
     id: str
     name: str
     description: str | None
+    visibility_scope: Literal["company", "department", "personal"] = "personal"
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
     created_at: str
     updated_at: str
 

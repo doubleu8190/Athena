@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from api.dto.access import grants_to_response
 from api.dto.knowledge import (
     KnowledgeBaseResponse,
     KnowledgeDocumentResponse,
@@ -32,6 +33,9 @@ def knowledge_base_to_response(item: KnowledgeBase) -> KnowledgeBaseResponse:
         id=item.id,
         name=item.name,
         description=item.description,
+        visibility_scope=item.visibility_scope.value,
+        owner_department_id=item.owner_department_id,
+        visibility_grants=grants_to_response(item.visibility_grants),
         created_at=item.created_at.isoformat(),
         updated_at=item.updated_at.isoformat(),
     )

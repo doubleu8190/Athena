@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
+from domain.access import VisibilityGrantInput
 from domain.auth import AuthContext
 from domain.file import PendingSessionFile
 from domain.skill.model import (
@@ -17,6 +18,7 @@ from domain.skill.model import (
     SkillExecutionStatus,
     SkillImportRequestResult,
     SkillPackageManifest,
+    SkillScope,
     SkillVersion,
     SkillVersionPage,
 )
@@ -73,8 +75,11 @@ class SkillRepository(Protocol):
         idempotency_key: str,
         request_fingerprint: str,
         created_at: datetime,
+        scope: SkillScope = SkillScope.COMPANY,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
     ) -> tuple[Skill, SkillVersion]:
-        """原子创建首发 Skill 与第一个未启用版本。"""
+        """原子创建首发公司/部门 Skill 与第一个未启用版本及可见性授权。"""
 
     async def create_personal_skill(
         self,
@@ -159,8 +164,19 @@ class SkillRepository(Protocol):
         dependency_check: DependencyCheck,
         actor: AuthContext,
         updated_at: datetime,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> Skill | None:
-        """按修订号 CAS 切换版本、启停和审批配置。"""
+        """按修订号 CAS 切换版本、启停、审批配置及可选的部门可见性授权。"""
+
+    async def delete_admin_skill(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: int,
+        actor: AuthContext,
+        deleted_at: datetime,
+    ) -> bool:
+        """软删除部门级 Skill 并同事务清理可见性授权。"""
 
     async def set_personal_enabled(
         self,

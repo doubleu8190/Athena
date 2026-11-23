@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from adapter.subagent.model import SubagentModel
+from domain.access import VisibilityGrant, VisibilityScope
 from domain.subagent import SubagentProfile
 
 
@@ -13,7 +14,11 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def subagent_to_domain(row: SubagentModel) -> SubagentProfile:
+def subagent_to_domain(
+    row: SubagentModel,
+    *,
+    grants: tuple[VisibilityGrant, ...] = (),
+) -> SubagentProfile:
     """将 Subagent ORM 行转换为不可变领域实体。"""
     return SubagentProfile(
         id=row.id,
@@ -31,6 +36,9 @@ def subagent_to_domain(row: SubagentModel) -> SubagentProfile:
         deleted_at=None if row.deleted_at is None else _utc(row.deleted_at),
         created_at=_utc(row.created_at),
         updated_at=_utc(row.updated_at),
+        visibility_scope=VisibilityScope(row.visibility_scope),
+        owner_department_id=row.owner_department_id,
+        visibility_grants=grants,
     )
 
 

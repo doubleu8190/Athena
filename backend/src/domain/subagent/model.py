@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from domain.access import VisibilityGrant, VisibilityGrantInput, VisibilityScope
 from domain.subagent.errors import (
     SubagentSlugReservedError,
     SubagentToolForbiddenError,
@@ -192,6 +193,9 @@ class SubagentProfile:
     deleted_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    visibility_scope: VisibilityScope = VisibilityScope.COMPANY
+    owner_department_id: str | None = None
+    visibility_grants: tuple[VisibilityGrant, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +221,9 @@ class CreateSubagentCommand:
     enabled: bool = True
     max_llm_requests: int | None = None
     timeout_seconds: int | None = None
+    visibility_scope: VisibilityScope = VisibilityScope.COMPANY
+    owner_department_id: str | None = None
+    visibility_grants: tuple[VisibilityGrantInput, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +239,9 @@ class UpdateSubagentCommand:
     allowed_tool_ids: tuple[str, ...] | UnsetType = UNSET
     max_llm_requests: int | None | UnsetType = UNSET
     timeout_seconds: int | None | UnsetType = UNSET
+    visibility_scope: VisibilityScope | UnsetType = UNSET
+    owner_department_id: str | None | UnsetType = UNSET
+    visibility_grants: tuple[VisibilityGrantInput, ...] | None | UnsetType = UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +257,9 @@ class SubagentUpdatePatch:
     max_llm_requests: int | None
     timeout_seconds: int | None
     updated_at: datetime
+    visibility_scope: VisibilityScope = VisibilityScope.COMPANY
+    owner_department_id: str | None = None
+    visibility_grants: tuple[VisibilityGrantInput, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

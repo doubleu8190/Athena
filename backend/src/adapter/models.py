@@ -1,5 +1,6 @@
 """集中注册所有 SQLAlchemy 模型，供迁移和测试建表使用。"""
 
+from adapter.access.model import ResourceVisibilityGrantModel
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.base import Base
 from adapter.file.model import SessionFileModel
@@ -66,6 +67,7 @@ __all__ = [
     "KnowledgeVersionModel",
     "ProjectKnowledgeBaseModel",
     "ProjectModel",
+    "ResourceVisibilityGrantModel",
     "RunEventModel",
     "RunInputRequestModel",
     "RunModel",

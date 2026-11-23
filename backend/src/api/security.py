@@ -140,9 +140,26 @@ async def require_admin(current_auth: CurrentAuth) -> AuthContext:
 AdminAuth = Annotated[AuthContext, Depends(require_admin)]
 
 
+async def require_skill_manager(current_auth: CurrentAuth) -> AuthContext:
+    """基于本次数据库认证结果预检查超管或部门管理员角色（用于 /api/v1/admin/skills）。
+
+    细粒度部门范围与事务内身份复核仍由 SkillService 与仓储事务守卫完成。
+    """
+    if current_auth.user.role not in {UserRole.SUPER_ADMIN, UserRole.DEPT_ADMIN}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="admin_required",
+        )
+    return current_auth
+
+
+SkillManagerAuth = Annotated[AuthContext, Depends(require_skill_manager)]
+
+
 __all__ = [
     "CurrentAuth",
     "AdminAuth",
+    "SkillManagerAuth",
     "DEFAULT_COOKIE_NAME",
     "NOT_AUTHENTICATED",
     "ORIGIN_NOT_ALLOWED",
@@ -153,5 +170,6 @@ __all__ = [
     "is_origin_allowed",
     "normalize_origin",
     "require_admin",
+    "require_skill_manager",
     "verify_request_origin",
 ]

@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -40,6 +41,15 @@ class SubagentModel(Base):
             "timeout_seconds IS NULL OR (timeout_seconds >= 10 AND timeout_seconds <= 1800)",
             name="ck_subagents_timeout_seconds",
         ),
+        CheckConstraint(
+            "visibility_scope IN ('company', 'department')",
+            name="ck_subagents_visibility_scope",
+        ),
+        CheckConstraint(
+            "(visibility_scope = 'company' AND owner_department_id IS NULL) "
+            "OR (visibility_scope = 'department' AND owner_department_id IS NOT NULL)",
+            name="ck_subagents_owner_department_scope",
+        ),
         Index(
             "uq_subagents_slug_active",
             "slug",
@@ -48,6 +58,12 @@ class SubagentModel(Base):
             sqlite_where=text("deleted_at IS NULL"),
         ),
         Index("ix_subagents_enabled_created", "enabled", "created_at", "id"),
+        Index(
+            "ix_subagents_visibility_dept",
+            "visibility_scope",
+            "owner_department_id",
+            "deleted_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -67,6 +83,14 @@ class SubagentModel(Base):
         nullable=False,
         default=True,
         server_default=text("true"),
+    )
+    visibility_scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="company", server_default="company"
+    )
+    owner_department_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     max_llm_requests: Mapped[int | None] = mapped_column(Integer, nullable=True)
     timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)

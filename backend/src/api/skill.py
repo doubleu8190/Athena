@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+import json
+from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     Header,
     HTTPException,
     Path,
@@ -16,6 +18,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import Response
+from pydantic import TypeAdapter, ValidationError
 
 from adapter.file.storage import FileStorageError
 from api.converter.skill import (
@@ -28,6 +31,7 @@ from api.converter.skill import (
     version_page_to_response,
     version_to_response,
 )
+from api.dto.access import VisibilityGrantRequest
 from api.dto.skill import (
     SkillAdminDetailsResponse,
     SkillAdminListResponse,
@@ -42,11 +46,12 @@ from api.dto.skill import (
     SkillVersionListResponse,
     SkillVersionResponse,
 )
-from api.security import AdminAuth, CurrentAuth, verify_request_origin
+from api.security import AdminAuth, CurrentAuth, SkillManagerAuth, verify_request_origin
 from api.upload import UploadTooLargeError, staged_upload
 from app.skill import SkillService
 from app.skill.personal import PersonalSkillError
 from app.skill.service import SkillAuthorizationError, SkillUserAuthorizationError
+from domain.access import VisibilityGrantInput
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
     MAX_PERSONAL_MARKDOWN_BYTES,
@@ -54,7 +59,24 @@ from domain.skill import (
     SkillDependencyUnsatisfiedError,
     SkillNotFoundError,
     SkillPackageError,
+    SkillScope,
 )
+
+_GRANTS_ADAPTER: TypeAdapter[list[VisibilityGrantRequest]] = TypeAdapter(
+    list[VisibilityGrantRequest]
+)
+
+
+def _parse_form_visibility_grants(raw: str | None) -> tuple[VisibilityGrantInput, ...] | None:
+    """将 multipart 表单中的 JSON 字符串解析为领域可见性授权元组。"""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+        items = _GRANTS_ADAPTER.validate_python(parsed)
+    except (ValueError, ValidationError) as error:
+        raise SkillPackageError("visibility_grants_invalid") from error
+    return tuple(item.to_domain() for item in items)
 
 
 def build_skill_user_router(service: SkillService) -> APIRouter:
@@ -256,7 +278,7 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
 
 
 def build_skill_admin_router(service: SkillService) -> APIRouter:
-    """创建仅管理员可访问的 Skill 包与版本管理接口。"""
+    """创建面向超管与部门管理员分权管理的 Skill 包与版本接口。"""
     router = APIRouter(
         prefix="/api/v1/admin",
         tags=["skill-admin"],
@@ -264,8 +286,8 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
     )
 
     @router.get("/skills", response_model=SkillAdminListResponse)
-    async def list_skills(actor: AdminAuth) -> SkillAdminListResponse:
-        """读取全部稳定 Skill 身份。"""
+    async def list_skills(actor: SkillManagerAuth) -> SkillAdminListResponse:
+        """读取当前管理员可维护的公司级或管辖部门级 Skill。"""
         try:
             return admin_list_to_response(await service.list_admin(actor))
         except SkillAuthorizationError as error:
@@ -277,26 +299,43 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         status_code=status.HTTP_201_CREATED,
     )
     async def import_skill(
-        actor: AdminAuth,
+        actor: SkillManagerAuth,
         package: Annotated[UploadFile, File()],
         idempotency_key: Annotated[
             str,
             Header(alias="Idempotency-Key", min_length=1, max_length=128),
         ],
+        scope: Annotated[Literal["company", "department"], Form()] = "company",
+        owner_department_id: Annotated[str | None, Form()] = None,
+        visibility_grants: Annotated[str | None, Form()] = None,
     ) -> SkillAdminDetailsResponse:
-        """首发导入完整 ZIP，成功版本默认不启用。"""
+        """首发导入完整 ZIP；支持 company 与 department 级三层分权导入。"""
         try:
+            parsed_grants = _parse_form_visibility_grants(visibility_grants)
             async with staged_upload(
                 package,
                 maximum_bytes=MAX_PACKAGE_ZIP_BYTES,
             ) as path:
-                return admin_details_to_response(
-                    await service.import_package(
+                if (
+                    scope == "company"
+                    and owner_department_id is None
+                    and parsed_grants is None
+                ):
+                    details = await service.import_package(
                         actor,
                         path,
                         idempotency_key=idempotency_key,
                     )
-                )
+                else:
+                    details = await service.import_package(
+                        actor,
+                        path,
+                        idempotency_key=idempotency_key,
+                        scope=SkillScope(scope),
+                        owner_department_id=owner_department_id,
+                        visibility_grants=parsed_grants,
+                    )
+                return admin_details_to_response(details)
         except UploadTooLargeError as error:
             raise HTTPException(413, "skill_zip_too_large") from error
         except SkillAuthorizationError as error:
@@ -310,7 +349,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
 
     @router.get("/skills/{skill_id}", response_model=SkillAdminDetailsResponse)
     async def get_skill(
-        actor: AdminAuth,
+        actor: SkillManagerAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillAdminDetailsResponse:
         """读取管理详情、完整指南、资源清单与最近 100 个版本。"""
@@ -327,7 +366,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         status_code=status.HTTP_201_CREATED,
     )
     async def add_version(
-        actor: AdminAuth,
+        actor: SkillManagerAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
         package: Annotated[UploadFile, File()],
         idempotency_key: Annotated[
@@ -369,7 +408,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         response_model=SkillVersionListResponse,
     )
     async def list_versions(
-        actor: AdminAuth,
+        actor: SkillManagerAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -398,7 +437,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         response_model=SkillVersionResponse,
     )
     async def get_version(
-        actor: AdminAuth,
+        actor: SkillManagerAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
         version_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillVersionResponse:
@@ -415,19 +454,32 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
     @router.patch("/skills/{skill_id}", response_model=SkillAdminDetailsResponse)
     async def configure_skill(
         request: SkillConfigurationRequest,
-        actor: AdminAuth,
+        actor: SkillManagerAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillAdminDetailsResponse:
-        """按配置修订号原子切换版本、启停和脚本审批。"""
+        """按配置修订号原子切换版本、启停、脚本审批及可选的可见性授权。"""
         try:
-            await service.configure(
-                actor,
-                skill_id,
-                expected_revision=request.expected_revision,
-                enabled=request.enabled,
-                current_version_id=request.current_version_id,
-                script_requires_approval=request.script_requires_approval,
-            )
+            if request.visibility_grants is None:
+                await service.configure(
+                    actor,
+                    skill_id,
+                    expected_revision=request.expected_revision,
+                    enabled=request.enabled,
+                    current_version_id=request.current_version_id,
+                    script_requires_approval=request.script_requires_approval,
+                )
+            else:
+                await service.configure(
+                    actor,
+                    skill_id,
+                    expected_revision=request.expected_revision,
+                    enabled=request.enabled,
+                    current_version_id=request.current_version_id,
+                    script_requires_approval=request.script_requires_approval,
+                    visibility_grants=tuple(
+                        item.to_domain() for item in request.visibility_grants
+                    ),
+                )
             return admin_details_to_response(await service.get_admin(actor, skill_id))
         except SkillAuthorizationError as error:
             raise _authorization_error(error) from error
@@ -439,6 +491,29 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             raise HTTPException(422, error.code) from error
         except SkillPackageError as error:
             raise _skill_package_http_error(error) from error
+
+    @router.delete("/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_skill(
+        actor: SkillManagerAuth,
+        skill_id: Annotated[str, Path(min_length=1, max_length=128)],
+        expected_revision: Annotated[int, Query(ge=1)],
+    ) -> Response:
+        """软删除部门级 Skill 并同事务清理关联的可见性授权。"""
+        try:
+            await service.delete_admin(
+                actor,
+                skill_id,
+                expected_revision=expected_revision,
+            )
+        except SkillAuthorizationError as error:
+            raise _authorization_error(error) from error
+        except SkillNotFoundError as error:
+            raise HTTPException(404, error.code) from error
+        except SkillConflictError as error:
+            raise HTTPException(409, error.code) from error
+        except SkillPackageError as error:
+            raise _skill_package_http_error(error) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.get(
         "/skill-executions/{call_id}",

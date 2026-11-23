@@ -59,8 +59,14 @@ class McpServerRepository(Protocol):
     ) -> AdminToolDefinition:
         """复核管理员后更新已注册工具的审批策略。"""
 
-    async def list_public(self, *, offset: int, limit: int) -> ToolPage[PublicToolDefinition]:
-        """读取供普通调用方使用的工具定义。"""
+    async def list_public(
+        self,
+        *,
+        offset: int,
+        limit: int,
+        allowed_server_ids: Sequence[str] | None = None,
+    ) -> ToolPage[PublicToolDefinition]:
+        """读取供普通调用方使用的工具定义，支持按有权限的 MCP Server ID 集合过滤。"""
 
     async def list_admin(self, *, offset: int, limit: int) -> ToolPage[AdminToolDefinition]:
         """读取包含 Server 来源映射的管理员工具定义。"""

@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.security import get_current_auth, require_admin
+from api.security import get_current_auth, require_skill_manager
 from api.skill import build_skill_admin_router, build_skill_user_router
 from app.skill.service import SkillAuthorizationError
 from domain.skill import SkillConflictError, SkillPackageError
@@ -35,7 +35,7 @@ class _PackageService:
 def _client(error: Exception) -> TestClient:
     """创建只挂载管理员 Skill 路由的测试应用。"""
     app = FastAPI()
-    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_skill_manager] = lambda: object()
     app.include_router(build_skill_admin_router(cast(Any, _PackageService(error))))
     return TestClient(app)
 
@@ -127,7 +127,7 @@ def test_configure_transaction_authorization_failure_returns_403() -> None:
             raise SkillAuthorizationError("admin_required")
 
     app = FastAPI()
-    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_skill_manager] = lambda: object()
     app.include_router(
         build_skill_admin_router(cast(Any, _ConfigureService()))
     )
@@ -209,7 +209,7 @@ def test_admin_configure_maps_skill_package_error(
             raise SkillPackageError(error_code)
 
     app = FastAPI()
-    app.dependency_overrides[require_admin] = lambda: object()
+    app.dependency_overrides[require_skill_manager] = lambda: object()
     app.include_router(
         build_skill_admin_router(cast(Any, _ConfigurePackageErrorService()))
     )

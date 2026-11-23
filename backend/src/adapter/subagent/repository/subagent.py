@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.access.repository import (
+    delete_resource_grants_in_session,
+    load_grants_map_in_session,
+    sync_resource_grants_in_session,
+)
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
 from adapter.llm.model import ModelProfileVersionModel
 from adapter.subagent.converter import subagent_to_domain
 from adapter.subagent.model import SubagentModel
+from domain.access import ResourceType, VisibilityGrantInput, VisibilityScope
 from domain.auth import AuthContext, UserRole
 from domain.subagent import (
     SubagentAdminRequiredError,
@@ -34,8 +41,14 @@ class SqlAlchemySubagentRepository(SubagentRepository):
         """保存异步数据库会话工厂。"""
         self._session_factory = session_factory
 
-    async def create(self, actor: AuthContext, profile: SubagentProfile) -> SubagentProfile:
-        """在事务内复核管理员身份后写入新 Subagent，冲突时映射为领域异常。"""
+    async def create(
+        self,
+        actor: AuthContext,
+        profile: SubagentProfile,
+        *,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
+    ) -> SubagentProfile:
+        """在事务内复核管理员身份后写入新 Subagent 与可见性授权，冲突时映射为领域异常。"""
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -49,6 +62,8 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                         model_profile_id=profile.model_profile_id,
                         allowed_tool_ids=list(profile.allowed_tool_ids),
                         enabled=profile.enabled,
+                        visibility_scope=profile.visibility_scope.value,
+                        owner_department_id=profile.owner_department_id,
                         max_llm_requests=profile.max_llm_requests,
                         timeout_seconds=profile.timeout_seconds,
                         version=profile.version,
@@ -59,14 +74,25 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     )
                     session.add(row)
                     await session.flush()
-                    return subagent_to_domain(row)
+                    grants = await sync_resource_grants_in_session(
+                        session,
+                        ResourceType.SUBAGENT,
+                        row.id,
+                        (
+                            visibility_grants
+                            if profile.visibility_scope is VisibilityScope.DEPARTMENT
+                            else ()
+                        ),
+                        now=profile.created_at,
+                    )
+                    return subagent_to_domain(row, grants=grants)
         except IntegrityError as error:
             if _is_slug_conflict(error):
                 raise SubagentSlugConflictError() from error
             raise
 
     async def get(self, subagent_id: str) -> SubagentProfile | None:
-        """按 ID 读取未软删除的 Subagent 配置。"""
+        """按 ID 读取未软删除的 Subagent 配置（含可见性授权）。"""
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(SubagentModel).where(
@@ -74,10 +100,13 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     SubagentModel.deleted_at.is_(None),
                 )
             )
-        return None if row is None else subagent_to_domain(row)
+            if row is None:
+                return None
+            grants_map = await load_grants_map_in_session(session, ResourceType.SUBAGENT, (row.id,))
+            return subagent_to_domain(row, grants=grants_map.get(row.id, ()))
 
     async def get_by_slug(self, slug: str) -> SubagentProfile | None:
-        """按 slug 读取未软删除的 Subagent 配置。"""
+        """按 slug 读取未软删除的 Subagent 配置（含可见性授权）。"""
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(SubagentModel).where(
@@ -85,7 +114,10 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     SubagentModel.deleted_at.is_(None),
                 )
             )
-        return None if row is None else subagent_to_domain(row)
+            if row is None:
+                return None
+            grants_map = await load_grants_map_in_session(session, ResourceType.SUBAGENT, (row.id,))
+            return subagent_to_domain(row, grants=grants_map.get(row.id, ()))
 
     async def list_page(
         self,
@@ -111,8 +143,13 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     )
                 ).all()
             )
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.SUBAGENT, [row.id for row in rows]
+            )
         return SubagentPage(
-            items=tuple(subagent_to_domain(row) for row in rows),
+            items=tuple(
+                subagent_to_domain(row, grants=grants_map.get(row.id, ())) for row in rows
+            ),
             total=int(total),
             offset=offset,
             limit=limit,
@@ -133,7 +170,10 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     )
                 ).all()
             )
-        return tuple(subagent_to_domain(row) for row in rows)
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.SUBAGENT, [row.id for row in rows]
+            )
+        return tuple(subagent_to_domain(row, grants=grants_map.get(row.id, ())) for row in rows)
 
     async def update(
         self,
@@ -167,12 +207,31 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     row.system_prompt = patch.system_prompt
                     row.model_profile_id = patch.model_profile_id
                     row.allowed_tool_ids = list(patch.allowed_tool_ids)
+                    row.visibility_scope = patch.visibility_scope.value
+                    row.owner_department_id = patch.owner_department_id
                     row.max_llm_requests = patch.max_llm_requests
                     row.timeout_seconds = patch.timeout_seconds
                     row.version = row.version + 1
                     row.updated_at = patch.updated_at
                     await session.flush()
-                    return subagent_to_domain(row)
+                    if patch.visibility_grants is not None:
+                        grants = await sync_resource_grants_in_session(
+                            session,
+                            ResourceType.SUBAGENT,
+                            row.id,
+                            (
+                                patch.visibility_grants
+                                if patch.visibility_scope is VisibilityScope.DEPARTMENT
+                                else ()
+                            ),
+                            now=patch.updated_at,
+                        )
+                    else:
+                        grants_map = await load_grants_map_in_session(
+                            session, ResourceType.SUBAGENT, (row.id,)
+                        )
+                        grants = grants_map.get(row.id, ())
+                    return subagent_to_domain(row, grants=grants)
         except IntegrityError as error:
             if _is_slug_conflict(error):
                 raise SubagentSlugConflictError() from error
@@ -205,7 +264,10 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     row.version = row.version + 1
                     row.updated_at = updated_at
                     await session.flush()
-                return subagent_to_domain(row)
+                grants_map = await load_grants_map_in_session(
+                    session, ResourceType.SUBAGENT, (row.id,)
+                )
+                return subagent_to_domain(row, grants=grants_map.get(row.id, ()))
 
     async def soft_delete(
         self,
@@ -214,7 +276,7 @@ class SqlAlchemySubagentRepository(SubagentRepository):
         *,
         deleted_at: datetime,
     ) -> None:
-        """在事务内复核管理员身份并执行幂等软删除。"""
+        """在事务内复核管理员身份并执行幂等软删除，同时清理关联可见性授权。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_admin(session, actor)
@@ -226,6 +288,7 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                     return
                 row.deleted_at = deleted_at
                 row.updated_at = deleted_at
+                await delete_resource_grants_in_session(session, ResourceType.SUBAGENT, row.id)
                 await session.flush()
 
     @staticmethod

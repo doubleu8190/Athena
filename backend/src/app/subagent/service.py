@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from datetime import datetime
 
+from app.access import AccessPolicyService
 from common.ids import new_id, now_utc
+from domain.access import (
+    AccessPermissionDeniedError,
+    InvalidVisibilityConfigError,
+    ResourceAccessTarget,
+    ResourceType,
+    VisibilityGrantInput,
+    VisibilityScope,
+)
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
 from domain.subagent import (
     AvailableToolGroup,
@@ -44,14 +54,16 @@ class SubagentService:
         repository: SubagentRepository,
         auth_reader: CurrentSessionReader,
         *,
+        access_policy: AccessPolicyService | None = None,
         model_checker: SubagentModelChecker | None = None,
         tool_catalog: SubagentToolCatalog | None = None,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
-        """保存仓储、会话读取、模型/工具校验端口与基础设施依赖。"""
+        """保存仓储、会话读取、权限引擎、模型/工具校验端口与基础设施依赖。"""
         self._repository = repository
         self._auth_reader = auth_reader
+        self._access_policy = access_policy
         self._model_checker = model_checker
         self._tool_catalog = tool_catalog
         self._id_factory = id_factory
@@ -101,6 +113,14 @@ class SubagentService:
             model_profile_id=model_profile_id,
             allowed_tool_ids=allowed_tool_ids,
         )
+        resolved_scope, resolved_dept, resolved_grants = await self._resolve_visibility(
+            actor,
+            visibility_scope=command.visibility_scope,
+            owner_department_id=command.owner_department_id,
+            visibility_grants=command.visibility_grants,
+            for_create=True,
+            preserve_existing_grants_when_none=False,
+        )
 
         now = self._clock()
         profile = SubagentProfile(
@@ -119,7 +139,15 @@ class SubagentService:
             deleted_at=None,
             created_at=now,
             updated_at=now,
+            visibility_scope=resolved_scope,
+            owner_department_id=resolved_dept,
         )
+        if _accepts_kwarg(self._repository.create, "visibility_grants"):
+            return await self._repository.create(
+                actor,
+                profile,
+                visibility_grants=resolved_grants or (),
+            )
         return await self._repository.create(actor, profile)
 
     async def update_subagent(
@@ -189,6 +217,45 @@ class SubagentService:
             ),
         )
 
+        has_visibility_patch = (
+            not isinstance(command.visibility_scope, UnsetType)
+            or not isinstance(command.owner_department_id, UnsetType)
+            or not isinstance(command.visibility_grants, UnsetType)
+        )
+        resolved_scope = current.visibility_scope
+        resolved_dept = current.owner_department_id
+        resolved_grants: tuple[VisibilityGrantInput, ...] | None = None
+        if has_visibility_patch:
+            target_scope = (
+                current.visibility_scope
+                if isinstance(command.visibility_scope, UnsetType)
+                else command.visibility_scope
+            )
+            if isinstance(command.owner_department_id, UnsetType):
+                target_dept = (
+                    current.owner_department_id
+                    if target_scope is VisibilityScope.DEPARTMENT
+                    else None
+                )
+            else:
+                target_dept = command.owner_department_id
+            explicit_grants = (
+                None
+                if isinstance(command.visibility_grants, UnsetType)
+                else command.visibility_grants
+            )
+            resolved_scope, resolved_dept, resolved_grants = await self._resolve_visibility(
+                actor,
+                visibility_scope=target_scope,
+                owner_department_id=target_dept,
+                visibility_grants=explicit_grants,
+                for_create=False,
+                existing=current,
+                preserve_existing_grants_when_none=isinstance(
+                    command.visibility_grants, UnsetType
+                ),
+            )
+
         patch = SubagentUpdatePatch(
             slug=slug,
             name=name,
@@ -199,6 +266,9 @@ class SubagentService:
             max_llm_requests=max_llm_requests,
             timeout_seconds=timeout_seconds,
             updated_at=self._clock(),
+            visibility_scope=resolved_scope,
+            owner_department_id=resolved_dept,
+            visibility_grants=resolved_grants,
         )
         return await self._repository.update(
             actor,
@@ -275,6 +345,65 @@ class SubagentService:
             ]
             if unknown_tools:
                 raise SubagentValidationError("subagent_tool_not_found")
+
+
+    async def _resolve_visibility(
+        self,
+        actor: AuthContext,
+        *,
+        visibility_scope: VisibilityScope,
+        owner_department_id: str | None,
+        visibility_grants: tuple[VisibilityGrantInput, ...] | None,
+        for_create: bool,
+        existing: SubagentProfile | None = None,
+        preserve_existing_grants_when_none: bool = True,
+    ) -> tuple[VisibilityScope, str | None, tuple[VisibilityGrantInput, ...] | None]:
+        """校验 Subagent 可见范围、归属部门与授权清单，并按需补齐默认部门授权。"""
+        if self._access_policy is None:
+            if visibility_scope is not VisibilityScope.COMPANY or owner_department_id is not None:
+                raise SubagentValidationError("subagent_visibility_requires_access_policy")
+            if visibility_grants:
+                raise SubagentValidationError("visibility_grants_not_allowed")
+            return VisibilityScope.COMPANY, None, ()
+        existing_target = (
+            None
+            if existing is None
+            else ResourceAccessTarget(
+                resource_type=ResourceType.SUBAGENT,
+                resource_id=existing.id,
+                visibility_scope=existing.visibility_scope,
+                owner_id=None,
+                owner_department_id=existing.owner_department_id,
+            )
+        )
+        try:
+            return await self._access_policy.resolve_and_validate_visibility(
+                user_id=actor.user.id,
+                resource_type=ResourceType.SUBAGENT,
+                visibility_scope=visibility_scope,
+                owner_department_id=owner_department_id,
+                visibility_grants=visibility_grants,
+                for_create=for_create,
+                existing_target=existing_target,
+                preserve_existing_grants_when_none=preserve_existing_grants_when_none,
+            )
+        except AccessPermissionDeniedError as error:
+            raise SubagentAdminRequiredError() from error
+        except InvalidVisibilityConfigError as error:
+            raise SubagentValidationError(error.code) from error
+
+
+def _accepts_kwarg(func: object, name: str) -> bool:
+    """检查仓储回调是否支持指定关键字参数，兼容旧测试替身签名。"""
+    if not callable(func):
+        return False
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
+    )
 
 
 def _validate_page(offset: int, limit: int) -> None:

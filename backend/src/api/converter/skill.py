@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from api.dto.access import grants_to_response
 from api.dto.skill import (
     SkillAdminDetailsResponse,
     SkillAdminListResponse,
@@ -62,6 +63,8 @@ def skill_to_response(skill: Skill) -> SkillSummaryResponse:
             if skill.dependency_check is None
             else dependency_check_to_response(skill.dependency_check)
         ),
+        owner_department_id=skill.owner_department_id,
+        visibility_grants=grants_to_response(skill.visibility_grants),
     )
 
 

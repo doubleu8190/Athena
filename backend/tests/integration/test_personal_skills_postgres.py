@@ -58,7 +58,7 @@ async def _run_personal_skill_migration_scenario(database_url: str) -> None:
                     )
                 )
             ).one()
-        assert backfilled.scope == "public"
+        assert backfilled.scope == "company"
         assert backfilled.owner_id is None
         assert backfilled.deleted_at is None
 
@@ -87,7 +87,7 @@ async def _run_personal_skill_migration_scenario(database_url: str) -> None:
                 "INSERT INTO skills "
                 "(id, slug, scope, owner_id, deleted_at, enabled, "
                 "script_requires_approval, revision, created_by, created_at, updated_at) "
-                "VALUES ('skill_public_duplicate', 'shared-scope-slug', 'public', NULL, NULL, "
+                "VALUES ('skill_public_duplicate', 'shared-scope-slug', 'company', NULL, NULL, "
                 "false, false, 1, NULL, :now, :now)"
             ),
             {"now": datetime.now(UTC)},
@@ -162,7 +162,7 @@ async def _run_personal_skill_migration_scenario(database_url: str) -> None:
                             "WHERE namespace.nspname = current_schema() "
                             "AND table_row.relname IN ('skills', 'skill_versions') "
                             "AND index_class.relname IN ("
-                            "'uq_skills_public_slug', "
+                            "'uq_skills_company_slug', "
                             "'uq_skills_personal_owner_slug', "
                             "'ix_skill_versions_package_sha256')"
                         )
@@ -183,13 +183,13 @@ async def _run_personal_skill_migration_scenario(database_url: str) -> None:
                 ).all()
             )
         indexes = {row["index_name"]: row for row in index_rows}
-        public_slug = indexes["uq_skills_public_slug"]
+        company_slug = indexes["uq_skills_company_slug"]
         personal_owner_slug = indexes["uq_skills_personal_owner_slug"]
         package_hash = indexes["ix_skill_versions_package_sha256"]
-        assert public_slug["is_unique"] is True
-        assert public_slug["columns"] == ["slug"]
-        assert "scope" in public_slug["predicate"]
-        assert "public" in public_slug["predicate"]
+        assert company_slug["is_unique"] is True
+        assert company_slug["columns"] == ["slug"]
+        assert "scope" in company_slug["predicate"]
+        assert "company" in company_slug["predicate"]
         assert personal_owner_slug["is_unique"] is True
         assert personal_owner_slug["columns"] == ["owner_id", "slug"]
         assert "scope" in personal_owner_slug["predicate"]

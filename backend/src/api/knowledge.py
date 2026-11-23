@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 from fastapi import (
@@ -44,11 +44,15 @@ from api.dto.knowledge import (
 )
 from api.security import CurrentAuth, verify_request_origin
 from app.knowledge.service import (
+    KNOWLEDGE_UNSET,
     KnowledgeInputError,
     KnowledgeNotFoundError,
+    KnowledgePermissionDeniedError,
     KnowledgeSearchUnavailableError,
     KnowledgeService,
+    KnowledgeUnsetType,
 )
+from domain.access import VisibilityGrantInput, VisibilityScope
 from domain.knowledge.model import (
     OriginalStorageError,
 )
@@ -69,10 +73,32 @@ def build_knowledge_router(
     async def create_base(
         request: KnowledgeBaseRequest, auth: CurrentAuth
     ) -> KnowledgeBaseResponse:
+        has_visibility = (
+            "visibility_scope" in request.model_fields_set
+            or "owner_department_id" in request.model_fields_set
+            or "visibility_grants" in request.model_fields_set
+        )
         try:
-            return _base_response(
-                await service.create_base(auth.user.id, request.name, request.description)
-            )
+            if has_visibility:
+                created = await service.create_base(
+                    auth.user.id,
+                    request.name,
+                    request.description,
+                    visibility_scope=VisibilityScope(request.visibility_scope),
+                    owner_department_id=request.owner_department_id,
+                    visibility_grants=(
+                        None
+                        if request.visibility_grants is None
+                        else tuple(item.to_domain() for item in request.visibility_grants)
+                    ),
+                )
+            else:
+                created = await service.create_base(
+                    auth.user.id, request.name, request.description
+                )
+            return _base_response(created)
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except KnowledgeInputError as error:
             raise _bad_request(error) from error
 
@@ -81,9 +107,24 @@ def build_knowledge_router(
         auth: CurrentAuth,
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+        visibility_scope: Annotated[
+            Literal["company", "department", "personal"] | None, Query()
+        ] = None,
+        owner_department_id: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     ) -> KnowledgeBaseListResponse:
         try:
-            items = await service.list_bases(auth.user.id, page=page, page_size=page_size)
+            if visibility_scope is not None or owner_department_id is not None:
+                items = await service.list_bases(
+                    auth.user.id,
+                    page=page,
+                    page_size=page_size,
+                    visibility_scope=(
+                        None if visibility_scope is None else VisibilityScope(visibility_scope)
+                    ),
+                    owner_department_id=owner_department_id,
+                )
+            else:
+                items = await service.list_bases(auth.user.id, page=page, page_size=page_size)
         except KnowledgeInputError as error:
             raise _bad_request(error) from error
         return KnowledgeBaseListResponse(
@@ -101,12 +142,53 @@ def build_knowledge_router(
     async def patch_base(
         base_id: str, request: KnowledgeBasePatchRequest, auth: CurrentAuth
     ) -> KnowledgeBaseResponse:
+        fields = request.model_fields_set
+        has_visibility_patch = bool(
+            fields & {"visibility_scope", "owner_department_id", "visibility_grants"}
+        )
         try:
-            return _base_response(
-                await service.rename_base(auth.user.id, base_id, request.name, request.description)
-            )
+            if has_visibility_patch:
+                if "visibility_scope" in fields and request.visibility_scope is None:
+                    raise KnowledgeInputError("visibility_scope_invalid")
+                visibility_scope_arg: VisibilityScope | KnowledgeUnsetType = (
+                    VisibilityScope(request.visibility_scope)
+                    if "visibility_scope" in fields and request.visibility_scope is not None
+                    else KNOWLEDGE_UNSET
+                )
+                owner_department_arg: str | None | KnowledgeUnsetType = (
+                    request.owner_department_id
+                    if "owner_department_id" in fields
+                    else KNOWLEDGE_UNSET
+                )
+                visibility_grants_arg: (
+                    tuple[VisibilityGrantInput, ...] | None | KnowledgeUnsetType
+                ) = (
+                    (
+                        None
+                        if request.visibility_grants is None
+                        else tuple(item.to_domain() for item in request.visibility_grants)
+                    )
+                    if "visibility_grants" in fields
+                    else KNOWLEDGE_UNSET
+                )
+                updated = await service.rename_base(
+                    auth.user.id,
+                    base_id,
+                    request.name,
+                    request.description,
+                    visibility_scope=visibility_scope_arg,
+                    owner_department_id=owner_department_arg,
+                    visibility_grants=visibility_grants_arg,
+                )
+            else:
+                updated = await service.rename_base(
+                    auth.user.id, base_id, request.name, request.description
+                )
+            return _base_response(updated)
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except KnowledgeInputError as error:
             raise _bad_request(error) from error
 
@@ -116,6 +198,8 @@ def build_knowledge_router(
             await service.delete_base(auth.user.id, base_id)
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.post(
@@ -141,6 +225,8 @@ def build_knowledge_router(
             )
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except LookupError as error:
             raise _not_found(error) from error
         except ValueError as error:
@@ -181,6 +267,8 @@ def build_knowledge_router(
             )
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except LookupError as error:
             raise _not_found(error) from error
         except OriginalStorageError as error:
@@ -223,6 +311,8 @@ def build_knowledge_router(
             )
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except LookupError as error:
             raise _not_found(error) from error
         except OriginalStorageError as error:
@@ -263,6 +353,8 @@ def build_knowledge_router(
             )
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except LookupError as error:
             raise _not_found(error) from error
         except KnowledgeInputError as error:
@@ -332,6 +424,8 @@ def build_knowledge_router(
             item = await service.retry_version(auth.user.id, base_id, document_id, version_id)
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except KnowledgeInputError as error:
             if str(error) == "document_update_in_progress":
                 raise HTTPException(status_code=409, detail=str(error)) from error
@@ -351,6 +445,8 @@ def build_knowledge_router(
             )
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         except KnowledgeInputError as error:
             raise _bad_request(error) from error
         return _document_response(document)
@@ -361,6 +457,8 @@ def build_knowledge_router(
             await service.delete_document(auth.user.id, base_id, document_id)
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
+        except KnowledgePermissionDeniedError as error:
+            raise _forbidden(error) from error
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.post("/{base_id}/search", response_model=KnowledgeSearchResponse)
@@ -474,6 +572,10 @@ def _upload_error(error: ValueError) -> HTTPException:
 
 def _not_found(error: Exception) -> HTTPException:
     return HTTPException(status_code=404, detail=str(error))
+
+
+def _forbidden(error: Exception) -> HTTPException:
+    return HTTPException(status_code=403, detail=str(error) or "knowledge_permission_denied")
 
 
 def _storage_unavailable() -> HTTPException:

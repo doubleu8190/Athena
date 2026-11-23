@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal, cast
 
+from api.dto.access import grants_to_response
 from api.dto.subagent import (
     AvailableToolGroupResponse,
     AvailableToolItemResponse,
@@ -13,6 +15,7 @@ from api.dto.subagent import (
     SubagentResponse,
     SubagentUpdateRequest,
 )
+from domain.access import VisibilityScope
 from domain.subagent import (
     UNSET,
     AvailableToolGroup,
@@ -36,6 +39,13 @@ def create_request_to_command(request: SubagentCreateRequest) -> CreateSubagentC
         enabled=request.enabled,
         max_llm_requests=request.max_llm_requests,
         timeout_seconds=request.timeout_seconds,
+        visibility_scope=VisibilityScope(request.visibility_scope),
+        owner_department_id=request.owner_department_id,
+        visibility_grants=(
+            None
+            if request.visibility_grants is None
+            else tuple(item.to_domain() for item in request.visibility_grants)
+        ),
     )
 
 
@@ -52,6 +62,8 @@ def update_request_to_command(request: SubagentUpdateRequest) -> UpdateSubagentC
         raise SubagentValidationError("subagent_system_prompt_invalid")
     if "allowed_tool_ids" in fields and request.allowed_tool_ids is None:
         raise SubagentValidationError("subagent_allowed_tools_invalid")
+    if "visibility_scope" in fields and request.visibility_scope is None:
+        raise SubagentValidationError("visibility_scope_invalid")
 
     return UpdateSubagentCommand(
         expected_version=request.version,
@@ -75,11 +87,29 @@ def update_request_to_command(request: SubagentUpdateRequest) -> UpdateSubagentC
         ),
         max_llm_requests=(request.max_llm_requests if "max_llm_requests" in fields else UNSET),
         timeout_seconds=(request.timeout_seconds if "timeout_seconds" in fields else UNSET),
+        visibility_scope=(
+            VisibilityScope(request.visibility_scope)
+            if "visibility_scope" in fields and request.visibility_scope is not None
+            else UNSET
+        ),
+        owner_department_id=(
+            request.owner_department_id if "owner_department_id" in fields else UNSET
+        ),
+        visibility_grants=(
+            (
+                None
+                if request.visibility_grants is None
+                else tuple(item.to_domain() for item in request.visibility_grants)
+            )
+            if "visibility_grants" in fields
+            else UNSET
+        ),
     )
 
 
 def subagent_to_response(profile: SubagentProfile) -> SubagentResponse:
     """将领域 Subagent 实体转换为 HTTP 响应。"""
+    scope = cast(Literal["company", "department"], profile.visibility_scope.value)
     return SubagentResponse(
         id=profile.id,
         slug=profile.slug,
@@ -89,6 +119,9 @@ def subagent_to_response(profile: SubagentProfile) -> SubagentResponse:
         model_profile_id=profile.model_profile_id,
         allowed_tool_ids=list(profile.allowed_tool_ids),
         enabled=profile.enabled,
+        visibility_scope=scope,
+        owner_department_id=profile.owner_department_id,
+        visibility_grants=grants_to_response(profile.visibility_grants),
         max_llm_requests=profile.max_llm_requests,
         timeout_seconds=profile.timeout_seconds,
         version=profile.version,

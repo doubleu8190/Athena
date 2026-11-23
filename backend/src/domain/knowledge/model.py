@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from domain.access import VisibilityGrant, VisibilityScope
+
 MAX_PROJECT_KNOWLEDGE_BASES = 20
 MAX_ORIGINAL_BYTES = 20 * 1024 * 1024
 
@@ -93,7 +95,7 @@ class TextBlock:
 
 @dataclass(frozen=True, slots=True)
 class KnowledgeBase:
-    """用户私有知识库。"""
+    """支持公司/部门/个人三层可见性的知识库实体。"""
 
     id: str
     owner_id: str
@@ -102,6 +104,9 @@ class KnowledgeBase:
     created_at: datetime
     updated_at: datetime
     deleted_time: datetime | None = None
+    visibility_scope: VisibilityScope = VisibilityScope.PERSONAL
+    owner_department_id: str | None = None
+    visibility_grants: tuple[VisibilityGrant, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

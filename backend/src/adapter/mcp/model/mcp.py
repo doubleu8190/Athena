@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     LargeBinary,
     String,
     UniqueConstraint,
@@ -24,7 +25,7 @@ _JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
 
 
 class McpServerModel(Base):
-    """MCP Server 连接配置与加密凭据。"""
+    """MCP Server 连接配置、加密凭据与组织可见范围。"""
 
     __tablename__ = "mcp_servers"
     __table_args__ = (
@@ -42,7 +43,17 @@ class McpServerModel(Base):
             "AND key_version IS NOT NULL)",
             name="ck_mcp_servers_secret_bundle",
         ),
+        CheckConstraint(
+            "visibility_scope IN ('company', 'department')",
+            name="ck_mcp_servers_visibility_scope",
+        ),
+        CheckConstraint(
+            "(visibility_scope = 'company' AND owner_department_id IS NULL) "
+            "OR (visibility_scope = 'department' AND owner_department_id IS NOT NULL)",
+            name="ck_mcp_servers_owner_department_scope",
+        ),
         UniqueConstraint("name", name="uq_mcp_servers_name"),
+        Index("ix_mcp_servers_visibility_dept", "visibility_scope", "owner_department_id"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -53,6 +64,14 @@ class McpServerModel(Base):
     secrets_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     key_version: Mapped[int | None] = mapped_column(nullable=True)
     config_version: Mapped[int] = mapped_column(nullable=False, server_default="1")
+    visibility_scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="company", server_default="company"
+    )
+    owner_department_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     created_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,

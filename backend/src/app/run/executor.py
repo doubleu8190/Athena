@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
 
+from app.access import AccessPolicyService
 from app.preference import PreferenceService, render_preference_context
 from app.run.budget import RunLlmBudget
 from app.run.compression import ContextCompressor, ContextPreparation
@@ -34,6 +35,7 @@ from app.tool.runtime import (
 )
 from common.ids import new_id, now_utc
 from common.json import utf8_size
+from domain.access import ResourceType
 from domain.file import PendingSessionFile
 from domain.llm.model import (
     LlmError,
@@ -166,11 +168,12 @@ class RunExecutor:
         preferences: PreferenceService | None = None,
         preference_memory_token_budget: int = DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET,
         subagents: SubagentRepository | None = None,
+        access_policy: AccessPolicyService | None = None,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        """保存持久化命令、模型配置、工具运行目录和有界执行参数。"""
+        """保存持久化命令、模型配置、工具运行目录、权限引擎和有界执行参数。"""
         self._repository = repository
         self._profiles = profiles
         self._provider = provider
@@ -179,6 +182,7 @@ class RunExecutor:
         self._publisher = publisher
         self._config = config or RunWorkerConfig()
         self._subagents = subagents
+        self._access_policy = access_policy
         self._preferences = preferences
         self._preference_memory_token_budget = preference_memory_token_budget
         self._id_factory = id_factory
@@ -1554,6 +1558,23 @@ class RunExecutor:
             profile = await self._subagents.get_by_slug(slug.strip())
             if profile is None or not profile.enabled:
                 raise LlmError("subagent_profile_unavailable")
+
+            # 调度执行前实时复核当前员工是否对目标子智能体拥有读权限，
+            # 防止模型强行拼出他部门 subagent slug 或员工调岗后越权触发子 Run。
+            if self._access_policy is not None:
+                if not await self._access_policy.can_read_resource(
+                    run.owner_id,
+                    ResourceType.SUBAGENT,
+                    profile.id,
+                ):
+                    raise LlmError("subagent_profile_unavailable")
+            elif self._tool_runtime is not None:
+                check_subagent = getattr(self._tool_runtime, "can_read_subagent", None)
+                if callable(check_subagent) and not await check_subagent(
+                    run.owner_id,
+                    profile.id,
+                ):
+                    raise LlmError("subagent_profile_unavailable")
 
             if self._tool_runtime is not None:
                 if state.authorized is None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from adapter.mcp.model import McpServerModel, McpToolModel
+from domain.access import VisibilityGrant, VisibilityScope
 from domain.mcp import McpSecretMetadata, McpServer, parse_server_config
 from domain.tool import AdminToolDefinition, PublicToolDefinition, ToolDefinition
 
@@ -14,7 +15,12 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def server_to_domain(row: McpServerModel, secret_names: tuple[str, ...]) -> McpServer:
+def server_to_domain(
+    row: McpServerModel,
+    secret_names: tuple[str, ...],
+    *,
+    grants: tuple[VisibilityGrant, ...] = (),
+) -> McpServer:
     """转换 Server 行和已由仓储认证解密的秘密名称，不接触秘密值。"""
     metadata = tuple(McpSecretMetadata(name=name, has_value=True) for name in secret_names)
     return McpServer(
@@ -30,6 +36,9 @@ def server_to_domain(row: McpServerModel, secret_names: tuple[str, ...]) -> McpS
         tools_discovered_at=(
             _as_utc(row.tools_discovered_at) if row.tools_discovered_at is not None else None
         ),
+        visibility_scope=VisibilityScope(row.visibility_scope),
+        owner_department_id=row.owner_department_id,
+        visibility_grants=grants,
     )
 
 

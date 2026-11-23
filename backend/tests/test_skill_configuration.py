@@ -140,6 +140,9 @@ class _Repository:
         self.error = error
         self.configuration: dict[str, object] | None = None
 
+    async def get_skill(self, skill_id: str) -> Skill | None:
+        return self.skill if skill_id == self.skill.id else None
+
     async def get_version(self, version_id: str) -> SkillVersion | None:
         return self.version if version_id == self.version.id else None
 

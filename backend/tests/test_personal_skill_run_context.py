@@ -78,7 +78,7 @@ def test_public_skill_catalog_and_guide_remain_system_messages() -> None:
         version_id="skillver_public",
         version_label="v2",
         requires_approval=False,
-        scope=SkillScope.PUBLIC,
+        scope=SkillScope.COMPANY,
     )
     context = RunSkillPromptContext(
         catalog=(entry,),
@@ -89,7 +89,7 @@ def test_public_skill_catalog_and_guide_remain_system_messages() -> None:
                 version_id=entry.version_id,
                 version_label=entry.version_label,
                 guide="公共业务正文。",
-                scope=SkillScope.PUBLIC,
+                scope=SkillScope.COMPANY,
             ),
         ),
     )
@@ -118,7 +118,7 @@ def test_public_and_personal_catalogs_are_both_available() -> None:
         version_id="skillver_public",
         version_label="v2",
         requires_approval=False,
-        scope=SkillScope.PUBLIC,
+        scope=SkillScope.COMPANY,
     )
     personal_entry = RunSkillEntry(
         skill_id="skill_personal",
@@ -139,7 +139,7 @@ def test_public_and_personal_catalogs_are_both_available() -> None:
                 version_id=public_entry.version_id,
                 version_label=public_entry.version_label,
                 guide="公共业务正文。",
-                scope=SkillScope.PUBLIC,
+                scope=SkillScope.COMPANY,
             ),
             ActiveSkillGuide(
                 skill_id=personal_entry.skill_id,
@@ -197,7 +197,7 @@ def test_historical_snapshot_defaults_to_public_scope() -> None:
         }
     )
 
-    assert snapshot.skills[0].scope is SkillScope.PUBLIC
+    assert snapshot.skills[0].scope is SkillScope.COMPANY
 
 
 def test_subrun_subset_rebuilds_entries_from_parent_snapshot() -> None:
@@ -226,7 +226,7 @@ def test_subrun_subset_rebuilds_entries_from_parent_snapshot() -> None:
                 version_id="skillver_evil",
                 version_label="v99",
                 requires_approval=True,
-                scope=SkillScope.PUBLIC,
+                scope=SkillScope.COMPANY,
             ),
         ),
         selected_skill_ids=(parent_entry.skill_id,),

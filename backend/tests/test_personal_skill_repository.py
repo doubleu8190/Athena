@@ -12,8 +12,10 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from adapter.access.model import ResourceVisibilityGrantModel
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.base import Base
+from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from adapter.skill.model.skill import SkillModel, SkillVersionModel
 from adapter.skill.repository import SqlAlchemySkillRepository, build_run_skill_snapshot
 from app.skill.service import SkillService
@@ -102,6 +104,10 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
                         [
                             UserModel.__table__,
                             AuthSessionModel.__table__,
+                            DepartmentModel.__table__,
+                            UserDepartmentModel.__table__,
+                            DeptAdminScopeModel.__table__,
+                            ResourceVisibilityGrantModel.__table__,
                             SkillModel.__table__,
                             SkillVersionModel.__table__,
                         ],
@@ -162,7 +168,7 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
                 owner_id=actor_a.user.id,
             )
         by_scope = {(item.slug, item.scope) for item in snapshot.skills}
-        assert ("public-shared", SkillScope.PUBLIC) in by_scope
+        assert ("public-shared", SkillScope.COMPANY) in by_scope
         assert (created_a.skill.slug, SkillScope.PERSONAL) in by_scope
         assert (created_b.skill.slug, SkillScope.PERSONAL) not in by_scope
         with pytest.raises(SkillConflictError, match="skill_selection_unavailable"):
@@ -291,6 +297,10 @@ async def _run_personal_replay_current_scenario(tmp_path: Path) -> None:
                         [
                             UserModel.__table__,
                             AuthSessionModel.__table__,
+                            DepartmentModel.__table__,
+                            UserDepartmentModel.__table__,
+                            DeptAdminScopeModel.__table__,
+                            ResourceVisibilityGrantModel.__table__,
                             SkillModel.__table__,
                             SkillVersionModel.__table__,
                         ],
@@ -467,7 +477,7 @@ async def _insert_public_skill(factory: async_sessionmaker[Any]) -> None:
             skill = SkillModel(
                 id="skill_public",
                 slug=manifest.slug,
-                scope=SkillScope.PUBLIC.value,
+                scope=SkillScope.COMPANY.value,
                 owner_id=None,
                 deleted_at=None,
                 current_version_id=None,
@@ -517,6 +527,10 @@ async def _run_admin_package_hash_scenario(tmp_path: Path) -> None:
                         [
                             UserModel.__table__,
                             AuthSessionModel.__table__,
+                            DepartmentModel.__table__,
+                            UserDepartmentModel.__table__,
+                            DeptAdminScopeModel.__table__,
+                            ResourceVisibilityGrantModel.__table__,
                             SkillModel.__table__,
                             SkillVersionModel.__table__,
                         ],

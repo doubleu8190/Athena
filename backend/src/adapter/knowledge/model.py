@@ -27,12 +27,36 @@ class KnowledgeBaseModel(Base):
     __tablename__ = "knowledge_bases"
     __table_args__ = (
         UniqueConstraint("id", "owner_id", name="uq_knowledge_bases_id_owner"),
+        CheckConstraint(
+            "visibility_scope IN ('company', 'department', 'personal')",
+            name="ck_knowledge_bases_visibility_scope",
+        ),
+        CheckConstraint(
+            "(visibility_scope = 'department' AND owner_department_id IS NOT NULL) "
+            "OR (visibility_scope IN ('company', 'personal') AND owner_department_id IS NULL)",
+            name="ck_knowledge_bases_owner_department_scope",
+        ),
         Index("ix_knowledge_bases_owner_updated", "owner_id", "updated_at"),
+        Index(
+            "ix_knowledge_bases_visibility_dept",
+            "visibility_scope",
+            "owner_department_id",
+            "deleted_time",
+        ),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500))
+    # 三层可见范围：默认 personal，兼容既有创建路径；department 级必须绑定活跃归属部门。
+    visibility_scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="personal", server_default="personal"
+    )
+    owner_department_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     deleted_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -55,14 +79,17 @@ class KnowledgeDocumentModel(Base):
     __tablename__ = "knowledge_documents"
     __table_args__ = (
         UniqueConstraint("id", "owner_id", name="uq_knowledge_documents_id_owner"),
+        # 拆除 (knowledge_base_id, owner_id) 复合外键，改为单列外键以支持同部门多管理员协作维护。
         ForeignKeyConstraint(
-            ["knowledge_base_id", "owner_id"],
-            ["knowledge_bases.id", "knowledge_bases.owner_id"],
+            ["knowledge_base_id"],
+            ["knowledge_bases.id"],
+            name="fk_knowledge_documents_base",
             ondelete="CASCADE",
         ),
         Index("ix_knowledge_documents_owner_kb", "owner_id", "knowledge_base_id", "updated_at"),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # 语义明确为文档创建/上传者 ID，不再与所属知识库 owner_id 强制绑定。
     owner_id: Mapped[str] = mapped_column(String(128), nullable=False)
     knowledge_base_id: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -77,14 +104,17 @@ class KnowledgeVersionModel(Base):
     __tablename__ = "knowledge_document_versions"
     __table_args__ = (
         UniqueConstraint("id", "document_id", name="uq_knowledge_versions_id_document"),
+        # 拆除 (document_id, owner_id) 与 (source_id, owner_id) 复合外键，允许协作替换版本。
         ForeignKeyConstraint(
-            ["document_id", "owner_id"],
-            ["knowledge_documents.id", "knowledge_documents.owner_id"],
+            ["document_id"],
+            ["knowledge_documents.id"],
+            name="fk_knowledge_versions_document",
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
-            ["source_id", "owner_id"],
-            ["knowledge_sources.id", "knowledge_sources.owner_id"],
+            ["source_id"],
+            ["knowledge_sources.id"],
+            name="fk_knowledge_versions_source",
         ),
         CheckConstraint(
             "(source_id IS NULL) != (source_text IS NULL)", name="ck_knowledge_version_source"
@@ -221,12 +251,15 @@ class KnowledgeUploadSlotModel(Base):
 class ProjectKnowledgeBaseModel(Base):
     __tablename__ = "project_knowledge_bases"
     __table_args__ = (
+        # 项目仍为个人私用，保留 (project_id, owner_id) 复合外键。
         ForeignKeyConstraint(
             ["project_id", "owner_id"], ["projects.id", "projects.owner_id"], ondelete="CASCADE"
         ),
+        # 拆除 (knowledge_base_id, owner_id) 复合外键，允许员工将有权限的公司/部门库绑定到个人项目。
         ForeignKeyConstraint(
-            ["knowledge_base_id", "owner_id"],
-            ["knowledge_bases.id", "knowledge_bases.owner_id"],
+            ["knowledge_base_id"],
+            ["knowledge_bases.id"],
+            name="fk_project_knowledge_bases_base",
             ondelete="CASCADE",
         ),
     )

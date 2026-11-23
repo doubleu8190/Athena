@@ -14,7 +14,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.access import SqlAlchemyAccessControlRepository
 from adapter.knowledge.repository import KnowledgeRepository
+from app.access import AccessPolicyService
 from app.file.service import SessionFileService
 from app.knowledge.service import KnowledgeService
 from app.preference import PreferenceService
@@ -109,14 +111,20 @@ def build_query_services(
     *,
     projects: ProjectService,
     knowledge_service: KnowledgeService | None = None,
+    access_policy: AccessPolicyService | None = None,
 ) -> QueryServiceBundle:
-    """按统一环境变量为 API 与 Run Worker 装配知识库查询服务。"""
+    """按统一环境变量为 API 与 Run Worker 装配知识库查询服务与实时权限引擎。"""
     knowledge_enabled = knowledge_service is not None or env_flag(
         "ATHENA_KNOWLEDGE_ENABLED", default=False
     )
     startables: list[Any] = []
     closables: list[Any] = []
     knowledge = knowledge_service
+    resolved_access_policy = (
+        access_policy
+        if access_policy is not None
+        else AccessPolicyService(SqlAlchemyAccessControlRepository(sessions))
+    )
     # 组合根是唯一允许构造具体适配器的地方；bundle 只暴露领域端口。
     knowledge_repository: KnowledgeRepositoryPort | None = None
     knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
@@ -144,6 +152,7 @@ def build_query_services(
             models.embedding,
             knowledge_originals,
             models.counter,
+            access_policy=resolved_access_policy,
             profile_id=models.profile_id,
             semantic_min_score=semantic_min_score,
         )
@@ -158,7 +167,11 @@ def build_query_services(
     project_knowledge = (
         None
         if not knowledge_enabled or knowledge is None or project_knowledge_repository is None
-        else ProjectKnowledgeService(projects, project_knowledge_repository)
+        else ProjectKnowledgeService(
+            projects,
+            project_knowledge_repository,
+            access_policy=resolved_access_policy,
+        )
     )
     return QueryServiceBundle(
         knowledge=knowledge,
@@ -200,8 +213,9 @@ def build_run_tool_runtime(
     session_files: SessionFileService | None = None,
     skill_execution: SkillExecutionService | None = None,
     subagents: SubagentRepository | None = None,
+    access_policy: AccessPolicyService | None = None,
 ) -> RunToolRuntimeService:
-    """绑定查询服务、轻量偏好服务与 MCP 端口到 Run 工具运行时。"""
+    """绑定查询服务、轻量偏好服务、统一权限引擎与 MCP 端口到 Run 工具运行时。"""
     return RunToolRuntimeService(
         auth=auth,
         sessions=sessions,
@@ -214,6 +228,7 @@ def build_run_tool_runtime(
         session_files=session_files,
         skill_execution=skill_execution,
         subagents=subagents,
+        access_policy=access_policy,
     )
 
 

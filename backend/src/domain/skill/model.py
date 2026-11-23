@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from common.json import dumps
+from domain.access import VisibilityGrant
 
 MAX_PACKAGE_ZIP_BYTES = 25 * 1024 * 1024
 MAX_PACKAGE_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
@@ -35,9 +36,10 @@ class DependencyCheckStatus(StrEnum):
 
 
 class SkillScope(StrEnum):
-    """Skill 对当前用户的可见范围。"""
+    """Skill 对当前用户的三层可见范围（公司/部门/个人）。"""
 
-    PUBLIC = "public"
+    COMPANY = "company"
+    DEPARTMENT = "department"
     PERSONAL = "personal"
 
 
@@ -178,9 +180,11 @@ class Skill:
     description: str
     current_version_label: str | None = None
     dependency_check: DependencyCheck | None = None
-    scope: SkillScope = SkillScope.PUBLIC
+    scope: SkillScope = SkillScope.COMPANY
     owner_id: str | None = None
     deleted_at: datetime | None = None
+    owner_department_id: str | None = None
+    visibility_grants: tuple[VisibilityGrant, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +204,13 @@ class SkillImportRequestResult:
     request_version: SkillVersion | None = None
 
 
+def _normalize_legacy_skill_scope(value: object) -> object:
+    """兼容历史 Run 快照中持久化的 public 范围，归一化为 company 防止反序列化失败。"""
+    if isinstance(value, str) and value == "public":
+        return SkillScope.COMPANY.value
+    return value
+
+
 class RunSkillEntry(_FrozenModel):
     """Run 创建时固定、执行期间不再读取当前管理目录的一项技能。"""
 
@@ -210,7 +221,13 @@ class RunSkillEntry(_FrozenModel):
     version_id: str
     version_label: str
     requires_approval: bool
-    scope: SkillScope = SkillScope.PUBLIC
+    scope: SkillScope = SkillScope.COMPANY
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _coerce_legacy_scope(cls, value: object) -> object:
+        """升级后兼容历史 runs.skill_snapshot 中的 public 范围值。"""
+        return _normalize_legacy_skill_scope(value)
 
 
 class RunSkillSnapshot(_FrozenModel):
@@ -257,7 +274,13 @@ class ActiveSkillGuide(_FrozenModel):
     version_id: str
     version_label: str
     guide: str
-    scope: SkillScope = SkillScope.PUBLIC
+    scope: SkillScope = SkillScope.COMPANY
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _coerce_legacy_scope(cls, value: object) -> object:
+        """兼容历史上下文或快照中的 public 范围值。"""
+        return _normalize_legacy_skill_scope(value)
 
 
 class RunSkillPromptContext(_FrozenModel):

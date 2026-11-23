@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 
+from domain.access import VisibilityGrant, VisibilityGrantInput, VisibilityScope
 from domain.mcp.model.config import McpServerConfig
 
 MAX_MCP_SECRET_BYTES = 16 * 1024
@@ -71,6 +72,9 @@ class McpServer:
     created_at: datetime
     updated_at: datetime
     tools_discovered_at: datetime | None
+    visibility_scope: VisibilityScope = VisibilityScope.COMPANY
+    owner_department_id: str | None = None
+    visibility_grants: tuple[VisibilityGrant, ...] = ()
 
     @property
     def transport(self) -> McpTransport:
@@ -86,6 +90,9 @@ class McpServerWrite:
     name: str
     config: McpServerConfig
     secrets: Mapping[str, str] = field(repr=False)
+    visibility_scope: VisibilityScope = VisibilityScope.COMPANY
+    owner_department_id: str | None = None
+    visibility_grants: tuple[VisibilityGrantInput, ...] = ()
 
     def __post_init__(self) -> None:
         """校验展示名、秘密名和秘密总大小，不把输入值写入异常。"""

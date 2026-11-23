@@ -9,6 +9,13 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.access.repository import (
+    delete_resource_grants_in_session,
+    filter_readable_targets_in_session,
+    load_grants_map_in_session,
+    load_user_access_snapshot_in_session,
+    sync_resource_grants_in_session,
+)
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
 from adapter.run.model import RunToolCallModel
 from adapter.skill.converter import (
@@ -17,6 +24,13 @@ from adapter.skill.converter import (
     skill_version_to_domain,
 )
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from domain.access import (
+    ResourceAccessTarget,
+    ResourceType,
+    VisibilityGrantInput,
+    VisibilityScope,
+    evaluate_can_manage,
+)
 from domain.auth import AuthContext, UserRole
 from domain.file import PendingSessionFile
 from domain.skill.model import (
@@ -40,6 +54,7 @@ from domain.skill.model import (
 from domain.skill.ports import SkillRepository
 
 _PERSONAL_REQUEST_OPERATIONS = frozenset({"personal_create", "personal_publish"})
+_ADMIN_MANAGED_SCOPES = (SkillScope.COMPANY.value, SkillScope.DEPARTMENT.value)
 
 
 async def build_run_skill_snapshot(
@@ -48,7 +63,7 @@ async def build_run_skill_snapshot(
     *,
     owner_id: str,
 ) -> RunSkillSnapshot:
-    """在当前 Run 事务中固定公共及本人个人 Skill 的一致目录。"""
+    """在当前 Run 事务中按统一三层权限引擎实时过滤并固定一致 Skill 目录。"""
     if len(selected_skill_ids) != len(set(selected_skill_ids)):
         raise SkillConflictError("skill_selection_invalid")
     rows = (
@@ -62,7 +77,7 @@ async def build_run_skill_snapshot(
                 SkillModel.enabled.is_(True),
                 SkillModel.deleted_at.is_(None),
                 or_(
-                    SkillModel.scope == SkillScope.PUBLIC.value,
+                    SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
                     and_(
                         SkillModel.scope == SkillScope.PERSONAL.value,
                         SkillModel.owner_id == owner_id,
@@ -72,8 +87,25 @@ async def build_run_skill_snapshot(
             .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
         )
     ).all()
+
+    # 同一事务快照内通过统一权限引擎实时过滤 department/company/personal 可读技能，
+    # 员工调岗后无法将旧部门技能选入新 Run。
+    targets = tuple(
+        ResourceAccessTarget(
+            resource_type=ResourceType.SKILL,
+            resource_id=skill_row.id,
+            visibility_scope=VisibilityScope(skill_row.scope),
+            owner_id=skill_row.owner_id,
+            owner_department_id=skill_row.owner_department_id,
+        )
+        for skill_row, _ in rows
+    )
+    readable_ids = await filter_readable_targets_in_session(session, owner_id, targets)
+
     available: list[tuple[SkillModel, SkillVersionModel]] = []
     for skill_row, version_row in rows:
+        if skill_row.id not in readable_ids:
+            continue
         # 持久化 dependency_check 只是上次探测快照，不能成为新 Run 的永久门禁；
         # 实际脚本执行前仍会实时复核，这里只验证目录和不可变清单完整性。
         # 清单解析失败说明不可变记录损坏，不能让 Run 以不完整目录继续。
@@ -113,14 +145,14 @@ async def build_run_skill_snapshot(
 
 
 class SqlAlchemySkillRepository(SkillRepository):
-    """在管理员事务内维护稳定身份和不可变版本指针。"""
+    """在管理员事务内维护稳定身份、不可变版本指针与三层可见性授权。"""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         """保存共享数据库会话工厂。"""
         self._session_factory = session_factory
 
     async def list_skills(self) -> tuple[Skill, ...]:
-        """按 slug 稳定读取全部未删除公共管理目录项。"""
+        """按 slug 稳定读取全部未删除公司级与部门级管理目录项（含可见性授权）。"""
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
@@ -130,16 +162,22 @@ class SqlAlchemySkillRepository(SkillRepository):
                         SkillVersionModel.id == SkillModel.current_version_id,
                     )
                     .where(
-                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
                         SkillModel.deleted_at.is_(None),
                     )
                     .order_by(SkillModel.slug, SkillModel.id)
                 )
             ).all()
-        return tuple(skill_to_domain(row, version) for row, version in rows)
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.SKILL, [row.id for row, _ in rows]
+            )
+        return tuple(
+            skill_to_domain(row, version, grants=grants_map.get(row.id, ()))
+            for row, version in rows
+        )
 
     async def get_skill(self, skill_id: str) -> Skill | None:
-        """读取一个公共管理目录项及其当前版本展示元数据。"""
+        """读取一个未删除的公司级或部门级管理目录项及其当前版本与授权。"""
         async with self._session_factory() as session:
             row = (
                 await session.execute(
@@ -150,15 +188,18 @@ class SqlAlchemySkillRepository(SkillRepository):
                     )
                     .where(
                         SkillModel.id == skill_id,
-                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
                         SkillModel.deleted_at.is_(None),
                     )
                 )
             ).one_or_none()
-        return None if row is None else skill_to_domain(row[0], row[1])
+            if row is None:
+                return None
+            grants_map = await load_grants_map_in_session(session, ResourceType.SKILL, (row[0].id,))
+            return skill_to_domain(row[0], row[1], grants=grants_map.get(row[0].id, ()))
 
     async def get_public_directory_entries(self) -> tuple[tuple[Skill, SkillVersion], ...]:
-        """单次 JOIN 读取全部已启用公共候选及其当前不可变版本，避免服务层逐项 N+1 查版本。"""
+        """单次 JOIN 读取全部已启用公司级候选及其当前不可变版本。"""
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
@@ -169,7 +210,7 @@ class SqlAlchemySkillRepository(SkillRepository):
                     )
                     .where(
                         SkillModel.enabled.is_(True),
-                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.scope == SkillScope.COMPANY.value,
                         SkillModel.deleted_at.is_(None),
                     )
                     .order_by(SkillModel.slug, SkillModel.id)
@@ -181,14 +222,14 @@ class SqlAlchemySkillRepository(SkillRepository):
         )
 
     async def get_public_directory(self) -> tuple[Skill, ...]:
-        """读取全部已启用候选，依赖状态由服务层实时探测。"""
+        """读取全部已启用公司级候选，依赖状态由服务层实时探测。"""
         entries = await self.get_public_directory_entries()
         return tuple(skill for skill, _ in entries)
 
     async def get_user_directory_entries(
         self, owner_id: str
     ) -> tuple[tuple[Skill, SkillVersion], ...]:
-        """单次 JOIN 读取公共及本人已启用候选及其当前版本，避免目录查询 N+1。"""
+        """单次 JOIN 读取公司级、部门级及本人已启用候选及其当前版本，供权限引擎实时过滤。"""
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
@@ -201,7 +242,7 @@ class SqlAlchemySkillRepository(SkillRepository):
                         SkillModel.enabled.is_(True),
                         SkillModel.deleted_at.is_(None),
                         or_(
-                            SkillModel.scope == SkillScope.PUBLIC.value,
+                            SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
                             and_(
                                 SkillModel.scope == SkillScope.PERSONAL.value,
                                 SkillModel.owner_id == owner_id,
@@ -211,8 +252,14 @@ class SqlAlchemySkillRepository(SkillRepository):
                     .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
                 )
             ).all()
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.SKILL, [row.id for row, _ in rows]
+            )
         return tuple(
-            (skill_to_domain(row, version), skill_version_to_domain(version))
+            (
+                skill_to_domain(row, version, grants=grants_map.get(row.id, ())),
+                skill_version_to_domain(version),
+            )
             for row, version in rows
         )
 
@@ -271,7 +318,7 @@ class SqlAlchemySkillRepository(SkillRepository):
             exists = await session.scalar(
                 select(SkillModel.id).where(
                     SkillModel.id == skill_id,
-                    SkillModel.scope == SkillScope.PUBLIC.value,
+                    SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
                     SkillModel.deleted_at.is_(None),
                 )
             )
@@ -324,17 +371,26 @@ class SqlAlchemySkillRepository(SkillRepository):
         idempotency_key: str,
         request_fingerprint: str,
         created_at: datetime,
+        scope: SkillScope = SkillScope.COMPANY,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
     ) -> tuple[Skill, SkillVersion]:
-        """原子插入身份和首个未启用版本；重复 slug 由唯一约束兜底。"""
+        """原子插入身份、首个未启用版本及可见性授权；事务内复核管理员与管辖范围。"""
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    await self._require_admin(session, actor)
+                    await self._require_skill_manager(
+                        session,
+                        actor,
+                        scope=scope,
+                        owner_department_id=owner_department_id,
+                    )
                     skill_row = SkillModel(
                         id=skill_id,
                         slug=manifest.slug,
-                        scope=SkillScope.PUBLIC.value,
+                        scope=scope.value,
                         owner_id=None,
+                        owner_department_id=owner_department_id,
                         deleted_at=None,
                         current_version_id=None,
                         enabled=False,
@@ -364,8 +420,15 @@ class SqlAlchemySkillRepository(SkillRepository):
                     )
                     session.add(version_row)
                     await session.flush()
+                    grants = await sync_resource_grants_in_session(
+                        session,
+                        ResourceType.SKILL,
+                        skill_id,
+                        visibility_grants if scope is SkillScope.DEPARTMENT else (),
+                        now=created_at,
+                    )
                     return (
-                        skill_to_domain(skill_row, version_row),
+                        skill_to_domain(skill_row, version_row, grants=grants),
                         skill_version_to_domain(version_row),
                     )
         except IntegrityError as error:
@@ -574,18 +637,24 @@ class SqlAlchemySkillRepository(SkillRepository):
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    await self._require_admin(session, actor)
+                    await self._require_skill_manager_session(session, actor)
                     skill_row = await session.scalar(
                         select(SkillModel)
                         .where(
                             SkillModel.id == skill_id,
-                            SkillModel.scope == SkillScope.PUBLIC.value,
+                            SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
                             SkillModel.deleted_at.is_(None),
                         )
                         .with_for_update()
                     )
                     if skill_row is None:
                         return None
+                    await self._require_skill_manager(
+                        session,
+                        actor,
+                        scope=SkillScope(skill_row.scope),
+                        owner_department_id=skill_row.owner_department_id,
+                    )
                     if skill_row.slug != manifest.slug:
                         raise SkillConflictError("skill_slug_mismatch")
                     ordinal = (
@@ -644,7 +713,7 @@ class SqlAlchemySkillRepository(SkillRepository):
         """在写对象前查询导入请求键，网络重试不会生成第二个版本。"""
         async with self._session_factory() as session:
             async with session.begin():
-                await self._require_admin(session, actor)
+                await self._require_skill_manager_session(session, actor)
                 return await self._read_import_result_in_session(
                     session,
                     actor,
@@ -695,22 +764,30 @@ class SqlAlchemySkillRepository(SkillRepository):
         dependency_check: DependencyCheck,
         actor: AuthContext,
         updated_at: datetime,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> Skill | None:
-        """以修订号 CAS 原子切换版本、启停和脚本审批。"""
+        """以修订号 CAS 原子切换版本、启停、审批及部门可见性授权。"""
         async with self._session_factory() as session:
             async with session.begin():
-                await self._require_admin(session, actor)
+                await self._require_skill_manager_session(session, actor)
                 skill_row = await session.scalar(
                     select(SkillModel)
                     .where(
                         SkillModel.id == skill_id,
-                        SkillModel.scope == SkillScope.PUBLIC.value,
+                        SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
                         SkillModel.deleted_at.is_(None),
                     )
                     .with_for_update()
                 )
                 if skill_row is None:
                     return None
+                skill_scope = SkillScope(skill_row.scope)
+                await self._require_skill_manager(
+                    session,
+                    actor,
+                    scope=skill_scope,
+                    owner_department_id=skill_row.owner_department_id,
+                )
                 if skill_row.revision != expected_revision:
                     raise SkillConflictError("skill_revision_conflict")
                 version_row = await session.scalar(
@@ -724,10 +801,12 @@ class SqlAlchemySkillRepository(SkillRepository):
                 if enabled and dependency_check.status is not DependencyCheckStatus.SATISFIED:
                     raise ValueError("skill_dependency_unsatisfied")
                 version_row.dependency_check = dependency_check.model_dump(mode="json")
+                grants_changed = visibility_grants is not None
                 if (
                     skill_row.current_version_id != current_version_id
                     or skill_row.enabled != enabled
                     or skill_row.script_requires_approval != script_requires_approval
+                    or grants_changed
                 ):
                     skill_row.current_version_id = current_version_id
                     skill_row.enabled = enabled
@@ -735,7 +814,62 @@ class SqlAlchemySkillRepository(SkillRepository):
                     skill_row.revision += 1
                     skill_row.updated_at = updated_at
                     await session.flush()
-                return skill_to_domain(skill_row, version_row)
+                if visibility_grants is not None:
+                    grants = await sync_resource_grants_in_session(
+                        session,
+                        ResourceType.SKILL,
+                        skill_row.id,
+                        visibility_grants if skill_scope is SkillScope.DEPARTMENT else (),
+                        now=updated_at,
+                    )
+                else:
+                    grants_map = await load_grants_map_in_session(
+                        session, ResourceType.SKILL, (skill_row.id,)
+                    )
+                    grants = grants_map.get(skill_row.id, ())
+                return skill_to_domain(skill_row, version_row, grants=grants)
+
+    async def delete_admin_skill(
+        self,
+        skill_id: str,
+        *,
+        expected_revision: int,
+        actor: AuthContext,
+        deleted_at: datetime,
+    ) -> bool:
+        """在单事务内复核权限并按 revision 软删除部门级 Skill 及关联授权。"""
+        async with self._session_factory() as session:
+            async with session.begin():
+                await self._require_skill_manager_session(session, actor)
+                skill_row = await session.scalar(
+                    select(SkillModel)
+                    .where(
+                        SkillModel.id == skill_id,
+                        SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
+                    )
+                    .with_for_update()
+                )
+                if skill_row is None:
+                    raise SkillNotFoundError()
+                skill_scope = SkillScope(skill_row.scope)
+                await self._require_skill_manager(
+                    session,
+                    actor,
+                    scope=skill_scope,
+                    owner_department_id=skill_row.owner_department_id,
+                )
+                if skill_scope is SkillScope.COMPANY:
+                    raise ValueError("company_skill_delete_unsupported")
+                if skill_row.revision != expected_revision:
+                    raise SkillConflictError("skill_revision_conflict")
+                if skill_row.deleted_at is not None:
+                    return True
+                skill_row.enabled = False
+                skill_row.deleted_at = deleted_at
+                skill_row.updated_at = deleted_at
+                await delete_resource_grants_in_session(session, ResourceType.SKILL, skill_row.id)
+                await session.flush()
+                return True
 
     async def set_personal_enabled(
         self,
@@ -1086,18 +1220,45 @@ class SqlAlchemySkillRepository(SkillRepository):
             ):
                 raise SkillConflictError("skill_catalog_integrity_invalid")
             result_version_row = current_version_row
+        grants_map = await load_grants_map_in_session(session, ResourceType.SKILL, (skill_row.id,))
         return SkillImportRequestResult(
-            skill=skill_to_domain(skill_row, result_version_row),
+            skill=skill_to_domain(
+                skill_row,
+                result_version_row,
+                grants=grants_map.get(skill_row.id, ()),
+            ),
             version=skill_version_to_domain(result_version_row),
             request_version=request_version,
         )
 
     @staticmethod
-    async def _require_admin(session: AsyncSession, actor: AuthContext) -> None:
-        """在管理写事务内重新锁定并校验当前管理员身份。"""
+    async def _require_skill_manager_session(session: AsyncSession, actor: AuthContext) -> UserRole:
+        """在技能管理写事务内重新锁定并校验当前超管或部门管理员会话仍然有效。"""
         guard = SqlAlchemyAuthTransactionGuard(session)
         user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
-        if user is None or user.role is not UserRole.SUPER_ADMIN:
+        if user is None or user.role not in {UserRole.SUPER_ADMIN, UserRole.DEPT_ADMIN}:
+            raise PermissionError("admin_required")
+        return user.role
+
+    @staticmethod
+    async def _require_skill_manager(
+        session: AsyncSession,
+        actor: AuthContext,
+        *,
+        scope: SkillScope,
+        owner_department_id: str | None,
+    ) -> None:
+        """在事务内同步复核当前操作者对目标公司/部门 Skill 的实时管理权限，消除 TOCTOU。"""
+        role = await SqlAlchemySkillRepository._require_skill_manager_session(session, actor)
+        if role is UserRole.SUPER_ADMIN:
+            return
+        snapshot = await load_user_access_snapshot_in_session(session, actor.user.id)
+        if not evaluate_can_manage(
+            snapshot,
+            ResourceType.SKILL,
+            VisibilityScope(scope.value),
+            owner_department_id=owner_department_id,
+        ):
             raise PermissionError("admin_required")
 
     @staticmethod

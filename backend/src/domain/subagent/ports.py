@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
+from domain.access import VisibilityGrantInput
 from domain.auth import AuthContext
 from domain.subagent.model import (
     AvailableToolGroup,
@@ -17,8 +19,14 @@ from domain.subagent.model import (
 class SubagentRepository(Protocol):
     """Subagent 配置持久化仓储端口。"""
 
-    async def create(self, actor: AuthContext, profile: SubagentProfile) -> SubagentProfile:
-        """在事务内复核管理员身份后创建 Subagent 配置。"""
+    async def create(
+        self,
+        actor: AuthContext,
+        profile: SubagentProfile,
+        *,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
+    ) -> SubagentProfile:
+        """在事务内复核管理员身份后创建 Subagent 配置及可见性授权。"""
         ...
 
     async def get(self, subagent_id: str) -> SubagentProfile | None:

@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from api.dto.access import VisibilityGrantRequest, VisibilityGrantResponse
 from domain.mcp import StdioConfig, StreamableHttpConfig
 
 
@@ -19,6 +20,9 @@ class _HttpServerBase(BaseModel):
     transport: Literal["streamable_http"]
     url: str
     secrets: dict[str, str] = Field(default_factory=dict)
+    visibility_scope: Literal["company", "department"] = "company"
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantRequest] | None = None
 
     def to_domain_config(self) -> StreamableHttpConfig:
         """转换为领域 Streamable HTTP 连接配置。"""
@@ -36,6 +40,9 @@ class _StdioServerBase(BaseModel):
     args: list[str]
     cwd: str | None = None
     secrets: dict[str, str] = Field(default_factory=dict)
+    visibility_scope: Literal["company", "department"] = "company"
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantRequest] | None = None
 
     def to_domain_config(self) -> StdioConfig:
         """转换为领域 Stdio 连接配置。"""
@@ -80,7 +87,7 @@ McpServerUpdateRequest = Annotated[
 
 
 class McpServerResponse(BaseModel):
-    """管理员可见的 Server 配置与脱敏秘密状态。"""
+    """管理员可见的 Server 配置、可见范围与脱敏秘密状态。"""
 
     id: str
     name: str
@@ -88,6 +95,9 @@ class McpServerResponse(BaseModel):
     config: dict[str, Any]
     secrets: list[dict[str, Any]]
     config_version: int
+    visibility_scope: Literal["company", "department"] = "company"
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
     created_by: str | None
     created_at: datetime
     updated_at: datetime

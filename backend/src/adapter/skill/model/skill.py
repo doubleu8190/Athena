@@ -29,26 +29,36 @@ def _json_type() -> JSON:
 
 
 class SkillModel(Base):
-    """稳定 Skill 身份、当前版本指针及管理员配置修订。"""
+    """稳定 Skill 身份、当前版本指针、三层可见范围及管理员配置修订。"""
 
     __tablename__ = "skills"
     __table_args__ = (
         CheckConstraint("revision >= 1", name="ck_skills_revision"),
         CheckConstraint(
-            "scope IN ('public', 'personal')",
+            "scope IN ('company', 'department', 'personal')",
             name="ck_skills_scope",
         ),
         CheckConstraint(
-            "(scope = 'public' AND owner_id IS NULL AND deleted_at IS NULL) OR "
-            "(scope = 'personal' AND owner_id IS NOT NULL)",
+            "(scope = 'company' AND owner_id IS NULL AND owner_department_id IS NULL "
+            "AND deleted_at IS NULL) OR "
+            "(scope = 'department' AND owner_id IS NULL AND owner_department_id IS NOT NULL) OR "
+            "(scope = 'personal' AND owner_id IS NOT NULL AND owner_department_id IS NULL)",
             name="ck_skills_owner_scope",
         ),
         Index(
-            "uq_skills_public_slug",
+            "uq_skills_company_slug",
             "slug",
             unique=True,
-            postgresql_where=text("scope = 'public'"),
-            sqlite_where=text("scope = 'public'"),
+            postgresql_where=text("scope = 'company'"),
+            sqlite_where=text("scope = 'company'"),
+        ),
+        Index(
+            "uq_skills_department_slug",
+            "owner_department_id",
+            "slug",
+            unique=True,
+            postgresql_where=text("scope = 'department' AND deleted_at IS NULL"),
+            sqlite_where=text("scope = 'department' AND deleted_at IS NULL"),
         ),
         Index(
             "uq_skills_personal_owner_slug",
@@ -61,6 +71,13 @@ class SkillModel(Base):
         Index(
             "ix_skills_owner_scope_enabled",
             "owner_id",
+            "scope",
+            "enabled",
+            "deleted_at",
+        ),
+        Index(
+            "ix_skills_department_scope",
+            "owner_department_id",
             "scope",
             "enabled",
             "deleted_at",
@@ -78,14 +95,21 @@ class SkillModel(Base):
             name="fk_skills_owner",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["owner_department_id"],
+            ["departments.id"],
+            name="fk_skills_owner_department",
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     slug: Mapped[str] = mapped_column(String(64), nullable=False)
     scope: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="public", server_default="public"
+        String(16), nullable=False, default="company", server_default="company"
     )
     owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    owner_department_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -455,6 +455,9 @@ def test_replace_file_document_conflicts_return_http_409(
             return tuple(text.split())
 
     class _ConflictRepo:
+        async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None:
+            return KnowledgeBase(base_id, owner_id, "Base", None, now, now)
+
         async def get_document(
             self, owner_id: str, base_id: str, document_id: str
         ) -> Document | None:

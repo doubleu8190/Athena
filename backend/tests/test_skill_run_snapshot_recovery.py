@@ -6,8 +6,10 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from adapter.auth.model import UserModel
 from adapter.skill.model import SkillModel, SkillVersionModel
 from adapter.skill.repository import build_run_skill_snapshot
+from domain.auth import UserRole, UserStatus
 from domain.skill import (
     DependencyCheck,
     DependencyCheckStatus,
@@ -20,19 +22,36 @@ NOW = datetime(2026, 11, 12, tzinfo=UTC)
 
 
 class _Rows:
-    def __init__(self, rows: list[tuple[SkillModel, SkillVersionModel]]) -> None:
+    def __init__(self, rows: list[Any]) -> None:
         self._rows = rows
 
-    def all(self) -> list[tuple[SkillModel, SkillVersionModel]]:
+    def all(self) -> list[Any]:
         return self._rows
 
 
 class _Session:
     def __init__(self, rows: list[tuple[SkillModel, SkillVersionModel]]) -> None:
         self._rows = rows
+        self._served_skills = False
 
     async def execute(self, _statement: object) -> _Rows:
-        return _Rows(self._rows)
+        if not self._served_skills:
+            self._served_skills = True
+            return _Rows(self._rows)
+        return _Rows([])
+
+    async def scalar(self, _statement: object) -> UserModel:
+        return UserModel(
+            id="usr_owner",
+            email="owner@example.test",
+            password_hash="unused",
+            display_name="Owner",
+            status=UserStatus.ACTIVE.value,
+            role=UserRole.MEMBER.value,
+            created_at=NOW,
+            updated_at=NOW,
+            deleted_time=None,
+        )
 
 
 def _catalog_row(
@@ -71,7 +90,7 @@ def _catalog_row(
     skill = SkillModel(
         id="skill_recovery",
         slug=manifest.slug,
-        scope="public",
+        scope="company",
         owner_id=None,
         deleted_at=None,
         current_version_id="skillver_recovery",

@@ -528,7 +528,7 @@ def test_alembic_migration_20261201_0034_single_head_and_offline_sql() -> None:
     config = _migration_config()
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["20261201_0034"]
+    assert len(heads) == 1
     rev = script.get_revision("20261201_0034")
     assert rev is not None
     assert rev.down_revision == "20261130_0033"

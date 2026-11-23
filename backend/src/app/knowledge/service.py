@@ -8,12 +8,22 @@ import inspect
 import json
 import math
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import PurePath
+from typing import Final
 
+from app.access import AccessPolicyService
 from common.ids import new_id, now_utc
+from domain.access import (
+    AccessPermissionDeniedError,
+    InvalidVisibilityConfigError,
+    ResourceAccessTarget,
+    ResourceType,
+    VisibilityGrantInput,
+    VisibilityScope,
+)
 from domain.knowledge.model import (
     MAX_ORIGINAL_BYTES,
     Document,
@@ -50,7 +60,11 @@ _MEDIA_TYPES = {
 
 
 class KnowledgeNotFoundError(LookupError):
-    """资源不存在或不属于当前用户。"""
+    """资源不存在或当前用户无权访问（按 404 防探测语义返回）。"""
+
+
+class KnowledgePermissionDeniedError(PermissionError):
+    """当前用户可读但无权创建、修改或删除目标知识库。"""
 
 
 class KnowledgeInputError(ValueError):
@@ -59,6 +73,26 @@ class KnowledgeInputError(ValueError):
 
 class KnowledgeSearchUnavailableError(RuntimeError):
     """关键词与语义检索通道均不可用。"""
+
+
+class KnowledgeUnsetType:
+    """区分 PATCH 更新中未传递字段与显式传 None 的哨兵类型。"""
+
+    __slots__ = ()
+
+
+KNOWLEDGE_UNSET: Final[KnowledgeUnsetType] = KnowledgeUnsetType()
+
+
+def _kb_access_target(base: KnowledgeBase) -> ResourceAccessTarget:
+    """构造知识库的统一权限引擎判定目标。"""
+    return ResourceAccessTarget(
+        resource_type=ResourceType.KNOWLEDGE_BASE,
+        resource_id=base.id,
+        visibility_scope=base.visibility_scope,
+        owner_id=base.owner_id,
+        owner_department_id=base.owner_department_id,
+    )
 
 
 class KnowledgeService:
@@ -72,12 +106,13 @@ class KnowledgeService:
         originals: OriginalStore | None = None,
         counter: TokenCounterPort | None = None,
         *,
+        access_policy: AccessPolicyService | None = None,
         profile_id: str = "bge-m3-default",
         semantic_min_score: float = DEFAULT_SEMANTIC_MIN_SCORE,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
-        """保存持久化、分词及可替换的模型档案、ID 和时钟来源。"""
+        """保存持久化、分词、权限引擎及可替换的模型档案、ID 和时钟来源。"""
         if not math.isfinite(semantic_min_score) or not 0.0 <= semantic_min_score <= 1.0:
             raise ValueError("knowledge_semantic_min_score_invalid")
         self._repository = repository
@@ -85,18 +120,61 @@ class KnowledgeService:
         self._embedding = embedding
         self._originals = originals
         self._counter = counter
+        self._access_policy = access_policy
         self._profile_id = profile_id
         self._semantic_min_score = semantic_min_score
-        # 检测仓储是否支持 min_score 关键字参数，兼容既有测试中的旧版 fake 仓储签名。
+        # 检测仓储是否支持 min_score / visibility_grants 参数，兼容既有测试中的旧版 fake 仓储。
         self._semantic_supports_min_score = _accepts_keyword_argument(
             getattr(repository, "search_semantic", None),
             "min_score",
         )
+        self._create_supports_grants = _accepts_keyword_argument(
+            getattr(repository, "create_base", None),
+            "visibility_grants",
+        )
         self._id_factory = id_factory
         self._clock = clock
 
-    async def create_base(self, owner_id: str, name: str, description: str | None) -> KnowledgeBase:
-        """创建用户私有知识库并校验名称和说明。"""
+    async def _require_readable_base(self, actor_user_id: str, base_id: str) -> KnowledgeBase:
+        """校验当前用户对知识库拥有读权限；无权或不存在一律抛 404 防止探测 ID。"""
+        owner = _required(actor_user_id, "owner_id_required")
+        if self._access_policy is None:
+            base = await self._repository.get_base(owner, base_id)
+            if base is None:
+                raise KnowledgeNotFoundError("knowledge_base_not_found")
+            return base
+        get_by_id = getattr(self._repository, "get_base_by_id", None)
+        base = (
+            await get_by_id(base_id)
+            if callable(get_by_id)
+            else await self._repository.get_base(owner, base_id)
+        )
+        if base is None:
+            raise KnowledgeNotFoundError("knowledge_base_not_found")
+        if not await self._access_policy.can_read_target(owner, _kb_access_target(base)):
+            raise KnowledgeNotFoundError("knowledge_base_not_found")
+        return base
+
+    async def _require_manageable_base(self, actor_user_id: str, base_id: str) -> KnowledgeBase:
+        """校验知识库管理权限：不可读返回 404，可读但无管理权返回 403。"""
+        owner = _required(actor_user_id, "owner_id_required")
+        base = await self._require_readable_base(owner, base_id)
+        if self._access_policy is not None:
+            if not await self._access_policy.can_manage_resource(owner, _kb_access_target(base)):
+                raise KnowledgePermissionDeniedError("knowledge_permission_denied")
+        return base
+
+    async def create_base(
+        self,
+        owner_id: str,
+        name: str,
+        description: str | None,
+        *,
+        visibility_scope: VisibilityScope = VisibilityScope.PERSONAL,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
+    ) -> KnowledgeBase:
+        """创建知识库并按统一权限引擎校验可见范围、归属部门与默认授权。"""
         owner = _required(owner_id, "owner_id_required")
         normalized_name = _clean_text(name, maximum=120, code="knowledge_base_name_invalid")
         normalized_description = (
@@ -104,62 +182,189 @@ class KnowledgeService:
             if description is not None
             else None
         )
-        at = _utc(self._clock())
-        return await self._repository.create_base(
-            KnowledgeBase(
-                self._id_factory("kb"),
-                owner,
-                normalized_name,
-                normalized_description,
-                at,
-                at,
-            )
-        )
+        resolved_scope = visibility_scope
+        resolved_department_id = owner_department_id
+        resolved_grants: tuple[VisibilityGrantInput, ...] = ()
+        if self._access_policy is not None:
+            try:
+                (
+                    resolved_scope,
+                    resolved_department_id,
+                    maybe_grants,
+                ) = await self._access_policy.resolve_and_validate_visibility(
+                    user_id=owner,
+                    resource_type=ResourceType.KNOWLEDGE_BASE,
+                    visibility_scope=visibility_scope,
+                    owner_department_id=owner_department_id,
+                    visibility_grants=visibility_grants,
+                    for_create=True,
+                )
+            except AccessPermissionDeniedError as error:
+                raise KnowledgePermissionDeniedError(error.code) from error
+            except InvalidVisibilityConfigError as error:
+                raise KnowledgeInputError(error.code) from error
+            resolved_grants = maybe_grants or ()
+        else:
+            if visibility_scope is not VisibilityScope.PERSONAL or owner_department_id is not None:
+                raise KnowledgeInputError("visibility_scope_requires_access_policy")
 
-    async def list_bases(self, owner_id: str, *, page: int, page_size: int) -> list[KnowledgeBase]:
-        """分页读取当前用户的知识库。"""
+        at = _utc(self._clock())
+        item = KnowledgeBase(
+            self._id_factory("kb"),
+            owner,
+            normalized_name,
+            normalized_description,
+            at,
+            at,
+            visibility_scope=resolved_scope,
+            owner_department_id=resolved_department_id,
+        )
+        if self._create_supports_grants:
+            return await self._repository.create_base(item, visibility_grants=resolved_grants)
+        return await self._repository.create_base(item)
+
+    async def list_bases(
+        self,
+        owner_id: str,
+        *,
+        page: int,
+        page_size: int,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+    ) -> list[KnowledgeBase]:
+        """分页读取当前用户全部可读知识库，支持按可见范围与归属部门筛选。"""
         if page < 1 or not 1 <= page_size <= MAX_PAGE_SIZE:
             raise KnowledgeInputError("invalid_pagination")
-        return await self._repository.list_bases(
-            _required(owner_id, "owner_id_required"),
+        owner = _required(owner_id, "owner_id_required")
+        if self._access_policy is None:
+            return await self._repository.list_bases(
+                owner,
+                offset=(page - 1) * page_size,
+                limit=page_size,
+            )
+        readable_ids = await self._access_policy.filter_readable_ids(
+            owner,
+            ResourceType.KNOWLEDGE_BASE,
+        )
+        if not readable_ids:
+            return []
+        return await self._repository.list_bases_by_ids(
+            tuple(readable_ids),
             offset=(page - 1) * page_size,
             limit=page_size,
+            visibility_scope=visibility_scope,
+            owner_department_id=owner_department_id,
         )
 
     async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase:
         """读取当前用户可见知识库。"""
-        base = await self._repository.get_base(_required(owner_id, "owner_id_required"), base_id)
-        if base is None:
-            raise KnowledgeNotFoundError("knowledge_base_not_found")
-        return base
+        return await self._require_readable_base(owner_id, base_id)
 
     async def rename_base(
-        self, owner_id: str, base_id: str, name: str | None, description: str | None
+        self,
+        owner_id: str,
+        base_id: str,
+        name: str | None,
+        description: str | None,
+        *,
+        visibility_scope: VisibilityScope | KnowledgeUnsetType = KNOWLEDGE_UNSET,
+        owner_department_id: str | None | KnowledgeUnsetType = KNOWLEDGE_UNSET,
+        visibility_grants: (
+            Sequence[VisibilityGrantInput] | None | KnowledgeUnsetType
+        ) = KNOWLEDGE_UNSET,
     ) -> KnowledgeBase:
-        """修改知识库名称或说明。"""
-        if name is None and description is None:
+        """修改知识库名称、说明或可见性配置（不可读返回 404，无管理权返回 403）。"""
+        has_visibility_patch = (
+            not isinstance(visibility_scope, KnowledgeUnsetType)
+            or not isinstance(owner_department_id, KnowledgeUnsetType)
+            or not isinstance(visibility_grants, KnowledgeUnsetType)
+        )
+        if name is None and description is None and not has_visibility_patch:
             raise KnowledgeInputError("knowledge_base_patch_empty")
-        current = await self.get_base(owner_id, base_id)
-        updated = await self._repository.rename_base(
-            current.owner_id,
-            base_id,
+        owner = _required(owner_id, "owner_id_required")
+        current = await self._require_manageable_base(owner, base_id)
+        next_name = (
             _clean_text(name, maximum=120, code="knowledge_base_name_invalid")
             if name is not None
-            else current.name,
+            else current.name
+        )
+        next_description = (
             _clean_text(description, maximum=500, code="knowledge_base_description_invalid")
             if description is not None
-            else current.description,
-            _utc(self._clock()),
+            else current.description
+        )
+        if not has_visibility_patch:
+            updated = await self._repository.rename_base(
+                owner,
+                base_id,
+                next_name,
+                next_description,
+                _utc(self._clock()),
+            )
+            if updated is None:
+                raise KnowledgeNotFoundError("knowledge_base_not_found")
+            return updated
+
+        if self._access_policy is None:
+            raise KnowledgeInputError("visibility_scope_requires_access_policy")
+
+        target_scope = (
+            current.visibility_scope
+            if isinstance(visibility_scope, KnowledgeUnsetType)
+            else visibility_scope
+        )
+        if isinstance(owner_department_id, KnowledgeUnsetType):
+            # 切换为 company/personal 且未显式传 owner_department_id 时自动清空归属部门。
+            target_dept = (
+                current.owner_department_id if target_scope is VisibilityScope.DEPARTMENT else None
+            )
+        else:
+            target_dept = owner_department_id
+        explicit_grants = (
+            None if isinstance(visibility_grants, KnowledgeUnsetType) else visibility_grants
+        )
+        try:
+            (
+                resolved_scope,
+                resolved_dept,
+                resolved_grants,
+            ) = await self._access_policy.resolve_and_validate_visibility(
+                user_id=owner,
+                resource_type=ResourceType.KNOWLEDGE_BASE,
+                visibility_scope=target_scope,
+                owner_department_id=target_dept,
+                visibility_grants=explicit_grants,
+                for_create=False,
+                existing_target=_kb_access_target(current),
+                preserve_existing_grants_when_none=isinstance(
+                    visibility_grants,
+                    KnowledgeUnsetType,
+                ),
+            )
+        except AccessPermissionDeniedError as error:
+            raise KnowledgePermissionDeniedError(error.code) from error
+        except InvalidVisibilityConfigError as error:
+            raise KnowledgeInputError(error.code) from error
+
+        updated = await self._repository.update_base(
+            base_id,
+            name=next_name,
+            description=next_description,
+            visibility_scope=resolved_scope,
+            owner_department_id=resolved_dept,
+            visibility_grants=resolved_grants,
+            at=_utc(self._clock()),
         )
         if updated is None:
             raise KnowledgeNotFoundError("knowledge_base_not_found")
         return updated
 
     async def delete_base(self, owner_id: str, base_id: str) -> None:
-        """软删除知识库，后续由清理任务回收内容。"""
-        deleted = await self._repository.soft_delete_base(
-            _required(owner_id, "owner_id_required"), base_id, _utc(self._clock())
-        )
+        """软删除知识库（不可读返回 404，无管理权返回 403），后续由清理任务回收内容。"""
+        owner = _required(owner_id, "owner_id_required")
+        if self._access_policy is not None:
+            await self._require_manageable_base(owner, base_id)
+        deleted = await self._repository.soft_delete_base(owner, base_id, _utc(self._clock()))
         if not deleted:
             raise KnowledgeNotFoundError("knowledge_base_not_found")
 
@@ -168,7 +373,7 @@ class KnowledgeService:
     ) -> tuple[Document, str]:
         """幂等登记文本导入任务，返回文档和版本身份。"""
         owner = _required(owner_id, "owner_id_required")
-        await self.get_base(owner, base_id)
+        await self._require_manageable_base(owner, base_id)
         normalized_title = _clean_text(title, maximum=255, code="document_title_invalid")
         normalized_text = unicodedata.normalize("NFC", text.strip())
         if not normalized_text or len(normalized_text) > MAX_TEXT_LENGTH:
@@ -215,7 +420,7 @@ class KnowledgeService:
         if self._originals is None:
             raise OriginalStorageUnavailableError()
         owner = _required(owner_id, "owner_id_required")
-        await self.get_base(owner, base_id)
+        await self._require_manageable_base(owner, base_id)
         normalized_title = _clean_text(title, maximum=255, code="document_title_invalid")
         safe_filename = unicodedata.normalize(
             "NFC", PurePath(filename.replace("\\", "/")).name.strip()
@@ -292,6 +497,7 @@ class KnowledgeService:
     ) -> tuple[Document, str]:
         """登记文档文本替换；处理成功前原活动版本仍可检索。"""
         owner = _required(owner_id, "owner_id_required")
+        await self._require_manageable_base(owner, base_id)
         await self.get_document(owner, base_id, document_id)
         normalized = unicodedata.normalize("NFC", text.strip())
         if not normalized or len(normalized) > MAX_TEXT_LENGTH:
@@ -340,6 +546,7 @@ class KnowledgeService:
         if self._originals is None:
             raise OriginalStorageUnavailableError()
         owner = _required(owner_id, "owner_id_required")
+        await self._require_manageable_base(owner, base_id)
         document = await self.get_document(owner, base_id, document_id)
         safe_filename = unicodedata.normalize(
             "NFC", PurePath(filename.replace("\\", "/")).name.strip()
@@ -435,6 +642,8 @@ class KnowledgeService:
 
     async def get_document(self, owner_id: str, base_id: str, document_id: str) -> Document:
         """读取知识库内文档身份及当前版本状态指针。"""
+        if self._access_policy is not None:
+            await self._require_readable_base(owner_id, base_id)
         document = await self._repository.get_document(owner_id, base_id, document_id)
         if document is None:
             raise KnowledgeNotFoundError("document_not_found")
@@ -445,7 +654,7 @@ class KnowledgeService:
     ) -> Document:
         """修改文档标题，不改变活动或待处理版本。"""
         normalized = _clean_text(title, maximum=255, code="document_title_invalid")
-        await self.get_base(owner_id, base_id)
+        await self._require_manageable_base(owner_id, base_id)
         document = await self._repository.rename_document(
             owner_id,
             base_id,
@@ -459,7 +668,7 @@ class KnowledgeService:
 
     async def delete_document(self, owner_id: str, base_id: str, document_id: str) -> None:
         """软删除文档并登记后台原件回收，不依赖同步存储可用性。"""
-        await self.get_base(owner_id, base_id)
+        await self._require_manageable_base(owner_id, base_id)
         deleted = await self._repository.delete_document(owner_id, base_id, document_id)
         if deleted is None:
             raise KnowledgeNotFoundError("document_not_found")
@@ -468,6 +677,8 @@ class KnowledgeService:
         self, owner_id: str, base_id: str, document_id: str
     ) -> list[DocumentVersion]:
         """按时间倒序读取可见文档的版本历史。"""
+        if self._access_policy is not None:
+            await self._require_readable_base(owner_id, base_id)
         versions = await self._repository.list_versions(owner_id, base_id, document_id)
         if versions is None:
             raise KnowledgeNotFoundError("document_not_found")
@@ -477,6 +688,8 @@ class KnowledgeService:
         self, owner_id: str, base_id: str, document_id: str, version_id: str
     ) -> DocumentVersion:
         """重试最新失败版本，复用其来源内容。"""
+        if self._access_policy is not None:
+            await self._require_manageable_base(owner_id, base_id)
         try:
             version = await self._repository.retry_version(
                 owner_id,
@@ -496,6 +709,8 @@ class KnowledgeService:
         self, owner_id: str, base_id: str, document_id: str, version_id: str
     ) -> tuple[str, str, bytes]:
         """授权读取指定历史版本原件或手动文本副本。"""
+        if self._access_policy is not None:
+            await self._require_readable_base(owner_id, base_id)
         reference = await self._repository.get_source(owner_id, base_id, document_id, version_id)
         if reference is None:
             raise KnowledgeNotFoundError("source_not_found")
@@ -518,6 +733,8 @@ class KnowledgeService:
 
     async def chunk(self, owner_id: str, base_id: str, chunk_id: str) -> SearchHit:
         """读取指定知识库内的历史版本片段。"""
+        if self._access_policy is not None:
+            await self._require_readable_base(owner_id, base_id)
         hit = await self._repository.get_chunk(owner_id, base_id, chunk_id)
         if hit is None:
             raise KnowledgeNotFoundError("chunk_not_found")
@@ -543,6 +760,14 @@ class KnowledgeService:
             raise KnowledgeInputError("search_request_invalid")
         if not base_ids or len(base_ids) > 20:
             raise KnowledgeInputError("knowledge_base_ids_invalid")
+        if self._access_policy is not None:
+            readable_ids = await self._access_policy.filter_readable_ids(
+                owner_id,
+                ResourceType.KNOWLEDGE_BASE,
+                base_ids,
+            )
+            if not set(base_ids) <= readable_ids:
+                raise KnowledgeNotFoundError("knowledge_base_not_found")
         await self._repository.validate_search_scope(owner_id, base_ids)
         tokens: tuple[str, ...] = ()
         keyword_reason: str | None = None

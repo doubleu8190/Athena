@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from api.dto.access import VisibilityGrantRequest, VisibilityGrantResponse
 
 
 class SubagentResponse(BaseModel):
@@ -18,6 +21,9 @@ class SubagentResponse(BaseModel):
     model_profile_id: str | None
     allowed_tool_ids: list[str]
     enabled: bool
+    visibility_scope: Literal["company", "department"] = "company"
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
     max_llm_requests: int | None
     timeout_seconds: int | None
     version: int
@@ -49,6 +55,9 @@ class SubagentCreateRequest(BaseModel):
     enabled: bool = True
     max_llm_requests: int | None = None
     timeout_seconds: int | None = None
+    visibility_scope: Literal["company", "department"] = "company"
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantRequest] | None = None
 
 
 class SubagentUpdateRequest(BaseModel):
@@ -65,6 +74,9 @@ class SubagentUpdateRequest(BaseModel):
     allowed_tool_ids: list[str] | None = None
     max_llm_requests: int | None = None
     timeout_seconds: int | None = None
+    visibility_scope: Literal["company", "department"] | None = None
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantRequest] | None = None
 
 
 class SubagentEnabledRequest(BaseModel):

@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from api.dto.access import VisibilityGrantRequest, VisibilityGrantResponse
+
 
 class SkillDependencyItemResponse(BaseModel):
     requirement: str
@@ -59,7 +61,7 @@ class SkillVersionResponse(BaseModel):
 class SkillSummaryResponse(BaseModel):
     id: str
     slug: str
-    scope: Literal["public", "personal"]
+    scope: Literal["company", "department", "personal"]
     name: str
     description: str
     current_version_id: str | None
@@ -69,6 +71,8 @@ class SkillSummaryResponse(BaseModel):
     revision: int
     updated_at: datetime
     dependency_check: SkillDependencyCheckResponse | None = None
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
 
 
 class SkillAdminDetailsResponse(SkillSummaryResponse):
@@ -101,6 +105,7 @@ class SkillConfigurationRequest(BaseModel):
     current_version_id: str = Field(min_length=1, max_length=128)
     enabled: bool
     script_requires_approval: bool
+    visibility_grants: list[VisibilityGrantRequest] | None = None
 
 
 class SkillPersonalCreateRequest(BaseModel):

@@ -6,13 +6,11 @@ import asyncio
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from secrets import token_hex
 from typing import Any
 
 import pytest
-from alembic import command
-from alembic.config import Config
+from integration.postgres_harness import sync_isolated_postgres_schema
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -47,7 +45,6 @@ from domain.project import ProjectHasSessionsError, ProjectNotFoundError
 from domain.session import SessionProjectLockedError
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 LOCK_WAIT_TIMEOUT = 30.0
 TASK_TIMEOUT = 30.0
 pytestmark = [
@@ -109,43 +106,8 @@ def migrated_schema() -> Iterator[str]:
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
-    schema = f"athena_v2_row_locks_{token_hex(8)}"
-
-    async def create_schema() -> None:
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            migration_config = Config(str(ALEMBIC_INI))
-            migration_config.set_main_option(
-                "sqlalchemy.url",
-                database_url.replace("%", "%%"),
-            )
-            migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            migration_config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, migration_config, "head")
-        except BaseException:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            raise
-        finally:
-            await admin_engine.dispose()
-
-    async def drop_schema() -> None:
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        finally:
-            await admin_engine.dispose()
-
-    asyncio.run(create_schema())
-    try:
+    with sync_isolated_postgres_schema(database_url, prefix="athena_v2_row_locks") as schema:
         yield schema
-    finally:
-        asyncio.run(drop_schema())
 
 
 def _engine(database_url: str, schema: str, application_name: str) -> AsyncEngine:

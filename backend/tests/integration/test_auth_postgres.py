@@ -5,17 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 
 import pytest
-from alembic import command
-from alembic.config import Config
-from alembic.script import ScriptDirectory
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.project.model import ProjectModel
@@ -29,7 +23,6 @@ from domain.auth import (
 )
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -46,37 +39,15 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_auth_test_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-            migration_config = Config(str(ALEMBIC_INI))
-            migration_config.set_main_option(
-                "sqlalchemy.url",
-                database_url.replace("%", "%%"),
-            )
-            migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            migration_config.attributes["version_table_schema"] = schema
-            expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-            await asyncio.to_thread(command.upgrade, migration_config, "head")
+        async with isolated_postgres_schema(database_url, prefix="athena_v2_auth_test") as db:
+            test_engine = db.engine
+            expected_head = db.head_revision()
 
             async with test_engine.connect() as connection:
                 revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             assert revision == expected_head
 
-            session_factory = async_sessionmaker(
-                test_engine,
-                expire_on_commit=False,
-            )
+            session_factory = db.session_factory
             repository = SqlAlchemyAuthRepository(session_factory)
             timestamp = datetime(2026, 1, 1, tzinfo=UTC)
             user = User(
@@ -211,8 +182,8 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                 == 1
             )
 
-            await asyncio.to_thread(command.downgrade, migration_config, "20261105_0005")
-            await asyncio.to_thread(command.upgrade, migration_config, "head")
+            await db.downgrade_to("20261105_0005")
+            await db.upgrade_to("head")
             async with test_engine.connect() as connection:
                 assert (
                     await connection.scalar(
@@ -227,10 +198,5 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                         text("UPDATE users SET role = 'owner' WHERE id = :user_id"),
                         {"user_id": user.id},
                     )
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())

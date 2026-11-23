@@ -8,27 +8,23 @@ import os
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
-from pathlib import Path
 from secrets import token_hex
 from typing import Any, cast
 
 import httpx
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
+from integration.postgres_harness import isolated_postgres_schema
 from pydantic import TypeAdapter
 from redis.asyncio import Redis
 from sqlalchemy import event as db_event
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
@@ -78,7 +74,6 @@ from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 REDIS_URL = os.getenv("ATHENA_REDIS_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -98,29 +93,8 @@ async def _database(
     None,
 ]:
     """创建仅属于当前用例的随机 schema，并把迁移和业务连接固定到该 schema。"""
-    schema = f"athena_v2_context_safety_e2e_{token_hex(8)}"
-    admin_engine = create_async_engine(database_url, poolclass=NullPool)
-    engine = create_async_engine(
-        database_url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"search_path": f"{schema},public"}},
-    )
-    try:
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        migration_config = Config(str(ALEMBIC_INI))
-        migration_config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-        migration_config.attributes["connect_args"] = {
-            "server_settings": {"search_path": f"{schema},public"}
-        }
-        migration_config.attributes["version_table_schema"] = schema
-        await asyncio.to_thread(command.upgrade, migration_config, "head")
-        yield async_sessionmaker(engine, expire_on_commit=False), engine, admin_engine, schema
-    finally:
-        await engine.dispose()
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin_engine.dispose()
+    async with isolated_postgres_schema(database_url, prefix="athena_v2_context_safety_e2e") as db:
+        yield db.session_factory, db.engine, db.admin_engine, db.schema
 
 
 async def _seed_user_and_profile(

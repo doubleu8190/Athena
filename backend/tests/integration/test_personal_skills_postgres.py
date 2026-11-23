@@ -6,20 +6,14 @@ import asyncio
 import json
 import os
 from datetime import UTC, datetime
-from pathlib import Path
-from secrets import token_hex
 from typing import Any
 
 import pytest
-from alembic import command
-from alembic.config import Config
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -46,26 +40,14 @@ def test_personal_skill_migration_backfill_and_scoped_constraints() -> None:
 
 async def _run_personal_skill_migration_scenario(database_url: str) -> None:
     """在随机 schema 中只执行本测试创建和清理的迁移。"""
-    schema = f"athena_v2_personal_skills_{token_hex(8)}"
-    admin_engine = create_async_engine(database_url, poolclass=NullPool)
-    test_engine = create_async_engine(
+    async with isolated_postgres_schema(
         database_url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"search_path": f"{schema},public"}},
-    )
-    schema_created = False
-    try:
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        schema_created = True
-        migration_config = _migration_config(database_url, schema)
-        await asyncio.to_thread(
-            command.upgrade,
-            migration_config,
-            "20261129_0030",
-        )
+        prefix="athena_v2_personal_skills",
+        revision="20261129_0030",
+    ) as db:
+        test_engine = db.engine
         await _insert_pre_migration_public_skill(test_engine)
-        await asyncio.to_thread(command.upgrade, migration_config, "head")
+        await db.upgrade_to("head")
 
         async with test_engine.connect() as connection:
             backfilled = (
@@ -153,38 +135,42 @@ async def _run_personal_skill_migration_scenario(database_url: str) -> None:
 
         async with test_engine.connect() as connection:
             index_rows = (
-                await connection.execute(
-                    text(
-                        "SELECT "
-                        "index_class.relname AS index_name, "
-                        "index_row.indisunique AS is_unique, "
-                        "pg_get_expr(index_row.indpred, index_row.indrelid) "
-                        "AS predicate, "
-                        "ARRAY("
-                        "SELECT attribute.attname "
-                        "FROM unnest(index_row.indkey) "
-                        "WITH ORDINALITY AS key(attnum, ordinal) "
-                        "JOIN pg_attribute AS attribute "
-                        "ON attribute.attrelid = index_row.indrelid "
-                        "AND attribute.attnum = key.attnum "
-                        "ORDER BY key.ordinal"
-                        ") AS columns "
-                        "FROM pg_index AS index_row "
-                        "JOIN pg_class AS table_row "
-                        "ON table_row.oid = index_row.indrelid "
-                        "JOIN pg_class AS index_class "
-                        "ON index_class.oid = index_row.indexrelid "
-                        "JOIN pg_namespace AS namespace "
-                        "ON namespace.oid = table_row.relnamespace "
-                        "WHERE namespace.nspname = current_schema() "
-                        "AND table_row.relname IN ('skills', 'skill_versions') "
-                        "AND index_class.relname IN ("
-                        "'uq_skills_public_slug', "
-                        "'uq_skills_personal_owner_slug', "
-                        "'ix_skill_versions_package_sha256')"
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT "
+                            "index_class.relname AS index_name, "
+                            "index_row.indisunique AS is_unique, "
+                            "pg_get_expr(index_row.indpred, index_row.indrelid) "
+                            "AS predicate, "
+                            "ARRAY("
+                            "SELECT attribute.attname "
+                            "FROM unnest(index_row.indkey) "
+                            "WITH ORDINALITY AS key(attnum, ordinal) "
+                            "JOIN pg_attribute AS attribute "
+                            "ON attribute.attrelid = index_row.indrelid "
+                            "AND attribute.attnum = key.attnum "
+                            "ORDER BY key.ordinal"
+                            ") AS columns "
+                            "FROM pg_index AS index_row "
+                            "JOIN pg_class AS table_row "
+                            "ON table_row.oid = index_row.indrelid "
+                            "JOIN pg_class AS index_class "
+                            "ON index_class.oid = index_row.indexrelid "
+                            "JOIN pg_namespace AS namespace "
+                            "ON namespace.oid = table_row.relnamespace "
+                            "WHERE namespace.nspname = current_schema() "
+                            "AND table_row.relname IN ('skills', 'skill_versions') "
+                            "AND index_class.relname IN ("
+                            "'uq_skills_public_slug', "
+                            "'uq_skills_personal_owner_slug', "
+                            "'ix_skill_versions_package_sha256')"
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             constraint_names = set(
                 (
                     await connection.scalars(
@@ -213,16 +199,6 @@ async def _run_personal_skill_migration_scenario(database_url: str) -> None:
         assert package_hash["is_unique"] is False
         assert package_hash["columns"] == ["package_sha256"]
         assert constraint_names == {"ck_skills_scope", "ck_skills_owner_scope"}
-    finally:
-        await test_engine.dispose()
-        if schema_created:
-            try:
-                async with admin_engine.begin() as connection:
-                    await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            except Exception as error:
-                if not _is_connection_refused(error):
-                    raise
-        await admin_engine.dispose()
 
 
 def _is_connection_refused(error: BaseException) -> bool:
@@ -243,17 +219,6 @@ def _is_connection_refused(error: BaseException) -> bool:
         if current.__context__ is not None:
             pending.append(current.__context__)
     return False
-
-
-def _migration_config(database_url: str, schema: str) -> Config:
-    """构造只指向测试 schema 的 Alembic 配置。"""
-    config = Config(str(ALEMBIC_INI))
-    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-    config.attributes["connect_args"] = {
-        "server_settings": {"search_path": f"{schema},public"}
-    }
-    config.attributes["version_table_schema"] = schema
-    return config
 
 
 async def _insert_pre_migration_public_skill(test_engine: Any) -> None:
@@ -362,10 +327,7 @@ async def _insert_personal_skill(
             },
         )
         await connection.execute(
-            text(
-                "UPDATE skills SET current_version_id = :version_id "
-                "WHERE id = :skill_id"
-            ),
+            text("UPDATE skills SET current_version_id = :version_id WHERE id = :skill_id"),
             {"version_id": version_id, "skill_id": skill_id},
         )
 

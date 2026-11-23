@@ -6,16 +6,12 @@ import asyncio
 import hashlib
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 
 import pytest
-from alembic import command
-from alembic.config import Config
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.memory.model import (
     MemoryModel,
@@ -103,32 +99,32 @@ def test_memory_migration_and_hybrid_candidate_queries() -> None:
         pytest.skip("test DB not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_memory_{token_hex(6)}"
-        shared_schema = f"athena_v2_shared_{token_hex(6)}"
-        admin = create_async_engine(database_url, poolclass=NullPool)
-        engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
+        async with (
+            isolated_postgres_schema(
+                database_url,
+                prefix="athena_v2_memory",
+                revision=None,
+                token_bytes=6,
+            ) as db,
+            isolated_postgres_schema(
+                database_url,
+                prefix="athena_v2_shared",
+                revision=None,
+                token_bytes=6,
+            ) as shared_db,
+        ):
+            shared_schema = shared_db.schema
+            admin = db.admin_engine
             async with admin.begin() as connection:
-                await connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
-                await connection.exec_driver_sql(f'CREATE SCHEMA "{shared_schema}"')
                 await connection.exec_driver_sql(
                     f'CREATE TEXT SEARCH CONFIGURATION "{shared_schema}".'
                     '"athena_memory_chinese" (PARSER=zhparser)'
                 )
-            config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "head")
-            await asyncio.to_thread(command.upgrade, config, "head")
+            # 连续执行两次 head 升级以验证记忆迁移脚本幂等。
+            await db.upgrade_to("head")
+            await db.upgrade_to("head")
 
-            factory = async_sessionmaker(engine, expire_on_commit=False)
+            factory = db.session_factory
             repository = MemoryRepository(factory)
             now = datetime.now(UTC)
             async with factory() as session, session.begin():
@@ -242,7 +238,7 @@ def test_memory_migration_and_hybrid_candidate_queries() -> None:
             assert disabled_snapshot.memories == {}
             await repository.update_settings("memory-test-user", True, True)
 
-            await asyncio.to_thread(command.downgrade, config, "20261106_0007")
+            await db.downgrade_to("20261106_0007")
             async with admin.connect() as connection:
                 shared_exists = await connection.scalar(
                     text(
@@ -258,11 +254,5 @@ def test_memory_migration_and_hybrid_candidate_queries() -> None:
                     },
                 )
                 assert shared_exists
-        finally:
-            await engine.dispose()
-            async with admin.begin() as connection:
-                await connection.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-                await connection.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{shared_schema}" CASCADE')
-            await admin.dispose()
 
     asyncio.run(scenario())

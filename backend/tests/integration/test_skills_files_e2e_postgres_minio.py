@@ -17,13 +17,11 @@ from typing import Any, cast
 
 import httpx2
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from integration.postgres_harness import isolated_postgres_schema
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
@@ -77,7 +75,6 @@ from domain.tool import RuntimeToolDefinition
 from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 _FILE_MINIO_ENV = (
     "ATHENA_FILE_MINIO_ENDPOINT",
     "ATHENA_FILE_MINIO_ACCESS_KEY",
@@ -90,8 +87,7 @@ pytestmark = [
     pytest.mark.skipif(
         not DATABASE_URL or not MINIO_CONFIGURED,
         reason=(
-            "ATHENA_TEST_DATABASE_URL and isolated ATHENA_FILE_MINIO_* "
-            "configuration are required"
+            "ATHENA_TEST_DATABASE_URL and isolated ATHENA_FILE_MINIO_* configuration are required"
         ),
     ),
 ]
@@ -106,29 +102,8 @@ async def _database() -> AsyncGenerator[
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-    schema = f"athena_v2_skills_e2e_{token_hex(8)}"
-    admin_engine = create_async_engine(database_url, poolclass=NullPool)
-    engine = create_async_engine(
-        database_url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"search_path": f"{schema},public"}},
-    )
-    try:
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        config = Config(str(ALEMBIC_INI))
-        config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-        config.attributes["connect_args"] = {
-            "server_settings": {"search_path": f"{schema},public"}
-        }
-        config.attributes["version_table_schema"] = schema
-        await asyncio.to_thread(command.upgrade, config, "head")
-        yield async_sessionmaker(engine, expire_on_commit=False), engine, admin_engine, schema
-    finally:
-        await engine.dispose()
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin_engine.dispose()
+    async with isolated_postgres_schema(database_url, prefix="athena_v2_skills_e2e") as db:
+        yield db.session_factory, db.engine, db.admin_engine, db.schema
 
 
 class _RecordingStore:
@@ -258,12 +233,8 @@ def test_recording_store_fills_logical_page_across_shared_bucket_pages() -> None
     """过滤 1000+ 非本测试对象后，不得把短物理页误判为扫描结束。"""
     first_created_key = "session-files/aa/created-before"
     last_created_key = "session-files/aa/zz-created-after"
-    shared_keys = tuple(
-        f"session-files/aa/shared-{index:04d}" for index in range(1005)
-    )
-    delegate = _PagedFakeFileObjectStore(
-        (first_created_key, *shared_keys, last_created_key)
-    )
+    shared_keys = tuple(f"session-files/aa/shared-{index:04d}" for index in range(1005))
+    delegate = _PagedFakeFileObjectStore((first_created_key, *shared_keys, last_created_key))
     store = _RecordingStore(cast(FileObjectStore, delegate))
     store.created_keys.update({first_created_key, last_created_key})
 
@@ -382,7 +353,7 @@ scripts:
           type: string
       required: [period, api_token]
 """.strip()
-    script = r'''
+    script = r"""
 import json
 import os
 from pathlib import Path
@@ -418,7 +389,7 @@ output.mkdir(parents=True, exist_ok=True)
     ),
     encoding="utf-8",
 )
-'''.lstrip()
+""".lstrip()
     bundle = io.BytesIO()
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -717,9 +688,7 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                 assert len(first_leases) == 1
                 await executor.execute(first_leases[0])
 
-                waiting = await http_client.get(
-                    f"/api/v1/sessions/{session_id}/runs/{run_id}"
-                )
+                waiting = await http_client.get(f"/api/v1/sessions/{session_id}/runs/{run_id}")
                 assert waiting.status_code == 200, waiting.text
                 waiting_body = waiting.json()
                 assert waiting_body["status"] == "waiting_for_approval"
@@ -766,17 +735,15 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                 assert "event: snapshot" in stream.text
                 for value in forbidden_wire_values:
                     assert value not in stream.text
-                messages = await http_client.get(
-                    f"/api/v1/sessions/{session_id}/messages"
-                )
+                messages = await http_client.get(f"/api/v1/sessions/{session_id}/messages")
                 assert messages.status_code == 200, messages.text
                 for value in forbidden_wire_values:
                     assert value not in messages.text
 
                     http_client.cookies.set("athena_session", ordinary_token)
                     admin_execution_by_user = await http_client.get(
-                    f"/api/v1/admin/skill-executions/{call_id}"
-                )
+                        f"/api/v1/admin/skill-executions/{call_id}"
+                    )
                     assert admin_execution_by_user.status_code == 403
                     assert admin_execution_by_user.json() == {"detail": "admin_required"}
                     http_client.cookies.set("athena_session", token)
@@ -792,8 +759,7 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                 assert answer_with_skill_binding.status_code == 422
 
                 approved = await http_client.post(
-                    f"/api/v1/sessions/{session_id}/runs/{run_id}/"
-                    f"tool-calls/{call_id}/approval",
+                    f"/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/{call_id}/approval",
                     json={
                         "request_id": "approve-skills-e2e",
                         "decision": "approve",
@@ -810,9 +776,7 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                 assert len(second_leases) == 1
                 await executor.execute(second_leases[0])
 
-                completed = await http_client.get(
-                    f"/api/v1/sessions/{session_id}/runs/{run_id}"
-                )
+                completed = await http_client.get(f"/api/v1/sessions/{session_id}/runs/{run_id}")
                 assert completed.status_code == 200, completed.text
                 assert completed.json()["status"] == "completed"
                 completed_detail = await http_client.get(
@@ -861,29 +825,26 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                 ]
                 for value in forbidden_wire_values:
                     assert all(value not in str(page) for page in delivered_pages)
-                admin_execution = await http_client.get(
-                    f"/api/v1/admin/skill-executions/{call_id}"
-                )
+                admin_execution = await http_client.get(f"/api/v1/admin/skill-executions/{call_id}")
                 assert admin_execution.status_code == 200, admin_execution.text
                 assert admin_execution.json()["status"] == "succeeded"
                 for value in forbidden_wire_values:
                     assert value not in admin_execution.text
 
                 first_download = await http_client.get(
-                    f"/api/v1/sessions/{session_id}/files/"
-                    f"{artifacts[0]['file_id']}/download"
+                    f"/api/v1/sessions/{session_id}/files/{artifacts[0]['file_id']}/download"
                 )
                 second_download = await http_client.get(
-                    f"/api/v1/sessions/{session_id}/files/"
-                    f"{artifacts[1]['file_id']}/download"
+                    f"/api/v1/sessions/{session_id}/files/{artifacts[1]['file_id']}/download"
                 )
                 assert first_download.status_code == 200
                 assert first_download.content == b"month,total\n2026-10,42\n"
                 assert second_download.status_code == 200
                 assert second_download.content.startswith(b"\x89PNG\r\n\x1a\n")
-                assert 'attachment; filename="report.csv"' in first_download.headers[
-                    "content-disposition"
-                ]
+                assert (
+                    'attachment; filename="report.csv"'
+                    in first_download.headers["content-disposition"]
+                )
                 assert first_download.headers["x-content-type-options"] == "nosniff"
 
                 listed = await http_client.get(

@@ -4,18 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-import subprocess
-import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 from typing import Any, cast
 
 import pytest
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import KnowledgeDocumentModel
@@ -24,47 +19,15 @@ from app.knowledge.worker import KnowledgeWorker
 from domain.knowledge.model import KnowledgeBase
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-BACKEND_DIR = Path(__file__).resolve().parents[2]
 DB_CONNECT_ARGS = {"timeout": 8, "command_timeout": 12}
+KNOWLEDGE_SERVER_SETTINGS = {
+    "statement_timeout": "15000",
+    "lock_timeout": "5000",
+}
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="test PostgreSQL URL is not configured"),
 ]
-
-
-def _upgrade_schema(database_url: str, schema: str) -> None:
-    child_env = os.environ.copy()
-    child_env["ATHENA_TEST_DATABASE_URL"] = database_url
-    child_env["KNOWLEDGE_TEST_ALEMBIC_INI"] = str(BACKEND_DIR / "alembic.ini")
-    child_env["KNOWLEDGE_TEST_SCHEMA"] = schema
-    child_code = """
-import os
-from alembic import command
-from alembic.config import Config
-config = Config(os.environ['KNOWLEDGE_TEST_ALEMBIC_INI'])
-config.set_main_option('sqlalchemy.url', os.environ['ATHENA_TEST_DATABASE_URL'].replace('%', '%%'))
-config.attributes['connect_args'] = {
-    'timeout': 8,
-    'command_timeout': 12,
-    'server_settings': {
-        'search_path': f\"{os.environ['KNOWLEDGE_TEST_SCHEMA']},public\",
-        'statement_timeout': '15000',
-        'lock_timeout': '5000',
-    },
-}
-config.attributes['version_table_schema'] = os.environ['KNOWLEDGE_TEST_SCHEMA']
-command.upgrade(config, 'head')
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", child_code],
-        cwd=BACKEND_DIR,
-        env=child_env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert result.returncode == 0, "knowledge Alembic migration subprocess failed"
 
 
 def test_expired_job_reclaim_fences_late_worker_publish() -> None:
@@ -73,25 +36,14 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
         pytest.skip("test PostgreSQL URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_knowledge_jobs_{token_hex(8)}"
-        admin = create_async_engine(database_url, poolclass=NullPool, connect_args=DB_CONNECT_ARGS)
-        engine = create_async_engine(
+        async with isolated_postgres_schema(
             database_url,
-            poolclass=NullPool,
-            connect_args={
-                **DB_CONNECT_ARGS,
-                "server_settings": {
-                    "search_path": f"{schema},public",
-                    "statement_timeout": "15000",
-                    "lock_timeout": "5000",
-                },
-            },
-        )
-        try:
-            async with admin.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            _upgrade_schema(database_url, schema)
-            factory = async_sessionmaker(engine, expire_on_commit=False)
+            prefix="athena_knowledge_jobs",
+            connect_args=DB_CONNECT_ARGS,
+            server_settings=KNOWLEDGE_SERVER_SETTINGS,
+            use_subprocess=True,
+        ) as db:
+            factory = db.session_factory
             repository = KnowledgeRepository(factory)
             now = datetime(2026, 1, 1, tzinfo=UTC)
             async with factory() as session, session.begin():
@@ -497,10 +449,5 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
             assert await repository.get_base("lease_owner", "lease_kb") is None
             with pytest.raises(LookupError, match="knowledge_base_not_found"):
                 await repository.validate_search_scope("lease_owner", ["lease_kb"])
-        finally:
-            await engine.dispose()
-            async with admin.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin.dispose()
 
     asyncio.run(scenario())

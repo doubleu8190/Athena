@@ -6,17 +6,12 @@ import asyncio
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from integration.llm_fixtures import encrypted_llm_key_fields
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import UserModel
 from adapter.llm.model.profile import (
@@ -57,7 +52,6 @@ from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is required"),
@@ -71,25 +65,10 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
         pytest.skip("ATHENA_TEST_DATABASE_URL is required")
 
     async def scenario() -> None:
-        schema = f"athena_context_compression_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "head")
-
-            factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with isolated_postgres_schema(
+            database_url, prefix="athena_context_compression"
+        ) as db:
+            factory = db.session_factory
             now = datetime.now(UTC)
             async with factory() as session, session.begin():
                 session.add(
@@ -304,8 +283,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
             assert first is not None and second is not None
             assert first == second
             assert (
-                first[0].compression_prompt_version_id
-                == INITIAL_SYSTEM_PROMPT_IDS["compression"]
+                first[0].compression_prompt_version_id == INITIAL_SYSTEM_PROMPT_IDS["compression"]
             )
             assert isinstance(first[1].payload, RunCompressionCompletedPayload)
             async with factory() as session:
@@ -466,11 +444,6 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                     )
                 )
             ] == [[1], [2, 3]]
-        finally:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await engine.dispose()
-            await admin_engine.dispose()
 
     asyncio.run(scenario())
 
@@ -482,25 +455,8 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
         pytest.skip("ATHENA_TEST_DATABASE_URL is required")
 
     async def scenario() -> None:
-        schema = f"athena_context_report_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "head")
-
-            factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with isolated_postgres_schema(database_url, prefix="athena_context_report") as db:
+            factory = db.session_factory
             now = datetime.now(UTC)
             async with factory() as session, session.begin():
                 session.add(
@@ -675,8 +631,7 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
                 failed_payload = RunFailedPayload.model_validate(failed_events[0].payload)
                 assert failed_payload.report_message_id == report.id
                 assert (
-                    failed_payload.context_stop_reason
-                    is ContextStopReason.NO_COMPRESSIBLE_HISTORY
+                    failed_payload.context_stop_reason is ContextStopReason.NO_COMPRESSIBLE_HISTORY
                 )
 
             async with factory() as session, session.begin():
@@ -781,11 +736,6 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
                     assert race_row.cancel_requested_at is not None
                     assert race_report_row is None
                     assert race_row.report_message_id is None
-        finally:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await engine.dispose()
-            await admin_engine.dispose()
 
     asyncio.run(scenario())
 
@@ -797,24 +747,12 @@ def test_0024_upgrades_old_policy_and_run_references_without_rewriting() -> None
         pytest.skip("ATHENA_TEST_DATABASE_URL is required")
 
     async def scenario() -> None:
-        schema = f"athena_context_policy_upgrade_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        engine = create_async_engine(
+        async with isolated_postgres_schema(
             database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "20261122_0023")
-
+            prefix="athena_context_policy_upgrade",
+            revision="20261122_0023",
+        ) as db:
+            engine = db.engine
             now = datetime.now(UTC)
             async with engine.begin() as connection:
                 await connection.execute(
@@ -930,21 +868,25 @@ def test_0024_upgrades_old_policy_and_run_references_without_rewriting() -> None
                     },
                 )
 
-            await asyncio.to_thread(command.upgrade, config, "head")
-            factory = async_sessionmaker(engine, expire_on_commit=False)
+            await db.upgrade_to("head")
+            factory = db.session_factory
             async with engine.connect() as connection:
                 policy_row = (
-                    await connection.execute(
-                        text(
-                            """
+                    (
+                        await connection.execute(
+                            text(
+                                """
                             SELECT trigger_ratio, trigger_tokens, recent_ratio,
                                    recent_token_cap, summary_ratio, summary_token_cap
                             FROM llm_compression_policy_versions
                             WHERE id = 'cmpol_legacy_upgrade'
                             """
+                            )
                         )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 current_policy_id = await connection.scalar(
                     text(
                         """
@@ -980,11 +922,6 @@ def test_0024_upgrades_old_policy_and_run_references_without_rewriting() -> None
             )
             assert await repository.get_current_compression_policy() is None
             assert await repository.get_compression_policy("cmpol_legacy_upgrade") is None
-        finally:
-            await engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())
 
@@ -996,25 +933,10 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is required")
 
     async def scenario() -> None:
-        schema = f"athena_context_report_rollback_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "head")
-
-            factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with isolated_postgres_schema(
+            database_url, prefix="athena_context_report_rollback"
+        ) as db:
+            factory = db.session_factory
             now = datetime.now(UTC)
             async with factory() as session, session.begin():
                 session.add(
@@ -1109,9 +1031,7 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
                             model_config_version_id="llmprof_report_rollback",
                             compression_policy_version_id=None,
                             main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
-                            compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
-                                "compression"
-                            ],
+                            compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                             prompt_template_version="run-v2",
                             event_sequence=0,
                             execution_epoch=1,
@@ -1170,9 +1090,7 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
                         failed_at=now + timedelta(seconds=1),
                         report_message=report,
                         usage=RunUsage(attempts=(usage_attempt,)),
-                        context_stop_reason=(
-                            ContextStopReason.NO_COMPRESSIBLE_HISTORY
-                        ),
+                        context_stop_reason=(ContextStopReason.NO_COMPRESSIBLE_HISTORY),
                     )
                 )
 
@@ -1194,10 +1112,5 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
                     .with_only_columns(RunEventModel.id)
                 )
                 assert failed_event_count is None
-        finally:
-            await engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())

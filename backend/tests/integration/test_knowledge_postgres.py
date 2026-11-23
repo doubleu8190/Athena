@@ -5,32 +5,34 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import subprocess
-import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 from threading import Thread
 from typing import Any, cast
 
 import pytest
+from integration.postgres_harness import isolated_postgres_schema
 from knowledge_fakes import MemoryOriginalStore
 from sqlalchemy import event, insert, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import UserModel
-from adapter.knowledge.model import KnowledgeDocumentModel
+from adapter.knowledge.model import (
+    KnowledgeDocumentModel,
+    KnowledgeVersionModel,
+)
 from adapter.knowledge.repository import KnowledgeRepository
 from app.knowledge.service import KnowledgeService
-from domain.knowledge.model import Document, KnowledgeBase
+from domain.knowledge.model import Document, DocumentState, KnowledgeBase
 from domain.knowledge.ports import ClaimedKnowledgeJob, KnowledgeRepositoryPort
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-BACKEND_DIR = Path(__file__).resolve().parents[2]
-ALEMBIC_INI = BACKEND_DIR / "alembic.ini"
 DB_CONNECT_ARGS = {"timeout": 8, "command_timeout": 12}
+KNOWLEDGE_SERVER_SETTINGS = {
+    "statement_timeout": "15000",
+    "lock_timeout": "5000",
+}
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="test PostgreSQL URL is not configured"),
@@ -75,67 +77,22 @@ async def _claim_job_target(repository: KnowledgeRepository, target_id: str) -> 
     raise AssertionError(f"queued task {target_id} was not reached")
 
 
-def _upgrade_schema(database_url: str, schema: str) -> None:
-    """Run Alembic in an isolated process so logging config cannot affect pytest."""
-    child_env = os.environ.copy()
-    child_env["ATHENA_TEST_DATABASE_URL"] = database_url
-    child_env["KNOWLEDGE_TEST_ALEMBIC_INI"] = str(ALEMBIC_INI)
-    child_env["KNOWLEDGE_TEST_SCHEMA"] = schema
-    child_code = """
-import os
-from alembic import command
-from alembic.config import Config
-config = Config(os.environ['KNOWLEDGE_TEST_ALEMBIC_INI'])
-config.set_main_option('sqlalchemy.url', os.environ['ATHENA_TEST_DATABASE_URL'].replace('%', '%%'))
-config.attributes['connect_args'] = {
-    'timeout': 8,
-    'command_timeout': 12,
-    'server_settings': {
-        'search_path': f\"{os.environ['KNOWLEDGE_TEST_SCHEMA']},public\",
-        'statement_timeout': '15000',
-        'lock_timeout': '5000',
-    },
-}
-config.attributes['version_table_schema'] = os.environ['KNOWLEDGE_TEST_SCHEMA']
-command.upgrade(config, 'head')
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", child_code],
-        cwd=BACKEND_DIR,
-        env=child_env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert result.returncode == 0, "knowledge Alembic migration subprocess failed"
-
-
 def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -> None:
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("test PostgreSQL URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_knowledge_{token_hex(8)}"
-        admin = create_async_engine(database_url, poolclass=NullPool, connect_args=DB_CONNECT_ARGS)
-        engine = create_async_engine(
+        async with isolated_postgres_schema(
             database_url,
-            poolclass=NullPool,
-            connect_args={
-                **DB_CONNECT_ARGS,
-                "server_settings": {
-                    "search_path": f"{schema},public",
-                    "statement_timeout": "15000",
-                    "lock_timeout": "5000",
-                },
-            },
-        )
-        try:
-            async with admin.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            _upgrade_schema(database_url, schema)
-            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+            prefix="athena_knowledge",
+            connect_args=DB_CONNECT_ARGS,
+            server_settings=KNOWLEDGE_SERVER_SETTINGS,
+            use_subprocess=True,
+        ) as db:
+            schema = db.schema
+            engine = db.engine
+            session_factory = db.session_factory
             repository = KnowledgeRepository(session_factory)
             now = datetime(2026, 1, 1, tzinfo=UTC)
             async with session_factory() as session, session.begin():
@@ -659,6 +616,10 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             assert after_failure is not None
             assert after_failure.active_version_id == ver_a
             assert after_failure.pending_version_id is None
+            assert after_failure.latest_version is not None
+            assert after_failure.latest_version.id == failed_version
+            assert after_failure.latest_version.state is DocumentState.FAILED
+            assert after_failure.latest_version.error_code == "parser_failed"
             after_failure_hits = await repository.search_keyword(
                 "kb_owner_a", ["kb_a"], ("PostgreSQL",), 10
             )
@@ -1038,10 +999,262 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                         "quota-replace-reject",
                     )
                 assert quota_store.put_calls == []
-        finally:
-            await engine.dispose()
-            async with admin.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_list_documents_batch_loads_latest_version_in_single_query() -> None:
+    """真实 PostgreSQL 下验证 list_documents 单次批量装配 latest_version 且空页不发版本查询。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("test PostgreSQL URL is not configured")
+
+    async def scenario() -> None:
+        async with isolated_postgres_schema(
+            database_url,
+            prefix="athena_knowledge_latest_ver",
+            connect_args=DB_CONNECT_ARGS,
+            server_settings=KNOWLEDGE_SERVER_SETTINGS,
+            use_subprocess=True,
+        ) as db:
+            factory = db.session_factory
+            repository = KnowledgeRepository(factory)
+            now = datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
+            same_time = datetime(2026, 4, 1, 9, 5, tzinfo=UTC)
+
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="latest_owner",
+                        email="latest-owner@knowledge.example",
+                        password_hash="test-hash",
+                        display_name=None,
+                        status="active",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            await repository.create_base(
+                KnowledgeBase("kb_empty", "latest_owner", "empty", None, now, now)
+            )
+            await repository.create_base(
+                KnowledgeBase("kb_batch", "latest_owner", "batch", None, now, now)
+            )
+            async with factory() as session, session.begin():
+                session.add_all(
+                    [
+                        KnowledgeDocumentModel(
+                            id="doc_ready",
+                            owner_id="latest_owner",
+                            knowledge_base_id="kb_batch",
+                            title="多版本就绪文档",
+                            active_version_id="ver_ready_2",
+                            pending_version_id=None,
+                            created_at=now,
+                            updated_at=now + timedelta(seconds=4),
+                        ),
+                        KnowledgeDocumentModel(
+                            id="doc_failed",
+                            owner_id="latest_owner",
+                            knowledge_base_id="kb_batch",
+                            title="替换失败文档",
+                            active_version_id="ver_fail_1",
+                            pending_version_id=None,
+                            created_at=now,
+                            updated_at=now + timedelta(seconds=3),
+                        ),
+                        KnowledgeDocumentModel(
+                            id="doc_tie",
+                            owner_id="latest_owner",
+                            knowledge_base_id="kb_batch",
+                            title="同时间戳按 ID 倒序文档",
+                            active_version_id=None,
+                            pending_version_id="ver_tie_z",
+                            created_at=now,
+                            updated_at=now + timedelta(seconds=2),
+                        ),
+                        KnowledgeDocumentModel(
+                            id="doc_noversion",
+                            owner_id="latest_owner",
+                            knowledge_base_id="kb_batch",
+                            title="无版本文档",
+                            active_version_id=None,
+                            pending_version_id=None,
+                            created_at=now,
+                            updated_at=now + timedelta(seconds=1),
+                        ),
+                    ]
+                )
+                await session.flush()
+                session.add_all(
+                    [
+                        KnowledgeVersionModel(
+                            id="ver_ready_1",
+                            document_id="doc_ready",
+                            owner_id="latest_owner",
+                            source_id=None,
+                            source_text="v1",
+                            content_hash="1" * 64,
+                            profile_id="profile-v1",
+                            processing_config={},
+                            state="ready",
+                            error_code=None,
+                            warnings=[],
+                            chunk_count=1,
+                            created_at=now + timedelta(seconds=1),
+                            completed_at=now + timedelta(seconds=2),
+                        ),
+                        KnowledgeVersionModel(
+                            id="ver_ready_2",
+                            document_id="doc_ready",
+                            owner_id="latest_owner",
+                            source_id=None,
+                            source_text="v2",
+                            content_hash="2" * 64,
+                            profile_id="profile-v1",
+                            processing_config={},
+                            state="ready",
+                            error_code=None,
+                            warnings=["ocr_fallback"],
+                            chunk_count=6,
+                            created_at=now + timedelta(seconds=3),
+                            completed_at=now + timedelta(seconds=4),
+                        ),
+                        KnowledgeVersionModel(
+                            id="ver_fail_1",
+                            document_id="doc_failed",
+                            owner_id="latest_owner",
+                            source_id=None,
+                            source_text="active",
+                            content_hash="3" * 64,
+                            profile_id="profile-v1",
+                            processing_config={},
+                            state="ready",
+                            error_code=None,
+                            warnings=[],
+                            chunk_count=2,
+                            created_at=now + timedelta(seconds=1),
+                            completed_at=now + timedelta(seconds=2),
+                        ),
+                        KnowledgeVersionModel(
+                            id="ver_fail_2",
+                            document_id="doc_failed",
+                            owner_id="latest_owner",
+                            source_id=None,
+                            source_text="broken",
+                            content_hash="4" * 64,
+                            profile_id="profile-v1",
+                            processing_config={},
+                            state="failed",
+                            error_code="parser_failed",
+                            warnings=["partial_page"],
+                            chunk_count=0,
+                            created_at=now + timedelta(seconds=5),
+                            completed_at=now + timedelta(seconds=6),
+                        ),
+                        KnowledgeVersionModel(
+                            id="ver_tie_a",
+                            document_id="doc_tie",
+                            owner_id="latest_owner",
+                            source_id=None,
+                            source_text="tie-a",
+                            content_hash="5" * 64,
+                            profile_id="profile-v1",
+                            processing_config={},
+                            state="ready",
+                            error_code=None,
+                            warnings=[],
+                            chunk_count=3,
+                            created_at=same_time,
+                            completed_at=same_time,
+                        ),
+                        KnowledgeVersionModel(
+                            id="ver_tie_z",
+                            document_id="doc_tie",
+                            owner_id="latest_owner",
+                            source_id=None,
+                            source_text="tie-z",
+                            content_hash="6" * 64,
+                            profile_id="profile-v1",
+                            processing_config={},
+                            state="processing",
+                            error_code=None,
+                            warnings=[],
+                            chunk_count=0,
+                            created_at=same_time,
+                            completed_at=None,
+                        ),
+                    ]
+                )
+
+            executed_sql: list[str] = []
+
+            def _record_sql(
+                connection: Any,
+                cursor: Any,
+                statement: str,
+                parameters: Any,
+                context: Any,
+                executemany: bool,
+            ) -> None:
+                del connection, cursor, parameters, context, executemany
+                executed_sql.append(statement)
+
+            event.listen(db.engine.sync_engine, "before_cursor_execute", _record_sql)
+            try:
+                executed_sql.clear()
+                assert (
+                    await repository.list_documents("latest_owner", "kb_empty", offset=0, limit=20)
+                    == []
+                )
+                assert len(executed_sql) == 1
+                assert all("knowledge_document_versions" not in sql for sql in executed_sql)
+
+                executed_sql.clear()
+                docs = await repository.list_documents(
+                    "latest_owner", "kb_batch", offset=0, limit=20
+                )
+                version_queries = [
+                    sql for sql in executed_sql if "knowledge_document_versions" in sql
+                ]
+                assert len(executed_sql) == 2
+                assert len(version_queries) == 1
+            finally:
+                event.remove(db.engine.sync_engine, "before_cursor_execute", _record_sql)
+
+            by_id = {doc.id: doc for doc in docs}
+            assert [doc.id for doc in docs] == [
+                "doc_ready",
+                "doc_failed",
+                "doc_tie",
+                "doc_noversion",
+            ]
+            assert by_id["doc_ready"].latest_version is not None
+            assert by_id["doc_ready"].latest_version.id == "ver_ready_2"
+            assert by_id["doc_ready"].latest_version.state is DocumentState.READY
+            assert by_id["doc_ready"].latest_version.warnings == ("ocr_fallback",)
+            assert by_id["doc_ready"].latest_version.chunk_count == 6
+
+            assert by_id["doc_failed"].latest_version is not None
+            assert by_id["doc_failed"].latest_version.id == "ver_fail_2"
+            assert by_id["doc_failed"].latest_version.state is DocumentState.FAILED
+            assert by_id["doc_failed"].latest_version.error_code == "parser_failed"
+            assert by_id["doc_failed"].latest_version.warnings == ("partial_page",)
+
+            assert by_id["doc_tie"].latest_version is not None
+            assert by_id["doc_tie"].latest_version.id == "ver_tie_z"
+            assert by_id["doc_tie"].latest_version.state is DocumentState.PROCESSING
+
+            assert by_id["doc_noversion"].latest_version is None
+
+            # 逐篇核对 latest_version 与 list_versions 首位、get_document 100% 一致。
+            for doc in docs:
+                versions = await repository.list_versions("latest_owner", "kb_batch", doc.id)
+                assert versions is not None
+                expected = versions[0] if versions else None
+                assert doc.latest_version == expected
+                single = await repository.get_document("latest_owner", "kb_batch", doc.id)
+                assert single is not None
+                assert single.latest_version == expected
 
     asyncio.run(scenario())

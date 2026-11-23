@@ -8,19 +8,15 @@ import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 from typing import Any, cast
 
 import httpx2
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from integration.postgres_harness import isolated_postgres_schema
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
@@ -70,7 +66,6 @@ from domain.tool import (
 from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is not configured"),
@@ -84,27 +79,8 @@ async def _database() -> AsyncGenerator[
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-    schema = f"athena_v2_tool_e2e_{token_hex(8)}"
-    admin_engine = create_async_engine(database_url, poolclass=NullPool)
-    engine = create_async_engine(
-        database_url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"search_path": f"{schema},public"}},
-    )
-    try:
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        config = Config(str(ALEMBIC_INI))
-        config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-        config.attributes["connect_args"] = {"server_settings": {"search_path": f"{schema},public"}}
-        config.attributes["version_table_schema"] = schema
-        await asyncio.to_thread(command.upgrade, config, "head")
-        yield async_sessionmaker(engine, expire_on_commit=False), engine, admin_engine, schema
-    finally:
-        await engine.dispose()
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin_engine.dispose()
+    async with isolated_postgres_schema(database_url, prefix="athena_v2_tool_e2e") as db:
+        yield db.session_factory, db.engine, db.admin_engine, db.schema
 
 
 class _MemorySearch:

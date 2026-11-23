@@ -6,15 +6,10 @@ import asyncio
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 
 import pytest
-from alembic import command
-from alembic.config import Config
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, select, text, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.llm.model.profile import CompressionPolicyVersionModel, ModelProfileVersionModel
@@ -37,7 +32,6 @@ from domain.mcp import McpSecretError, McpSecretPurpose
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is not configured"),
@@ -53,29 +47,15 @@ def test_model_profile_migration_admin_and_runtime_credentials(
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_llm_profile_test_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            migration_config = Config(str(ALEMBIC_INI))
-            migration_config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            migration_config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, migration_config, "head")
-            async with test_engine.connect() as connection:
+        async with isolated_postgres_schema(
+            database_url, prefix="athena_v2_llm_profile_test"
+        ) as db:
+            async with db.engine.connect() as connection:
                 created_table = await connection.scalar(
                     text("SELECT to_regclass(current_schema() || '.llm_model_profile_versions')")
                 )
             assert created_table == "llm_model_profile_versions"
-            factory = async_sessionmaker(test_engine, expire_on_commit=False)
+            factory = db.session_factory
             now = datetime.now(UTC)
             async with factory() as session:
                 async with session.begin():
@@ -141,6 +121,7 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                 summary_ratio=0.1,
                 summary_token_cap=8_192,
             )
+
             class _SessionReader:
                 async def get_current_session_user(
                     self, user_id: str, session_id: str, now: datetime
@@ -181,9 +162,7 @@ def test_model_profile_migration_admin_and_runtime_credentials(
             assert max_policy.summary_token_cap == MAX_COMPRESSION_TOKEN_BUDGET
             await repository.set_enabled(actor, created.id, False)
             assert await repository.get_current_compression_policy() == max_policy
-            run_repository = SqlAlchemyRunRepository(
-                factory, SqlAlchemyMessageRepository(factory)
-            )
+            run_repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
             async with factory() as session:
                 assert await run_repository._current_compression_policy_id(session) == max_policy.id
             await repository.set_enabled(actor, created.id, True)
@@ -196,9 +175,7 @@ def test_model_profile_migration_admin_and_runtime_credentials(
             unsupported_runtime = await repository.get_runtime(unsupported.id)
             assert unsupported_runtime is not None
             assert unsupported_runtime.version.supports_tools is False
-            no_key = await repository.create(
-                actor, replace(value, name="Needs reconfiguration")
-            )
+            no_key = await repository.create(actor, replace(value, name="Needs reconfiguration"))
             async with factory() as session, session.begin():
                 profile = await session.get(ModelProfileVersionModel, no_key.id)
                 assert profile is not None
@@ -253,10 +230,5 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                     session_id="auth_llm_admin",
                 )
                 await repository.create(user_actor, value)
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())

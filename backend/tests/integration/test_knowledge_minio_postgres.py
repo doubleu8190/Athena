@@ -5,24 +5,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import subprocess
-import sys
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from secrets import token_hex
 from typing import Any, cast
 
 import pytest
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import KnowledgeJobModel, KnowledgeSourceModel
@@ -52,9 +47,11 @@ _MINIO_ENV = (
     "ATHENA_TEST_MINIO_BUCKET",
 )
 _MINIO_CONFIGURED = all(os.getenv(name) for name in _MINIO_ENV)
-BACKEND_DIR = Path(__file__).resolve().parents[2]
-ALEMBIC_INI = BACKEND_DIR / "alembic.ini"
 DB_CONNECT_ARGS = {"timeout": 8, "command_timeout": 20}
+KNOWLEDGE_JOINT_SERVER_SETTINGS = {
+    "statement_timeout": "30000",
+    "lock_timeout": "5000",
+}
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -183,72 +180,18 @@ def _key(content: bytes, *, owner: str, source_id: str) -> str:
     return f"{owner_scope}/{source_id}/{digest[:2]}/{digest}"
 
 
-def _upgrade_schema(database_url: str, schema: str) -> None:
-    child_env = os.environ.copy()
-    child_env["ATHENA_TEST_DATABASE_URL"] = database_url
-    child_env["KNOWLEDGE_TEST_ALEMBIC_INI"] = str(ALEMBIC_INI)
-    child_env["KNOWLEDGE_TEST_SCHEMA"] = schema
-    child_code = """
-import os
-from alembic import command
-from alembic.config import Config
-config = Config(os.environ['KNOWLEDGE_TEST_ALEMBIC_INI'])
-config.set_main_option(
-    'sqlalchemy.url',
-    os.environ['ATHENA_TEST_DATABASE_URL'].replace('%', '%%'),
-)
-config.attributes['connect_args'] = {
-    'timeout': 8,
-    'command_timeout': 20,
-    'server_settings': {
-        'search_path': f"{os.environ['KNOWLEDGE_TEST_SCHEMA']},public",
-        'statement_timeout': '30000',
-        'lock_timeout': '5000',
-    },
-}
-config.attributes['version_table_schema'] = os.environ['KNOWLEDGE_TEST_SCHEMA']
-command.upgrade(config, 'head')
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", child_code],
-        cwd=BACKEND_DIR,
-        env=child_env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
-    assert result.returncode == 0, "joint-test Alembic migration subprocess failed"
-
-
 @asynccontextmanager
 async def _isolated_postgres(
     database_url: str,
 ) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
-    schema = f"athena_knowledge_joint_{token_hex(8)}"
-    admin = create_async_engine(database_url, poolclass=NullPool, connect_args=DB_CONNECT_ARGS)
-    engine: AsyncEngine = create_async_engine(
+    async with isolated_postgres_schema(
         database_url,
-        poolclass=NullPool,
-        connect_args={
-            **DB_CONNECT_ARGS,
-            "server_settings": {
-                "search_path": f"{schema},public",
-                "statement_timeout": "30000",
-                "lock_timeout": "5000",
-            },
-        },
-    )
-    try:
-        async with admin.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        await asyncio.to_thread(_upgrade_schema, database_url, schema)
-        yield async_sessionmaker(engine, expire_on_commit=False)
-    finally:
-        await engine.dispose()
-        async with admin.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin.dispose()
+        prefix="athena_knowledge_joint",
+        connect_args=DB_CONNECT_ARGS,
+        server_settings=KNOWLEDGE_JOINT_SERVER_SETTINGS,
+        use_subprocess=True,
+    ) as db:
+        yield db.session_factory
 
 
 async def _seed_base(

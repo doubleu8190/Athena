@@ -285,25 +285,93 @@ def test_scanned_pdf_page_uses_ocr_and_keeps_page_locator() -> None:
 def test_real_chinese_ocr_for_image_and_scanned_pdf() -> None:
     parser = LocalDocumentParser(ocr_languages="ch")
     image_bytes = io.BytesIO()
-    _label_image().save(image_bytes, format="PNG")
+    _label_image(require_cjk=True).save(image_bytes, format="PNG")
     image_result = asyncio.run(parser.parse("sample.png", image_bytes.getvalue()))
     assert "知识检索" in image_result.blocks[0].text
 
     pdf_bytes = io.BytesIO()
-    _label_image().save(pdf_bytes, format="PDF", resolution=144)
+    _label_image(require_cjk=True).save(pdf_bytes, format="PDF", resolution=144)
     pdf_result = asyncio.run(parser.parse("scan.pdf", pdf_bytes.getvalue()))
     assert pdf_result.blocks[0].locator.page == 1
     assert "知识检索" in pdf_result.blocks[0].text
 
 
-def _label_image() -> Image.Image:
-    image = Image.new("RGB", (1300, 180), "white")
-    draw = ImageDraw.Draw(image)
+_CJK_FONT_CANDIDATES: tuple[str, ...] = (
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+)
+_FALLBACK_TTF_CANDIDATES: tuple[str, ...] = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+)
+
+
+def _load_label_font(*, require_cjk: bool = False) -> Any:
+    """按跨平台候选顺序加载 TrueType 字体；非真实中文 OCR 用例缺字体时安全回退默认字体。"""
     from PIL import ImageFont
 
-    font = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 48)
-    draw.text((20, 35), "Athena 知识检索 PostgreSQL 17", font=font, fill="black")
+    for font_path in _CJK_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(font_path, 48)
+        except OSError:
+            continue
+    if require_cjk:
+        pytest.skip("no CJK TrueType font available for real Chinese OCR test")
+    for font_path in _FALLBACK_TTF_CANDIDATES:
+        try:
+            return ImageFont.truetype(font_path, 48)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _label_image(*, require_cjk: bool = False) -> Image.Image:
+    """生成用于 OCR 解析器测试的标签图像，兼容无 macOS/中文字体的 Linux CI 环境。"""
+    image = Image.new("RGB", (1300, 180), "white")
+    draw = ImageDraw.Draw(image)
+    font = _load_label_font(require_cjk=require_cjk)
+    try:
+        draw.text((20, 35), "Athena 知识检索 PostgreSQL 17", font=font, fill="black")
+    except UnicodeEncodeError:
+        # 极端环境下若默认字体为仅支持 Latin-1 的位图字体，则回退纯 ASCII 文本以保证图像生成成功。
+        draw.text((20, 35), "Athena Knowledge Search PostgreSQL 17", font=font, fill="black")
     return image
+
+
+def test_label_image_falls_back_to_default_font_when_truetype_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无可用 TrueType 字体文件时，_label_image 应回退默认字体并产出有效 PNG；real_ocr 则跳过。"""
+    from PIL import ImageFont
+
+    real_truetype = ImageFont.truetype
+    tried_paths: list[str] = []
+
+    def _missing_disk_font(font: Any = None, *args: Any, **kwargs: Any) -> Any:
+        # 仅模拟系统磁盘字体文件缺失；保留 Pillow load_default() 内部对 BytesIO 内嵌字体的调用。
+        if isinstance(font, (str, bytes, os.PathLike)):
+            tried_paths.append(os.fsdecode(font))
+            raise OSError("cannot open resource")
+        return real_truetype(font, *args, **kwargs)
+
+    monkeypatch.setattr(ImageFont, "truetype", _missing_disk_font)
+
+    image = _label_image()
+    assert tuple(tried_paths) == _CJK_FONT_CANDIDATES + _FALLBACK_TTF_CANDIDATES
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    raw = output.getvalue()
+    assert raw.startswith(b"\x89PNG\r\n\x1a\n")
+    with Image.open(io.BytesIO(raw)) as reopened:
+        assert reopened.size == (1300, 180)
+
+    with pytest.raises(pytest.skip.Exception):
+        _label_image(require_cjk=True)
 
 
 def test_pdf_limit_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -562,8 +630,7 @@ def test_docx_skips_external_and_unsupported_vector_images(
                 data = xml.encode("utf-8")
             elif item.filename == "word/_rels/document.xml.rels":
                 rel_type = (
-                    "http://schemas.openxmlformats.org/"
-                    "officeDocument/2006/relationships/image"
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
                 )
                 xml = data.decode("utf-8").replace(
                     "</Relationships>",

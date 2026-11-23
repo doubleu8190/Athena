@@ -5,18 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from secrets import token_hex
 from uuid import uuid4
 
 import pytest
-from alembic import command
-from alembic.config import Config
-from alembic.script import ScriptDirectory
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.mcp.model import McpServerModel, McpToolModel
@@ -34,7 +29,6 @@ from domain.tool import ToolDefinition
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is not configured"),
@@ -61,29 +55,14 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
 
     async def scenario() -> None:
         suffix = token_hex(8)
-        schema = f"athena_v2_mcp_catalog_{suffix}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            migration_config = Config(str(ALEMBIC_INI))
-            migration_config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            migration_config.attributes["version_table_schema"] = schema
-            expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-            await asyncio.to_thread(command.upgrade, migration_config, "head")
+        async with isolated_postgres_schema(database_url, prefix="athena_v2_mcp_catalog") as db:
+            test_engine = db.engine
+            expected_head = db.head_revision()
             async with test_engine.connect() as connection:
                 revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             assert revision == expected_head
 
-            session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+            session_factory = db.session_factory
             now = datetime.now(UTC)
             user = User(
                 id=f"usr_mcp_{suffix}",
@@ -238,10 +217,5 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
             async with session_factory() as session:
                 assert await session.scalar(select(func.count()).select_from(McpServerModel)) == 1
                 assert await session.scalar(select(func.count()).select_from(McpToolModel)) == 1
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())

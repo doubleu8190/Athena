@@ -9,7 +9,6 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from alembic import command
 from integration.test_memory_lifecycle_support import (
     DATABASE_URL,
     HeadFixture,
@@ -476,7 +475,7 @@ def test_0027_preserves_data_projects_extract_json_and_drops_fact_schema() -> No
                 )
 
             # 精确升级至目标迁移 20261126_0027，避免后续新迁移改变 revision 断言与回滚路径。
-            await asyncio.to_thread(command.upgrade, harness.config, "20261126_0027")
+            await harness.upgrade_to("20261126_0027")
 
             async with harness.factory() as session:
                 revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
@@ -659,7 +658,7 @@ def test_0027_preserves_data_projects_extract_json_and_drops_fact_schema() -> No
                 assert parsed.result.batch_id == "batch_old"
                 assert parsed.result.run_ids == (fixture.run_ids[0],)
 
-            await asyncio.to_thread(command.downgrade, harness.config, "20261125_0026")
+            await harness.downgrade_to("20261125_0026")
             async with harness.factory() as session:
                 restored_columns = set(
                     (

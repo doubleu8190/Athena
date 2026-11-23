@@ -9,17 +9,12 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 from typing import cast
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, select, text, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
@@ -82,7 +77,6 @@ from domain.run.ports import RunRepository
 from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is not configured"),
@@ -121,24 +115,11 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_subagent_parent_ids_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "head")
-
+        async with isolated_postgres_schema(
+            database_url, prefix="athena_v2_subagent_parent_ids"
+        ) as db:
+            test_engine = db.engine
+            factory = db.session_factory
             now = datetime.now(UTC)
             async with test_engine.begin() as connection:
                 column_lengths: dict[str, int | None] = dict(
@@ -193,7 +174,6 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
                     },
                 )
 
-            factory = async_sessionmaker(test_engine, expire_on_commit=False)
             parent_run_id = f"parent_{'r' * 121}"
             child_run_id = f"child_{'c' * 122}"
             parent_tool_call_id = f"tool_{'t' * 251}"
@@ -280,11 +260,6 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
                 assert child.parent_run_id == parent_run_id
                 assert child.root_run_id == parent_run_id
                 assert child.parent_tool_call_id == parent_tool_call_id
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())
 
@@ -296,42 +271,31 @@ def test_subagent_parent_id_width_migration_repairs_old_0029_layout() -> None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_subagent_parent_widths_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
+        async with isolated_postgres_schema(
             database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
+            prefix="athena_v2_subagent_parent_widths",
+            revision="20261128_0029",
+        ) as db:
+            test_engine = db.engine
 
-        async def _read_widths() -> dict[str, int | None]:
-            """读取三个父 Run 关联列在真实 PostgreSQL 中的宽度。"""
-            async with test_engine.connect() as connection:
-                return dict(
-                    (
-                        await connection.execute(
-                            text(
-                                "SELECT column_name, character_maximum_length "
-                                "FROM information_schema.columns "
-                                "WHERE table_schema = current_schema() "
-                                "AND table_name = 'runs' "
-                                "AND column_name IN "
-                                "('parent_run_id','root_run_id','parent_tool_call_id')"
+            async def _read_widths() -> dict[str, int | None]:
+                """读取三个父 Run 关联列在真实 PostgreSQL 中的宽度。"""
+                async with test_engine.connect() as connection:
+                    return dict(
+                        (
+                            await connection.execute(
+                                text(
+                                    "SELECT column_name, character_maximum_length "
+                                    "FROM information_schema.columns "
+                                    "WHERE table_schema = current_schema() "
+                                    "AND table_name = 'runs' "
+                                    "AND column_name IN "
+                                    "('parent_run_id','root_run_id','parent_tool_call_id')"
+                                )
                             )
-                        )
-                    ).all()
-                )
+                        ).all()
+                    )
 
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "20261128_0029")
             async with test_engine.begin() as connection:
                 await connection.execute(
                     text(
@@ -347,14 +311,14 @@ def test_subagent_parent_id_width_migration_repairs_old_0029_layout() -> None:
                 "parent_tool_call_id": 64,
             }
 
-            await asyncio.to_thread(command.upgrade, config, "head")
+            await db.upgrade_to("head")
             assert await _read_widths() == {
                 "parent_run_id": 128,
                 "root_run_id": 128,
                 "parent_tool_call_id": 256,
             }
 
-            await asyncio.to_thread(command.downgrade, config, "20261128_0029")
+            await db.downgrade_to("20261128_0029")
             assert await _read_widths() == {
                 "parent_run_id": 128,
                 "root_run_id": 128,
@@ -373,17 +337,12 @@ def test_subagent_parent_id_width_migration_repairs_old_0029_layout() -> None:
                 RuntimeError,
                 match="subagent_parent_id_width_unsafe:parent_run_id:256>128",
             ):
-                await asyncio.to_thread(command.upgrade, config, "head")
+                await db.upgrade_to("head")
             assert await _read_widths() == {
                 "parent_run_id": 256,
                 "root_run_id": 64,
                 "parent_tool_call_id": 256,
             }
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())
 
@@ -395,23 +354,12 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_run_test_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
+        async with isolated_postgres_schema(
             database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "20261110_0011")
+            prefix="athena_v2_run_test",
+            revision="20261110_0011",
+        ) as db:
+            test_engine = db.engine
             now = datetime.now(UTC)
             async with test_engine.begin() as connection:
                 await connection.execute(
@@ -457,8 +405,8 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         "now": now,
                     },
                 )
-            await asyncio.to_thread(command.upgrade, config, "head")
-            factory = async_sessionmaker(test_engine, expire_on_commit=False)
+            await db.upgrade_to("head")
+            factory = db.session_factory
             async with factory() as session:
                 legacy = await session.get(ConversationMessageModel, "msg_legacy")
                 assert legacy is not None
@@ -2053,12 +2001,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                     )
             downgrade_error = "Cannot restore uq_conversation_messages_run_role"
             with pytest.raises(RuntimeError, match=downgrade_error):
-                await asyncio.to_thread(command.downgrade, config, "20261110_0011")
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
+                await db.downgrade_to("20261110_0011")
 
     asyncio.run(scenario())
 
@@ -2070,23 +2013,12 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_approval_migration_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
+        async with isolated_postgres_schema(
             database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, config, "20261113_0014")
+            prefix="athena_v2_approval_migration",
+            revision="20261113_0014",
+        ) as db:
+            test_engine = db.engine
             now = datetime.now(UTC)
             async with test_engine.begin() as connection:
                 await connection.execute(
@@ -2246,7 +2178,7 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                     ),
                     {"schema": json.dumps({"type": "object"}), "now": now},
                 )
-            await asyncio.to_thread(command.upgrade, config, "head")
+            await db.upgrade_to("head")
             async with test_engine.connect() as connection:
                 tool_row = (
                     await connection.execute(
@@ -2317,7 +2249,7 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
             assert run_snapshot.model_config_version_id == "llmprof_approval_migration"
             assert run_snapshot.compression_policy_version_id == "cmpol_approval_migration"
             assert run_row.status == "completed"
-            factory = async_sessionmaker(test_engine, expire_on_commit=False)
+            factory = db.session_factory
             messages = SqlAlchemyMessageRepository(factory)
             repository = SqlAlchemyRunRepository(factory, messages)
             async with factory() as session, session.begin():
@@ -2336,10 +2268,5 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                 with pytest.raises(RunStateError, match="llm_default_profile_unavailable"):
                     await repository._lock_default_profile_id(session)
                 assert await repository._current_compression_policy_id(session) is None
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())

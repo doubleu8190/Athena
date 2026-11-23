@@ -5,23 +5,16 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime
-from pathlib import Path
-from secrets import token_hex
 
 import pytest
-from alembic import command
-from alembic.config import Config
-from alembic.script import ScriptDirectory
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import UserModel
 from adapter.project.repository import SqlAlchemyProjectRepository
 from domain.project import Project
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -38,32 +31,11 @@ def test_repository_round_trip_after_real_alembic_migration() -> None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        schema = f"athena_v2_test_{token_hex(8)}"
-        admin_engine = create_async_engine(database_url, poolclass=NullPool)
-        test_engine = create_async_engine(
-            database_url,
-            poolclass=NullPool,
-            connect_args={"server_settings": {"search_path": f"{schema},public"}},
-        )
-        try:
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-            migration_config = Config(str(ALEMBIC_INI))
-            migration_config.set_main_option(
-                "sqlalchemy.url",
-                database_url.replace("%", "%%"),
-            )
-            migration_config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            migration_config.attributes["version_table_schema"] = schema
-            await asyncio.to_thread(command.upgrade, migration_config, "head")
-            expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-
-            session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+        async with isolated_postgres_schema(database_url, prefix="athena_v2_test") as db:
+            expected_head = db.head_revision()
+            session_factory = db.session_factory
             repository = SqlAlchemyProjectRepository(session_factory)
-            async with test_engine.connect() as connection:
+            async with db.engine.connect() as connection:
                 revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             assert revision == expected_head
 
@@ -107,10 +79,5 @@ def test_repository_round_trip_after_real_alembic_migration() -> None:
                 is True
             )
             assert await repository.get("user_1", project.id) is None
-        finally:
-            await test_engine.dispose()
-            async with admin_engine.begin() as connection:
-                await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            await admin_engine.dispose()
 
     asyncio.run(scenario())

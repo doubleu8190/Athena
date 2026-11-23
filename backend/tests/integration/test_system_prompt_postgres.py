@@ -10,23 +10,18 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from secrets import token_hex
 from typing import Any, cast
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
+from integration.postgres_harness import IsolatedPostgresSchema, isolated_postgres_schema
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.llm.model.profile import (
@@ -84,7 +79,6 @@ from domain.system_prompt import (
 )
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is not configured"),
@@ -92,47 +86,17 @@ pytestmark = [
 
 
 @asynccontextmanager
-async def _schema() -> AsyncIterator[
-    tuple[
-        async_sessionmaker[AsyncSession],
-        Config,
-        str,
-        AsyncEngine,
-        AsyncEngine,
-    ]
-]:
+async def _schema(*, revision: str | None = "head") -> AsyncIterator[IsolatedPostgresSchema]:
     """创建隔离 schema 和迁移配置，结束时只删除本测试 schema。"""
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-    schema = f"athena_system_prompt_{token_hex(8)}"
-    admin_engine = create_async_engine(database_url, poolclass=NullPool)
-    engine = create_async_engine(
+    async with isolated_postgres_schema(
         database_url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"search_path": f"{schema},public"}},
-    )
-    config = Config(str(ALEMBIC_INI))
-    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-    config.attributes["connect_args"] = {
-        "server_settings": {"search_path": f"{schema},public"}
-    }
-    config.attributes["version_table_schema"] = schema
-    try:
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        yield (
-            async_sessionmaker(engine, expire_on_commit=False),
-            config,
-            schema,
-            engine,
-            admin_engine,
-        )
-    finally:
-        await engine.dispose()
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin_engine.dispose()
+        prefix="athena_system_prompt",
+        revision=revision,
+    ) as db:
+        yield db
 
 
 def _auth_context(
@@ -498,8 +462,8 @@ def test_system_prompt_migration_backfills_legacy_run_and_summary() -> None:
     """从旧 revision 升级时初始化两类原文并回填既有 Run 和摘要。"""
 
     async def scenario() -> None:
-        async with _schema() as (_factory, config, schema, engine, _admin_engine):
-            await asyncio.to_thread(command.upgrade, config, "20261115_0016")
+        async with _schema(revision="20261115_0016") as db:
+            engine = db.engine
             now = datetime.now(UTC)
             async with engine.begin() as connection:
                 await connection.execute(
@@ -588,7 +552,7 @@ def test_system_prompt_migration_backfills_legacy_run_and_summary() -> None:
                     {"now": now},
                 )
 
-            await asyncio.to_thread(command.upgrade, config, "head")
+            await db.upgrade_to("head")
             async with engine.connect() as connection:
                 run_prompts = (
                     await connection.execute(
@@ -611,10 +575,7 @@ def test_system_prompt_migration_backfills_legacy_run_and_summary() -> None:
                 settings: dict[str, str] = dict(
                     (
                         await connection.execute(
-                            text(
-                                "SELECT kind, current_version_id "
-                                "FROM system_prompt_settings"
-                            )
+                            text("SELECT kind, current_version_id FROM system_prompt_settings")
                         )
                     ).all()
                 )
@@ -664,8 +625,8 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
     """真实 PostgreSQL 验证 CAS、回滚、同正文恢复、权限和 Run 创建绑定。"""
 
     async def scenario() -> None:
-        async with _schema() as (factory, config, _schema_name, _engine, _admin_engine):
-            await asyncio.to_thread(command.upgrade, config, "head")
+        async with _schema() as db:
+            factory = db.session_factory
             now = datetime.now(UTC)
             admin_one, admin_two, _ = await _seed_admins(factory, now)
             await _seed_session_and_model(
@@ -718,9 +679,7 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
                 ),
                 return_exceptions=True,
             )
-            winners = [
-                item for item in race_results if isinstance(item, SystemPromptVersion)
-            ]
+            winners = [item for item in race_results if isinstance(item, SystemPromptVersion)]
             conflicts = [
                 item for item in race_results if isinstance(item, SystemPromptConflictError)
             ]
@@ -731,9 +690,7 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
 
             prompt_repository_module = cast(
                 Any,
-                importlib.import_module(
-                    "adapter.system_prompt.repository.system_prompt"
-                ),
+                importlib.import_module("adapter.system_prompt.repository.system_prompt"),
             )
 
             original_new_id = prompt_repository_module.new_id
@@ -773,9 +730,7 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
             assert restored_same_content.content == initial.content
             assert restored_same_content.restored_from_version_id == initial.id
 
-            compression_initial = await repository.get_current(
-                SystemPromptKind.COMPRESSION
-            )
+            compression_initial = await repository.get_current(SystemPromptKind.COMPRESSION)
             assert compression_initial is not None
             with pytest.raises(SystemPromptNotFoundError):
                 await repository.restore(
@@ -909,6 +864,7 @@ def test_system_prompt_repository_cas_restore_rollback_and_run_bindings(
                     ),
                     created_at=now + timedelta(seconds=11),
                 )
+
     asyncio.run(scenario())
 
 
@@ -916,8 +872,8 @@ def test_waiting_run_resumes_with_original_prompts_and_new_run_uses_new_versions
     """跨 Worker 执行与澄清恢复时，实际请求和摘要继续使用 Run 创建时绑定的正文。"""
 
     async def scenario() -> None:
-        async with _schema() as (factory, config, _schema_name, _engine, _admin_engine):
-            await asyncio.to_thread(command.upgrade, config, "head")
+        async with _schema() as db:
+            factory = db.session_factory
             now = datetime.now(UTC)
             admin, _, _ = await _seed_admins(factory, now)
             session_id = "ses_prompt_closure"
@@ -936,9 +892,7 @@ def test_waiting_run_resumes_with_original_prompts_and_new_run_uses_new_versions
 
             prompt_repository = SqlAlchemySystemPromptRepository(factory)
             main_a = await prompt_repository.get_current(SystemPromptKind.MAIN)
-            compression_a = await prompt_repository.get_current(
-                SystemPromptKind.COMPRESSION
-            )
+            compression_a = await prompt_repository.get_current(SystemPromptKind.COMPRESSION)
             assert main_a is not None and compression_a is not None
 
             submit_repository = SqlAlchemyRunRepository(

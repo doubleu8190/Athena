@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from secrets import token_hex
 
-from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from integration.postgres_harness import IsolatedPostgresSchema, isolated_postgres_schema
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.llm.model.profile import DefaultModelProfileModel, ModelProfileVersionModel
@@ -39,7 +34,6 @@ from domain.memory.lifecycle import (
 from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +43,15 @@ class DatabaseHarness:
     factory: async_sessionmaker[AsyncSession]
     config: Config
     schema: str
+    _isolated: IsolatedPostgresSchema
+
+    async def upgrade_to(self, target_revision: str = "head") -> None:
+        """在当前隔离 schema 上升级至目标 revision。"""
+        await self._isolated.upgrade_to(target_revision)
+
+    async def downgrade_to(self, target_revision: str) -> None:
+        """在当前隔离 schema 上降级至目标 revision。"""
+        await self._isolated.downgrade_to(target_revision)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,31 +74,18 @@ async def isolated_database(*, revision: str = "head") -> AsyncIterator[Database
     database_url = DATABASE_URL
     if database_url is None:
         raise RuntimeError("ATHENA_TEST_DATABASE_URL is required")
-    schema = f"athena_v2_memory_lifecycle_{token_hex(6)}"
-    admin = create_async_engine(database_url, poolclass=NullPool)
-    engine = create_async_engine(
+    async with isolated_postgres_schema(
         database_url,
-        poolclass=NullPool,
-        connect_args={"server_settings": {"search_path": f"{schema},public"}},
-    )
-    try:
-        async with admin.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        config = Config(str(ALEMBIC_INI))
-        config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-        config.attributes["connect_args"] = {"server_settings": {"search_path": f"{schema},public"}}
-        config.attributes["version_table_schema"] = schema
-        await asyncio.to_thread(command.upgrade, config, revision)
+        prefix="athena_v2_memory_lifecycle",
+        revision=revision,
+        token_bytes=6,
+    ) as db:
         yield DatabaseHarness(
-            factory=async_sessionmaker(engine, expire_on_commit=False),
-            config=config,
-            schema=schema,
+            factory=db.session_factory,
+            config=db.alembic_config,
+            schema=db.schema,
+            _isolated=db,
         )
-    finally:
-        await engine.dispose()
-        async with admin.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin.dispose()
 
 
 async def seed_head_fixture(

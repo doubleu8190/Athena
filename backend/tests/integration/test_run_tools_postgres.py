@@ -9,21 +9,17 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from secrets import token_hex
 from types import SimpleNamespace
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from integration.llm_fixtures import encrypted_llm_key_fields
+from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.file.model import SessionFileModel
@@ -107,7 +103,6 @@ from domain.tool import (
 )
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[3] / "backend" / "alembic.ini"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is not configured"),
@@ -131,43 +126,24 @@ async def _database(
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-    schema = f"athena_v2_tool_test_{token_hex(8)}"
-    admin_engine = create_async_engine(database_url, poolclass=NullPool)
-    engine_kwargs: dict[str, object] = {
-        "connect_args": {"server_settings": {"search_path": f"{schema},public"}},
-    }
-    if pool_size is None:
-        engine_kwargs["poolclass"] = NullPool
-    else:
-        engine_kwargs.update(
-            {
-                "pool_size": pool_size,
-                "max_overflow": 0,
-                "pool_timeout": 0.5,
-            }
-        )
-    engine = create_async_engine(database_url, **engine_kwargs)
-    try:
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        config = Config(str(ALEMBIC_INI))
-        config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-        config.attributes["connect_args"] = {"server_settings": {"search_path": f"{schema},public"}}
-        config.attributes["version_table_schema"] = schema
-        await asyncio.to_thread(command.upgrade, config, "head")
-        yield async_sessionmaker(engine, expire_on_commit=False), engine, admin_engine, schema
-    finally:
-        await engine.dispose()
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin_engine.dispose()
+    async with isolated_postgres_schema(
+        database_url,
+        prefix="athena_v2_tool_test",
+        pool_size=pool_size,
+    ) as db:
+        yield db.session_factory, db.engine, db.admin_engine, db.schema
 
 
 def test_0023_round_trip_removes_only_online_maintenance_tables_in_isolated_schema() -> None:
     """只在隔离 schema 中验证 0023 的 downgrade 与再次 upgrade。"""
+    database_url = DATABASE_URL
+    if database_url is None:
+        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
-        async with _database() as (_factory, engine, _admin, schema):
+        async with isolated_postgres_schema(database_url, prefix="athena_v2_tool_test") as db:
+            engine = db.engine
+            schema = db.schema
             async with engine.connect() as connection:
                 for table_name in (
                     "file_object_publications",
@@ -182,17 +158,7 @@ def test_0023_round_trip_removes_only_online_maintenance_tables_in_isolated_sche
                     )
                     assert exists is None
 
-            config = Config(str(ALEMBIC_INI))
-            config.set_main_option(
-                "sqlalchemy.url",
-                (DATABASE_URL or "").replace("%", "%%"),
-            )
-            config.attributes["connect_args"] = {
-                "server_settings": {"search_path": f"{schema},public"}
-            }
-            config.attributes["version_table_schema"] = schema
-
-            await asyncio.to_thread(command.downgrade, config, "20261121_0022")
+            await db.downgrade_to("20261121_0022")
             async with engine.connect() as connection:
                 for table_name in (
                     "file_object_publications",
@@ -214,7 +180,7 @@ def test_0023_round_trip_removes_only_online_maintenance_tables_in_isolated_sche
                 )
                 assert cursor_generation == 0
 
-            await asyncio.to_thread(command.upgrade, config, "20261122_0023")
+            await db.upgrade_to("20261122_0023")
             async with engine.connect() as connection:
                 for table_name in (
                     "file_object_publications",
@@ -1056,28 +1022,22 @@ def test_skill_artifacts_messages_and_execution_completion_are_one_transaction()
             assert call.status == ToolCallStatus.COMPLETED.value
             assert call.result_message_id == command.result_message.id
             assert [item.id for item in files] == [item.id for item in artifacts]
-            assert [item.size_bytes for item in files] == [
-                item.size_bytes for item in artifacts
-            ]
+            assert [item.size_bytes for item in files] == [item.size_bytes for item in artifacts]
             assert execution is not None
             assert execution.status == SkillExecutionStatus.SUCCEEDED.value
-            assert [
-                item["file_id"] for item in execution.result_artifacts
-            ] == [item.id for item in artifacts]
+            assert [item["file_id"] for item in execution.result_artifacts] == [
+                item.id for item in artifacts
+            ]
             assert result is not None and result_count == 1
             assert delivery is not None
             delivery_message = conversation_to_domain(delivery)
             assert delivery_message.role is ConversationRole.ASSISTANT
             assert tuple(
-                part.file_id
-                for part in delivery_message.parts
-                if isinstance(part, FileRefPart)
+                part.file_id for part in delivery_message.parts if isinstance(part, FileRefPart)
             ) == tuple(item.id for item in artifacts)
             result_message = execution_to_domain(result)
             result_part = next(
-                part
-                for part in result_message.parts
-                if isinstance(part, ToolResultPart)
+                part for part in result_message.parts if isinstance(part, ToolResultPart)
             )
             assert result_part.artifacts == tuple(
                 ArtifactFileRef(
@@ -1621,9 +1581,7 @@ def _batch_command(
                 record_id=f"record_{suffix}_{ordinal}",
                 tool_call_id=call_id,
                 model_name=name,
-                tool_id=(
-                    "builtin_risky_tool" if name == "risky_tool" else "builtin_safe_tool"
-                ),
+                tool_id=("builtin_risky_tool" if name == "risky_tool" else "builtin_safe_tool"),
                 tool_kind=ToolKind.BUILTIN,
                 requires_approval=name == "risky_tool",
             )
@@ -1684,9 +1642,7 @@ def test_tool_approval_batch_barrier_resume_and_context_order_are_atomic() -> No
     async def scenario() -> None:
         async with _database() as (factory, _engine, _admin, _schema):
             owner_id, _ = await _seed_owner_and_profile(factory, suffix="approval")
-            repository = SqlAlchemyRunRepository(
-                factory, SqlAlchemyMessageRepository(factory)
-            )
+            repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
             lease = await _running_run(
                 repository,
                 factory,
@@ -1709,9 +1665,7 @@ def test_tool_approval_batch_barrier_resume_and_context_order_are_atomic() -> No
                 )
             )
             assert begun.waiting_for_approval is True
-            waiting = await repository.get(
-                lease.run.session_id, owner_id, lease.run.id
-            )
+            waiting = await repository.get(lease.run.session_id, owner_id, lease.run.id)
             assert waiting is not None and waiting.status is RunStatus.WAITING_FOR_APPROVAL
             assert [call.record.status for call in begun.batch.calls] == [
                 ToolCallStatus.APPROVED,
@@ -1753,20 +1707,14 @@ def test_tool_approval_batch_barrier_resume_and_context_order_are_atomic() -> No
                     select(RunRequestModel).where(
                         RunRequestModel.owner_id == owner_id,
                         RunRequestModel.session_id == lease.run.session_id,
-                        RunRequestModel.operation
-                        == RunRequestOperation.DECIDE_TOOL_APPROVAL.value,
+                        RunRequestModel.operation == RunRequestOperation.DECIDE_TOOL_APPROVAL.value,
                         RunRequestModel.request_id == replay_request_id,
                     )
                 )
             assert replay_request is not None
             assert replay_request.fingerprint == "2" * 64
-            assert (
-                RunRequestResult.model_validate(replay_request.result).run_id
-                == lease.run.id
-            )
-            with pytest.raises(
-                RunConflictError, match="run_request_id_conflict"
-            ):
+            assert RunRequestResult.model_validate(replay_request.result).run_id == lease.run.id
+            with pytest.raises(RunConflictError, match="run_request_id_conflict"):
                 await repository.decide_tool_approval(
                     replace(
                         first,
@@ -1847,22 +1795,14 @@ def test_tool_approval_batch_barrier_resume_and_context_order_are_atomic() -> No
                 lease.run.session_id, owner_id, lease.run.id
             )
             assert context is not None
-            execution = [
-                message
-                for message in context
-                if isinstance(message, ExecutionMessage)
-            ]
+            execution = [message for message in context if isinstance(message, ExecutionMessage)]
             assert isinstance(execution[0], ExecutionMessage)
             assert [
-                part.tool_call_id
-                for part in execution[0].parts
-                if isinstance(part, ToolCallPart)
+                part.tool_call_id for part in execution[0].parts if isinstance(part, ToolCallPart)
             ] == ["call_safe", "call_risky"]
             result_ids = [
                 next(
-                    part.tool_call_id
-                    for part in message.parts
-                    if isinstance(part, ToolResultPart)
+                    part.tool_call_id for part in message.parts if isinstance(part, ToolResultPart)
                 )
                 for message in execution[1:]
             ]
@@ -1889,9 +1829,7 @@ def test_concurrent_last_approval_decision_queues_once_and_cancel_closes_pending
     async def scenario() -> None:
         async with _database() as (factory, _engine, _admin, _schema):
             owner_id, _ = await _seed_owner_and_profile(factory, suffix="approval-race")
-            repository = SqlAlchemyRunRepository(
-                factory, SqlAlchemyMessageRepository(factory)
-            )
+            repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
             lease = await _running_run(
                 repository,
                 factory,
@@ -1939,9 +1877,10 @@ def test_concurrent_last_approval_decision_queues_once_and_cancel_closes_pending
                 ),
             )
             assert all(item is not None for item in decisions)
-            assert sorted(
-                item.status.value for item in decisions if item is not None
-            ) == ["queued", "waiting_for_approval"]
+            assert sorted(item.status.value for item in decisions if item is not None) == [
+                "queued",
+                "waiting_for_approval",
+            ]
             final = await repository.get(lease.run.session_id, owner_id, lease.run.id)
             assert final is not None and final.status is RunStatus.QUEUED
             async with factory() as session:
@@ -1959,9 +1898,7 @@ def test_concurrent_last_approval_decision_queues_once_and_cancel_closes_pending
             assert resumed_events == 1
             async with factory() as session:
                 rejected = await session.scalar(
-                    select(RunToolCallModel).where(
-                        RunToolCallModel.id == pending[1].call_id
-                    )
+                    select(RunToolCallModel).where(RunToolCallModel.id == pending[1].call_id)
                 )
             assert rejected is not None
             assert rejected.status == "failed"
@@ -1978,17 +1915,13 @@ def test_concurrent_last_approval_decision_queues_once_and_cancel_closes_pending
                 for part in message.parts
                 if isinstance(part, ToolResultPart) and part.output is not None
             ]
-            assert any(
-                outcome.code == "tool_approval_denied" for outcome in denied_results
-            )
+            assert any(outcome.code == "tool_approval_denied" for outcome in denied_results)
             # 已决定的调用不能被后续相反决策覆盖。
             decided = decisions[0]
             assert decided is not None
             async with factory() as session:
                 row = await session.scalar(
-                    select(RunToolCallModel).where(
-                        RunToolCallModel.id == pending[0].call_id
-                    )
+                    select(RunToolCallModel).where(RunToolCallModel.id == pending[0].call_id)
                 )
             assert row is not None and row.approval_decision is not None
             opposite = (
@@ -2442,9 +2375,7 @@ def test_pool_size_one_maintenance_imports_and_publishes_without_nested_connecti
             )
             async with factory() as session, session.begin():
                 await session.execute(
-                    update(UserModel)
-                    .where(UserModel.id == owner_id)
-                    .values(role="admin")
+                    update(UserModel).where(UserModel.id == owner_id).values(role="admin")
                 )
                 session.add(
                     AuthSessionModel(

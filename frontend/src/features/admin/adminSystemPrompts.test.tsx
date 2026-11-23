@@ -84,6 +84,13 @@ function installSimplePromptFetch(main: SystemPromptVersion) {
         if (url.pathname.endsWith("/auth/me")) {
           return jsonResponse(TEST_ADMIN);
         }
+        if (url.pathname.endsWith("/auth/providers")) {
+          return jsonResponse({
+            feishu_enabled: false,
+            local_login_enabled: true,
+            mock_enabled: false,
+          });
+        }
         if (isCurrentPath(url, "main")) {
           return jsonResponse(main);
         }
@@ -1422,11 +1429,17 @@ describe("管理员系统提示词页", () => {
     });
 
     expect(
-      await screen.findByRole("heading", { name: "欢迎回来" }),
+      await screen.findByRole("heading", { name: "登录工作台" }),
     ).toBeInTheDocument();
     await waitFor(() => {
-      expect(app.getLocation().pathname).toBe("/login");
+      expect(app.getLocation()).toEqual({
+        pathname: "/login",
+        search: "?reason=expired",
+      });
     });
+    expect(
+      screen.getByText("登录状态已过期或账号权限已变更，请重新登录。"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", {
         name: "离开系统提示词页面？",

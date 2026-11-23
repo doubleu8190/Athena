@@ -13,14 +13,13 @@ import type {
   SkillAdminDetails,
   SkillVersion,
 } from "../features/skills/model";
+import { makeSuperAdmin } from "./fixtures";
 
-export const TEST_ADMIN: User = {
-  created_at: "2026-11-01T00:00:00Z",
+export const TEST_ADMIN: User = makeSuperAdmin({
   display_name: "管理员",
   email: "admin@example.com",
   id: "admin-1",
-  role: "admin",
-};
+});
 
 export function makeModelProfile(
   overrides: Partial<ModelProfile> & Pick<ModelProfile, "id" | "name">,

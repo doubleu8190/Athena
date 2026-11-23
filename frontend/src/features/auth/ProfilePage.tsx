@@ -2,16 +2,13 @@ import { useState, type FormEvent } from "react";
 
 import { authErrorMessage } from "./errorMessages";
 import { useAuth } from "./AuthProvider";
+import { getUserDisplayName, getUserRoleLabel } from "./model";
 import {
   useChangePasswordMutation,
   useRefreshAuthenticatedUserMutation,
   useUpdateCurrentUserMutation,
 } from "./useAuthMutations";
 import { validateDisplayName, validatePassword } from "./validation";
-
-function getDisplayName(displayName: string | null, email: string): string {
-  return displayName?.trim() || email.split("@")[0] || "Athena 用户";
-}
 
 export function ProfilePage() {
   const { user } = useAuth();
@@ -128,8 +125,13 @@ export function ProfilePage() {
             <h2 id="profile-info-title">账号信息</h2>
           </div>
           <span className="profile-avatar" aria-hidden="true">
-            {Array.from(getDisplayName(displayName, user.email))[0]?.toUpperCase() ??
-              "A"}
+            {Array.from(
+              getUserDisplayName({
+                display_name: displayName,
+                email: user.email,
+                employee_no: user.employee_no,
+              }),
+            )[0]?.toUpperCase() ?? "A"}
           </span>
         </div>
         <form
@@ -145,11 +147,11 @@ export function ProfilePage() {
               onChange={(event) => setDisplayName(event.target.value)}
               value={displayName}
             />
-            <small>清空后将使用邮箱前缀作为显示名。</small>
+            <small>清空后将自动回退使用企业邮箱前缀或工号。</small>
           </label>
           <dl className="profile-readonly-grid">
-            <div><dt>邮箱</dt><dd>{user.email}</dd></div>
-            <div><dt>角色</dt><dd>{user.role === "admin" ? "管理员" : "普通用户"}</dd></div>
+            <div><dt>邮箱</dt><dd>{user.email ?? "未绑定企业邮箱"}</dd></div>
+            <div><dt>角色</dt><dd>{getUserRoleLabel(user.role)}</dd></div>
             <div><dt>注册时间</dt><dd>{new Date(user.created_at).toLocaleString("zh-CN")}</dd></div>
           </dl>
           {displayError ? (

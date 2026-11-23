@@ -103,15 +103,21 @@ function emptySessions(url: URL): Response {
   );
 }
 
+const LOCAL_ONLY_PROVIDERS = {
+  feishu_enabled: false,
+  local_login_enabled: true,
+  mock_enabled: false,
+};
+
 async function loginAsB(
   user: ReturnType<typeof userEvent.setup>,
 ) {
-  await user.type(screen.getByLabelText("工作邮箱"), USER_B.email);
+  await user.type(screen.getByLabelText("工作邮箱"), USER_B.email ?? "");
   await user.type(
     screen.getByLabelText("密码"),
     "correct-horse-battery",
   );
-  await user.click(screen.getByRole("button", { name: "进入 Athena" }));
+  await user.click(screen.getByRole("button", { name: "使用邮箱登录" }));
 }
 
 async function waitForStableLoginScreen(
@@ -120,12 +126,12 @@ async function waitForStableLoginScreen(
   await waitFor(() => {
     expect(app.getLocation().pathname).toBe("/login");
     expect(
-      screen.getByRole("heading", { name: "欢迎回来" }),
+      screen.getByRole("heading", { name: "登录工作台" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("工作邮箱")).toBeEnabled();
     expect(screen.getByLabelText("密码")).toBeEnabled();
     expect(
-      screen.getByRole("button", { name: "进入 Athena" }),
+      screen.getByRole("button", { name: "使用邮箱登录" }),
     ).toBeEnabled();
   });
 }
@@ -137,7 +143,7 @@ describe("认证身份缓存隔离", () => {
     const updatedUser: User = {
       ...USER_A,
       display_name: "权限复核后的名字",
-      role: "user",
+      role: "member",
     };
     vi.stubGlobal(
       "fetch",
@@ -176,13 +182,13 @@ describe("认证身份缓存隔离", () => {
     await screen.findByText("显示名已更新。");
     expect(
       app.client.getQueryData<User>(authKeys.currentUser),
-    ).toMatchObject({ display_name: "权限复核后的名字", role: "user" });
+    ).toMatchObject({ display_name: "权限复核后的名字", role: "member" });
 
     oldMeGate.resolve(jsonResponse(USER_A));
     await waitFor(() => {
       expect(app.client.getQueryData<User>(authKeys.currentUser)).toMatchObject({
         display_name: "权限复核后的名字",
-        role: "user",
+        role: "member",
       });
     });
   });
@@ -206,6 +212,9 @@ describe("认证身份缓存隔离", () => {
         }
         if (url.pathname.endsWith("/auth/logout")) {
           return new Response(null, { status: 204 });
+        }
+        if (url.pathname.endsWith("/auth/providers")) {
+          return jsonResponse(LOCAL_ONLY_PROVIDERS);
         }
         if (url.pathname.endsWith("/auth/login")) {
           return jsonResponse(USER_B);
@@ -268,7 +277,7 @@ describe("认证身份缓存隔离", () => {
   });
 
   it("显示名刷新失败不会解除管理员权限复核拒止", async () => {
-    const adminUser: User = { ...USER_A, role: "admin" };
+    const adminUser: User = { ...USER_A, role: "super_admin" };
     let authMeCalls = 0;
     vi.stubGlobal(
       "fetch",
@@ -333,6 +342,9 @@ describe("认证身份缓存隔离", () => {
         }
         if (url.pathname.endsWith("/auth/logout")) {
           return new Response(null, { status: 204 });
+        }
+        if (url.pathname.endsWith("/auth/providers")) {
+          return jsonResponse(LOCAL_ONLY_PROVIDERS);
         }
         if (url.pathname.endsWith("/auth/login")) {
           return jsonResponse(USER_B);
@@ -599,6 +611,9 @@ describe("认证身份缓存隔离", () => {
           identity = null;
           return new Response(null, { status: 204 });
         }
+        if (url.pathname.endsWith("/auth/providers")) {
+          return jsonResponse(LOCAL_ONLY_PROVIDERS);
+        }
         if (url.pathname.endsWith("/auth/login")) {
           identity = USER_B;
           return jsonResponse(USER_B);
@@ -645,7 +660,7 @@ describe("认证身份缓存隔离", () => {
     await loginAsB(user);
     await user.click(await screen.findByRole("button", { name: "账户菜单" }));
     expect(
-      await screen.findAllByText(USER_B.display_name ?? USER_B.email),
+      await screen.findAllByText(USER_B.display_name ?? USER_B.email ?? ""),
     ).not.toHaveLength(0);
     await waitFor(() => {
       expect(bProjectsStarted).toBe(true);
@@ -686,6 +701,9 @@ describe("认证身份缓存隔离", () => {
         if (url.pathname.endsWith("/auth/logout")) {
           identity = null;
           return new Response(null, { status: 204 });
+        }
+        if (url.pathname.endsWith("/auth/providers")) {
+          return jsonResponse(LOCAL_ONLY_PROVIDERS);
         }
         if (url.pathname.endsWith("/auth/login")) {
           identity = USER_B;
@@ -774,6 +792,9 @@ describe("认证身份缓存隔离", () => {
           if (url.pathname.endsWith("/auth/logout")) {
             identity = null;
             return new Response(null, { status: 204 });
+          }
+          if (url.pathname.endsWith("/auth/providers")) {
+            return jsonResponse(LOCAL_ONLY_PROVIDERS);
           }
           if (url.pathname.endsWith("/auth/login")) {
             identity = USER_B;
@@ -866,6 +887,9 @@ describe("认证身份缓存隔离", () => {
             identity = null;
             return new Response(null, { status: 204 });
           }
+          if (url.pathname.endsWith("/auth/providers")) {
+            return jsonResponse(LOCAL_ONLY_PROVIDERS);
+          }
           if (url.pathname.endsWith("/auth/login")) {
             identity = USER_B;
             return jsonResponse(USER_B);
@@ -957,6 +981,9 @@ describe("认证身份缓存隔离", () => {
             identity = null;
             return new Response(null, { status: 204 });
           }
+          if (url.pathname.endsWith("/auth/providers")) {
+            return jsonResponse(LOCAL_ONLY_PROVIDERS);
+          }
           if (url.pathname.endsWith("/auth/login")) {
             identity = USER_B;
             return jsonResponse(USER_B);
@@ -1017,11 +1044,11 @@ describe("认证身份缓存隔离", () => {
       screen.getAllByText(PROJECT_FOR_B.name),
     ).not.toHaveLength(0);
     expect(
-      screen.queryByRole("heading", { name: "欢迎回来" }),
+      screen.queryByRole("heading", { name: "登录工作台" }),
     ).not.toBeInTheDocument();
   });
 
-  it("当前身份收到 401 时清空业务缓存并跳转登录", async () => {
+  it("当前身份收到 401 时清空业务缓存并携带过期提示跳转登录", async () => {
     let unauthorized = false;
     vi.stubGlobal(
       "fetch",
@@ -1030,6 +1057,9 @@ describe("认证身份缓存隔离", () => {
           const url = requestUrl(input);
           if (url.pathname.endsWith("/auth/me")) {
             return jsonResponse(USER_A);
+          }
+          if (url.pathname.endsWith("/auth/providers")) {
+            return jsonResponse(LOCAL_ONLY_PROVIDERS);
           }
           if (
             url.pathname === "/api/v1/projects" &&
@@ -1066,6 +1096,13 @@ describe("认证身份缓存隔离", () => {
     });
 
     await waitForStableLoginScreen(app);
+    expect(app.getLocation()).toEqual({
+      pathname: "/login",
+      search: "?reason=expired",
+    });
+    expect(
+      screen.getByText("登录状态已过期或账号权限已变更，请重新登录。"),
+    ).toBeInTheDocument();
     expect(
       app.client
         .getQueryCache()
@@ -1079,5 +1116,98 @@ describe("认证身份缓存隔离", () => {
     expect(
       app.client.getQueryData<User | null>(authKeys.currentUser),
     ).toBeNull();
+  });
+
+  it("Mock 快捷登录切换身份同样推进代次并隔离受保护业务缓存", async () => {
+    let identity: User | null = USER_A;
+    const aSlowGate = deferred<Response>();
+    let aStarted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        if (url.pathname.endsWith("/auth/me")) {
+          return identity
+            ? jsonResponse(identity)
+            : jsonResponse({ detail: "not_authenticated" }, 401);
+        }
+        if (url.pathname.endsWith("/auth/logout")) {
+          identity = null;
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname.endsWith("/auth/providers")) {
+          return jsonResponse({
+            feishu_enabled: false,
+            local_login_enabled: false,
+            mock_enabled: true,
+          });
+        }
+        if (url.pathname.endsWith("/auth/mock/users")) {
+          return jsonResponse({
+            items: [
+              {
+                avatar_url: null,
+                departments: USER_B.departments,
+                display_name: USER_B.display_name,
+                email: USER_B.email,
+                employee_no: "MOCK002",
+                id: USER_B.id,
+                job_title: "产品经理",
+                managed_department_ids: [],
+                role: USER_B.role,
+              },
+            ],
+          });
+        }
+        if (url.pathname.endsWith("/auth/mock/login")) {
+          identity = { ...USER_B, auth_provider: "mock" };
+          return jsonResponse(identity);
+        }
+        if (
+          url.pathname === "/api/v1/projects" &&
+          (!init?.method || init.method === "GET")
+        ) {
+          if (identity?.id === USER_A.id) {
+            aStarted = true;
+            return aSlowGate.promise;
+          }
+          return jsonResponse(listResponse([PROJECT_FOR_B], 1, 100, 1));
+        }
+        if (
+          url.pathname === "/api/v1/sessions" &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return emptySessions(url);
+        }
+        throw new Error(
+          `Unexpected request: ${init?.method ?? "GET"} ${url}`,
+        );
+      }),
+    );
+
+    const app = renderApp("/chat");
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(aStarted).toBe(true));
+    await clickLogout(user);
+
+    const mockCard = await screen.findByRole("button", { name: /用户 B/ });
+    await user.click(mockCard);
+    expect(
+      await screen.findAllByText(PROJECT_FOR_B.name),
+    ).not.toHaveLength(0);
+
+    // 旧身份 A 的慢响应迟到，不得写回当前用户 B 的缓存。
+    await act(async () => {
+      aSlowGate.resolve(jsonResponse(listResponse([PROJECT_FOR_A], 1, 100, 1)));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(app.client.getQueryData<Project[]>(projectKeys.directory())).toEqual([
+        PROJECT_FOR_B,
+      ]);
+    });
+    expect(screen.queryByText(PROJECT_FOR_A.name)).not.toBeInTheDocument();
   });
 });

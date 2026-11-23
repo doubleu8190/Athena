@@ -47,6 +47,17 @@ export function setAuthenticatedIdentity(
   queryClient.setQueryData<User>(authKeys.currentUser, user);
 }
 
+/**
+ * 统一完成登录身份切换（本地登录与 Mock 快捷登录共用），
+ * 推进请求代次并清空全部受保护业务缓存，严格防止跨用户缓存串号。
+ */
+export function completeAuthenticatedIdentity(
+  queryClient: QueryClient,
+  user: User,
+): void {
+  setAuthenticatedIdentity(queryClient, user);
+}
+
 export function clearAuthenticatedIdentity(
   queryClient: QueryClient,
 ): void {

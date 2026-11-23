@@ -1,26 +1,20 @@
-import { Icon } from "../shared/ui/Icons";
+import { Link } from "react-router-dom";
+
+import { Button, EmptyState } from "../shared/ui";
 
 export function AccessDeniedPage() {
   return (
-    <div className="page-shell">
-      <header className="page-heading">
-        <div className="page-heading-copy">
-          <p className="page-eyebrow">Admin / Restricted</p>
-          <h1>无法访问管理控制台</h1>
-          <p className="page-description">
-            管理入口仅对具有管理员角色的账号开放。
-          </p>
-        </div>
-      </header>
-
-      <section className="empty-panel" aria-labelledby="access-denied-title">
-        <span className="empty-panel-icon" aria-hidden="true">
-          <Icon name="shield" size={26} />
-        </span>
-        <p className="empty-panel-kicker">Permission required</p>
-        <h2 id="access-denied-title">当前账号没有管理员权限</h2>
-        <p>你仍可使用认证后的工作空间，但无法查看或修改管理配置。</p>
-      </section>
+    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-center px-6 py-12">
+      <EmptyState
+        action={
+          <Button asChild size="sm" variant="secondary">
+            <Link to="/chat">返回对话工作台</Link>
+          </Button>
+        }
+        description="当前页面仅对具备对应管理权限的企业管理员开放，你仍可正常使用工作台的其他功能。"
+        icon="shield"
+        title="当前账号没有管理员权限"
+      />
     </div>
   );
 }

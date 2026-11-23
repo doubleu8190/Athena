@@ -3,6 +3,10 @@ const API_PREFIX = "/api/v1";
 export const AUTH_UNAUTHORIZED_EVENT = "athena:auth-unauthorized";
 export const ADMIN_FORBIDDEN_EVENT = "athena:admin-forbidden";
 
+export interface AdminForbiddenEventDetail {
+  path: string;
+}
+
 let authIdentityEpoch = 0;
 
 export function advanceAuthIdentityEpoch(): void {
@@ -70,10 +74,14 @@ function publishUnauthorized(): void {
   }
 }
 
-function publishAdminForbidden(): void {
+function publishAdminForbidden(path: string): void {
   if (typeof window !== "undefined") {
-    // 管理接口的最终权限复核失败时，由应用根节点统一清空管理缓存并重新核验身份。
-    window.dispatchEvent(new CustomEvent(ADMIN_FORBIDDEN_EVENT));
+    // 附带触发 403 的接口路径，供 AuthProvider 区分超管专属端点、技能集合端点与资源级端点。
+    window.dispatchEvent(
+      new CustomEvent<AdminForbiddenEventDetail>(ADMIN_FORBIDDEN_EVENT, {
+        detail: { path },
+      }),
+    );
   }
 }
 
@@ -161,7 +169,7 @@ async function performRequest(
       response.status === 403 &&
       parsedDetail.code === "admin_required"
     ) {
-      publishAdminForbidden();
+      publishAdminForbidden(path);
     }
     throw new ApiError(
       response.status,

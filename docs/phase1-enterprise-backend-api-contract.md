@@ -370,7 +370,7 @@
 - **会话列表与搜索**：`GET /api/v1/sessions`
   - 新增 Query 参数：`q`（`string | null`，最大 `120` 字符，支持按会话标题安全转义子串模糊检索）；保留既有 `page`、`page_size`、`project_id`、`unbound`（`unbound=true` 仅查无项目会话，不可与 `project_id` 同时使用，冲突返回 `422 invalid_session_filter`）。
 - **修改会话**：`PATCH /api/v1/sessions/{session_id}`
-  - 支持修改 `title`（传 `null` 清空）及在首条消息前绑定/解绑 `project_id`（有活跃 Run 返回 `409 session_has_active_run`，已有消息后修改项目绑定返回 `409 session_project_locked`）。
+  - 支持修改 `title`（传 `null` 清空）及绑定/改绑/解绑 `project_id`（允许已有历史消息的会话自由变更归属；若存在活跃 Run 则拒绝变更并返回 `409 session_has_active_run`）。
 - **异步自动会话标题**：
   - 首轮主 Run 完成后（且会话当前 `title IS NULL`），Worker 后台异步生成 `<= 20` 字的干净中文标题（优先使用当前压缩策略模型，无则回退 Run 自身模型，超时/失败降级截取首条消息前 24 字）；
   - 采用 `WHERE title IS NULL` 条件更新，**绝不覆盖用户预先设置或途中手工修改的标题**；子智能体 Run 绝不触发自动标题；

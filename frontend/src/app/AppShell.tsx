@@ -9,6 +9,13 @@ import {
 
 import { useAuth } from "../features/auth/AuthProvider";
 import { authErrorMessage } from "../features/auth/errorMessages";
+import {
+  canManageSkills,
+  getUserDisplayName,
+  getUserRoleLabel,
+  isSuperAdmin,
+  type User,
+} from "../features/auth/model";
 import { useLogoutMutation } from "../features/auth/useAuthMutations";
 import { ChatSidebarContent } from "../features/chat/ChatSidebar";
 import { DraftChatProvider } from "../features/chat/DraftChatContext";
@@ -41,8 +48,14 @@ const ADMIN_NAVIGATION: NavigationItem[] = [
   { icon: "chat", label: "子智能体", to: "/admin/subagents" },
 ];
 
-function getDisplayName(displayName: string | null, email: string): string {
-  return displayName?.trim() || email.split("@")[0] || "Athena 用户";
+function getAdminNavigationForUser(user: User): NavigationItem[] {
+  if (isSuperAdmin(user)) {
+    return ADMIN_NAVIGATION;
+  }
+  if (canManageSkills(user)) {
+    return ADMIN_NAVIGATION.filter((item) => item.to === "/admin/skills");
+  }
+  return [];
 }
 
 function getInitial(name: string): string {
@@ -60,6 +73,7 @@ function WorkspaceSidebar() {
   const isProjectPath = pathname.startsWith("/projects");
   const isKnowledgePath = pathname.startsWith("/knowledge");
   const isSkillsPath = pathname.startsWith("/skills");
+  const adminNavigation = getAdminNavigationForUser(user);
 
   return (
     <aside className="workspace-sidebar" aria-label="工作区侧栏">
@@ -74,9 +88,9 @@ function WorkspaceSidebar() {
             <div className="sidebar-section-heading">
               <span id="admin-nav-title">管理控制台</span>
             </div>
-            {user.role === "admin" ? (
+            {adminNavigation.length > 0 ? (
               <nav className="sidebar-links" aria-label="管理控制台">
-                {ADMIN_NAVIGATION.map((item) => (
+                {adminNavigation.map((item) => (
                   <NavLink
                     className={({ isActive }) =>
                       `sidebar-link${isActive ? " is-active" : ""}`
@@ -111,11 +125,11 @@ function WorkspaceSidebar() {
   );
 }
 
-function AdminSubnav() {
+function AdminSubnav({ items }: { items: NavigationItem[] }) {
   return (
     <nav className="admin-subnav" aria-label="管理子导航">
       <span className="admin-subnav-label">管理视图</span>
-      {ADMIN_NAVIGATION.map((item) => (
+      {items.map((item) => (
         <NavLink
           className={({ isActive }) =>
             `admin-subnav-link${isActive ? " is-active" : ""}`
@@ -192,13 +206,14 @@ export function AppShell() {
     return null;
   }
 
-  const name = getDisplayName(user.display_name, user.email);
+  const name = getUserDisplayName(user);
   const initial = getInitial(name);
-  const roleLabel = user.role === "admin" ? "管理员" : "普通用户";
+  const roleLabel = getUserRoleLabel(user.role);
+  const adminNavigation = getAdminNavigationForUser(user);
   const isAdminSection =
-    user.role === "admin" && location.pathname.startsWith("/admin");
+    adminNavigation.length > 0 && location.pathname.startsWith("/admin");
   const navigation =
-    user.role === "admin"
+    adminNavigation.length > 0
       ? [
           ...BASE_NAVIGATION,
           { icon: "settings" as const, label: "管理", to: "/admin" },
@@ -307,7 +322,11 @@ export function AppShell() {
               >
                 <div className="account-menu-identity">
                   <strong>{name}</strong>
-                  <span title={user.email}>{user.email}</span>
+                  {user.email ? (
+                    <span title={user.email}>{user.email}</span>
+                  ) : user.employee_no ? (
+                    <span>工号 {user.employee_no}</span>
+                  ) : null}
                   <small>{roleLabel}</small>
                 </div>
                 <Link
@@ -365,7 +384,7 @@ export function AppShell() {
             </div>
           )}
 
-          {isAdminSection && <AdminSubnav />}
+          {isAdminSection && <AdminSubnav items={adminNavigation} />}
 
           <main
             className="workspace-main"

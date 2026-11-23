@@ -1,6 +1,6 @@
 import type { Project } from "../features/projects/model";
 import type { Session } from "../features/sessions/model";
-import type { User } from "../features/auth/model";
+import type { User, UserDepartment } from "../features/auth/model";
 import type {
   KnowledgeBase,
   KnowledgeDocument,
@@ -18,13 +18,74 @@ import type {
   SessionFile,
 } from "../features/files/model";
 
-export const TEST_USER: User = {
-  created_at: "2026-11-10T00:00:00Z",
-  display_name: "林知远",
-  email: "lin@example.com",
-  id: "user-1",
-  role: "user",
+export const DEFAULT_USER_DEPARTMENT: UserDepartment = {
+  id: "dept-rd",
+  is_primary: true,
+  name: "研发部",
+  path: "/dept-root/dept-rd/",
 };
+
+export function makeUser(overrides: Partial<User> = {}): User {
+  return {
+    auth_provider: "local",
+    avatar_url: null,
+    created_at: "2026-11-10T00:00:00Z",
+    departments: [DEFAULT_USER_DEPARTMENT],
+    display_name: "林知远",
+    email: "lin@example.com",
+    employee_no: "EMP001",
+    id: "user-1",
+    job_title: "高级研发工程师",
+    managed_department_ids: [],
+    role: "member",
+    ...overrides,
+  };
+}
+
+export function makeDeptAdmin(overrides: Partial<User> = {}): User {
+  return makeUser({
+    departments: [
+      {
+        id: "dept-fin",
+        is_primary: true,
+        name: "财务部",
+        path: "/dept-root/dept-fin/",
+      },
+    ],
+    display_name: "财务主管",
+    email: "fin-admin@example.com",
+    employee_no: "EMP002",
+    id: "dept-admin-1",
+    job_title: "财务部负责人",
+    managed_department_ids: ["dept-fin"],
+    role: "dept_admin",
+    ...overrides,
+  });
+}
+
+export function makeSuperAdmin(overrides: Partial<User> = {}): User {
+  return makeUser({
+    created_at: "2026-11-01T00:00:00Z",
+    departments: [
+      {
+        id: "dept-root",
+        is_primary: true,
+        name: "集团总部",
+        path: "/dept-root/",
+      },
+    ],
+    display_name: "系统超级管理员",
+    email: "admin@example.com",
+    employee_no: "EMP000",
+    id: "admin-1",
+    job_title: "企业信息安全负责人",
+    managed_department_ids: [],
+    role: "super_admin",
+    ...overrides,
+  });
+}
+
+export const TEST_USER: User = makeUser();
 
 export const PROJECT_A: Project = {
   created_at: "2026-11-08T08:00:00Z",

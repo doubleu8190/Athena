@@ -168,6 +168,14 @@
     background: var(--bg-subtle);
   }
 
+  /* 过渡期表单字段校验提示样式：供 M2.3–M2.6 尚未迁完的 9 个既有业务弹窗与 FieldError 共用。 */
+  .field-error {
+    margin-top: 4px;
+    color: var(--danger);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
   /* 恢复既有 Markdown 富文本列表标记，避免 Tailwind Preflight 重置 ul/ol 的 list-style 导致圆点与序号消失。 */
   .markdown-content ul {
     list-style: disc;

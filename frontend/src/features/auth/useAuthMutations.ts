@@ -1,19 +1,44 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-import { changePassword, login, logout, register, updateCurrentUser } from "./api";
+import {
+  changePassword,
+  login,
+  logout,
+  mockLogin,
+  updateCurrentUser,
+} from "./api";
+import { useOptionalAuth } from "./AuthProvider";
 import {
   clearAuthenticatedIdentity,
+  completeAuthenticatedIdentity,
   refreshAuthenticatedUser,
-  setAuthenticatedIdentity,
 } from "./cacheBoundary";
-import type { LoginInput, RegisterInput } from "./model";
+import type { LoginInput } from "./model";
 
 export function useLoginMutation() {
   const queryClient = useQueryClient();
+  const auth = useOptionalAuth();
   return useMutation({
     mutationFn: (input: LoginInput) => login(input),
     onSuccess: (user) => {
-      setAuthenticatedIdentity(queryClient, user);
+      // 登录成功后清理历史业务缓存，并同步复位会话过期与权限拒止状态，避免跨账号首帧瞬闪。
+      completeAuthenticatedIdentity(queryClient, user);
+      auth?.resetAccessDenied();
+      auth?.clearSessionExpired();
+    },
+  });
+}
+
+export function useMockLoginMutation() {
+  const queryClient = useQueryClient();
+  const auth = useOptionalAuth();
+  return useMutation({
+    mutationFn: (userId: string) => mockLogin(userId),
+    onSuccess: (user) => {
+      // 与本地登录复用同一身份切换与缓存清理边界，严格防止非生产切换角色时串号与权限残留。
+      completeAuthenticatedIdentity(queryClient, user);
+      auth?.resetAccessDenied();
+      auth?.clearSessionExpired();
     },
   });
 }
@@ -41,21 +66,15 @@ export function useChangePasswordMutation() {
   return useMutation({ mutationFn: changePassword });
 }
 
-export function useRegisterMutation() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: RegisterInput) => register(input),
-    onSuccess: (user) => {
-      setAuthenticatedIdentity(queryClient, user);
-    },
-  });
-}
-
 export function useLogoutMutation() {
   const queryClient = useQueryClient();
+  const auth = useOptionalAuth();
   return useMutation({
     mutationFn: logout,
     onSuccess: () => {
+      // 主动退出清空全部受保护缓存并复位权限拒止与过期标记，不误触发“会话已过期”横幅。
+      auth?.resetAccessDenied();
+      auth?.clearSessionExpired();
       clearAuthenticatedIdentity(queryClient);
     },
   });

@@ -202,7 +202,7 @@ describe("apiRequest", () => {
     window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, listener);
   });
 
-  it("403 admin_required 仅发布管理员权限失效事件", async () => {
+  it("403 admin_required 仅发布管理员权限失效事件并携带触发路径", async () => {
     const adminListener = vi.fn();
     const authListener = vi.fn();
     window.addEventListener(ADMIN_FORBIDDEN_EVENT, adminListener);
@@ -214,12 +214,17 @@ describe("apiRequest", () => {
       ),
     );
 
-    await expect(getCurrentUser()).rejects.toMatchObject({
+    await expect(apiRequest("/admin/models")).rejects.toMatchObject({
       detail: "admin_required",
       status: 403,
     });
 
     expect(adminListener).toHaveBeenCalledTimes(1);
+    const event = adminListener.mock.calls[0]?.[0];
+    expect(event).toBeInstanceOf(CustomEvent);
+    expect((event as CustomEvent<{ path: string }>).detail).toEqual({
+      path: "/admin/models",
+    });
     expect(authListener).not.toHaveBeenCalled();
     window.removeEventListener(ADMIN_FORBIDDEN_EVENT, adminListener);
     window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, authListener);

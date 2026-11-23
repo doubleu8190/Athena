@@ -11,6 +11,7 @@ import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import { useAuth } from "../auth/AuthProvider";
+import { isSuperAdmin } from "../auth/model";
 import {
   AdminPagination,
   lastPageNumber,
@@ -186,12 +187,12 @@ export function AdminSystemPromptsPage() {
     }) =>
       status === "authenticated" &&
       !adminAccessDenied &&
-      user?.role === "admin" &&
+      isSuperAdmin(user) &&
       Boolean(isDirty) &&
       (currentLocation.pathname !== nextLocation.pathname ||
         currentLocation.search !== nextLocation.search ||
         currentLocation.hash !== nextLocation.hash),
-    [adminAccessDenied, isDirty, status, user?.role],
+    [adminAccessDenied, isDirty, status, user],
   );
   const blocker = useBlocker(shouldBlockNavigation);
   const validationError = editor

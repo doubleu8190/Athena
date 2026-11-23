@@ -49,6 +49,7 @@ def test_storage_start_failure_disposes_database_and_storage(
         return database
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_database, "Database", database_factory)
     monkeypatch.setattr(bootstrap_knowledge, "MinioOriginalStore", FakeStore)
 
@@ -104,10 +105,11 @@ def test_model_start_failure_closes_all_created_resources(
             events.append("counter_close")
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr(bootstrap_knowledge, "MinioOriginalStore", FakeStore)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", FakeEmbedding)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalTokenCounter", FakeCounter)
+    monkeypatch.setattr(bootstrap_knowledge, "OpenAICompatibleEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr(bootstrap_knowledge, "TiktokenTokenCounter", FakeCounter)
 
     with pytest.raises(RuntimeError, match="model unavailable"):
         asyncio.run(knowledge_worker.run_worker())
@@ -191,10 +193,11 @@ def test_knowledge_worker_stop_event_cancels_consumers_and_closes_resources(
             raise
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr(bootstrap_knowledge, "MinioOriginalStore", FakeStore)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", FakeEmbedding)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalTokenCounter", FakeCounter)
+    monkeypatch.setattr(bootstrap_knowledge, "OpenAICompatibleEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr(bootstrap_knowledge, "TiktokenTokenCounter", FakeCounter)
     monkeypatch.setattr(knowledge_worker, "_run_consumers", fake_consumers)
 
     async def scenario() -> None:
@@ -269,10 +272,11 @@ def test_knowledge_worker_pre_set_stop_event_skips_consumers_and_main_unbinds_si
         events.append("consumers_started")
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr(bootstrap_knowledge, "MinioOriginalStore", FakeStore)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", FakeEmbedding)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalTokenCounter", FakeCounter)
+    monkeypatch.setattr(bootstrap_knowledge, "OpenAICompatibleEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr(bootstrap_knowledge, "TiktokenTokenCounter", FakeCounter)
     monkeypatch.setattr(knowledge_worker, "_run_consumers", fail_if_called)
 
     async def scenario() -> None:

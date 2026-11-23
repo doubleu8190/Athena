@@ -43,6 +43,8 @@ def build_knowledge_worker_resources(bundle: KnowledgeWorkerBundle) -> None:
     if os.getenv("ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"):
         os.environ["PADDLE_PDX_CACHE_HOME"] = os.environ["ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"]
     bundle.database = build_database(database_url)
+    # 知识库原件与远程 Embedding/Tiktoken 已无状态化，
+    # 统一复用 ATHENA_STORAGE_* 与 ATHENA_EMBEDDING_* 配置。
     bundle.originals = build_knowledge_original_store()
     bundle.models = build_knowledge_models()
 

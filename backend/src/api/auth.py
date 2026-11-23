@@ -30,6 +30,7 @@ from app.auth import (
     InvalidPasswordError,
     InvalidSessionError,
     RateLimitExceededError,
+    RateLimitUnavailableError,
 )
 from app.auth.converter.result import user_to_result
 
@@ -40,6 +41,7 @@ EMAIL_EXISTS = "email_exists"
 INVALID_CREDENTIALS = "invalid_credentials"
 INVALID_CURRENT_PASSWORD = "current_password_invalid"
 RATE_LIMITED = "rate_limited"
+RATE_LIMIT_UNAVAILABLE = "rate_limit_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +131,11 @@ def _raise_auth_error(error: Exception) -> NoReturn:
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=RATE_LIMITED,
         ) from error
+    if isinstance(error, RateLimitUnavailableError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=RATE_LIMIT_UNAVAILABLE,
+        ) from error
     raise error
 
 
@@ -168,6 +175,7 @@ def build_auth_router(
             InvalidDisplayNameError,
             EmailAlreadyRegisteredError,
             RateLimitExceededError,
+            RateLimitUnavailableError,
         ) as error:
             _raise_auth_error(error)
         _set_session_cookie(
@@ -193,7 +201,11 @@ def build_auth_router(
                 remember_me=request.remember_me,
                 client_key=_client_key(http_request),
             )
-        except (InvalidCredentialsError, RateLimitExceededError) as error:
+        except (
+            InvalidCredentialsError,
+            RateLimitExceededError,
+            RateLimitUnavailableError,
+        ) as error:
             _raise_auth_error(error)
         _set_session_cookie(
             response,
@@ -255,6 +267,7 @@ def build_auth_router(
             InvalidCurrentPasswordError,
             InvalidSessionError,
             RateLimitExceededError,
+            RateLimitUnavailableError,
         ) as error:
             _raise_auth_error(error)
         response = Response(status_code=status.HTTP_204_NO_CONTENT)

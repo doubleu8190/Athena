@@ -18,6 +18,7 @@ from domain.auth import (
     InvalidPasswordError,
     InvalidSessionError,
     RateLimitExceededError,
+    RateLimitUnavailableError,
 )
 
 __all__ = [
@@ -36,5 +37,6 @@ __all__ = [
     "MIN_PASSWORD_LENGTH",
     "REMEMBER_SESSION_SECONDS",
     "RateLimitExceededError",
+    "RateLimitUnavailableError",
     "UserResult",
 ]

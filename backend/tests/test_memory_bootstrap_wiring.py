@@ -567,26 +567,40 @@ def test_api_bootstrap_skips_memory_models_but_keeps_memory_lifecycle_wakeup(
     asyncio.run(deps.aclose())
 
 
-def test_query_services_share_identical_local_embedding_and_separate_distinct_configs(
+def test_query_services_use_remote_embedding_for_knowledge_independent_of_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """同进程同时开启 Memory 与 Knowledge：配置一致时共享单实例且仅启停一次，不同则各自独立。"""
+    """同进程同时开启 Memory 与 Knowledge：Knowledge 独立使用远程 Embedding 与 Tiktoken。"""
     import bootstrap.knowledge as bootstrap_knowledge
     import bootstrap.tool as bootstrap_tool
 
-    embeddings: list[_TrackedEmbedding] = []
+    memory_embeddings: list[_TrackedLocalEmbedding] = []
+    knowledge_embeddings: list[_TrackedRemoteEmbedding] = []
     rerankers: list[Any] = []
     counters: list[Any] = []
     originals: list[Any] = []
     memory_services: list[tuple[object, ...]] = []
     knowledge_services: list[tuple[object, ...]] = []
 
-    class _TrackedEmbedding:
+    class _TrackedLocalEmbedding:
         def __init__(self, model: str, revision: str, device: str) -> None:
             self.key = (model, revision, device)
             self.starts = 0
             self.closes = 0
-            embeddings.append(self)
+            memory_embeddings.append(self)
+
+        async def start(self) -> None:
+            self.starts += 1
+
+        async def aclose(self) -> None:
+            self.closes += 1
+
+    class _TrackedRemoteEmbedding:
+        def __init__(self, config: object) -> None:
+            self.config = config
+            self.starts = 0
+            self.closes = 0
+            knowledge_embeddings.append(self)
 
         async def start(self) -> None:
             self.starts += 1
@@ -625,12 +639,16 @@ def test_query_services_share_identical_local_embedding_and_separate_distinct_co
     monkeypatch.setenv("ATHENA_MEMORY_EMBEDDING_MODEL", "BAAI/bge-m3")
     monkeypatch.setenv("ATHENA_MEMORY_EMBEDDING_REVISION", "rev-shared")
     monkeypatch.setenv("ATHENA_MEMORY_EMBEDDING_DEVICE", "cpu")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_REVISION", "rev-shared")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("ATHENA_EMBEDDING_MODEL", "BAAI/bge-m3")
+    monkeypatch.setenv("ATHENA_EMBEDDING_DIMENSIONS", "1024")
 
-    monkeypatch.setattr(bootstrap_tool, "LocalEmbedding", _TrackedEmbedding)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", _TrackedEmbedding)
+    monkeypatch.setattr(bootstrap_tool, "LocalEmbedding", _TrackedLocalEmbedding)
+    monkeypatch.setattr(
+        bootstrap_knowledge,
+        "OpenAICompatibleEmbeddingClient",
+        _TrackedRemoteEmbedding,
+    )
     monkeypatch.setattr(
         bootstrap_tool,
         "LocalReranker",
@@ -638,7 +656,7 @@ def test_query_services_share_identical_local_embedding_and_separate_distinct_co
     )
     monkeypatch.setattr(
         bootstrap_knowledge,
-        "LocalTokenCounter",
+        "TiktokenTokenCounter",
         lambda *args: _TrackedResource(counters, *args),
     )
     monkeypatch.setattr(bootstrap_knowledge, "JiebaChineseTokenizer", lambda: object())
@@ -652,42 +670,24 @@ def test_query_services_share_identical_local_embedding_and_separate_distinct_co
     monkeypatch.setattr(bootstrap_tool, "MemoryService", _capture_memory_service)
     monkeypatch.setattr(bootstrap_tool, "KnowledgeService", _capture_knowledge_service)
 
-    # 1. 模型、版本、设备完全一致 -> 仅构造 1 个 LocalEmbedding，共享实例且启停各 1 次。
-    shared_bundle = build_query_services(
+    bundle = build_query_services(
         cast(Any, object()),
         projects=cast(ProjectService, object()),
         load_memory_models=True,
     )
-    assert len(embeddings) == 1
-    assert memory_services[-1][1] is embeddings[0]
-    assert knowledge_services[-1][2] is embeddings[0]
+    assert len(memory_embeddings) == 1
+    assert len(knowledge_embeddings) == 1
+    assert memory_services[-1][1] is memory_embeddings[0]
+    assert knowledge_services[-1][2] is knowledge_embeddings[0]
 
-    asyncio.run(shared_bundle.start())
-    asyncio.run(shared_bundle.aclose())
-    assert embeddings[0].starts == 1
-    assert embeddings[0].closes == 1
-
-    # 2. 设备不同 -> 各自构造独立 LocalEmbedding，并分别启停 1 次。
-    embeddings.clear()
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "mps")
-    separate_bundle = build_query_services(
-        cast(Any, object()),
-        projects=cast(ProjectService, object()),
-        load_memory_models=True,
-    )
-    assert len(embeddings) == 2
-    assert embeddings[0] is not embeddings[1]
-    assert embeddings[0].key == ("BAAI/bge-m3", "rev-shared", "cpu")
-    assert embeddings[1].key == ("BAAI/bge-m3", "rev-shared", "mps")
-    assert memory_services[-1][1] is embeddings[0]
-    assert knowledge_services[-1][2] is embeddings[1]
-
-    asyncio.run(separate_bundle.start())
-    asyncio.run(separate_bundle.aclose())
-    assert embeddings[0].starts == 1
-    assert embeddings[0].closes == 1
-    assert embeddings[1].starts == 1
-    assert embeddings[1].closes == 1
+    asyncio.run(bundle.start())
+    asyncio.run(bundle.aclose())
+    assert memory_embeddings[0].starts == 1
+    assert memory_embeddings[0].closes == 1
+    assert knowledge_embeddings[0].starts == 1
+    assert knowledge_embeddings[0].closes == 1
+    assert counters[0].starts == 1
+    assert counters[0].closes == 1
 
 
 def test_bootstrap_wires_memory_recall_knowledge_threshold_and_run_context_env_vars(
@@ -727,6 +727,7 @@ def test_bootstrap_wires_memory_recall_knowledge_threshold_and_run_context_env_v
 
     monkeypatch.setenv("ATHENA_MEMORY_ENABLED", "true")
     monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setenv("ATHENA_MEMORY_VECTOR_MIN_SCORE", "0.78")
     monkeypatch.setenv("ATHENA_MEMORY_RERANK_MIN_SCORE", "0.45")
     monkeypatch.setenv("ATHENA_MEMORY_TIMEOUT_SECONDS", "25.5")
@@ -734,9 +735,9 @@ def test_bootstrap_wires_memory_recall_knowledge_threshold_and_run_context_env_v
     monkeypatch.setenv("ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE", "0.41")
 
     monkeypatch.setattr(bootstrap_tool, "LocalEmbedding", _StubResource)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalEmbedding", _StubResource)
+    monkeypatch.setattr(bootstrap_knowledge, "OpenAICompatibleEmbeddingClient", _StubResource)
     monkeypatch.setattr(bootstrap_tool, "LocalReranker", _StubResource)
-    monkeypatch.setattr(bootstrap_knowledge, "LocalTokenCounter", _StubResource)
+    monkeypatch.setattr(bootstrap_knowledge, "TiktokenTokenCounter", _StubResource)
     monkeypatch.setattr(bootstrap_knowledge, "JiebaChineseTokenizer", lambda: object())
     monkeypatch.setattr(bootstrap_tool, "build_knowledge_original_store", _StubResource)
     monkeypatch.setattr(bootstrap_tool, "MemoryRepository", lambda _s: object())

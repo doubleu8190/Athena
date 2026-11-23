@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -29,10 +30,13 @@ from domain.auth import (
     InvalidSessionError,
     PasswordHasher,
     RateLimitExceededError,
+    RateLimitUnavailableError,
     User,
     UserRole,
     UserStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_LENGTH = 128
@@ -176,7 +180,7 @@ class AuthService:
         normalized_password = _validate_password(password)
         normalized_display_name = _normalize_display_name(display_name)
         normalized_client = _normalize_client_key(client_key)
-        if not self._register_limiter.consume(f"register:{normalized_client}"):
+        if not await self._register_limiter.consume(f"register:{normalized_client}"):
             raise RateLimitExceededError("rate_limited")
 
         current = _utc_value(self._clock())
@@ -219,9 +223,9 @@ class AuthService:
         email_key = _login_email_key(email)
         ip_key = f"login:ip:{normalized_client}"
         account_key = f"login:account:{sha256(email_key.encode()).hexdigest()}"
-        if not self._login_ip_limiter.consume(ip_key):
+        if not await self._login_ip_limiter.consume(ip_key):
             raise RateLimitExceededError("rate_limited")
-        if not self._login_account_limiter.consume(account_key):
+        if not await self._login_account_limiter.consume(account_key):
             raise RateLimitExceededError("rate_limited")
         if not password or len(password) > MAX_PASSWORD_LENGTH:
             raise InvalidCredentialsError("invalid_credentials")
@@ -256,7 +260,7 @@ class AuthService:
         ):
             raise InvalidCredentialsError("invalid_credentials")
 
-        self._login_account_limiter.reset(account_key)
+        await self._login_account_limiter.reset(account_key)
         current = _utc_value(self._clock())
         ttl_seconds = REMEMBER_SESSION_SECONDS if remember_me else DEFAULT_SESSION_SECONDS
         auth_session, token, max_age_seconds = self._new_session(
@@ -332,7 +336,7 @@ class AuthService:
         """校验当前密码并撤销其他设备会话。"""
         rate_limit_key = f"change_password:user:{context.user.id}"
         # 按 user_id 限制改密失败次数，在进入 Argon2 校验前拦截暴力猜测。
-        if not self._change_password_limiter.consume(rate_limit_key):
+        if not await self._change_password_limiter.consume(rate_limit_key):
             raise RateLimitExceededError("rate_limited")
         if not current_password or len(current_password) > MAX_PASSWORD_LENGTH:
             raise InvalidCurrentPasswordError("current_password_invalid")
@@ -357,8 +361,12 @@ class AuthService:
         )
         if not changed:
             raise InvalidSessionError("invalid_session")
-        # 改密成功后重置当前用户的失败计数窗口。
-        self._change_password_limiter.reset(rate_limit_key)
+        # 改密与会话吊销已落库提交；限流窗口重置为非关键清理，
+        # Redis 短暂异常不应掩盖已成功的密码修改。
+        try:
+            await self._change_password_limiter.reset(rate_limit_key)
+        except RateLimitUnavailableError:
+            logger.warning("auth_change_password_rate_limit_reset_skipped")
 
     async def update_display_name(
         self,

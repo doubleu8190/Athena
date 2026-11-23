@@ -114,8 +114,9 @@ class _RedisRunSubscription(RunEventSubscription):
 class RedisRunTransport(RunEventTransport):
     """为每条 Run 建立独立 channel 与执行 epoch 内的临时序号。"""
 
-    def __init__(self, client: Redis) -> None:
+    def __init__(self, client: Redis, *, owns_client: bool = True) -> None:
         self._client = client
+        self._owns_client = owns_client
         self._failed_epochs: OrderedDict[tuple[str, int], float] = OrderedDict()
 
     async def publish_text(
@@ -202,6 +203,8 @@ class RedisRunTransport(RunEventTransport):
             await subscription.aclose()
 
     async def aclose(self) -> None:
+        if not self._owns_client:
+            return
         with suppress(RedisError, TimeoutError):
             async with asyncio.timeout(1.0):
                 await self._client.aclose()

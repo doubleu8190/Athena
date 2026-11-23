@@ -586,3 +586,77 @@ def test_change_password_api_returns_429_after_repeated_failures() -> None:
 
     assert limited.status_code == 429
     assert limited.json() == {"detail": "rate_limited"}
+
+
+def test_auth_endpoints_return_503_when_rate_limiter_is_unavailable() -> None:
+    """限流后端故障时，注册、登录与改密接口均 fail-safe 返回 503 rate_limit_unavailable。"""
+    from app.auth.rate_limit import RateLimitUnavailableError
+
+    class _UnavailableLimiter:
+        async def consume(self, key: str) -> bool:
+            del key
+            raise RateLimitUnavailableError("rate_limit_unavailable")
+
+        async def reset(self, key: str) -> None:
+            del key
+            raise RateLimitUnavailableError("rate_limit_unavailable")
+
+    unavailable = _UnavailableLimiter()
+
+    # 1. 注册和登录在限流器不可用时直接返回 503。
+    failing_service = AuthService(
+        InMemoryAuthRepository(),
+        FakePasswordHasher(),
+        user_id_factory=_incrementing_factory("usr_"),
+        auth_session_id_factory=_incrementing_factory("ses_"),
+        token_factory=_incrementing_factory("token_"),
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        login_account_limiter=unavailable,
+        login_ip_limiter=unavailable,
+        register_limiter=unavailable,
+        change_password_limiter=unavailable,
+    )
+    with TestClient(_app(failing_service)) as client:
+        register_resp = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "user@example.com",
+                "password": "long-enough-password",
+                "display_name": "Athena",
+            },
+        )
+        login_resp = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "user@example.com",
+                "password": "long-enough-password",
+            },
+        )
+
+    assert register_resp.status_code == 503
+    assert register_resp.json() == {"detail": "rate_limit_unavailable"}
+    assert login_resp.status_code == 503
+    assert login_resp.json() == {"detail": "rate_limit_unavailable"}
+
+    # 2. 已登录用户改密在限流器不可用时同样返回 503。
+    change_password_service = AuthService(
+        InMemoryAuthRepository(),
+        FakePasswordHasher(),
+        user_id_factory=_incrementing_factory("usr_"),
+        auth_session_id_factory=_incrementing_factory("ses_"),
+        token_factory=_incrementing_factory("token_"),
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        change_password_limiter=unavailable,
+    )
+    with TestClient(_app(change_password_service)) as client:
+        _register(client)
+        password_resp = client.post(
+            "/api/v1/auth/password",
+            json={
+                "current_password": "long-enough-password",
+                "new_password": "new-long-enough-password",
+            },
+        )
+
+    assert password_resp.status_code == 503
+    assert password_resp.json() == {"detail": "rate_limit_unavailable"}

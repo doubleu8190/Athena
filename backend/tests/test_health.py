@@ -114,10 +114,10 @@ def test_disabled_knowledge_does_not_parse_minio_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_MINIO_ENDPOINT", "https://invalid")
-    monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY", raising=False)
-    monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_SECRET_KEY", raising=False)
-    monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_BUCKET", raising=False)
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "https://invalid")
+    monkeypatch.delenv("ATHENA_STORAGE_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("ATHENA_STORAGE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ATHENA_STORAGE_BUCKET", raising=False)
     bundle = build_query_services(
         cast(Any, object()),
         projects=cast(ProjectService, object()),
@@ -141,23 +141,23 @@ def test_enabled_knowledge_requires_database_configuration(
     (
         {},
         {
-            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "localhost:abc",
-            "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-            "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "test-bucket",
+            "ATHENA_STORAGE_ENDPOINT": "localhost:abc",
+            "ATHENA_STORAGE_ACCESS_KEY": "access",
+            "ATHENA_STORAGE_SECRET_KEY": "secret",
+            "ATHENA_STORAGE_BUCKET": "test-bucket",
         },
         {
-            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "localhost:9000",
-            "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-            "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "Invalid_Bucket",
+            "ATHENA_STORAGE_ENDPOINT": "localhost:9000",
+            "ATHENA_STORAGE_ACCESS_KEY": "access",
+            "ATHENA_STORAGE_SECRET_KEY": "secret",
+            "ATHENA_STORAGE_BUCKET": "Invalid_Bucket",
         },
         {
-            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "localhost:9000",
-            "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-            "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "test-bucket",
-            "ATHENA_KNOWLEDGE_MINIO_SECURE": "sometimes",
+            "ATHENA_STORAGE_ENDPOINT": "localhost:9000",
+            "ATHENA_STORAGE_ACCESS_KEY": "access",
+            "ATHENA_STORAGE_SECRET_KEY": "secret",
+            "ATHENA_STORAGE_BUCKET": "test-bucket",
+            "ATHENA_STORAGE_SECURE": "sometimes",
         },
     ),
 )
@@ -178,12 +178,13 @@ def test_knowledge_minio_configuration_fails_before_creating_query_resources(
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
     monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     for name in (
-        "ATHENA_KNOWLEDGE_MINIO_ENDPOINT",
-        "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY",
-        "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY",
-        "ATHENA_KNOWLEDGE_MINIO_BUCKET",
-        "ATHENA_KNOWLEDGE_MINIO_SECURE",
+        "ATHENA_STORAGE_ENDPOINT",
+        "ATHENA_STORAGE_ACCESS_KEY",
+        "ATHENA_STORAGE_SECRET_KEY",
+        "ATHENA_STORAGE_BUCKET",
+        "ATHENA_STORAGE_SECURE",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in overrides.items():
@@ -192,6 +193,33 @@ def test_knowledge_minio_configuration_fails_before_creating_query_resources(
     monkeypatch.setattr(bootstrap_api, "build_query_services", unexpected_query_services)
 
     with pytest.raises(OriginalStorageConfigurationError):
+        create_app(project_service=cast(ProjectService, object()))
+    assert created == []
+
+
+def test_knowledge_embedding_configuration_fails_before_creating_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from infrastructure.embedding import EmbeddingConfigurationError
+
+    created: list[str] = []
+
+    class FakeDatabase:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            created.append("database")
+
+    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "localhost:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "access")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "secret")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "test-bucket")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.delenv("ATHENA_EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
+
+    with pytest.raises(EmbeddingConfigurationError, match="embedding_base_url_missing"):
         create_app(project_service=cast(ProjectService, object()))
     assert created == []
 
@@ -278,10 +306,11 @@ def test_injected_knowledge_service_mounts_project_routes_without_stealing_owner
     knowledge = InjectedKnowledge()
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_MINIO_ENDPOINT", "localhost:not-a-port")
-    monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY", raising=False)
-    monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_SECRET_KEY", raising=False)
-    monkeypatch.delenv("ATHENA_KNOWLEDGE_MINIO_BUCKET", raising=False)
+    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "localhost:not-a-port")
+    monkeypatch.delenv("ATHENA_STORAGE_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("ATHENA_STORAGE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ATHENA_STORAGE_BUCKET", raising=False)
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr("bootstrap.api.build_query_services", capture_query_services)
     app = create_app(

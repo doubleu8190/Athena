@@ -11,6 +11,7 @@ from domain.auth.model.errors import (
     InvalidPasswordError,
     InvalidSessionError,
     RateLimitExceededError,
+    RateLimitUnavailableError,
 )
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "InvalidPasswordError",
     "InvalidSessionError",
     "RateLimitExceededError",
+    "RateLimitUnavailableError",
     "User",
     "UserRole",
     "UserStatus",

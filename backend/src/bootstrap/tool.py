@@ -28,7 +28,6 @@ from bootstrap.config import env_csv_set, env_flag, memory_enabled_from_env
 from bootstrap.knowledge import (
     build_knowledge_models,
     build_knowledge_original_store,
-    knowledge_embedding_settings,
 )
 from domain.auth import CurrentSessionReader
 from domain.knowledge.ports import (
@@ -149,8 +148,6 @@ def build_query_services(
     closables: list[Any] = []
     memory = memory_service
     memory_repository: MemoryRepository | None = None
-    memory_embedding: LocalEmbedding | None = None
-    memory_embedding_key: tuple[str, str, str] | None = None
     knowledge = knowledge_service
     # 组合根是唯一允许构造具体适配器的地方；bundle 只暴露领域端口。
     knowledge_repository: KnowledgeRepositoryPort | None = None
@@ -181,7 +178,6 @@ def build_query_services(
                 embedding_revision,
                 embedding_device,
             )
-            memory_embedding_key = (embedding_model, embedding_revision, embedding_device)
             reranker = LocalReranker(
                 reranker_model,
                 reranker_revision,
@@ -227,22 +223,10 @@ def build_query_services(
             startables.extend((memory_embedding, reranker))
             closables.extend((memory_embedding, reranker))
     if knowledge_enabled and knowledge is None:
-        # 先校验并构造原件存储，再加载模型资源，保持原有启动顺序。
+        # 先校验并构造统一对象存储，再构造无状态远程 Embedding 与 tiktoken 计数资源。
         minio_originals = build_knowledge_original_store()
         knowledge_originals = minio_originals
-        # 同进程内若 Memory 与 Knowledge 的 (model, revision, device) 完全一致，
-        # 共享同一个 LocalEmbedding 实例且只注册一次启停生命周期，避免重复占用显存/内存。
-        reused_embedding = (
-            memory_embedding
-            if memory_embedding is not None
-            and memory_embedding_key == knowledge_embedding_settings()
-            else None
-        )
-        models = (
-            build_knowledge_models(embedding=reused_embedding)
-            if reused_embedding is not None
-            else build_knowledge_models()
-        )
+        models = build_knowledge_models()
         concrete_repository = KnowledgeRepository(sessions)
         knowledge_repository = concrete_repository
         knowledge_upload_slots = concrete_repository
@@ -262,14 +246,9 @@ def build_query_services(
             profile_id=models.profile_id,
             semantic_min_score=semantic_min_score,
         )
-        # 启动顺序沿用存储 → 计数 → 向量模型，关闭时按相反依赖顺序释放；
-        # 复用 Memory 向量实例时不再重复加入 startables/closables。
-        if reused_embedding is None:
-            startables.extend((minio_originals, models.counter, models.embedding))
-            closables.extend((minio_originals, models.embedding, models.counter))
-        else:
-            startables.extend((minio_originals, models.counter))
-            closables.extend((minio_originals, models.counter))
+        # 启动顺序沿用存储 → 计数 → 远程向量客户端，关闭时按相反依赖顺序释放。
+        startables.extend((minio_originals, models.counter, models.embedding))
+        closables.extend((minio_originals, models.embedding, models.counter))
     elif knowledge is not None and knowledge_repository is None:
         concrete_repository = KnowledgeRepository(sessions)
         knowledge_repository = concrete_repository

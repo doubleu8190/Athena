@@ -37,6 +37,10 @@ class RateLimitExceededError(ValueError):
     """认证请求超过允许频率。"""
 
 
+class RateLimitUnavailableError(RuntimeError):
+    """认证限流基础设施（如 Redis）不可用，按 fail-safe 策略拒绝继续放行。"""
+
+
 __all__ = [
     "EmailAlreadyRegisteredError",
     "AdminPromotionError",
@@ -47,4 +51,5 @@ __all__ = [
     "InvalidPasswordError",
     "InvalidSessionError",
     "RateLimitExceededError",
+    "RateLimitUnavailableError",
 ]

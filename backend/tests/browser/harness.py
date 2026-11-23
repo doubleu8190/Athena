@@ -79,9 +79,9 @@ def _runtime_environment() -> dict[str, str]:
     required = (
         "ATHENA_TEST_DATABASE_URL",
         "ATHENA_MCP_SECRET_KEY",
-        "ATHENA_FILE_MINIO_ENDPOINT",
-        "ATHENA_FILE_MINIO_ACCESS_KEY",
-        "ATHENA_FILE_MINIO_SECRET_KEY",
+        "ATHENA_STORAGE_ENDPOINT",
+        "ATHENA_STORAGE_ACCESS_KEY",
+        "ATHENA_STORAGE_SECRET_KEY",
     )
     missing = [name for name in required if not os.getenv(name, "").strip()]
     if missing:
@@ -302,10 +302,10 @@ def _create_minio_bucket(
 ) -> Minio:
     """创建本次独占测试 bucket，不列举或删除共享 bucket。"""
     client = Minio(
-        os.environ["ATHENA_FILE_MINIO_ENDPOINT"],
-        access_key=os.environ["ATHENA_FILE_MINIO_ACCESS_KEY"],
-        secret_key=os.environ["ATHENA_FILE_MINIO_SECRET_KEY"],
-        secure=os.getenv("ATHENA_FILE_MINIO_SECURE", "false").lower() == "true",
+        os.environ["ATHENA_STORAGE_ENDPOINT"],
+        access_key=os.environ["ATHENA_STORAGE_ACCESS_KEY"],
+        secret_key=os.environ["ATHENA_STORAGE_SECRET_KEY"],
+        secure=os.getenv("ATHENA_STORAGE_SECURE", "false").lower() == "true",
     )
     if client.bucket_exists(bucket):
         raise RuntimeError("e2e_minio_bucket_collision")
@@ -970,7 +970,7 @@ def main() -> None:
                 "ATHENA_MEMORY_ENABLED": "false",
                 "ATHENA_KNOWLEDGE_ENABLED": "false",
                 "ATHENA_FILES_ENABLED": "true",
-                "ATHENA_FILE_MINIO_BUCKET": bucket,
+                "ATHENA_STORAGE_BUCKET": bucket,
                 "ATHENA_SKILL_TEMP_ROOT": str(state_directory / "skill-temp"),
                 "ATHENA_SKILL_PYTHON_EXECUTABLE": str(_PYTHON),
                 "ATHENA_SKILL_TEMP_STALE_SECONDS": "300",

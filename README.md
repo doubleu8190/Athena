@@ -285,7 +285,7 @@ ATHENA_FILES_ENABLED=false
 ATHENA_KNOWLEDGE_ENABLED=false
 ```
 
-> 完整环境变量、MinIO 独立桶参数（`ATHENA_FILE_MINIO_*` / `ATHENA_KNOWLEDGE_MINIO_*`）、Worker 调优与生产上线安全自检清单见 [`.env.example`](.env.example)。
+> 完整环境变量、统一对象存储参数（`ATHENA_STORAGE_*`）、远程 Embedding 服务（`ATHENA_EMBEDDING_*`）、Worker 调优与生产上线安全自检清单见 [`.env.example`](.env.example)。
 
 ---
 

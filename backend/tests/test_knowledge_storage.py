@@ -18,7 +18,11 @@ from typing import Any, BinaryIO, cast
 import pytest
 from minio.error import S3Error
 
-from adapter.knowledge.storage import MinioOriginalStore, MinioStorageConfig
+from adapter.knowledge.storage import (
+    KNOWLEDGE_OBJECT_PREFIX,
+    MinioOriginalStore,
+    MinioStorageConfig,
+)
 from domain.knowledge.model import (
     OriginalStorageAccessDeniedError,
     OriginalStorageConfigurationError,
@@ -75,6 +79,10 @@ class _GetResponse:
         self.released = True
 
 
+def _physical(logical_key: str) -> str:
+    return f"{KNOWLEDGE_OBJECT_PREFIX}{logical_key}"
+
+
 class FakeMinioClient:
     def __init__(self) -> None:
         self.bucket_exists_result = True
@@ -82,6 +90,7 @@ class FakeMinioClient:
         self.put_calls = 0
         self.remove_calls: list[str] = []
         self.list_calls = 0
+        self.list_prefixes: list[str | None] = []
         self.responses: list[_GetResponse] = []
         self.stat_error: Exception | None = None
         self.get_error: Exception | None = None
@@ -144,13 +153,23 @@ class FakeMinioClient:
         self.objects.pop(object_name, None)
         return SimpleNamespace(object_name=object_name)
 
-    def list_objects(self, bucket_name: str, *, recursive: bool) -> Iterator[SimpleNamespace]:
+    def list_objects(
+        self,
+        bucket_name: str,
+        *,
+        prefix: str | None = None,
+        recursive: bool,
+    ) -> Iterator[SimpleNamespace]:
         del bucket_name
         assert recursive is True
         self.list_calls += 1
+        self.list_prefixes.append(prefix)
         if self.list_error is not None:
             raise self.list_error
-        yield from self.list_items
+        for item in self.list_items:
+            if prefix is not None and not item.object_name.startswith(prefix):
+                continue
+            yield item
 
 
 def _store(
@@ -170,10 +189,10 @@ def _store(
 def test_config_is_strict_and_hides_credentials() -> None:
     config = MinioStorageConfig.from_environment(
         {
-            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "minio.example:9000",
-            "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-            "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "top-secret",
-            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "knowledge-test",
+            "ATHENA_STORAGE_ENDPOINT": "minio.example:9000",
+            "ATHENA_STORAGE_ACCESS_KEY": "access",
+            "ATHENA_STORAGE_SECRET_KEY": "top-secret",
+            "ATHENA_STORAGE_BUCKET": "knowledge-test",
         }
     )
     assert config.secure is True
@@ -181,31 +200,31 @@ def test_config_is_strict_and_hides_credentials() -> None:
     with pytest.raises(OriginalStorageConfigurationError):
         MinioStorageConfig.from_environment(
             {
-                "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "https://minio.example",
-                "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-                "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-                "ATHENA_KNOWLEDGE_MINIO_BUCKET": "test-bucket",
+                "ATHENA_STORAGE_ENDPOINT": "https://minio.example",
+                "ATHENA_STORAGE_ACCESS_KEY": "access",
+                "ATHENA_STORAGE_SECRET_KEY": "secret",
+                "ATHENA_STORAGE_BUCKET": "test-bucket",
             }
         )
     with pytest.raises(OriginalStorageConfigurationError):
         MinioStorageConfig.from_environment(
             {
-                "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "minio.example:9000",
-                "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-                "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-                "ATHENA_KNOWLEDGE_MINIO_BUCKET": "test-bucket",
-                "ATHENA_KNOWLEDGE_MINIO_SECURE": "maybe",
+                "ATHENA_STORAGE_ENDPOINT": "minio.example:9000",
+                "ATHENA_STORAGE_ACCESS_KEY": "access",
+                "ATHENA_STORAGE_SECRET_KEY": "secret",
+                "ATHENA_STORAGE_BUCKET": "test-bucket",
+                "ATHENA_STORAGE_SECURE": "maybe",
             }
         )
     with pytest.raises(OriginalStorageConfigurationError):
         MinioStorageConfig.from_environment({})
     insecure = MinioStorageConfig.from_environment(
         {
-            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "127.0.0.1:9000",
-            "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-            "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "test-bucket",
-            "ATHENA_KNOWLEDGE_MINIO_SECURE": "false",
+            "ATHENA_STORAGE_ENDPOINT": "127.0.0.1:9000",
+            "ATHENA_STORAGE_ACCESS_KEY": "access",
+            "ATHENA_STORAGE_SECRET_KEY": "secret",
+            "ATHENA_STORAGE_BUCKET": "test-bucket",
+            "ATHENA_STORAGE_SECURE": "false",
         }
     )
     assert insecure.secure is False
@@ -239,10 +258,10 @@ def test_config_rejects_malformed_endpoint(endpoint: str) -> None:
     with pytest.raises(OriginalStorageConfigurationError):
         MinioStorageConfig.from_environment(
             {
-                "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": endpoint,
-                "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-                "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-                "ATHENA_KNOWLEDGE_MINIO_BUCKET": "test-bucket",
+                "ATHENA_STORAGE_ENDPOINT": endpoint,
+                "ATHENA_STORAGE_ACCESS_KEY": "access",
+                "ATHENA_STORAGE_SECRET_KEY": "secret",
+                "ATHENA_STORAGE_BUCKET": "test-bucket",
             }
         )
 
@@ -264,10 +283,10 @@ def test_config_rejects_malformed_endpoint(endpoint: str) -> None:
 def test_config_accepts_strict_host_port_forms(endpoint: str) -> None:
     config = MinioStorageConfig.from_environment(
         {
-            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": endpoint,
-            "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "access",
-            "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "secret",
-            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "test-bucket",
+            "ATHENA_STORAGE_ENDPOINT": endpoint,
+            "ATHENA_STORAGE_ACCESS_KEY": "access",
+            "ATHENA_STORAGE_SECRET_KEY": "secret",
+            "ATHENA_STORAGE_BUCKET": "test-bucket",
         }
     )
     assert config.endpoint == endpoint
@@ -306,12 +325,14 @@ def test_put_get_delete_are_content_verified_and_idempotent() -> None:
         await store.put(key, content)
         await store.put(key, content)
         assert client.put_calls == 1
+        assert _physical(key) in client.objects
+        assert key not in client.objects
         assert await store.get(key) == content
         assert client.responses[-1].closed and client.responses[-1].released
 
         await store.delete(key)
         await store.delete(key)
-        assert client.remove_calls == [key, key]
+        assert client.remove_calls == [_physical(key), _physical(key)]
         with pytest.raises(OriginalStorageNotFoundError):
             await store.get(key)
 
@@ -325,7 +346,7 @@ def test_existing_object_is_fully_compared_and_corruption_is_rejected() -> None:
         await store.start()
         content = b"trusted bytes"
         key = _key(content)
-        client.objects[key] = _StoredObject(b"x" * len(content), datetime.now(UTC))
+        client.objects[_physical(key)] = _StoredObject(b"x" * len(content), datetime.now(UTC))
 
         with pytest.raises(OriginalStorageIntegrityError):
             await store.put(key, content)
@@ -340,7 +361,7 @@ def test_existing_object_with_different_size_is_read_before_conflict() -> None:
         await store.start()
         content = b"trusted bytes"
         key = _key(content)
-        client.objects[key] = _StoredObject(b"x", datetime.now(UTC))
+        client.objects[_physical(key)] = _StoredObject(b"x", datetime.now(UTC))
 
         with pytest.raises(OriginalStorageIntegrityError):
             await store.put(key, content)
@@ -372,7 +393,7 @@ def test_get_is_bounded_and_releases_response_on_error() -> None:
         await store.start()
         content = b"toolarge"
         key = _key(content)
-        client.objects[key] = _StoredObject(content, datetime.now(UTC))
+        client.objects[_physical(key)] = _StoredObject(content, datetime.now(UTC))
 
         with pytest.raises(OriginalStorageIntegrityError, match="too_large"):
             await store.get(key)
@@ -430,15 +451,27 @@ def test_orphan_listing_filters_age_and_legal_keys_and_requires_grace_period() -
         old = _key(b"old", source="ksrc_old")
         recent = _key(b"recent", source="ksrc_recent")
         client.list_items = [
-            SimpleNamespace(object_name=old, last_modified=now - timedelta(days=2)),
-            SimpleNamespace(object_name=recent, last_modified=now - timedelta(hours=1)),
-            SimpleNamespace(object_name="not-a-key", last_modified=now - timedelta(days=2)),
-            SimpleNamespace(object_name=_key(b"none"), last_modified=None),
+            SimpleNamespace(object_name=_physical(old), last_modified=now - timedelta(days=2)),
+            SimpleNamespace(object_name=_physical(recent), last_modified=now - timedelta(hours=1)),
+            SimpleNamespace(
+                object_name="knowledge/not-a-key",
+                last_modified=now - timedelta(days=2),
+            ),
+            SimpleNamespace(
+                object_name="session-files/aa/file_1",
+                last_modified=now - timedelta(days=2),
+            ),
+            SimpleNamespace(
+                object_name="skills/aa/" + "b" * 64 + "/ver_1.zip",
+                last_modified=now - timedelta(days=2),
+            ),
+            SimpleNamespace(object_name=_physical(_key(b"none")), last_modified=None),
         ]
         store = _store(client, clock=lambda: now)
         await store.start()
 
         assert [key async for key in store.iter_orphan_candidates()] == [old]
+        assert client.list_prefixes == [KNOWLEDGE_OBJECT_PREFIX]
         with pytest.raises(ValueError, match="grace_period"):
             async for _ in store.iter_orphan_candidates(older_than_seconds=60):
                 raise AssertionError("must not yield")
@@ -452,24 +485,36 @@ def test_orphan_iterator_closes_when_consumer_stops_early() -> None:
             super().__init__()
             self.closed = False
 
-        def list_objects(self, bucket_name: str, *, recursive: bool) -> Iterator[SimpleNamespace]:
+        def list_objects(
+            self,
+            bucket_name: str,
+            *,
+            prefix: str | None = None,
+            recursive: bool,
+        ) -> Iterator[SimpleNamespace]:
             del bucket_name
             assert recursive is True
+            assert prefix == KNOWLEDGE_OBJECT_PREFIX
             try:
-                yield from self.list_items
+                for item in self.list_items:
+                    if prefix is not None and not item.object_name.startswith(prefix):
+                        continue
+                    yield item
             finally:
                 self.closed = True
 
     async def scenario() -> None:
         now = datetime(2026, 11, 9, tzinfo=UTC)
         client = ClosingClient()
+        first_logical = _key(b"first", source="ksrc_first")
+        second_logical = _key(b"second", source="ksrc_second")
         client.list_items = [
             SimpleNamespace(
-                object_name=_key(b"first", source="ksrc_first"),
+                object_name=_physical(first_logical),
                 last_modified=now - timedelta(days=2),
             ),
             SimpleNamespace(
-                object_name=_key(b"second", source="ksrc_second"),
+                object_name=_physical(second_logical),
                 last_modified=now - timedelta(days=2),
             ),
         ]
@@ -477,7 +522,7 @@ def test_orphan_iterator_closes_when_consumer_stops_early() -> None:
         await store.start()
 
         iterator = cast(AsyncGenerator[str, None], store.iter_orphan_candidates())
-        assert await anext(iterator) == client.list_items[0].object_name
+        assert await anext(iterator) == first_logical
         await iterator.aclose()
         assert client.closed
 
@@ -707,7 +752,7 @@ def test_cancelled_get_still_closes_and_releases_response_connection() -> None:
         await store.start()
         content = b"cancelled content"
         key = _key(content)
-        client.objects[key] = _StoredObject(content, datetime.now(UTC))
+        client.objects[_physical(key)] = _StoredObject(content, datetime.now(UTC))
         task = asyncio.create_task(store.get(key))
         assert await asyncio.to_thread(client.started.wait, 2)
         task.cancel()

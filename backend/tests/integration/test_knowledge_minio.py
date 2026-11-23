@@ -31,7 +31,7 @@ pytestmark = [
 
 def _config() -> MinioStorageConfig:
     bucket = os.environ["ATHENA_TEST_MINIO_BUCKET"]
-    production_bucket = os.getenv("ATHENA_KNOWLEDGE_MINIO_BUCKET")
+    production_bucket = os.getenv("ATHENA_STORAGE_BUCKET")
     if production_bucket and production_bucket == bucket:
         raise AssertionError("test MinIO bucket must differ from the production bucket")
     secure = os.getenv("ATHENA_TEST_MINIO_SECURE", "true").strip().lower()

@@ -1,76 +1,75 @@
-"""知识库进程共享的模型与存储资源构造。"""
+"""知识库进程共享的远程 Embedding、Token 计数与统一对象存储构造。"""
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from adapter.knowledge.storage import MinioOriginalStore, MinioStorageConfig
-from infrastructure.embedding import LocalEmbedding, LocalTokenCounter
-from infrastructure.embedding.profile import embedding_profile_id
+from infrastructure.embedding import (
+    OpenAICompatibleEmbeddingClient,
+    OpenAICompatibleEmbeddingConfig,
+    TiktokenTokenCounter,
+    remote_embedding_profile_id,
+)
 from infrastructure.knowledge import JiebaChineseTokenizer
 
-DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
-DEFAULT_EMBEDDING_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
+# PostgreSQL knowledge_chunks.embedding 列固定为 Vector(1024)，启动阶段必须严格对齐。
+KNOWLEDGE_VECTOR_DIMENSIONS = 1024
 
 
 @dataclass(slots=True)
 class KnowledgeModelResources:
-    """API 与 Knowledge Worker 共用的知识库模型资源。"""
+    """API、Run Worker 与 Knowledge Worker 共用的无状态知识库文本与向量资源。"""
 
-    embedding: LocalEmbedding
-    counter: LocalTokenCounter
+    embedding: OpenAICompatibleEmbeddingClient
+    counter: TiktokenTokenCounter
     tokenizer: JiebaChineseTokenizer
     profile_id: str
 
 
-def knowledge_embedding_settings() -> tuple[str, str, str]:
-    """读取知识库本地向量模型配置，供同进程共享实例判定复用。"""
-    model = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
-    revision = os.getenv(
-        "ATHENA_KNOWLEDGE_EMBEDDING_REVISION",
-        DEFAULT_EMBEDDING_REVISION,
+def knowledge_embedding_config() -> OpenAICompatibleEmbeddingConfig:
+    """读取并校验远程 Embedding 配置，确保维度与 pgvector 1024 列约束一致。"""
+    return OpenAICompatibleEmbeddingConfig.from_environment(
+        expected_dimensions=KNOWLEDGE_VECTOR_DIMENSIONS,
     )
-    device = os.getenv("ATHENA_KNOWLEDGE_EMBEDDING_DEVICE", "cpu")
-    return model, revision, device
 
 
-def build_knowledge_models(
-    *,
-    embedding: LocalEmbedding | None = None,
-) -> KnowledgeModelResources:
-    """按统一环境变量构造 embedding、token 计数与分词资源。
+def validate_knowledge_embedding_configuration() -> None:
+    """在创建数据库或对象存储连接前快速校验远程 Embedding 配置。"""
+    knowledge_embedding_config()
 
-    profile_id 必须由模型与修订版本共同推导，保证写入侧与后台消费侧使用
-    同一个向量档案标识，避免混用不同预处理规则的向量。
-    调用方已构造同配置 LocalEmbedding 时可显式注入复用，避免同进程重复加载模型。
+
+def build_knowledge_models() -> KnowledgeModelResources:
+    """按统一 ATHENA_EMBEDDING_* 环境变量构造无状态远程向量客户端、tiktoken 计数与分词器。
+
+    profile_id 稳定地由模型名与维度生成，确保 API、Run Worker 与 Knowledge Worker
+    写入与检索使用完全一致的向量档案标识。
     """
-    model, revision, device = knowledge_embedding_settings()
-    selected_embedding = (
-        embedding if embedding is not None else LocalEmbedding(model, revision, device)
-    )
+    config = knowledge_embedding_config()
     return KnowledgeModelResources(
-        embedding=selected_embedding,
-        counter=LocalTokenCounter(model, revision),
+        embedding=OpenAICompatibleEmbeddingClient(config),
+        counter=TiktokenTokenCounter(),
         tokenizer=JiebaChineseTokenizer(),
-        profile_id=embedding_profile_id(model, revision),
+        profile_id=remote_embedding_profile_id(config.model, config.dimensions),
     )
 
 
 def build_knowledge_original_store() -> MinioOriginalStore:
-    """构造 MinIO 原件存储；配置缺失或非法时立即失败。"""
+    """构造基于统一 ATHENA_STORAGE_* 的知识库原件存储；配置缺失或非法时立即失败。"""
     return MinioOriginalStore.from_environment()
 
 
 def validate_knowledge_storage_configuration() -> None:
-    """在创建数据库、Redis 或模型资源前快速校验存储配置。"""
+    """在创建数据库、Redis 或模型资源前快速校验对象存储配置。"""
     MinioStorageConfig.from_environment()
 
 
 __all__ = [
+    "KNOWLEDGE_VECTOR_DIMENSIONS",
     "KnowledgeModelResources",
     "build_knowledge_models",
     "build_knowledge_original_store",
-    "knowledge_embedding_settings",
+    "knowledge_embedding_config",
+    "validate_knowledge_embedding_configuration",
     "validate_knowledge_storage_configuration",
 ]

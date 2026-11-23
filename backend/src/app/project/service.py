@@ -5,11 +5,10 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
-from threading import Lock
 
 from app.project.converter.result import project_page_to_result, project_to_result
 from app.project.model.result import ProjectPageResult, ProjectResult
-from common.ids import monotonic_timestamp_id_factory, now_utc
+from common.ids import new_id, now_utc
 from domain.project import (
     InvalidProjectNameError,
     Project,
@@ -20,14 +19,10 @@ from domain.project import (
 MAX_PROJECT_NAME_LENGTH = 120
 MAX_PAGE_SIZE = 100
 
-_project_id_factory = monotonic_timestamp_id_factory()
-_project_id_factory_lock = Lock()
-
 
 def _default_id_factory() -> str:
-    """使用进程级单调 UTC 毫秒工厂生成项目主键。"""
-    with _project_id_factory_lock:
-        return _project_id_factory()
+    """使用全局随机唯一 ID 生成项目主键，消除单进程时间戳锁以支持多副本并发。"""
+    return new_id("proj")
 
 
 def _normalize_name(name: str) -> str:

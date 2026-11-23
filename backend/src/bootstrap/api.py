@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from redis.asyncio import Redis
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
@@ -36,8 +39,16 @@ from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.config import env_csv_set, env_flag, memory_enabled_from_env
 from bootstrap.database import build_database
-from bootstrap.knowledge import validate_knowledge_storage_configuration
-from bootstrap.redis import build_run_transport
+from bootstrap.knowledge import (
+    validate_knowledge_embedding_configuration,
+    validate_knowledge_storage_configuration,
+)
+from bootstrap.redis import (
+    build_auth_rate_limiters,
+    build_redis_client,
+    build_run_transport,
+    validate_auth_rate_limit_configuration,
+)
 from bootstrap.tool import QueryServiceBundle, build_query_services
 from domain.file.ports import FileObjectStore
 from domain.knowledge.ports import (
@@ -52,24 +63,18 @@ from infrastructure.knowledge.parsers import LocalDocumentParser
 from infrastructure.mcp.discovery import McpDiscoveryClient
 from infrastructure.security.mcp_secrets import McpSecretCipher
 from infrastructure.security.password import Argon2PasswordHasher
+from infrastructure.storage.config import has_object_storage_env
 
 logger = logging.getLogger(__name__)
 
-_FILE_STORAGE_SETTING_NAMES = (
-    "ATHENA_FILE_MINIO_ENDPOINT",
-    "ATHENA_FILE_MINIO_ACCESS_KEY",
-    "ATHENA_FILE_MINIO_SECRET_KEY",
-    "ATHENA_FILE_MINIO_BUCKET",
-)
-
 
 def _file_storage_enabled() -> bool:
-    """按独立文件存储配置启用 Skills/files，不依赖知识库功能。"""
+    """优先按显式 ATHENA_FILES_ENABLED 开关启用；未显式设置时按统一 ATHENA_STORAGE_* 判定。"""
     if "ATHENA_FILES_ENABLED" in os.environ:
         return env_flag("ATHENA_FILES_ENABLED", default=False)
-    # 任一专用连接项存在即视为已配置，让不完整配置在启动时明确失败；
-    # 完全没有文件存储配置的开发/旧测试实例则不挂载相关路由。
-    return any(os.getenv(name, "").strip() for name in _FILE_STORAGE_SETTING_NAMES)
+    # 任一统一对象存储连接项存在即视为已配置，让不完整配置在启动时明确失败；
+    # 完全没有对象存储配置的开发/旧测试实例则不挂载相关路由。
+    return has_object_storage_env()
 
 
 @dataclass(slots=True)
@@ -98,6 +103,7 @@ class ApiDependencies:
     session_file_service: SessionFileService | None
     knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
     subagent_service: SubagentService | None = None
+    redis_client: Redis | None = None
 
     async def start(self) -> None:
         """在首个请求前启动共享查询资源。"""
@@ -114,6 +120,15 @@ class ApiDependencies:
             except Exception as error:
                 logger.error(
                     "run_redis_shutdown_failed exception_type=%s",
+                    type(error).__name__,
+                )
+        if self.redis_client is not None:
+            try:
+                async with asyncio.timeout(1.0):
+                    await self.redis_client.aclose()
+            except Exception as error:
+                logger.error(
+                    "redis_client_shutdown_failed exception_type=%s",
                     type(error).__name__,
                 )
         if self.query_services is not None:
@@ -185,14 +200,19 @@ def build_api_dependencies(
     knowledge_owned = knowledge_service is None and knowledge_enabled
     run_stream_service: RunStreamService | None = None
     run_transport: RedisRunTransport | None = None
+    redis_client: Redis | None = None
+    if auth_use_case is None:
+        # 生产环境必须在启动初期拒绝缺失 Redis 限流的配置，避免分配数据库连接池后再失败。
+        validate_auth_rate_limit_configuration()
     if memory_owned and not database_url:
         raise RuntimeError("memory_database_required")
     if knowledge_owned and not database_url:
         raise RuntimeError("knowledge_database_required")
     if knowledge_owned:
-        # 在创建任何数据库、Redis 或模型资源前失败，避免遗留半组装资源。
-        # 同一份环境会由 build_query_services 再次解析。
+        # 在创建任何数据库、Redis 或模型资源前校验统一存储与远程 Embedding 配置，
+        # 避免遗留半组装资源；同一份环境会由 build_query_services 再次解析。
         validate_knowledge_storage_configuration()
+        validate_knowledge_embedding_configuration()
     # LLM 配置由管理员持久化；部署环境只提供加密主密钥，不提供模型凭据。
     secret_cipher: McpSecretCipher | None = None
     mcp_discovery: McpDiscoveryClient | None = None
@@ -241,8 +261,6 @@ def build_api_dependencies(
             )
         session_repository = SqlAlchemySessionRepository(database.session_factory)
         auth_repository = SqlAlchemyAuthRepository(database.session_factory)
-        if auth_use_case is None:
-            auth_use_case = AuthService(auth_repository, Argon2PasswordHasher())
         if system_prompt_use_case is None:
             system_prompt_use_case = SystemPromptService(
                 SqlAlchemySystemPromptRepository(database.session_factory),
@@ -305,9 +323,29 @@ def build_api_dependencies(
         )
         if run_use_case is None:
             run_use_case = RunService(run_repository)
+        # 在数据库与查询服务均构建成功后再建立共享 Redis 客户端，供认证分布式限流与 Run SSE 共用，
+        # 所有权统一归 ApiDependencies.aclose() 释放。
+        redis_client = build_redis_client()
+        if auth_use_case is None:
+            if redis_client is not None:
+                rate_limiters = build_auth_rate_limiters(redis_client)
+                auth_use_case = AuthService(
+                    auth_repository,
+                    Argon2PasswordHasher(),
+                    login_account_limiter=rate_limiters.login_account,
+                    login_ip_limiter=rate_limiters.login_ip,
+                    register_limiter=rate_limiters.register,
+                    change_password_limiter=rate_limiters.change_password,
+                )
+            else:
+                auth_use_case = AuthService(auth_repository, Argon2PasswordHasher())
         if auth_use_case is not None:
             # Redis 未配置时保持为 None，Run 流式服务降级为仅持久化事件。
-            run_transport = build_run_transport()
+            run_transport = (
+                build_run_transport(redis_client)
+                if redis_client is not None
+                else build_run_transport()
+            )
             run_stream_service = RunStreamService(
                 run_repository,
                 auth_use_case,
@@ -366,6 +404,7 @@ def build_api_dependencies(
         skill_service=skill_use_case,
         session_file_service=session_file_use_case,
         subagent_service=subagent_use_case,
+        redis_client=redis_client,
     )
 
 

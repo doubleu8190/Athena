@@ -36,16 +36,13 @@ def _write_test_project(root: Path) -> None:
                 "REDIS_PORT=16379",
                 "MINIO_API_PORT=19000",
                 "MINIO_CONSOLE_PORT=19001",
-                "MINIO_DEV_BUCKET=tenant-knowledge-dev",
-                "MINIO_TEST_BUCKET=tenant-knowledge-test",
-                "MINIO_FILES_DEV_BUCKET=tenant-files-dev",
-                "MINIO_FILES_TEST_BUCKET=tenant-files-test",
+                "MINIO_DEV_BUCKET=tenant-storage-dev",
+                "MINIO_TEST_BUCKET=tenant-storage-test",
                 "ATHENA_COOKIE_SECURE=false",
                 "ATHENA_KNOWLEDGE_ENABLED=false",
-                "ATHENA_KNOWLEDGE_MINIO_SECURE=false",
+                "ATHENA_STORAGE_SECURE=false",
                 "ATHENA_TEST_MINIO_SECURE=false",
                 "ATHENA_FILES_ENABLED=true",
-                "ATHENA_FILE_MINIO_SECURE=false",
             )
         )
         + "\n",
@@ -97,10 +94,10 @@ assert parsed.path == "/" + __import__("urllib.parse").parse.quote(
 )
 assert unquote(parsed.username or "") == os.environ["EXPECTED_DATABASE_USER"]
 assert unquote(parsed.password or "") == os.environ["EXPECTED_DATABASE_PASSWORD"]
-assert os.environ["ATHENA_KNOWLEDGE_MINIO_BUCKET"] == "tenant-knowledge-test"
-assert os.environ["ATHENA_TEST_MINIO_BUCKET"] == "tenant-knowledge-test"
-assert os.environ["ATHENA_FILE_MINIO_BUCKET"] == "tenant-files-test"
-assert os.environ["ATHENA_KNOWLEDGE_MINIO_ENDPOINT"] == "host.docker.internal:19000"
+assert os.environ["ATHENA_STORAGE_BUCKET"] == "tenant-storage-test"
+assert os.environ["ATHENA_TEST_MINIO_BUCKET"] == "tenant-storage-test"
+assert os.environ["ATHENA_STORAGE_ENDPOINT"] == "host.docker.internal:19000"
+assert os.environ["ATHENA_STORAGE_SECURE"] == "false"
 PY
 """
     result = subprocess.run(
@@ -194,7 +191,7 @@ fi
 printf 'ARGV=%s\\n' "$*" >> {str(command_log)!r}
 for key in \
   PORT POSTGRES_TEST_DB MINIO_TEST_BUCKET ATHENA_DATABASE_URL \
-  ATHENA_KNOWLEDGE_MINIO_BUCKET ATHENA_FILE_MINIO_BUCKET ROOT_ONLY; do
+  ATHENA_STORAGE_BUCKET ATHENA_STORAGE_SECURE ROOT_ONLY; do
   printf 'ENV_%s=%s\\n' "$key" "${{!key-}}" >> {str(command_log)!r}
 done
 case "$*" in
@@ -239,9 +236,9 @@ printf '%s\\n' "$*" >> {str(curl_log)!r}
     command_text = command_log.read_text(encoding="utf-8")
     assert "ENV_PORT=18080" in command_text
     assert "ENV_POSTGRES_TEST_DB=athena test@primary" in command_text
-    assert "ENV_MINIO_TEST_BUCKET=tenant-knowledge-test" in command_text
-    assert "ENV_ATHENA_KNOWLEDGE_MINIO_BUCKET=tenant-knowledge-test" in command_text
-    assert "ENV_ATHENA_FILE_MINIO_BUCKET=tenant-files-test" in command_text
+    assert "ENV_MINIO_TEST_BUCKET=tenant-storage-test" in command_text
+    assert "ENV_ATHENA_STORAGE_BUCKET=tenant-storage-test" in command_text
+    assert "ENV_ATHENA_STORAGE_SECURE=false" in command_text
     encoded_database = quote("athena test@primary", safe="")
     encoded_user = quote("db-user@example.test", safe="")
     encoded_password = quote('p@ss:word/with?#&="quotes"', safe="")

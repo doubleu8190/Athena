@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import os
 import re
@@ -11,7 +10,7 @@ import ssl
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol, TypeVar, cast
@@ -19,11 +18,20 @@ from typing import Any, BinaryIO, Protocol, TypeVar, cast
 from common.date import as_utc
 from common.ids import now_utc
 from domain.file import FileObjectScanEntry, FileObjectStore
+from infrastructure.storage.config import (
+    ObjectStorageConfig,
+    ObjectStorageConfigError,
+)
 
 logger = logging.getLogger(__name__)
 
-_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-_HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+# 文件与技能域仅允许操作下列业务前缀，与同桶内 knowledge/ 严格隔离。
+FILE_OBJECT_PREFIXES = (
+    "session-files/",
+    "session-artifacts/",
+    "skill-logs/",
+    "skills/",
+)
 _OBJECT_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,1022}$")
 _ORPHAN_KEY = re.compile(
     r"^(?:"
@@ -89,35 +97,28 @@ class _MinioClient(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class MinioFileStorageConfig:
-    """Skill/文件对象存储连接配置。"""
+class MinioFileStorageConfig(ObjectStorageConfig):
+    """基于统一 ATHENA_STORAGE_* 的文件/技能对象存储连接配置。"""
 
-    endpoint: str
-    access_key: str = field(repr=False)
-    secret_key: str = field(repr=False)
-    bucket: str
-    secure: bool = True
+    def __post_init__(self) -> None:
+        try:
+            super().__post_init__()
+        except ObjectStorageConfigError:
+            raise FileStorageError("file_storage_configuration_invalid") from None
 
     @classmethod
-    def from_environment(
-        cls, environ: Mapping[str, str] | None = None
-    ) -> MinioFileStorageConfig:
-        """只读取专用文件桶配置，禁止误用知识库桶。"""
-        source = os.environ if environ is None else environ
-        endpoint = _setting(source, "ATHENA_FILE_MINIO_ENDPOINT")
-        access_key = _setting(source, "ATHENA_FILE_MINIO_ACCESS_KEY")
-        secret_key = _setting(source, "ATHENA_FILE_MINIO_SECRET_KEY")
-        bucket = _setting(source, "ATHENA_FILE_MINIO_BUCKET")
-        secure = _flag(source, "ATHENA_FILE_MINIO_SECURE")
-        _validate_endpoint(endpoint)
-        if not _BUCKET.fullmatch(bucket) or ".." in bucket:
-            raise FileStorageError("file_storage_configuration_invalid")
+    def from_environment(cls, environ: Mapping[str, str] | None = None) -> MinioFileStorageConfig:
+        """从统一 ATHENA_STORAGE_* 读取配置，并将非法配置映射为 FileStorageError。"""
+        try:
+            base = ObjectStorageConfig.from_environment(environ)
+        except ObjectStorageConfigError:
+            raise FileStorageError("file_storage_configuration_invalid") from None
         return cls(
-            endpoint=endpoint,
-            access_key=access_key,
-            secret_key=secret_key,
-            bucket=bucket,
-            secure=secure,
+            endpoint=base.endpoint,
+            access_key=base.access_key,
+            secret_key=base.secret_key,
+            bucket=base.bucket,
+            secure=base.secure,
         )
 
 
@@ -158,7 +159,7 @@ class MinioFileObjectStore(FileObjectStore):
 
     def __init__(
         self,
-        config: MinioFileStorageConfig | None = None,
+        config: ObjectStorageConfig | None = None,
         *,
         client: _MinioClient | None = None,
         environ: Mapping[str, str] | None = None,
@@ -500,73 +501,20 @@ class MinioFileObjectStore(FileObjectStore):
             raise FileStorageError()
         return self._client
 
-    def _configuration(self) -> MinioFileStorageConfig:
+    def _configuration(self) -> ObjectStorageConfig:
         """读取已在 lifespan 中完成的配置，禁止使用未初始化存储。"""
         if self._config is None:
             raise FileStorageError("file_storage_not_started")
         return self._config
 
 
-def _setting(source: Mapping[str, str], name: str) -> str:
-    """读取文件存储专用必填变量，不跨服务复用连接配置。"""
-    value = source.get(name)
-    if value is None or not value.strip():
-        raise FileStorageError("file_storage_configuration_invalid")
-    return value
-
-
-def _flag(source: Mapping[str, str], name: str, *, default: bool = True) -> bool:
-    """读取文件存储专用布尔变量，缺失时使用安全默认值。"""
-    value = source.get(name)
-    if value is None or not value.strip():
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise FileStorageError("file_storage_configuration_invalid")
-
-
-def _validate_endpoint(endpoint: str) -> None:
-    if (
-        not endpoint
-        or len(endpoint) > 253
-        or any(character.isspace() or ord(character) < 32 for character in endpoint)
-        or any(character in "/\\?#@%" for character in endpoint)
-    ):
-        raise FileStorageError("file_storage_configuration_invalid")
-    if endpoint.startswith("["):
-        closing = endpoint.find("]")
-        if closing < 0:
-            raise FileStorageError("file_storage_configuration_invalid")
-        ipaddress.IPv6Address(endpoint[1:closing])
-        remainder = endpoint[closing + 1 :]
-        if remainder:
-            if not remainder.startswith(":"):
-                raise FileStorageError("file_storage_configuration_invalid")
-            _validate_port(remainder[1:])
-        return
-    if endpoint.count(":") > 1:
-        raise FileStorageError("file_storage_configuration_invalid")
-    host, separator, port = endpoint.partition(":")
-    labels = host.split(".")
-    if any(_HOST_LABEL.fullmatch(label) is None for label in labels):
-        raise FileStorageError("file_storage_configuration_invalid")
-    if separator:
-        _validate_port(port)
-
-
-def _validate_port(value: str) -> None:
-    if not value.isdigit() or not 1 <= int(value) <= 65535:
-        raise FileStorageError("file_storage_configuration_invalid")
-
-
 def _validate_key(key: str) -> None:
+    """校验文件/技能对象键合法性并限定于本域业务前缀，避免跨前缀触碰 knowledge/ 对象。"""
     if (
         _OBJECT_KEY.fullmatch(key) is None
         or "//" in key
         or any(part in {"", ".", ".."} for part in key.split("/"))
+        or not key.startswith(FILE_OBJECT_PREFIXES)
     ):
         raise ValueError("file_storage_key_invalid")
 
@@ -607,4 +555,9 @@ def _error_code(error: Exception) -> str:
     return "file_storage_unavailable"
 
 
-__all__ = ["FileStorageError", "MinioFileObjectStore", "MinioFileStorageConfig"]
+__all__ = [
+    "FILE_OBJECT_PREFIXES",
+    "FileStorageError",
+    "MinioFileObjectStore",
+    "MinioFileStorageConfig",
+]

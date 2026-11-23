@@ -75,19 +75,19 @@ from domain.tool import RuntimeToolDefinition
 from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
-_FILE_MINIO_ENV = (
-    "ATHENA_FILE_MINIO_ENDPOINT",
-    "ATHENA_FILE_MINIO_ACCESS_KEY",
-    "ATHENA_FILE_MINIO_SECRET_KEY",
-    "ATHENA_FILE_MINIO_BUCKET",
+_TEST_MINIO_ENV = (
+    "ATHENA_TEST_MINIO_ENDPOINT",
+    "ATHENA_TEST_MINIO_ACCESS_KEY",
+    "ATHENA_TEST_MINIO_SECRET_KEY",
+    "ATHENA_TEST_MINIO_BUCKET",
 )
-MINIO_CONFIGURED = all(os.getenv(name) for name in _FILE_MINIO_ENV)
+MINIO_CONFIGURED = all(os.getenv(name) for name in _TEST_MINIO_ENV)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not DATABASE_URL or not MINIO_CONFIGURED,
         reason=(
-            "ATHENA_TEST_DATABASE_URL and isolated ATHENA_FILE_MINIO_* configuration are required"
+            "ATHENA_TEST_DATABASE_URL and isolated ATHENA_TEST_MINIO_* configuration are required"
         ),
     ),
 ]
@@ -503,14 +503,19 @@ async def _seed(
 
 
 def _minio_config() -> MinioFileStorageConfig:
-    secure = os.getenv("ATHENA_FILE_MINIO_SECURE", "true").strip().lower()
+    bucket = os.environ["ATHENA_TEST_MINIO_BUCKET"]
+    production_bucket = os.getenv("ATHENA_STORAGE_BUCKET")
+    # 防止集成测试误指向开发/生产业务桶，隔离测试数据与真实业务对象。
+    if production_bucket and production_bucket == bucket:
+        raise AssertionError("test MinIO bucket must differ from the production bucket")
+    secure = os.getenv("ATHENA_TEST_MINIO_SECURE", "true").strip().lower()
     if secure not in {"true", "1", "yes", "on", "false", "0", "no", "off"}:
-        raise AssertionError("ATHENA_FILE_MINIO_SECURE_invalid")
+        raise AssertionError("ATHENA_TEST_MINIO_SECURE_invalid")
     return MinioFileStorageConfig(
-        endpoint=os.environ["ATHENA_FILE_MINIO_ENDPOINT"],
-        access_key=os.environ["ATHENA_FILE_MINIO_ACCESS_KEY"],
-        secret_key=os.environ["ATHENA_FILE_MINIO_SECRET_KEY"],
-        bucket=os.environ["ATHENA_FILE_MINIO_BUCKET"],
+        endpoint=os.environ["ATHENA_TEST_MINIO_ENDPOINT"],
+        access_key=os.environ["ATHENA_TEST_MINIO_ACCESS_KEY"],
+        secret_key=os.environ["ATHENA_TEST_MINIO_SECRET_KEY"],
+        bucket=bucket,
         secure=secure in {"true", "1", "yes", "on"},
     )
 

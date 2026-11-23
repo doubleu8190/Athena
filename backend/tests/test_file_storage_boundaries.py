@@ -116,33 +116,50 @@ def test_get_range_returns_empty_only_for_true_eof_and_closes_response() -> None
     assert client.response.released is True
 
 
-def test_file_storage_config_does_not_fall_back_to_knowledge_bucket() -> None:
-    knowledge_only = {
+def test_file_storage_config_ignores_legacy_minio_env_vars() -> None:
+    legacy_only = {
         "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "knowledge.example.test:9000",
         "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY": "knowledge-access",
         "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY": "knowledge-secret",
         "ATHENA_KNOWLEDGE_MINIO_BUCKET": "knowledge-bucket",
+        "ATHENA_FILE_MINIO_ENDPOINT": "files.example.test:9000",
+        "ATHENA_FILE_MINIO_ACCESS_KEY": "files-access",
+        "ATHENA_FILE_MINIO_SECRET_KEY": "files-secret",
+        "ATHENA_FILE_MINIO_BUCKET": "files-bucket",
     }
 
     with pytest.raises(FileStorageError, match="file_storage_configuration_invalid"):
-        MinioFileStorageConfig.from_environment(knowledge_only)
+        MinioFileStorageConfig.from_environment(legacy_only)
 
 
-def test_file_storage_config_reads_only_dedicated_variables() -> None:
+def test_file_storage_config_reads_unified_storage_variables() -> None:
     config = MinioFileStorageConfig.from_environment(
         {
-            "ATHENA_FILE_MINIO_ENDPOINT": "files.example.test:9000",
-            "ATHENA_FILE_MINIO_ACCESS_KEY": "files-access",
-            "ATHENA_FILE_MINIO_SECRET_KEY": "files-secret",
-            "ATHENA_FILE_MINIO_BUCKET": "files-bucket",
-            "ATHENA_FILE_MINIO_SECURE": "false",
-            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "knowledge.example.test:9000",
-            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "knowledge-bucket",
+            "ATHENA_STORAGE_ENDPOINT": "storage.example.test:9000",
+            "ATHENA_STORAGE_ACCESS_KEY": "storage-access",
+            "ATHENA_STORAGE_SECRET_KEY": "storage-secret",
+            "ATHENA_STORAGE_BUCKET": "athena-shared-bucket",
+            "ATHENA_STORAGE_SECURE": "false",
+            "ATHENA_KNOWLEDGE_MINIO_ENDPOINT": "legacy.example.test:9000",
+            "ATHENA_KNOWLEDGE_MINIO_BUCKET": "legacy-bucket",
         }
     )
 
-    assert config.endpoint == "files.example.test:9000"
-    assert config.access_key == "files-access"
-    assert config.secret_key == "files-secret"
-    assert config.bucket == "files-bucket"
+    assert config.endpoint == "storage.example.test:9000"
+    assert config.access_key == "storage-access"
+    assert config.secret_key == "storage-secret"
+    assert config.bucket == "athena-shared-bucket"
     assert config.secure is False
+    assert "storage-secret" not in repr(config)
+
+
+def test_file_storage_rejects_knowledge_prefix_keys() -> None:
+    client = _Client(b"secret")
+    store = _store(client)
+
+    with pytest.raises(ValueError, match="file_storage_key_invalid"):
+        asyncio.run(store.get_bytes("knowledge/aa/bb", maximum_bytes=16))
+    with pytest.raises(ValueError, match="file_storage_key_invalid"):
+        asyncio.run(store.put_bytes("knowledge/aa/bb", b"x", content_type="text/plain"))
+    with pytest.raises(ValueError, match="file_storage_key_invalid"):
+        asyncio.run(store.delete("knowledge/aa/bb"))

@@ -17,11 +17,7 @@ from app.project.service import ProjectService
 from domain.project import Project, ProjectPage
 from main import create_app
 
-PROJECT_ID_PATTERN = re.compile(r"^\d{4}\.\d{2}\.\d{2}\.\d{2}\.\d{2}\.\d{2}\.\d{3}$")
-UUID_PATTERNS = (
-    re.compile(r"^[0-9a-f]{32}$"),
-    re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"),
-)
+PROJECT_ID_PATTERN = re.compile(r"^proj_[0-9a-f]{32}$")
 
 
 class InMemoryProjectRepository:
@@ -208,7 +204,7 @@ def test_create_returns_201_location_and_normalized_name() -> None:
     assert "owner_id" not in response.json()
 
 
-def test_default_project_ids_are_process_monotonic_timestamps() -> None:
+def test_default_project_ids_are_distributed_unique_proj_ids() -> None:
     first_service = ProjectService(
         InMemoryProjectRepository(),
         clock=lambda: datetime(2026, 2, 1, 8, 30, tzinfo=UTC),
@@ -218,20 +214,21 @@ def test_default_project_ids_are_process_monotonic_timestamps() -> None:
         clock=lambda: datetime(2026, 2, 1, 8, 30, tzinfo=UTC),
     )
 
+    generated: list[str] = []
     with _client(first_service) as client:
-        first_response = client.post("/api/v1/projects", json={"name": "项目一"})
+        for index in range(10):
+            response = client.post("/api/v1/projects", json={"name": f"项目A-{index}"})
+            assert response.status_code == 201
+            generated.append(response.json()["id"])
     with _client(second_service) as client:
-        second_response = client.post("/api/v1/projects", json={"name": "项目二"})
+        for index in range(10):
+            response = client.post("/api/v1/projects", json={"name": f"项目B-{index}"})
+            assert response.status_code == 201
+            generated.append(response.json()["id"])
 
-    first_id = first_response.json()["id"]
-    second_id = second_response.json()["id"]
-    assert PROJECT_ID_PATTERN.fullmatch(first_id)
-    assert PROJECT_ID_PATTERN.fullmatch(second_id)
-    assert len(first_id) <= 64
-    assert len(second_id) <= 64
-    assert all(pattern.fullmatch(first_id) is None for pattern in UUID_PATTERNS)
-    assert all(pattern.fullmatch(second_id) is None for pattern in UUID_PATTERNS)
-    assert second_id > first_id
+    assert len(set(generated)) == 20
+    assert all(PROJECT_ID_PATTERN.fullmatch(project_id) is not None for project_id in generated)
+    assert all(len(project_id) <= 64 for project_id in generated)
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import pytest
 
 from adapter.file import MinioFileObjectStore, MinioFileStorageConfig
+from domain.file import FileObjectScanEntry
 
 NOW = datetime(2026, 11, 12, tzinfo=UTC)
 
@@ -55,8 +56,9 @@ def _store(client: _Client) -> MinioFileObjectStore:
 
 
 def test_storage_returns_bounded_raw_items_and_marks_ineligible_objects() -> None:
-    """未到期和非法键也返回为已扫描项，页大小受回收检查上限约束。"""
+    """未到期、knowledge/ 前缀和非法键均标记为非候选，页大小受回收检查上限约束。"""
     items = (
+        _Item("knowledge/" + "a" * 64 + "/ksrc_1/aa/" + "b" * 64, NOW.replace(day=1)),
         _Item("session-files/aa/old", NOW.replace(day=1)),
         _Item("session-files/bb/recent", NOW),
         _Item("operator-not-owned", NOW.replace(day=1)),
@@ -64,23 +66,24 @@ def test_storage_returns_bounded_raw_items_and_marks_ineligible_objects() -> Non
     )
     client = _Client(items)
 
-    async def scenario() -> list[object]:
+    async def scenario() -> list[FileObjectScanEntry]:
         return [
             entry
             async for entry in _store(client).iter_maintenance_candidates(
                 older_than_seconds=86400,
-                maximum_items=3,
+                maximum_items=4,
             )
         ]
 
     entries = asyncio.run(scenario())
 
     assert [entry.object_key for entry in entries] == [
+        "knowledge/" + "a" * 64 + "/ksrc_1/aa/" + "b" * 64,
         "session-files/aa/old",
         "session-files/bb/recent",
         "operator-not-owned",
     ]
-    assert [entry.is_candidate for entry in entries] == [True, False, False]
+    assert [entry.is_candidate for entry in entries] == [False, True, False, False]
     assert client.list_calls == [None]
 
 

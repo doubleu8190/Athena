@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
-import ipaddress
 import logging
 import os
 import re
@@ -13,10 +12,9 @@ import ssl
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, BinaryIO, Protocol, Self, TypeVar, cast
-from urllib.parse import urlsplit
 
 from common.date import as_utc, utc_now
 from domain.knowledge.model import (
@@ -29,15 +27,21 @@ from domain.knowledge.model import (
     OriginalStorageUnavailableError,
 )
 from domain.knowledge.ports import OriginalStore
+from infrastructure.storage.config import (
+    ObjectStorageConfig,
+    ObjectStorageConfigError,
+)
 
 logger = logging.getLogger(__name__)
+
+# 同桶多业务隔离：知识库原件在底层 S3 中统一落入 knowledge/ 前缀，
+# 对上层领域和数据库继续保持无前缀的逻辑 storage_key 契约。
+KNOWLEDGE_OBJECT_PREFIX = "knowledge/"
 
 _KEY = re.compile(
     r"^(?:[a-f0-9]{64}/[a-f0-9]{2}/[a-f0-9]{64}|"
     r"[a-f0-9]{64}/[a-z0-9_-]{1,64}/[a-f0-9]{2}/[a-f0-9]{64})$"
 )
-_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-_HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _MAX_WORKERS = 4
 _ResultT = TypeVar("_ResultT")
 
@@ -79,7 +83,13 @@ class _MinioClient(Protocol):
 
     def remove_object(self, bucket_name: str, object_name: str) -> object: ...
 
-    def list_objects(self, bucket_name: str, *, recursive: bool) -> Iterator[_ListedObject]: ...
+    def list_objects(
+        self,
+        bucket_name: str,
+        *,
+        prefix: str | None = None,
+        recursive: bool,
+    ) -> Iterator[_ListedObject]: ...
 
 
 class _BoundedExecutor:
@@ -122,57 +132,37 @@ class _BoundedExecutor:
 
 
 @dataclass(frozen=True, slots=True)
-class MinioStorageConfig:
-    """Validated deployment-level MinIO connection settings."""
-
-    endpoint: str
-    access_key: str = field(repr=False)
-    secret_key: str = field(repr=False)
-    bucket: str
-    secure: bool = True
+class MinioStorageConfig(ObjectStorageConfig):
+    """基于统一 ATHENA_STORAGE_* 的知识库对象存储配置。"""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.endpoint, str):
-            raise OriginalStorageConfigurationError()
-        _validate_endpoint(self.endpoint)
-        if (
-            not isinstance(self.access_key, str)
-            or not self.access_key.strip()
-            or not isinstance(self.secret_key, str)
-            or not self.secret_key.strip()
-        ):
-            raise OriginalStorageConfigurationError()
-        if not isinstance(self.bucket, str) or not _valid_bucket(self.bucket):
-            raise OriginalStorageConfigurationError()
-        if not isinstance(self.secure, bool):
-            raise OriginalStorageConfigurationError()
+        try:
+            super().__post_init__()
+        except ObjectStorageConfigError:
+            raise OriginalStorageConfigurationError() from None
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> MinioStorageConfig:
-        source = os.environ if environ is None else environ
-        endpoint = _required_setting(source, "ATHENA_KNOWLEDGE_MINIO_ENDPOINT")
-        access_key = _required_setting(source, "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY")
-        secret_key = _required_setting(source, "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY")
-        bucket = _required_setting(source, "ATHENA_KNOWLEDGE_MINIO_BUCKET")
+        """从统一 ATHENA_STORAGE_* 环境变量读取配置并映射为知识库配置异常。"""
+        try:
+            base = ObjectStorageConfig.from_environment(environ)
+        except ObjectStorageConfigError:
+            raise OriginalStorageConfigurationError() from None
         return cls(
-            endpoint=endpoint,
-            access_key=access_key,
-            secret_key=secret_key,
-            bucket=bucket,
-            secure=_strict_flag(
-                source,
-                "ATHENA_KNOWLEDGE_MINIO_SECURE",
-                default=True,
-            ),
+            endpoint=base.endpoint,
+            access_key=base.access_key,
+            secret_key=base.secret_key,
+            bucket=base.bucket,
+            secure=base.secure,
         )
 
 
 class MinioOriginalStore(OriginalStore):
-    """Store content-addressed originals in one private MinIO bucket."""
+    """在统一私有 S3/MinIO 存储桶的 knowledge/ 前缀下存储内容寻址知识库原件。"""
 
     def __init__(
         self,
-        config: MinioStorageConfig,
+        config: ObjectStorageConfig,
         *,
         client: _MinioClient | None = None,
         clock: Callable[[], datetime] = utc_now,
@@ -225,28 +215,29 @@ class MinioOriginalStore(OriginalStore):
             raise
 
     async def put(self, key: str, content: bytes) -> None:
-        """Store immutable bytes and reject a conflicting existing object."""
+        """Store immutable bytes under knowledge/<key> and reject a conflicting existing object."""
         expected_hash = _validate_key_and_content(key, content)
         if len(content) > self._max_object_bytes:
             raise OriginalStorageIntegrityError("knowledge_storage_object_too_large")
+        physical_key = _to_physical_key(key)
 
         def store() -> None:
             client = self._require_client()
             try:
-                info = client.stat_object(self._config.bucket, key)
+                info = client.stat_object(self._config.bucket, physical_key)
             except Exception as error:
                 if _is_not_found_error(error):
                     info = None
                 else:
                     raise
             if info is not None:
-                existing = self._read_verified(client, key, expected_hash)
+                existing = self._read_verified(client, physical_key, expected_hash)
                 if existing != content:
                     raise OriginalStorageIntegrityError("knowledge_storage_key_conflict")
                 return
             client.put_object(
                 self._config.bucket,
-                key,
+                physical_key,
                 io.BytesIO(content),
                 len(content),
                 content_type="application/octet-stream",
@@ -256,20 +247,22 @@ class MinioOriginalStore(OriginalStore):
         await self._call("put", store)
 
     async def get(self, key: str) -> bytes:
-        """Read a bounded object and verify its bytes against the key."""
+        """Read a bounded object from knowledge/<key> and verify its bytes against the key."""
         expected_hash = _validate_key(key)
+        physical_key = _to_physical_key(key)
         return await self._call(
             "get",
-            lambda: self._read_verified(self._require_client(), key, expected_hash),
+            lambda: self._read_verified(self._require_client(), physical_key, expected_hash),
         )
 
     async def delete(self, key: str) -> None:
-        """Delete an object idempotently while preserving transport failures."""
+        """Delete knowledge/<key> idempotently while preserving transport failures."""
         _validate_key(key)
+        physical_key = _to_physical_key(key)
 
         def remove() -> None:
             try:
-                self._require_client().remove_object(self._config.bucket, key)
+                self._require_client().remove_object(self._config.bucket, physical_key)
             except Exception as error:
                 if _is_not_found_error(error):
                     return
@@ -280,7 +273,10 @@ class MinioOriginalStore(OriginalStore):
     async def iter_orphan_candidates(
         self, *, older_than_seconds: int = 86400
     ) -> AsyncIterator[str]:
-        """Yield old legal keys from the dedicated bucket without reference checks."""
+        """仅扫描 knowledge/ 前缀下的老对象，剥离前缀后返回合法逻辑键。
+
+        绝不扫描或返回同桶内的 session-files/、session-artifacts/、skill-logs/、skills/ 对象。
+        """
         if older_than_seconds < 86400:
             raise ValueError("knowledge_orphan_grace_period_invalid")
         cutoff = as_utc(self._clock()) - timedelta(seconds=older_than_seconds)
@@ -289,6 +285,7 @@ class MinioOriginalStore(OriginalStore):
             lambda: iter(
                 self._require_client().list_objects(
                     self._config.bucket,
+                    prefix=KNOWLEDGE_OBJECT_PREFIX,
                     recursive=True,
                 )
             ),
@@ -299,13 +296,10 @@ class MinioOriginalStore(OriginalStore):
                 if item is None:
                     return
                 modified_at = item.last_modified
-                if (
-                    modified_at is None
-                    or as_utc(modified_at) >= cutoff
-                    or _KEY.fullmatch(item.object_name) is None
-                ):
+                logical_key = _from_physical_key(item.object_name)
+                if modified_at is None or as_utc(modified_at) >= cutoff or logical_key is None:
                     continue
-                yield item.object_name
+                yield logical_key
         finally:
             close = getattr(iterator, "close", None)
             if callable(close):
@@ -458,63 +452,19 @@ class MinioOriginalStore(OriginalStore):
             raise OriginalStorageUnavailableError()
 
 
-def _required_setting(environ: Mapping[str, str], name: str) -> str:
-    value = environ.get(name)
-    if value is None or not value.strip():
-        raise OriginalStorageConfigurationError()
-    return value
+def _to_physical_key(logical_key: str) -> str:
+    """将知识库逻辑键转换为单桶物理键（knowledge/<key>）。"""
+    return f"{KNOWLEDGE_OBJECT_PREFIX}{logical_key}"
 
 
-def _strict_flag(environ: Mapping[str, str], name: str, *, default: bool) -> bool:
-    value = environ.get(name)
-    if value is None or not value.strip():
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise OriginalStorageConfigurationError()
-
-
-def _validate_endpoint(endpoint: str) -> None:
-    """使用标准库 urllib.parse + ipaddress 解析 host[:port]，拒绝路径、凭据和非法端口。"""
-    if (
-        not endpoint
-        or any(character.isspace() or ord(character) < 32 for character in endpoint)
-        or any(character in "/\\?#@%" for character in endpoint)
-    ):
-        raise OriginalStorageConfigurationError() from None
-    try:
-        parsed = urlsplit(f"//{endpoint}")
-        host = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        raise OriginalStorageConfigurationError() from None
-    if (
-        not host
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-        or parsed.username
-        or parsed.password
-    ):
-        raise OriginalStorageConfigurationError()
-    trailing = endpoint.rsplit("]", 1)[-1] if endpoint.startswith("[") else endpoint
-    if (":" in trailing and port is None) or (port is not None and not 1 <= port <= 65535):
-        raise OriginalStorageConfigurationError()
-    try:
-        ipaddress.ip_address(host)
-        return
-    except ValueError:
-        if host.replace(".", "").isdigit() and "." in host:
-            raise OriginalStorageConfigurationError() from None
-    if len(host) > 253 or any(_HOST_LABEL.fullmatch(label) is None for label in host.split(".")):
-        raise OriginalStorageConfigurationError()
-
-
-def _valid_bucket(bucket: str) -> bool:
-    return _BUCKET.fullmatch(bucket) is not None and ".." not in bucket
+def _from_physical_key(object_name: str) -> str | None:
+    """剥离 knowledge/ 前缀并校验逻辑键合法性；非本域对象一律返回 None。"""
+    if not object_name.startswith(KNOWLEDGE_OBJECT_PREFIX):
+        return None
+    logical_key = object_name[len(KNOWLEDGE_OBJECT_PREFIX) :]
+    if _KEY.fullmatch(logical_key) is None:
+        return None
+    return logical_key
 
 
 def _validate_key(key: str) -> str:
@@ -594,4 +544,4 @@ def _map_storage_error(error: Exception) -> OriginalStorageError:
     return OriginalStorageUnavailableError()
 
 
-__all__ = ["MinioOriginalStore", "MinioStorageConfig"]
+__all__ = ["KNOWLEDGE_OBJECT_PREFIX", "MinioOriginalStore", "MinioStorageConfig"]

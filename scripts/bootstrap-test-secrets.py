@@ -23,16 +23,24 @@ SENSITIVE_KEYS = {
     "MINIO_ROOT_PASSWORD",
     "ATHENA_DATABASE_URL",
     "ATHENA_TEST_DATABASE_URL",
+    "ATHENA_STORAGE_ACCESS_KEY",
+    "ATHENA_STORAGE_SECRET_KEY",
     "ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY",
     "ATHENA_KNOWLEDGE_MINIO_SECRET_KEY",
+    "ATHENA_FILE_MINIO_ACCESS_KEY",
+    "ATHENA_FILE_MINIO_SECRET_KEY",
     "ATHENA_TEST_MINIO_ACCESS_KEY",
     "ATHENA_TEST_MINIO_SECRET_KEY",
     "ATHENA_MCP_SECRET_KEY",
 }
 DERIVED_CONFIG_KEYS = {
+    "ATHENA_STORAGE_ENDPOINT",
+    "ATHENA_STORAGE_BUCKET",
     "ATHENA_KNOWLEDGE_MINIO_ENDPOINT",
+    "ATHENA_FILE_MINIO_ENDPOINT",
     "ATHENA_TEST_MINIO_ENDPOINT",
     "ATHENA_KNOWLEDGE_MINIO_BUCKET",
+    "ATHENA_FILE_MINIO_BUCKET",
     "ATHENA_TEST_MINIO_BUCKET",
 }
 SECRET_NAMES = (
@@ -297,9 +305,13 @@ def main(argv: list[str] | None = None) -> int:
             "mcp_secret_key",
         )
         for key, expected in (
+            ("ATHENA_STORAGE_ACCESS_KEY", minio_user),
             ("ATHENA_KNOWLEDGE_MINIO_ACCESS_KEY", minio_user),
+            ("ATHENA_FILE_MINIO_ACCESS_KEY", minio_user),
             ("ATHENA_TEST_MINIO_ACCESS_KEY", minio_user),
+            ("ATHENA_STORAGE_SECRET_KEY", minio_password),
             ("ATHENA_KNOWLEDGE_MINIO_SECRET_KEY", minio_password),
+            ("ATHENA_FILE_MINIO_SECRET_KEY", minio_password),
             ("ATHENA_TEST_MINIO_SECRET_KEY", minio_password),
         ):
             configured = legacy_values.get(key)
@@ -307,14 +319,19 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"{key} 与 MinIO root secret 不一致，未写入或清理任何文件")
         for app_key, compose_key, default_bucket in (
             (
+                "ATHENA_STORAGE_BUCKET",
+                "MINIO_DEV_BUCKET",
+                "athena-storage-dev",
+            ),
+            (
                 "ATHENA_KNOWLEDGE_MINIO_BUCKET",
                 "MINIO_DEV_BUCKET",
-                "athena-knowledge-dev",
+                "athena-storage-dev",
             ),
             (
                 "ATHENA_TEST_MINIO_BUCKET",
                 "MINIO_TEST_BUCKET",
-                "athena-knowledge-test",
+                "athena-storage-test",
             ),
         ):
             configured_bucket = legacy_values.get(app_key)

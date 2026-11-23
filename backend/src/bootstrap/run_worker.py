@@ -42,6 +42,7 @@ from bootstrap.tool import (
 from domain.file import FileObjectStore
 from infrastructure.database import Database
 from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.storage.config import has_object_storage_env
 
 
 @dataclass(slots=True)
@@ -57,19 +58,11 @@ class RunWorkerBundle:
     worker: RunWorker | None = None
 
 
-_FILE_STORAGE_SETTING_NAMES = (
-    "ATHENA_FILE_MINIO_ENDPOINT",
-    "ATHENA_FILE_MINIO_ACCESS_KEY",
-    "ATHENA_FILE_MINIO_SECRET_KEY",
-    "ATHENA_FILE_MINIO_BUCKET",
-)
-
-
 def _files_enabled() -> bool:
-    """Worker 使用独立文件配置，不依赖知识库或嵌入模型开关。"""
+    """优先尊重显式 ATHENA_FILES_ENABLED 开关；未显式声明时按统一 ATHENA_STORAGE_* 判定。"""
     if "ATHENA_FILES_ENABLED" in os.environ:
         return env_flag("ATHENA_FILES_ENABLED", default=False)
-    return any(os.getenv(name, "").strip() for name in _FILE_STORAGE_SETTING_NAMES)
+    return has_object_storage_env()
 
 
 def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:

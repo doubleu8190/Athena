@@ -1045,7 +1045,7 @@ def test_script_execution_isolates_environment_and_interpreter_flags(
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql://secret-user:secret-pass@db/athena")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "super-secret-mcp-key")
-    monkeypatch.setenv("ATHENA_FILE_MINIO_SECRET_KEY", "super-secret-minio-key")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "super-secret-minio-key")
     monkeypatch.setenv("PYTHONPATH", str(rogue_dir))
 
     script = """
@@ -1079,7 +1079,7 @@ observation = {
     "env_keys": sorted(os.environ.keys()),
     "has_db_url": "ATHENA_DATABASE_URL" in os.environ,
     "has_mcp_key": "ATHENA_MCP_SECRET_KEY" in os.environ,
-    "has_minio_key": "ATHENA_FILE_MINIO_SECRET_KEY" in os.environ,
+    "has_minio_key": "ATHENA_STORAGE_SECRET_KEY" in os.environ,
     "has_pythonpath": "PYTHONPATH" in os.environ,
     "input_path": str(input_path),
     "home": str(home_dir),

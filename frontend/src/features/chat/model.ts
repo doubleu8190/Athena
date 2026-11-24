@@ -107,6 +107,12 @@ export interface RunInputInteraction {
   answered_at: string | null;
 }
 
+export interface FormattedToolArgument {
+  key: string;
+  label: string;
+  value: string;
+}
+
 export interface RunPendingApproval {
   call_id: string;
   batch_message_id: string;
@@ -115,6 +121,9 @@ export interface RunPendingApproval {
   tool_kind: string | null;
   requested_at: string;
   safe_skill_projection: SafeSkillApprovalProjection | null;
+  display_name?: string | null;
+  approval_summary?: string | null;
+  formatted_arguments?: FormattedToolArgument[];
 }
 
 export interface SafeSkillInputFile {
@@ -212,6 +221,9 @@ export interface PendingSubagentApproval {
   tool_kind: string | null;
   requested_at: string;
   safe_skill_projection: SafeSkillApprovalProjection | null;
+  display_name?: string | null;
+  approval_summary?: string | null;
+  formatted_arguments?: FormattedToolArgument[];
 }
 
 export interface Run {
@@ -331,6 +343,7 @@ export interface RunToolCallSummary {
   tool_id: string | null;
   tool_kind: string | null;
   model_name: string;
+  display_name?: string | null;
   status: string;
   started_at: string | null;
   finished_at: string | null;

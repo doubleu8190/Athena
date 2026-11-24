@@ -1,5 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
+import { StrictMode } from "react";
 import {
   createMemoryRouter,
   RouterProvider,
@@ -25,6 +26,8 @@ export function createTestQueryClient(): QueryClient {
 
 interface RenderAppOptions {
   initialIndex?: number;
+  seedQueryClient?: (client: QueryClient) => void;
+  strictMode?: boolean;
 }
 
 export function renderApp(
@@ -32,6 +35,7 @@ export function renderApp(
   options: RenderAppOptions = {},
 ) {
   const client = createTestQueryClient();
+  options.seedQueryClient?.(client);
   let currentLocation: {
     pathname: string;
     search: string;
@@ -68,10 +72,13 @@ export function renderApp(
       initialIndex: options.initialIndex,
     },
   );
-  const view = render(
+  const appTree = (
     <AppProviders client={client}>
       <RouterProvider router={router} />
-    </AppProviders>,
+    </AppProviders>
+  );
+  const view = render(
+    options.strictMode ? <StrictMode>{appTree}</StrictMode> : appTree,
   );
 
   return {

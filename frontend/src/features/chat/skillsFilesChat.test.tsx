@@ -838,25 +838,31 @@ describe("安全技能审批与多文件交付", () => {
     const messageList = screen.getByRole("region", {
       name: "消息历史",
     });
-    await user.click(
-      within(messageList).getByText(/工具结果/),
-    );
     expect(
       within(messageList).getByText("月度销售报表"),
     ).toBeInTheDocument();
     expect(within(messageList).getByText("趋势图")).toBeInTheDocument();
+    expect(
+      within(messageList).queryByText(/private skill execution log/),
+    ).not.toBeInTheDocument();
 
-    const trace = await screen.findByRole("complementary", {
-      name: "执行轨迹",
+    const progress = await screen.findByRole("region", {
+      name: "执行进度",
     });
     await user.click(
-      within(trace).getByRole("button", {
-        name: /#1 skill_execute/,
+      within(progress).getByRole("button", { name: /展开/ }),
+    );
+    const stepList = within(progress).getByRole("list", {
+      name: "工具调用步骤",
+    });
+    await user.click(
+      within(stepList).getByRole("button", {
+        name: /执行技能脚本/,
       }),
     );
-    await within(trace).findByText("交付文件");
+    await within(progress).findByText("交付文件");
     expect(
-      within(trace).queryByText(/private|secret/),
+      within(progress).queryByText(/private|secret/),
     ).not.toBeInTheDocument();
 
     await user.click(
@@ -907,18 +913,12 @@ describe("安全技能审批与多文件交付", () => {
         },
       }),
     });
-    const user = userEvent.setup();
 
     renderApp(`/chat/${SESSION.id}`);
 
     const approval = await screen.findByRole("region", {
       name: "等待工具审批",
     });
-    await user.click(
-      within(approval).getByRole("button", {
-        name: "查看安全详情",
-      }),
-    );
     expect(
       within(approval).getByText(/没有返回可审批的安全投影/),
     ).toBeInTheDocument();
@@ -939,7 +939,7 @@ describe("安全技能审批与多文件交付", () => {
     ).toBe(false);
   });
 
-  it("执行轨迹按三个技能身份隐藏 load/read/execute 的裸参数和结果", async () => {
+  it("执行进度按三个技能身份隐藏 load/read/execute 的裸参数和结果", async () => {
     const run = makeRun({
       id: "run-skill-trace-projections",
       session_id: SESSION.id,
@@ -996,24 +996,30 @@ describe("安全技能审批与多文件交付", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
-    const trace = await screen.findByRole("complementary", {
-      name: "执行轨迹",
+    const progress = await screen.findByRole("region", {
+      name: "执行进度",
     });
-    for (const call of calls) {
+    await user.click(
+      within(progress).getByRole("button", { name: /已完成 3 个步骤/ }),
+    );
+    const stepList = within(progress).getByRole("list", {
+      name: "工具调用步骤",
+    });
+    for (const label of ["加载技能说明", "读取技能资料", "执行技能脚本"]) {
       await user.click(
-        await within(trace).findByRole("button", {
-          name: new RegExp(`#${call.ordinal} ${call.model_name}`),
+        await within(stepList).findByRole("button", {
+          name: new RegExp(label),
         }),
       );
     }
 
     expect(
-      await within(trace).findAllByText(
+      await within(progress).findAllByText(
         /普通用户详情不会回退展示原始参数、输出或日志/,
       ),
     ).toHaveLength(3);
     expect(
-      within(trace).queryByText(/private|secret/),
+      within(progress).queryByText(/private|secret/),
     ).not.toBeInTheDocument();
   });
 });

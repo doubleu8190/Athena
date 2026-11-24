@@ -200,21 +200,24 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
     renderApp("/chat/session-1");
 
     expect(
-      await screen.findByText("子智能体任务（2）"),
+      await screen.findByText("协作任务（2）"),
     ).toBeInTheDocument();
     expect(screen.getByText("调研助手")).toBeInTheDocument();
     expect(screen.getByText("代码助手")).toBeInTheDocument();
+    // 隐藏底层 slug / run_id / 裸错误码，向员工展示清晰中文原因
+    expect(screen.queryByText("research_assistant")).not.toBeInTheDocument();
+    expect(screen.queryByText("sub-run-1")).not.toBeInTheDocument();
     expect(
-      screen.getByText("安全错误码：execution_timeout"),
+      screen.getByText("任务处理耗时超出上限，您可以稍后重新执行。"),
     ).toBeInTheDocument();
 
     const expandButtons = screen.getAllByRole("button", { name: "查看详情" });
     await user.click(expandButtons[0]);
 
     expect(
-      await screen.findByText("#1 knowledge_search"),
+      await screen.findByText("查阅企业知识库"),
     ).toBeInTheDocument();
-    expect(screen.getByText("completed · 420 ms")).toBeInTheDocument();
+    expect(screen.getByText("420 ms")).toBeInTheDocument();
   });
 
   it("多子 Run 并发提问队列支持切换目标并精确路由提交", async () => {
@@ -330,18 +333,16 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
 
     renderApp("/chat/session-1");
 
-    expect(
-      await screen.findByText("待回答子智能体队列（2）"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("2 项待回复")).toBeInTheDocument();
     // 默认选中队首
     expect(
-      screen.getByText("正在回答 #1「调研助手」的提问："),
+      screen.getByText("当前回复：#1「调研助手」"),
     ).toBeInTheDocument();
 
     // 切换到第二个子智能体
     await user.click(screen.getByRole("button", { name: /代码助手/ }));
     expect(
-      screen.getByText("正在回答 #2「代码助手」的提问："),
+      screen.getByText("当前回复：#2「代码助手」"),
     ).toBeInTheDocument();
 
     await user.type(
@@ -351,7 +352,7 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
       "main 分支",
     );
     await user.click(
-      screen.getByRole("button", { name: "提交给 代码助手" }),
+      screen.getByRole("button", { name: "提交给「代码助手」" }),
     );
 
     await waitFor(() => {
@@ -362,11 +363,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
 
     // 提交后自动回落到剩余的调研助手提问
     expect(
-      await screen.findByText("待回答子智能体队列（1）"),
+      await screen.findByText("当前回复：#1「调研助手」"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("正在回答 #1「调研助手」的提问："),
-    ).toBeInTheDocument();
+    expect(screen.queryByText("2 项待回复")).not.toBeInTheDocument();
   });
 
   it("按 sub_run_id 分组展示工具审批，提交互不阻塞", async () => {
@@ -490,13 +489,13 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
     renderApp("/chat/session-1");
 
     const approvalPanel = await screen.findByRole("region", {
-      name: "子智能体工具审批（2）",
+      name: "协作任务操作审批（2）",
     });
-    expect(within(approvalPanel).getByText("调研助手")).toBeInTheDocument();
-    expect(within(approvalPanel).getByText("代码助手")).toBeInTheDocument();
+    expect(within(approvalPanel).getByText("来自：调研助手")).toBeInTheDocument();
+    expect(within(approvalPanel).getByText("来自：代码助手")).toBeInTheDocument();
 
     const approveButtons = within(approvalPanel).getAllByRole("button", {
-      name: "批准",
+      name: "确认执行",
     });
     await user.click(approveButtons[1]);
 
@@ -750,16 +749,16 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
     renderApp("/chat/session-1");
 
     const queue = await screen.findByRole("region", {
-      name: "待回答子智能体队列（2）",
+      name: "需要补充信息",
     });
     expect(within(queue).getByText("#1")).toBeInTheDocument();
     expect(within(queue).getByText("#2")).toBeInTheDocument();
-    expect(within(queue).getAllByText("分析 2024 年财报")).not.toHaveLength(0);
-    expect(within(queue).getByText("分析 2025 年财报")).toBeInTheDocument();
+    expect(within(queue).getAllByText(/分析 2024 年财报/)).not.toHaveLength(0);
+    expect(within(queue).getByText(/分析 2025 年财报/)).toBeInTheDocument();
 
     // 默认选中 #1
     expect(
-      within(queue).getByText("正在回答 #1「调研员」的提问："),
+      within(queue).getByText("当前回复：#1「调研员」"),
     ).toBeInTheDocument();
 
     // 切换到 #2
@@ -767,7 +766,7 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
       within(queue).getByRole("button", { name: /#2.*分析 2025 年财报/ }),
     );
     expect(
-      within(queue).getByText("正在回答 #2「调研员」的提问："),
+      within(queue).getByText("当前回复：#2「调研员」"),
     ).toBeInTheDocument();
 
     await user.type(
@@ -776,7 +775,7 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
       }),
       "合并报表口径",
     );
-    await user.click(screen.getByRole("button", { name: "提交给 调研员" }));
+    await user.click(screen.getByRole("button", { name: "提交给「调研员」" }));
 
     await waitFor(() => {
       expect(submittedPaths).toEqual([
@@ -888,24 +887,27 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
 
     renderApp("/chat/session-1");
 
+    const progress = await screen.findByRole("region", {
+      name: "执行进度",
+    });
     await user.click(
-      await screen.findByRole("button", { name: "查看详情" }),
+      within(progress).getByRole("button", { name: /已完成 1 个步骤/ }),
+    );
+    await user.click(
+      await within(progress).findByRole("button", { name: "查看详情" }),
     );
 
-    const subagentPanel = screen.getByRole("region", {
-      name: "子智能体任务（1）",
-    });
     expect(
-      await within(subagentPanel).findByText("人工输入记录（提问与回答）"),
+      await within(progress).findByText("补充问答记录"),
     ).toBeInTheDocument();
-    expect(within(subagentPanel).getByText("已回答")).toBeInTheDocument();
+    expect(within(progress).getByText("已回答")).toBeInTheDocument();
     expect(
-      within(subagentPanel).getByText("请确认指标是否包含海外子公司？"),
+      within(progress).getByText("请确认指标是否包含海外子公司？"),
     ).toBeInTheDocument();
     expect(
-      within(subagentPanel).getByText("包含全部海外子公司。"),
+      within(progress).getByText("包含全部海外子公司。"),
     ).toBeInTheDocument();
-    expect(within(subagentPanel).queryByText(/暂无工具调用/)).toBeNull();
+    expect(within(progress).queryByText(/暂无执行步骤/)).toBeNull();
   });
 
   it("展开 waiting_for_input 子任务后提交定向回答，即使返回空 input_interactions 也不丢失问答记录并刷新详情", async () => {
@@ -1043,15 +1045,17 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
     renderApp("/chat/session-1");
 
     // 1. 先展开子任务详情并看到待回答的提问
-    await user.click(await screen.findByRole("button", { name: "查看详情" }));
-    const subagentPanel = screen.getByRole("region", {
-      name: "子智能体任务（1）",
+    const progress = await screen.findByRole("region", {
+      name: "执行进度",
     });
+    await user.click(
+      await within(progress).findByRole("button", { name: "查看详情" }),
+    );
     expect(
-      await within(subagentPanel).findByText("待回答"),
+      await within(progress).findByText("待回答"),
     ).toBeInTheDocument();
     expect(
-      within(subagentPanel).getByText("请确认是否包含海外子公司？"),
+      within(progress).getByText("请确认是否包含海外子公司？"),
     ).toBeInTheDocument();
 
     // 2. 在 Composer 提交定向回答
@@ -1061,17 +1065,17 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
       }),
       "包含海外子公司",
     );
-    await user.click(screen.getByRole("button", { name: "提交给 调研员" }));
+    await user.click(screen.getByRole("button", { name: "提交给「调研员」" }));
 
     // 3. 详情面板保持展开，立即展示已回答内容且不退化为空态，同时触发子 Run 详情刷新
     expect(
-      await within(subagentPanel).findByText("已回答"),
+      await within(progress).findByText("已回答"),
     ).toBeInTheDocument();
     expect(
-      within(subagentPanel).getByText("包含海外子公司"),
+      within(progress).getByText("包含海外子公司"),
     ).toBeInTheDocument();
     expect(
-      within(subagentPanel).queryByText(/暂无工具调用或人工输入记录/),
+      within(progress).queryByText(/暂无执行步骤或问答记录/),
     ).toBeNull();
     await waitFor(() => {
       expect(subRunDetailCalls).toBeGreaterThanOrEqual(2);

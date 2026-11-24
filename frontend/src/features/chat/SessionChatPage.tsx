@@ -1,1483 +1,438 @@
-import {
-  useQueryClient,
-  type InfiniteData,
-} from "@tanstack/react-query";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { RefreshCw, RotateCcw, XCircle } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { formatDateTime } from "../../shared/lib/format";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
-import { MarkdownContent } from "../../shared/ui/MarkdownContent";
-import { Modal } from "../../shared/ui/Modal";
-import { useProjectDirectory } from "../projects/hooks";
-import type { PendingSessionUpload } from "../files/model";
-import { sessionFileKeys } from "../files/queryKeys";
-import { SkillScopeBadge } from "../skills/SkillScopeBadge";
-import { skillScope } from "../skills/model";
+import { Button, EmptyState, InlineAlert, toast } from "../../shared/ui";
 import {
   isSessionNotFound,
   sessionErrorMessage,
 } from "../sessions/errorMessages";
 import { useSession } from "../sessions/hooks";
-import { sessionDisplayTitle } from "../sessions/model";
+import type { Session } from "../sessions/model";
+import { ChatHeader } from "./ChatHeader";
+import { ChatMessageList } from "./ChatMessageList";
+import { ExecutionProgressAccordion } from "./ExecutionProgressAccordion";
+import { FailedRunCard, RetryRunAlertDialog } from "./FailedRunCard";
+import { messageText } from "./model";
 import {
-  answerRunInput,
-  cancelRun,
-  decideRunToolApproval,
-  retryRun,
-  submitRun,
-} from "./api";
-import {
-  ChatMessageList,
-  findQuestionText,
-  type ChatAutoScrollRequest,
-} from "./ChatMessageList";
-import { useDraftChat } from "./DraftChatContext";
-import {
-  chatErrorMessage,
-  requestIdCanBeReused,
-} from "./errorMessages";
-import {
-  useLatestRun,
-  useRunDetails,
-  useSessionMessages,
-} from "./hooks";
-import {
-  isActiveRunStatus,
-  isTerminalRunStatus,
-  mergeConversationMessages,
-  runResultIsStale,
-  selectRunProjection,
-  shouldApplyStreamSnapshot,
-  type ConversationMessagePage,
-  type PendingSubagentApproval,
-  type Run,
-  type RunListResponse,
-  type RunPendingApproval,
-  type RunSnapshotPayload,
-  type RunStatus,
-} from "./model";
-import { chatKeys } from "./queryKeys";
-import { newRequestId } from "./requestId";
-import {
-  projectRunStatus,
-  reconcileCompletedRun,
-  reconcileFailedRun,
-} from "./runStream";
-import { RunExecutionTrace } from "./RunExecutionTrace";
-import { RunStatusBadge } from "./RunStatusBadge";
-import { SessionComposer } from "./SessionComposer";
-import { SubagentExecutionPanel } from "./SubagentExecutionPanel";
-import {
-  SubagentApprovalPanel,
-  SubagentInputQueuePanel,
-  subagentApprovalKey,
-  subagentInputKey,
-} from "./SubagentHitlPanels";
+  SessionComposer,
+  type SessionComposerHandle,
+} from "./SessionComposer";
+import { SessionFilesDrawer } from "./SessionFilesDrawer";
+import { SubagentApprovalPanel, subagentInputKey } from "./SubagentHitlPanels";
 import { ToolApprovalPanel } from "./ToolApprovalPanel";
-import { useRunStream } from "./useRunStream";
+import { useSessionChatController } from "./useSessionChatController";
+import { WaitingInputBanner } from "./WaitingInputBanner";
 
-interface FailedComposerCommand {
-  fileIds: string[];
-  inputRequestId?: string;
-  kind: "answer" | "submit";
-  knowledgeBaseIds: string[] | null;
-  modelProfileId: string | null;
-  requestId: string;
-  reuseRequestId: boolean;
-  skillIds: string[];
-  text: string;
-}
-
-/** 精确对比知识库三态（null / [] / string[]），确保 request_id 幂等指纹与后端完全一致。 */
-function knowledgeScopeEqual(
-  left: string[] | null | undefined,
-  right: string[] | null | undefined,
-): boolean {
-  const normalizedLeft = left ?? null;
-  const normalizedRight = right ?? null;
-  if (normalizedLeft === null || normalizedRight === null) {
-    return normalizedLeft === normalizedRight;
-  }
-  return (
-    normalizedLeft.length === normalizedRight.length &&
-    normalizedLeft.every((id, index) => id === normalizedRight[index])
-  );
-}
-
-type RunCommandKind = "answer" | "approval" | "cancel" | "retry" | "submit";
-
-interface ActiveRunCommand {
-  kind: RunCommandKind;
-  runId: string | null;
-  token: number;
-}
-
-interface TerminalMessageFailure {
-  kind: "not_found" | "sync_failed";
-  runId: string;
-}
-
-type MessageInfiniteData = InfiniteData<
-  ConversationMessagePage,
-  number | undefined
->;
-
-const RETRY_RISK_WARNING =
-  "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。";
-
-// SSE 高频 run_event 对账的合并节流窗口，避免连续事件触发 4 路失效请求风暴。
-const RECONCILE_THROTTLE_MS = 200;
-
-function mergeReconciledMessages(
-  current: MessageInfiniteData | undefined,
-  fetched: {
-    page: ConversationMessagePage;
-    beforeSequence: number | undefined;
-  }[],
-): MessageInfiniteData {
-  if (!current) {
-    return {
-      pageParams: fetched.map((item) => item.beforeSequence),
-      pages: fetched.map((item) => item.page),
-    };
-  }
-  const existingSequences = new Set(
-    current.pages.flatMap((page) =>
-      page.items.map((message) => message.sequence),
-    ),
-  );
-  const additions = fetched.filter((item) =>
-    item.page.items.some(
-      (message) => !existingSequences.has(message.sequence),
-    ),
-  );
-  if (additions.length === 0) {
-    return current;
-  }
-  return {
-    pageParams: [
-      ...current.pageParams,
-      ...additions.map((item) => item.beforeSequence),
-    ],
-    pages: [
-      ...current.pages,
-      ...additions.map((item) => item.page),
-    ],
-  };
-}
-
-function RunSummary({
-  canRetry,
-  commandPending,
-  onOpenTrace,
-  onRetry,
-  run,
-  status,
-  traceOpen,
-}: {
-  canRetry: boolean;
-  commandPending: boolean;
-  onOpenTrace: () => void;
-  onRetry: () => void;
-  run: Run | null;
-  status: RunStatus | null;
-  traceOpen: boolean;
-}) {
-  if (!run || !status) {
-    return (
-      <div className="run-summary run-summary--empty">
-        <div>
-          <span className="run-summary-label">当前运行</span>
-          <strong>尚未提交 Run</strong>
-        </div>
-        <span className="run-summary-meta">发送消息后可查看真实执行轨迹。</span>
-      </div>
-    );
-  }
-
-  const selectedSkills =
-    run.skill_snapshot?.skills.filter((skill) =>
-      run.skill_snapshot?.selected_skill_ids.includes(skill.skill_id),
-    ) ?? [];
-
-  return (
-    <div className="run-summary">
-      <div className="run-summary-primary">
-        <RunStatusBadge status={status} />
-        <span className="run-summary-id" title={run.id}>
-          Run {run.id}
-        </span>
-      </div>
-      <div className="run-summary-meta">
-        <span>事件 #{run.event_sequence}</span>
-        <span>执行代次 {run.execution_epoch}</span>
-        {run.first_started_at ? (
-          <span>开始 {formatDateTime(run.first_started_at)}</span>
-        ) : null}
-        {run.finished_at ? (
-          <span>结束 {formatDateTime(run.finished_at)}</span>
-        ) : null}
-        {run.cancel_requested_at ? <span>已请求取消</span> : null}
-      </div>
-      {run.safe_error_code ? (
-        <p className="run-summary-error">安全错误码：{run.safe_error_code}</p>
-      ) : null}
-      {run.skill_snapshot ? (
-        <div className="run-skill-snapshot" aria-label="本次指定技能">
-          <span>本次指定技能</span>
-          {selectedSkills.length === 0 ? (
-            <small>自动选择，允许 Agent 按任务使用可用技能</small>
-          ) : (
-            selectedSkills.map((skill) => (
-              <span
-                className="run-skill-snapshot-item"
-                key={skill.skill_id}
-                title={`${
-                  skillScope(skill) === "personal"
-                    ? "个人"
-                    : skillScope(skill) === "department"
-                      ? "部门共享"
-                      : "全公司"
-                } · ${skill.name} · ${skill.version_label}`}
-              >
-                <SkillScopeBadge
-                  compact
-                  scope={skillScope(skill)}
-                />
-                <span>
-                  {skill.name} · {skill.version_label}
-                </span>
-              </span>
-            ))
-          )}
-        </div>
-      ) : null}
-      {run.retry_warning ? (
-        <p
-          aria-label="服务端重试警告"
-          className="run-summary-warning"
-          role="note"
-        >
-          {run.retry_warning}
-        </p>
-      ) : null}
-      <div className="run-summary-actions">
-        <button
-          className="button-quiet"
-          disabled={traceOpen}
-          onClick={onOpenTrace}
-          type="button"
-        >
-          <Icon name="tools" size={14} />
-          {traceOpen ? "轨迹已展开" : "查看执行轨迹"}
-        </button>
-        {status === "failed" && canRetry ? (
-          <button
-            className="button-danger-outline"
-            disabled={commandPending}
-            onClick={onRetry}
-            type="button"
-          >
-            重试失败任务
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function SessionConversation({
-  hasProjectContext,
-  sessionId,
-}: {
-  hasProjectContext: boolean;
+interface SessionWorkbenchProps {
+  session: Session | null;
   sessionId: string;
-}) {
-  const queryClient = useQueryClient();
-  const { clearSessionHandoff, getSessionHandoff } = useDraftChat();
-  const initialHandoff = useMemo(
-    () => getSessionHandoff(sessionId),
-    [getSessionHandoff, sessionId],
-  );
-  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>(
-    initialHandoff?.selectedSkillIds ?? [],
-  );
-  const [selectedFileIds, setSelectedFileIds] = useState<string[]>(
-    initialHandoff?.inputFileIds ?? [],
-  );
-  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[] | null>(
-    initialHandoff?.knowledgeBaseIds ?? null,
-  );
-  const [modelProfileId, setModelProfileId] = useState<string | null>(
-    initialHandoff?.modelProfileId ?? null,
-  );
-  const [handoffUploads, setHandoffUploads] = useState<
-    PendingSessionUpload[]
-  >(initialHandoff?.pendingUploads ?? []);
-  const [hasBlockingUploads, setHasBlockingUploads] = useState(
-    () => (initialHandoff?.pendingUploads?.length ?? 0) > 0,
-  );
-  const [commandError, setCommandError] = useState<string | null>(
-    initialHandoff?.error ?? null,
-  );
-  const [commandNotice, setCommandNotice] = useState<string | null>(null);
-  const [failedCommand, setFailedCommand] =
-    useState<FailedComposerCommand | null>(
-      initialHandoff
-        ? {
-            kind: "submit",
-            fileIds: initialHandoff.inputFileIds ?? [],
-            knowledgeBaseIds: initialHandoff.knowledgeBaseIds ?? null,
-            modelProfileId: initialHandoff.modelProfileId ?? null,
-            requestId: initialHandoff.requestId,
-            reuseRequestId: initialHandoff.reuseRequestId,
-            skillIds: initialHandoff.selectedSkillIds ?? [],
-            text: initialHandoff.draft,
-          }
-        : null,
-    );
-  const [activeCommand, setActiveCommand] = useState<RunCommandKind | null>(
-    null,
-  );
-  const [busyApprovalIds, setBusyApprovalIds] = useState<ReadonlySet<string>>(
-    new Set(),
-  );
-  const [approvalErrors, setApprovalErrors] = useState<
-    Record<string, string>
-  >({});
-  const [selectedSubagentInputKey, setSelectedSubagentInputKey] = useState<
-    string | null
-  >(null);
-  const [busySubagentApprovalKeys, setBusySubagentApprovalKeys] = useState<
-    ReadonlySet<string>
-  >(new Set());
-  const busySubagentApprovalKeysRef = useRef<Set<string>>(new Set());
-  const [subagentApprovalErrors, setSubagentApprovalErrors] = useState<
-    Record<string, string>
-  >({});
-  const subagentApprovalRequestsRef = useRef<
-    Record<string, { decision: "approve" | "reject"; requestId: string }>
-  >({});
-  const [retryOpen, setRetryOpen] = useState(false);
-  const [retryError, setRetryError] = useState<string | null>(null);
-  const [terminalMessageFailure, setTerminalMessageFailure] =
-    useState<TerminalMessageFailure | null>(null);
-  const [terminalMessageRetry, setTerminalMessageRetry] = useState(0);
-  const [autoScrollRequest, setAutoScrollRequest] =
-    useState<ChatAutoScrollRequest | null>(null);
-  const [traceOpen, setTraceOpen] = useState(
-    () => typeof window === "undefined" || window.innerWidth > 920,
-  );
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const approvalRequestsRef = useRef<
-    Record<string, { decision: "approve" | "reject"; requestId: string }>
-  >({});
-  const commandLockRef = useRef<ActiveRunCommand | null>(null);
-  const commandTokenRef = useRef(0);
-  const runSnapshotRef = useRef<{
-    run: Run | null;
-    status: RunStatus | null;
-    streamRunId: string | null;
-    streamStatus: RunStatus | null;
-  }>({
-    run: null,
-    status: null,
-    streamRunId: null,
-    streamStatus: null,
-  });
-  const retryRequestRef = useRef<{
-    requestId: string;
-    runId: string;
-  } | null>(null);
-  const settledTerminalRunsRef = useRef(new Set<string>());
-  const reconcileTimerRef = useRef<number | null>(null);
-  const suppressNextScheduledReconcileRef = useRef(false);
+}
 
-  const messagesQuery = useSessionMessages(sessionId);
-  const {
-    fetchNextPage: fetchNextMessagesPage,
-    refetch: refetchMessages,
-  } = messagesQuery;
-  const handleLoadMoreMessages = useCallback(() => {
-    void fetchNextMessagesPage();
-  }, [fetchNextMessagesPage]);
-  const handleRetryMessages = useCallback(() => {
-    void refetchMessages();
-  }, [refetchMessages]);
-  const latestRuns = useLatestRun(sessionId);
-  const latestRun = latestRuns.data?.items[0] ?? null;
-  const currentRunId = selectedRunId ?? latestRun?.id ?? null;
-  const runDetails = useRunDetails(sessionId, currentRunId);
-  const run = selectRunProjection(
-    currentRunId,
-    latestRun,
-    runDetails.data ?? null,
-  );
+function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
+  const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
+  const composerRef = useRef<SessionComposerHandle>(null);
 
-  const clearReconcileTimer = useCallback(() => {
-    if (reconcileTimerRef.current !== null) {
-      window.clearTimeout(reconcileTimerRef.current);
-      reconcileTimerRef.current = null;
-    }
-  }, []);
-
-  const invalidateRunQueries = useCallback(() => {
-    void queryClient.invalidateQueries({
-      queryKey: chatKeys.latestRun(sessionId),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: chatKeys.messages(sessionId),
-    });
-    if (currentRunId) {
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.run(sessionId, currentRunId),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.toolCalls(sessionId, currentRunId),
-      });
-    }
-  }, [currentRunId, queryClient, sessionId]);
-
-  // 命令纠偏以及终态/等待态快照需要零延迟刷新，先清掉尚未触发的节流定时器避免重复请求。
-  const flushReconcile = useCallback(() => {
-    clearReconcileTimer();
-    invalidateRunQueries();
-  }, [clearReconcileTimer, invalidateRunQueries]);
-
-  // 高频连续 SSE run_event 在 200ms 窗口内合并为一次 4 路失效，避免请求风暴。
-  const scheduleReconcile = useCallback(() => {
-    if (suppressNextScheduledReconcileRef.current) {
-      suppressNextScheduledReconcileRef.current = false;
-      return;
-    }
-    if (reconcileTimerRef.current !== null) {
-      return;
-    }
-    reconcileTimerRef.current = window.setTimeout(() => {
-      reconcileTimerRef.current = null;
-      invalidateRunQueries();
-    }, RECONCILE_THROTTLE_MS);
-  }, [invalidateRunQueries]);
-
-  useEffect(() => {
-    // 卸载或切换 sessionId / currentRunId 时立即清理定时器，防止旧上下文延迟失效缓存。
-    return () => {
-      suppressNextScheduledReconcileRef.current = false;
-      clearReconcileTimer();
-    };
-  }, [clearReconcileTimer, currentRunId, sessionId]);
-
-  const handleStreamSnapshot = useCallback(
-    (snapshot: RunSnapshotPayload) => {
-      if (!currentRunId) {
-        return;
-      }
-      // SSE 快照包含子任务与并发 HITL 最新投影；写入前校验单调性，禁止终态、取消态或旧序号回退覆盖。
-      const patchRun = (existing: Run): Run =>
-        shouldApplyStreamSnapshot(existing, snapshot)
-          ? {
-              ...existing,
-              status: snapshot.status,
-              event_sequence: snapshot.event_sequence,
-              report_message_id: snapshot.report_message_id,
-              subagent_tasks: snapshot.subagent_tasks ?? [],
-              pending_subagent_inputs: snapshot.pending_subagent_inputs ?? [],
-              pending_subagent_approvals:
-                snapshot.pending_subagent_approvals ?? [],
-            }
-          : existing;
-      queryClient.setQueryData<Run>(
-        chatKeys.run(sessionId, currentRunId),
-        (existing) => (existing ? patchRun(existing) : existing),
-      );
-      queryClient.setQueryData<RunListResponse>(
-        chatKeys.latestRun(sessionId),
-        (existing) =>
-          existing
-            ? {
-                ...existing,
-                items: existing.items.map((item) =>
-                  item.id === currentRunId ? patchRun(item) : item,
-                ),
-              }
-            : existing,
-      );
-      // 终态或等待态快照随后会关闭 SSE，立即刷新对账并跳过 useRunStream 紧接着触发的重复节流回调。
-      if (
-        isTerminalRunStatus(snapshot.status) ||
-        snapshot.status === "waiting_for_input" ||
-        snapshot.status === "waiting_for_approval"
-      ) {
-        suppressNextScheduledReconcileRef.current = true;
-        flushReconcile();
-      }
-    },
-    [currentRunId, flushReconcile, queryClient, sessionId],
-  );
-
-  const stream = useRunStream({
-    onReconcile: scheduleReconcile,
-    onSnapshot: handleStreamSnapshot,
-    runId: currentRunId,
+  const controller = useSessionChatController({
     sessionId,
-    status: run?.status ?? null,
+    sessionTitle: session ? session.title : undefined,
   });
+
   const {
-    closeTerminal: closeStreamTerminal,
-    settleTerminal: settleStreamTerminal,
-    syncStatus: syncStreamStatus,
-  } = stream;
-  const streamMatchesRun = stream.state.runId === currentRunId;
-  const streamEvents = stream.state.events;
-  const streamReportMessageId = streamMatchesRun
-    ? stream.state.reportMessageId
-    : null;
-  const transientText = streamMatchesRun
-    ? stream.state.transientText
-    : "";
-  // SSE 先驱动中间状态；服务端查询确认终态后，终态必须覆盖残留的 live 状态。
-  const status = projectRunStatus({
-    queryStatus: run?.status ?? null,
-    runId: currentRunId,
-    streamRunId: stream.state.runId,
-    streamStatus: stream.state.status,
-  });
-  const isActive = isActiveRunStatus(status);
-  const isWaitingInput = status === "waiting_for_input";
-  const isWaitingApproval = status === "waiting_for_approval";
-  const isWaitingSubagents = status === "waiting_for_subagents";
-  const subagentTasks =
-    run?.subagent_tasks ??
-    (streamMatchesRun && stream.state.hasSnapshot
-      ? stream.state.subagentTasks
-      : []);
-  const pendingSubagentInputs = useMemo(
-    () =>
-      run?.pending_subagent_inputs ??
-      (streamMatchesRun && stream.state.hasSnapshot
-        ? stream.state.pendingSubagentInputs
-        : []),
-    [
-      run?.pending_subagent_inputs,
-      stream.state.hasSnapshot,
-      stream.state.pendingSubagentInputs,
-      streamMatchesRun,
-    ],
-  );
-  const pendingSubagentApprovals =
-    run?.pending_subagent_approvals ??
-    (streamMatchesRun && stream.state.hasSnapshot
-      ? stream.state.pendingSubagentApprovals
-      : []);
-  const activeSubagentInput = useMemo(() => {
-    if (pendingSubagentInputs.length === 0) {
+    activeSubagentInput,
+    approvalErrors,
+    autoScrollRequest,
+    busyApprovalIds,
+    busySubagentApprovalKeys,
+    canSendWithoutDraft,
+    closeRetryDialog,
+    commandError,
+    commandNotice,
+    commandPending,
+    currentRunId,
+    currentRunModelLabel,
+    handleApproval,
+    handleCancel,
+    handleLoadMoreMessages,
+    handleRetry,
+    handleRetryMessages,
+    handleSubagentApproval,
+    handleSubmit,
+    handoffUploads,
+    initialDraft,
+    isActive,
+    isLatestRun,
+    isTargetedSubagentAnswer,
+    isWaitingApproval,
+    isWaitingInput,
+    isWaitingSubagents,
+    knowledgeBaseIds,
+    latestRunsIsError,
+    liveAnnouncement,
+    messages,
+    messagesQuery,
+    modelProfileId,
+    openRetryDialog,
+    pendingSubagentApprovals,
+    pendingSubagentInputs,
+    questionText,
+    refetchLatestRuns,
+    refetchRunDetails,
+    retryError,
+    retryOpen,
+    retrying,
+    retryTerminalReconcile,
+    run,
+    runDetailsIsError,
+    selectedFileIds,
+    selectedSkillIds,
+    sending,
+    setHasBlockingUploads,
+    setHandoffUploads,
+    setKnowledgeBaseIds,
+    setModelProfileId,
+    setSelectedFileIds,
+    setSelectedSkillIds,
+    setSelectedSubagentInputKey,
+    status,
+    stopping,
+    streamNotice,
+    subagentApprovalErrors,
+    subagentTasks,
+    terminalMessageFailure,
+    transientText,
+    transientUnfinished,
+  } = controller;
+
+  const triggerMessageText = useMemo(() => {
+    if (!run?.trigger_message_id) {
       return null;
     }
-    if (selectedSubagentInputKey) {
-      const matched = pendingSubagentInputs.find(
-        (item) => subagentInputKey(item) === selectedSubagentInputKey,
-      );
-      if (matched) {
-        return matched;
-      }
-    }
-    return pendingSubagentInputs[0];
-  }, [pendingSubagentInputs, selectedSubagentInputKey]);
-  const isTargetedSubagentAnswer = Boolean(activeSubagentInput);
-  const isLatestRun = Boolean(run && latestRun?.id === run.id);
-  const sending = activeCommand === "submit" || activeCommand === "answer";
-  const stopping = activeCommand === "cancel";
-  const retrying = activeCommand === "retry";
-  const commandPending = activeCommand !== null;
+    const triggerMessage = messages.find(
+      (message) => message.id === run.trigger_message_id,
+    );
+    return triggerMessage ? messageText(triggerMessage).trim() || null : null;
+  }, [messages, run?.trigger_message_id]);
 
-  runSnapshotRef.current = {
-    run,
-    status,
-    streamRunId: stream.state.runId,
-    streamStatus: stream.state.status,
-  };
-
-  useEffect(() => {
-    if (
-      !currentRunId ||
-      !status ||
-      !isTerminalRunStatus(status)
-    ) {
-      return;
-    }
-    const terminalRunId = currentRunId;
-    const terminalStatus = status;
-    const triggerMessageId = run?.trigger_message_id;
-    closeStreamTerminal(terminalRunId, terminalStatus);
-    if (reconcileTimerRef.current !== null) {
-      // 终态已由 SSE 事件触发时立刻冲刷挂起的节流对账，保证终态对账零延迟。
-      flushReconcile();
-    }
-    // 刷新和终态恢复都重新读取服务端文件发布记录，不能只依赖临时消息投影。
-    void queryClient.invalidateQueries({
-      queryKey: sessionFileKeys.list(sessionId),
-    });
-    // 取消终态没有权威回答；旧工具/文件交付消息不能用于清除临时文本。
-    if (terminalStatus === "cancelled") {
-      return;
-    }
-    if (!triggerMessageId) {
-      setTerminalMessageFailure({
-        kind: "sync_failed",
-        runId: terminalRunId,
-      });
-      return;
-    }
-    const terminalKey = terminalRunId + ":" + terminalStatus;
-    if (settledTerminalRunsRef.current.has(terminalKey)) {
-      return;
-    }
-    let active = true;
-    setTerminalMessageFailure(null);
-    const projectedReportMessageId =
-      terminalStatus === "failed"
-        ? (run?.report_message_id ?? streamReportMessageId)
-        : null;
-    const reconciliation =
-      terminalStatus === "failed"
-        ? reconcileFailedRun(
-            sessionId,
-            terminalRunId,
-            triggerMessageId,
-            projectedReportMessageId,
-            streamEvents,
-          )
-        : reconcileCompletedRun(
-            sessionId,
-            terminalRunId,
-            triggerMessageId,
-          );
-    void reconciliation
-      .then((result) => {
-        if (result.kind === "not_found") {
-          // 普通 failed 没有报告时维持原行为；只有显式报告未能对账才提示失败。
-          if (
-            terminalStatus === "failed" &&
-            result.reason === "failed_event"
-          ) {
-            return;
-          }
-          if (active) {
-            setTerminalMessageFailure({
-              kind: "not_found",
-              runId: terminalRunId,
-            });
-          }
-          return;
-        }
-        if (!active) {
-          return;
-        }
-        queryClient.setQueryData<MessageInfiniteData>(
-          chatKeys.messages(sessionId),
-          (current) => mergeReconciledMessages(current, result.messages),
-        );
-        settledTerminalRunsRef.current.add(terminalKey);
-        settleStreamTerminal(terminalRunId, terminalStatus);
-      })
-      .catch(() => {
-        if (active) {
-          setTerminalMessageFailure({
-            kind: "sync_failed",
-            runId: terminalRunId,
-          });
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [
-    closeStreamTerminal,
-    currentRunId,
-    flushReconcile,
-    queryClient,
-    run?.report_message_id,
-    run?.trigger_message_id,
-    sessionId,
-    settleStreamTerminal,
-    status,
-    streamEvents,
-    streamReportMessageId,
-    terminalMessageRetry,
-  ]);
-
-  // 同一 Run 的所有用户命令共享一个显式锁；ref 在事件入口同步生效，
-  // activeCommand 仅负责驱动按钮 disabled 与 aria-busy。
-  const beginRunCommand = useCallback(
-    (kind: RunCommandKind, runId: string | null): number | null => {
-      if (commandLockRef.current) {
-        return null;
-      }
-      const token = commandTokenRef.current + 1;
-      commandTokenRef.current = token;
-      commandLockRef.current = { kind, runId, token };
-      setCommandNotice(null);
-      setActiveCommand(kind);
-      return token;
-    },
-    [],
-  );
-
-  const endRunCommand = useCallback((token: number) => {
-    if (commandLockRef.current?.token !== token) {
-      return;
-    }
-    commandLockRef.current = null;
-    setActiveCommand(null);
+  // 稳定回调保证 ChatMessageList 与历史 MessageRow 保持记忆化隔离。
+  const handleEditResend = useCallback((text: string) => {
+    composerRef.current?.fillDraft(text);
   }, []);
 
-  const isCurrentRunCommand = useCallback(
-    (token: number) => commandLockRef.current?.token === token,
-    [],
-  );
+  // 仅当最新一轮失败，或已取消且当前消息分页包含触发提问文本时，助手消息才展示「重新执行」快捷操作。
+  const canRetryFromAssistantMessage =
+    isLatestRun &&
+    (status === "failed" ||
+      (status === "cancelled" && Boolean(triggerMessageText)));
 
-  const messages = useMemo(
-    () =>
-      mergeConversationMessages(
-        messagesQuery.data?.pages ?? [],
-        currentRunId,
-        streamMatchesRun ? stream.state.messages : [],
-      ),
-    [
-      currentRunId,
-      messagesQuery.data?.pages,
-      stream.state.messages,
-      streamMatchesRun,
-    ],
-  );
-
-  const questionText = useMemo(() => {
-    const questionMessageId = run?.pending_input?.question_message_id;
-    return questionMessageId
-      ? findQuestionText(messages, questionMessageId)
-      : null;
-  }, [messages, run?.pending_input?.question_message_id]);
-
-  const applyRunResult = useCallback(
-    (nextRun: Run, commandToken: number): boolean => {
-      // 结果只允许发起它的当前命令应用；共享锁之外再保留令牌守卫，
-      // 防止异常调度或旧异步链覆盖后续命令状态。
-      if (!isCurrentRunCommand(commandToken)) {
-        flushReconcile();
-        return false;
-      }
-      const activeCommand = commandLockRef.current;
-      if (
-        activeCommand?.runId &&
-        (activeCommand.kind === "answer" ||
-          activeCommand.kind === "approval" ||
-          activeCommand.kind === "cancel") &&
-        activeCommand.runId !== nextRun.id
-      ) {
-        flushReconcile();
-        return false;
-      }
-      const liveState = runSnapshotRef.current;
-      if (
-        liveState.streamRunId === nextRun.id &&
-        (liveState.streamStatus === "cancelling" ||
-          liveState.streamStatus === "cancelled") &&
-        nextRun.status !== "cancelling" &&
-        nextRun.status !== "cancelled"
-      ) {
-        flushReconcile();
-        return false;
-      }
-
-      const latestPage = queryClient.getQueryData<RunListResponse>(
-        chatKeys.latestRun(sessionId),
-      );
-      const cachedRuns = [
-        latestPage?.items.find((item) => item.id === nextRun.id),
-        queryClient.getQueryData<Run>(chatKeys.run(sessionId, nextRun.id)),
-        runSnapshotRef.current.run?.id === nextRun.id
-          ? runSnapshotRef.current.run
-          : null,
-      ].filter((item): item is Run => Boolean(item));
-      const currentRun = cachedRuns.reduce<Run | null>((current, candidate) => {
-        if (!current) {
-          return candidate;
-        }
-        if (candidate.execution_epoch !== current.execution_epoch) {
-          return candidate.execution_epoch > current.execution_epoch
-            ? candidate
-            : current;
-        }
-        if (candidate.event_sequence !== current.event_sequence) {
-          return candidate.event_sequence > current.event_sequence
-            ? candidate
-            : current;
-        }
-        // 与 model.ts 保持一致，统一使用 Date.parse 比较时间戳而非字典序字符串比较。
-        return Date.parse(candidate.updated_at) > Date.parse(current.updated_at)
-          ? candidate
-          : current;
-      }, null);
-      if (currentRun && runResultIsStale(nextRun, currentRun)) {
-        flushReconcile();
-        return false;
-      }
-
-      setSelectedRunId(nextRun.id);
-      syncStreamStatus(nextRun.id, nextRun.status);
-      queryClient.setQueryData(chatKeys.latestRun(sessionId), {
-        items: [nextRun],
-        next_cursor: null,
-      });
-      queryClient.setQueryData(chatKeys.run(sessionId, nextRun.id), nextRun);
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.latestRun(sessionId),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.messages(sessionId),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.run(sessionId, nextRun.id),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.toolCalls(sessionId, nextRun.id),
-      });
-      return true;
-    },
-    [
-      flushReconcile,
-      isCurrentRunCommand,
-      queryClient,
-      sessionId,
-      syncStreamStatus,
-    ],
-  );
-
-  const handleSubmit = async (submittedDraft: string): Promise<boolean> => {
-    const text = submittedDraft.trim();
-    if (!text || commandLockRef.current) {
-      return false;
+  const handleRetryFromAssistantMessage = useCallback(() => {
+    if (status === "failed" && isLatestRun) {
+      openRetryDialog();
+      return;
     }
-    if (hasBlockingUploads || handoffUploads.length > 0) {
-      setCommandError(
-        "请先等待附件上传完成，或重试/移除失败的附件后再提交。",
-      );
-      return false;
+    if (status === "cancelled" && triggerMessageText) {
+      composerRef.current?.fillDraft(triggerMessageText);
+      toast.info("原任务已取消，已为您回填提问以便重新发送");
     }
-    if (isWaitingInput && !run?.pending_input) {
-      setCommandError("服务端尚未返回可回答的输入请求，正在同步状态。");
-      flushReconcile();
-      return false;
-    }
-    if (isActive && !isWaitingInput && !isTargetedSubagentAnswer) {
-      return false;
-    }
-    if (!run && !latestRuns.isSuccess) {
-      return false;
-    }
+  }, [isLatestRun, openRetryDialog, status, triggerMessageText]);
 
-    const inputRequestId = activeSubagentInput
-      ? activeSubagentInput.input_request_id
-      : isWaitingInput
-        ? run?.pending_input?.id
-        : undefined;
-    const targetRunId = activeSubagentInput
-      ? activeSubagentInput.sub_run_id
-      : (run?.id ?? null);
-    const sequenceAtSubmit = messages.reduce(
-      (latestSequence, message) =>
-        Math.max(latestSequence, message.sequence),
-      0,
+  const progressSlot = useMemo(() => {
+    // 零 Run 空会话必须返回 null，确保 ChatMessageList 正常渲染「开始这段对话」空态。
+    if (!run || !status) {
+      return null;
+    }
+    return (
+      <ExecutionProgressAccordion
+        run={run}
+        sessionId={sessionId}
+        status={status}
+        subagentTasks={subagentTasks}
+      />
     );
-    const isAnswering = isWaitingInput || isTargetedSubagentAnswer;
-    const submittedSkillIds = isAnswering ? [] : [...selectedSkillIds];
-    const submittedFileIds = [...selectedFileIds];
-    const submittedKnowledgeBaseIds = isAnswering
-      ? null
-      : knowledgeBaseIds === null
-        ? null
-        : [...knowledgeBaseIds];
-    const submittedModelProfileId = isAnswering ? null : modelProfileId;
-    const commandKind: RunCommandKind = isAnswering ? "answer" : "submit";
-    const commandToken = beginRunCommand(commandKind, targetRunId);
-    if (commandToken === null) {
-      return false;
+  }, [run, sessionId, status, subagentTasks]);
+
+  const topAlertSlot = useMemo(() => {
+    const hasTopAlerts =
+      latestRunsIsError ||
+      (runDetailsIsError && Boolean(currentRunId)) ||
+      Boolean(streamNotice) ||
+      transientUnfinished ||
+      terminalMessageFailure?.runId === currentRunId;
+
+    if (!hasTopAlerts) {
+      return null;
     }
-    const canReuse =
-      failedCommand?.reuseRequestId === true &&
-      failedCommand?.text === text &&
-      failedCommand.fileIds.join("\u0000") ===
-        submittedFileIds.join("\u0000") &&
-      failedCommand.skillIds.join("\u0000") ===
-        submittedSkillIds.join("\u0000") &&
-      knowledgeScopeEqual(
-        failedCommand.knowledgeBaseIds,
-        submittedKnowledgeBaseIds,
-      ) &&
-      (failedCommand.modelProfileId ?? null) ===
-        (submittedModelProfileId ?? null) &&
-      (isAnswering
-        ? failedCommand.kind === "answer" &&
-          failedCommand.inputRequestId === inputRequestId
-        : failedCommand?.kind === "submit");
-    const requestId = canReuse ? failedCommand.requestId : newRequestId();
 
-    setCommandError(null);
-    try {
-      const nextRun =
-        activeSubagentInput && inputRequestId
-          ? await answerRunInput(
-              sessionId,
-              activeSubagentInput.sub_run_id,
-              inputRequestId,
-              requestId,
-              text,
-              submittedFileIds,
-            )
-          : isWaitingInput && run && inputRequestId
-            ? await answerRunInput(
-                sessionId,
-                run.id,
-                inputRequestId,
-                requestId,
-                text,
-                submittedFileIds,
-              )
-            : await submitRun(
-                sessionId,
-                requestId,
-                text,
-                submittedSkillIds,
-                submittedFileIds,
-                {
-                  knowledgeBaseIds: submittedKnowledgeBaseIds,
-                  modelProfileId: submittedModelProfileId,
-                },
-              );
-
-      if (activeSubagentInput) {
-        // 子智能体定向回答返回的是子 Run，不能切换 selectedRunId，
-        // 若回答接口未携带完整 input_interactions，则保留并乐观更新已缓存的提问记录，
-        // 再失效子 Run 查询以拉取服务端权威详情，防止已展开的详情面板闪烁退化为空态。
-        queryClient.setQueryData<Run>(
-          chatKeys.run(sessionId, nextRun.id),
-          (existing) => {
-            if (
-              !nextRun.input_interactions?.length &&
-              existing?.input_interactions?.length
-            ) {
-              return {
-                ...nextRun,
-                input_interactions: existing.input_interactions.map((item) =>
-                  item.input_request_id === activeSubagentInput.input_request_id
-                    ? {
-                        ...item,
-                        status: "answered",
-                        answer_text: text,
-                        answered_at:
-                          item.answered_at ?? new Date().toISOString(),
-                      }
-                    : item,
-                ),
-              };
+    return (
+      <div className="space-y-2.5">
+        {latestRunsIsError ? (
+          <InlineAlert
+            action={
+              <Button
+                onClick={refetchLatestRuns}
+                size="xs"
+                variant="outline"
+              >
+                <RefreshCw aria-hidden="true" className="h-3 w-3" />
+                重试
+              </Button>
             }
-            return nextRun;
-          },
-        );
-        void queryClient.invalidateQueries({
-          queryKey: chatKeys.run(sessionId, nextRun.id),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: chatKeys.toolCalls(sessionId, nextRun.id),
-        });
-        if (currentRunId) {
-          const removeAnswered = (existing: Run): Run => ({
-            ...existing,
-            pending_subagent_inputs: (
-              existing.pending_subagent_inputs ?? []
-            ).filter(
-              (item) =>
-                item.input_request_id !== activeSubagentInput.input_request_id,
-            ),
-          });
-          queryClient.setQueryData<Run>(
-            chatKeys.run(sessionId, currentRunId),
-            (existing) => (existing ? removeAnswered(existing) : existing),
-          );
-          queryClient.setQueryData<RunListResponse>(
-            chatKeys.latestRun(sessionId),
-            (existing) =>
-              existing
-                ? {
-                    ...existing,
-                    items: existing.items.map((item) =>
-                      item.id === currentRunId ? removeAnswered(item) : item,
-                    ),
-                  }
-                : existing,
-          );
-        }
-        flushReconcile();
-      } else {
-        // HTTP 成功先确认命令结果；投影是否采纳只决定 Run 状态如何同步。
-        applyRunResult(nextRun, commandToken);
-      }
+            description="最新任务状态加载失败，请重试。"
+            variant="danger"
+          />
+        ) : null}
 
-      if (isCurrentRunCommand(commandToken)) {
-        setFailedCommand(null);
-        setSelectedFileIds([]);
-        // 新 Run 与澄清回答都只消费已经提交的固定快照；交回控制权后不能把
-        // 上一 Run 的手动选择静默带入后续任务。
-        setSelectedSkillIds([]);
-        setHandoffUploads([]);
-        clearSessionHandoff(sessionId);
-        // 子 Run 的定向回答不会进入主消息历史；主发送与主 Run 补充回答
-        // 等对应用户消息真正出现后再通知列表定位，失败路径不会登记。
-        if (!activeSubagentInput) {
-          setAutoScrollRequest(
-            isAnswering
-              ? {
-                  afterSequence: sequenceAtSubmit,
-                  key: `${commandToken}:${requestId}`,
-                  text,
-                }
-              : {
-                  key: `${commandToken}:${requestId}`,
-                  messageId: nextRun.trigger_message_id,
-                },
-          );
-        }
-        setCommandNotice(
-          activeSubagentInput
-            ? `已向子智能体「${activeSubagentInput.subagent_name}」提交回答，正在同步状态。`
-            : isWaitingInput
-              ? "补充回答已提交，正在按服务端最新运行状态同步。"
-              : "消息已提交，正在按服务端最新运行状态同步。",
-        );
-        return true;
-      }
-      return false;
-    } catch (error) {
-      if (isCurrentRunCommand(commandToken)) {
-        setFailedCommand({
-          fileIds: submittedFileIds,
-          inputRequestId,
-          kind: isAnswering ? "answer" : "submit",
-          knowledgeBaseIds: submittedKnowledgeBaseIds,
-          modelProfileId: submittedModelProfileId,
-          requestId,
-          reuseRequestId: requestIdCanBeReused(error),
-          skillIds: submittedSkillIds,
-          text,
-        });
-        setCommandNotice(null);
-        setCommandError(chatErrorMessage(error));
-        // 命令失败后重新读取最新 Run，避免继续以已失效的等待/活跃状态展示。
-        flushReconcile();
-      }
-      return false;
-    } finally {
-      endRunCommand(commandToken);
-    }
-  };
+        {runDetailsIsError && currentRunId ? (
+          <InlineAlert
+            action={
+              <Button
+                onClick={refetchRunDetails}
+                size="xs"
+                variant="outline"
+              >
+                <RefreshCw aria-hidden="true" className="h-3 w-3" />
+                重试
+              </Button>
+            }
+            description="任务详情同步失败，历史消息仍可正常阅读。"
+            variant="warning"
+          />
+        ) : null}
 
-  const handleCancel = async () => {
-    if (!run || commandLockRef.current) {
-      return;
-    }
-    const commandToken = beginRunCommand("cancel", run.id);
-    if (commandToken === null) {
-      return;
-    }
-    setCommandError(null);
-    try {
-      const nextRun = await cancelRun(sessionId, run.id);
-      applyRunResult(nextRun, commandToken);
-    } catch (error) {
-      if (isCurrentRunCommand(commandToken)) {
-        setCommandError(chatErrorMessage(error));
-        flushReconcile();
-      }
-    } finally {
-      endRunCommand(commandToken);
-    }
-  };
+        {streamNotice ? (
+          <InlineAlert description={streamNotice} variant="warning" />
+        ) : null}
 
-  const handleApproval = async (
-    approval: RunPendingApproval,
-    decision: "approve" | "reject",
-  ) => {
-    if (!run || commandLockRef.current) {
-      return;
-    }
-    const commandToken = beginRunCommand("approval", run.id);
-    if (commandToken === null) {
-      return;
-    }
-    // 审批响应包含整份 Run 投影；串行提交可避免较早响应迟到后覆盖
-    // 最后一次决定产生的 queued 状态。
-    const previous = approvalRequestsRef.current[approval.call_id];
-    const requestId =
-      previous?.decision === decision
-        ? previous.requestId
-        : newRequestId();
-    approvalRequestsRef.current[approval.call_id] = {
-      decision,
-      requestId,
-    };
-    setApprovalErrors((current) => {
-      const next = { ...current };
-      delete next[approval.call_id];
-      return next;
-    });
-    setBusyApprovalIds((current) => {
-      const next = new Set(current);
-      next.add(approval.call_id);
-      return next;
-    });
-    try {
-      const nextRun = await decideRunToolApproval(
-        sessionId,
-        run.id,
-        approval.call_id,
-        requestId,
-        decision,
-      );
-      delete approvalRequestsRef.current[approval.call_id];
-      setApprovalErrors((current) => {
-        const next = { ...current };
-        delete next[approval.call_id];
-        return next;
-      });
-      setCommandError(null);
-      applyRunResult(nextRun, commandToken);
-    } catch (error) {
-      if (isCurrentRunCommand(commandToken)) {
-        setApprovalErrors((current) => ({
-          ...current,
-          [approval.call_id]: chatErrorMessage(error),
-        }));
-        flushReconcile();
-      }
-    } finally {
-      if (isCurrentRunCommand(commandToken)) {
-        setBusyApprovalIds((current) => {
-          const next = new Set(current);
-          next.delete(approval.call_id);
-          return next;
-        });
-      }
-      endRunCommand(commandToken);
-    }
-  };
+        {transientUnfinished ? (
+          <InlineAlert
+            description={
+              status === "failed"
+                ? "任务执行未完成，已生成的临时内容保留在当前页面，刷新后不承诺恢复。"
+                : "任务已取消，已生成的临时内容保留在当前页面，刷新后不承诺恢复。"
+            }
+            variant="warning"
+          />
+        ) : null}
 
-  const handleSubagentApproval = async (
-    approval: PendingSubagentApproval,
-    decision: "approve" | "reject",
-  ) => {
-    const key = subagentApprovalKey(approval);
-    // 同步 ref 锁防止同一渲染帧内连点触发重复审批请求。
+        {terminalMessageFailure?.runId === currentRunId ? (
+          <InlineAlert
+            action={
+              <Button
+                onClick={retryTerminalReconcile}
+                size="xs"
+                variant="outline"
+              >
+                {status === "failed" ? "重试加载失败报告" : "重试加载最终消息"}
+              </Button>
+            }
+            description={
+              status === "failed"
+                ? terminalMessageFailure.kind === "not_found"
+                  ? "任务失败，但未找到对应的权威说明。清空草稿前请重试同步。"
+                  : "失败说明同步失败，请重试加载。"
+                : terminalMessageFailure.kind === "not_found"
+                  ? "任务已完成，但未找到对应的最终回复。清空草稿前请重试同步。"
+                  : "任务已完成，但最终回复同步失败，请重试加载。"
+            }
+            variant="danger"
+          />
+        ) : null}
+      </div>
+    );
+  }, [
+    currentRunId,
+    latestRunsIsError,
+    refetchLatestRuns,
+    refetchRunDetails,
+    retryTerminalReconcile,
+    runDetailsIsError,
+    status,
+    streamNotice,
+    terminalMessageFailure,
+    transientUnfinished,
+  ]);
+
+  const footerSlot = useMemo(() => {
+    const showMainApprovals = isWaitingApproval && Boolean(run);
+    const showSubagentApprovals = pendingSubagentApprovals.length > 0;
+    const showFailedCard = status === "failed" && Boolean(run);
+    const showCancelledCard = status === "cancelled" && Boolean(run);
+    const showActiveRetryWarning =
+      !showFailedCard && Boolean(run?.retry_warning?.trim());
+
     if (
-      busySubagentApprovalKeysRef.current.has(key) ||
-      busySubagentApprovalKeys.has(key)
+      !showMainApprovals &&
+      !showSubagentApprovals &&
+      !showFailedCard &&
+      !showCancelledCard &&
+      !showActiveRetryWarning
     ) {
-      return;
+      return null;
     }
-    busySubagentApprovalKeysRef.current.add(key);
-    const previous = subagentApprovalRequestsRef.current[key];
-    const requestId =
-      previous?.decision === decision ? previous.requestId : newRequestId();
-    subagentApprovalRequestsRef.current[key] = { decision, requestId };
-    setSubagentApprovalErrors((current) => {
-      const next = { ...current };
-      delete next[key];
-      return next;
-    });
-    setBusySubagentApprovalKeys((current) => {
-      const next = new Set(current);
-      next.add(key);
-      return next;
-    });
-    try {
-      // 子智能体工具审批精确路由至对应 sub_run_id，各子智能体之间互不阻塞。
-      const nextSubRun = await decideRunToolApproval(
-        sessionId,
-        approval.sub_run_id,
-        approval.call_id,
-        requestId,
-        decision,
-      );
-      delete subagentApprovalRequestsRef.current[key];
-      queryClient.setQueryData(
-        chatKeys.run(sessionId, nextSubRun.id),
-        nextSubRun,
-      );
-      if (currentRunId) {
-        const removeDecided = (existing: Run): Run => ({
-          ...existing,
-          pending_subagent_approvals: (
-            existing.pending_subagent_approvals ?? []
-          ).filter(
-            (item) =>
-              !(
-                item.sub_run_id === approval.sub_run_id &&
-                item.call_id === approval.call_id
-              ),
-          ),
-        });
-        queryClient.setQueryData<Run>(
-          chatKeys.run(sessionId, currentRunId),
-          (existing) => (existing ? removeDecided(existing) : existing),
-        );
-        queryClient.setQueryData<RunListResponse>(
-          chatKeys.latestRun(sessionId),
-          (existing) =>
-            existing
-              ? {
-                  ...existing,
-                  items: existing.items.map((item) =>
-                    item.id === currentRunId ? removeDecided(item) : item,
-                  ),
-                }
-              : existing,
-        );
-      }
-      flushReconcile();
-    } catch (error) {
-      setSubagentApprovalErrors((current) => ({
-        ...current,
-        [key]: chatErrorMessage(error),
-      }));
-      flushReconcile();
-    } finally {
-      busySubagentApprovalKeysRef.current.delete(key);
-      setBusySubagentApprovalKeys((current) => {
-        const next = new Set(current);
-        next.delete(key);
-        return next;
-      });
-    }
-  };
 
-  const handleRetry = async () => {
-    if (
-      !run ||
-      !isLatestRun ||
-      status !== "failed" ||
-      commandLockRef.current
-    ) {
-      return;
-    }
-    const commandToken = beginRunCommand("retry", run.id);
-    if (commandToken === null) {
-      return;
-    }
-    setRetryError(null);
-    const requestId =
-      retryRequestRef.current?.runId === run.id
-        ? retryRequestRef.current.requestId
-        : newRequestId();
-    retryRequestRef.current = { requestId, runId: run.id };
-    try {
-      const nextRun = await retryRun(sessionId, run.id, requestId);
-      retryRequestRef.current = null;
-      setRetryError(null);
-      setRetryOpen(false);
-      setCommandError(null);
-      clearSessionHandoff(sessionId);
-      if (!applyRunResult(nextRun, commandToken)) {
-        // 投影被旧查询守卫拒绝时，释放旧选中 Run，由最新 Run 查询接续。
-        setSelectedRunId(null);
-      }
-    } catch (error) {
-      if (isCurrentRunCommand(commandToken)) {
-        setRetryError(chatErrorMessage(error));
-        flushReconcile();
-      }
-    } finally {
-      endRunCommand(commandToken);
-    }
-  };
-
-  // 仍有上传中或上传失败的附件时阻止提交，避免静默漏掉用户选择的资料。
-  const canSendWithoutDraft =
-    !commandPending &&
-    !hasBlockingUploads &&
-    handoffUploads.length === 0 &&
-    (isTargetedSubagentAnswer ||
-      (isWaitingInput && Boolean(run?.pending_input)) ||
-      (!isActive && Boolean(run || latestRuns.isSuccess)));
-  const streamNotice = streamMatchesRun ? stream.state.notice : null;
-  const transientUnfinished =
-    Boolean(transientText) &&
-    (status === "failed" || status === "cancelled");
-  const serverRetryWarning = run?.retry_warning?.trim() ?? "";
-  const distinctServerRetryWarning =
-    serverRetryWarning && serverRetryWarning !== RETRY_RISK_WARNING
-      ? serverRetryWarning
-      : null;
-
-  return (
-    <>
-      <div
-        className={`session-workspace${traceOpen ? " has-trace" : ""}`}
-      >
-        <div className="session-conversation-column">
-          <RunSummary
-            canRetry={isLatestRun}
-            commandPending={commandPending}
-            onOpenTrace={() => setTraceOpen(true)}
-            onRetry={() => {
-              setRetryError(null);
-              setRetryOpen(true);
-            }}
-            run={run}
-            status={status}
-            traceOpen={traceOpen}
+    return (
+      <div className="space-y-4">
+        {showActiveRetryWarning && run?.retry_warning ? (
+          <InlineAlert
+            aria-label="服务端重试警告"
+            description={run.retry_warning.trim()}
+            role="note"
+            variant="warning"
           />
+        ) : null}
 
-          {latestRuns.isError ? (
-            <ErrorBanner
-              message="最新运行状态加载失败。"
-              onRetry={() => void latestRuns.refetch()}
-            />
-          ) : null}
-          {runDetails.isError && currentRunId ? (
-            <ErrorBanner
-              message="Run 详情加载失败，消息仍可继续查看。"
-              onRetry={() => void runDetails.refetch()}
-            />
-          ) : null}
-          {streamNotice ? (
-            <div className="run-stream-notice" role="status">
-              <Icon name="refresh" size={15} />
-              <span>{streamNotice}</span>
-            </div>
-          ) : null}
-          {transientUnfinished ? (
-            <div className="run-stream-notice" role="status">
-              <Icon name="shield" size={15} />
-              <span>
-                {status === "failed"
-                  ? "运行失败，未完成回答已保留在当前页面。"
-                  : "运行已取消，未完成回答已保留在当前页面。"}
-                刷新后不承诺恢复该文本。
-              </span>
-            </div>
-          ) : null}
-          {commandNotice ? (
-            <div className="run-command-notice" role="status">
-              <Icon name="inbox" size={15} />
-              <span>{commandNotice}</span>
-            </div>
-          ) : null}
-          {commandError ? <ErrorBanner message={commandError} /> : null}
-          {terminalMessageFailure?.runId === currentRunId ? (
-            <ErrorBanner
-              message={
-                status === "failed"
-                  ? terminalMessageFailure.kind === "not_found"
-                    ? "运行失败，但未找到失败事件所指的权威报告。清空状态前请重试对账。"
-                    : "失败报告同步失败，不会使用其他 Run 或工具交付消息替代。请重试加载失败报告。"
-                  : terminalMessageFailure.kind === "not_found"
-                    ? "运行已完成，但未找到完成事件所指的最终消息。清空草稿前请重试对账。"
-                    : "运行已完成，但最终消息同步失败。请重试加载最终回答。"
-              }
-              onRetry={() =>
-                setTerminalMessageRetry((attempt) => attempt + 1)
-              }
-              retryLabel={
-                status === "failed"
-                  ? "重试加载失败报告"
-                  : "重试加载最终消息"
-              }
-            />
-          ) : null}
-
-          <ChatMessageList
-            autoScrollRequest={autoScrollRequest}
-            error={messagesQuery.isError ? messagesQuery.error : null}
-            hasMore={Boolean(messagesQuery.hasNextPage)}
-            isLoading={messagesQuery.isPending}
-            isLoadingMore={messagesQuery.isFetchingNextPage}
-            key={sessionId}
-            messages={messages}
-            onLoadMore={handleLoadMoreMessages}
-            onRetry={handleRetryMessages}
-            sessionId={sessionId}
-            transientText={transientText}
-            transientUnfinished={transientUnfinished}
-          />
-
-          <SubagentExecutionPanel
-            sessionId={sessionId}
-            tasks={subagentTasks}
-          />
-
+        {showSubagentApprovals ? (
           <SubagentApprovalPanel
             approvals={pendingSubagentApprovals}
             busyKeys={busySubagentApprovalKeys}
             errors={subagentApprovalErrors}
-            onDecision={(approval, decision) =>
-              void handleSubagentApproval(approval, decision)
-            }
+            onDecision={handleSubagentApproval}
             sessionId={sessionId}
           />
+        ) : null}
 
-          <SubagentInputQueuePanel
-            activeInput={activeSubagentInput}
-            inputs={pendingSubagentInputs}
-            onSelect={(item) =>
+        {showMainApprovals && run ? (
+          <ToolApprovalPanel
+            approvals={run.pending_approvals}
+            busyCallIds={busyApprovalIds}
+            decisionPending={commandPending}
+            errors={approvalErrors}
+            onDecision={handleApproval}
+            runId={run.id}
+            sessionId={sessionId}
+          />
+        ) : null}
+
+        {showFailedCard && run ? (
+          <FailedRunCard
+            canRetry={isLatestRun}
+            commandPending={commandPending}
+            onOpenRetry={openRetryDialog}
+            run={run}
+          />
+        ) : null}
+
+        {showCancelledCard ? (
+          <section
+            aria-label="任务已取消"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border-default bg-subtle/70 px-4 py-3 text-xs text-text-secondary"
+          >
+            <span className="inline-flex items-center gap-2 font-medium text-text-primary">
+              <XCircle
+                aria-hidden="true"
+                className="h-4 w-4 text-text-tertiary"
+              />
+              <span>本次任务已取消</span>
+            </span>
+            {isLatestRun && triggerMessageText ? (
+              <Button
+                onClick={() => {
+                  composerRef.current?.fillDraft(triggerMessageText);
+                }}
+                size="xs"
+                variant="outline"
+              >
+                <RotateCcw aria-hidden="true" className="h-3 w-3" />
+                重新编辑发送
+              </Button>
+            ) : null}
+          </section>
+        ) : null}
+      </div>
+    );
+  }, [
+    approvalErrors,
+    busyApprovalIds,
+    busySubagentApprovalKeys,
+    commandPending,
+    handleApproval,
+    handleSubagentApproval,
+    isLatestRun,
+    isWaitingApproval,
+    openRetryDialog,
+    pendingSubagentApprovals,
+    run,
+    sessionId,
+    status,
+    subagentApprovalErrors,
+    triggerMessageText,
+  ]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-canvas">
+      {/* 仅在 5 个生命周期节点更新的屏幕阅读器礼貌播报区，杜绝按流式 Token 刷屏。 */}
+      <div aria-atomic="true" aria-live="polite" className="sr-only">
+        {liveAnnouncement}
+      </div>
+
+      <ChatHeader
+        hasActiveRun={isActive}
+        onOpenFilesDrawer={() => setFilesDrawerOpen(true)}
+        session={session}
+        sessionId={sessionId}
+      />
+
+      {/* 中间唯一纵向滚动区：消除嵌套滚动条，消息居中 max-w-[780px]。 */}
+      <ChatMessageList
+        autoScrollRequest={autoScrollRequest}
+        beforeLatestAssistantSlot={progressSlot}
+        currentRunId={currentRunId}
+        currentRunModelLabel={currentRunModelLabel}
+        currentRunStatus={status}
+        error={messagesQuery.isError ? messagesQuery.error : null}
+        footerSlot={footerSlot}
+        hasMore={Boolean(messagesQuery.hasNextPage)}
+        isLatestRun={isLatestRun}
+        isLoading={messagesQuery.isPending}
+        isLoadingMore={messagesQuery.isFetchingNextPage}
+        key={sessionId}
+        messages={messages}
+        onEditResend={handleEditResend}
+        onLoadMore={handleLoadMoreMessages}
+        onRetry={handleRetryMessages}
+        onRetryRun={
+          canRetryFromAssistantMessage
+            ? handleRetryFromAssistantMessage
+            : undefined
+        }
+        sessionId={sessionId}
+        topAlertSlot={topAlertSlot}
+        transientText={transientText}
+        transientUnfinished={transientUnfinished}
+      />
+
+      {/* 底部固定吸底区：澄清问答引导条 + 命令反馈 + 一体化输入器。 */}
+      <div className="shrink-0 bg-canvas">
+        <div className="mx-auto w-full max-w-[780px] px-4 pt-1 pb-3 sm:px-6">
+          <WaitingInputBanner
+            activeSubagentInput={activeSubagentInput}
+            isWaitingMainInput={isWaitingInput && Boolean(run)}
+            mainQuestionText={questionText}
+            onSelectSubagentInput={(item) =>
               setSelectedSubagentInputKey(subagentInputKey(item))
             }
+            pendingSubagentInputs={pendingSubagentInputs}
           />
 
-          {isWaitingInput && run ? (
-            <section
-              aria-labelledby="run-question-title"
-              className="run-question"
-            >
-              <span className="empty-panel-kicker">Input requested</span>
-              <h2 id="run-question-title">服务端请求补充信息</h2>
-              {questionText ? (
-                <MarkdownContent text={questionText} />
-              ) : (
-                <p>
-                  当前问题消息尚未出现在已加载的历史窗口中；请结合服务端状态回答，页面不会伪造问题内容。
-                </p>
-              )}
-            </section>
+          {commandNotice ? (
+            <div className="mb-2">
+              <InlineAlert description={commandNotice} variant="info" />
+            </div>
           ) : null}
 
-          {isWaitingApproval && run ? (
-            <ToolApprovalPanel
-              approvals={run.pending_approvals}
-              busyCallIds={busyApprovalIds}
-              decisionPending={commandPending}
-              errors={approvalErrors}
-              onDecision={(approval, decision) =>
-                void handleApproval(approval, decision)
-              }
-              runId={run.id}
-              sessionId={sessionId}
-            />
+          {commandError ? (
+            <div className="mb-2">
+              <InlineAlert description={commandError} variant="danger" />
+            </div>
           ) : null}
 
           <SessionComposer
             activeSubagentInput={activeSubagentInput}
             canSendWithoutDraft={canSendWithoutDraft}
             commandPending={commandPending}
-            hasProjectContext={hasProjectContext}
+            hasProjectContext={Boolean(session?.project_id)}
             hasRun={Boolean(run)}
-            initialDraft={initialHandoff?.draft ?? ""}
+            initialDraft={initialDraft}
             initialPendingUploads={handoffUploads}
             isActive={isActive}
             isTargetedSubagentAnswer={isTargetedSubagentAnswer}
@@ -1493,187 +448,88 @@ function SessionConversation({
             onChangeSelectedSkillIds={setSelectedSkillIds}
             onPendingUploadsChange={setHandoffUploads}
             onSubmit={handleSubmit}
+            ref={composerRef}
             selectedFileIds={selectedFileIds}
             selectedSkillIds={selectedSkillIds}
             sending={sending}
             sessionId={sessionId}
             status={status}
+            sticky={false}
             stopping={stopping}
           />
         </div>
-
-        <RunExecutionTrace
-          onClose={() => setTraceOpen(false)}
-          onOpen={() => setTraceOpen(true)}
-          open={traceOpen}
-          runId={currentRunId}
-          sessionId={sessionId}
-        />
       </div>
 
-      <Modal
-        closeDisabled={commandPending}
-        description="此操作会从任务开头重新执行。"
-        footer={
-          <>
-            <button
-              className="button-quiet"
-              disabled={commandPending}
-              onClick={() => setRetryOpen(false)}
-              type="button"
-            >
-              取消
-            </button>
-            <button
-              className="button-danger"
-              disabled={commandPending}
-              onClick={() => void handleRetry()}
-              type="button"
-            >
-              {retrying ? "正在创建重试…" : "确认从头重试"}
-            </button>
-          </>
-        }
-        onClose={() => {
-          if (!commandPending) {
-            setRetryOpen(false);
-          }
-        }}
-        open={
-          retryOpen &&
-          Boolean(run && isLatestRun && status === "failed")
-        }
-        title="重试失败任务"
-      >
-        <div className="retry-risk">
-          <p
-            aria-label={
-              serverRetryWarning === RETRY_RISK_WARNING
-                ? "服务端重试警告"
-                : undefined
-            }
-            role={
-              serverRetryWarning === RETRY_RISK_WARNING ? "note" : undefined
-            }
-          >
-            {RETRY_RISK_WARNING}
-          </p>
-          <ul>
-            <li>工具写入、消息发送或其他副作用可能重复。</li>
-            <li>原操作结果未知时，该操作也可能已经实际生效。</li>
-            <li>系统不会跨工具回滚既有结果。</li>
-          </ul>
-          {distinctServerRetryWarning ? (
-            <p
-              aria-label="服务端重试警告"
-              className="retry-server-warning"
-              role="note"
-            >
-              {distinctServerRetryWarning}
-            </p>
-          ) : null}
-          <p>
-            确认后前端会发送 <code>confirm_unknown=true</code>，并切换到新的
-            Run。
-          </p>
-        </div>
-        {retryError ? <ErrorBanner message={retryError} /> : null}
-      </Modal>
-    </>
+      <SessionFilesDrawer
+        onOpenChange={setFilesDrawerOpen}
+        open={filesDrawerOpen}
+        sessionId={sessionId}
+      />
+
+      <RetryRunAlertDialog
+        commandPending={commandPending}
+        onClose={closeRetryDialog}
+        onConfirmRetry={handleRetry}
+        open={retryOpen && Boolean(run && isLatestRun && status === "failed")}
+        retryError={retryError}
+        retrying={retrying}
+        serverRetryWarning={run?.retry_warning ?? null}
+      />
+    </div>
   );
 }
 
 export function SessionChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const session = useSession(sessionId);
-  const projects = useProjectDirectory();
 
   if (!sessionId) {
     return null;
   }
 
   if (session.isError) {
+    const notFound = isSessionNotFound(session.error);
     return (
-      <div className="page-shell">
-        <header className="page-heading">
-          <div className="page-heading-copy">
-            <p className="page-eyebrow">Workspace / Conversation</p>
-            <h1>
-              {isSessionNotFound(session.error) ? "会话不可用" : "会话加载失败"}
-            </h1>
-            <p className="page-description">
-              当前页面不会保留失效的会话状态，也不会展示本地伪造的对话。
-            </p>
-          </div>
-        </header>
-        <ErrorBanner
-          message={sessionErrorMessage(session.error)}
-          onRetry={
-            isSessionNotFound(session.error)
-              ? undefined
-              : () => void session.refetch()
-          }
-        />
-        <Link className="button-secondary" to="/chat">
-          返回新对话
-        </Link>
+      <div className="flex h-full min-h-0 flex-col items-center justify-center bg-canvas px-4 py-12">
+        <div className="w-full max-w-md">
+          <EmptyState
+            action={
+              notFound ? (
+                <Button asChild variant="primary">
+                  <Link to="/chat">开启新对话</Link>
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    onClick={() => void session.refetch()}
+                    variant="primary"
+                  >
+                    重新加载
+                  </Button>
+                  <Button asChild variant="outline">
+                    <Link to="/chat">开启新对话</Link>
+                  </Button>
+                </>
+              )
+            }
+            description={
+              notFound
+                ? "该对话可能已被删除，或当前账号无权查看此内容。"
+                : sessionErrorMessage(session.error)
+            }
+            icon="chat"
+            title={notFound ? "对话不存在或当前无权访问" : "对话加载失败"}
+          />
+        </div>
       </div>
     );
   }
 
-  const projectName = !session.data
-    ? "正在加载项目…"
-    : session.data.project_id
-      ? projects.isPending
-        ? "正在加载项目…"
-        : (projects.data ?? []).find(
-            (project) => project.id === session.data?.project_id,
-          )?.name ?? "项目不可访问"
-      : "未归属项目";
-
   return (
-    <div
-      aria-busy={session.isPending}
-      className="page-shell session-page session-page--workspace"
-    >
-      <header className="page-heading session-page-heading">
-        <div className="page-heading-copy">
-          <p className="page-eyebrow">{projectName} / Conversation</p>
-          <h1>
-            {session.data
-              ? sessionDisplayTitle(session.data.title)
-              : "正在加载会话…"}
-          </h1>
-          <div className="session-page-meta">
-            {session.data ? (
-              <>
-                <span>创建于 {formatDateTime(session.data.created_at)}</span>
-                <span>更新于 {formatDateTime(session.data.updated_at)}</span>
-                <span>标题保持后端原值，不会自动生成</span>
-              </>
-            ) : (
-              <span role="status">正在并行读取消息与最新运行状态…</span>
-            )}
-          </div>
-        </div>
-        {session.data?.project_id ? (
-          <Link
-            className="button-quiet"
-            to={`/projects/${encodeURIComponent(
-              session.data.project_id,
-            )}/overview`}
-          >
-            查看项目
-          </Link>
-        ) : null}
-      </header>
-
-      <SessionConversation
-        hasProjectContext={Boolean(session.data?.project_id)}
-        key={sessionId}
-        sessionId={sessionId}
-      />
-    </div>
+    <SessionWorkbench
+      key={sessionId}
+      session={session.data ?? null}
+      sessionId={sessionId}
+    />
   );
 }
-

@@ -10,9 +10,11 @@ import {
   Upload,
 } from "lucide-react";
 import {
+  forwardRef,
   useCallback,
   useEffect,
   useId,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -578,6 +580,11 @@ export function ChatComposer({
   );
 }
 
+export interface SessionComposerHandle {
+  /** 从历史用户消息回填草稿文本并立即聚焦输入框（供「编辑重发」使用，不触发外层消息列表重渲染）。 */
+  fillDraft: (text: string) => void;
+}
+
 export interface SessionComposerProps {
   activeSubagentInput: PendingSubagentInput | null;
   canSendWithoutDraft: boolean;
@@ -605,44 +612,53 @@ export interface SessionComposerProps {
   sending: boolean;
   sessionId: string;
   status: RunStatus | null;
+  sticky?: boolean;
   stopping: boolean;
 }
 
 /**
  * 会话页吸底一体化输入器：
- * - 独立承载高频击键的 draft 状态，避免输入过程触发消息历史与执行轨迹重渲染；
+ * - 独立承载高频击键的 draft 状态，避免输入过程触发消息历史与进度条重渲染；
+ * - 通过 forwardRef 暴露 fillDraft 命令句柄，支持用户消息「编辑重发」无额外重渲染回填并聚焦；
  * - 吸收旧版 SessionFilesPanel：选文件/拖入/粘贴后立即调用 uploadSessionFile 自动上传，
  *   并在 📎 菜单中支持勾选引用本会话已有文件与产物。
  */
-export function SessionComposer({
-  activeSubagentInput,
-  canSendWithoutDraft,
-  commandPending,
-  hasProjectContext = false,
-  hasRun,
-  initialDraft,
-  initialPendingUploads = [],
-  isActive,
-  isTargetedSubagentAnswer,
-  isWaitingInput,
-  isWaitingSubagents,
-  knowledgeBaseIds,
-  modelProfileId,
-  onBlockingUploadsChange,
-  onCancel,
-  onChangeKnowledgeBaseIds,
-  onChangeModelProfileId,
-  onChangeSelectedFileIds,
-  onChangeSelectedSkillIds,
-  onPendingUploadsChange,
-  onSubmit,
-  selectedFileIds,
-  selectedSkillIds,
-  sending,
-  sessionId,
-  status,
-  stopping,
-}: SessionComposerProps) {
+export const SessionComposer = forwardRef<
+  SessionComposerHandle,
+  SessionComposerProps
+>(function SessionComposer(
+  {
+    activeSubagentInput,
+    canSendWithoutDraft,
+    commandPending,
+    hasProjectContext = false,
+    hasRun,
+    initialDraft,
+    initialPendingUploads = [],
+    isActive,
+    isTargetedSubagentAnswer,
+    isWaitingInput,
+    isWaitingSubagents,
+    knowledgeBaseIds,
+    modelProfileId,
+    onBlockingUploadsChange,
+    onCancel,
+    onChangeKnowledgeBaseIds,
+    onChangeModelProfileId,
+    onChangeSelectedFileIds,
+    onChangeSelectedSkillIds,
+    onPendingUploadsChange,
+    onSubmit,
+    selectedFileIds,
+    selectedSkillIds,
+    sending,
+    sessionId,
+    status,
+    sticky = true,
+    stopping,
+  },
+  ref,
+) {
   const [draft, setDraft] = useState(initialDraft);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
@@ -663,6 +679,27 @@ export function SessionComposer({
 
   const attachmentMenuTitleId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      fillDraft(text: string) {
+        setDraft(text);
+        textareaRef.current?.focus();
+        queueMicrotask(() => {
+          const element = textareaRef.current;
+          if (!element) {
+            return;
+          }
+          element.focus();
+          const length = element.value.length;
+          element.setSelectionRange(length, length);
+        });
+      },
+    }),
+    [],
+  );
   const mountedRef = useRef(true);
   const selectedFileIdsRef = useRef(selectedFileIds);
   selectedFileIdsRef.current = selectedFileIds;
@@ -1203,7 +1240,7 @@ export function SessionComposer({
       ? "正在提交回答…"
       : "正在发送…"
     : activeSubagentInput
-      ? `提交给 ${activeSubagentInput.subagent_name}`
+      ? `提交给「${activeSubagentInput.subagent_name}」`
       : isWaitingInput
         ? "提交回答"
         : isWaitingSubagents
@@ -1267,12 +1304,13 @@ export function SessionComposer({
           ? "任务运行中，本次指定技能已锁定；下一轮可继续调整。"
           : "当前操作进行中，下一轮可调整技能。"
       }
-      sticky
+      sticky={sticky}
       submitButtonLabel={submitButtonLabel}
       submitLoading={sending}
       textareaId="session-message"
       textareaLabel={textareaLabel}
+      textareaRef={textareaRef}
       validationErrors={validationErrors}
     />
   );
-}
+});

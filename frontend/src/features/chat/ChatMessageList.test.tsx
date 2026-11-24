@@ -103,7 +103,7 @@ describe("会话消息滚动", () => {
     expect(scrollIntoView).not.toHaveBeenCalled();
   });
 
-  it("主动上滑后停止跟随，并可通过回到最新恢复", () => {
+  it("主动上滑后停止跟随，并可通过回到底部恢复", () => {
     const scrollHeightSpy = vi
       .spyOn(HTMLElement.prototype, "scrollHeight", "get")
       .mockReturnValue(900);
@@ -115,7 +115,7 @@ describe("会话消息滚动", () => {
     list.scrollTop = 100;
     fireEvent.scroll(list);
     expect(
-      screen.getByRole("button", { name: "回到最新" }),
+      screen.getByRole("button", { name: "回到底部" }),
     ).toBeInTheDocument();
 
     scrollHeightSpy.mockReturnValue(1200);
@@ -126,14 +126,14 @@ describe("会话消息滚动", () => {
     );
     expect(list.scrollTop).toBe(100);
 
-    fireEvent.click(screen.getByRole("button", { name: "回到最新" }));
+    fireEvent.click(screen.getByRole("button", { name: "回到底部" }));
     expect(list.scrollTop).toBe(1200);
     expect(scrollIntoView).toHaveBeenCalledWith({
       block: "nearest",
       inline: "nearest",
     });
     expect(
-      screen.queryByRole("button", { name: "回到最新" }),
+      screen.queryByRole("button", { name: "回到底部" }),
     ).not.toBeInTheDocument();
   });
 
@@ -188,11 +188,11 @@ describe("会话消息滚动", () => {
 
     expect(list.scrollTop).toBe(100);
     expect(
-      screen.getByRole("button", { name: "回到最新" }),
+      screen.getByRole("button", { name: "回到底部" }),
     ).toBeInTheDocument();
   });
 
-  it("补充回答只在对应新用户消息进入列表后回到最新", () => {
+  it("补充回答只在对应新用户消息进入列表后回到底部", () => {
     const request: ChatAutoScrollRequest = {
       afterSequence: 2,
       key: "answer-request",
@@ -243,7 +243,7 @@ describe("会话消息滚动", () => {
       inline: "nearest",
     });
     expect(
-      screen.queryByRole("button", { name: "回到最新" }),
+      screen.queryByRole("button", { name: "回到底部" }),
     ).not.toBeInTheDocument();
   });
 
@@ -295,5 +295,71 @@ describe("会话消息滚动", () => {
     ).toHaveTextContent("流式片段 1+2+3");
     // 历史消息数组引用未变时，流式更新不得触发历史 MessageRow 重渲染。
     expect(formatDateTimeSpy).not.toHaveBeenCalled();
+  });
+
+  it("跟底态下仅 footerSlot 挂载增高时自动滚至底部，非跟底态下保持原滚动位置不变", () => {
+    const messages = [
+      makeMessage({
+        id: "slot-msg-1",
+        parts: [{ text: "请发起报销审批", type: "text" }],
+        role: "user",
+        sequence: 1,
+        session_id: SESSION_ID,
+      }),
+      makeMessage({
+        id: "slot-msg-2",
+        parts: [{ text: "正在准备报销单操作…", type: "text" }],
+        role: "assistant",
+        sequence: 2,
+        session_id: SESSION_ID,
+      }),
+    ];
+    const onLoadMore = vi.fn();
+    const onRetry = vi.fn();
+
+    const { rerender } = render(
+      makeMessageList({
+        footerSlot: null,
+        messages,
+        onLoadMore,
+        onRetry,
+        transientText: "",
+      }),
+    );
+    const list = screen.getByRole("region", { name: "消息历史" });
+    const metrics = setMessageListMetrics(list, 800);
+    list.scrollTop = 800;
+
+    // 场景 1：跟底态下 messages 与 transientText 均不变，仅挂载 footerSlot 且高度增长 -> 自动滚到底部
+    metrics.setScrollHeight(1150);
+    rerender(
+      makeMessageList({
+        footerSlot: <section aria-label="等待工具审批">审批卡片</section>,
+        messages,
+        onLoadMore,
+        onRetry,
+        transientText: "",
+      }),
+    );
+    expect(list.scrollTop).toBe(1150);
+
+    // 场景 2：用户主动上滑离开底部，随后 footerSlot 更新增高 -> 严格保留原滚动位置
+    list.scrollTop = 120;
+    fireEvent.scroll(list);
+    expect(
+      screen.getByRole("button", { name: "回到底部" }),
+    ).toBeInTheDocument();
+
+    metrics.setScrollHeight(1450);
+    rerender(
+      makeMessageList({
+        footerSlot: <section aria-label="等待工具审批">新增第二张审批卡片</section>,
+        messages,
+        onLoadMore,
+        onRetry,
+        transientText: "",
+      }),
+    );
+    expect(list.scrollTop).toBe(120);
   });
 });

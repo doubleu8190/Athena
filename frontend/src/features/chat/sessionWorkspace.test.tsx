@@ -283,8 +283,15 @@ describe("会话工作台初始加载与历史", () => {
       await screen.findByRole("heading", { name: "真实前端会话" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("请分析真实会话")).toBeInTheDocument();
-    expect(await screen.findByText(/web_search/)).toBeInTheDocument();
-    expect(screen.getByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
+    const progress = await screen.findByRole("region", { name: "执行进度" });
+    const user = userEvent.setup();
+    await user.click(
+      await within(progress).findByRole("button", { name: /展开/ }),
+    );
+    expect(await within(progress).findByText("web_search")).toBeInTheDocument();
     expect(FakeEventSource.instances).toHaveLength(1);
     expect(FakeEventSource.instances[0].url).toBe(
       `/api/v1/sessions/${SESSION.id}/runs/run-1/stream`,
@@ -565,7 +572,7 @@ describe("Run 命令与真实状态", () => {
     expect(composer).toHaveValue(failedMessage);
     expect(list.scrollTop).toBe(100);
     expect(
-      screen.getByRole("button", { name: "回到最新" }),
+      screen.getByRole("button", { name: "回到底部" }),
     ).toBeInTheDocument();
   });
 
@@ -605,7 +612,7 @@ describe("Run 命令与真实状态", () => {
       within(approval).getByText(/approval_tool/),
     ).toBeInTheDocument();
     expect(
-      within(approval).queryByText("服务端当前没有返回待审批项。"),
+      within(approval).queryByText("当前暂无待确认的操作，正在同步最新进展。"),
     ).not.toBeInTheDocument();
   });
 
@@ -670,7 +677,9 @@ describe("Run 命令与真实状态", () => {
     });
     renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit("snapshot", {
@@ -754,14 +763,13 @@ describe("Run 命令与真实状态", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByText("已完成")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "发送消息" }),
+      ).toBeInTheDocument();
     });
 
-    const summary = document.querySelector<HTMLElement>(".run-summary");
-    expect(summary).not.toBeNull();
-    expect(within(summary as HTMLElement).getByText("已完成")).toBeInTheDocument();
     expect(
-      within(summary as HTMLElement).queryByText("运行中"),
+      screen.queryByRole("button", { name: "运行中，暂不可发送" }),
     ).not.toBeInTheDocument();
     expect(source.closed).toBe(true);
     expect(
@@ -853,7 +861,9 @@ describe("Run 命令与真实状态", () => {
     });
     const { client } = renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit("text_delta", {
@@ -879,9 +889,7 @@ describe("Run 命令与真实状态", () => {
     });
 
     expect(
-      await screen.findByText(
-        "运行已完成，但最终消息同步失败。请重试加载最终回答。",
-      ),
+      await screen.findByText("任务已完成，但最终回复同步失败，请重试加载。"),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("Athena 的临时流式输出"),
@@ -964,7 +972,9 @@ describe("Run 命令与真实状态", () => {
     });
     const { client } = renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit("text_delta", {
@@ -986,7 +996,7 @@ describe("Run 命令与真实状态", () => {
     });
 
     expect(
-      await screen.findByText(/未找到完成事件所指的最终消息/),
+      await screen.findByText(/未找到对应的最终回复/),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("Athena 的临时流式输出"),
@@ -1049,7 +1059,9 @@ describe("Run 命令与真实状态", () => {
     });
     const { client } = renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit("text_delta", {
@@ -1071,7 +1083,7 @@ describe("Run 命令与真实状态", () => {
     });
 
     expect(
-      await screen.findByText(/未找到完成事件所指的最终消息/),
+      await screen.findByText(/未找到对应的最终回复/),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("Athena 的临时流式输出"),
@@ -1087,8 +1099,8 @@ describe("Run 命令与真实状态", () => {
   });
 
   it.each([
-    ["failed", "失败", "运行失败"],
-    ["cancelled", "已取消", "运行已取消"],
+    ["failed", "任务执行未完成", "任务执行未完成，已生成的临时内容"],
+    ["cancelled", "本次任务已取消", "任务已取消，已生成的临时内容"],
   ] as const)(
     "%s 终态保留旧交付旁的未完成回答且不猜测 settle",
     async (terminalStatus, statusLabel, retentionLabel) => {
@@ -1128,7 +1140,9 @@ describe("Run 命令与真实状态", () => {
       });
       renderApp(`/chat/${SESSION.id}`);
 
-      expect(await screen.findByText("运行中")).toBeInTheDocument();
+      expect(
+        await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+      ).toBeDisabled();
       const source = FakeEventSource.instances[0];
       act(() => {
         source.emit("text_delta", {
@@ -1253,7 +1267,9 @@ describe("Run 命令与真实状态", () => {
     });
     renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit("text_delta", {
@@ -1356,16 +1372,14 @@ describe("Run 命令与真实状态", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("失败")).toBeInTheDocument();
+    expect(await screen.findByText("任务执行未完成")).toBeInTheDocument();
     expect(
       await screen.findByRole("article", {
         name: "Athena的消息，序号 5",
       }),
     ).toHaveTextContent("刷新后仍可见的失败报告");
     expect(
-      screen.queryByText(
-        "运行失败，但未找到失败事件所指的权威报告。清空状态前请重试对账。",
-      ),
+      screen.queryByText(/未找到对应的权威说明/),
     ).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) => {
@@ -1416,7 +1430,9 @@ describe("Run 命令与真实状态", () => {
     });
     renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit("text_delta", {
@@ -1441,7 +1457,7 @@ describe("Run 命令与真实状态", () => {
 
     expect(
       await screen.findByText(
-        "运行失败，但未找到失败事件所指的权威报告。清空状态前请重试对账。",
+        "任务失败，但未找到对应的权威说明。清空草稿前请重试同步。",
       ),
     ).toBeInTheDocument();
     expect(
@@ -1466,7 +1482,9 @@ describe("Run 命令与真实状态", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
     act(() => {
       source.emit("run_event", {
@@ -1482,7 +1500,7 @@ describe("Run 命令与真实状态", () => {
         },
       });
     });
-    expect(await screen.findByText("正在取消")).toBeInTheDocument();
+    expect(await screen.findByText("正在停止当前任务…")).toBeInTheDocument();
     expect(source.closed).toBe(false);
 
     act(() => {
@@ -1499,7 +1517,7 @@ describe("Run 命令与真实状态", () => {
         },
       });
     });
-    expect(await screen.findByText("已取消")).toBeInTheDocument();
+    expect(await screen.findByText("本次任务已取消")).toBeInTheDocument();
     expect(source.closed).toBe(true);
   });
 
@@ -1529,10 +1547,10 @@ describe("Run 命令与真实状态", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
-    await screen.findByText("运行中");
+    await screen.findByRole("button", { name: "运行中，暂不可发送" });
     await user.click(screen.getByRole("button", { name: "停止任务" }));
-    expect(await screen.findByText("正在取消")).toBeInTheDocument();
-    expect(screen.queryByText("已取消")).not.toBeInTheDocument();
+    expect(await screen.findByText("正在停止当前任务…")).toBeInTheDocument();
+    expect(screen.queryByText("本次任务已取消")).not.toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "再次请求停止" }),
@@ -1575,9 +1593,8 @@ describe("Run 命令与真实状态", () => {
       ),
     ).toBeInTheDocument();
     expect(composer).toHaveValue("不能丢失的草稿");
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "运行中，暂不可发送" }),
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
   });
 
@@ -1661,7 +1678,9 @@ describe("Run 命令与真实状态", () => {
       await submitGate.promise;
     });
 
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
     expect(composer).toHaveValue("原始草稿");
   });
 
@@ -1720,7 +1739,11 @@ describe("Run 命令与真实状态", () => {
         advancedRun,
       );
     });
-    expect(await screen.findByText("已完成")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByText("任务排队中，即将开始处理…"),
+      ).not.toBeInTheDocument();
+    });
 
     await user.clear(composer);
     await user.type(composer, "提交期间的新草稿");
@@ -1735,8 +1758,12 @@ describe("Run 命令与真实状态", () => {
       ),
     ).toBeInTheDocument();
     expect(composer).toHaveValue("提交期间的新草稿");
-    expect(screen.getByText("已完成")).toBeInTheDocument();
-    expect(screen.queryByText("排队中")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "发送消息" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByText("任务排队中，即将开始处理…"),
+    ).not.toBeInTheDocument();
     expect(requestIds).toHaveLength(1);
     expect(
       screen.queryByText("无法连接服务器，请检查网络后重试。"),
@@ -1828,7 +1855,9 @@ describe("Run 命令与真实状态", () => {
       );
       await answerGate.promise;
     });
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
     expect(answerCalls).toBe(1);
     expect(cancelCalls).toBe(0);
   });
@@ -1914,7 +1943,11 @@ describe("Run 命令与真实状态", () => {
         advancedRun,
       );
     });
-    expect(await screen.findByText("已完成")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "提交回答" }),
+      ).not.toBeInTheDocument();
+    });
 
     await act(async () => {
       answerGate.resolve(jsonResponse(responseRun));
@@ -1927,8 +1960,12 @@ describe("Run 命令与真实状态", () => {
       ),
     ).toBeInTheDocument();
     expect(answerInput).toHaveValue("");
-    expect(screen.getByText("已完成")).toBeInTheDocument();
-    expect(screen.queryByText("排队中")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "发送消息" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("任务排队中，即将开始处理…"),
+    ).not.toBeInTheDocument();
     expect(requestIds).toHaveLength(1);
     expect(
       screen.queryByText("无法连接服务器，请检查网络后重试。"),
@@ -2059,7 +2096,9 @@ describe("Run 命令与真实状态", () => {
     expect(answerInput).toHaveValue("季度口径按自然季度");
 
     await user.click(screen.getByRole("button", { name: "提交回答" }));
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
     expect(requestIds[0]).toBe(requestIds[1]);
     expect(answerInput).toHaveValue("");
     await waitFor(() => {
@@ -2129,11 +2168,10 @@ describe("Run 命令与真实状态", () => {
         "该补充输入请求已失效，正在同步最新运行状态。",
       ),
     ).toBeInTheDocument();
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
-    expect(answerInput).toHaveValue("不能丢的补充回答");
     expect(
-      screen.getByRole("button", { name: "运行中，暂不可发送" }),
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
+    expect(answerInput).toHaveValue("不能丢的补充回答");
   });
 });
 
@@ -2214,22 +2252,27 @@ describe("审批与失败重试", () => {
 
     expect(await screen.findByText("等待工具审批")).toBeInTheDocument();
     expect(FakeEventSource.instances).toHaveLength(0);
-    expect(screen.getByText(/#1 write_crm/)).toBeInTheDocument();
-    expect(screen.getByText(/#2 send_email/)).toBeInTheDocument();
+    expect(screen.getByText("write_crm")).toBeInTheDocument();
+    expect(screen.getByText("send_email")).toBeInTheDocument();
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
 
     await user.click(
       screen.getAllByRole("button", { name: "查看参数" })[0],
     );
-    expect(await screen.findByText(/"query": "真实参数"/)).toBeInTheDocument();
+    expect(await screen.findByText("query")).toBeInTheDocument();
+    expect(screen.getByText("真实参数")).toBeInTheDocument();
 
-    await user.click(screen.getAllByRole("button", { name: "批准" })[0]);
+    await user.click(screen.getAllByRole("button", { name: "确认执行" })[0]);
     await waitFor(() => expect(decisions).toHaveLength(1));
     expect(decisions[0].decision).toBe("approve");
 
     await user.click(await screen.findByRole("button", { name: "拒绝" }));
     await waitFor(() => expect(decisions).toHaveLength(2));
     expect(decisions[1].decision).toBe("reject");
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
     await waitFor(() => {
       expect(FakeEventSource.instances).toHaveLength(1);
     });
@@ -2296,7 +2339,7 @@ describe("审批与失败重试", () => {
     renderApp(`/chat/${SESSION.id}`);
 
     await screen.findByText("等待工具审批");
-    await user.click(screen.getAllByRole("button", { name: "批准" })[0]);
+    await user.click(screen.getAllByRole("button", { name: "确认执行" })[0]);
     await waitFor(() => expect(decisions).toHaveLength(1));
 
     expect(
@@ -2329,15 +2372,17 @@ describe("审批与失败重试", () => {
       await firstDecision.promise;
     });
 
-    expect(await screen.findByText(/#2 send_email/)).toBeInTheDocument();
-    expect(screen.queryByText(/#1 write_crm/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "批准" }));
+    expect(await screen.findByText("send_email")).toBeInTheDocument();
+    expect(screen.queryByText("write_crm")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认执行" }));
     await waitFor(() => expect(decisions).toHaveLength(2));
     expect(decisions).toEqual([
       "call-serial-1:approve",
       "call-serial-2:approve",
     ]);
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
   });
 
   it("审批响应迟到时不能回退先完成的取消状态", async () => {
@@ -2385,7 +2430,7 @@ describe("审批与失败重试", () => {
     const { client } = renderApp(`/chat/${SESSION.id}`);
 
     expect(await screen.findByText("等待工具审批")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "批准" }));
+    await user.click(screen.getByRole("button", { name: "确认执行" }));
     await approvalStarted.promise;
 
     act(() => {
@@ -2399,7 +2444,7 @@ describe("审批与失败重试", () => {
         cancelling,
       );
     });
-    expect(await screen.findByText("正在取消")).toBeInTheDocument();
+    expect(await screen.findByText("正在停止当前任务…")).toBeInTheDocument();
 
     await act(async () => {
       approvalGate.resolve(jsonResponse(waiting));
@@ -2407,7 +2452,7 @@ describe("审批与失败重试", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("正在取消")).toBeInTheDocument();
+      expect(screen.getByText("正在停止当前任务…")).toBeInTheDocument();
     });
     expect(screen.queryByText("等待工具审批")).not.toBeInTheDocument();
     expect(approvalCalls).toBe(1);
@@ -2472,7 +2517,7 @@ describe("审批与失败重试", () => {
       );
       await cancelGate.promise;
     });
-    expect(await screen.findByText("已取消")).toBeInTheDocument();
+    expect(await screen.findByText("本次任务已取消")).toBeInTheDocument();
     expect(approvalCalls).toBe(0);
   });
 
@@ -2519,14 +2564,19 @@ describe("审批与失败重试", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
-    await screen.findByText("失败");
+    await screen.findByText("任务执行未完成");
     await user.click(
-      screen.getByRole("button", { name: "重试失败任务" }),
+      screen.getByRole("button", { name: "重新执行" }),
     );
-    const dialog = screen.getByRole("dialog", { name: "重试失败任务" });
+    const dialog = screen.getByRole("alertdialog", {
+      name: "重新执行本次任务",
+    });
     expect(
       within(dialog).getByText(/整个任务将从头执行/),
     ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(/confirm_unknown/),
+    ).not.toBeInTheDocument();
     expect(
       within(dialog).queryByRole("note", { name: "服务端重试警告" }),
     ).not.toBeInTheDocument();
@@ -2539,7 +2589,7 @@ describe("审批与失败重试", () => {
     ).toBe(false);
 
     await user.click(
-      within(dialog).getByRole("button", { name: "确认从头重试" }),
+      within(dialog).getByRole("button", { name: "确认重新执行" }),
     );
     expect(
       await within(dialog).findByText(
@@ -2547,12 +2597,14 @@ describe("审批与失败重试", () => {
       ),
     ).toBeInTheDocument();
     await user.click(
-      within(dialog).getByRole("button", { name: "确认从头重试" }),
+      within(dialog).getByRole("button", { name: "确认重新执行" }),
     );
 
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
     expect(
-      screen.queryByRole("dialog", { name: "重试失败任务" }),
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("alertdialog", { name: "重新执行本次任务" }),
     ).not.toBeInTheDocument();
     expect(requestIds).toHaveLength(2);
     expect(requestIds[0]).toBe(requestIds[1]);
@@ -2597,11 +2649,13 @@ describe("审批与失败重试", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
-    await screen.findByText("失败");
+    await screen.findByText("任务执行未完成");
     await user.click(
-      screen.getByRole("button", { name: "重试失败任务" }),
+      screen.getByRole("button", { name: "重新执行" }),
     );
-    const dialog = screen.getByRole("dialog", { name: "重试失败任务" });
+    const dialog = screen.getByRole("alertdialog", {
+      name: "重新执行本次任务",
+    });
     expect(
       within(dialog).getByText(/整个任务将从头执行/),
     ).toBeInTheDocument();
@@ -2610,9 +2664,11 @@ describe("审批与失败重试", () => {
     ).toHaveTextContent(serverWarning);
 
     await user.click(
-      within(dialog).getByRole("button", { name: "确认从头重试" }),
+      within(dialog).getByRole("button", { name: "确认重新执行" }),
     );
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
     expect(await screen.findByText(retriedWarning)).toBeInTheDocument();
   });
 
@@ -2638,11 +2694,13 @@ describe("审批与失败重试", () => {
 
     renderApp(`/chat/${SESSION.id}`);
 
-    await screen.findByText("失败");
+    await screen.findByText("任务执行未完成");
     await user.click(
-      screen.getByRole("button", { name: "重试失败任务" }),
+      screen.getByRole("button", { name: "重新执行" }),
     );
-    const dialog = screen.getByRole("dialog", { name: "重试失败任务" });
+    const dialog = screen.getByRole("alertdialog", {
+      name: "重新执行本次任务",
+    });
     expect(within(dialog).getAllByText(fixedWarning)).toHaveLength(1);
     expect(
       within(dialog).getByRole("note", { name: "服务端重试警告" }),
@@ -2650,9 +2708,9 @@ describe("审批与失败重试", () => {
   });
 });
 
-describe("窄屏执行轨迹与输入区", () => {
+describe("窄屏消息内执行进度与输入区", () => {
   it.each([920, 390])(
-    "%ipx 可展开/收起真实工具轨迹并继续编辑输入",
+    "%ipx 可展开/收起消息内执行进度并继续编辑输入",
     async (width) => {
       window.innerWidth = width;
       const completed = makeRun({
@@ -2687,21 +2745,22 @@ describe("窄屏执行轨迹与输入区", () => {
       await user.type(composer, `窄屏草稿 ${width}`);
       expect(composer).toHaveValue(`窄屏草稿 ${width}`);
 
+      const progress = await screen.findByRole("region", { name: "执行进度" });
       await user.click(
-        screen.getByRole("button", { name: "查看执行轨迹" }),
+        within(progress).getByRole("button", { name: /已完成 1 个步骤/ }),
+      );
+      const stepList = within(progress).getByRole("list", {
+        name: "工具调用步骤",
+      });
+      await user.click(
+        within(stepList).getByRole("button", { name: /web_search/ }),
+      );
+      expect(await within(progress).findByText("真实参数")).toBeInTheDocument();
+      await user.click(
+        within(progress).getByRole("button", { name: /收起/ }),
       );
       expect(
-        screen.getByRole("complementary", { name: "执行轨迹" }),
-      ).toBeInTheDocument();
-      await user.click(
-        screen.getByRole("button", { name: /#1 web_search/ }),
-      );
-      expect(await screen.findByText(/"query": "真实参数"/)).toBeInTheDocument();
-      await user.click(
-        screen.getByRole("button", { name: "收起执行轨迹" }),
-      );
-      expect(
-        screen.queryByRole("complementary", { name: "执行轨迹" }),
+        within(progress).queryByRole("list", { name: "工具调用步骤" }),
       ).not.toBeInTheDocument();
       expect(composer).toHaveValue(`窄屏草稿 ${width}`);
     },
@@ -2806,7 +2865,9 @@ describe("新草稿创建与提交部分失败", () => {
     expect(sessionComposer).toHaveValue("草稿不能丢");
 
     await user.click(screen.getByRole("button", { name: "发送消息" }));
-    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(
+      await screen.findByText("任务排队中，即将开始处理…"),
+    ).toBeInTheDocument();
     expect(sessionComposer).toHaveValue("");
     expect(sessionCreateCount).toBe(1);
     expect(runRequestIds).toHaveLength(2);
@@ -2963,7 +3024,9 @@ describe("新草稿创建与提交部分失败", () => {
         "会话页 Enter 发送",
       ]);
     });
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     expect(sessionComposer).toHaveValue("");
 
     // 运行锁定态下输入新内容并按 Enter 不应重复提交
@@ -2976,7 +3039,7 @@ describe("新草稿创建与提交部分失败", () => {
   });
 });
 
-describe("聊天热路径隔离、节流对账与隐藏轨迹按需加载", () => {
+describe("聊天热路径隔离、节流对账与步骤详情按需加载", () => {
   it("输入区高频击键不会触发已有历史消息行重渲染", async () => {
     const completedRun = makeRun({
       id: "run-typing-isolation",
@@ -3011,11 +3074,11 @@ describe("聊天热路径隔离、节流对账与隐藏轨迹按需加载", () =
     await user.type(composer, "连续输入十个字符验证热路径隔离");
 
     expect(composer).toHaveValue("连续输入十个字符验证热路径隔离");
-    // SessionComposer 独立承载草稿输入态，击键期间 SessionConversation 与 ChatMessageList 不应重渲染。
+    // SessionComposer 独立承载草稿输入态，击键期间 SessionWorkbench 与 ChatMessageList 不应重渲染。
     expect(formatSpy).not.toHaveBeenCalled();
   });
 
-  it("窄屏默认收起执行轨迹时不提前请求 tool-calls，展开后才按需请求", async () => {
+  it("完成态默认收起为单行摘要且不提前请求单步详情，点击具体步骤后才懒加载", async () => {
     window.innerWidth = 800;
     const completedRun = makeRun({
       id: "run-trace-lazy",
@@ -3034,6 +3097,13 @@ describe("聊天热路径隔离、节流对账与隐藏轨迹按需加载", () =
         throw new Error("unexpected write");
       },
       messages: () => ({ items: [], next_before_sequence: null }),
+      toolCallDetail: () =>
+        makeToolCallDetail({
+          id: toolCall.id,
+          model_name: toolCall.model_name,
+          ordinal: 1,
+          tool_call_id: toolCall.tool_call_id,
+        }),
       toolCalls: () => [toolCall],
     });
     const user = userEvent.setup();
@@ -3042,20 +3112,35 @@ describe("聊天热路径隔离、节流对账与隐藏轨迹按需加载", () =
     expect(
       await screen.findByRole("heading", { name: "真实前端会话" }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("已完成")).toBeInTheDocument();
+    const progress = await screen.findByRole("region", { name: "执行进度" });
+    expect(
+      await within(progress).findByRole("button", {
+        name: /已完成 1 个步骤.*lazy_search_tool/,
+      }),
+    ).toBeInTheDocument();
 
-    const countToolCallRequests = () =>
+    const countDetailRequests = () =>
       fetchMock.mock.calls.filter(([input]) =>
         new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
-          "/tool-calls",
+          "/tool-calls/call-lazy-1",
         ),
       ).length;
 
-    expect(countToolCallRequests()).toBe(0);
+    expect(countDetailRequests()).toBe(0);
 
-    await user.click(screen.getByRole("button", { name: "展开执行轨迹" }));
-    expect(await screen.findByText(/lazy_search_tool/)).toBeInTheDocument();
-    expect(countToolCallRequests()).toBe(1);
+    await user.click(
+      within(progress).getByRole("button", { name: /已完成 1 个步骤/ }),
+    );
+    expect(countDetailRequests()).toBe(0);
+
+    const stepList = within(progress).getByRole("list", {
+      name: "工具调用步骤",
+    });
+    await user.click(
+      within(stepList).getByRole("button", { name: /lazy_search_tool/ }),
+    );
+    expect(await within(progress).findByText("真实参数")).toBeInTheDocument();
+    expect(countDetailRequests()).toBe(1);
   });
 
   it("高频连续 SSE run_event 在 200ms 窗口内合并为一次对账失效，并阻止旧快照回退缓存", async () => {
@@ -3075,7 +3160,9 @@ describe("聊天热路径隔离、节流对账与隐藏轨迹按需加载", () =
     });
 
     const view = renderApp(`/chat/${SESSION.id}`);
-    expect(await screen.findByText("运行中")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
     const source = FakeEventSource.instances[0];
 
     const countRunDetailRequests = () =>

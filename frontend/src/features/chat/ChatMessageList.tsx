@@ -1,4 +1,13 @@
 import {
+  ArrowDown,
+  Copy,
+  FileText,
+  Pencil,
+  RefreshCw,
+  RotateCcw,
+} from "lucide-react";
+import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -6,20 +15,29 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 
+import { copyTextToClipboard } from "../../shared/lib/clipboard";
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
-import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  InlineAlert,
+  Skeleton,
+  cn,
+  toast,
+} from "../../shared/ui";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
-import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
 import { fileDisplayName } from "../files/model";
+import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
 import {
   isSkillTool,
   messageText,
   type ConversationMessage,
   type ConversationMessagePart,
+  type RunStatus,
 } from "./model";
 
 const FOLLOW_LATEST_THRESHOLD_PX = 48;
@@ -91,8 +109,8 @@ function revealElementIfNeeded(
     Math.min(elementRect.height, 64),
   );
   if (visibleHeight < minimumVisibleHeight) {
-    // 只有用户主动发送后的目标定位或“回到最新”才允许调整外层页面；
-    // nearest 避免强制居中，也不会移动输入焦点。
+    // 只有用户主动发送后的目标定位或「回到底部」才允许调整外层位置；
+    // nearest 避免强制居中，也不会抢占输入框焦点。
     element.scrollIntoView({
       block: "nearest",
       inline: "nearest",
@@ -100,11 +118,31 @@ function revealElementIfNeeded(
   }
 }
 
+/** 助手消息顶部极简 Athena 几何品牌徽标（24×24）。 */
+function AthenaAvatarMark() {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-brand/15 bg-brand text-brand-fg shadow-xs"
+    >
+      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24">
+        <path
+          d="M12 3.5L20 19.5H16.2L14.3 15.6H9.7L7.8 19.5H4L12 3.5Z"
+          fill="currentColor"
+        />
+        <circle cx="12" cy="12.5" fill="#ebf4f0" r="1.9" />
+      </svg>
+    </span>
+  );
+}
+
 function MessagePart({
+  isAssistant,
   part,
   sessionId,
   suppressOutput,
 }: {
+  isAssistant: boolean;
   part: ConversationMessagePart;
   sessionId: string;
   suppressOutput: boolean;
@@ -112,15 +150,33 @@ function MessagePart({
   if (part.type === "text") {
     return <MarkdownContent text={part.text} />;
   }
+
   if (part.type === "file_ref") {
     return (
-      <div className="message-file-ref">
-        <div>
-          <strong>文件引用 · {part.filename}</strong>
-          <span>
-            {part.mime_type ?? "未知类型"}
-            {part.size_bytes === null ? "" : ` · ${formatBytes(part.size_bytes)}`}
-          </span>
+      <div
+        className={cn(
+          "mt-2 flex flex-wrap items-center justify-between gap-2.5 rounded-xl border px-3 py-2 text-xs",
+          isAssistant
+            ? "border-border-subtle bg-subtle/70"
+            : "border-border-default/80 bg-canvas/90",
+        )}
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <FileText
+            aria-hidden="true"
+            className="h-4 w-4 shrink-0 text-text-tertiary"
+          />
+          <div className="min-w-0 flex-1">
+            <strong className="block truncate font-medium text-text-primary">
+              {part.filename}
+            </strong>
+            <span className="block truncate text-[11px] text-text-tertiary">
+              {part.mime_type ?? "附件"}
+              {part.size_bytes === null
+                ? ""
+                : ` · ${formatBytes(part.size_bytes)}`}
+            </span>
+          </div>
         </div>
         <SessionFileDownloadButton
           compact
@@ -131,43 +187,37 @@ function MessagePart({
       </div>
     );
   }
+
   if (part.type === "tool_call") {
-    return (
-      <div className="message-tool-ref">
-        <strong>工具调用 · {part.name}</strong>
-        <span>{part.tool_call_id}</span>
-      </div>
-    );
+    // 工具调用过程已收敛至消息内折叠进度条，消息流内绝不暴露原始 arguments 或底层 tool_call_id。
+    return null;
   }
-  return (
-    <details className="message-tool-ref">
-      <summary>
-        工具结果 · {part.status} · {part.tool_call_id}
-      </summary>
-      {suppressOutput ? (
-        <p className="trace-empty">
-          技能原始结果正文不在普通用户消息中展示；状态、交付文件与安全调用详情见执行轨迹。
-        </p>
-      ) : part.output ? (
-        <pre>{part.output}</pre>
-      ) : null}
-      {!suppressOutput && part.artifact_id ? (
-        <span>产物：{part.artifact_id}</span>
-      ) : null}
-      {(part.artifacts ?? []).length > 0 ? (
-        <ul className="message-artifact-list">
-          {part.artifacts?.map((artifact) => (
+
+  const artifacts = part.artifacts ?? [];
+  if (artifacts.length > 0) {
+    return (
+      <div className="mt-2 space-y-2">
+        <div className="text-xs font-medium text-text-secondary">生成文件</div>
+        <ul className="space-y-1.5">
+          {artifacts.map((artifact) => (
             <li
-              className="message-artifact"
+              className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-border-default bg-subtle/60 px-3 py-2 text-xs"
               key={artifact.file_id}
             >
-              <span>
-                <strong>{fileDisplayName(artifact)}</strong>
-                <small>
-                  {artifact.filename} · {artifact.mime_type} ·{" "}
-                  {formatBytes(artifact.size_bytes)}
-                </small>
-              </span>
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <FileText
+                  aria-hidden="true"
+                  className="h-4 w-4 shrink-0 text-brand"
+                />
+                <span className="min-w-0 flex-1">
+                  <strong className="block truncate font-medium text-text-primary">
+                    {fileDisplayName(artifact)}
+                  </strong>
+                  <small className="block truncate text-[11px] text-text-tertiary">
+                    {artifact.filename} · {formatBytes(artifact.size_bytes)}
+                  </small>
+                </span>
+              </div>
               <SessionFileDownloadButton
                 compact
                 fileId={artifact.file_id}
@@ -177,26 +227,57 @@ function MessagePart({
             </li>
           ))}
         </ul>
-      ) : null}
-    </details>
+      </div>
+    );
+  }
+
+  // 安全铁律：技能原始输出绝不在普通用户消息流中展示。
+  if (suppressOutput) {
+    return (
+      <p className="text-xs text-text-tertiary">
+        已完成技能步骤，安全详情与交付文件请在上方执行进度或会话文件抽屉查看。
+      </p>
+    );
+  }
+
+  return (
+    <p className="text-xs text-text-tertiary">
+      已完成业务工具操作，详细记录可在上方执行进度中展开查看。
+    </p>
   );
 }
 
 interface MessageRowProps {
+  canRetryMessage: boolean;
   message: ConversationMessage;
+  modelLabel: string | null;
+  onCopyText: (text: string) => void;
+  onEditResend?: (text: string) => void;
   onNodeChange: (messageId: string, node: HTMLElement | null) => void;
+  onRetryRun?: () => void;
   sessionId: string;
   skillToolCallIds: ReadonlySet<string>;
 }
 
-// 记忆化历史消息行并配合稳定节点登记回调，确保流式输出更新 transientText 时已有历史消息零重渲染。
+// 记忆化历史消息行并配合稳定节点登记回调，确保流式输出更新 transientText 或输入区高频击键时已有历史消息零重渲染。
 const MessageRow = memo(function MessageRow({
+  canRetryMessage,
   message,
+  modelLabel,
+  onCopyText,
+  onEditResend,
   onNodeChange,
+  onRetryRun,
   sessionId,
   skillToolCallIds,
 }: MessageRowProps) {
   const isAssistant = message.role === "assistant";
+  const plainText = messageText(message).trim();
+  const formattedTime = formatDateTime(message.created_at);
+  const hasRenderableParts = message.parts.some(
+    (part) => part.type !== "tool_call",
+  );
+
   const bindNode = useCallback(
     (node: HTMLElement | null) => {
       onNodeChange(message.id, node);
@@ -204,23 +285,83 @@ const MessageRow = memo(function MessageRow({
     [message.id, onNodeChange],
   );
 
+  // 纯协议层 tool_call 消息不向业务员工渲染空壳卡片，避免视觉噪音。
+  if (!hasRenderableParts && message.parts.length > 0) {
+    return null;
+  }
+
+  if (!isAssistant) {
+    return (
+      <article
+        aria-label={`你的消息，序号 ${message.sequence}`}
+        className="group/message flex flex-col items-end gap-1"
+        ref={bindNode}
+      >
+        <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-[#F1F5F3] px-4 py-3 text-sm text-text-primary sm:max-w-[78%]">
+          {message.parts.map((part, index) => (
+            <MessagePart
+              isAssistant={false}
+              key={`${part.type}-${index}`}
+              part={part}
+              sessionId={sessionId}
+              suppressOutput={false}
+            />
+          ))}
+          {message.parts.length === 0 ? (
+            <p className="text-xs text-text-tertiary">该消息没有可展示的内容。</p>
+          ) : null}
+        </div>
+
+        <div className="flex items-center gap-1 pr-1 text-[11px] text-text-tertiary opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100">
+          <time className="mr-1">{formattedTime}</time>
+          {plainText ? (
+            <button
+              aria-label="复制消息"
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-secondary transition-colors hover:bg-subtle hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+              data-compact-control="true"
+              onClick={() => onCopyText(plainText)}
+              type="button"
+            >
+              <Copy aria-hidden="true" className="h-3 w-3" />
+              <span>复制</span>
+            </button>
+          ) : null}
+          {plainText && onEditResend ? (
+            <button
+              aria-label="编辑重发"
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-text-secondary transition-colors hover:bg-subtle hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+              data-compact-control="true"
+              onClick={() => onEditResend(plainText)}
+              type="button"
+            >
+              <Pencil aria-hidden="true" className="h-3 w-3" />
+              <span>编辑重发</span>
+            </button>
+          ) : null}
+        </div>
+      </article>
+    );
+  }
+
   return (
     <article
-      aria-label={`${isAssistant ? "Athena" : "你"}的消息，序号 ${
-        message.sequence
-      }`}
-      className={`chat-message chat-message--${isAssistant ? "assistant" : "user"}`}
+      aria-label={`Athena的消息，序号 ${message.sequence}`}
+      className="group/message flex w-full flex-col gap-2"
       ref={bindNode}
     >
-      <header className="chat-message-meta">
-        <strong>{isAssistant ? "Athena" : "你"}</strong>
-        <span>#{message.sequence}</span>
-        <span>{formatDateTime(message.created_at)}</span>
-        <span>{message.status}</span>
+      <header className="flex flex-wrap items-center gap-2">
+        <AthenaAvatarMark />
+        <strong className="text-sm font-semibold text-text-primary">
+          Athena
+        </strong>
+        {modelLabel ? <Badge variant="neutral">{modelLabel}</Badge> : null}
+        <time className="text-xs text-text-tertiary">{formattedTime}</time>
       </header>
-      <div className="chat-message-body">
+
+      <div className="pl-8">
         {message.parts.map((part, index) => (
           <MessagePart
+            isAssistant
             key={`${part.type}-${index}`}
             part={part}
             sessionId={sessionId}
@@ -231,41 +372,95 @@ const MessageRow = memo(function MessageRow({
           />
         ))}
         {message.parts.length === 0 ? (
-          <p className="chat-message-empty">该消息没有可展示的内容块。</p>
+          <p className="text-xs text-text-tertiary">该消息没有可展示的内容。</p>
         ) : null}
+
+        <div className="mt-2 flex flex-wrap items-center gap-1 opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100">
+          {plainText ? (
+            <button
+              aria-label="复制回答"
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-text-secondary transition-colors hover:bg-subtle hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+              data-compact-control="true"
+              onClick={() => onCopyText(plainText)}
+              type="button"
+            >
+              <Copy aria-hidden="true" className="h-3.5 w-3.5" />
+              <span>复制</span>
+            </button>
+          ) : null}
+          {canRetryMessage && onRetryRun ? (
+            <button
+              aria-label="重新执行"
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-text-secondary transition-colors hover:bg-subtle hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+              data-compact-control="true"
+              onClick={onRetryRun}
+              type="button"
+            >
+              <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+              <span>重新执行</span>
+            </button>
+          ) : null}
+        </div>
       </div>
     </article>
   );
 });
 
-interface ChatMessageListProps {
+export interface ChatMessageListProps {
   autoScrollRequest: ChatAutoScrollRequest | null;
+  /** 置于最新一轮助手回复上方的消息内折叠进度条插槽。 */
+  beforeLatestAssistantSlot?: ReactNode;
+  currentRunId?: string | null;
+  currentRunModelLabel?: string | null;
+  currentRunStatus?: RunStatus | null;
   error: unknown;
+  /** 置于消息流底部的业务交互卡片插槽（审批卡片、失败卡片、取消说明等）。 */
+  footerSlot?: ReactNode;
   hasMore: boolean;
+  isLatestRun?: boolean;
   isLoading: boolean;
   isLoadingMore: boolean;
   messages: ConversationMessage[];
+  onEditResend?: (text: string) => void;
   onLoadMore: () => void;
   onRetry: () => void;
+  onRetryRun?: () => void;
   sessionId: string;
+  topAlertSlot?: ReactNode;
   transientText: string;
   transientUnfinished: boolean;
 }
 
+/**
+ * 沉浸式唯一纵向消息滚动区：
+ * - 内容水平居中在 max-w-[780px] 阅读列宽内，消除嵌套盒模型与双滚动条；
+ * - 智能跟底（<= 48px 阈值）：用户主动上滑浏览历史时暂停跟底，底部居中浮现丸状「回到底部」按钮；
+ * - 全量记忆化消息行，确保流式输出与输入区击键对历史消息保持零重渲染隔离。
+ */
 export const ChatMessageList = memo(function ChatMessageList({
   autoScrollRequest,
+  beforeLatestAssistantSlot = null,
+  currentRunId = null,
+  currentRunModelLabel = null,
+  currentRunStatus = null,
   error,
+  footerSlot = null,
   hasMore,
+  isLatestRun = false,
   isLoading,
   isLoadingMore,
   messages,
+  onEditResend,
   onLoadMore,
   onRetry,
+  onRetryRun,
   sessionId,
+  topAlertSlot = null,
   transientText,
   transientUnfinished,
 }: ChatMessageListProps) {
   const scrollContainerRef = useRef<HTMLElement | null>(null);
+  const contentWrapperRef = useRef<HTMLDivElement | null>(null);
   // 按消息 ID 登记已挂载 DOM 节点，避免为每条历史消息创建内联 ref 回调破坏 React.memo。
   const rowNodesRef = useRef(new Map<string, HTMLElement>());
   const transientNodeRef = useRef<HTMLElement | null>(null);
@@ -273,6 +468,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   const followingLatestRef = useRef(true);
   const handledAutoScrollRequestRef = useRef<string | null>(null);
   const [followingLatest, setFollowingLatest] = useState(true);
+  const showingSkeleton = isLoading && !transientText;
   const autoScrollTargetMessage = autoScrollRequest
     ? findAutoScrollTargetMessage(messages, autoScrollRequest)
     : null;
@@ -288,6 +484,16 @@ export const ChatMessageList = memo(function ChatMessageList({
     [],
   );
 
+  const handleCopyText = useCallback((text: string) => {
+    void copyTextToClipboard(text).then((ok) => {
+      if (ok) {
+        toast.success("已复制到剪贴板");
+      } else {
+        toast.error("当前环境无法自动复制，请手动选中复制");
+      }
+    });
+  }, []);
+
   // 仅当历史消息数组引用变化时重算技能工具调用 ID 集合，保持 MessageRow props 稳定。
   const skillToolCallIds = useMemo(() => {
     const ids = new Set<string>();
@@ -301,21 +507,52 @@ export const ChatMessageList = memo(function ChatMessageList({
     return ids;
   }, [messages]);
 
+  // 定位当前 Run 的第一条可见助手消息，将消息内折叠进度条精准挂载在其上方。
+  const progressAnchorIndex = useMemo(() => {
+    if (!beforeLatestAssistantSlot || !currentRunId) {
+      return -1;
+    }
+    return messages.findIndex(
+      (message) =>
+        message.role === "assistant" &&
+        message.run_id === currentRunId &&
+        message.parts.some((part) => part.type !== "tool_call"),
+    );
+  }, [beforeLatestAssistantSlot, currentRunId, messages]);
+
+  // 仅在最近一轮失败/已取消 Run 的最后一条可见助手消息上展示「重新执行」快捷操作。
+  const retryableAssistantMessageId = useMemo(() => {
+    if (
+      !isLatestRun ||
+      !currentRunId ||
+      (currentRunStatus !== "failed" && currentRunStatus !== "cancelled")
+    ) {
+      return null;
+    }
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const candidate = messages[index];
+      if (
+        candidate.role === "assistant" &&
+        candidate.run_id === currentRunId &&
+        candidate.parts.some((part) => part.type !== "tool_call")
+      ) {
+        return candidate.id;
+      }
+    }
+    return null;
+  }, [currentRunId, currentRunStatus, isLatestRun, messages]);
+
   useLayoutEffect(() => {
     const node = scrollContainerRef.current;
-    if (
-      !node ||
-      isLoading ||
-      hasInitializedScrollRef.current
-    ) {
+    if (!node || showingSkeleton || hasInitializedScrollRef.current) {
       return;
     }
-    // 首次载入默认落在当前会话最新消息，但只操作消息容器，不变更外层页面位置。
+    // 首次载入默认落在当前会话最新消息，且只滚动消息容器本身。
     hasInitializedScrollRef.current = true;
     followingLatestRef.current = true;
     setFollowingLatest(true);
     scrollNodeToLatest(node);
-  }, [isLoading]);
+  }, [showingSkeleton]);
 
   useLayoutEffect(() => {
     const node = scrollContainerRef.current;
@@ -348,9 +585,35 @@ export const ChatMessageList = memo(function ChatMessageList({
     ) {
       return;
     }
-    // 流式文本和历史消息都只驱动消息容器跟随，输入框与执行轨迹不受影响。
+    // 流式文本、新消息、执行进度条或底部审批/失败卡片挂载更新时，仅在跟底态下保持视口贴底。
     scrollNodeToLatest(node);
-  }, [messages, transientText]);
+  }, [beforeLatestAssistantSlot, footerSlot, messages, transientText]);
+
+  useEffect(() => {
+    const contentNode = contentWrapperRef.current;
+    if (
+      showingSkeleton ||
+      !contentNode ||
+      typeof ResizeObserver === "undefined"
+    ) {
+      return;
+    }
+    // 跟底态下监听消息内容容器的实际高度变化（如进度条内部异步拉取步骤或审批卡片展开参数），
+    // 严格遵守 followingLatestRef 守卫，避免打断用户主动上滑回看历史。
+    const observer = new ResizeObserver(() => {
+      const scrollNode = scrollContainerRef.current;
+      if (
+        !scrollNode ||
+        !hasInitializedScrollRef.current ||
+        !followingLatestRef.current
+      ) {
+        return;
+      }
+      scrollNodeToLatest(scrollNode);
+    });
+    observer.observe(contentNode);
+    return () => observer.disconnect();
+  }, [showingSkeleton]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -370,20 +633,37 @@ export const ChatMessageList = memo(function ChatMessageList({
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  if (isLoading && !transientText) {
+  if (showingSkeleton) {
     return (
-      <div className="chat-history-state" role="status">
-        正在加载消息历史…
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          className="mx-auto flex w-full max-w-[780px] flex-col gap-5 px-4 py-8 sm:px-6"
+          role="status"
+        >
+          <span className="sr-only">正在加载消息历史…</span>
+          <div className="ml-auto w-2/3 max-w-sm space-y-2">
+            <Skeleton className="h-12 w-full rounded-2xl" />
+          </div>
+          <div className="w-full space-y-2.5">
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-6 w-6 rounded-md" />
+              <Skeleton className="h-4 w-20" />
+            </div>
+            <Skeleton className="ml-8 h-4 w-5/6" />
+            <Skeleton className="ml-8 h-4 w-3/4" />
+            <Skeleton className="ml-8 h-4 w-2/3" />
+          </div>
+        </div>
       </div>
     );
   }
 
-  const showJumpToLatest =
-    !followingLatest && (messages.length > 0 || Boolean(transientText));
+  const showJumpToBottom =
+    !followingLatest &&
+    (messages.length > 0 || Boolean(transientText) || Boolean(footerSlot));
 
   const handleLoadMore = () => {
-    // 更早消息由浏览器原生滚动锚定保持当前位置；同时退出跟随，
-    // 避免异步分页完成时被误判成新消息并带到底部。
+    // 更早消息由浏览器原生滚动锚定保持当前位置；同时退出跟底，避免加载完毕后被强行拉到底部。
     followingLatestRef.current = false;
     setFollowingLatest(false);
     onLoadMore();
@@ -402,7 +682,7 @@ export const ChatMessageList = memo(function ChatMessageList({
     setFollowingLatest(nextFollowingLatest);
   };
 
-  const handleJumpToLatest = () => {
+  const handleJumpToBottom = () => {
     const node = scrollContainerRef.current;
     followingLatestRef.current = true;
     setFollowingLatest(true);
@@ -418,83 +698,145 @@ export const ChatMessageList = memo(function ChatMessageList({
     }
   };
 
+  const isEmptyConversation =
+    !error &&
+    messages.length === 0 &&
+    !transientText &&
+    !beforeLatestAssistantSlot &&
+    !footerSlot;
+
   return (
-    <div className="chat-message-list-frame">
+    <div
+      className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+      style={{ overflowAnchor: "none" }}
+    >
       <section
         aria-label="消息历史"
-        className="chat-message-list"
+        className="min-h-0 flex-1 overflow-y-auto focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring-focus"
         onScroll={handleScroll}
         ref={scrollContainerRef}
+        style={{ overflowAnchor: "auto" }}
         tabIndex={0}
       >
-        {hasMore ? (
-          <button
-            className="button-quiet chat-load-earlier"
-            disabled={isLoadingMore}
-            onClick={handleLoadMore}
-            type="button"
-          >
-            {isLoadingMore ? "正在加载更早消息…" : "加载更早消息"}
-          </button>
-        ) : null}
+        <div
+          className="mx-auto flex w-full max-w-[780px] flex-col gap-5 px-4 py-6 sm:px-6"
+          ref={contentWrapperRef}
+        >
+          {topAlertSlot}
 
-        {error ? (
-          <ErrorBanner
-            message="消息历史加载失败，请重试。"
-            onRetry={onRetry}
-          />
-        ) : null}
-
-        {!error && messages.length === 0 && !transientText ? (
-          <EmptyState
-            compact
-            description="发送第一条消息后，这里会展示后端保存的真实对话内容。"
-            icon="chat"
-            title="还没有消息"
-          />
-        ) : (
-          <div className="chat-messages">
-            {messages.map((message) => (
-              <MessageRow
-                key={`${message.sequence}-${message.id}`}
-                message={message}
-                onNodeChange={handleRowNodeChange}
-                sessionId={sessionId}
-                skillToolCallIds={skillToolCallIds}
-              />
-            ))}
-            {transientText ? (
-              <article
-                aria-label="Athena 的临时流式输出"
-                className="chat-message chat-message--assistant chat-message--transient"
-                ref={transientNodeRef}
+          {hasMore ? (
+            <div className="flex justify-center">
+              <Button
+                disabled={isLoadingMore}
+                onClick={handleLoadMore}
+                size="xs"
+                variant="outline"
               >
-                <header className="chat-message-meta">
-                  <strong>Athena</strong>
-                  <span>{transientUnfinished ? "未完成回答" : "实时草稿"}</span>
-                  <span>
-                    {transientUnfinished
-                      ? "仅保留在当前页面，刷新后不承诺恢复"
-                      : "等待快照校正"}
-                  </span>
-                </header>
-                <div className="chat-message-body">
-                  <MarkdownContent text={transientText} />
-                </div>
-              </article>
-            ) : null}
-          </div>
-        )}
+                {isLoadingMore ? "正在加载更早消息…" : "加载更早消息"}
+              </Button>
+            </div>
+          ) : null}
+
+          {error ? (
+            <InlineAlert
+              action={
+                <Button onClick={onRetry} size="xs" variant="outline">
+                  <RefreshCw aria-hidden="true" className="h-3 w-3" />
+                  重试
+                </Button>
+              }
+              description="消息历史加载失败，请重试。"
+              variant="danger"
+            />
+          ) : null}
+
+          {isEmptyConversation ? (
+            <div className="py-10">
+              <EmptyState
+                compact
+                description="在下方输入您的问题，Athena 将结合企业知识库与可用工具为您处理。"
+                icon="chat"
+                title="开始这段对话"
+              />
+            </div>
+          ) : (
+            <div className="flex flex-col gap-6">
+              {messages.map((message, index) => (
+                <Fragment key={`${message.sequence}-${message.id}`}>
+                  {index === progressAnchorIndex
+                    ? beforeLatestAssistantSlot
+                    : null}
+                  <MessageRow
+                    canRetryMessage={
+                      message.id === retryableAssistantMessageId
+                    }
+                    message={message}
+                    modelLabel={
+                      message.role === "assistant" &&
+                      currentRunId &&
+                      message.run_id === currentRunId
+                        ? currentRunModelLabel
+                        : null
+                    }
+                    onCopyText={handleCopyText}
+                    onEditResend={onEditResend}
+                    onNodeChange={handleRowNodeChange}
+                    onRetryRun={onRetryRun}
+                    sessionId={sessionId}
+                    skillToolCallIds={skillToolCallIds}
+                  />
+                </Fragment>
+              ))}
+
+              {/* 尚未持久化最新助手回复时，将消息内折叠进度条置于流式输出上方。 */}
+              {beforeLatestAssistantSlot && progressAnchorIndex === -1
+                ? beforeLatestAssistantSlot
+                : null}
+
+              {transientText ? (
+                <article
+                  aria-label="Athena 的临时流式输出"
+                  className="flex w-full flex-col gap-2"
+                  ref={transientNodeRef}
+                >
+                  <header className="flex flex-wrap items-center gap-2">
+                    <AthenaAvatarMark />
+                    <strong className="text-sm font-semibold text-text-primary">
+                      Athena
+                    </strong>
+                    {currentRunModelLabel ? (
+                      <Badge variant="neutral">{currentRunModelLabel}</Badge>
+                    ) : null}
+                    <Badge variant={transientUnfinished ? "warning" : "brand"}>
+                      {transientUnfinished ? "未完成回答" : "正在生成"}
+                    </Badge>
+                  </header>
+                  <div className="pl-8">
+                    <MarkdownContent text={transientText} />
+                    {transientUnfinished ? (
+                      <p className="mt-2 text-xs text-text-tertiary">
+                        该未完成内容仅保留在当前页面，刷新后不承诺恢复。
+                      </p>
+                    ) : null}
+                  </div>
+                </article>
+              ) : null}
+            </div>
+          )}
+
+          {footerSlot}
+        </div>
       </section>
 
-      {showJumpToLatest ? (
+      {showJumpToBottom ? (
         <button
-          className="button-secondary chat-jump-latest"
-          onClick={handleJumpToLatest}
+          className="absolute bottom-4 left-1/2 z-10 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border-default bg-canvas/95 px-3.5 py-1.5 text-xs font-medium text-text-primary shadow-md backdrop-blur-xs transition-colors hover:border-brand-border hover:bg-brand-subtle hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+          data-compact-control="true"
+          onClick={handleJumpToBottom}
           type="button"
         >
-          <Icon name="arrow-right" size={14} />
-          回到最新
+          <ArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
+          <span>回到底部</span>
         </button>
       ) : null}
     </div>

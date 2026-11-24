@@ -252,8 +252,14 @@ export function useRunStream({
   const snapshotRef = useRef(onSnapshot);
   const probeAuthRef = useRef(probeAuth);
   const mode = runStreamMode(status);
-  // 等待和终态由查询/快照承载；只有仍可能产生实时增量的状态才建立连接。
-  const shouldConnect = Boolean(enabled && runId && mode === "live");
+  const alreadyTerminalInStream =
+    Boolean(runId) &&
+    state.runId === runId &&
+    isTerminalRunStatus(state.status);
+  // 等待和终态由查询/快照承载；同一 Run 已在实时流中确认终态后，禁止迟到的非终态查询重新拉起 SSE 并覆盖终态。
+  const shouldConnect = Boolean(
+    enabled && runId && mode === "live" && !alreadyTerminalInStream,
+  );
   const streamUrl = useMemo(
     () => (runId ? runStreamUrl(sessionId, runId) : ""),
     [runId, sessionId],

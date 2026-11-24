@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -15,6 +16,9 @@ class SessionFileResponse(BaseModel):
     label: str | None
     mime_type: str
     size_bytes: int
+    extraction_status: Literal["none", "ready", "failed"] = "none"
+    extracted_text_bytes: int | None = None
+    extraction_error_code: str | None = None
     created_at: datetime
 
 
@@ -23,4 +27,18 @@ class SessionFileListResponse(BaseModel):
     next_after_file_id: str | None
 
 
-__all__ = ["SessionFileListResponse", "SessionFileResponse"]
+class SessionFileContentResponse(BaseModel):
+    file: SessionFileResponse
+    source_kind: Literal["raw_text", "extracted_document"]
+    offset: int
+    next_offset: int
+    content: str
+    eof: bool
+    truncated: bool
+
+
+__all__ = [
+    "SessionFileContentResponse",
+    "SessionFileListResponse",
+    "SessionFileResponse",
+]

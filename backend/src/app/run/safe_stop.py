@@ -741,6 +741,9 @@ class SafeStopReporter:
                     "mime_type": item.mime_type,
                     "size_bytes": item.size_bytes,
                     "source": item.source,
+                    "extraction_status": item.extraction_status,
+                    "extracted_text_bytes": item.extracted_text_bytes,
+                    "extraction_error_code": item.extraction_error_code,
                 }
                 for item in state.input_files
             ],

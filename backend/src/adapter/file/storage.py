@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # 文件与技能域仅允许操作下列业务前缀，与同桶内 knowledge/ 严格隔离。
 FILE_OBJECT_PREFIXES = (
     "session-files/",
+    "session-files-extracted/",
     "session-artifacts/",
     "skill-logs/",
     "skills/",
@@ -36,6 +37,7 @@ _OBJECT_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,1022}$")
 _ORPHAN_KEY = re.compile(
     r"^(?:"
     r"session-files/[0-9a-f]{2}/[A-Za-z0-9_-]{1,128}|"
+    r"session-files-extracted/[0-9a-f]{2}/[A-Za-z0-9_-]{1,128}\.txt|"
     r"session-artifacts/[0-9a-f]{2}/[0-9a-f]{64}/[A-Za-z0-9_-]{1,128}|"
     r"skill-logs/[0-9a-f]{2}/[0-9a-f]{64}/[A-Za-z0-9_-]{1,128}\.log|"
     r"skills/[0-9a-f]{2}/[0-9a-f]{64}/[A-Za-z0-9_-]{1,128}\.zip"
@@ -102,7 +104,8 @@ class MinioFileStorageConfig(ObjectStorageConfig):
 
     def __post_init__(self) -> None:
         try:
-            super().__post_init__()
+            # 显式调用父类校验，兼容 Python 3.12 @dataclass(slots=True) 类重建场景。
+            ObjectStorageConfig.__post_init__(self)
         except ObjectStorageConfigError:
             raise FileStorageError("file_storage_configuration_invalid") from None
 

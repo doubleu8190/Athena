@@ -69,6 +69,7 @@ from domain.mcp import McpSecretError
 from domain.org import OrgRepository
 from infrastructure.database import Database
 from infrastructure.feishu import FeishuClient, FeishuConfig
+from infrastructure.file import LocalSessionDocumentExtractor
 from infrastructure.knowledge.parsers import LocalDocumentParser
 from infrastructure.mcp.discovery import McpDiscoveryClient
 from infrastructure.security.mcp_secrets import McpSecretCipher
@@ -444,6 +445,7 @@ def build_api_dependencies(
             session_file_use_case = SessionFileService(
                 SqlAlchemySessionFileRepository(database.session_factory),
                 file_object_store,
+                document_extractor=LocalSessionDocumentExtractor(),
             )
     return ApiDependencies(
         database=database,

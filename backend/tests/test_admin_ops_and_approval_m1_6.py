@@ -2019,7 +2019,12 @@ def test_alembic_migration_0037_single_head_and_reversible_sql() -> None:
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["20261204_0037"]
+    # 保持 Alembic 单一 head，并验证 20261204_0037 节点链正确（兼容后续 M3.1+ 迁移脚本）。
+    heads = script.get_heads()
+    assert len(heads) == 1
+    revision = script.get_revision("20261204_0037")
+    assert revision is not None
+    assert revision.down_revision == "20261203_0036"
 
     up_buffer = StringIO()
     with redirect_stdout(up_buffer):

@@ -5,9 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 MAX_SESSION_FILE_BYTES = 50 * 1024 * 1024
 MAX_SESSION_FILES = 100
+# 会话办公文档自动提取的安全边界：单文件上限 20 MiB，提取后 UTF-8 文本上限 10 MiB。
+MAX_SESSION_DOCUMENT_EXTRACT_BYTES = 20 * 1024 * 1024
+MAX_SESSION_EXTRACTED_TEXT_BYTES = 10 * 1024 * 1024
+EXTRACTABLE_DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".xlsx", ".pptx"})
 
 
 class SessionFileSource(StrEnum):
@@ -15,6 +20,41 @@ class SessionFileSource(StrEnum):
 
     UPLOAD = "upload"
     ARTIFACT = "artifact"
+
+
+class SessionFileExtractionStatus(StrEnum):
+    """会话附件文本提取缓存状态。"""
+
+    NONE = "none"
+    READY = "ready"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDocumentExtractionResult:
+    """PDF / Office 会话附件提取结果；失败时只暴露稳定安全错误码。"""
+
+    status: SessionFileExtractionStatus
+    text: str | None = None
+    error_code: str | None = None
+
+    @classmethod
+    def ready(cls, text: str) -> SessionDocumentExtractionResult:
+        """构造成功提取的结构化 UTF-8 文本结果。"""
+        return cls(
+            status=SessionFileExtractionStatus.READY,
+            text=text,
+            error_code=None,
+        )
+
+    @classmethod
+    def failed(cls, error_code: str) -> SessionDocumentExtractionResult:
+        """构造安全降级的提取失败结果，绝不携带原始异常或宿主路径。"""
+        return cls(
+            status=SessionFileExtractionStatus.FAILED,
+            text=None,
+            error_code=error_code,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +70,10 @@ class PendingSessionFile:
     object_key: str
     output_index: int
     created_at: datetime
+    extraction_status: SessionFileExtractionStatus = SessionFileExtractionStatus.NONE
+    extracted_text_key: str | None = None
+    extracted_text_bytes: int | None = None
+    extraction_error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +93,10 @@ class SessionFile:
     source_call_id: str | None
     output_index: int | None
     created_at: datetime
+    extraction_status: SessionFileExtractionStatus = SessionFileExtractionStatus.NONE
+    extracted_text_key: str | None = None
+    extracted_text_bytes: int | None = None
+    extraction_error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +109,7 @@ class SessionFilePage:
 
 @dataclass(frozen=True, slots=True)
 class SessionFileTextSlice:
-    """严格 UTF-8 文本文件的字节偏移读取结果。"""
+    """严格 UTF-8 文本原件或提取文档缓存的字节偏移读取结果。"""
 
     file: SessionFile
     offset: int
@@ -69,6 +117,7 @@ class SessionFileTextSlice:
     content: str
     eof: bool
     truncated: bool
+    source_kind: Literal["raw_text", "extracted_document"] = "raw_text"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,11 +139,16 @@ class TextFileReadError(ValueError):
 
 
 __all__ = [
+    "EXTRACTABLE_DOCUMENT_EXTENSIONS",
+    "MAX_SESSION_DOCUMENT_EXTRACT_BYTES",
+    "MAX_SESSION_EXTRACTED_TEXT_BYTES",
     "MAX_SESSION_FILE_BYTES",
     "MAX_SESSION_FILES",
     "FileObjectScanEntry",
     "PendingSessionFile",
+    "SessionDocumentExtractionResult",
     "SessionFile",
+    "SessionFileExtractionStatus",
     "SessionFilePage",
     "SessionFileSource",
     "SessionFileTextSlice",

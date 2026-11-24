@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import threading
 import zipfile
 from pathlib import Path, PurePath
 from typing import Any
@@ -21,6 +22,9 @@ from domain.knowledge.ports import (
 DEFAULT_OCR_LANGUAGES = "en"
 _MAX_CONTENT_TYPES_BYTES = 10 * 1024 * 1024
 _MIN_PDF_OCR_IMAGE_DIMENSION = 32
+# PDFium 底层 C++ 库非线程安全；同进程内并发解析/校验多个 PDF 时必须串行化访问，
+# 避免多线程同时调用 pypdfium2 导致死锁或未定义行为。
+_PDFIUM_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +38,19 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
         min_pdf_chars: int = 24,
         ocr_languages: str = DEFAULT_OCR_LANGUAGES,
         ocr_engine: Any | None = None,
+        enable_ocr: bool = True,
     ) -> None:
         self._min_pdf_chars = min_pdf_chars
         self._ocr_languages = ocr_languages
         self._ocr: Any = ocr_engine
+        self._enable_ocr = enable_ocr
 
     async def parse(self, filename: str, content: bytes) -> ParsedDocument:
         return await asyncio.to_thread(self._parse_bounded, filename, content)
+
+    def parse_sync(self, filename: str, content: bytes) -> ParsedDocument:
+        """在调用方已管理线程边界时同步解析并执行文本上限校验。"""
+        return self._parse_bounded(filename, content)
 
     def _parse_bounded(self, filename: str, content: bytes) -> ParsedDocument:
         document = self._parse(filename, content)
@@ -70,25 +80,26 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                 raise ValueError("knowledge_file_signature_invalid")
             import pypdfium2 as pdfium  # type: ignore[import-untyped]
 
-            try:
-                pdf = pdfium.PdfDocument(str(path))
-            except ValueError:
-                raise
-            except Exception as error:
-                # 将损坏或加密 PDF 触发的 Pdfium 底层异常转译为稳定业务错误码，
-                # 避免上传接口返回 HTTP 500。
-                raise ValueError("knowledge_pdf_invalid") from error
-            try:
+            with _PDFIUM_LOCK:
                 try:
-                    page_count = len(pdf)
+                    pdf = pdfium.PdfDocument(str(path))
                 except ValueError:
                     raise
                 except Exception as error:
+                    # 将损坏或加密 PDF 触发的 Pdfium 底层异常转译为稳定业务错误码，
+                    # 避免上传接口返回 HTTP 500。
                     raise ValueError("knowledge_pdf_invalid") from error
-                if page_count > 500:
-                    raise ValueError("knowledge_pdf_page_limit")
-            finally:
-                pdf.close()
+                try:
+                    try:
+                        page_count = len(pdf)
+                    except ValueError:
+                        raise
+                    except Exception as error:
+                        raise ValueError("knowledge_pdf_invalid") from error
+                    if page_count > 500:
+                        raise ValueError("knowledge_pdf_page_limit")
+                finally:
+                    pdf.close()
             return
         if suffix in {".docx", ".xlsx", ".pptx"}:
             self._validate_office_archive(path, suffix)
@@ -176,6 +187,8 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
         if suffix == ".pptx":
             return self._pptx(content)
         if suffix in {".png", ".jpg", ".jpeg"}:
+            if not self._enable_ocr:
+                return ParsedDocument(())
             return ParsedDocument(self._ocr_image(content, media_id="image"))
         if suffix in {".doc", ".xls", ".ppt"}:
             raise ValueError("knowledge_legacy_office_unsupported")
@@ -200,6 +213,9 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
     def _ocr_image(
         self, image: bytes, *, page: int | None = None, media_id: str | None = None
     ) -> tuple[TextBlock, ...]:
+        # 关闭 OCR 时直接短路返回空元组，避免误加载重量级 PaddleOCR 引擎。
+        if not self._enable_ocr:
+            return ()
         from PIL import Image
 
         with Image.open(io.BytesIO(image)) as decoded:
@@ -224,65 +240,69 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
     def _pdf(self, content: bytes) -> ParsedDocument:
         import pypdfium2 as pdfium
 
-        pdf = pdfium.PdfDocument(content)
         blocks: list[TextBlock] = []
-        try:
-            if len(pdf) > 500:
-                raise ValueError("knowledge_pdf_page_limit")
-            for number in range(len(pdf)):
-                page = pdf[number]
-                try:
-                    textpage = page.get_textpage()
-                    text = textpage.get_text_range().strip()
-                    if text:
-                        blocks.append(TextBlock(text, ChunkLocator(kind="pdf", page=number + 1)))
-                    seen_ocr: set[str] = set()
-                    image_no = 0
-                    image_ocr_succeeded = False
-                    for image_object in page.get_objects():
-                        if not hasattr(image_object, "get_bitmap"):
-                            continue
-                        bitmap = image_object.get_bitmap()
-                        pil_image = bitmap.to_pil()
-                        # 跳过极小装饰图或 1px 细线，避免对无效图元空跑 OCR 引擎。
-                        if (
-                            pil_image.width < _MIN_PDF_OCR_IMAGE_DIMENSION
-                            or pil_image.height < _MIN_PDF_OCR_IMAGE_DIMENSION
-                        ):
-                            continue
-                        image_no += 1
-                        image_buffer = io.BytesIO()
-                        pil_image.save(image_buffer, format="PNG")
-                        ocr_blocks = self._ocr_image(
-                            image_buffer.getvalue(),
-                            page=number + 1,
-                            media_id=f"pdf-page-{number + 1}-image-{image_no}",
-                        )
-                        image_ocr_succeeded = image_ocr_succeeded or bool(ocr_blocks)
-                        for block in ocr_blocks:
-                            normalized = " ".join(block.text.casefold().split())
-                            if (
-                                normalized
-                                and normalized not in seen_ocr
-                                and normalized not in text.casefold()
-                            ):
-                                blocks.append(block)
-                                seen_ocr.add(normalized)
-                    if len(text) < self._min_pdf_chars and not image_ocr_succeeded:
-                        bitmap = page.render(scale=2).to_pil()
-                        buffer = io.BytesIO()
-                        bitmap.save(buffer, format="PNG")
-                        blocks.extend(
-                            self._ocr_image(
-                                buffer.getvalue(),
-                                page=number + 1,
-                                media_id=f"pdf-page-{number + 1}",
+        with _PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(content)
+            try:
+                if len(pdf) > 500:
+                    raise ValueError("knowledge_pdf_page_limit")
+                for number in range(len(pdf)):
+                    page = pdf[number]
+                    try:
+                        textpage = page.get_textpage()
+                        text = textpage.get_text_range().strip()
+                        if text:
+                            blocks.append(
+                                TextBlock(text, ChunkLocator(kind="pdf", page=number + 1))
                             )
-                        )
-                finally:
-                    page.close()
-        finally:
-            pdf.close()
+                        if self._enable_ocr:
+                            seen_ocr: set[str] = set()
+                            image_no = 0
+                            image_ocr_succeeded = False
+                            for image_object in page.get_objects():
+                                if not hasattr(image_object, "get_bitmap"):
+                                    continue
+                                bitmap = image_object.get_bitmap()
+                                pil_image = bitmap.to_pil()
+                                # 跳过极小装饰图或 1px 细线，避免对无效图元空跑 OCR 引擎。
+                                if (
+                                    pil_image.width < _MIN_PDF_OCR_IMAGE_DIMENSION
+                                    or pil_image.height < _MIN_PDF_OCR_IMAGE_DIMENSION
+                                ):
+                                    continue
+                                image_no += 1
+                                image_buffer = io.BytesIO()
+                                pil_image.save(image_buffer, format="PNG")
+                                ocr_blocks = self._ocr_image(
+                                    image_buffer.getvalue(),
+                                    page=number + 1,
+                                    media_id=f"pdf-page-{number + 1}-image-{image_no}",
+                                )
+                                image_ocr_succeeded = image_ocr_succeeded or bool(ocr_blocks)
+                                for block in ocr_blocks:
+                                    normalized = " ".join(block.text.casefold().split())
+                                    if (
+                                        normalized
+                                        and normalized not in seen_ocr
+                                        and normalized not in text.casefold()
+                                    ):
+                                        blocks.append(block)
+                                        seen_ocr.add(normalized)
+                            if len(text) < self._min_pdf_chars and not image_ocr_succeeded:
+                                bitmap = page.render(scale=2).to_pil()
+                                buffer = io.BytesIO()
+                                bitmap.save(buffer, format="PNG")
+                                blocks.extend(
+                                    self._ocr_image(
+                                        buffer.getvalue(),
+                                        page=number + 1,
+                                        media_id=f"pdf-page-{number + 1}",
+                                    )
+                                )
+                    finally:
+                        page.close()
+            finally:
+                pdf.close()
         if not blocks:
             raise ValueError("knowledge_document_text_empty")
         return ParsedDocument(tuple(blocks))
@@ -315,25 +335,28 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                             "table",
                         )
                     )
-        from PIL import UnidentifiedImageError
+        if self._enable_ocr:
+            from PIL import UnidentifiedImageError
 
-        seen: set[str] = set()
-        for rel in doc.part.rels.values():
-            # 外链图片没有内嵌 target_part，跳过以避免解析抛错或产生外网依赖。
-            if getattr(rel, "is_external", False):
-                continue
-            if "image" in rel.reltype and rel.target_ref not in seen:
-                seen.add(rel.target_ref)
-                try:
-                    blocks.extend(self._ocr_image(rel.target_part.blob, media_id=rel.target_ref))
-                except (UnidentifiedImageError, OSError) as error:
-                    # 跳过 EMF/WMF/SVG 等 PIL 不支持的矢量图或单张损坏图，不阻断整篇文档导入。
-                    logger.warning(
-                        "docx_unsupported_image_skipped media_id=%s exception_type=%s",
-                        rel.target_ref,
-                        type(error).__name__,
-                    )
+            seen: set[str] = set()
+            for rel in doc.part.rels.values():
+                # 外链图片没有内嵌 target_part，跳过以避免解析抛错或产生外网依赖。
+                if getattr(rel, "is_external", False):
                     continue
+                if "image" in rel.reltype and rel.target_ref not in seen:
+                    seen.add(rel.target_ref)
+                    try:
+                        blocks.extend(
+                            self._ocr_image(rel.target_part.blob, media_id=rel.target_ref)
+                        )
+                    except (UnidentifiedImageError, OSError) as error:
+                        # 跳过 EMF/WMF/SVG 等 PIL 不支持的矢量图或单张损坏图，不阻断整篇文档导入。
+                        logger.warning(
+                            "docx_unsupported_image_skipped media_id=%s exception_type=%s",
+                            rel.target_ref,
+                            type(error).__name__,
+                        )
+                        continue
         return ParsedDocument(tuple(blocks))
 
     def _xlsx(self, content: bytes) -> ParsedDocument:
@@ -378,36 +401,37 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
         finally:
             workbook.close()
             value_workbook.close()
-        # 先低成本扫描 ZIP 目录判断是否存在嵌入式图片或绘图；
-        # 纯表格工作簿直接跳过 read_only=False 二次全量 DOM 加载以大幅降低内存峰值。
-        with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            has_embedded_media = any(
-                name.lower().startswith(("xl/media/", "xl/drawings/"))
-                for name in archive.namelist()
-            )
-        if has_embedded_media:
-            image_workbook = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
-            try:
-                for sheet in image_workbook.worksheets:
-                    for image_no, image in enumerate(getattr(sheet, "_images", ()), 1):
-                        # 兼容 AbsoluteAnchor 等不含 _from 单元格坐标的锚点，避免属性缺失崩溃。
-                        anchor_from = getattr(getattr(image, "anchor", None), "_from", None)
-                        if (
-                            anchor_from is not None
-                            and hasattr(anchor_from, "col")
-                            and hasattr(anchor_from, "row")
-                        ):
-                            location = f"cell-{anchor_from.col + 1}:{anchor_from.row + 1}"
-                        else:
-                            location = f"pos-{image_no}"
-                        blocks.extend(
-                            self._ocr_image(
-                                image._data(),
-                                media_id=f"sheet-{sheet.title}-image-{image_no}-{location}",
+        if self._enable_ocr:
+            # 先低成本扫描 ZIP 目录判断是否存在嵌入式图片或绘图；
+            # 纯表格工作簿直接跳过 read_only=False 二次全量 DOM 加载以大幅降低内存峰值。
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                has_embedded_media = any(
+                    name.lower().startswith(("xl/media/", "xl/drawings/"))
+                    for name in archive.namelist()
+                )
+            if has_embedded_media:
+                image_workbook = load_workbook(io.BytesIO(content), read_only=False, data_only=True)
+                try:
+                    for sheet in image_workbook.worksheets:
+                        for image_no, image in enumerate(getattr(sheet, "_images", ()), 1):
+                            # 兼容 AbsoluteAnchor 等不含 _from 单元格坐标的锚点，避免属性缺失崩溃。
+                            anchor_from = getattr(getattr(image, "anchor", None), "_from", None)
+                            if (
+                                anchor_from is not None
+                                and hasattr(anchor_from, "col")
+                                and hasattr(anchor_from, "row")
+                            ):
+                                location = f"cell-{anchor_from.col + 1}:{anchor_from.row + 1}"
+                            else:
+                                location = f"pos-{image_no}"
+                            blocks.extend(
+                                self._ocr_image(
+                                    image._data(),
+                                    media_id=f"sheet-{sheet.title}-image-{image_no}-{location}",
+                                )
                             )
-                        )
-            finally:
-                image_workbook.close()
+                finally:
+                    image_workbook.close()
         return ParsedDocument(tuple(blocks), tuple(dict.fromkeys(warnings)))
 
     def _pptx(self, content: bytes) -> ParsedDocument:
@@ -443,9 +467,10 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                         )
                     )
         if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-            blocks.extend(
-                self._ocr_image(shape.image.blob, media_id=f"slide-{slide_no}-shape-{path}")
-            )
+            if self._enable_ocr:
+                blocks.extend(
+                    self._ocr_image(shape.image.blob, media_id=f"slide-{slide_no}-shape-{path}")
+                )
         elif shape.shape_type == MSO_SHAPE_TYPE.GROUP:
             for index, child in enumerate(shape.shapes, 1):
                 blocks.extend(self._pptx_shape(child, slide_no, f"{path}.{index}", shape_types))

@@ -2124,9 +2124,14 @@ def test_e2e_6_alembic_full_migration_chain_and_phase1_downgrade_sql() -> None:
         "postgresql+asyncpg://athena:athena@127.0.0.1:5432/athena_acceptance",
     )
 
-    # 1. 校验 alembic heads 严格为单一 head 20261204_0037。
+    # 1. 校验 alembic heads 严格保持单一 head，且 20261204_0037 位于主干迁移链中
+    # （兼容后续 M3.1+ 迁移）。
     script_dir = ScriptDirectory.from_config(config)
-    assert script_dir.get_heads() == ["20261204_0037"]
+    heads = script_dir.get_heads()
+    assert len(heads) == 1
+    revision = script_dir.get_revision("20261204_0037")
+    assert revision is not None
+    assert revision.down_revision == "20261203_0036"
 
     # 2. 生成完整 base -> head 离线升级 SQL 并核验全部第一期关键表、索引与字段。
     upgrade_buffer = StringIO()

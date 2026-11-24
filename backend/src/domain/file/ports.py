@@ -10,9 +10,22 @@ from typing import Protocol
 from domain.file.model import (
     FileObjectScanEntry,
     PendingSessionFile,
+    SessionDocumentExtractionResult,
     SessionFile,
+    SessionFileExtractionStatus,
     SessionFilePage,
 )
+
+
+class SessionDocumentExtractor(Protocol):
+    """从 PDF / Office 会话附件安全提取结构化纯文本的领域端口。"""
+
+    async def extract(
+        self,
+        filename: str,
+        path: Path,
+    ) -> SessionDocumentExtractionResult:
+        """在有界大小与超时内校验并提取 UTF-8 文本，失败时返回稳定安全错误码。"""
 
 
 class SessionFileRepository(Protocol):
@@ -63,6 +76,17 @@ class SessionFileRepository(Protocol):
         file_ids: tuple[str, ...],
     ) -> tuple[SessionFile, ...]:
         """一次读取并保持请求顺序；任一文件不可见即由调用方拒绝。"""
+
+    async def update_extraction(
+        self,
+        file_id: str,
+        *,
+        extraction_status: SessionFileExtractionStatus,
+        extracted_text_key: str | None,
+        extracted_text_bytes: int | None,
+        extraction_error_code: str | None,
+    ) -> SessionFile | None:
+        """回填惰性提取结果；若并发已有其他调用写入 ready，则返回最新已提交记录不覆盖。"""
 
 
 class FileObjectReferenceRepository(Protocol):
@@ -124,5 +148,6 @@ class FileObjectStore(Protocol):
 __all__ = [
     "FileObjectReferenceRepository",
     "FileObjectStore",
+    "SessionDocumentExtractor",
     "SessionFileRepository",
 ]

@@ -251,7 +251,12 @@ SESSION_FILE_LIST_DEFINITION = RuntimeToolDefinition(
 SESSION_FILE_READ_DEFINITION = RuntimeToolDefinition(
     tool_id=SESSION_FILE_READ_TOOL_ID,
     model_name="session_file_read",
-    description="严格按 UTF-8 字符边界分段读取当前会话白名单文本文件。",
+    description=(
+        "严格按 UTF-8 字符边界分段读取当前会话文件正文："
+        "既可读取白名单纯文本文件（TXT/CSV/JSON/MD/LOG），"
+        "也可分段读取 PDF、Word（DOCX）、Excel（XLSX）、PPT（PPTX）"
+        "自动提取的结构化文本。"
+    ),
     input_schema={
         "type": "object",
         "properties": {
@@ -878,6 +883,9 @@ class RunToolRuntimeService(RunToolRuntime):
                 mime_type=file.mime_type,
                 size_bytes=file.size_bytes,
                 source=file.source.value,
+                extraction_status=file.extraction_status.value,
+                extracted_text_bytes=file.extracted_text_bytes,
+                extraction_error_code=file.extraction_error_code,
             )
             for file in files
         )
@@ -1441,21 +1449,20 @@ class RunToolRuntimeService(RunToolRuntime):
             return ToolOutcome(
                 status=ToolOutcomeStatus.ERROR,
                 code=error.code,
-                message=(
-                    "该文件不是可读取的 UTF-8 文本文件，请使用 Skill 脚本处理。"
-                    if error.code == "file_not_text"
-                    else "文件文本读取范围或内容不合法。"
-                ),
+                message=_session_file_read_error_message(error.code),
                 data={"file": None if error.file is None else _session_file_data(error.file)},
             )
         except (FileInputError, ValueError):
             return _error("session_file_read_failed", "会话文件读取失败。")
+        except Exception:
+            return _error("session_file_unavailable", "会话文件暂时不可用。")
         return ToolOutcome(
             status=ToolOutcomeStatus.OK,
             code="session_file_read",
             message="已读取当前会话文件。",
             data={
                 "file": _session_file_data(result.file),
+                "source_kind": result.source_kind,
                 "offset": result.offset,
                 "next_offset": result.next_offset,
                 "content": result.content,
@@ -1581,6 +1588,42 @@ def _skill_resource_error(error: Exception) -> ToolOutcome:
     return _error(code, messages.get(code, "Skill 资源暂时不能读取。"))
 
 
+_SESSION_FILE_READ_ERROR_MESSAGES: dict[str, str] = {
+    "file_not_text": (
+        "该文件不是可直接读取的纯文本或办公文档（如图片文件），请使用 Skill 脚本处理。"
+    ),
+    "file_offset_invalid": (
+        "文件读取偏移量无效，必须位于合法的 UTF-8 字符起始边界且不超过文本总字节数。"
+    ),
+    "file_range_too_small": (
+        "单次读取字节窗口过小，不足以完整解码当前多字节字符，请增大 limit_bytes。"
+    ),
+    "file_content_not_text": "文件内容不是合法的 UTF-8 文本，无法直接读取。",
+    "document_no_extractable_text": (
+        "该文档未检测到可提取的文本层（例如纯扫描图片 PDF 或空白文档），无法直接读取文本。"
+    ),
+    "document_encrypted": "该文档受密码加密保护，无法自动提取文本内容。",
+    "document_macro_unsupported": "出于安全限制，包含宏的 Office 文档不支持自动文本提取。",
+    "document_page_limit_exceeded": "该 PDF 文档页数超过平台单文件解析上限，无法自动提取文本。",
+    "document_extract_too_large": (
+        "该文档原件超过单文件自动文本提取大小上限（20 MiB），请改用 Skill 脚本处理。"
+    ),
+    "document_extracted_text_too_large": (
+        "该文档提取后的纯文本体积超过上限，请改用 Skill 脚本分段处理。"
+    ),
+    "document_archive_limit_exceeded": (
+        "该 Office 文档压缩结构或展开体积超过安全上限，无法自动提取文本。"
+    ),
+    "document_extract_timeout": "文档自动文本提取超时，未能生成可读文本缓存。",
+    "document_parse_failed": "文档解析失败（文件可能损坏或格式不兼容），无法自动提取文本。",
+}
+
+
+def _session_file_read_error_message(code: str) -> str:
+    """将文本读取与文档提取错误码转译为清晰、安全的中文业务提示。"""
+    return _SESSION_FILE_READ_ERROR_MESSAGES.get(code, "文件文本读取范围或内容不合法。")
+
+
 def _session_file_data(file: SessionFile) -> dict[str, object]:
     """只投影可下载文件的安全元数据，不暴露对象键或宿主路径。"""
     return {
@@ -1590,6 +1633,9 @@ def _session_file_data(file: SessionFile) -> dict[str, object]:
         "mime_type": file.mime_type,
         "size_bytes": file.size_bytes,
         "source": file.source.value,
+        "extraction_status": file.extraction_status.value,
+        "extracted_text_bytes": file.extracted_text_bytes,
+        "extraction_error_code": file.extraction_error_code,
         "created_at": file.created_at.isoformat(),
     }
 

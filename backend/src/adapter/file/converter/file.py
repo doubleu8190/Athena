@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC
 
 from adapter.file.model import SessionFileModel
-from domain.file import SessionFile, SessionFileSource
+from domain.file import SessionFile, SessionFileExtractionStatus, SessionFileSource
 
 
 def session_file_to_domain(row: SessionFileModel) -> SessionFile:
@@ -29,6 +29,10 @@ def session_file_to_domain(row: SessionFileModel) -> SessionFile:
         source_call_id=row.source_call_id,
         output_index=row.output_index,
         created_at=created_at,
+        extraction_status=SessionFileExtractionStatus(row.extraction_status),
+        extracted_text_key=row.extracted_text_key,
+        extracted_text_bytes=row.extracted_text_bytes,
+        extraction_error_code=row.extraction_error_code,
     )
 
 

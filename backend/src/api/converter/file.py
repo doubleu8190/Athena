@@ -2,8 +2,28 @@
 
 from __future__ import annotations
 
-from api.dto.file import SessionFileListResponse, SessionFileResponse
-from domain.file import SessionFile, SessionFilePage
+from typing import Literal
+
+from api.dto.file import (
+    SessionFileContentResponse,
+    SessionFileListResponse,
+    SessionFileResponse,
+)
+from domain.file import (
+    SessionFile,
+    SessionFileExtractionStatus,
+    SessionFilePage,
+    SessionFileTextSlice,
+)
+
+_EXTRACTION_STATUS_LITERAL: dict[
+    SessionFileExtractionStatus,
+    Literal["none", "ready", "failed"],
+] = {
+    SessionFileExtractionStatus.NONE: "none",
+    SessionFileExtractionStatus.READY: "ready",
+    SessionFileExtractionStatus.FAILED: "failed",
+}
 
 
 def session_file_to_response(file: SessionFile) -> SessionFileResponse:
@@ -16,6 +36,9 @@ def session_file_to_response(file: SessionFile) -> SessionFileResponse:
         label=file.label,
         mime_type=file.mime_type,
         size_bytes=file.size_bytes,
+        extraction_status=_EXTRACTION_STATUS_LITERAL[file.extraction_status],
+        extracted_text_bytes=file.extracted_text_bytes,
+        extraction_error_code=file.extraction_error_code,
         created_at=file.created_at,
     )
 
@@ -28,4 +51,23 @@ def session_file_page_to_response(page: SessionFilePage) -> SessionFileListRespo
     )
 
 
-__all__ = ["session_file_page_to_response", "session_file_to_response"]
+def session_file_text_slice_to_response(
+    text_slice: SessionFileTextSlice,
+) -> SessionFileContentResponse:
+    """转换会话文件分页文本预览响应。"""
+    return SessionFileContentResponse(
+        file=session_file_to_response(text_slice.file),
+        source_kind=text_slice.source_kind,
+        offset=text_slice.offset,
+        next_offset=text_slice.next_offset,
+        content=text_slice.content,
+        eof=text_slice.eof,
+        truncated=text_slice.truncated,
+    )
+
+
+__all__ = [
+    "session_file_page_to_response",
+    "session_file_text_slice_to_response",
+    "session_file_to_response",
+]

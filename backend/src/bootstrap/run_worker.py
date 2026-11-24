@@ -45,6 +45,7 @@ from bootstrap.tool import (
 )
 from domain.file import FileObjectStore
 from infrastructure.database import Database
+from infrastructure.file import LocalSessionDocumentExtractor
 from infrastructure.security.mcp_secrets import McpSecretCipher
 from infrastructure.storage.config import has_object_storage_env
 
@@ -129,6 +130,7 @@ def build_run_worker_dependencies(
         session_files = SessionFileService(
             file_repository,
             object_store,
+            document_extractor=LocalSessionDocumentExtractor(),
         )
         temp_root = Path(
             os.getenv(

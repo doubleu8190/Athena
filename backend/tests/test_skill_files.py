@@ -21,6 +21,7 @@ from domain.file import (
     FileObjectScanEntry,
     PendingSessionFile,
     SessionFile,
+    SessionFileExtractionStatus,
     SessionFilePage,
     SessionFileSource,
     TextFileReadError,
@@ -134,6 +135,10 @@ class _Repository:
             source_call_id=None,
             output_index=None,
             created_at=file.created_at,
+            extraction_status=file.extraction_status,
+            extracted_text_key=file.extracted_text_key,
+            extracted_text_bytes=file.extracted_text_bytes,
+            extraction_error_code=file.extraction_error_code,
         )
         _ = request_fingerprint
         self.idempotency[key] = result
@@ -193,6 +198,30 @@ class _Repository:
         if any(item is None for item in values):
             raise ValueError("session_file_not_found")
         return tuple(item for item in values if item is not None)
+
+    async def update_extraction(
+        self,
+        file_id: str,
+        *,
+        extraction_status: SessionFileExtractionStatus,
+        extracted_text_key: str | None,
+        extracted_text_bytes: int | None,
+        extraction_error_code: str | None,
+    ) -> SessionFile | None:
+        existing = self.files.get(file_id)
+        if existing is None:
+            return None
+        if existing.extraction_status is SessionFileExtractionStatus.READY:
+            return existing
+        updated = replace(
+            existing,
+            extraction_status=extraction_status,
+            extracted_text_key=extracted_text_key,
+            extracted_text_bytes=extracted_text_bytes,
+            extraction_error_code=extraction_error_code,
+        )
+        self.files[file_id] = updated
+        return updated
 
 
 def _service(objects: _Objects, repository: _Repository) -> SessionFileService:

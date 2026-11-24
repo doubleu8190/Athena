@@ -129,6 +129,9 @@ class RunInputFileContext:
     mime_type: str
     size_bytes: int
     source: str
+    extraction_status: str = "none"
+    extracted_text_bytes: int | None = None
+    extraction_error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

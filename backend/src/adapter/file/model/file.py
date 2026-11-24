@@ -38,6 +38,23 @@ class SessionFileModel(Base):
             "AND request_fingerprint IS NULL)",
             name="ck_session_files_idempotency",
         ),
+        CheckConstraint(
+            "extraction_status IN ('none', 'ready', 'failed')",
+            name="ck_session_files_extraction_status",
+        ),
+        CheckConstraint(
+            "extracted_text_bytes IS NULL OR extracted_text_bytes >= 0",
+            name="ck_session_files_extracted_text_bytes",
+        ),
+        CheckConstraint(
+            "(extraction_status = 'none' AND extracted_text_key IS NULL "
+            "AND extracted_text_bytes IS NULL AND extraction_error_code IS NULL) OR "
+            "(extraction_status = 'ready' AND extracted_text_key IS NOT NULL "
+            "AND extracted_text_bytes IS NOT NULL AND extraction_error_code IS NULL) OR "
+            "(extraction_status = 'failed' AND extracted_text_key IS NULL "
+            "AND extracted_text_bytes IS NULL AND extraction_error_code IS NOT NULL)",
+            name="ck_session_files_extraction_consistency",
+        ),
         UniqueConstraint("session_id", "id", name="uq_session_files_session_id"),
         UniqueConstraint("object_key", name="uq_session_files_object_key"),
         UniqueConstraint(
@@ -70,6 +87,11 @@ class SessionFileModel(Base):
             "created_at",
             "id",
         ),
+        Index(
+            "uq_session_files_extracted_text_key",
+            "extracted_text_key",
+            unique=True,
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -86,6 +108,27 @@ class SessionFileModel(Base):
     output_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extraction_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="none",
+        server_default="none",
+    )
+    extracted_text_key: Mapped[str | None] = mapped_column(
+        String(1024),
+        nullable=True,
+        default=None,
+    )
+    extracted_text_bytes: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        default=None,
+    )
+    extraction_error_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        default=None,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

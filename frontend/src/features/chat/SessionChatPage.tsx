@@ -1,8 +1,13 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, RotateCcw, XCircle } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { Button, EmptyState, InlineAlert, toast } from "../../shared/ui";
+import { FilePreviewDialog } from "../files/FilePreviewDialog";
+import { syncSessionFileInCache, useSessionFiles } from "../files/hooks";
+import type { FilePreviewTarget, SessionFile } from "../files/model";
+import { sessionFileKeys } from "../files/queryKeys";
 import {
   isSessionNotFound,
   sessionErrorMessage,
@@ -30,8 +35,42 @@ interface SessionWorkbenchProps {
 }
 
 function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
+  const queryClient = useQueryClient();
   const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
+  // 统一提升至会话工作台顶层挂载单个 FilePreviewDialog，由消息流、执行进度、输入器与右侧文件抽屉共用，
+  // 避免 Radix Sheet 与 Dialog 重复挂载冲突并保持焦点与关闭层级清晰。
+  const [previewTarget, setPreviewTarget] = useState<FilePreviewTarget | null>(
+    null,
+  );
   const composerRef = useRef<SessionComposerHandle>(null);
+
+  const sessionFilesQuery = useSessionFiles(sessionId, Boolean(sessionId));
+  const sessionFilesById = useMemo<ReadonlyMap<string, SessionFile>>(() => {
+    const map = new Map<string, SessionFile>();
+    for (const page of sessionFilesQuery.data?.pages ?? []) {
+      for (const file of page.items) {
+        map.set(file.id, file);
+      }
+    }
+    return map;
+  }, [sessionFilesQuery.data?.pages]);
+
+  const handlePreviewFile = useCallback((target: FilePreviewTarget) => {
+    setPreviewTarget(target);
+  }, []);
+
+  const handlePreviewMetadataUpdated = useCallback(
+    (updatedFile: SessionFile) => {
+      syncSessionFileInCache(queryClient, sessionId, updatedFile);
+    },
+    [queryClient, sessionId],
+  );
+
+  const handlePreviewExtractionFailed = useCallback(() => {
+    void queryClient.invalidateQueries({
+      queryKey: sessionFileKeys.list(sessionId),
+    });
+  }, [queryClient, sessionId]);
 
   const controller = useSessionChatController({
     sessionId,
@@ -143,13 +182,14 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
     }
     return (
       <ExecutionProgressAccordion
+        onPreviewFile={handlePreviewFile}
         run={run}
         sessionId={sessionId}
         status={status}
         subagentTasks={subagentTasks}
       />
     );
-  }, [run, sessionId, status, subagentTasks]);
+  }, [handlePreviewFile, run, sessionId, status, subagentTasks]);
 
   const topAlertSlot = useMemo(() => {
     const hasTopAlerts =
@@ -389,12 +429,14 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
         messages={messages}
         onEditResend={handleEditResend}
         onLoadMore={handleLoadMoreMessages}
+        onPreviewFile={handlePreviewFile}
         onRetry={handleRetryMessages}
         onRetryRun={
           canRetryFromAssistantMessage
             ? handleRetryFromAssistantMessage
             : undefined
         }
+        sessionFilesById={sessionFilesById}
         sessionId={sessionId}
         topAlertSlot={topAlertSlot}
         transientText={transientText}
@@ -447,6 +489,7 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
             onChangeSelectedFileIds={setSelectedFileIds}
             onChangeSelectedSkillIds={setSelectedSkillIds}
             onPendingUploadsChange={setHandoffUploads}
+            onPreviewFile={handlePreviewFile}
             onSubmit={handleSubmit}
             ref={composerRef}
             selectedFileIds={selectedFileIds}
@@ -462,7 +505,21 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
 
       <SessionFilesDrawer
         onOpenChange={setFilesDrawerOpen}
+        onPreviewFile={handlePreviewFile}
         open={filesDrawerOpen}
+        sessionId={sessionId}
+      />
+
+      <FilePreviewDialog
+        file={previewTarget}
+        onExtractionFailed={handlePreviewExtractionFailed}
+        onFileMetadataUpdated={handlePreviewMetadataUpdated}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            setPreviewTarget(null);
+          }
+        }}
+        open={Boolean(previewTarget)}
         sessionId={sessionId}
       />
 

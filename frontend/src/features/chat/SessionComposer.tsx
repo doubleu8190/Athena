@@ -1,5 +1,7 @@
 import {
+  AlertTriangle,
   ArrowUp,
+  Eye,
   FileText,
   FolderOpen,
   Loader2,
@@ -29,6 +31,7 @@ import { formatBytes } from "../../shared/lib/format";
 import { newRequestId } from "../../shared/lib/requestId";
 import {
   AutoResizeTextarea,
+  Badge,
   Button,
   Checkbox,
   InlineAlert,
@@ -45,12 +48,23 @@ import {
 } from "../files/errorMessages";
 import { useSessionFiles, useUploadSessionFileMutation } from "../files/hooks";
 import {
+  MAX_VISION_IMAGES_PER_RUN,
+  canInlinePreviewFile,
   fileDisplayName,
+  isPreviewableImageFile,
+  sessionFilePreviewUrl,
+  sessionFileToPreviewTarget,
   validateSessionUpload,
+  type FilePreviewTarget,
   type PendingSessionUpload,
   type SessionFile,
 } from "../files/model";
 import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
+import { useUserModels } from "../models/hooks";
+import {
+  resolveEffectiveUserModel,
+  userModelDisplayLabel,
+} from "../models/model";
 import { usePublicSkills } from "../skills/hooks";
 import { SkillCatalogPicker } from "../skills/SkillCatalogPicker";
 import {
@@ -199,6 +213,8 @@ export interface ChatComposerProps {
   footerHint: string;
   /** 当前是否包含图片附件（驱动非视觉模型琥珀提醒）。 */
   hasImageAttachment: boolean;
+  /** 当前附件中的图片张数（驱动非识图提醒与超 5 张上限提示）。 */
+  imageAttachmentCount?: number;
   /** 是否归属某个项目（影响知识库默认态文案）。 */
   hasProjectContext?: boolean;
   /** 是否锁定重复提交（用于顶部温和锁标识）。 */
@@ -260,6 +276,7 @@ export function ChatComposer({
   errorBanner = null,
   footerHint,
   hasImageAttachment,
+  imageAttachmentCount,
   hasProjectContext = false,
   isLocked = false,
   knowledgeBaseIds,
@@ -289,6 +306,38 @@ export function ChatComposer({
   const resolvedTextareaId = textareaId ?? generatedTextareaId;
   const dragDepthRef = useRef(0);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  // 订阅用户模型目录（与 ModelSelectorPopover 共享同一 TanStack Query 缓存），驱动方案 A2 温和提示与一键切识图模型。
+  const modelsQuery = useUserModels();
+  const resolvedImageCount = imageAttachmentCount ?? (hasImageAttachment ? 1 : 0);
+  const effectiveModel = useMemo(() => {
+    const catalog = modelsQuery.data;
+    if (!catalog) {
+      return null;
+    }
+    if (
+      modelsQuery.isSuccess &&
+      modelProfileId !== null &&
+      !catalog.items.some((item) => item.id === modelProfileId)
+    ) {
+      return null;
+    }
+    return resolveEffectiveUserModel(catalog, modelProfileId);
+  }, [modelProfileId, modelsQuery.data, modelsQuery.isSuccess]);
+  const recommendedVisionModel = useMemo(
+    () =>
+      (modelsQuery.data?.items ?? []).find((item) => item.supports_vision) ??
+      null,
+    [modelsQuery.data?.items],
+  );
+  const recommendedVisionLabel = recommendedVisionModel
+    ? userModelDisplayLabel(recommendedVisionModel)
+    : null;
+  // 方案 A2 核心约定：非识图模型与超 5 张图片均仅展示温和非阻断提醒，绝不禁用发送按钮。
+  const showVisionUnsupportedBanner =
+    resolvedImageCount > 0 &&
+    Boolean(effectiveModel && !effectiveModel.supports_vision);
+  const showVisionLimitBanner = resolvedImageCount > MAX_VISION_IMAGES_PER_RUN;
 
   useEffect(() => {
     // 输入区切入禁用/锁定态时立即复位拖拽计数与遮罩，防止卡死在拖拽态。
@@ -466,6 +515,64 @@ export function ChatComposer({
           skills={skillChips}
         />
 
+        {showVisionUnsupportedBanner || showVisionLimitBanner ? (
+          <div className="space-y-1.5 border-b border-warning-border bg-warning-bg px-3.5 py-2 text-xs text-warning">
+            {showVisionUnsupportedBanner ? (
+              <div
+                className="flex flex-wrap items-center justify-between gap-2"
+                data-testid="composer-vision-unsupported-banner"
+                role="status"
+              >
+                <span className="inline-flex min-w-0 items-start gap-1.5 leading-relaxed">
+                  <AlertTriangle
+                    aria-hidden="true"
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                  />
+                  <span>
+                    {recommendedVisionModel
+                      ? "当前模型暂不支持识图，仍可直接发送，或切换至识图模型"
+                      : "当前模型暂不支持识图，仍可直接发送；当前暂无可用识图模型"}
+                  </span>
+                </span>
+                {recommendedVisionModel && recommendedVisionLabel ? (
+                  <button
+                    className="inline-flex shrink-0 items-center gap-1 rounded-md border border-warning-border bg-canvas px-2 py-1 text-xs font-medium text-warning transition-colors hover:bg-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus disabled:cursor-not-allowed disabled:opacity-50"
+                    data-compact-control="true"
+                    disabled={capabilityControlsDisabled}
+                    onClick={() => {
+                      onChangeModelProfileId(recommendedVisionModel.id);
+                      toast.success(
+                        `已切换至识图模型「${recommendedVisionLabel}」`,
+                      );
+                    }}
+                    type="button"
+                  >
+                    <Eye aria-hidden="true" className="h-3 w-3 shrink-0" />
+                    <span>一键切至「{recommendedVisionLabel}」</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {showVisionLimitBanner ? (
+              <div
+                className="flex items-start gap-1.5 leading-relaxed"
+                data-testid="composer-vision-limit-banner"
+                role="status"
+              >
+                <AlertTriangle
+                  aria-hidden="true"
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                />
+                <span>
+                  单次对话最多同时识别 {MAX_VISION_IMAGES_PER_RUN}{" "}
+                  张图片，超出部分本次不会发送给识图模型（仍会保留为会话文件）
+                </span>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <label className="sr-only" htmlFor={resolvedTextareaId}>
           {textareaLabel}
         </label>
@@ -606,6 +713,7 @@ export interface SessionComposerProps {
   onChangeSelectedFileIds: (fileIds: string[]) => void;
   onChangeSelectedSkillIds: (skillIds: string[]) => void;
   onPendingUploadsChange?: (uploads: PendingSessionUpload[]) => void;
+  onPreviewFile?: (target: FilePreviewTarget) => void;
   onSubmit: (submittedDraft: string) => Promise<boolean>;
   selectedFileIds: string[];
   selectedSkillIds: string[];
@@ -648,6 +756,7 @@ export const SessionComposer = forwardRef<
     onChangeSelectedFileIds,
     onChangeSelectedSkillIds,
     onPendingUploadsChange,
+    onPreviewFile,
     onSubmit,
     selectedFileIds,
     selectedSkillIds,
@@ -936,13 +1045,34 @@ export const SessionComposer = forwardRef<
     const readyChips: ComposerAttachmentChip[] = selectedFileIds.map(
       (fileId) => {
         const file = sessionFileMap.get(fileId);
-        const filename = file ? fileDisplayName(file) : `文件 ${fileId.slice(0, 8)}`;
+        const displayLabel = file
+          ? fileDisplayName(file)
+          : `文件 ${fileId.slice(0, 8)}`;
+        const rawFilename = file ? file.filename : displayLabel;
+        const canPreview = Boolean(
+          file &&
+            onPreviewFile &&
+            canInlinePreviewFile(file.filename, file.mime_type),
+        );
         return {
-          filename,
+          displayName: displayLabel,
+          extractedTextBytes: file?.extracted_text_bytes ?? null,
+          extractionErrorCode: file?.extraction_error_code ?? null,
+          extractionStatus: file?.extraction_status,
+          // 保持原始 file.filename 供缩略图与安全白名单校验，展示文案使用 displayName。
+          filename: rawFilename,
           id: `selected-${fileId}`,
           mimeType: file?.mime_type ?? null,
+          onPreview:
+            file && canPreview && onPreviewFile
+              ? () => onPreviewFile(sessionFileToPreviewTarget(file))
+              : undefined,
           onRemove: () => toggleExistingSessionFile(fileId),
-          removeAriaLabel: `移除附件：${filename}`,
+          previewUrl:
+            file && isPreviewableImageFile(file.filename, file.mime_type)
+              ? sessionFilePreviewUrl(sessionId, file.id)
+              : null,
+          removeAriaLabel: `移除附件：${displayLabel}`,
           sizeBytes: file?.size_bytes ?? null,
           status: "ready",
         };
@@ -969,27 +1099,33 @@ export const SessionComposer = forwardRef<
 
     return [...readyChips, ...taskChips];
   }, [
+    onPreviewFile,
     removeUploadTask,
     retryUploadTask,
     selectedFileIds,
     sessionFileMap,
+    sessionId,
     toggleExistingSessionFile,
     uploadTasks,
   ]);
 
-  const hasImageAttachment = useMemo(() => {
-    if (
-      uploadTasks.some((task) =>
-        isImageAttachmentFile(task.file.name, task.file.type),
-      )
-    ) {
-      return true;
+  // 统计当前已附加/上传中的图片数量，用于驱动方案 A2 识图提示与单轮 5 张上限提醒。
+  const imageAttachmentCount = useMemo(() => {
+    let count = 0;
+    for (const task of uploadTasks) {
+      if (isImageAttachmentFile(task.file.name, task.file.type)) {
+        count += 1;
+      }
     }
-    return selectedFileIds.some((fileId) => {
+    for (const fileId of selectedFileIds) {
       const file = sessionFileMap.get(fileId);
-      return file ? isImageAttachmentFile(file.filename, file.mime_type) : false;
-    });
+      if (file && isImageAttachmentFile(file.filename, file.mime_type)) {
+        count += 1;
+      }
+    }
+    return count;
   }, [selectedFileIds, sessionFileMap, uploadTasks]);
+  const hasImageAttachment = imageAttachmentCount > 0;
 
   const skillChips = useMemo<ComposerSkillChip[]>(() => {
     const catalogMap = new Map(
@@ -1172,6 +1308,21 @@ export const SessionComposer = forwardRef<
                           <span className="truncate text-xs font-medium text-text-primary">
                             {label}
                           </span>
+                          {file.extraction_status === "ready" ? (
+                            <Badge
+                              className="px-1 py-0 text-[10px]"
+                              variant="success"
+                            >
+                              已解析
+                            </Badge>
+                          ) : file.extraction_status === "failed" ? (
+                            <Badge
+                              className="px-1 py-0 text-[10px]"
+                              variant="warning"
+                            >
+                              未提取
+                            </Badge>
+                          ) : null}
                         </div>
                         <span className="block truncate text-[11px] text-text-tertiary">
                           {formatBytes(file.size_bytes)} ·{" "}
@@ -1283,6 +1434,7 @@ export const SessionComposer = forwardRef<
       draft={draft}
       footerHint={footerHint}
       hasImageAttachment={hasImageAttachment}
+      imageAttachmentCount={imageAttachmentCount}
       hasProjectContext={hasProjectContext}
       isLocked={isActive && !isTargetedSubagentAnswer && !isWaitingInput}
       knowledgeBaseIds={knowledgeBaseIds}

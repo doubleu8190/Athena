@@ -1,5 +1,16 @@
-import { FileText, Image, Paperclip, RefreshCw, Sparkles } from "lucide-react";
-import { useMemo } from "react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Eye,
+  FileCode2,
+  FileSpreadsheet,
+  FileText,
+  Image as ImageIcon,
+  Paperclip,
+  RefreshCw,
+  Sparkles,
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
 import {
@@ -14,43 +25,165 @@ import {
   SheetHeader,
   SheetTitle,
   Skeleton,
+  Tooltip,
 } from "../../shared/ui";
-import { fileErrorMessage } from "../files/errorMessages";
+import {
+  extractionErrorSummary,
+  fileErrorMessage,
+} from "../files/errorMessages";
 import { useSessionFiles } from "../files/hooks";
-import { fileDisplayName, type SessionFile } from "../files/model";
+import {
+  canInlinePreviewFile,
+  fileDisplayName,
+  fileExtension,
+  isPreviewableImageFile,
+  sessionFilePreviewUrl,
+  sessionFileToPreviewTarget,
+  type FilePreviewTarget,
+  type SessionFile,
+} from "../files/model";
 import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
-import { isImageAttachmentFile } from "./ComposerAttachmentBar";
 
 export interface SessionFilesDrawerProps {
   onOpenChange: (open: boolean) => void;
+  onPreviewFile?: (target: FilePreviewTarget) => void;
   open: boolean;
   sessionId: string;
 }
 
+function DrawerFileThumbnail({
+  displayName,
+  file,
+  onPreview,
+  sessionId,
+}: {
+  displayName: string;
+  file: SessionFile;
+  onPreview?: () => void;
+  sessionId: string;
+}) {
+  const [imgError, setImgError] = useState(false);
+  const isSafeImage = isPreviewableImageFile(file.filename, file.mime_type);
+  const previewSrc = isSafeImage
+    ? sessionFilePreviewUrl(sessionId, file.id)
+    : null;
+
+  useEffect(() => {
+    setImgError(false);
+  }, [previewSrc]);
+
+  if (isSafeImage && previewSrc && !imgError) {
+    const imageNode = (
+      <img
+        alt={displayName}
+        className="h-10 w-10 rounded-lg border border-border-subtle bg-subtle object-cover"
+        loading="lazy"
+        onError={() => setImgError(true)}
+        src={previewSrc}
+      />
+    );
+    if (onPreview) {
+      return (
+        <button
+          aria-label={`查看大图：${displayName}`}
+          className="mt-0.5 shrink-0 rounded-lg transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+          data-compact-control="true"
+          onClick={onPreview}
+          type="button"
+        >
+          {imageNode}
+        </button>
+      );
+    }
+    return <span className="mt-0.5 shrink-0">{imageNode}</span>;
+  }
+
+  const ext = fileExtension(file.filename);
+  const FallbackIcon = isSafeImage
+    ? ImageIcon
+    : ext === "csv" || ext === "xlsx"
+      ? FileSpreadsheet
+      : ext === "md" || ext === "json"
+        ? FileCode2
+        : FileText;
+
+  return (
+    <span
+      aria-hidden="true"
+      className="mt-0.5 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-subtle text-text-secondary"
+    >
+      <FallbackIcon className="h-4 w-4" />
+    </span>
+  );
+}
+
 function FileRow({
   file,
+  onPreviewFile,
   sessionId,
 }: {
   file: SessionFile;
+  onPreviewFile?: (target: FilePreviewTarget) => void;
   sessionId: string;
 }) {
   const displayName = fileDisplayName(file);
-  const isImage = isImageAttachmentFile(file.filename, file.mime_type);
-  const FileIcon = isImage ? Image : FileText;
+  const canPreview = Boolean(
+    onPreviewFile && canInlinePreviewFile(file.filename, file.mime_type),
+  );
+  const triggerPreview =
+    canPreview && onPreviewFile
+      ? () => onPreviewFile(sessionFileToPreviewTarget(file))
+      : undefined;
+
+  const showExtractionBadge =
+    file.extraction_status === "ready" || file.extraction_status === "failed";
+
+  const readyTooltip =
+    file.extracted_text_bytes !== null &&
+    file.extracted_text_bytes !== undefined
+      ? `已完成结构化文本提取（${formatBytes(file.extracted_text_bytes)}）`
+      : "已完成结构化文本提取，支持在线预览与对话阅读";
 
   return (
-    <li className="flex items-start justify-between gap-3 rounded-xl border border-border-subtle bg-canvas p-3 transition-colors hover:border-border-default">
+    <li className="flex flex-wrap items-start justify-between gap-2.5 rounded-xl border border-border-subtle bg-canvas p-3 transition-colors hover:border-border-default">
       <div className="flex min-w-0 flex-1 items-start gap-2.5">
-        <span
-          aria-hidden="true"
-          className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-subtle text-text-secondary"
-        >
-          <FileIcon className="h-4 w-4" />
-        </span>
+        <DrawerFileThumbnail
+          displayName={displayName}
+          file={file}
+          onPreview={triggerPreview}
+          sessionId={sessionId}
+        />
         <div className="min-w-0 flex-1 space-y-0.5">
-          <p className="truncate text-sm font-medium text-text-primary">
-            {displayName}
-          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <p
+              className="min-w-0 truncate text-sm font-medium text-text-primary"
+              title={displayName}
+            >
+              {displayName}
+            </p>
+            {showExtractionBadge && file.extraction_status === "ready" ? (
+              <Tooltip content={readyTooltip}>
+                <span
+                  className="inline-flex shrink-0 cursor-help items-center gap-0.5 rounded-md border border-success-border bg-success-bg px-1.5 py-0.5 text-[10px] leading-none font-medium text-success focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring-focus"
+                  tabIndex={0}
+                >
+                  <CheckCircle2 aria-hidden="true" className="h-2.5 w-2.5" />
+                  <span>已解析</span>
+                </span>
+              </Tooltip>
+            ) : null}
+            {showExtractionBadge && file.extraction_status === "failed" ? (
+              <Tooltip content={extractionErrorSummary(file.extraction_error_code)}>
+                <span
+                  className="inline-flex shrink-0 cursor-help items-center gap-0.5 rounded-md border border-warning-border bg-warning-bg px-1.5 py-0.5 text-[10px] leading-none font-medium text-warning focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring-focus"
+                  tabIndex={0}
+                >
+                  <AlertTriangle aria-hidden="true" className="h-2.5 w-2.5" />
+                  <span>未提取</span>
+                </span>
+              </Tooltip>
+            ) : null}
+          </div>
           {displayName !== file.filename ? (
             <p className="truncate text-xs text-text-tertiary">
               {file.filename}
@@ -62,7 +195,19 @@ function FileRow({
         </div>
       </div>
 
-      <div className="shrink-0 self-center">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 self-center">
+        {triggerPreview ? (
+          <button
+            aria-label={`预览文件：${displayName}`}
+            className="inline-flex items-center gap-1 rounded-md border border-border-default bg-canvas px-2 py-1 text-xs font-medium text-text-primary transition-colors hover:border-brand-border hover:bg-brand-subtle hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+            data-compact-control="true"
+            onClick={triggerPreview}
+            type="button"
+          >
+            <Eye aria-hidden="true" className="h-3 w-3" />
+            <span>预览</span>
+          </button>
+        ) : null}
         <SessionFileDownloadButton
           compact
           fileId={file.id}
@@ -76,10 +221,11 @@ function FileRow({
 
 /**
  * 右侧会话文件抽屉（Radix Sheet）：
- * 集中展示本会话的全部「上传附件」与「生成产物」，提供文件元信息与一键下载。
+ * 集中展示本会话的全部「上传附件」与「生成产物」，提供缩略图、解析状态微标、在线预览与一键下载。
  */
 export function SessionFilesDrawer({
   onOpenChange,
+  onPreviewFile,
   open,
   sessionId,
 }: SessionFilesDrawerProps) {
@@ -169,6 +315,7 @@ export function SessionFilesDrawer({
                       <FileRow
                         file={file}
                         key={file.id}
+                        onPreviewFile={onPreviewFile}
                         sessionId={sessionId}
                       />
                     ))}
@@ -195,6 +342,7 @@ export function SessionFilesDrawer({
                       <FileRow
                         file={file}
                         key={file.id}
+                        onPreviewFile={onPreviewFile}
                         sessionId={sessionId}
                       />
                     ))}

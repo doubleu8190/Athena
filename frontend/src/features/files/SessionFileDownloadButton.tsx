@@ -9,6 +9,7 @@ interface SessionFileDownloadButtonProps {
   compact?: boolean;
   fileId: string;
   filename: string;
+  label?: string;
   sessionId: string;
 }
 
@@ -16,6 +17,7 @@ export function SessionFileDownloadButton({
   compact = false,
   fileId,
   filename,
+  label = "下载",
   sessionId,
 }: SessionFileDownloadButtonProps) {
   const [pending, setPending] = useState(false);
@@ -47,7 +49,7 @@ export function SessionFileDownloadButton({
         type="button"
       >
         {!compact ? <Icon name="download" size={14} /> : null}
-        {pending ? "正在准备…" : "下载"}
+        {pending ? "正在准备…" : label}
       </button>
       {error ? (
         <span className="text-xs leading-normal text-danger" role="alert">

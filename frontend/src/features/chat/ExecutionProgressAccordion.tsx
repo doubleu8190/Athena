@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Eye,
   Layers,
   Loader2,
   RefreshCw,
@@ -23,7 +24,11 @@ import {
   cn,
 } from "../../shared/ui";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
-import { fileDisplayName } from "../files/model";
+import {
+  canInlinePreviewFile,
+  fileDisplayName,
+  type FilePreviewTarget,
+} from "../files/model";
 import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
 import { runFailureReason } from "./FailedRunCard";
 import { useRunDetails, useRunToolCalls, useToolCallDetail } from "./hooks";
@@ -217,11 +222,13 @@ function formatReadableEntries(
 
 function StepArtifactList({
   artifacts,
+  onPreviewFile,
   sessionId,
 }: {
   artifacts: NonNullable<
     ReturnType<typeof useToolCallDetail>["data"]
   >["artifacts"];
+  onPreviewFile?: (target: FilePreviewTarget) => void;
   sessionId: string;
 }) {
   if (!artifacts || artifacts.length === 0) {
@@ -233,27 +240,56 @@ function StepArtifactList({
         交付文件
       </div>
       <ul className="space-y-1.5">
-        {artifacts.map((artifact) => (
-          <li
-            className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-subtle/60 px-2.5 py-1.5"
-            key={artifact.file_id}
-          >
-            <span className="min-w-0 flex-1">
-              <strong className="block truncate text-xs font-medium text-text-primary">
-                {fileDisplayName(artifact)}
-              </strong>
-              <small className="block truncate text-[11px] text-text-tertiary">
-                {artifact.filename} · {formatBytes(artifact.size_bytes)}
-              </small>
-            </span>
-            <SessionFileDownloadButton
-              compact
-              fileId={artifact.file_id}
-              filename={fileDisplayName(artifact)}
-              sessionId={sessionId}
-            />
-          </li>
-        ))}
+        {artifacts.map((artifact) => {
+          const displayName = fileDisplayName(artifact);
+          const canPreview = Boolean(
+            onPreviewFile &&
+              canInlinePreviewFile(artifact.filename, artifact.mime_type),
+          );
+          return (
+            <li
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border-subtle bg-subtle/60 px-2.5 py-1.5"
+              key={artifact.file_id}
+            >
+              <span className="min-w-0 flex-1">
+                <strong className="block truncate text-xs font-medium text-text-primary">
+                  {displayName}
+                </strong>
+                <small className="block truncate text-[11px] text-text-tertiary">
+                  {artifact.filename} · {formatBytes(artifact.size_bytes)}
+                </small>
+              </span>
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                {canPreview && onPreviewFile ? (
+                  <button
+                    aria-label={`预览文件：${displayName}`}
+                    className="inline-flex items-center gap-1 rounded-md border border-border-default bg-canvas px-2 py-0.5 text-xs font-medium text-text-primary transition-colors hover:border-brand-border hover:bg-brand-subtle hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
+                    data-compact-control="true"
+                    onClick={() =>
+                      onPreviewFile({
+                        fileId: artifact.file_id,
+                        filename: artifact.filename,
+                        label: artifact.label,
+                        mimeType: artifact.mime_type,
+                        sizeBytes: artifact.size_bytes,
+                      })
+                    }
+                    type="button"
+                  >
+                    <Eye aria-hidden="true" className="h-3 w-3" />
+                    <span>预览</span>
+                  </button>
+                ) : null}
+                <SessionFileDownloadButton
+                  compact
+                  fileId={artifact.file_id}
+                  filename={displayName}
+                  sessionId={sessionId}
+                />
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -263,11 +299,13 @@ function StepArtifactList({
 function ToolStepRow({
   approvalDisplayName,
   call,
+  onPreviewFile,
   runId,
   sessionId,
 }: {
   approvalDisplayName?: string | null;
   call: RunToolCallSummary;
+  onPreviewFile?: (target: FilePreviewTarget) => void;
   runId: string;
   sessionId: string;
 }) {
@@ -358,7 +396,11 @@ function ToolStepRow({
                   variant="warning"
                 />
               )}
-              <StepArtifactList artifacts={artifacts} sessionId={sessionId} />
+              <StepArtifactList
+                artifacts={artifacts}
+                onPreviewFile={onPreviewFile}
+                sessionId={sessionId}
+              />
             </>
           ) : details.data ? (
             <>
@@ -435,7 +477,11 @@ function ToolStepRow({
                 <p className="text-text-tertiary">该步骤尚未返回最终结果。</p>
               )}
 
-              <StepArtifactList artifacts={artifacts} sessionId={sessionId} />
+              <StepArtifactList
+                artifacts={artifacts}
+                onPreviewFile={onPreviewFile}
+                sessionId={sessionId}
+              />
             </>
           ) : null}
         </div>
@@ -446,9 +492,11 @@ function ToolStepRow({
 
 /** 嵌套协作任务卡片（替代旧独立 SubagentExecutionPanel）：隐藏底层 slug/run_id，按需懒加载详情与工具步骤。 */
 function NestedSubagentTaskRow({
+  onPreviewFile,
   sessionId,
   task,
 }: {
+  onPreviewFile?: (target: FilePreviewTarget) => void;
   sessionId: string;
   task: SubagentTaskSummary;
 }) {
@@ -629,6 +677,7 @@ function NestedSubagentTaskRow({
                       <ToolStepRow
                         call={call}
                         key={call.id}
+                        onPreviewFile={onPreviewFile}
                         runId={task.sub_run_id}
                         sessionId={sessionId}
                       />
@@ -645,6 +694,7 @@ function NestedSubagentTaskRow({
 }
 
 export interface ExecutionProgressAccordionProps {
+  onPreviewFile?: (target: FilePreviewTarget) => void;
   run: Run | null;
   sessionId: string;
   status: RunStatus | null;
@@ -658,6 +708,7 @@ export interface ExecutionProgressAccordionProps {
  * - 所有步骤详情与子智能体详情均按需懒加载，技能工具严格坚守 SafeSkillProjection 安全门禁。
  */
 export function ExecutionProgressAccordion({
+  onPreviewFile,
   run,
   sessionId,
   status,
@@ -903,6 +954,7 @@ export function ExecutionProgressAccordion({
                       approvalDisplayName={approvalDisplayNames.get(call.id)}
                       call={call}
                       key={call.id}
+                      onPreviewFile={onPreviewFile}
                       runId={run.id}
                       sessionId={sessionId}
                     />
@@ -934,6 +986,7 @@ export function ExecutionProgressAccordion({
                     {subagentTasks.map((task) => (
                       <NestedSubagentTaskRow
                         key={task.sub_run_id}
+                        onPreviewFile={onPreviewFile}
                         sessionId={sessionId}
                         task={task}
                       />

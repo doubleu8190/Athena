@@ -17,6 +17,7 @@ import {
   Skeleton,
   Tooltip,
   cn,
+  toast,
 } from "../../shared/ui";
 import { useUserModels } from "../models/hooks";
 import {
@@ -72,6 +73,11 @@ export function ModelSelectorPopover({
   const showVisionWarning = Boolean(
     hasImageAttachment && effectiveModel && !effectiveModel.supports_vision,
   );
+  const recommendedVisionModel =
+    items.find((item) => item.supports_vision) ?? null;
+  const recommendedVisionLabel = recommendedVisionModel
+    ? userModelDisplayLabel(recommendedVisionModel)
+    : null;
 
   return (
     <div className="inline-flex items-center gap-1">
@@ -149,14 +155,35 @@ export function ModelSelectorPopover({
 
           {showVisionWarning ? (
             <div
-              className="mx-1 mb-2 flex items-start gap-2 rounded-lg border border-warning-border bg-warning-bg px-2.5 py-2 text-xs text-warning"
+              className="mx-1 mb-2 space-y-2 rounded-lg border border-warning-border bg-warning-bg px-2.5 py-2 text-xs text-warning"
               role="status"
             >
-              <AlertTriangle
-                aria-hidden="true"
-                className="mt-0.5 h-3.5 w-3.5 shrink-0"
-              />
-              <span>当前模型不支持识图，建议切换支持视觉的模型。</span>
+              <div className="flex items-start gap-2">
+                <AlertTriangle
+                  aria-hidden="true"
+                  className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                />
+                <span>
+                  {recommendedVisionModel
+                    ? "当前模型暂不支持识图，仍可直接发送，或切换至识图模型。"
+                    : "当前模型暂不支持识图，仍可直接发送；当前暂无可用识图模型。"}
+                </span>
+              </div>
+              {recommendedVisionModel && recommendedVisionLabel ? (
+                <Button
+                  disabled={disabled}
+                  onClick={() => {
+                    onChange(recommendedVisionModel.id);
+                    toast.success(`已切换至识图模型「${recommendedVisionLabel}」`);
+                    setOpen(false);
+                  }}
+                  size="xs"
+                  variant="outline"
+                >
+                  <Eye aria-hidden="true" className="h-3 w-3" />
+                  一键切至「{recommendedVisionLabel}」
+                </Button>
+              ) : null}
             </div>
           ) : null}
 

@@ -12,7 +12,7 @@ import {
   Wand2,
   type LucideIcon,
 } from "lucide-react";
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -37,6 +37,7 @@ import {
   fileRequestCanBeReused,
 } from "../files/errorMessages";
 import {
+  isPreviewableImageFile,
   validateSessionUpload,
   type PendingSessionUpload,
 } from "../files/model";
@@ -149,6 +150,60 @@ export function DraftChatPage() {
   >("idle");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 草稿态本地图片缩略图 objectURL 映射：按 requestId 复用，移除文件或页面卸载时及时 revokeObjectURL 防泄漏。
+  const localPreviewUrlsRef = useRef<Map<string, string>>(new Map());
+  const [localPreviewUrls, setLocalPreviewUrls] = useState<
+    Record<string, string>
+  >({});
+
+  useEffect(() => {
+    if (
+      typeof URL === "undefined" ||
+      typeof URL.createObjectURL !== "function"
+    ) {
+      return;
+    }
+    const currentMap = localPreviewUrlsRef.current;
+    const activeIds = new Set<string>();
+    let changed = false;
+
+    for (const pending of pendingUploads) {
+      if (!isPreviewableImageFile(pending.file.name, pending.file.type)) {
+        continue;
+      }
+      activeIds.add(pending.requestId);
+      if (!currentMap.has(pending.requestId)) {
+        currentMap.set(pending.requestId, URL.createObjectURL(pending.file));
+        changed = true;
+      }
+    }
+
+    for (const [requestId, url] of Array.from(currentMap.entries())) {
+      if (!activeIds.has(requestId)) {
+        if (typeof URL.revokeObjectURL === "function") {
+          URL.revokeObjectURL(url);
+        }
+        currentMap.delete(requestId);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      setLocalPreviewUrls(Object.fromEntries(currentMap.entries()));
+    }
+  }, [pendingUploads]);
+
+  useEffect(() => {
+    const map = localPreviewUrlsRef.current;
+    return () => {
+      if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+        for (const url of map.values()) {
+          URL.revokeObjectURL(url);
+        }
+      }
+      map.clear();
+    };
+  }, []);
 
   const displayName = getUserDisplayName(user);
   const primaryDepartment = getPrimaryDepartment(user);
@@ -367,20 +422,22 @@ export function DraftChatPage() {
                   (item) => item.requestId !== pending.requestId,
                 ),
               ),
+        previewUrl: localPreviewUrls[pending.requestId] ?? null,
         removeAriaLabel: `移除任务文件：${pending.file.name}`,
         sizeBytes: pending.file.size,
         status: "queued",
       })),
-    [pendingUploads, setPendingUploads, submitting],
+    [localPreviewUrls, pendingUploads, setPendingUploads, submitting],
   );
 
-  const hasImageAttachment = useMemo(
+  const imageAttachmentCount = useMemo(
     () =>
-      pendingUploads.some((pending) =>
+      pendingUploads.filter((pending) =>
         isImageAttachmentFile(pending.file.name, pending.file.type),
-      ),
+      ).length,
     [pendingUploads],
   );
+  const hasImageAttachment = imageAttachmentCount > 0;
 
   const skillChips = useMemo<ComposerSkillChip[]>(() => {
     const catalogMap = new Map(
@@ -593,6 +650,7 @@ export function DraftChatPage() {
                 : "Enter 发送 · Shift + Enter 换行 · 支持拖拽或粘贴文件与截图"
             }
             hasImageAttachment={hasImageAttachment}
+            imageAttachmentCount={imageAttachmentCount}
             hasProjectContext={Boolean(selectedProjectId)}
             knowledgeBaseIds={knowledgeBaseIds}
             modelProfileId={modelProfileId}

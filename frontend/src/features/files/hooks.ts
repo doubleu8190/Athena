@@ -3,6 +3,7 @@ import {
   useMutation,
   useQueryClient,
   type InfiniteData,
+  type QueryClient,
   type QueryKey,
 } from "@tanstack/react-query";
 
@@ -13,6 +14,59 @@ import {
   type SessionFilePage,
 } from "./model";
 import { sessionFileKeys } from "./queryKeys";
+
+function isSessionFileMetadataEqual(
+  current: SessionFile,
+  next: SessionFile,
+): boolean {
+  return (
+    current.extraction_status === next.extraction_status &&
+    (current.extracted_text_bytes ?? null) ===
+      (next.extracted_text_bytes ?? null) &&
+    (current.extraction_error_code ?? null) ===
+      (next.extraction_error_code ?? null) &&
+    current.filename === next.filename &&
+    current.label === next.label &&
+    current.mime_type === next.mime_type &&
+    current.size_bytes === next.size_bytes
+  );
+}
+
+/**
+ * 在线预览触发后端惰性补解析后，将最新文件元数据（如 extraction_status / extracted_text_bytes）
+ * 原地同步回会话文件列表缓存；先按字段级判等，无变化时直接返回原缓存引用，避免触发 MessageRow 不必要重渲染。
+ */
+export function syncSessionFileInCache(
+  queryClient: QueryClient,
+  sessionId: string,
+  updatedFile: SessionFile,
+): void {
+  queryClient.setQueryData<InfiniteData<SessionFilePage>>(
+    sessionFileKeys.list(sessionId),
+    (current) => {
+      if (!current) {
+        return current;
+      }
+      let changed = false;
+      const nextPages = current.pages.map((page) => {
+        let pageChanged = false;
+        const nextItems = page.items.map((item) => {
+          if (item.id !== updatedFile.id) {
+            return item;
+          }
+          if (isSessionFileMetadataEqual(item, updatedFile)) {
+            return item;
+          }
+          pageChanged = true;
+          changed = true;
+          return { ...item, ...updatedFile };
+        });
+        return pageChanged ? { ...page, items: nextItems } : page;
+      });
+      return changed ? { ...current, pages: nextPages } : current;
+    },
+  );
+}
 
 export function useSessionFiles(sessionId: string, enabled = true) {
   return useInfiniteQuery<

@@ -1190,4 +1190,106 @@ describe("知识库检索", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("普通员工访问只读全公司知识库详情时隐藏全部写按钮，保留检索测试与版本历史查看；404 显示新无权文案", async () => {
+    const companyBase = {
+      ...KNOWLEDGE_BASE_A,
+      id: "kb-company-readonly",
+      name: "全公司规章库",
+      owner_department_id: null,
+      visibility_scope: "company" as const,
+    };
+    const failedDoc = makeKnowledgeDocument({
+      active_version_id: null,
+      id: "doc-readonly-failed",
+      knowledge_base_id: companyBase.id,
+      latest_version: makeKnowledgeVersion({
+        chunk_count: 0,
+        document_id: "doc-readonly-failed",
+        error_code: "knowledge_document_text_empty",
+        id: "ver-failed-1",
+        state: "failed",
+      }),
+      pending_version_id: null,
+      title: "只读失败文档",
+    });
+
+    const fetchMock = createFetchMock((url, init) => {
+      if (url.pathname === `/api/v1/knowledge-bases/${companyBase.id}`) {
+        return jsonResponse(companyBase);
+      }
+      if (
+        url.pathname === `/api/v1/knowledge-bases/${companyBase.id}/documents`
+      ) {
+        return jsonResponse(knowledgeListResponse([failedDoc], 1, 10));
+      }
+      if (
+        url.pathname ===
+        `/api/v1/knowledge-bases/${companyBase.id}/documents/${failedDoc.id}/versions`
+      ) {
+        return jsonResponse([failedDoc.latest_version!]);
+      }
+      if (url.pathname === "/api/v1/knowledge-bases/no-access") {
+        return jsonResponse({ detail: "knowledge_base_not_found" }, 404);
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    const view = renderApp(`/knowledge/${companyBase.id}`);
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "全公司规章库" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("全公司")).toBeInTheDocument();
+    expect(screen.getByText("只读")).toBeInTheDocument();
+    // 保留检索测试与版本历史。
+    expect(screen.getByRole("button", { name: "检索测试" })).toBeInTheDocument();
+    const versionHistoryButton = await screen.findByRole("button", {
+      name: "版本历史：只读失败文档",
+    });
+    expect(versionHistoryButton).toBeInTheDocument();
+    // 隐藏所有写操作按钮。
+    expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "添加资料" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "删除知识库" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /重命名文档/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /添加新版本/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /删除文档/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重试失败版本" }),
+    ).not.toBeInTheDocument();
+
+    // 打开只读知识库的「版本历史」弹窗：可查看失败版本记录与来源下载，但绝不渲染「重试此版本」写操作按钮。
+    await user.click(versionHistoryButton);
+    const historyDialog = await screen.findByRole("dialog", {
+      name: "版本历史",
+    });
+    expect(
+      await within(historyDialog).findByText(/没有提取到可检索文本/),
+    ).toBeInTheDocument();
+    expect(
+      within(historyDialog).queryByRole("button", { name: "重试此版本" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      within(historyDialog).getByRole("button", { name: "关闭" }),
+    );
+
+    // 404 / 跨部门无权访问展示新文案。
+    view.navigateTo("/knowledge/no-access");
+    expect(
+      await screen.findByText("该知识库不存在、已删除，或你当前无权访问。"),
+    ).toBeInTheDocument();
+  });
 });

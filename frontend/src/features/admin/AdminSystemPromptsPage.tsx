@@ -601,7 +601,6 @@ export function AdminSystemPromptsPage() {
     <div className="page-shell admin-page admin-system-prompts-page">
       <header className="page-heading">
         <div className="page-heading-copy">
-          <p className="page-eyebrow">Admin / System prompts</p>
           <h1>系统提示词</h1>
           <p className="page-description">
             管理主对话与历史压缩的全局纯文本提示词。保存会创建不可变版本并立即供后续新任务使用，已有任务继续使用创建时固定的版本。
@@ -685,7 +684,6 @@ export function AdminSystemPromptsPage() {
             >
               <header className="admin-section-heading">
                 <div>
-                  <p className="admin-section-kicker">Current version</p>
                   <h2 id="system-prompt-editor-title">
                     {activeDefinition?.label}正文
                   </h2>
@@ -857,7 +855,6 @@ export function AdminSystemPromptsPage() {
             >
               <header className="admin-section-heading">
                 <div>
-                  <p className="admin-section-kicker">Immutable history</p>
                   <h2 id="system-prompt-history-title">版本历史</h2>
                 </div>
                 {history.isSuccess ? (

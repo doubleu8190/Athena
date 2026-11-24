@@ -35,6 +35,12 @@ function toListQuery(query: KnowledgeListQuery): string {
   if (query.pageSize !== undefined) {
     params.set("page_size", String(query.pageSize));
   }
+  if (query.visibilityScope !== undefined) {
+    params.set("visibility_scope", query.visibilityScope);
+  }
+  if (query.ownerDepartmentId !== undefined && query.ownerDepartmentId.trim()) {
+    params.set("owner_department_id", query.ownerDepartmentId.trim());
+  }
   const serialized = params.toString();
   return serialized ? `?${serialized}` : "";
 }

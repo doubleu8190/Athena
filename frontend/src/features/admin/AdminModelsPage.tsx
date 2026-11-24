@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
+import { Badge } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -122,10 +123,9 @@ export function AdminModelsPage() {
     <div className="page-shell admin-page admin-models-page">
       <header className="page-heading">
         <div className="page-heading-copy">
-          <p className="page-eyebrow">Admin / Models</p>
           <h1>模型与压缩策略</h1>
           <p className="page-description">
-            管理不可变模型版本与默认路由。页面只展示后端安全投影，凭据仅引用环境变量名，不回显值。
+            管理模型配置、默认对话路由与上下文压缩策略。页面只展示后端安全投影，凭据不回显明文值。
           </p>
         </div>
         <button
@@ -157,7 +157,6 @@ export function AdminModelsPage() {
       >
         <header className="admin-section-heading">
           <div>
-            <p className="admin-section-kicker">Immutable versions</p>
             <h2 id="model-profile-list-title">模型版本</h2>
           </div>
           {profiles.isSuccess ? (
@@ -187,9 +186,8 @@ export function AdminModelsPage() {
                 创建第一个模型版本
               </button>
             }
-            description="创建后版本不可编辑或删除。只有已启用且支持流式与工具调用的版本才能设为默认。"
+            description="只有已启用且支持流式与工具调用的版本才能设为默认。"
             icon="sliders"
-            kicker="No model versions"
             title="还没有模型版本"
           />
         ) : (
@@ -223,10 +221,36 @@ export function AdminModelsPage() {
                           >
                             {profile.enabled ? "已启用" : "已停用"}
                           </span>
+                          {profile.scenario_label?.trim() ? (
+                            <Badge variant="info">
+                              {profile.scenario_label.trim()}
+                            </Badge>
+                          ) : null}
+                          {profile.visible_to_users !== undefined ? (
+                            <Badge
+                              variant={
+                                profile.visible_to_users ? "brand" : "neutral"
+                              }
+                            >
+                              {profile.visible_to_users
+                                ? "用户可见"
+                                : "仅内部使用"}
+                            </Badge>
+                          ) : null}
+                          {profile.version !== undefined ? (
+                            <span className="admin-status-badge">
+                              v{profile.version}
+                            </span>
+                          ) : null}
                         </div>
                         <p className="admin-code-line">
                           {profile.protocol} · {profile.model}
                         </p>
+                        {profile.scenario_description?.trim() ? (
+                          <p className="admin-muted">
+                            {profile.scenario_description.trim()}
+                          </p>
+                        ) : null}
                       </div>
                       <ModelCapabilityList profile={profile} />
                     </div>
@@ -339,7 +363,6 @@ export function AdminModelsPage() {
       >
         <header className="admin-section-heading">
           <div>
-            <p className="admin-section-kicker">Context policy</p>
             <h2 id="compression-policy-title">上下文压缩策略</h2>
           </div>
         </header>
@@ -379,13 +402,11 @@ export function AdminModelsPage() {
                 : "上下文压缩尚未配置或其模型密钥暂不可用。升级后需重新选择模型并保存策略；已有 Run 仍保留原策略快照。"
             }
             icon="history"
-            kicker="Not configured"
             title="尚未配置上下文压缩"
           />
         ) : (
           <article className="admin-policy-card">
             <div>
-              <p className="admin-section-kicker">Active policy</p>
               <h3>
                 {profiles.data?.items.find(
                   (profile) =>

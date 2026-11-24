@@ -586,6 +586,8 @@ export function DeleteKnowledgeDocumentDialog({
 
 interface VersionHistoryDialogProps {
   baseId: string;
+  /** 是否拥有知识库管理写权限；默认 false 保持 fail-closed，避免只读用户看到重试等写操作。 */
+  canManage?: boolean;
   document: KnowledgeDocument;
   onClose: () => void;
   open: boolean;
@@ -663,6 +665,7 @@ function VersionRow({
 
 export function VersionHistoryDialog({
   baseId,
+  canManage = false,
   document,
   onClose,
   open,
@@ -673,7 +676,9 @@ export function VersionHistoryDialog({
     document.id,
   );
   const latest = versions.data?.[0] ?? null;
+  // 仅当具备管理写权限且当前无排队中版本时，才允许对最新失败版本发起重试。
   const canRetry =
+    canManage &&
     document.pending_version_id === null &&
     latest?.state === "failed";
 

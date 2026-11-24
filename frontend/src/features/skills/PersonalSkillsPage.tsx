@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
+import { Tabs, TabsList, TabsTrigger } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
+import { useAuth } from "../auth/AuthProvider";
+import { resolveUserDepartmentName } from "../auth/model";
 import {
   isSkillRevisionConflict,
   skillErrorMessage,
@@ -21,6 +24,7 @@ import {
   skillScope,
   type Skill,
   type SkillAdminDetails,
+  type SkillScope,
 } from "./model";
 import { PersonalSkillEditorDialog } from "./PersonalSkillEditorDialog";
 import { SkillScopeBadge } from "./SkillScopeBadge";
@@ -31,9 +35,20 @@ type EditorState =
   | { mode: "closed"; open: false };
 
 type SkillsLibraryViewName = "available" | "mine";
+type AvailableScopeFilter = "all" | SkillScope;
 type CreateAction = () => void;
 
 const CLOSED_EDITOR: EditorState = { mode: "closed", open: false };
+
+const AVAILABLE_SCOPE_FILTERS: ReadonlyArray<{
+  label: string;
+  value: AvailableScopeFilter;
+}> = [
+  { label: "全部", value: "all" },
+  { label: "全公司", value: "company" },
+  { label: "部门共享", value: "department" },
+  { label: "个人", value: "personal" },
+];
 
 function conflictMessage(error: unknown, fallback: string): string {
   return isSkillRevisionConflict(error)
@@ -41,14 +56,31 @@ function conflictMessage(error: unknown, fallback: string): string {
     : skillErrorMessage(error) || fallback;
 }
 
-function AvailableSkillCard({ skill }: { skill: Skill }) {
+function skillSourceCopy(scope: SkillScope): string {
+  switch (scope) {
+    case "company":
+      return "全公司发布";
+    case "department":
+      return "部门发布";
+    case "personal":
+      return "本人创建";
+  }
+}
+
+function AvailableSkillCard({
+  departmentName,
+  skill,
+}: {
+  departmentName: string | null;
+  skill: Skill;
+}) {
   const scope = skillScope(skill);
   return (
     <li className="available-skill-card">
       <div className="available-skill-heading">
         <div className="personal-skill-title-line">
           <h3>{skill.name}</h3>
-          <SkillScopeBadge scope={scope} />
+          <SkillScopeBadge departmentName={departmentName} scope={scope} />
           <span className="available-skill-status">后续对话可用</span>
         </div>
         <p>{skill.description || "未填写描述"}</p>
@@ -57,8 +89,12 @@ function AvailableSkillCard({ skill }: { skill: Skill }) {
         <div>
           <dt>来源</dt>
           <dd>
-            <SkillScopeBadge compact scope={scope} />
-            <span>{scope === "personal" ? "本人创建" : "管理员发布"}</span>
+            <SkillScopeBadge
+              compact
+              departmentName={departmentName}
+              scope={scope}
+            />
+            <span>{skillSourceCopy(scope)}</span>
           </dd>
         </div>
         <div>
@@ -75,13 +111,15 @@ function AvailableSkillCard({ skill }: { skill: Skill }) {
 }
 
 export function PersonalSkillsPage() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const view: SkillsLibraryViewName =
     searchParams.get("view") === "mine" ? "mine" : "available";
   const createActionRef = useRef<CreateAction | null>(null);
-  const availableLinkRef = useRef<HTMLAnchorElement>(null);
-  const mineLinkRef = useRef<HTMLAnchorElement>(null);
+  const availableTabRef = useRef<HTMLButtonElement>(null);
+  const mineTabRef = useRef<HTMLButtonElement>(null);
   const previousViewRef = useRef(view);
+  // 记录最近一次已提交的目标视图，避免 Radix Tabs 在单次点击的 mousedown + focus 中重复 push 历史记录。
+  const latestViewRef = useRef(view);
 
   const registerCreateAction = useCallback(
     (action: CreateAction | null) => {
@@ -91,23 +129,32 @@ export function PersonalSkillsPage() {
   );
 
   useEffect(() => {
+    latestViewRef.current = view;
     if (previousViewRef.current === view) {
       return;
     }
-    // AppShell 只监听 pathname，技能库的 view query 变化不会自动聚焦主内容；
-    // 因而在 query 切换或浏览器前进/后退后，主动聚焦新的当前视图入口。
-    (view === "mine" ? mineLinkRef : availableLinkRef).current?.focus();
+    // 浏览器前进/后退或 query 切换视图后，主动聚焦新的当前标签触发器，维持键盘可达性。
+    (view === "mine" ? mineTabRef : availableTabRef).current?.focus();
     previousViewRef.current = view;
   }, [view]);
+
+  const handleViewChange = (nextValue: string) => {
+    const nextView: SkillsLibraryViewName =
+      nextValue === "mine" ? "mine" : "available";
+    if (nextView === latestViewRef.current) {
+      return;
+    }
+    latestViewRef.current = nextView;
+    setSearchParams(nextView === "mine" ? { view: "mine" } : {});
+  };
 
   return (
     <div className="page-shell personal-skills-page">
       <header className="page-heading">
         <div className="page-heading-copy">
-          <p className="page-eyebrow">Workspace / Skill library</p>
           <h1>技能库</h1>
           <p className="page-description">
-            公共技能由管理员发布，个人技能仅本人可见。启用表示允许后续对话按任务使用，并不等于每次对话都会执行。
+            企业与部门技能由对应管理员发布，个人技能仅本人可见。启用表示允许后续对话按任务使用，并不等于每次对话都会执行。
           </p>
         </div>
         <button
@@ -120,30 +167,18 @@ export function PersonalSkillsPage() {
         </button>
       </header>
 
-      <nav aria-label="技能库视图" className="skills-library-view-nav">
-        <Link
-          aria-current={view === "available" ? "page" : undefined}
-          className={`skills-library-view-link${
-            view === "available" ? " is-active" : ""
-          }`}
-          ref={availableLinkRef}
-          to="/skills"
-        >
-          <Icon name="spark" size={15} />
-          可用技能
-        </Link>
-        <Link
-          aria-current={view === "mine" ? "page" : undefined}
-          className={`skills-library-view-link${
-            view === "mine" ? " is-active" : ""
-          }`}
-          ref={mineLinkRef}
-          to="/skills?view=mine"
-        >
-          <Icon name="user" size={15} />
-          我的技能
-        </Link>
-      </nav>
+      <Tabs onValueChange={handleViewChange} value={view} variant="underline">
+        <TabsList aria-label="技能库视图">
+          <TabsTrigger ref={availableTabRef} value="available">
+            <Icon name="spark" size={15} />
+            可用技能
+          </TabsTrigger>
+          <TabsTrigger ref={mineTabRef} value="mine">
+            <Icon name="user" size={15} />
+            我的技能
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       {/* key 只隔离视图数据、提示、弹窗和 mutation；页面标题与视图导航保持在父层，避免切换时焦点被卸载。 */}
       <SkillsLibraryView
@@ -164,12 +199,14 @@ function SkillsLibraryView({
   registerCreateAction,
   view,
 }: SkillsLibraryViewProps) {
+  const { user } = useAuth();
   const publicSkills = usePublicSkills(view === "available");
   const personalSkills = usePersonalSkills(view === "mine");
   const activeSkills =
     view === "mine" ? personalSkills : publicSkills;
   const toggleMutation = useSetPersonalSkillEnabledMutation();
   const deleteMutation = useDeletePersonalSkillMutation();
+  const [scopeFilter, setScopeFilter] = useState<AvailableScopeFilter>("all");
   const [editor, setEditor] = useState<EditorState>(CLOSED_EDITOR);
   const [deleteTarget, setDeleteTarget] = useState<Skill | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -186,6 +223,14 @@ function SkillsLibraryView({
     registerCreateAction(openCreateEditor);
     return () => registerCreateAction(null);
   }, [openCreateEditor, registerCreateAction]);
+
+  const filteredAvailableSkills = useMemo(() => {
+    const items = publicSkills.data ?? [];
+    if (scopeFilter === "all") {
+      return items;
+    }
+    return items.filter((skill) => skillScope(skill) === scopeFilter);
+  }, [publicSkills.data, scopeFilter]);
 
   const handleSaved = (
     details: SkillAdminDetails,
@@ -286,9 +331,8 @@ function SkillsLibraryView({
                 创建个人技能
               </button>
             }
-            description="管理员发布公共技能，或你在“我的技能”中启用个人技能后，会出现在这里。当前对话仍可继续。"
+            description="管理员发布全公司或部门技能，或你在“我的技能”中启用个人技能后，会出现在这里。当前对话仍可继续。"
             icon="spark"
-            kicker="Available skills"
             title="当前没有可用技能"
           />
         ) : (
@@ -298,21 +342,62 @@ function SkillsLibraryView({
           >
             <header className="personal-skill-list-header">
               <div>
-                <span className="empty-panel-kicker">Available catalog</span>
                 <h2 id="available-skill-list-title">可用技能</h2>
               </div>
-              <span>共 {activeSkills.data.length} 个</span>
+              <div className="flex flex-wrap items-center gap-3">
+                <Tabs
+                  onValueChange={(value) =>
+                    setScopeFilter(value as AvailableScopeFilter)
+                  }
+                  value={scopeFilter}
+                  variant="segmented"
+                >
+                  <TabsList aria-label="按来源筛选可用技能">
+                    {AVAILABLE_SCOPE_FILTERS.map((option) => (
+                      <TabsTrigger key={option.value} value={option.value}>
+                        {option.label}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
+                <span>共 {filteredAvailableSkills.length} 个</span>
+              </div>
             </header>
             <p className="skills-library-availability-note">
               <Icon name="shield" size={15} />
-              这里展示公共技能与你已启用的个人技能；可用只表示后续对话可以按任务使用。
+              这里展示全公司技能、所属部门共享技能与你已启用的个人技能；可用只表示后续对话可以按任务使用。
             </p>
-            <ul className="available-skill-list">
-              {activeSkills.data.map((skill) => (
-                // 可用技能是运行目录投影，仅供查看；个人启停与删除只在“我的技能”中操作。
-                <AvailableSkillCard key={skill.id} skill={skill} />
-              ))}
-            </ul>
+            {filteredAvailableSkills.length === 0 ? (
+              <EmptyState
+                action={
+                  <button
+                    className="button-quiet"
+                    onClick={() => setScopeFilter("all")}
+                    type="button"
+                  >
+                    查看全部可用技能
+                  </button>
+                }
+                compact
+                description="当前筛选条件下没有可用技能，可切换回「全部」查看。"
+                icon="spark"
+                title="该范围内暂无可用技能"
+              />
+            ) : (
+              <ul className="available-skill-list">
+                {filteredAvailableSkills.map((skill) => (
+                  // 可用技能是运行目录投影，仅供查看；个人启停与删除只在“我的技能”中操作。
+                  <AvailableSkillCard
+                    departmentName={resolveUserDepartmentName(
+                      user,
+                      skill.owner_department_id,
+                    )}
+                    key={skill.id}
+                    skill={skill}
+                  />
+                ))}
+              </ul>
+            )}
           </section>
         )
       ) : activeSkills.data.length === 0 ? (
@@ -329,7 +414,6 @@ function SkillsLibraryView({
           }
           description="在线编写方法，或导入一个 Markdown 文件。保存后仅你本人可以使用。"
           icon="spark"
-          kicker="Private Markdown skills"
           title="还没有个人技能"
         />
       ) : (
@@ -339,7 +423,6 @@ function SkillsLibraryView({
         >
           <header className="personal-skill-list-header">
             <div>
-              <span className="empty-panel-kicker">Private catalog</span>
               <h2 id="personal-skill-list-title">我的技能</h2>
             </div>
             <span>共 {activeSkills.data.length} 个</span>

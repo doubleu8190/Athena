@@ -12,6 +12,7 @@ import type {
   ModelProfile,
   ModelProfileCreateInput,
   ModelProfileListResponse,
+  OrgDepartmentListResponse,
   SubagentAvailableToolsResponse,
   SubagentCreateInput,
   SubagentListResponse,
@@ -274,6 +275,16 @@ export function deleteSubagent(subagentId: string): Promise<void> {
 export function listSubagentAvailableTools(): Promise<SubagentAvailableToolsResponse> {
   return apiRequest<SubagentAvailableToolsResponse>(
     "/admin/subagents/available-tools",
+    { method: "GET" },
+  );
+}
+
+/** 查询企业组织部门树扁平列表（仅超管可调用，供部门共享知识库与部门技能选择器复用）。 */
+export function listAdminOrgDepartments(
+  includeArchived = false,
+): Promise<OrgDepartmentListResponse> {
+  return apiRequest<OrgDepartmentListResponse>(
+    `/admin/org/departments?include_archived=${String(includeArchived)}`,
     { method: "GET" },
   );
 }

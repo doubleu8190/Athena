@@ -333,4 +333,32 @@ describe("管理工具页", () => {
     ).toEqual([PROJECT_A]);
     expect(screen.queryByText(TOOL_A.model_name)).not.toBeInTheDocument();
   });
+
+  it("兼容展示一期工具中文展示名 display_name", async () => {
+    const namedTool = {
+      ...TOOL_A,
+      display_name: "文档检索工具",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (
+          url.pathname === "/api/v1/admin/tools" &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return jsonResponse(listResponse([namedTool], 1, 20, 1));
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+
+    renderApp("/admin/tools");
+
+    expect(await screen.findByText("文档检索工具")).toBeInTheDocument();
+    expect(screen.getByText(TOOL_A.model_name)).toBeInTheDocument();
+  });
 });

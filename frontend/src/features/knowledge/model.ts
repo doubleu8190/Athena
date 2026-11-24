@@ -1,4 +1,18 @@
+import { isDeptAdmin, isSuperAdmin, type User } from "../auth/model";
 import type { VisibilityScope } from "../../shared/ui/VisibilityBadge";
+
+export type VisibilityGrantTargetType = "department" | "role";
+
+export interface VisibilityGrantInput {
+  include_subdepartments: boolean;
+  target_id: string;
+  target_type: VisibilityGrantTargetType;
+}
+
+export interface VisibilityGrant extends VisibilityGrantInput {
+  created_at: string;
+  id: string;
+}
 
 export const KNOWLEDGE_BASE_NAME_MAX_LENGTH = 120;
 export const KNOWLEDGE_DESCRIPTION_MAX_LENGTH = 500;
@@ -32,6 +46,7 @@ export interface KnowledgeBase {
   description: string | null;
   visibility_scope?: VisibilityScope;
   owner_department_id?: string | null;
+  visibility_grants?: VisibilityGrant[];
   created_at: string;
   updated_at: string;
 }
@@ -50,6 +65,39 @@ export function knowledgeBaseScope(
   return "personal";
 }
 
+/**
+ * 判断当前登录用户是否拥有目标知识库的管理写权限（编辑、删除、资料上传与版本变更）：
+ * - personal：仅本人可见且可管理；
+ * - company：仅 super_admin 可管理；
+ * - department：super_admin 或管辖该 owner_department_id 的 dept_admin 可管理。
+ */
+export function canManageKnowledgeBase(
+  user: Pick<User, "role" | "managed_department_ids"> | null | undefined,
+  base: Pick<KnowledgeBase, "visibility_scope" | "owner_department_id">,
+): boolean {
+  // 未登录或异常空用户态一律 fail-closed 拒绝写权限。
+  if (!user) {
+    return false;
+  }
+  const scope = knowledgeBaseScope(base);
+  if (scope === "personal") {
+    return true;
+  }
+  if (isSuperAdmin(user)) {
+    return true;
+  }
+  if (scope === "department") {
+    return (
+      isDeptAdmin(user) &&
+      Boolean(
+        base.owner_department_id &&
+          user.managed_department_ids.includes(base.owner_department_id),
+      )
+    );
+  }
+  return false;
+}
+
 export interface KnowledgeBaseListResponse {
   items: KnowledgeBase[];
   page: number;
@@ -57,18 +105,26 @@ export interface KnowledgeBaseListResponse {
 }
 
 export interface KnowledgeListQuery {
+  ownerDepartmentId?: string;
   page?: number;
   pageSize?: number;
+  visibilityScope?: VisibilityScope;
 }
 
 export interface KnowledgeBaseInput {
-  name: string;
   description?: string;
+  name: string;
+  owner_department_id?: string | null;
+  visibility_grants?: VisibilityGrantInput[];
+  visibility_scope?: VisibilityScope;
 }
 
 export interface KnowledgeBasePatch {
-  name?: string;
   description?: string;
+  name?: string;
+  owner_department_id?: string | null;
+  visibility_grants?: VisibilityGrantInput[];
+  visibility_scope?: VisibilityScope;
 }
 
 export type KnowledgeDocumentState =

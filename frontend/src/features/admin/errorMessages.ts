@@ -9,6 +9,15 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
     "该模型配置与已有版本冲突，请检查名称或唯一配置字段。",
   llm_model_profile_not_found:
     "该模型版本不存在、已停用，或不再满足默认模型条件。",
+  model_profile_not_found: "该模型配置不存在或已被删除。",
+  model_profile_version_conflict:
+    "模型配置已被其他管理员修改，请刷新最新配置后重试。",
+  model_profile_in_use_as_default:
+    "该模型正在作为系统默认模型使用，请先切换默认模型后再操作。",
+  model_profile_in_use_by_compression_policy:
+    "该模型正在被上下文压缩策略使用，请先更换压缩模型后再操作。",
+  model_profile_in_use_by_subagent:
+    "该模型仍被子智能体绑定，请先解除绑定后再删除。",
   llm_model_credential_unavailable:
     "模型 API Key 未配置，无法创建版本。",
   llm_model_credential_invalid:
@@ -19,6 +28,13 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
     "MCP 配置不合法，请检查 transport、地址、命令、参数和秘密名称。",
   mcp_conflict:
     "MCP Server 名称或配置版本发生冲突，请刷新后重新提交。",
+  mcp_config_version_conflict:
+    "MCP Server 配置已被其他管理员修改，请刷新最新配置后重试。",
+  mcp_tool_not_found: "目标 MCP 工具不存在或已被移除。",
+  visibility_scope_invalid: "可见范围无效，请重新选择。",
+  owner_department_id_required: "部门共享资源必须指定归属部门。",
+  owner_department_required: "部门共享资源必须指定归属部门。",
+  visibility_grants_invalid: "可见性授权配置无效，请检查部门或角色设置。",
   mcp_discovery_failed:
     "服务端连接 MCP Server 或发现工具失败，配置未保存。",
   mcp_discovery_timeout:
@@ -53,10 +69,17 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
   invalid_response: "服务器返回了无法识别的响应，请稍后重试。",
 };
 
+function lookupAdminErrorCopy(code: string): string | undefined {
+  // 严格通过 Object.hasOwn 查表，防止原型属性污染错误提示。
+  return Object.hasOwn(ADMIN_ERROR_COPY, code)
+    ? ADMIN_ERROR_COPY[code]
+    : undefined;
+}
+
 export function adminErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     return (
-      ADMIN_ERROR_COPY[error.detail] ??
+      lookupAdminErrorCopy(error.detail) ??
       (error.status === 403
         ? ADMIN_ERROR_COPY.admin_required
         : "管理操作未完成，请稍后重试。")

@@ -2,9 +2,12 @@ import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
+import { Badge, VisibilityBadge } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
+import { useAuth } from "../auth/AuthProvider";
+import { resolveUserDepartmentName } from "../auth/model";
 import {
   DeleteKnowledgeBaseDialog,
   EditKnowledgeBaseDialog,
@@ -29,7 +32,11 @@ import {
 } from "./hooks";
 import { KnowledgeSearchDialog } from "./KnowledgeSearchDialog";
 import { KnowledgeStateBadge } from "./KnowledgeStateBadge";
-import type { KnowledgeDocument } from "./model";
+import {
+  canManageKnowledgeBase,
+  knowledgeBaseScope,
+  type KnowledgeDocument,
+} from "./model";
 
 const PAGE_SIZE = 10;
 
@@ -43,6 +50,7 @@ function parsePage(value: string | null): number {
 
 interface DocumentRowProps {
   baseId: string;
+  canManage: boolean;
   document: KnowledgeDocument;
   onDelete: (document: KnowledgeDocument) => void;
   onRename: (document: KnowledgeDocument) => void;
@@ -52,6 +60,7 @@ interface DocumentRowProps {
 
 function DocumentRow({
   baseId,
+  canManage,
   document,
   onDelete,
   onRename,
@@ -76,6 +85,7 @@ function DocumentRow({
     ? document.latest_version === null
     : (versions.data?.length ?? 0) === 0;
   const canRetry =
+    canManage &&
     latest?.state === "failed" &&
     document.pending_version_id === null;
   const activeVersionAvailable = document.active_version_id !== null;
@@ -172,29 +182,33 @@ function DocumentRow({
       </time>
 
       <div className="knowledge-document-actions">
-        <button
-          aria-label={`重命名文档：${document.title}`}
-          className="icon-button"
-          onClick={() => onRename(document)}
-          title="重命名文档"
-          type="button"
-        >
-          <Icon name="edit" size={15} />
-        </button>
-        <button
-          aria-label={`添加新版本：${document.title}`}
-          className="icon-button"
-          disabled={document.pending_version_id !== null}
-          onClick={() => onReplace(document)}
-          title={
-            document.pending_version_id
-              ? "已有版本正在处理中"
-              : "添加新版本"
-          }
-          type="button"
-        >
-          <Icon name="upload" size={15} />
-        </button>
+        {canManage ? (
+          <>
+            <button
+              aria-label={`重命名文档：${document.title}`}
+              className="icon-button"
+              onClick={() => onRename(document)}
+              title="重命名文档"
+              type="button"
+            >
+              <Icon name="edit" size={15} />
+            </button>
+            <button
+              aria-label={`添加新版本：${document.title}`}
+              className="icon-button"
+              disabled={document.pending_version_id !== null}
+              onClick={() => onReplace(document)}
+              title={
+                document.pending_version_id
+                  ? "已有版本正在处理中"
+                  : "添加新版本"
+              }
+              type="button"
+            >
+              <Icon name="upload" size={15} />
+            </button>
+          </>
+        ) : null}
         <button
           aria-label={`版本历史：${document.title}`}
           className="icon-button"
@@ -204,21 +218,24 @@ function DocumentRow({
         >
           <Icon name="history" size={15} />
         </button>
-        <button
-          aria-label={`删除文档：${document.title}`}
-          className="icon-button icon-button--danger"
-          onClick={() => onDelete(document)}
-          title="删除文档"
-          type="button"
-        >
-          <Icon name="trash" size={15} />
-        </button>
+        {canManage ? (
+          <button
+            aria-label={`删除文档：${document.title}`}
+            className="icon-button icon-button--danger"
+            onClick={() => onDelete(document)}
+            title="删除文档"
+            type="button"
+          >
+            <Icon name="trash" size={15} />
+          </button>
+        ) : null}
       </div>
     </article>
   );
 }
 
 export function KnowledgeDetailPage() {
+  const { user } = useAuth();
   const { baseId } = useParams<{ baseId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const page = parsePage(searchParams.get("page"));
@@ -301,11 +318,10 @@ export function KnowledgeDetailPage() {
           }
           description={
             notFound
-              ? "该知识库不存在、已删除，或不属于当前账号。"
+              ? "该知识库不存在、已删除，或你当前无权访问。"
               : "知识库信息暂时无法加载，请稍后重试。"
           }
           icon="book"
-          kicker={notFound ? "404 / Knowledge" : "Request failed"}
           title={notFound ? "知识库不存在或不可访问" : "知识库加载失败"}
         />
         {!notFound ? (
@@ -318,12 +334,25 @@ export function KnowledgeDetailPage() {
     );
   }
 
+  const scope = knowledgeBaseScope(base.data);
+  const departmentName = resolveUserDepartmentName(
+    user,
+    base.data.owner_department_id,
+  );
+  const canManage = canManageKnowledgeBase(user, base.data);
+
   return (
     <div className="page-shell knowledge-detail-page">
       <header className="knowledge-hero">
         <div className="knowledge-hero-top">
           <div className="knowledge-hero-copy">
-            <p className="page-eyebrow">Knowledge base</p>
+            <div className="mb-1.5 flex flex-wrap items-center gap-2">
+              <VisibilityBadge
+                departmentName={departmentName}
+                scope={scope}
+              />
+              {!canManage ? <Badge variant="neutral">只读</Badge> : null}
+            </div>
             <h1>{base.data.name}</h1>
             <p className="knowledge-hero-description">
               {base.data.description || "未填写知识库说明"}
@@ -342,42 +371,47 @@ export function KnowledgeDetailPage() {
               <Icon name="search" size={14} />
               检索测试
             </button>
-            <button
-              className="button-quiet"
-              onClick={() => setEditBaseOpen(true)}
-              type="button"
-            >
-              <Icon name="edit" size={14} />
-              编辑
-            </button>
-            <button
-              className="button-primary"
-              onClick={() => setImportOpen(true)}
-              type="button"
-            >
-              <Icon name="plus" size={14} />
-              添加资料
-            </button>
+            {canManage ? (
+              <>
+                <button
+                  className="button-quiet"
+                  onClick={() => setEditBaseOpen(true)}
+                  type="button"
+                >
+                  <Icon name="edit" size={14} />
+                  编辑
+                </button>
+                <button
+                  className="button-primary"
+                  onClick={() => setImportOpen(true)}
+                  type="button"
+                >
+                  <Icon name="plus" size={14} />
+                  添加资料
+                </button>
+              </>
+            ) : null}
           </div>
         </div>
       </header>
 
       <div className="knowledge-detail-toolbar">
         <div>
-          <p className="page-eyebrow">Documents</p>
           <h2>文档</h2>
           <p>
             处理状态来自最新版本接口；排队和处理中会自动刷新，且不展示虚构进度。
           </p>
         </div>
-        <button
-          className="button-danger-outline"
-          onClick={() => setDeleteBaseOpen(true)}
-          type="button"
-        >
-          <Icon name="trash" size={14} />
-          删除知识库
-        </button>
+        {canManage ? (
+          <button
+            className="button-danger-outline"
+            onClick={() => setDeleteBaseOpen(true)}
+            type="button"
+          >
+            <Icon name="trash" size={14} />
+            删除知识库
+          </button>
+        ) : null}
       </div>
 
       {documents.isPending ? (
@@ -392,18 +426,23 @@ export function KnowledgeDetailPage() {
       ) : documents.data.items.length === 0 && page === 1 ? (
         <EmptyState
           action={
-            <button
-              className="button-primary"
-              onClick={() => setImportOpen(true)}
-              type="button"
-            >
-              <Icon name="plus" size={14} />
-              添加资料
-            </button>
+            canManage ? (
+              <button
+                className="button-primary"
+                onClick={() => setImportOpen(true)}
+                type="button"
+              >
+                <Icon name="plus" size={14} />
+                添加资料
+              </button>
+            ) : undefined
           }
-          description="上传文件或粘贴文本后，后端会在后台完成解析、OCR 和索引。"
+          description={
+            canManage
+              ? "上传文件或粘贴文本后，后端会在后台完成解析、OCR 和索引。"
+              : "当前知识库尚未导入文档，你可以稍后再来查看或检索。"
+          }
           icon="upload"
-          kicker="No documents yet"
           title="还没有文档"
         />
       ) : (
@@ -420,6 +459,7 @@ export function KnowledgeDetailPage() {
           {documents.data.items.map((document) => (
             <DocumentRow
               baseId={baseId}
+              canManage={canManage}
               document={document}
               key={document.id}
               onDelete={setDeleteDocument}
@@ -460,63 +500,69 @@ export function KnowledgeDetailPage() {
         </section>
       )}
 
-      <KnowledgeIngestDialog
-        baseId={baseId}
-        onClose={() => setImportOpen(false)}
-        onImported={handleImported}
-        open={importOpen}
-      />
       <KnowledgeSearchDialog
         baseId={baseId}
         onClose={() => setSearchOpen(false)}
         open={searchOpen}
       />
 
-      {editBaseOpen ? (
-        <EditKnowledgeBaseDialog
-          base={base.data}
-          onClose={() => setEditBaseOpen(false)}
-          open
-        />
+      {canManage ? (
+        <>
+          <KnowledgeIngestDialog
+            baseId={baseId}
+            onClose={() => setImportOpen(false)}
+            onImported={handleImported}
+            open={importOpen}
+          />
+          {editBaseOpen ? (
+            <EditKnowledgeBaseDialog
+              base={base.data}
+              onClose={() => setEditBaseOpen(false)}
+              open
+            />
+          ) : null}
+          {deleteBaseOpen ? (
+            <DeleteKnowledgeBaseDialog
+              base={base.data}
+              onClose={() => setDeleteBaseOpen(false)}
+              open
+            />
+          ) : null}
+          {renameDocument ? (
+            <RenameKnowledgeDocumentDialog
+              baseId={baseId}
+              document={renameDocument}
+              onClose={() => setRenameDocument(null)}
+              open
+            />
+          ) : null}
+          {replaceDocument ? (
+            <KnowledgeIngestDialog
+              baseId={baseId}
+              document={replaceDocument}
+              onClose={() => setReplaceDocument(null)}
+              onImported={handleImported}
+              open
+            />
+          ) : null}
+          {deleteDocument ? (
+            <DeleteKnowledgeDocumentDialog
+              baseId={baseId}
+              document={deleteDocument}
+              onClose={() => setDeleteDocument(null)}
+              onDeleted={handleDocumentDeleted}
+              open
+            />
+          ) : null}
+        </>
       ) : null}
-      {deleteBaseOpen ? (
-        <DeleteKnowledgeBaseDialog
-          base={base.data}
-          onClose={() => setDeleteBaseOpen(false)}
-          open
-        />
-      ) : null}
-      {renameDocument ? (
-        <RenameKnowledgeDocumentDialog
-          baseId={baseId}
-          document={renameDocument}
-          onClose={() => setRenameDocument(null)}
-          open
-        />
-      ) : null}
-      {replaceDocument ? (
-        <KnowledgeIngestDialog
-          baseId={baseId}
-          document={replaceDocument}
-          onClose={() => setReplaceDocument(null)}
-          onImported={handleImported}
-          open
-        />
-      ) : null}
+
       {versionsDocument ? (
         <VersionHistoryDialog
           baseId={baseId}
+          canManage={canManage}
           document={versionsDocument}
           onClose={() => setVersionsDocument(null)}
-          open
-        />
-      ) : null}
-      {deleteDocument ? (
-        <DeleteKnowledgeDocumentDialog
-          baseId={baseId}
-          document={deleteDocument}
-          onClose={() => setDeleteDocument(null)}
-          onDeleted={handleDocumentDeleted}
           open
         />
       ) : null}

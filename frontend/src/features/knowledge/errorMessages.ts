@@ -6,7 +6,18 @@ const KNOWLEDGE_ERROR_COPY: Record<string, string> = {
   knowledge_base_description_invalid:
     "知识库说明最多 500 个字符，且不能包含换行或控制字符。",
   knowledge_base_patch_empty: "没有需要保存的变更。",
-  knowledge_base_not_found: "知识库不存在、已删除，或不属于当前账号。",
+  knowledge_base_not_found: "该知识库不存在、已删除，或你当前无权访问。",
+  knowledge_permission_denied: "你没有权限修改或删除该知识库。",
+  permission_denied: "你没有权限执行该知识库操作。",
+  admin_required: "当前操作需要对应管理员权限。",
+  visibility_scope_invalid: "可见范围无效，请选择个人、部门共享或全公司。",
+  visibility_scope_unsupported: "当前资源不支持所选可见范围。",
+  owner_department_id_required: "部门共享知识库必须指定归属部门。",
+  owner_department_required: "部门共享知识库必须指定归属部门。",
+  owner_department_not_allowed: "当前可见范围不允许指定归属部门。",
+  owner_department_not_found: "所选归属部门不存在或已归档。",
+  visibility_grants_invalid: "可见性授权配置无效，请检查部门或角色设置。",
+  visibility_grants_not_allowed: "当前可见范围不支持额外共享授权。",
   document_title_invalid:
     "文档标题需为 1–255 个字符，且不能包含控制字符。",
   document_text_invalid: "文本内容为空或超过 1,000,000 个字符。",
@@ -63,10 +74,23 @@ const VERSION_ERROR_COPY: Record<string, string> = {
   knowledge_processing_failed: "文档处理失败。",
 };
 
+function lookupKnowledgeErrorCopy(code: string): string | undefined {
+  // 使用 Object.hasOwn 防止原型属性键污染错误文案查表。
+  return Object.hasOwn(KNOWLEDGE_ERROR_COPY, code)
+    ? KNOWLEDGE_ERROR_COPY[code]
+    : undefined;
+}
+
+function lookupVersionErrorCopy(code: string): string | undefined {
+  return Object.hasOwn(VERSION_ERROR_COPY, code)
+    ? VERSION_ERROR_COPY[code]
+    : undefined;
+}
+
 export function knowledgeErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     return (
-      KNOWLEDGE_ERROR_COPY[error.detail] ??
+      lookupKnowledgeErrorCopy(error.detail) ??
       "知识库操作未完成，请稍后重试。"
     );
   }
@@ -77,7 +101,7 @@ export function versionErrorMessage(code: string | null): string {
   if (!code) {
     return "处理失败，未返回具体原因。";
   }
-  return VERSION_ERROR_COPY[code] ?? `处理失败（${code}）。`;
+  return lookupVersionErrorCopy(code) ?? `处理失败（${code}）。`;
 }
 
 export function isKnowledgeNotFound(error: unknown): boolean {

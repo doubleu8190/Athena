@@ -8,7 +8,7 @@ import {
   makeSkillVersion,
   TEST_ADMIN,
 } from "../../test/adminFixtures";
-import { getRequestUrl } from "../../test/fixtures";
+import { getRequestUrl, makeDeptAdmin } from "../../test/fixtures";
 import { jsonResponse, renderApp } from "../../test/testUtils";
 import { adminKeys } from "../admin/queryKeys";
 import type { SkillAdminDetails, SkillVersion } from "./model";
@@ -1118,5 +1118,195 @@ describe("管理员技能管理", () => {
       within(dialog).getByRole("button", { name: "清除已选文件" }),
     );
     expect(within(dialog).getByText("未选择 .zip 文件")).toBeInTheDocument();
+  });
+
+  it("部门管理员展示「部门技能管理」、导入自动绑定唯一管辖部门并支持软删部门技能；全公司技能绝不显示删除按钮", async () => {
+    const deptAdmin = makeDeptAdmin();
+    const deptSkill = makeSkillDetails({
+      id: "skill-fin-dept",
+      name: "财务报销核对",
+      owner_department_id: "dept-fin",
+      revision: 3,
+      scope: "department",
+      slug: "fin-expense-check",
+    });
+    const companySkill = makeSkillDetails({
+      id: "skill-company-global",
+      name: "全公司通用模板",
+      owner_department_id: null,
+      revision: 1,
+      scope: "company",
+      slug: "company-template",
+    });
+    let currentSkills = [deptSkill];
+    let importForm: FormData | null = null;
+    let deletedUrl: string | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(deptAdmin);
+        }
+        if (url.pathname === "/api/v1/admin/skills" && method === "GET") {
+          return jsonResponse({ items: currentSkills });
+        }
+        if (url.pathname === "/api/v1/skills" && method === "GET") {
+          return jsonResponse({ items: [] });
+        }
+        if (
+          url.pathname === "/api/v1/admin/skills/import" &&
+          method === "POST"
+        ) {
+          importForm = init?.body as FormData;
+          return jsonResponse(deptSkill, 201);
+        }
+        if (url.pathname === `/api/v1/admin/skills/${deptSkill.id}`) {
+          if (method === "GET") {
+            return jsonResponse(deptSkill);
+          }
+          if (method === "DELETE") {
+            deletedUrl = `${url.pathname}${url.search}`;
+            currentSkills = [];
+            return new Response(null, { status: 204 });
+          }
+        }
+        if (
+          url.pathname === `/api/v1/admin/skills/${deptSkill.id}/versions` &&
+          method === "GET"
+        ) {
+          return jsonResponse(versionListResponse(deptSkill));
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    const firstView = renderApp("/admin/skills");
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "部门技能管理" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("财务报销核对")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("main")).getByText("财务部"),
+    ).toBeInTheDocument();
+
+    // 1. 部门管理员导入技能：固定 department 范围并自动选中唯一管辖部门 dept-fin。
+    await user.click(screen.getByRole("button", { name: "导入技能 ZIP" }));
+    const importDialog = screen.getByRole("dialog", { name: "导入技能包" });
+    expect(
+      within(importDialog).queryByLabelText("发布范围"),
+    ).not.toBeInTheDocument();
+    expect(within(importDialog).getByLabelText("归属部门")).toHaveValue(
+      "dept-fin",
+    );
+    await user.upload(
+      within(importDialog).getByLabelText("技能 ZIP"),
+      new File(["zip"], "fin.zip", { type: "application/zip" }),
+    );
+    await user.click(
+      within(importDialog).getByRole("button", { name: "导入并查看检查结果" }),
+    );
+
+    const detailDialog = await screen.findByRole("dialog", {
+      name: "技能：财务报销核对",
+    });
+    expect(importForm).toBeInstanceOf(FormData);
+    expect((importForm as unknown as FormData).get("scope")).toBe("department");
+    expect((importForm as unknown as FormData).get("owner_department_id")).toBe(
+      "dept-fin",
+    );
+
+    // 2. 部门级技能详情展示「删除部门技能」按钮并通过嵌套子 Modal 二次确认（支持取消、Escape 仅关栈顶确认框及携带 expected_revision=3 删除）。
+    await user.click(
+      within(detailDialog).getByRole("button", { name: "删除部门技能" }),
+    );
+    const firstConfirm = screen.getByRole("dialog", { name: "删除部门技能" });
+    expect(firstConfirm).toHaveAttribute("aria-modal", "true");
+    // 点击取消仅关闭嵌套确认弹窗，外层详情弹窗保持打开。
+    await user.click(within(firstConfirm).getByRole("button", { name: "取消" }));
+    expect(
+      screen.queryByRole("dialog", { name: "删除部门技能" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "技能：财务报销核对" }),
+    ).toBeInTheDocument();
+
+    // 再次打开确认弹窗并按 Escape：仅栈顶确认弹窗关闭，外层详情弹窗不关闭。
+    await user.click(
+      within(detailDialog).getByRole("button", { name: "删除部门技能" }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "删除部门技能" }),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("dialog", { name: "删除部门技能" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "技能：财务报销核对" }),
+    ).toBeInTheDocument();
+
+    // 正式确认删除。
+    await user.click(
+      within(detailDialog).getByRole("button", { name: "删除部门技能" }),
+    );
+    const confirmDelete = screen.getByRole("dialog", {
+      name: "删除部门技能",
+    });
+    await user.click(
+      within(confirmDelete).getByRole("button", { name: "确认删除" }),
+    );
+    await waitFor(() => {
+      expect(deletedUrl).toBe(
+        `/api/v1/admin/skills/${deptSkill.id}?expected_revision=3`,
+      );
+    });
+    expect(
+      await screen.findByRole("heading", { name: "还没有技能包" }),
+    ).toBeInTheDocument();
+    firstView.unmount();
+
+    // 3. 全公司（company）技能详情中绝不展示任何删除按钮。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/skills" && method === "GET") {
+          return jsonResponse({ items: [companySkill] });
+        }
+        if (
+          url.pathname === `/api/v1/admin/skills/${companySkill.id}` &&
+          method === "GET"
+        ) {
+          return jsonResponse(companySkill);
+        }
+        if (
+          url.pathname ===
+            `/api/v1/admin/skills/${companySkill.id}/versions` &&
+          method === "GET"
+        ) {
+          return jsonResponse(versionListResponse(companySkill));
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    renderApp("/admin/skills");
+    await user.click(
+      await screen.findByRole("button", { name: "查看版本与指南" }),
+    );
+    const companyDialog = await screen.findByRole("dialog", {
+      name: "技能：全公司通用模板",
+    });
+    expect(within(companyDialog).getByText("全公司")).toBeInTheDocument();
+    expect(
+      within(companyDialog).queryByRole("button", { name: /删除/ }),
+    ).not.toBeInTheDocument();
   });
 });

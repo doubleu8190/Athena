@@ -7,80 +7,100 @@ import {
   listResponse,
   makeSession,
   PROJECT_A,
+  PROJECT_B,
   TEST_USER,
 } from "../../test/fixtures";
 import { jsonResponse, renderApp } from "../../test/testUtils";
 
 interface SessionPageFetchOptions {
-  initialSessions: ReturnType<typeof makeSession>[];
-  deleteStatus?: number;
   deleteDetail?: string;
+  deleteStatus?: number;
+  initialSessions: ReturnType<typeof makeSession>[];
 }
 
 function installSessionPageFetch(options: SessionPageFetchOptions) {
-  let renamed = false;
-  let deleted = false;
+  let sessions = [...options.initialSessions];
   const fetchMock = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(getRequestUrl(input), "http://localhost");
+      const method = init?.method ?? "GET";
+
       if (url.pathname.endsWith("/auth/me")) {
         return jsonResponse(TEST_USER);
       }
       if (url.pathname === "/api/v1/projects") {
-        return jsonResponse(listResponse([PROJECT_A], 1, 100, 1));
+        return jsonResponse(listResponse([PROJECT_A, PROJECT_B], 1, 100, 2));
       }
       if (url.pathname === `/api/v1/projects/${PROJECT_A.id}`) {
         return jsonResponse(PROJECT_A);
       }
-      if (url.pathname === "/api/v1/sessions") {
-        const pageSize = Number(url.searchParams.get("page_size"));
-        if (pageSize !== 10) {
-          return jsonResponse(listResponse([]));
-        }
-        if (deleted) {
-          return jsonResponse(listResponse([], 1, 10, 0));
-        }
-        const items = renamed
-          ? options.initialSessions.map((session) => ({
-              ...session,
-              title: session.id === "session-1" ? "新的会话标题" : session.title,
-            }))
-          : options.initialSessions;
-        return jsonResponse(listResponse(items, 1, 10, items.length));
+      if (url.pathname === `/api/v1/projects/${PROJECT_A.id}/knowledge-bases`) {
+        return jsonResponse([]);
       }
-      if (url.pathname === "/api/v1/sessions/session-1") {
-        if (init?.method === "PATCH") {
-          renamed = true;
-          const body = JSON.parse(String(init.body)) as { title: string };
-          return jsonResponse({
-            ...options.initialSessions[0],
-            title: body.title,
-          });
+      if (url.pathname === "/api/v1/skills") {
+        return jsonResponse({ items: [] });
+      }
+      if (url.pathname === "/api/v1/sessions" && method === "GET") {
+        const pageSize = Number(url.searchParams.get("page_size") ?? 10);
+        const projectId = url.searchParams.get("project_id");
+        if (projectId !== PROJECT_A.id) {
+          return jsonResponse(listResponse([], 1, pageSize, 0));
         }
-        if (init?.method === "DELETE") {
+        const q = url.searchParams.get("q")?.trim().toLowerCase() ?? "";
+        const matched = sessions
+          .filter((item) => item.project_id === PROJECT_A.id)
+          .filter((item) =>
+            q ? (item.title ?? "").toLowerCase().includes(q) : true,
+          );
+        return jsonResponse(listResponse(matched, 1, pageSize, matched.length));
+      }
+      const sessionMatch = /^\/api\/v1\/sessions\/([^/]+)$/.exec(url.pathname);
+      if (sessionMatch) {
+        const sessionId = decodeURIComponent(sessionMatch[1]);
+        const target = sessions.find((item) => item.id === sessionId);
+        if (method === "PATCH" && target) {
+          const body = JSON.parse(String(init?.body)) as {
+            project_id?: string | null;
+            title?: string | null;
+          };
+          const updated = {
+            ...target,
+            ...(Object.hasOwn(body, "title") ? { title: body.title ?? null } : {}),
+            ...(Object.hasOwn(body, "project_id")
+              ? { project_id: body.project_id ?? null }
+              : {}),
+          };
+          sessions = sessions.map((item) =>
+            item.id === sessionId ? updated : item,
+          );
+          return jsonResponse(updated);
+        }
+        if (method === "DELETE") {
           if (options.deleteStatus && options.deleteStatus >= 400) {
             return jsonResponse(
               { detail: options.deleteDetail ?? "http_error" },
               options.deleteStatus,
             );
           }
-          deleted = true;
+          sessions = sessions.filter((item) => item.id !== sessionId);
           return new Response(null, { status: 204 });
         }
-        return jsonResponse(options.initialSessions[0]);
+        if (target) {
+          return jsonResponse(target);
+        }
       }
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      throw new Error(`Unexpected request: ${method} ${url}`);
     },
   );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
 
-describe("项目会话管理", () => {
-  it("空标题显示未命名对话，重命名成功后刷新列表", async () => {
+describe("项目会话管理（单页工作文件夹左栏）", () => {
+  it("空标题显示未命名对话，支持操作菜单重命名与移出项目并刷新列表", async () => {
     const fetchMock = installSessionPageFetch({
       initialSessions: [
-        makeSession({ id: "session-1", title: null }),
+        makeSession({ id: "session-1", project_id: PROJECT_A.id, title: null }),
       ],
     });
     const user = userEvent.setup();
@@ -89,57 +109,122 @@ describe("项目会话管理", () => {
 
     expect(await screen.findByText("未命名对话")).toBeInTheDocument();
     await user.click(
-      screen.getByRole("button", {
-        name: "重命名会话：未命名对话",
-      }),
+      screen.getByRole("button", { name: "更多对话操作：未命名对话" }),
     );
-    const dialog = screen.getByRole("dialog", { name: "重命名会话" });
-    const input = within(dialog).getByLabelText("会话标题");
+    await user.click(screen.getByRole("menuitem", { name: "重命名" }));
+
+    const dialog = screen.getByRole("dialog", { name: "重命名对话" });
+    const input = within(dialog).getByLabelText("对话标题");
     expect(input).toHaveValue("");
     await user.type(input, "新的会话标题");
-    await user.click(
-      within(dialog).getByRole("button", { name: "保存标题" }),
-    );
+    await user.click(within(dialog).getByRole("button", { name: "保存标题" }));
 
     expect(await screen.findByText("新的会话标题")).toBeInTheDocument();
-    const patchCall = fetchMock.mock.calls.find(
+    const renamePatchCall = fetchMock.mock.calls.find(
       ([request, init]) =>
         new URL(getRequestUrl(request), "http://localhost").pathname ===
           "/api/v1/sessions/session-1" && init?.method === "PATCH",
     );
-    expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(renamePatchCall?.[1]?.body))).toEqual({
       title: "新的会话标题",
     });
+
+    // 通过「移动 / 移出项目」将该会话移出当前项目。
+    await user.click(
+      screen.getByRole("button", { name: "更多对话操作：新的会话标题" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "移动 / 移出项目" }));
+    const moveDialog = screen.getByRole("dialog", { name: "调整所属项目" });
+    await user.click(
+      within(moveDialog).getByRole("combobox", { name: "目标项目" }),
+    );
+    await user.click(screen.getByRole("option", { name: "未归属项目" }));
+    await user.click(
+      within(moveDialog).getByRole("button", { name: "保存归属" }),
+    );
+
     expect(
-      screen.queryByRole("dialog", { name: "重命名会话" }),
-    ).not.toBeInTheDocument();
+      await screen.findByRole("heading", { name: "还没有项目对话" }),
+    ).toBeInTheDocument();
+  });
+
+  it("支持按标题防抖搜索项目内对话（q 参数）与清空恢复", async () => {
+    const fetchMock = installSessionPageFetch({
+      initialSessions: [
+        makeSession({
+          id: "session-1",
+          project_id: PROJECT_A.id,
+          title: "年度财务规划",
+        }),
+        makeSession({
+          id: "session-2",
+          project_id: PROJECT_A.id,
+          title: "研发架构评审",
+        }),
+      ],
+    });
+    const user = userEvent.setup();
+
+    renderApp(`/projects/${PROJECT_A.id}`);
+
+    expect(await screen.findByText("年度财务规划")).toBeInTheDocument();
+    expect(screen.getByText("研发架构评审")).toBeInTheDocument();
+
+    const searchInput = screen.getByLabelText("搜索项目内对话");
+    await user.type(searchInput, "财务");
+
+    await waitFor(
+      () => {
+        expect(
+          fetchMock.mock.calls.some(([input]) => {
+            const url = new URL(getRequestUrl(input), "http://localhost");
+            return (
+              url.pathname === "/api/v1/sessions" &&
+              url.searchParams.get("project_id") === PROJECT_A.id &&
+              url.searchParams.get("q") === "财务"
+            );
+          }),
+        ).toBe(true);
+      },
+      { timeout: 1500 },
+    );
+
+    expect(await screen.findByText("年度财务规划")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("研发架构评审")).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "清空搜索" }));
+    expect(await screen.findByText("研发架构评审")).toBeInTheDocument();
   });
 
   it("删除 Session 成功并刷新为真实空态", async () => {
     installSessionPageFetch({
       initialSessions: [
-        makeSession({ id: "session-1", title: "待删除会话" }),
+        makeSession({
+          id: "session-1",
+          project_id: PROJECT_A.id,
+          title: "待删除会话",
+        }),
       ],
     });
     const user = userEvent.setup();
 
-    renderApp(`/projects/${PROJECT_A.id}/sessions`);
+    renderApp(`/projects/${PROJECT_A.id}`);
 
     await screen.findByText("待删除会话");
     await user.click(
-      screen.getByRole("button", {
-        name: "删除会话：待删除会话",
-      }),
+      screen.getByRole("button", { name: "更多对话操作：待删除会话" }),
     );
-    const dialog = screen.getByRole("dialog", { name: "删除会话" });
+    await user.click(screen.getByRole("menuitem", { name: "删除对话" }));
+
+    const alertDialog = screen.getByRole("alertdialog", { name: "删除对话" });
     await user.click(
-      within(dialog).getByRole("button", { name: "确认删除" }),
+      within(alertDialog).getByRole("button", { name: "确认删除" }),
     );
 
     expect(
-      await screen.findByRole("heading", {
-        name: "还没有项目会话",
-      }),
+      await screen.findByRole("heading", { name: "还没有项目对话" }),
     ).toBeInTheDocument();
   });
 
@@ -148,41 +233,40 @@ describe("项目会话管理", () => {
       deleteDetail: "session_has_active_run",
       deleteStatus: 409,
       initialSessions: [
-        makeSession({ id: "session-1", title: "运行中会话" }),
+        makeSession({
+          id: "session-1",
+          project_id: PROJECT_A.id,
+          title: "运行中会话",
+        }),
       ],
     });
     const user = userEvent.setup();
 
-    renderApp(`/projects/${PROJECT_A.id}/sessions`);
+    renderApp(`/projects/${PROJECT_A.id}`);
 
     await screen.findByText("运行中会话");
     await user.click(
-      screen.getByRole("button", {
-        name: "删除会话：运行中会话",
-      }),
+      screen.getByRole("button", { name: "更多对话操作：运行中会话" }),
     );
-    const dialog = screen.getByRole("dialog", { name: "删除会话" });
+    await user.click(screen.getByRole("menuitem", { name: "删除对话" }));
+
+    const alertDialog = screen.getByRole("alertdialog", { name: "删除对话" });
     await user.click(
-      within(dialog).getByRole("button", { name: "确认删除" }),
+      within(alertDialog).getByRole("button", { name: "确认删除" }),
     );
 
     expect(
-      await within(dialog).findByText(
+      await within(alertDialog).findByText(
         "当前对话有正在执行的任务，请等待完成或停止后再操作。",
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("dialog", { name: "删除会话" }),
+      screen.getByRole("alertdialog", { name: "删除对话" }),
     ).toBeInTheDocument();
   });
 
-  it("分页参数写入 URL 并可恢复对应页面", async () => {
-    const fetchMock = installSessionPageFetch({
-      initialSessions: [
-        makeSession({ id: "session-page-2", title: "第二页会话" }),
-      ],
-    });
-    fetchMock.mockImplementation(
+  it("分页参数通过旧路由重定向后仍写入 URL 并可恢复对应页面", async () => {
+    const fetchMock = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
         if (url.pathname.endsWith("/auth/me")) {
@@ -193,6 +277,14 @@ describe("项目会话管理", () => {
         }
         if (url.pathname === `/api/v1/projects/${PROJECT_A.id}`) {
           return jsonResponse(PROJECT_A);
+        }
+        if (
+          url.pathname === `/api/v1/projects/${PROJECT_A.id}/knowledge-bases`
+        ) {
+          return jsonResponse([]);
+        }
+        if (url.pathname === "/api/v1/skills") {
+          return jsonResponse({ items: [] });
         }
         if (url.pathname === "/api/v1/sessions") {
           const pageSize = Number(url.searchParams.get("page_size"));
@@ -219,6 +311,7 @@ describe("项目会话管理", () => {
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
       },
     );
+    vi.stubGlobal("fetch", fetchMock);
 
     renderApp(`/projects/${PROJECT_A.id}/sessions?page=2`);
 
@@ -227,10 +320,7 @@ describe("项目会话管理", () => {
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(([request]) => {
-          const url = new URL(
-            getRequestUrl(request),
-            "http://localhost",
-          );
+          const url = new URL(getRequestUrl(request), "http://localhost");
           return (
             url.pathname === "/api/v1/sessions" &&
             url.searchParams.get("page") === "2"
@@ -240,4 +330,3 @@ describe("项目会话管理", () => {
     });
   });
 });
-

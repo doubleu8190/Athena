@@ -878,4 +878,35 @@ describe("管理模型页", () => {
       screen.queryByRole("heading", { name: "模型版本" }),
     ).not.toBeInTheDocument();
   });
+
+  it("兼容展示一期可选字段：场景标签、仅后台可见标识与识图能力标签", async () => {
+    const visionProfile = makeModelProfile({
+      id: "model-vision",
+      name: "多模态办公模型",
+      scenario_label: "综合办公",
+      supports_vision: true,
+      visible_to_users: false,
+    });
+    vi.stubGlobal(
+      "fetch",
+      baseFetch((url) => {
+        if (url.pathname === "/api/v1/admin/llm/model-profiles") {
+          return jsonResponse({
+            default_profile_id: visionProfile.id,
+            items: [visionProfile],
+          });
+        }
+        return null;
+      }),
+    );
+
+    renderApp("/admin/models");
+
+    const card = (
+      await screen.findByRole("heading", { name: "多模态办公模型" })
+    ).closest("li") as HTMLElement;
+    expect(within(card).getByText("综合办公")).toBeInTheDocument();
+    expect(within(card).getByText("仅内部使用")).toBeInTheDocument();
+    expect(within(card).getByText("识图")).toBeInTheDocument();
+  });
 });

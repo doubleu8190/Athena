@@ -7,6 +7,7 @@ import {
 import { adminKeys } from "../admin/queryKeys";
 import {
   createPersonalSkill,
+  deleteAdminSkill,
   deletePersonalSkill,
   getAdminSkill,
   getAdminSkillVersion,
@@ -23,6 +24,7 @@ import {
   uploadSkillVersion,
 } from "./api";
 import type {
+  ImportSkillPackageOptions,
   PersonalSkillInput,
   SkillConfigurationInput,
 } from "./model";
@@ -116,11 +118,19 @@ export function useImportSkillMutation() {
   return useMutation({
     mutationFn: ({
       file,
+      ownerDepartmentId,
       requestId,
-    }: {
+      scope,
+      visibilityGrants,
+    }: ImportSkillPackageOptions & {
       file: File;
       requestId: string;
-    }) => importSkillPackage(file, requestId),
+    }) =>
+      importSkillPackage(file, requestId, {
+        ownerDepartmentId,
+        scope,
+        visibilityGrants,
+      }),
     onSuccess: async (details) => {
       queryClient.setQueryData(
         adminKeys.skill(details.id),
@@ -158,6 +168,26 @@ export function useUpdateSkillConfigurationMutation(skillId: string) {
       // PATCH 返回同一修订下的完整详情，先写入缓存可避免保存成功到后台刷新间短暂显示旧草稿。
       queryClient.setQueryData(adminKeys.skill(skillId), details);
       await refreshSkillCatalogs(queryClient, skillId);
+    },
+  });
+}
+
+/** 软删除部门级技能并清理缓存与目录。 */
+export function useDeleteAdminSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      expectedRevision,
+      skillId,
+    }: {
+      expectedRevision: number;
+      skillId: string;
+    }) => deleteAdminSkill(skillId, expectedRevision),
+    onSuccess: async (_result, variables) => {
+      queryClient.removeQueries({
+        queryKey: adminKeys.skill(variables.skillId),
+      });
+      await refreshSkillCatalogs(queryClient);
     },
   });
 }

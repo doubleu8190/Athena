@@ -2,12 +2,15 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
 import { newRequestId } from "../../shared/lib/requestId";
+import { InlineAlert, toast } from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { Modal } from "../../shared/ui/Modal";
 import { SelectDropdown } from "../../shared/ui/SelectDropdown";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
+import { useAuth } from "../auth/AuthProvider";
+import { resolveUserDepartmentName } from "../auth/model";
 import {
   isSkillRevisionConflict,
   skillErrorMessage,
@@ -16,11 +19,13 @@ import {
   useAdminSkill,
   useAdminSkillVersion,
   useAdminSkillVersions,
+  useDeleteAdminSkillMutation,
   useUpdateSkillConfigurationMutation,
   useUploadSkillVersionMutation,
 } from "./hooks";
 import {
   dependencySatisfied,
+  skillScope,
   validateSkillZip,
   versionLabel,
   type DependencyCheck,
@@ -28,6 +33,7 @@ import {
   type SkillFormState,
   type SkillVersion,
 } from "./model";
+import { SkillScopeBadge } from "./SkillScopeBadge";
 
 const VERSION_PAGE_SIZE = 20;
 
@@ -326,6 +332,7 @@ export function AdminSkillDetailDialog({
   open,
   skillId,
 }: AdminSkillDetailDialogProps) {
+  const { user } = useAuth();
   const versionSelectId = useId();
   const activeSkillId = open ? skillId : null;
   const detail = useAdminSkill(activeSkillId);
@@ -336,6 +343,7 @@ export function AdminSkillDetailDialog({
     VERSION_PAGE_SIZE,
   );
   const update = useUpdateSkillConfigurationMutation(skillId ?? "");
+  const deleteSkillMutation = useDeleteAdminSkillMutation();
   const [form, setForm] = useState<SkillFormState | null>(null);
   // revision 是服务端乐观锁基线；后台刷新只标记冲突，不能覆盖未保存草稿。
   const [baseline, setBaseline] =
@@ -346,6 +354,8 @@ export function AdminSkillDetailDialog({
   );
   const [requestError, setRequestError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const submitLock = useRef(false);
 
   useEffect(() => {
@@ -355,6 +365,8 @@ export function AdminSkillDetailDialog({
     setConflictMessage(null);
     setRequestError(null);
     setNotice(null);
+    setDeleteDialogOpen(false);
+    setDeleteError(null);
     setVersionPageNumber(1);
     submitLock.current = false;
   }, [open, skillId]);
@@ -421,7 +433,11 @@ export function AdminSkillDetailDialog({
   );
 
   const close = () => {
-    if (!update.isPending && !submitLock.current) {
+    if (
+      !update.isPending &&
+      !deleteSkillMutation.isPending &&
+      !submitLock.current
+    ) {
       onClose();
     }
   };
@@ -545,7 +561,48 @@ export function AdminSkillDetailDialog({
     }
   };
 
-  const pending = update.isPending;
+  const currentScope = detail.data ? skillScope(detail.data) : null;
+  // 严格遵守后端契约：仅部门级技能允许软删除，全公司（company）技能绝不渲染删除入口。
+  const isDepartmentSkill = currentScope === "department";
+  const currentDepartmentName = detail.data
+    ? (resolveUserDepartmentName(user, detail.data.owner_department_id) ??
+      detail.data.owner_department_id ??
+      null)
+    : null;
+
+  const handleConfirmDeleteDepartmentSkill = async () => {
+    if (
+      !detail.data ||
+      !baseline ||
+      !isDepartmentSkill ||
+      deleteSkillMutation.isPending
+    ) {
+      return;
+    }
+    setDeleteError(null);
+    try {
+      await deleteSkillMutation.mutateAsync({
+        expectedRevision: baseline.revision,
+        skillId: detail.data.id,
+      });
+      setDeleteDialogOpen(false);
+      toast.success(`部门技能「${detail.data.name}」已删除`);
+      onClose();
+    } catch (error) {
+      if (isSkillRevisionConflict(error)) {
+        setRevisionConflict(true);
+        setConflictMessage(null);
+        setDeleteError(
+          "该部门技能已被并发更新（修订号冲突），请先关闭确认框并重新载入最新配置后再决定是否删除。",
+        );
+        void detail.refetch();
+      } else {
+        setDeleteError(skillErrorMessage(error));
+      }
+    }
+  };
+
+  const pending = update.isPending || deleteSkillMutation.isPending;
 
   return (
     <Modal
@@ -553,6 +610,20 @@ export function AdminSkillDetailDialog({
       description="版本内容不可修改；当前版本、启停和脚本审批在同一修订号下保存。"
       footer={
         <>
+          {isDepartmentSkill ? (
+            <button
+              className="button-danger-outline"
+              disabled={pending || hasRevisionConflict}
+              onClick={() => {
+                setDeleteError(null);
+                setDeleteDialogOpen(true);
+              }}
+              type="button"
+            >
+              <Icon name="trash" size={14} />
+              删除部门技能
+            </button>
+          ) : null}
           <button
             className="button-quiet"
             disabled={pending}
@@ -572,7 +643,7 @@ export function AdminSkillDetailDialog({
             onClick={() => void save()}
             type="button"
           >
-            {pending ? "正在保存配置…" : "保存当前配置"}
+            {update.isPending ? "正在保存配置…" : "保存当前配置"}
           </button>
         </>
       }
@@ -600,7 +671,15 @@ export function AdminSkillDetailDialog({
           >
             <header>
               <div>
-                <h3 id="skill-config-title">当前发布配置</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 id="skill-config-title">当前发布配置</h3>
+                  <SkillScopeBadge
+                    departmentName={
+                      isDepartmentSkill ? currentDepartmentName : null
+                    }
+                    scope={detail.data.scope}
+                  />
+                </div>
                 <p>
                   revision {detail.data.revision} · slug{" "}
                   <code>{detail.data.slug}</code>
@@ -883,6 +962,52 @@ export function AdminSkillDetailDialog({
             </div>
           </section>
         </div>
+      ) : null}
+
+      {/* 复用支持 ModalDepthContext 层级栈的嵌套子 Modal，确保确认框稳定位于详情弹窗之上且 Escape/焦点隔离正常。 */}
+      {isDepartmentSkill && detail.data ? (
+        <Modal
+          closeDisabled={deleteSkillMutation.isPending}
+          description="删除后后续新对话将不再展示该技能，历史运行记录不受影响。"
+          footer={
+            <>
+              <button
+                className="button-quiet"
+                disabled={deleteSkillMutation.isPending}
+                onClick={() => setDeleteDialogOpen(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="button-danger"
+                disabled={deleteSkillMutation.isPending}
+                onClick={() => void handleConfirmDeleteDepartmentSkill()}
+                type="button"
+              >
+                {deleteSkillMutation.isPending ? "正在删除…" : "确认删除"}
+              </button>
+            </>
+          }
+          onClose={() => {
+            if (!deleteSkillMutation.isPending) {
+              setDeleteDialogOpen(false);
+            }
+          }}
+          open={deleteDialogOpen}
+          panelClassName="admin-modal"
+          title="删除部门技能"
+        >
+          <p className="confirm-copy">
+            确定软删除部门技能「{detail.data.name}」（slug:{" "}
+            <code>{detail.data.slug}</code>）吗？
+          </p>
+          {deleteError ? (
+            <div className="mt-3">
+              <InlineAlert description={deleteError} variant="danger" />
+            </div>
+          ) : null}
+        </Modal>
       ) : null}
     </Modal>
   );

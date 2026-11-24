@@ -82,13 +82,13 @@ export function SidebarWorkspaceNav({
   });
 
   const activeProjectId = activeProjectIdFromPath(location.pathname);
-  const visibilityScope = new URLSearchParams(location.search).get(
-    "visibility_scope",
-  );
+  const searchParams = new URLSearchParams(location.search);
+  const knowledgeScopeParam =
+    searchParams.get("scope") ?? searchParams.get("visibility_scope");
   const isDeptKnowledgeActive =
     adminSection?.kind === "dept_admin" &&
     location.pathname.startsWith("/knowledge") &&
-    visibilityScope === "department";
+    knowledgeScopeParam === "department";
   const isKnowledgeActive =
     location.pathname.startsWith("/knowledge") && !isDeptKnowledgeActive;
   const isSkillsActive = location.pathname.startsWith("/skills");
@@ -162,7 +162,7 @@ export function SidebarWorkspaceNav({
                   )}
                   key={project.id}
                   title={project.name}
-                  to={`/projects/${encodeURIComponent(project.id)}/overview`}
+                  to={`/projects/${encodeURIComponent(project.id)}`}
                 >
                   {isActive ? (
                     <span

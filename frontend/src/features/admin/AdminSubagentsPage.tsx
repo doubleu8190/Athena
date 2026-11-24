@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { getAuthIdentityEpoch } from "../../shared/api/client";
 import { formatDateTime } from "../../shared/lib/format";
+import { VisibilityBadge } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -100,7 +101,6 @@ export function AdminSubagentsPage() {
     <div className="page-shell admin-page admin-subagents-page">
       <header className="page-heading">
         <div className="page-heading-copy">
-          <p className="page-eyebrow">Admin / Subagents</p>
           <h1>子智能体管理</h1>
           <p className="page-description">
             配置可被主智能体异步派发的子智能体。每个子智能体拥有独立系统提示词、可选绑定模型与最小工具权限白名单。
@@ -140,7 +140,6 @@ export function AdminSubagentsPage() {
           }
           description="创建并启用子智能体后，主智能体在对话中可通过 dispatch_subagents 并发派发专业子任务。"
           icon="spark"
-          kicker="No subagents"
           title="还没有子智能体"
         />
       ) : (
@@ -150,7 +149,6 @@ export function AdminSubagentsPage() {
         >
           <header className="admin-section-heading">
             <div>
-              <p className="admin-section-kicker">Configured profiles</p>
               <h2 id="subagent-list-title">子智能体目录</h2>
             </div>
             <span className="admin-data-count">
@@ -185,6 +183,16 @@ export function AdminSubagentsPage() {
                         <span className="admin-status-badge">
                           v{subagent.version}
                         </span>
+                        {subagent.visibility_scope ? (
+                          <VisibilityBadge
+                            departmentName={
+                              subagent.visibility_scope === "department"
+                                ? (subagent.owner_department_id ?? null)
+                                : null
+                            }
+                            scope={subagent.visibility_scope}
+                          />
+                        ) : null}
                       </div>
                       <p className="admin-muted">{subagent.description}</p>
                     </div>

@@ -229,7 +229,7 @@ describe("单层侧栏会话历史与项目上下文", () => {
     const nav = await screen.findByRole("navigation", { name: "主导航" });
     expect(
       await within(nav).findByRole("link", { name: PROJECT_A.name }),
-    ).toHaveAttribute("href", `/projects/${PROJECT_A.id}/overview`);
+    ).toHaveAttribute("href", `/projects/${PROJECT_A.id}`);
     expect(
       within(nav).getByRole("link", { name: "查看全部项目 →" }),
     ).toHaveAttribute("href", "/projects");
@@ -522,7 +522,7 @@ describe("新对话草稿", () => {
     });
     await user.type(screen.getByLabelText("对话草稿"), "项目 A 的旧草稿");
 
-    view.navigateTo(`/projects/${PROJECT_B.id}/overview`);
+    view.navigateTo(`/projects/${PROJECT_B.id}`);
     await screen.findByRole("heading", { name: PROJECT_B.name });
     const startLinks = await screen.findAllByRole("link", {
       name: "开始对话",
@@ -551,7 +551,7 @@ describe("新对话草稿", () => {
     });
     await user.type(screen.getByLabelText("对话草稿"), "项目 A 草稿");
 
-    view.navigateTo(`/projects/${PROJECT_B.id}/overview`);
+    view.navigateTo(`/projects/${PROJECT_B.id}`);
     await screen.findByRole("heading", { name: PROJECT_B.name });
     const startLinks = await screen.findAllByRole("link", {
       name: "开始对话",
@@ -568,7 +568,7 @@ describe("新对话草稿", () => {
     view.goBack();
     await waitFor(() => {
       expect(view.getLocation()).toEqual({
-        pathname: `/projects/${PROJECT_B.id}/overview`,
+        pathname: `/projects/${PROJECT_B.id}`,
         search: "",
       });
     });

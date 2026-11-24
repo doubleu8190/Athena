@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { Badge } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import {
@@ -53,10 +54,9 @@ export function AdminToolsPage() {
     <div className="page-shell admin-page admin-tools-page">
       <header className="page-heading">
         <div className="page-heading-copy">
-          <p className="page-eyebrow">Admin / Tools</p>
           <h1>工具审批策略</h1>
           <p className="page-description">
-            仅管理后端已注册 MCP 工具的审批开关。没有批量接口，保存按单个工具依次提交。
+            管理后端已注册 MCP 工具的审批开关与业务展示信息。保存按单个工具依次提交。
           </p>
         </div>
       </header>
@@ -74,7 +74,6 @@ export function AdminToolsPage() {
         <EmptyState
           description="工具只会由后端在 MCP Server 创建或完整替换并成功发现后注册。当前没有可管理的工具。"
           icon="tools"
-          kicker="No registered MCP tools"
           title="还没有已注册工具"
         />
       ) : (
@@ -84,7 +83,6 @@ export function AdminToolsPage() {
         >
           <header className="admin-section-heading">
             <div>
-              <p className="admin-section-kicker">Registered MCP tools</p>
               <h2 id="admin-tool-list-title">工具目录</h2>
             </div>
             <span className="admin-data-count">
@@ -110,6 +108,9 @@ export function AdminToolsPage() {
                 <div className="admin-tool-main">
                   <div className="admin-title-line">
                     <h3>{tool.model_name}</h3>
+                    {tool.display_name?.trim() ? (
+                      <Badge variant="brand">{tool.display_name.trim()}</Badge>
+                    ) : null}
                     <span
                       className={`admin-status-badge${
                         tool.requires_approval
@@ -140,6 +141,12 @@ export function AdminToolsPage() {
                         {tool.remote_name}
                       </dd>
                     </div>
+                    {tool.approval_summary_template?.trim() ? (
+                      <div className="admin-detail-wide">
+                        <dt>审批摘要模板</dt>
+                        <dd>{tool.approval_summary_template.trim()}</dd>
+                      </div>
+                    ) : null}
                   </dl>
                 </div>
 

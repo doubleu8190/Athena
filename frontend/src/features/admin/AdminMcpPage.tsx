@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
+import { VisibilityBadge } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -63,10 +64,9 @@ export function AdminMcpPage() {
     <div className="page-shell admin-page admin-mcp-page">
       <header className="page-heading">
         <div className="page-heading-copy">
-          <p className="page-eyebrow">Admin / MCP</p>
           <h1>MCP Server</h1>
           <p className="page-description">
-            管理全局 MCP 连接。创建和编辑都会由后端真实连接并发现工具，页面不模拟连接或发现结果。
+            管理企业 MCP 连接。创建和编辑都会由后端真实连接并发现工具，页面不模拟连接或发现结果。
           </p>
         </div>
         <button
@@ -101,7 +101,6 @@ export function AdminMcpPage() {
           }
           description="新建时后端会连接远端 Server、发现工具并原子写入目录；失败不会创建占位配置。"
           icon="settings"
-          kicker="No MCP servers"
           title="还没有 MCP Server"
         />
       ) : (
@@ -111,7 +110,6 @@ export function AdminMcpPage() {
         >
           <header className="admin-section-heading">
             <div>
-              <p className="admin-section-kicker">Global connections</p>
               <h2 id="mcp-server-list-title">Server 目录</h2>
             </div>
             <span className="admin-data-count">
@@ -132,6 +130,25 @@ export function AdminMcpPage() {
                       <span className="admin-status-badge">
                         v{server.config_version}
                       </span>
+                      {server.enabled !== undefined ? (
+                        <span
+                          className={`admin-status-badge${
+                            server.enabled ? " is-success" : " is-muted"
+                          }`}
+                        >
+                          {server.enabled ? "已启用" : "已停用"}
+                        </span>
+                      ) : null}
+                      {server.visibility_scope ? (
+                        <VisibilityBadge
+                          departmentName={
+                            server.visibility_scope === "department"
+                              ? (server.owner_department_id ?? null)
+                              : null
+                          }
+                          scope={server.visibility_scope}
+                        />
+                      ) : null}
                     </div>
                     <p className="admin-muted">
                       {discoveredAtLabel(server)}

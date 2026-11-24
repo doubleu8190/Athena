@@ -88,6 +88,18 @@ const SKILL_ERROR_COPY: Record<string, string> = {
   skill_selection_invalid: "技能选择重复或包含当前 Run 不支持的技能。",
   skill_not_found: "技能或版本不存在，或已不再可用。",
   skill_version_not_found: "技能版本不存在或不属于目标技能。",
+  company_skill_delete_unsupported:
+    "全公司技能不支持删除，如需下线请将其停用。",
+  visibility_scope_invalid: "技能可见范围无效，请选择全公司或部门共享。",
+  visibility_scope_unsupported: "当前操作不支持所选可见范围。",
+  owner_department_id_required: "部门技能必须指定归属部门。",
+  owner_department_required: "部门技能必须指定归属部门。",
+  owner_department_not_found: "所选归属部门不存在或已归档。",
+  owner_department_not_allowed: "全公司技能不能指定归属部门。",
+  visibility_grants_invalid: "可见性授权配置无效，请检查部门或角色设置。",
+  visibility_grants_not_allowed: "当前可见范围不支持额外共享授权。",
+  admin_required: "你没有权限执行该技能管理操作。",
+  permission_denied: "你没有权限执行该技能操作。",
   skill_parameter_schema_unsupported:
     "技能脚本参数 Schema 使用了当前平台不支持的规则。",
   skill_parameter_schema_invalid:
@@ -103,10 +115,17 @@ const SKILL_ERROR_COPY: Record<string, string> = {
   invalid_response: "服务器返回了无法识别的技能响应。",
 };
 
+function lookupSkillErrorCopy(code: string): string | undefined {
+  // 严格通过 Object.hasOwn 查表，防止原型属性污染导致异常输出。
+  return Object.hasOwn(SKILL_ERROR_COPY, code)
+    ? SKILL_ERROR_COPY[code]
+    : undefined;
+}
+
 export function skillErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     const message =
-      SKILL_ERROR_COPY[error.detail] ?? "技能操作未完成，请稍后重试。";
+      lookupSkillErrorCopy(error.detail) ?? "技能操作未完成，请稍后重试。";
     return error.memberPath
       ? `${message}\n包内文件：${error.memberPath}`
       : message;

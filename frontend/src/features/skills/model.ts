@@ -1,3 +1,8 @@
+import type {
+  VisibilityGrant,
+  VisibilityGrantInput,
+} from "../knowledge/model";
+
 export const SKILL_ZIP_MAX_BYTES = 25 * 1024 * 1024;
 export const PERSONAL_SKILL_FILE_MAX_BYTES = 1024 * 1024;
 export const PERSONAL_SKILL_NAME_MAX_LENGTH = 120;
@@ -67,6 +72,7 @@ export interface Skill {
   revision: number;
   scope?: LegacyCompatibleSkillScope;
   owner_department_id?: string | null;
+  visibility_grants?: VisibilityGrant[];
   updated_at: string;
   dependency_check: DependencyCheck | null;
 }
@@ -108,6 +114,13 @@ export interface SkillConfigurationInput {
   enabled: boolean;
   expected_revision: number;
   script_requires_approval: boolean;
+  visibility_grants?: VisibilityGrantInput[];
+}
+
+export interface ImportSkillPackageOptions {
+  ownerDepartmentId?: string;
+  scope?: "company" | "department";
+  visibilityGrants?: VisibilityGrantInput[];
 }
 
 export interface SkillFormState {

@@ -1096,7 +1096,7 @@ describe("认证流程与本地应急登录", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
-  it("账户菜单可跳转工作偏好与记忆占位页且不会回跳 /chat", async () => {
+  it("账户菜单可跳转工作偏好与记忆页且不会回跳 /chat", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
@@ -1110,6 +1110,16 @@ describe("认证流程与本地应急登录", () => {
         }
         if (url.endsWith("/api/v1/skills")) {
           return jsonResponse({ items: [] });
+        }
+        if (url.endsWith("/api/v1/me/preferences")) {
+          return jsonResponse({
+            custom_instructions: "",
+            memory_enabled: true,
+            updated_at: null,
+          });
+        }
+        if (url.endsWith("/api/v1/me/memories")) {
+          return jsonResponse({ items: [], limit: 50, total: 0 });
         }
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -1586,6 +1596,109 @@ describe("认证流程与本地应急登录", () => {
     await screen.findByText("显示名已更新。");
     expect(savedDisplayName).toBe(emojiName);
     expect(Array.from(savedDisplayName)).toHaveLength(50);
+  });
+
+  it("个人资料页展示完整企业组织名片（工号、职位、主部门与管辖部门回退）且 local 账号支持密码显隐切换", async () => {
+    const richDeptAdmin = makeDeptAdmin({
+      auth_provider: "local",
+      departments: [
+        {
+          id: "dept-fin",
+          is_primary: true,
+          name: "财务部",
+          path: "/dept-root/dept-fin/",
+        },
+        {
+          id: "dept-audit",
+          is_primary: false,
+          name: "内审组",
+          path: "/dept-root/dept-audit/",
+        },
+      ],
+      display_name: "周财管",
+      email: null,
+      employee_no: "FIN-009",
+      job_title: "财务总监",
+      managed_department_ids: ["dept-fin", "dept-unmatched-id"],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = getRequestUrl(input);
+        if (url.endsWith("/auth/me")) return jsonResponse(richDeptAdmin);
+        if (url.includes("/api/v1/projects")) {
+          return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+        }
+        if (url.includes("/api/v1/sessions")) {
+          return jsonResponse({ items: [], page: 1, page_size: 30, total: 0 });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp("/profile");
+
+    expect(await screen.findByText("FIN-009")).toBeInTheDocument();
+    expect(screen.getByText("财务总监")).toBeInTheDocument();
+    expect(screen.getByText("未绑定企业邮箱")).toBeInTheDocument();
+    expect(screen.getByText("主部门")).toBeInTheDocument();
+    expect(screen.getByText("内审组")).toBeInTheDocument();
+    // 管辖部门优先映射中文名，未命中时安全回退展示部门 ID。
+    expect(screen.getByText("dept-unmatched-id")).toBeInTheDocument();
+
+    // local 账号渲染修改密码表单，且密码框支持带 aria-pressed 的显隐切换。
+    const currentPasswordInput = screen.getByLabelText("当前密码");
+    expect(currentPasswordInput).toHaveAttribute("type", "password");
+    const toggles = screen.getAllByRole("button", { name: "显示密码" });
+    expect(toggles).toHaveLength(3);
+    expect(toggles[0]).toHaveAttribute("aria-pressed", "false");
+    await user.click(toggles[0]);
+    expect(currentPasswordInput).toHaveAttribute("type", "text");
+    expect(
+      screen.getByRole("button", { name: "隐藏密码" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it.each([
+    {
+      expectedHeading: "飞书企业身份托管",
+      provider: "feishu" as const,
+      title: "飞书单点登录账号仅展示只读安全说明，隐藏本地改密表单",
+    },
+    {
+      expectedHeading: "非生产 Mock 体验账号",
+      provider: "mock" as const,
+      title: "Mock 体验账号仅展示只读安全说明，隐藏本地改密表单",
+    },
+  ])("$title", async ({ expectedHeading, provider }) => {
+    const targetUser = makeUser({
+      auth_provider: provider,
+      employee_no: null,
+      job_title: null,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = getRequestUrl(input);
+        if (url.endsWith("/auth/me")) return jsonResponse(targetUser);
+        if (url.includes("/api/v1/projects")) {
+          return jsonResponse({ items: [], page: 1, page_size: 100, total: 0 });
+        }
+        if (url.includes("/api/v1/sessions")) {
+          return jsonResponse({ items: [], page: 1, page_size: 30, total: 0 });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    renderApp("/profile");
+
+    expect(await screen.findByText(expectedHeading)).toBeInTheDocument();
+    expect(screen.getAllByText("未配置")).toHaveLength(2);
+    expect(screen.queryByLabelText("当前密码")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "更新密码" }),
+    ).not.toBeInTheDocument();
   });
 });
 

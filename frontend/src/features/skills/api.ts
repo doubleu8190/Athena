@@ -1,5 +1,6 @@
 import { apiMultipart, apiRequest } from "../../shared/api/client";
 import type {
+  ImportSkillPackageOptions,
   Skill,
   SkillAdminDetails,
   SkillConfigurationInput,
@@ -44,9 +45,19 @@ export async function getAdminSkill(
 export async function importSkillPackage(
   file: File,
   requestId: string,
+  options?: ImportSkillPackageOptions,
 ): Promise<SkillAdminDetails> {
   const form = new FormData();
   form.set("package", file);
+  if (options?.scope) {
+    form.set("scope", options.scope);
+  }
+  if (options?.scope === "department" && options.ownerDepartmentId?.trim()) {
+    form.set("owner_department_id", options.ownerDepartmentId.trim());
+  }
+  if (options?.visibilityGrants && options.visibilityGrants.length > 0) {
+    form.set("visibility_grants", JSON.stringify(options.visibilityGrants));
+  }
   return apiMultipart<SkillAdminDetails>("/admin/skills/import", form, {
     method: "POST",
     headers: { "Idempotency-Key": requestId },
@@ -109,6 +120,17 @@ export function updateSkillConfiguration(
     method: "PATCH",
     body: input,
   });
+}
+
+/** 软删除部门级技能（后端严禁删除 company 级技能，须携带乐观锁 expected_revision）。 */
+export async function deleteAdminSkill(
+  skillId: string,
+  expectedRevision: number,
+): Promise<void> {
+  await apiRequest<void>(
+    `${adminSkillPath(skillId)}?expected_revision=${expectedRevision}`,
+    { method: "DELETE" },
+  );
 }
 
 export async function listPersonalSkills(): Promise<Skill[]> {

@@ -11,12 +11,15 @@ import {
   getProject,
   listAllProjects,
   listProjects,
-  renameProject,
+  updateProject,
+  type DeleteProjectOptions,
 } from "./api";
 import type {
   Project,
+  ProjectCreateInput,
   ProjectListQuery,
   ProjectNameInput,
+  ProjectUpdateInput,
 } from "./model";
 import { projectKeys } from "./queryKeys";
 
@@ -31,15 +34,15 @@ async function invalidateProjectCaches(
 
 export function useProjectDirectory() {
   return useQuery({
-    queryKey: projectKeys.directory(),
     queryFn: listAllProjects,
+    queryKey: projectKeys.directory(),
   });
 }
 
 export function useProjectList(query: ProjectListQuery = {}) {
   return useQuery({
-    queryKey: projectKeys.list(query),
     queryFn: () => listProjects(query),
+    queryKey: projectKeys.list(query),
   });
 }
 
@@ -48,27 +51,38 @@ export function useProject(
   options: { enabled?: boolean } = {},
 ) {
   return useQuery({
-    queryKey: projectKeys.detail(projectId ?? ""),
-    queryFn: () => getProject(projectId ?? ""),
     enabled: Boolean(projectId) && (options.enabled ?? true),
+    queryFn: () => getProject(projectId ?? ""),
+    queryKey: projectKeys.detail(projectId ?? ""),
   });
 }
 
 export function useCreateProjectMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: ProjectNameInput) => createProject(input),
+    mutationFn: (input: ProjectCreateInput) => createProject(input),
     onSuccess: async () => {
       await invalidateProjectCaches(queryClient);
     },
   });
 }
 
+export function useUpdateProjectMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ProjectUpdateInput) => updateProject(projectId, input),
+    onSuccess: async (project: Project) => {
+      queryClient.setQueryData(projectKeys.detail(projectId), project);
+      await invalidateProjectCaches(queryClient);
+    },
+  });
+}
+
+/** 保留旧 hook 导出以兼容既有改名弹窗调用方。 */
 export function useRenameProjectMutation(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: ProjectNameInput) =>
-      renameProject(projectId, input),
+    mutationFn: (input: ProjectNameInput) => updateProject(projectId, input),
     onSuccess: async (project: Project) => {
       queryClient.setQueryData(projectKeys.detail(projectId), project);
       await invalidateProjectCaches(queryClient);
@@ -79,7 +93,8 @@ export function useRenameProjectMutation(projectId: string) {
 export function useDeleteProjectMutation(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => deleteProject(projectId),
+    mutationFn: (options?: DeleteProjectOptions | void) =>
+      deleteProject(projectId, options ?? undefined),
     onSuccess: async () => {
       queryClient.removeQueries({
         queryKey: projectKeys.detail(projectId),
@@ -88,4 +103,3 @@ export function useDeleteProjectMutation(projectId: string) {
     },
   });
 }
-

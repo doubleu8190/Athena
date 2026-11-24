@@ -732,4 +732,36 @@ describe("管理 MCP 页", () => {
       transport: "stdio",
     });
   });
+
+  it("兼容展示 MCP Server 一期可见范围标签与归属部门标识", async () => {
+    const deptServer = makeMcpServer({
+      id: "mcp-dept",
+      name: "研发部代码网关",
+      owner_department_id: "dept-rd",
+      visibility_scope: "department",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (
+          url.pathname === "/api/v1/admin/mcp/servers" &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return jsonResponse(listResponse([deptServer], 1, 10, 1));
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+
+    renderApp("/admin/mcp");
+
+    const card = (
+      await screen.findByRole("heading", { name: "研发部代码网关" })
+    ).closest("li") as HTMLElement;
+    expect(within(card).getByText("dept-rd")).toBeInTheDocument();
+  });
 });

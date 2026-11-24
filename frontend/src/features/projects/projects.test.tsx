@@ -7,6 +7,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { makeSkill } from "../../test/adminFixtures";
 import {
   getRequestUrl,
   listResponse,
@@ -16,64 +17,153 @@ import {
   TEST_USER,
 } from "../../test/fixtures";
 import { jsonResponse, renderApp } from "../../test/testUtils";
+import type { Project } from "./model";
+import { projectKeys } from "./queryKeys";
 
 const PROJECT_SESSION = makeSession({
   id: "project-session",
   title: "项目真实会话",
 });
 
-function baseFetchMock() {
-  return vi.fn(
+const SKILL_FIN = makeSkill({
+  description: "按财务模板输出周报",
+  enabled: true,
+  id: "skill-fin",
+  name: "财务分析助手",
+  scope: "company",
+  slug: "fin-helper",
+});
+
+const SKILL_LEGAL = makeSkill({
+  description: "合同条款风险核查",
+  enabled: true,
+  id: "skill-legal",
+  name: "法务审阅",
+  scope: "department",
+  slug: "legal-review",
+});
+
+interface WorkspaceMockOptions {
+  deleteResponse?: (url: URL) => Response;
+  project?: Project;
+  projects?: Project[];
+  sessions?: ReturnType<typeof makeSession>[];
+  sessionsTotal?: number;
+  skills?: ReturnType<typeof makeSkill>[];
+}
+
+function installProjectWorkspaceFetch(options: WorkspaceMockOptions = {}) {
+  let currentProject: Project = options.project ?? {
+    ...PROJECT_A,
+    default_skill_ids: [],
+    description: "季度增长专项资料整理",
+    instructions: "先输出核心指标变化，再分析原因。",
+  };
+  let projectList: Project[] = options.projects ?? [currentProject, PROJECT_B];
+  const sessions = options.sessions ?? [PROJECT_SESSION];
+  const skills = options.skills ?? [SKILL_FIN, SKILL_LEGAL];
+  const patchPayloads: Array<Record<string, unknown>> = [];
+  const deleteUrls: string[] = [];
+
+  const fetchMock = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(getRequestUrl(input), "http://localhost");
-      if (url.pathname.endsWith("/auth/me")) {
+      const method = init?.method ?? "GET";
+
+      if (url.pathname.endsWith("/auth/me") && method === "GET") {
         return jsonResponse(TEST_USER);
       }
-      if (
-        url.pathname === "/api/v1/projects" &&
-        (!init?.method || init.method === "GET")
-      ) {
+      if (url.pathname === "/api/v1/projects" && method === "GET") {
         return jsonResponse(
-          listResponse([PROJECT_A, PROJECT_B], 1, 100, 2),
+          listResponse(projectList, 1, 100, projectList.length),
         );
       }
-      if (
-        url.pathname === `/api/v1/projects/${PROJECT_A.id}` &&
-        (!init?.method || init.method === "GET")
-      ) {
-        return jsonResponse(PROJECT_A);
-      }
-      if (url.pathname === "/api/v1/sessions") {
-        const pageSize = Number(url.searchParams.get("page_size"));
-        if (pageSize === 5 || pageSize === 10) {
-          return jsonResponse(
-            listResponse(
-              [PROJECT_SESSION],
-              Number(url.searchParams.get("page") ?? 1),
-              pageSize,
-              1,
-            ),
+      if (url.pathname === `/api/v1/projects/${currentProject.id}`) {
+        if (method === "GET") {
+          return jsonResponse(currentProject);
+        }
+        if (method === "PATCH") {
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
+          patchPayloads.push(body);
+          currentProject = {
+            ...currentProject,
+            ...(Object.hasOwn(body, "name")
+              ? { name: body.name as string }
+              : {}),
+            ...(Object.hasOwn(body, "description")
+              ? { description: body.description as string | null }
+              : {}),
+            ...(Object.hasOwn(body, "instructions")
+              ? { instructions: body.instructions as string | null }
+              : {}),
+            ...(Object.hasOwn(body, "default_skill_ids")
+              ? { default_skill_ids: body.default_skill_ids as string[] }
+              : {}),
+            updated_at: "2026-11-24T06:00:00Z",
+          };
+          projectList = projectList.map((item) =>
+            item.id === currentProject.id ? currentProject : item,
           );
+          return jsonResponse(currentProject);
         }
-        if (pageSize === 1) {
-          return jsonResponse(listResponse([], 1, 1, 0));
+        if (method === "DELETE") {
+          deleteUrls.push(`${url.pathname}${url.search}`);
+          if (options.deleteResponse) {
+            return options.deleteResponse(url);
+          }
+          projectList = projectList.filter(
+            (item) => item.id !== currentProject.id,
+          );
+          return new Response(null, { status: 204 });
         }
-        return jsonResponse(listResponse([]));
+      }
+      if (url.pathname === "/api/v1/sessions" && method === "GET") {
+        const pageSize = Number(url.searchParams.get("page_size") ?? 10);
+        const page = Number(url.searchParams.get("page") ?? 1);
+        const q = url.searchParams.get("q")?.trim().toLowerCase() ?? "";
+        const projectId = url.searchParams.get("project_id");
+        if (projectId === currentProject.id) {
+          const matched = q
+            ? sessions.filter((item) =>
+                (item.title ?? "").toLowerCase().includes(q),
+              )
+            : sessions;
+          const total = options.sessionsTotal ?? matched.length;
+          return jsonResponse(listResponse(matched, page, pageSize, total));
+        }
+        return jsonResponse(listResponse([], 1, pageSize, 0));
       }
       if (
         url.pathname ===
-        `/api/v1/projects/${PROJECT_A.id}/knowledge-bases`
+          `/api/v1/projects/${currentProject.id}/knowledge-bases` &&
+        method === "GET"
       ) {
         return jsonResponse([]);
       }
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      if (url.pathname === "/api/v1/skills" && method === "GET") {
+        return jsonResponse({ items: skills });
+      }
+      throw new Error(`Unexpected request: ${method} ${url}`);
     },
   );
+
+  vi.stubGlobal("fetch", fetchMock);
+  return { deleteUrls, fetchMock, patchPayloads };
 }
 
-describe("项目中心", () => {
-  it("主内容提供移动端可访问的真实项目列表", async () => {
-    vi.stubGlobal("fetch", baseFetchMock());
+describe("项目中心与单页双栏工作文件夹", () => {
+  it("项目目录页展示 3 列文件夹卡片、简介、指令/默认技能徽章，链接指向 /projects/:id", async () => {
+    installProjectWorkspaceFetch({
+      project: {
+        ...PROJECT_A,
+        default_skill_ids: ["skill-fin", "skill-legal"],
+        description: "年度增长战略资料与分析",
+        instructions: "输出采用结论先行",
+      },
+    });
 
     renderApp("/projects");
 
@@ -82,88 +172,45 @@ describe("项目中心", () => {
     const projectLink = await within(main).findByRole("link", {
       name: new RegExp(PROJECT_A.name),
     });
-    expect(projectLink).toHaveAttribute(
-      "href",
-      `/projects/${PROJECT_A.id}/overview`,
-    );
-    expect(within(main).getAllByText(/创建于/).length).toBeGreaterThan(0);
-    expect(within(main).getAllByText(/更新于/).length).toBeGreaterThan(0);
+    expect(projectLink).toHaveAttribute("href", `/projects/${PROJECT_A.id}`);
+    expect(within(main).getByText("年度增长战略资料与分析")).toBeInTheDocument();
+    expect(within(main).getByText("已配置专属指令")).toBeInTheDocument();
+    expect(within(main).getByText("默认技能 2")).toBeInTheDocument();
   });
 
-  it("四个 Tab 使用独立 URL、active 状态并在站内切换", async () => {
-    vi.stubGlobal("fetch", baseFetchMock());
-    const user = userEvent.setup();
-
-    renderApp(`/projects/${PROJECT_A.id}/overview`);
-
-    const tabs = await screen.findByRole("navigation", {
-      name: "项目页面",
+  it("旧版 /projects/:id/:tab?page=2 路由温和重定向至 /projects/:id 并保留分页参数", async () => {
+    const { fetchMock } = installProjectWorkspaceFetch({
+      sessions: [makeSession({ id: "s-p2", title: "第二页项目对话" })],
+      sessionsTotal: 15,
     });
-    expect(
-      within(tabs).getByRole("link", { name: "概览" }),
-    ).toHaveAttribute("href", `/projects/${PROJECT_A.id}/overview`);
-    expect(
-      within(tabs).getByRole("link", { name: "会话" }),
-    ).toHaveAttribute("href", `/projects/${PROJECT_A.id}/sessions`);
-    expect(
-      within(tabs).getByRole("link", { name: "知识库" }),
-    ).toHaveAttribute("href", `/projects/${PROJECT_A.id}/knowledge`);
-    expect(
-      within(tabs).getByRole("link", { name: "设置" }),
-    ).toHaveAttribute("href", `/projects/${PROJECT_A.id}/settings`);
-    expect(
-      within(tabs).getByRole("link", { name: "概览" }),
-    ).toHaveAttribute("aria-current", "page");
-    expect(
-      within(
-        screen.getByRole("navigation", { name: "主导航" }),
-      ).getByRole("link", { name: PROJECT_A.name }),
-    ).toHaveAttribute("aria-current", "page");
 
-    await user.click(within(tabs).getByRole("link", { name: "会话" }));
-    expect(await screen.findByText("项目真实会话")).toBeInTheDocument();
-    expect(
-      within(tabs).getByRole("link", { name: "会话" }),
-    ).toHaveAttribute("aria-current", "page");
+    const app = renderApp(`/projects/${PROJECT_A.id}/sessions?page=2`);
 
-    await user.click(within(tabs).getByRole("link", { name: "知识库" }));
     expect(
-      await screen.findByRole("heading", {
-        name: "还没有关联知识库",
+      await screen.findByRole("heading", { level: 1, name: PROJECT_A.name }),
+    ).toBeInTheDocument();
+    expect(app.getLocation()).toEqual({
+      pathname: `/projects/${PROJECT_A.id}`,
+      search: "?page=2",
+    });
+    expect(await screen.findByText("第二页项目对话")).toBeInTheDocument();
+    expect(screen.getByText("第 2 / 2 页")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) => {
+        const url = new URL(getRequestUrl(input), "http://localhost");
+        return (
+          url.pathname === "/api/v1/sessions" &&
+          url.searchParams.get("project_id") === PROJECT_A.id &&
+          url.searchParams.get("page") === "2"
+        );
       }),
-    ).toBeInTheDocument();
-    expect(
-      within(tabs).getByRole("link", { name: "知识库" }),
-    ).toHaveAttribute("aria-current", "page");
-
-    await user.click(within(tabs).getByRole("link", { name: "设置" }));
-    expect(
-      await screen.findByText("项目名称", { selector: "strong" }),
-    ).toBeInTheDocument();
-    expect(
-      within(tabs).getByRole("link", { name: "设置" }),
-    ).toHaveAttribute("aria-current", "page");
+    ).toBe(true);
   });
 
-  it("未知 Tab 回到 overview", async () => {
-    vi.stubGlobal("fetch", baseFetchMock());
-
-    renderApp(`/projects/${PROJECT_A.id}/not-a-tab`);
-
-    const tabs = await screen.findByRole("navigation", {
-      name: "项目页面",
-    });
-    await waitFor(() => {
-      expect(
-        within(tabs).getByRole("link", { name: "概览" }),
-      ).toHaveAttribute("aria-current", "page");
-    });
-  });
-
-  it("项目 404 显示明确不可访问状态", async () => {
-    const fetchMock = baseFetchMock();
-    fetchMock.mockImplementation(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
+  it("项目 404 显示明确不可访问状态并返回项目中心", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
         if (url.pathname.endsWith("/auth/me")) {
           return jsonResponse(TEST_USER);
@@ -178,26 +225,110 @@ describe("项目中心", () => {
           return jsonResponse(listResponse([]));
         }
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-      },
+      }),
     );
-    vi.stubGlobal("fetch", fetchMock);
 
     renderApp("/projects/missing/overview");
 
     expect(
-      await screen.findByRole("heading", {
-        name: "项目不存在或不可访问",
-      }),
+      await screen.findByRole("heading", { name: "项目不存在或不可访问" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "返回项目中心" }),
     ).toHaveAttribute("href", "/projects");
   });
+
+  it("单页工作文件夹支持编辑名称/清空简介、编辑/清空专属指令，以及配置与移除不可用默认技能", async () => {
+    const { patchPayloads } = installProjectWorkspaceFetch({
+      project: {
+        ...PROJECT_A,
+        default_skill_ids: ["skill-stale-removed"],
+        description: "旧项目简介",
+        instructions: "旧专属指令",
+      },
+    });
+    const user = userEvent.setup();
+
+    renderApp(`/projects/${PROJECT_A.id}`);
+
+    // 1. 顶部编辑项目信息：改名并清空简介（显式传 description: null）。
+    await screen.findByRole("heading", { level: 1, name: PROJECT_A.name });
+    expect(screen.getByText("旧项目简介")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑信息" }));
+    const editDialog = screen.getByRole("dialog", { name: "编辑项目信息" });
+    const nameInput = within(editDialog).getByLabelText("项目名称");
+    const descInput = within(editDialog).getByLabelText("项目简介");
+    await user.clear(nameInput);
+    await user.type(nameInput, "新增长文件夹");
+    await user.clear(descInput);
+    await user.click(within(editDialog).getByRole("button", { name: "保存信息" }));
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "新增长文件夹" }),
+    ).toBeInTheDocument();
+    expect(patchPayloads[0]).toEqual({
+      description: null,
+      name: "新增长文件夹",
+    });
+
+    // 2. 专属背景指令：编辑保存后再清空（显式传 instructions: null）。
+    const instructionsTextarea = screen.getByRole("textbox", {
+      name: "专属背景指令",
+    });
+    expect(instructionsTextarea).toHaveValue("旧专属指令");
+    const saveInstructionsBtn = screen.getByRole("button", { name: "保存指令" });
+    expect(saveInstructionsBtn).toBeDisabled();
+
+    await user.clear(instructionsTextarea);
+    await user.type(instructionsTextarea, "所有表格按季度汇总");
+    expect(saveInstructionsBtn).toBeEnabled();
+    await user.click(saveInstructionsBtn);
+
+    await waitFor(() => {
+      expect(patchPayloads[1]).toEqual({
+        instructions: "所有表格按季度汇总",
+      });
+    });
+
+    await user.clear(instructionsTextarea);
+    await user.click(saveInstructionsBtn);
+    await waitFor(() => {
+      expect(patchPayloads[2]).toEqual({
+        instructions: null,
+      });
+    });
+
+    // 3. 默认挂载技能：不可用旧技能标灰展示且可移除，Popover 搜索并勾选新技能后保存。
+    expect(
+      await screen.findByText("skill-stale-removed（当前不可用）"),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "移除默认技能：skill-stale-removed",
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "选择默认技能" }));
+    const searchSkillInput = await screen.findByLabelText("搜索可用技能");
+    await user.type(searchSkillInput, "财务");
+    expect(screen.getByText("财务分析助手")).toBeInTheDocument();
+    expect(screen.queryByText("法务审阅")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText("财务分析助手"));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "保存默认技能" }));
+
+    await waitFor(() => {
+      expect(patchPayloads[3]).toEqual({
+        default_skill_ids: ["skill-fin"],
+      });
+    });
+  });
 });
 
-describe("新建项目", () => {
+describe("新建项目（支持可选简介）", () => {
   function installCreateFetch(postResponse: () => Response) {
-    const createdProjects: typeof PROJECT_A[] = [];
+    const createdProjects: Project[] = [];
     const fetchMock = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
@@ -205,11 +336,15 @@ describe("新建项目", () => {
           return jsonResponse(TEST_USER);
         }
         if (url.pathname === "/api/v1/projects" && init?.method === "POST") {
-          const body = JSON.parse(String(init.body)) as { name: string };
+          const body = JSON.parse(String(init.body)) as {
+            description?: string;
+            name: string;
+          };
           const response = postResponse();
           if (response.status === 201) {
             createdProjects.push({
               ...PROJECT_A,
+              description: body.description ?? null,
               id: "created-project",
               name: body.name,
             });
@@ -227,11 +362,19 @@ describe("新建项目", () => {
           );
         }
         if (url.pathname === "/api/v1/projects/created-project") {
-          return jsonResponse({
-            ...PROJECT_A,
-            id: "created-project",
-            name: createdProjects[0]?.name ?? "创建项目",
-          });
+          return jsonResponse(
+            createdProjects[0] ?? {
+              ...PROJECT_A,
+              id: "created-project",
+              name: "创建项目",
+            },
+          );
+        }
+        if (url.pathname === "/api/v1/projects/created-project/knowledge-bases") {
+          return jsonResponse([]);
+        }
+        if (url.pathname === "/api/v1/skills") {
+          return jsonResponse({ items: [] });
         }
         if (url.pathname === "/api/v1/sessions") {
           return jsonResponse(listResponse([]));
@@ -243,11 +386,12 @@ describe("新建项目", () => {
     return fetchMock;
   }
 
-  it("空名称和 121 个 Unicode 码点被拦截，120 个码点成功并跳转", async () => {
+  it("空名称和 121 个 Unicode 码点被拦截，120 个码点与可选简介成功创建并跳至 /projects/:id", async () => {
     const fetchMock = installCreateFetch(() =>
       jsonResponse(
         {
           ...PROJECT_A,
+          description: "季度复盘材料",
           id: "created-project",
           name: "😀".repeat(120),
         },
@@ -256,7 +400,7 @@ describe("新建项目", () => {
     );
     const user = userEvent.setup();
 
-    renderApp("/projects");
+    const app = renderApp("/projects");
     await screen.findByRole("heading", { level: 1, name: "项目" });
     const main = screen.getByRole("main");
     const openButtons = await within(main).findAllByRole("button", {
@@ -268,19 +412,10 @@ describe("新建项目", () => {
     await user.click(
       within(dialog).getByRole("button", { name: "创建项目" }),
     );
-    expect(
-      within(dialog).getByText("请输入项目名称。"),
-    ).toBeInTheDocument();
-    expect(
-      fetchMock.mock.calls.some(
-        ([input, init]) =>
-          new URL(getRequestUrl(input), "http://localhost").pathname ===
-            "/api/v1/projects" && init?.method === "POST",
-      ),
-    ).toBe(false);
+    expect(within(dialog).getByText("请输入项目名称。")).toBeInTheDocument();
 
-    const input = within(dialog).getByLabelText("项目名称");
-    fireEvent.change(input, { target: { value: "😀".repeat(121) } });
+    const nameInput = within(dialog).getByLabelText("项目名称");
+    fireEvent.change(nameInput, { target: { value: "😀".repeat(121) } });
     await user.click(
       within(dialog).getByRole("button", { name: "创建项目" }),
     );
@@ -289,15 +424,9 @@ describe("新建项目", () => {
         "项目名称需为 1–120 个字符，且不能包含控制字符。",
       ),
     ).toBeInTheDocument();
-    expect(
-      fetchMock.mock.calls.some(
-        ([inputElement, init]) =>
-          new URL(getRequestUrl(inputElement), "http://localhost").pathname ===
-            "/api/v1/projects" && init?.method === "POST",
-      ),
-    ).toBe(false);
 
-    fireEvent.change(input, { target: { value: "😀".repeat(120) } });
+    fireEvent.change(nameInput, { target: { value: "😀".repeat(120) } });
+    await user.type(within(dialog).getByLabelText("项目简介"), "季度复盘材料");
     await user.click(
       within(dialog).getByRole("button", { name: "创建项目" }),
     );
@@ -308,17 +437,19 @@ describe("新建项目", () => {
         name: "😀".repeat(120),
       }),
     ).toBeInTheDocument();
+    expect(app.getLocation().pathname).toBe("/projects/created-project");
     const postCall = fetchMock.mock.calls.find(
       ([request, init]) =>
         new URL(getRequestUrl(request), "http://localhost").pathname ===
           "/api/v1/projects" && init?.method === "POST",
     );
     expect(JSON.parse(String(postCall?.[1]?.body))).toEqual({
+      description: "季度复盘材料",
       name: "😀".repeat(120),
     });
   });
 
-  it("服务端失败保留弹窗并在弹窗内显示冲突", async () => {
+  it("服务端失败保留弹窗并在弹窗内显示 InlineAlert", async () => {
     installCreateFetch(() =>
       jsonResponse({ detail: "project_name_invalid" }, 422),
     );
@@ -348,200 +479,161 @@ describe("新建项目", () => {
   });
 });
 
-describe("项目设置与删除边界", () => {
-  function installSettingsFetch(sessionsTotal: number, deleteResponse: () => Response) {
-    const fetchMock = vi.fn(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(getRequestUrl(input), "http://localhost");
-        if (url.pathname.endsWith("/auth/me")) {
-          return jsonResponse(TEST_USER);
+describe("温和删除项目与 409 冲突反馈", () => {
+  it("默认勾选保留历史对话提交 ?detach_sessions=true，遇 409 session_has_active_run 保留弹窗并可成功删除返回 /projects", async () => {
+    let deleteAttempts = 0;
+    const { deleteUrls } = installProjectWorkspaceFetch({
+      deleteResponse: (url) => {
+        deleteAttempts += 1;
+        if (deleteAttempts === 1) {
+          return jsonResponse({ detail: "session_has_active_run" }, 409);
         }
-        if (url.pathname === "/api/v1/projects") {
-          return jsonResponse(listResponse([PROJECT_A], 1, 100, 1));
+        if (url.searchParams.get("detach_sessions") !== "true") {
+          return jsonResponse({ detail: "project_has_sessions" }, 409);
         }
-        if (url.pathname === `/api/v1/projects/${PROJECT_A.id}`) {
-          if (init?.method === "DELETE") {
-            return deleteResponse();
-          }
-          return jsonResponse(PROJECT_A);
-        }
-        if (url.pathname === "/api/v1/sessions") {
-          return jsonResponse(
-            listResponse([], 1, 1, sessionsTotal),
-          );
-        }
-        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+        return new Response(null, { status: 204 });
       },
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    return fetchMock;
-  }
-
-  it("sessions total 大于 0 时禁用删除并说明原因", async () => {
-    installSettingsFetch(2, () => new Response(null, { status: 204 }));
-
-    renderApp(`/projects/${PROJECT_A.id}/settings`);
-
-    const deleteButton = await screen.findByRole("button", {
-      name: "删除项目",
+      projects: [PROJECT_A],
+      sessionsTotal: 2,
     });
-    await waitFor(() => {
-      expect(deleteButton).toBeDisabled();
-    });
-    expect(
-      screen.getByText(/仍有 2 个会话/),
-    ).toBeInTheDocument();
-  });
-
-  it("前端视为可删时仍展示后端 project_has_sessions 冲突", async () => {
-    installSettingsFetch(0, () =>
-      jsonResponse({ detail: "project_has_sessions" }, 409),
-    );
     const user = userEvent.setup();
+    const app = renderApp(`/projects/${PROJECT_A.id}`);
 
-    renderApp(`/projects/${PROJECT_A.id}/settings`);
+    await screen.findByRole("heading", { level: 1, name: PROJECT_A.name });
+    await user.click(screen.getByRole("button", { name: "删除项目" }));
 
-    const deleteButton = await screen.findByRole("button", {
-      name: "删除项目",
+    const alertDialog = screen.getByRole("alertdialog", { name: "删除项目" });
+    const detachCheckbox = within(alertDialog).getByRole("checkbox", {
+      name: /保留历史对话/,
     });
-    await waitFor(() => {
-      expect(deleteButton).toBeEnabled();
-    });
-    await user.click(deleteButton);
-    const dialog = screen.getByRole("dialog", { name: "删除项目" });
+    expect(detachCheckbox).toBeChecked();
+
+    // 取消勾选时对存在历史对话的项目给出警告提示。
+    await user.click(detachCheckbox);
+    expect(detachCheckbox).not.toBeChecked();
+    expect(
+      await within(alertDialog).findByText(/仍有 2 个历史对话/),
+    ).toBeInTheDocument();
+
+    // 重新勾选后提交：首次遇 409 session_has_active_run 保留弹窗并展示清晰反馈。
+    await user.click(detachCheckbox);
+    expect(detachCheckbox).toBeChecked();
     await user.click(
-      within(dialog).getByLabelText("我已确认要删除这个项目"),
-    );
-    await user.click(
-      within(dialog).getByRole("button", { name: "删除项目" }),
+      within(alertDialog).getByRole("button", { name: "确认删除" }),
     );
 
     expect(
-      await within(dialog).findByText(
-        "该项目仍有会话，请先删除全部会话后再删除项目。",
+      await within(alertDialog).findByText(
+        "项目内存在正在执行的对话任务，请等待任务完成或停止后再删除项目。",
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("dialog", { name: "删除项目" }),
+      screen.getByRole("alertdialog", { name: "删除项目" }),
     ).toBeInTheDocument();
+
+    // 再次提交成功：携带 ?detach_sessions=true 并跳转回 /projects。
+    await user.click(
+      within(alertDialog).getByRole("button", { name: "确认删除" }),
+    );
+
+    await waitFor(() => {
+      expect(app.getLocation().pathname).toBe("/projects");
+    });
+    expect(deleteUrls).toEqual([
+      `/api/v1/projects/${PROJECT_A.id}?detach_sessions=true`,
+      `/api/v1/projects/${PROJECT_A.id}?detach_sessions=true`,
+    ]);
   });
 
-  it("项目改名成功后更新页面并刷新缓存", async () => {
-    let currentProject = PROJECT_A;
-    const fetchMock = vi.fn(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
+  it("跨项目切换会隔离工作区实例，清空旧项目会话搜索关键词且不向新项目携带旧 q 参数", async () => {
+    const projectBSession = makeSession({
+      id: "project-b-session",
+      project_id: PROJECT_B.id,
+      title: "季度财务审阅",
+    });
+    const sessionRequests: Array<{ projectId: string | null; q: string | null }> =
+      [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
+        const method = init?.method ?? "GET";
         if (url.pathname.endsWith("/auth/me")) {
           return jsonResponse(TEST_USER);
         }
-        if (url.pathname === "/api/v1/projects") {
-          return jsonResponse(
-            listResponse([currentProject], 1, 100, 1),
-          );
+        if (url.pathname === "/api/v1/projects" && method === "GET") {
+          return jsonResponse(listResponse([PROJECT_A, PROJECT_B], 1, 100, 2));
         }
         if (url.pathname === `/api/v1/projects/${PROJECT_A.id}`) {
-          if (init?.method === "PATCH") {
-            const body = JSON.parse(String(init.body)) as { name: string };
-            currentProject = {
-              ...currentProject,
-              name: body.name,
-              updated_at: "2026-11-10T05:00:00Z",
-            };
-            return jsonResponse(currentProject);
-          }
-          return jsonResponse(currentProject);
-        }
-        if (url.pathname === "/api/v1/sessions") {
-          return jsonResponse(listResponse([], 1, 1, 0));
-        }
-        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-      },
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const user = userEvent.setup();
-
-    renderApp(`/projects/${PROJECT_A.id}/settings`);
-
-    await screen.findByRole("heading", { name: PROJECT_A.name });
-    await user.click(
-      screen.getByRole("button", { name: "重命名" }),
-    );
-    const dialog = screen.getByRole("dialog", { name: "重命名项目" });
-    const input = within(dialog).getByLabelText("项目名称");
-    await user.clear(input);
-    await user.type(input, "更新后的项目");
-    await user.click(
-      within(dialog).getByRole("button", { name: "保存名称" }),
-    );
-
-    expect(
-      await screen.findByRole("heading", { name: "更新后的项目" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("dialog", { name: "重命名项目" }),
-    ).not.toBeInTheDocument();
-    expect(
-      fetchMock.mock.calls.filter(
-        ([inputElement, init]) =>
-          new URL(getRequestUrl(inputElement), "http://localhost").pathname ===
-            `/api/v1/projects/${PROJECT_A.id}` &&
-          (!init?.method || init.method === "GET"),
-      ).length,
-    ).toBeGreaterThan(1);
-  });
-
-  it("项目删除成功后返回项目中心空态", async () => {
-    let deleted = false;
-    const fetchMock = vi.fn(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(getRequestUrl(input), "http://localhost");
-        if (url.pathname.endsWith("/auth/me")) {
-          return jsonResponse(TEST_USER);
-        }
-        if (url.pathname === "/api/v1/projects") {
-          return jsonResponse(
-            listResponse(deleted ? [] : [PROJECT_A], 1, 100, deleted ? 0 : 1),
-          );
-        }
-        if (url.pathname === `/api/v1/projects/${PROJECT_A.id}`) {
-          if (init?.method === "DELETE") {
-            deleted = true;
-            return new Response(null, { status: 204 });
-          }
           return jsonResponse(PROJECT_A);
         }
-        if (url.pathname === "/api/v1/sessions") {
-          return jsonResponse(listResponse([], 1, 1, 0));
+        if (url.pathname === `/api/v1/projects/${PROJECT_B.id}`) {
+          return jsonResponse(PROJECT_B);
         }
-        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-      },
+        if (
+          url.pathname === `/api/v1/projects/${PROJECT_A.id}/knowledge-bases` ||
+          url.pathname === `/api/v1/projects/${PROJECT_B.id}/knowledge-bases`
+        ) {
+          return jsonResponse([]);
+        }
+        if (url.pathname === "/api/v1/skills" && method === "GET") {
+          return jsonResponse({ items: [] });
+        }
+        if (url.pathname === "/api/v1/sessions" && method === "GET") {
+          const projectId = url.searchParams.get("project_id");
+          const q = url.searchParams.get("q");
+          if (projectId) {
+            sessionRequests.push({ projectId, q });
+          }
+          if (projectId === PROJECT_A.id) {
+            return jsonResponse(listResponse([PROJECT_SESSION], 1, 10, 1));
+          }
+          if (projectId === PROJECT_B.id) {
+            return jsonResponse(listResponse([projectBSession], 1, 10, 1));
+          }
+          return jsonResponse(listResponse([], 1, 8, 0));
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
     );
-    vi.stubGlobal("fetch", fetchMock);
+
     const user = userEvent.setup();
-
-    renderApp(`/projects/${PROJECT_A.id}/settings`);
-
-    const deleteButton = await screen.findByRole("button", {
-      name: "删除项目",
+    const app = renderApp(`/projects/${PROJECT_A.id}`, {
+      // 预置两个已缓存项目，确保跨项目切换同步切入 ProjectWorkspaceContent 从而验证 key 隔离。
+      seedQueryClient: (client) => {
+        client.setQueryData(projectKeys.detail(PROJECT_A.id), PROJECT_A);
+        client.setQueryData(projectKeys.detail(PROJECT_B.id), PROJECT_B);
+      },
     });
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: PROJECT_A.name }),
+    ).toBeInTheDocument();
+    const searchInputA = screen.getByLabelText("搜索项目内对话");
+    await user.type(searchInputA, "年度规划");
+
     await waitFor(() => {
-      expect(deleteButton).toBeEnabled();
+      expect(
+        sessionRequests.some(
+          (req) => req.projectId === PROJECT_A.id && req.q === "年度规划",
+        ),
+      ).toBe(true);
     });
-    await user.click(deleteButton);
-    const dialog = screen.getByRole("dialog", { name: "删除项目" });
-    await user.click(
-      within(dialog).getByLabelText("我已确认要删除这个项目"),
-    );
-    await user.click(
-      within(dialog).getByRole("button", { name: "删除项目" }),
-    );
+
+    // 切换至已缓存的项目 B：工作区实例应重建，搜索框清空且不携带项目 A 的旧 q 参数。
+    await app.navigateTo(`/projects/${PROJECT_B.id}`);
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "项目" }),
+      await screen.findByRole("heading", { level: 1, name: PROJECT_B.name }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByRole("heading", { name: "还没有项目" }),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("搜索项目内对话")).toHaveValue("");
+    expect(await screen.findByText("季度财务审阅")).toBeInTheDocument();
+
+    const projectBRequests = sessionRequests.filter(
+      (req) => req.projectId === PROJECT_B.id,
+    );
+    expect(projectBRequests.length).toBeGreaterThan(0);
+    expect(projectBRequests.every((req) => req.q === null)).toBe(true);
   });
 });
-

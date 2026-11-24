@@ -97,6 +97,20 @@ export function getPrimaryDepartment(
   );
 }
 
+/** 按部门 ID 从当前用户的所属部门清单中解析中文部门名，未命中时返回 null。 */
+export function resolveUserDepartmentName(
+  user: Pick<User, "departments"> | null | undefined,
+  departmentId: string | null | undefined,
+): string | null {
+  if (!user || !departmentId) {
+    return null;
+  }
+  return (
+    user.departments.find((department) => department.id === departmentId)
+      ?.name ?? null
+  );
+}
+
 /** 统一计算用户安全展示名称，兼容飞书无邮箱与无显示名账号。 */
 export function getUserDisplayName(
   user:

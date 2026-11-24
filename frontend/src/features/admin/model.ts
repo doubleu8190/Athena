@@ -1,3 +1,5 @@
+import type { VisibilityGrant } from "../knowledge/model";
+
 export const MODEL_PROFILE_NAME_MAX_LENGTH = 120;
 export const MODEL_BASE_URL_MAX_LENGTH = 2_048;
 export const MODEL_NAME_MAX_LENGTH = 200;
@@ -43,6 +45,23 @@ export interface SystemPromptVersionListResponse {
   total: number;
 }
 
+export interface OrgDepartment {
+  created_at: string;
+  external_id: string | null;
+  id: string;
+  name: string;
+  order_index: number;
+  parent_id: string | null;
+  path: string;
+  status: "active" | "archived";
+  synced_at: string | null;
+  updated_at: string;
+}
+
+export interface OrgDepartmentListResponse {
+  items: OrgDepartment[];
+}
+
 export interface ModelProfile {
   id: string;
   name: string;
@@ -62,6 +81,13 @@ export interface ModelProfile {
   temperature: number | null;
   enabled: boolean;
   created_at: string;
+  /** 一期新增可选元数据，兼容旧测试夹具缺省字段。 */
+  visible_to_users?: boolean;
+  scenario_label?: string | null;
+  scenario_description?: string | null;
+  supports_vision?: boolean;
+  version?: number;
+  updated_at?: string;
 }
 
 export interface ModelProfileListResponse {
@@ -133,6 +159,11 @@ export interface McpServer {
   created_at: string;
   updated_at: string;
   tools_discovered_at: string | null;
+  /** 一期新增可选字段：独立启停开关与三层可见性。 */
+  enabled?: boolean;
+  visibility_scope?: "company" | "department";
+  owner_department_id?: string | null;
+  visibility_grants?: VisibilityGrant[];
 }
 
 export interface McpServerListResponse {
@@ -173,6 +204,10 @@ export interface AdminTool {
   server_id: string;
   remote_name: string;
   requires_approval: boolean;
+  /** 一期新增业务化展示元数据（可选兼容旧夹具）。 */
+  display_name?: string | null;
+  approval_summary_template?: string | null;
+  parameter_labels?: Record<string, string>;
 }
 
 export interface AdminToolListResponse {
@@ -822,6 +857,10 @@ export interface SubagentProfile {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  /** 一期新增可见范围与部门归属元数据。 */
+  visibility_scope?: "company" | "department";
+  owner_department_id?: string | null;
+  visibility_grants?: VisibilityGrant[];
 }
 
 export interface SubagentListResponse {

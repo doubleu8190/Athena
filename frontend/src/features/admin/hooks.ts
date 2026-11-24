@@ -20,6 +20,7 @@ import {
   getSubagent,
   getSystemPrompt,
   getSystemPromptVersion,
+  listAdminOrgDepartments,
   listAdminTools,
   listMcpServers,
   listModelProfiles,
@@ -483,6 +484,18 @@ export function useSubagentAvailableTools(enabled = true) {
     enabled,
     queryKey: adminKeys.subagentAvailableTools(),
     queryFn: listSubagentAvailableTools,
+  });
+}
+
+/** 仅 super_admin 按需读取活跃企业部门列表，避免非超管或未展开部门选择时触发 403。 */
+export function useAdminOrgDepartments(
+  enabled = true,
+  includeArchived = false,
+) {
+  return useQuery({
+    enabled,
+    queryFn: () => listAdminOrgDepartments(includeArchived),
+    queryKey: adminKeys.orgDepartments(includeArchived),
   });
 }
 

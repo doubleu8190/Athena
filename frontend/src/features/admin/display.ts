@@ -20,6 +20,9 @@ export function modelCapabilities(profile: ModelProfile): string[] {
   ) {
     capabilities.push("并行工具");
   }
+  if (profile.supports_vision) {
+    capabilities.push("识图");
+  }
   return capabilities;
 }
 

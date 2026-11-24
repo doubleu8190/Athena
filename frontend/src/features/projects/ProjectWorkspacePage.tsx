@@ -1,57 +1,161 @@
-import { Navigate, NavLink, useParams } from "react-router-dom";
+import {
+  ArrowRight,
+  ChevronRight,
+  Folder,
+  Pencil,
+  Trash2,
+} from "lucide-react";
+import { useState } from "react";
+import { Link, Navigate, useLocation, useParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
-import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
-import { newChatHref } from "../chat/draft";
 import {
-  isProjectNotFound,
-  projectErrorMessage,
-} from "./errorMessages";
+  Button,
+  EmptyState,
+  InlineAlert,
+  Skeleton,
+} from "../../shared/ui";
+import { newChatHref } from "../chat/draft";
+import { DeleteProjectDialog } from "./DeleteProjectDialog";
+import { isProjectNotFound, projectErrorMessage } from "./errorMessages";
 import { useProject } from "./hooks";
 import type { Project } from "./model";
-import { ProjectKnowledgeTab } from "./ProjectKnowledgeTab";
-import { ProjectOverviewTab } from "./ProjectOverviewTab";
-import { ProjectSessionsTab } from "./ProjectSessionsTab";
-import { ProjectSettingsTab } from "./ProjectSettingsTab";
+import { ProjectConfigPanel } from "./ProjectConfigPanel";
+import { EditProjectInfoDialog } from "./ProjectNameDialogs";
+import { ProjectSessionsPanel } from "./ProjectSessionsPanel";
 
-const PROJECT_TABS = [
-  { key: "overview", label: "概览" },
-  { key: "sessions", label: "会话" },
-  { key: "knowledge", label: "知识库" },
-  { key: "settings", label: "设置" },
-] as const;
-
-type ProjectTab = (typeof PROJECT_TABS)[number]["key"];
-
-function isProjectTab(value: string | undefined): value is ProjectTab {
-  return PROJECT_TABS.some((tab) => tab.key === value);
-}
-
-export function ProjectIndexRedirect() {
+/**
+ * 兼容旧版 4-Tab 项目路由（/projects/:projectId/:tab）：
+ * 温和重定向到新的单页工作文件夹 /projects/:projectId，并完整保留查询参数（如 ?page=2）。
+ */
+export function LegacyProjectTabRedirect() {
   const { projectId } = useParams<{ projectId: string }>();
+  const location = useLocation();
+  if (!projectId) {
+    return <Navigate replace to="/projects" />;
+  }
   return (
     <Navigate
       replace
-      to={`/projects/${encodeURIComponent(projectId ?? "")}/overview`}
+      to={`/projects/${encodeURIComponent(projectId)}${location.search}`}
     />
   );
 }
 
-interface ProjectWorkspaceProps {
-  projectId: string;
-  tab: ProjectTab;
+interface ProjectWorkspaceContentProps {
+  project: Project;
 }
 
-function ProjectWorkspace({ projectId, tab }: ProjectWorkspaceProps) {
+function ProjectWorkspaceContent({ project }: ProjectWorkspaceContentProps) {
+  const [editInfoOpen, setEditInfoOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  return (
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
+      {/* 顶部面包屑与项目页头 */}
+      <header className="space-y-3 border-b border-border-subtle pb-5">
+        <nav
+          aria-label="项目面包屑"
+          className="flex items-center gap-1.5 text-xs text-text-tertiary"
+        >
+          <Link
+            className="inline-flex items-center gap-1 rounded hover:text-text-primary focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring-focus/40"
+            to="/projects"
+          >
+            <Folder aria-hidden="true" className="h-3.5 w-3.5" />
+            <span>项目</span>
+          </Link>
+          <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />
+          <span className="truncate font-medium text-text-secondary">
+            {project.name}
+          </span>
+        </nav>
+
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <h1 className="break-words text-xl font-semibold tracking-tight text-text-primary">
+              {project.name}
+            </h1>
+            {project.description?.trim() ? (
+              <p className="max-w-3xl text-sm leading-relaxed text-text-secondary">
+                {project.description}
+              </p>
+            ) : null}
+            <p className="text-xs text-text-tertiary">
+              创建于 {formatDateTime(project.created_at)} · 更新于{" "}
+              {formatDateTime(project.updated_at)}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              onClick={() => setEditInfoOpen(true)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
+              编辑信息
+            </Button>
+            <Button
+              onClick={() => setDeleteOpen(true)}
+              size="sm"
+              type="button"
+              variant="danger-outline"
+            >
+              <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+              删除项目
+            </Button>
+            <Button asChild size="sm" variant="primary">
+              <Link to={newChatHref(project.id)}>
+                <span>开始对话</span>
+                <ArrowRight aria-hidden="true" className="h-4 w-4" />
+              </Link>
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      {/* 单页双栏工作文件夹：宽屏左侧对话流 + 右侧固定比例配置栏，<1024px 自动纵向堆叠 */}
+      <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_360px] xl:grid-cols-[minmax(0,1fr)_380px]">
+        <ProjectSessionsPanel project={project} />
+        <ProjectConfigPanel project={project} />
+      </div>
+
+      <EditProjectInfoDialog
+        onClose={() => setEditInfoOpen(false)}
+        open={editInfoOpen}
+        project={project}
+      />
+      <DeleteProjectDialog
+        onClose={() => setDeleteOpen(false)}
+        open={deleteOpen}
+        project={project}
+      />
+    </div>
+  );
+}
+
+/** 单页个人项目工作文件夹（/projects/:projectId）。 */
+export function ProjectWorkspacePage() {
+  const { projectId } = useParams<{ projectId: string }>();
   const project = useProject(projectId);
+
+  if (!projectId) {
+    return <Navigate replace to="/projects" />;
+  }
 
   if (project.isPending) {
     return (
-      <div className="page-shell">
-        <div className="page-loading" role="status">
-          正在加载项目…
+      <div
+        className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8"
+        role="status"
+      >
+        <span className="sr-only">正在加载项目…</span>
+        <Skeleton className="h-20 w-full rounded-xl" />
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <Skeleton className="h-72 w-full rounded-xl" />
+          <Skeleton className="h-72 w-full rounded-xl" />
         </div>
       </div>
     );
@@ -60,12 +164,12 @@ function ProjectWorkspace({ projectId, tab }: ProjectWorkspaceProps) {
   if (project.isError) {
     const notFound = isProjectNotFound(project.error);
     return (
-      <div className="page-shell project-error-page">
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-12 sm:px-6">
         <EmptyState
           action={
-            <NavLink className="button-primary" to="/projects">
-              返回项目中心
-            </NavLink>
+            <Button asChild size="sm" variant="primary">
+              <Link to="/projects">返回项目中心</Link>
+            </Button>
           }
           description={
             notFound
@@ -73,102 +177,30 @@ function ProjectWorkspace({ projectId, tab }: ProjectWorkspaceProps) {
               : "项目信息暂时无法加载，请稍后重试。"
           }
           icon="folder"
-          kicker={notFound ? "404 / Project" : "Request failed"}
           title={notFound ? "项目不存在或不可访问" : "项目加载失败"}
         />
         {!notFound ? (
-          <ErrorBanner
-            message={projectErrorMessage(project.error)}
-            onRetry={() => void project.refetch()}
+          <InlineAlert
+            action={
+              <Button
+                onClick={() => void project.refetch()}
+                size="xs"
+                type="button"
+                variant="outline"
+              >
+                重试
+              </Button>
+            }
+            description={projectErrorMessage(project.error)}
+            variant="danger"
           />
         ) : null}
       </div>
     );
   }
 
+  // 跨项目切换时以 project.id 隔离工作区实例，重置左栏会话搜索防抖与右栏编辑/弹窗状态。
   return (
-    <ProjectWorkspaceContent project={project.data} tab={tab} />
+    <ProjectWorkspaceContent key={project.data.id} project={project.data} />
   );
 }
-
-interface ProjectWorkspaceContentProps {
-  project: Project;
-  tab: ProjectTab;
-}
-
-function ProjectWorkspaceContent({
-  project,
-  tab,
-}: ProjectWorkspaceContentProps) {
-  const basePath = `/projects/${encodeURIComponent(project.id)}`;
-  return (
-    <div className="page-shell project-workspace">
-      <header className="project-hero">
-        <div className="project-hero-top">
-          <div className="project-hero-copy">
-            <p className="page-eyebrow">Active project</p>
-            <h1>{project.name}</h1>
-            <p className="project-meta">
-              创建于 {formatDateTime(project.created_at)} · 更新于{" "}
-              {formatDateTime(project.updated_at)}
-            </p>
-          </div>
-          <div className="project-actions">
-            <NavLink className="button-quiet" to={`${basePath}/settings`}>
-              <Icon name="settings" size={14} />
-              项目设置
-            </NavLink>
-            <NavLink
-              className="button-primary"
-              to={newChatHref(project.id)}
-            >
-              开始对话
-              <Icon name="arrow-right" size={14} />
-            </NavLink>
-          </div>
-        </div>
-
-        <nav className="project-tabs" aria-label="项目页面">
-          {PROJECT_TABS.map((item) => (
-            <NavLink
-              className={({ isActive }) =>
-                `project-tab${isActive ? " is-active" : ""}`
-              }
-              key={item.key}
-              to={`${basePath}/${item.key}`}
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
-      </header>
-
-      {tab === "overview" ? <ProjectOverviewTab project={project} /> : null}
-      {tab === "sessions" ? <ProjectSessionsTab project={project} /> : null}
-      {tab === "knowledge" ? (
-        <ProjectKnowledgeTab project={project} />
-      ) : null}
-      {tab === "settings" ? <ProjectSettingsTab project={project} /> : null}
-    </div>
-  );
-}
-
-export function ProjectWorkspacePage() {
-  const { projectId, tab } = useParams<{
-    projectId: string;
-    tab: string;
-  }>();
-  if (!projectId) {
-    return <Navigate replace to="/projects" />;
-  }
-  if (!isProjectTab(tab)) {
-    return (
-      <Navigate
-        replace
-        to={`/projects/${encodeURIComponent(projectId)}/overview`}
-      />
-    );
-  }
-  return <ProjectWorkspace projectId={projectId} tab={tab} />;
-}
-

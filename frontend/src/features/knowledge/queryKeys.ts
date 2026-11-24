@@ -27,6 +27,8 @@ export const knowledgeKeys = {
       "list",
       query.page ?? 1,
       query.pageSize ?? 20,
+      query.visibilityScope ?? "all",
+      query.ownerDepartmentId ?? "",
     ] as const,
   lists: () => ["knowledge", "list"] as const,
   project: (projectId: string) =>

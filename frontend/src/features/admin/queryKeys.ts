@@ -104,5 +104,7 @@ export const adminKeys = {
     ["admin", "subagents", "detail", subagentId] as const,
   subagentAvailableTools: () =>
     ["admin", "subagents", "available-tools"] as const,
+  orgDepartments: (includeArchived = false) =>
+    ["admin", "org", "departments", includeArchived] as const,
 };
 

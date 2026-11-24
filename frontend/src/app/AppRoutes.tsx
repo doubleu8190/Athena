@@ -12,13 +12,15 @@ import {
 import { canManageSkills, isSuperAdmin } from "../features/auth/model";
 import { DraftChatPage } from "../features/chat/DraftChatPage";
 import { SessionChatPage } from "../features/chat/SessionChatPage";
-import {
-  AccessDeniedPage,
-  PreferencesPlaceholderPage,
-} from "../pages/PlaceholderPages";
+import { AccessDeniedPage } from "../pages/PlaceholderPages";
 import { AppShell } from "./AppShell";
 
 // 非首屏路由页面按路由级代码分割懒加载，减小首屏主包体积同时保留认证与聊天主链路即开即用。
+const PreferencesPage = lazy(() =>
+  import("../features/preferences/PreferencesPage").then((m) => ({
+    default: m.PreferencesPage,
+  })),
+);
 const ProfilePage = lazy(() =>
   import("../features/auth/ProfilePage").then((m) => ({
     default: m.ProfilePage,
@@ -29,9 +31,9 @@ const ProjectsPage = lazy(() =>
     default: m.ProjectsPage,
   })),
 );
-const ProjectIndexRedirect = lazy(() =>
+const LegacyProjectTabRedirect = lazy(() =>
   import("../features/projects/ProjectWorkspacePage").then((m) => ({
-    default: m.ProjectIndexRedirect,
+    default: m.LegacyProjectTabRedirect,
   })),
 );
 const ProjectWorkspacePage = lazy(() =>
@@ -135,18 +137,16 @@ export function AppRoutes() {
             <Route element={<SessionChatPage />} path="/chat/:sessionId" />
 
             <Route element={<LazyRouteBoundary />}>
-              <Route
-                element={<PreferencesPlaceholderPage />}
-                path="/preferences"
-              />
+              <Route element={<PreferencesPage />} path="/preferences" />
               <Route element={<ProfilePage />} path="/profile" />
               <Route element={<ProjectsPage />} path="/projects" />
               <Route
-                element={<ProjectIndexRedirect />}
+                element={<ProjectWorkspacePage />}
                 path="/projects/:projectId"
               />
+              {/* 兼容历史 4-Tab 链接，重定向至单页工作文件夹并保留 ?page= 等查询参数。 */}
               <Route
-                element={<ProjectWorkspacePage />}
+                element={<LegacyProjectTabRedirect />}
                 path="/projects/:projectId/:tab"
               />
               <Route element={<KnowledgePage />} path="/knowledge" />

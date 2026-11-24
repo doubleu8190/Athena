@@ -531,4 +531,44 @@ describe("管理子智能体页", () => {
     expect(await within(dialog).findByText("内置工具")).toBeInTheDocument();
     expect(availableToolsCalls).toBe(1);
   });
+
+  it("兼容展示子智能体一期可见范围标签", async () => {
+    const companySubagent = makeSubagent({
+      id: "subagent-company",
+      name: "全公司合规审核助手",
+      visibility_scope: "company",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/llm/model-profiles") {
+          return jsonResponse({
+            default_profile_id: MODEL_A.id,
+            items: [MODEL_A],
+          });
+        }
+        if (url.pathname === "/api/v1/admin/subagents" && method === "GET") {
+          return jsonResponse({
+            items: [companySubagent],
+            limit: 10,
+            offset: 0,
+            total: 1,
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    renderApp("/admin/subagents");
+
+    const row = (await screen.findByText("全公司合规审核助手")).closest(
+      "li",
+    ) as HTMLElement;
+    expect(within(row).getByText("全公司")).toBeInTheDocument();
+  });
 });

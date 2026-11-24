@@ -73,6 +73,10 @@ class SkillSummaryResponse(BaseModel):
     dependency_check: SkillDependencyCheckResponse | None = None
     owner_department_id: str | None = None
     visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
+    format: Literal["markdown", "package"] = "package"
+    has_scripts: bool = False
+    featured: bool = False
+    starter_prompt: str | None = None
 
 
 class SkillAdminDetailsResponse(SkillSummaryResponse):
@@ -106,6 +110,38 @@ class SkillConfigurationRequest(BaseModel):
     enabled: bool
     script_requires_approval: bool
     visibility_grants: list[VisibilityGrantRequest] | None = None
+    featured: bool | None = None
+    starter_prompt: str | None = None
+
+
+class AdminSkillMarkdownCreateRequest(BaseModel):
+    """管理端在线创建公司/部门纯 Markdown 技能请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str
+    guide: str
+    scope: Literal["company", "department"] = "company"
+    owner_department_id: str | None = None
+    visibility_grants: list[VisibilityGrantRequest] | None = None
+    slug: str | None = None
+    enabled: bool = True
+    featured: bool = False
+    starter_prompt: str | None = None
+
+
+class AdminSkillMarkdownVersionRequest(BaseModel):
+    """管理端在线发布 Markdown 技能新版本请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str
+    guide: str
+    expected_revision: int = Field(ge=1)
+    label: str | None = None
+    activate: bool = True
 
 
 class SkillPersonalCreateRequest(BaseModel):
@@ -155,6 +191,8 @@ class SkillExecutionResponse(BaseModel):
 
 
 __all__ = [
+    "AdminSkillMarkdownCreateRequest",
+    "AdminSkillMarkdownVersionRequest",
     "SkillAdminDetailsResponse",
     "SkillAdminListResponse",
     "SkillConfigurationRequest",

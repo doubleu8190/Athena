@@ -33,6 +33,8 @@ from api.converter.skill import (
 )
 from api.dto.access import VisibilityGrantRequest
 from api.dto.skill import (
+    AdminSkillMarkdownCreateRequest,
+    AdminSkillMarkdownVersionRequest,
     SkillAdminDetailsResponse,
     SkillAdminListResponse,
     SkillConfigurationRequest,
@@ -55,11 +57,13 @@ from domain.access import VisibilityGrantInput
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
     MAX_PERSONAL_MARKDOWN_BYTES,
+    UNSET,
     SkillConflictError,
     SkillDependencyUnsatisfiedError,
     SkillNotFoundError,
     SkillPackageError,
     SkillScope,
+    UnsetType,
 )
 
 _GRANTS_ADAPTER: TypeAdapter[list[VisibilityGrantRequest]] = TypeAdapter(
@@ -347,6 +351,93 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         except OSError as error:
             raise HTTPException(503, "file_storage_unavailable") from error
 
+    @router.post(
+        "/skills/parse-markdown",
+        response_model=SkillMarkdownParseResponse,
+    )
+    async def parse_admin_markdown(
+        actor: SkillManagerAuth,
+        files: Annotated[list[UploadFile], File(alias="file")],
+    ) -> SkillMarkdownParseResponse:
+        """管理端解析单个 Markdown 文件并返回草稿，不落库且不创建版本。"""
+        if len(files) != 1:
+            raise HTTPException(422, "skill_markdown_file_invalid")
+        file = files[0]
+        try:
+            async with staged_upload(
+                file,
+                maximum_bytes=MAX_PERSONAL_MARKDOWN_BYTES,
+            ) as path:
+                draft = await service.parse_admin_markdown(
+                    actor,
+                    file.filename or "",
+                    path,
+                )
+                return personal_draft_to_response(draft)
+        except UploadTooLargeError as error:
+            raise HTTPException(413, "skill_markdown_too_large") from error
+        except SkillAuthorizationError as error:
+            raise _authorization_error(error) from error
+        except PersonalSkillError as error:
+            raise _personal_validation_error(error) from error
+        except ValueError as error:
+            code = (
+                "skill_markdown_empty"
+                if str(error) == "upload_empty"
+                else "skill_markdown_file_invalid"
+            )
+            raise HTTPException(422, code) from error
+        except OSError as error:
+            raise HTTPException(503, "file_storage_unavailable") from error
+
+    @router.post(
+        "/skills/markdown",
+        response_model=SkillAdminDetailsResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_admin_markdown_skill(
+        request: AdminSkillMarkdownCreateRequest,
+        actor: SkillManagerAuth,
+        idempotency_key: Annotated[
+            str,
+            Header(alias="Idempotency-Key", min_length=1, max_length=128),
+        ],
+    ) -> SkillAdminDetailsResponse:
+        """管理端在线创建公司级或部门级纯 Markdown 技能，支持幂等与三层分权。"""
+        try:
+            grants = (
+                None
+                if request.visibility_grants is None
+                else tuple(item.to_domain() for item in request.visibility_grants)
+            )
+            details = await service.create_admin_markdown(
+                actor,
+                name=request.name,
+                description=request.description,
+                guide=request.guide,
+                idempotency_key=idempotency_key,
+                scope=SkillScope(request.scope),
+                owner_department_id=request.owner_department_id,
+                visibility_grants=grants,
+                slug=request.slug,
+                enabled=request.enabled,
+                featured=request.featured,
+                starter_prompt=request.starter_prompt,
+            )
+            return admin_details_to_response(details)
+        except SkillAuthorizationError as error:
+            raise _authorization_error(error) from error
+        except SkillNotFoundError as error:
+            raise HTTPException(404, error.code) from error
+        except SkillConflictError as error:
+            raise HTTPException(409, error.code) from error
+        except SkillPackageError as error:
+            raise _skill_package_http_error(error) from error
+        except (PersonalSkillError, ValueError) as error:
+            raise _personal_validation_error(error) from error
+        except (FileStorageError, OSError) as error:
+            raise HTTPException(503, "file_storage_unavailable") from error
+
     @router.get("/skills/{skill_id}", response_model=SkillAdminDetailsResponse)
     async def get_skill(
         actor: SkillManagerAuth,
@@ -403,6 +494,47 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         except OSError as error:
             raise HTTPException(503, "file_storage_unavailable") from error
 
+    @router.post(
+        "/skills/{skill_id}/versions/markdown",
+        response_model=SkillAdminDetailsResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def publish_admin_markdown_version(
+        request: AdminSkillMarkdownVersionRequest,
+        actor: SkillManagerAuth,
+        skill_id: Annotated[str, Path(min_length=1, max_length=128)],
+        idempotency_key: Annotated[
+            str,
+            Header(alias="Idempotency-Key", min_length=1, max_length=128),
+        ],
+    ) -> SkillAdminDetailsResponse:
+        """管理端在线发布 Markdown 技能新版本；拒绝覆盖 ZIP 技能包并执行修订号乐观锁。"""
+        try:
+            details = await service.publish_admin_markdown_version(
+                actor,
+                skill_id,
+                name=request.name,
+                description=request.description,
+                guide=request.guide,
+                expected_revision=request.expected_revision,
+                idempotency_key=idempotency_key,
+                label=request.label,
+                activate=request.activate,
+            )
+            return admin_details_to_response(details)
+        except SkillAuthorizationError as error:
+            raise _authorization_error(error) from error
+        except SkillNotFoundError as error:
+            raise HTTPException(404, error.code) from error
+        except SkillConflictError as error:
+            raise HTTPException(409, error.code) from error
+        except SkillPackageError as error:
+            raise _skill_package_http_error(error) from error
+        except (PersonalSkillError, ValueError) as error:
+            raise _personal_validation_error(error) from error
+        except (FileStorageError, OSError) as error:
+            raise HTTPException(503, "file_storage_unavailable") from error
+
     @router.get(
         "/skills/{skill_id}/versions",
         response_model=SkillVersionListResponse,
@@ -457,9 +589,24 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         actor: SkillManagerAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillAdminDetailsResponse:
-        """按配置修订号原子切换版本、启停、脚本审批及可选的可见性授权。"""
+        """按配置修订号原子切换版本、启停、脚本审批、可见性授权及首页推荐元数据。"""
+        # 借助 model_fields_set 精确区分“未传保持原值”与“显式 null 清空/非法”。
+        featured_value: bool | UnsetType = UNSET
+        if "featured" in request.model_fields_set:
+            if request.featured is None:
+                raise HTTPException(422, "skill_featured_invalid")
+            featured_value = request.featured
+        starter_prompt_value: str | None | UnsetType = (
+            request.starter_prompt
+            if "starter_prompt" in request.model_fields_set
+            else UNSET
+        )
         try:
-            if request.visibility_grants is None:
+            if (
+                request.visibility_grants is None
+                and featured_value is UNSET
+                and starter_prompt_value is UNSET
+            ):
                 await service.configure(
                     actor,
                     skill_id,
@@ -468,7 +615,8 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                     current_version_id=request.current_version_id,
                     script_requires_approval=request.script_requires_approval,
                 )
-            else:
+            elif featured_value is UNSET and starter_prompt_value is UNSET:
+                assert request.visibility_grants is not None
                 await service.configure(
                     actor,
                     skill_id,
@@ -479,6 +627,23 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                     visibility_grants=tuple(
                         item.to_domain() for item in request.visibility_grants
                     ),
+                )
+            else:
+                grants = (
+                    None
+                    if request.visibility_grants is None
+                    else tuple(item.to_domain() for item in request.visibility_grants)
+                )
+                await service.configure(
+                    actor,
+                    skill_id,
+                    expected_revision=request.expected_revision,
+                    enabled=request.enabled,
+                    current_version_id=request.current_version_id,
+                    script_requires_approval=request.script_requires_approval,
+                    visibility_grants=grants,
+                    featured=featured_value,
+                    starter_prompt=starter_prompt_value,
                 )
             return admin_details_to_response(await service.get_admin(actor, skill_id))
         except SkillAuthorizationError as error:

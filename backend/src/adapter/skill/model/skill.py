@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -44,6 +45,14 @@ class SkillModel(Base):
             "(scope = 'department' AND owner_id IS NULL AND owner_department_id IS NOT NULL) OR "
             "(scope = 'personal' AND owner_id IS NOT NULL AND owner_department_id IS NULL)",
             name="ck_skills_owner_scope",
+        ),
+        CheckConstraint(
+            "format IN ('markdown', 'package')",
+            name="ck_skills_format",
+        ),
+        CheckConstraint(
+            "(scope != 'personal') OR (format = 'markdown' AND NOT featured)",
+            name="ck_skills_personal_format_and_featured",
         ),
         Index(
             "uq_skills_company_slug",
@@ -120,6 +129,13 @@ class SkillModel(Base):
     script_requires_approval: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    format: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="package", server_default=text("'package'")
+    )
+    featured: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    starter_prompt: Mapped[str | None] = mapped_column(String(500), nullable=True)
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )

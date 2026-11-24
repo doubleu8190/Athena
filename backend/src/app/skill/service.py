@@ -20,9 +20,13 @@ from app.skill.package import SkillPackageValidator, validate_parameter_schema
 from app.skill.personal import (
     PersonalSkillDraft,
     PersonalSkillPackage,
+    build_admin_markdown_slug,
     build_personal_package,
     parse_personal_markdown,
+    validate_optional_admin_slug,
     validate_personal_content,
+    validate_starter_prompt,
+    validate_version_label,
 )
 from common.ids import new_id, now_utc
 from domain.access import (
@@ -37,6 +41,7 @@ from domain.auth import AuthContext, CurrentSessionReader, User, UserRole
 from domain.file import FileObjectStore
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
+    UNSET,
     ActiveSkillGuide,
     DependencyCheck,
     DependencyCheckStatus,
@@ -47,6 +52,7 @@ from domain.skill import (
     SkillConflictError,
     SkillDependencyUnsatisfiedError,
     SkillExecutionRecord,
+    SkillFormat,
     SkillImportRequestResult,
     SkillNotFoundError,
     SkillPackageError,
@@ -56,6 +62,7 @@ from domain.skill import (
     SkillScriptDefinition,
     SkillVersion,
     SkillVersionPage,
+    UnsetType,
 )
 
 
@@ -68,6 +75,12 @@ class SkillUserAuthorizationError(PermissionError):
 
 
 _IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")
+# 用户可用目录排序优先级：推荐置顶优先，其后按部门 > 公司 > 个人分层排序。
+_DIRECTORY_SCOPE_PRIORITY: dict[SkillScope, int] = {
+    SkillScope.DEPARTMENT: 0,
+    SkillScope.COMPANY: 1,
+    SkillScope.PERSONAL: 2,
+}
 
 
 def _skill_access_target(skill: Skill) -> ResourceAccessTarget:
@@ -335,6 +348,160 @@ class SkillService:
             raise SkillNotFoundError()
         return result
 
+    async def parse_admin_markdown(
+        self,
+        actor: AuthContext,
+        filename: str,
+        path: Path,
+    ) -> PersonalSkillDraft:
+        """管理员端解析单个 Markdown 文件返回草稿，不落库且不创建版本。"""
+        await self._authorize_skill_manager(actor)
+        return await asyncio.to_thread(parse_personal_markdown, filename, path)
+
+    async def create_admin_markdown(
+        self,
+        actor: AuthContext,
+        *,
+        name: str,
+        description: str,
+        guide: str,
+        idempotency_key: str,
+        scope: SkillScope = SkillScope.COMPANY,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
+        slug: str | None = None,
+        enabled: bool = True,
+        featured: bool = False,
+        starter_prompt: str | None = None,
+    ) -> SkillAdminDetails:
+        """在线创建公司级或部门级纯 Markdown 技能（复用三层分权、确定性打包与幂等重放）。"""
+        resolved_scope, resolved_department_id, resolved_grants = (
+            await self._resolve_admin_create_visibility(
+                actor,
+                scope=scope,
+                owner_department_id=owner_department_id,
+                visibility_grants=visibility_grants,
+            )
+        )
+        idempotency_key = _validate_idempotency_key(idempotency_key)
+        draft = validate_personal_content(name, description, guide)
+        normalized_slug = validate_optional_admin_slug(slug)
+        normalized_starter_prompt = validate_starter_prompt(starter_prompt)
+
+        # 幂等指纹显式包含 mode="admin_markdown" 及全部业务字段，避免与 ZIP 导入共享键时静默混淆；
+        # slug 字段使用规范化后的显式输入（未传为 None），保证自动派生 slug 的网络重试可精确重放。
+        fingerprint = _admin_markdown_create_fingerprint(
+            actor=actor,
+            draft=draft,
+            scope=resolved_scope.value,
+            owner_department_id=resolved_department_id,
+            visibility_grants=resolved_grants,
+            slug=normalized_slug,
+            enabled=enabled,
+            featured=featured,
+            starter_prompt=normalized_starter_prompt,
+        )
+        try:
+            replay = await self._repository.find_import_result(
+                actor,
+                operation="import",
+                target_skill_id=None,
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+            )
+        except PermissionError as error:
+            raise SkillAuthorizationError("admin_required") from error
+        if replay is not None:
+            if replay.skill.deleted_at is not None:
+                raise SkillNotFoundError()
+            return await self._admin_details_for_replay(actor, replay)
+
+        skill_id = self._id_factory("skill")
+        version_id = self._id_factory("skillver")
+        effective_slug = normalized_slug or build_admin_markdown_slug(skill_id)
+        package = build_personal_package(effective_slug, draft)
+        return await self._publish_admin_markdown_create(
+            actor,
+            skill_id=skill_id,
+            version_id=version_id,
+            package=package,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            scope=resolved_scope,
+            owner_department_id=resolved_department_id,
+            visibility_grants=resolved_grants,
+            enabled=enabled,
+            featured=featured,
+            starter_prompt=normalized_starter_prompt,
+        )
+
+    async def publish_admin_markdown_version(
+        self,
+        actor: AuthContext,
+        skill_id: str,
+        *,
+        name: str,
+        description: str,
+        guide: str,
+        expected_revision: int,
+        idempotency_key: str,
+        label: str | None = None,
+        activate: bool = True,
+    ) -> SkillAdminDetails:
+        """为公司/部门在线 Markdown 技能发布新版本；严禁覆盖 ZIP 包技能，支持 CAS 与幂等。"""
+        idempotency_key = _validate_idempotency_key(idempotency_key)
+        if expected_revision < 1:
+            raise SkillPackageError("skill_revision_invalid")
+        skill = await self._require_manageable_admin_skill(actor, skill_id)
+        # 格式防覆盖底线：ZIP 技能包可能包含脚本与多文件资源，绝不允许在线单文件覆盖。
+        if skill.format is not SkillFormat.MARKDOWN:
+            raise SkillConflictError("skill_markdown_edit_unsupported")
+
+        draft = validate_personal_content(name, description, guide)
+        normalized_label = validate_version_label(label)
+        fingerprint = _admin_markdown_version_fingerprint(
+            actor=actor,
+            target_skill_id=skill_id,
+            expected_revision=expected_revision,
+            draft=draft,
+            label=normalized_label,
+            activate=activate,
+            scope=skill.scope.value,
+            owner_department_id=skill.owner_department_id,
+        )
+        # 幂等重放先于 revision 预检，确保已成功提交后的网络重试不会因 revision 递增而误报 409。
+        try:
+            replay = await self._repository.find_import_result(
+                actor,
+                operation="add_version",
+                target_skill_id=skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=fingerprint,
+            )
+        except PermissionError as error:
+            raise SkillAuthorizationError("admin_required") from error
+        if replay is not None:
+            if replay.skill.deleted_at is not None:
+                raise SkillNotFoundError()
+            return await self._admin_details_for_replay(actor, replay)
+
+        if skill.revision != expected_revision:
+            raise SkillConflictError("skill_revision_conflict")
+
+        version_id = self._id_factory("skillver")
+        package = build_personal_package(skill.slug, draft)
+        return await self._publish_admin_markdown_version(
+            actor,
+            skill_id=skill_id,
+            version_id=version_id,
+            expected_revision=expected_revision,
+            label=normalized_label,
+            activate=activate,
+            package=package,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+        )
+
     async def import_package(
         self,
         actor: AuthContext,
@@ -346,38 +513,14 @@ class SkillService:
         visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> SkillAdminDetails:
         """首发导入完整 ZIP；支持 company 与 department 级三层分权校验。"""
-        user = await self._authorize_skill_manager(actor)
-        if scope is SkillScope.PERSONAL:
-            raise SkillPackageError("skill_scope_invalid")
-
-        resolved_scope: SkillScope = scope
-        resolved_department_id = owner_department_id
-        resolved_grants: tuple[VisibilityGrantInput, ...] = ()
-        if self._access_policy is not None:
-            try:
-                (
-                    vis_scope,
-                    resolved_department_id,
-                    maybe_grants,
-                ) = await self._access_policy.resolve_and_validate_visibility(
-                    user_id=user.id,
-                    resource_type=ResourceType.SKILL,
-                    visibility_scope=VisibilityScope(scope.value),
-                    owner_department_id=owner_department_id,
-                    visibility_grants=visibility_grants,
-                    for_create=True,
-                )
-            except AccessPermissionDeniedError as error:
-                raise SkillAuthorizationError(error.code) from error
-            except InvalidVisibilityConfigError as error:
-                raise SkillPackageError(error.code) from error
-            resolved_scope = SkillScope(vis_scope.value)
-            resolved_grants = maybe_grants or ()
-        else:
-            if user.role is not UserRole.SUPER_ADMIN:
-                raise SkillAuthorizationError("admin_required")
-            if scope is not SkillScope.COMPANY or owner_department_id is not None:
-                raise SkillPackageError("skill_scope_requires_access_policy")
+        resolved_scope, resolved_department_id, resolved_grants = (
+            await self._resolve_admin_create_visibility(
+                actor,
+                scope=scope,
+                owner_department_id=owner_department_id,
+                visibility_grants=visibility_grants,
+            )
+        )
 
         idempotency_key = _validate_idempotency_key(idempotency_key)
         validated = self._package_validator.validate(path)
@@ -638,6 +781,225 @@ class SkillService:
             checked_at=self._clock(),
         )
 
+    async def _resolve_admin_create_visibility(
+        self,
+        actor: AuthContext,
+        *,
+        scope: SkillScope,
+        owner_department_id: str | None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None,
+    ) -> tuple[SkillScope, str | None, tuple[VisibilityGrantInput, ...]]:
+        """校验管理端创建公司/部门技能的三层分权与可见性配置（ZIP 与在线 Markdown 共用）。"""
+        user = await self._authorize_skill_manager(actor)
+        if scope is SkillScope.PERSONAL:
+            raise SkillPackageError("skill_scope_invalid")
+
+        if self._access_policy is not None:
+            try:
+                (
+                    vis_scope,
+                    resolved_department_id,
+                    maybe_grants,
+                ) = await self._access_policy.resolve_and_validate_visibility(
+                    user_id=user.id,
+                    resource_type=ResourceType.SKILL,
+                    visibility_scope=VisibilityScope(scope.value),
+                    owner_department_id=owner_department_id,
+                    visibility_grants=visibility_grants,
+                    for_create=True,
+                )
+            except AccessPermissionDeniedError as error:
+                raise SkillAuthorizationError(error.code) from error
+            except InvalidVisibilityConfigError as error:
+                raise SkillPackageError(error.code) from error
+            return SkillScope(vis_scope.value), resolved_department_id, (maybe_grants or ())
+
+        if user.role is not UserRole.SUPER_ADMIN:
+            raise SkillAuthorizationError("admin_required")
+        if scope is not SkillScope.COMPANY or owner_department_id is not None:
+            raise SkillPackageError("skill_scope_requires_access_policy")
+        return scope, owner_department_id, ()
+
+    async def _admin_details_for_replay(
+        self,
+        actor: AuthContext,
+        replay: SkillImportRequestResult,
+    ) -> SkillAdminDetails:
+        """幂等重放或新版本发布后返回包含完整版本历史与当前有效指针的管理详情。"""
+        if callable(getattr(self._repository, "list_versions", None)):
+            return await self.get_admin(actor, replay.skill.id)
+        return SkillAdminDetails(replay.skill, (replay.version,))
+
+    async def _publish_admin_markdown_create(
+        self,
+        actor: AuthContext,
+        *,
+        skill_id: str,
+        version_id: str,
+        package: PersonalSkillPackage,
+        idempotency_key: str,
+        request_fingerprint: str,
+        scope: SkillScope,
+        owner_department_id: str | None,
+        visibility_grants: tuple[VisibilityGrantInput, ...],
+        enabled: bool,
+        featured: bool,
+        starter_prompt: str | None,
+    ) -> SkillAdminDetails:
+        """先写入确定性 Markdown ZIP 对象，再原子提交管理端技能；确定性失败时清理孤儿对象。"""
+        object_key = self._package_key(package.package_sha256, version_id)
+        try:
+            await self._object_store.put_bytes(
+                object_key,
+                package.content,
+                content_type="application/zip",
+            )
+        except BaseException:
+            await self._discard_prepared_package(object_key)
+            raise
+        try:
+            skill, version = await self._repository.create_skill(
+                skill_id=skill_id,
+                version_id=version_id,
+                label="v1",
+                manifest=package.manifest,
+                object_key=object_key,
+                package_sha256=package.package_sha256,
+                dependency_check=self._personal_dependency_check(),
+                actor=actor,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                created_at=self._clock(),
+                scope=scope,
+                owner_department_id=owner_department_id,
+                visibility_grants=visibility_grants,
+                format=SkillFormat.MARKDOWN,
+                enabled=enabled,
+                featured=featured,
+                starter_prompt=starter_prompt,
+            )
+            if version.id != version_id:
+                # 并发请求由唯一约束选出胜者，败者立即清理自己预写的未引用对象。
+                await self._discard_prepared_package(object_key)
+                return SkillAdminDetails(skill, (version,))
+        except asyncio.CancelledError:
+            # 取消可能发生在提交之后，保留对象供幂等重放或安全离线回收。
+            raise
+        except PermissionError as error:
+            raise SkillAuthorizationError("admin_required") from error
+        except SkillConflictError as error:
+            replay = await self._replay_after_import_failure(
+                actor,
+                operation="import",
+                target_skill_id=None,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                if (replay.request_version or replay.version).object_key != object_key:
+                    await self._discard_prepared_package(object_key)
+                return await self._admin_details_for_replay(actor, replay)
+            # 事务已确定性回滚，安全清理本次预写对象。
+            await self._discard_prepared_package(object_key)
+            if error.code == "skill_slug_exists":
+                raise SkillConflictError("skill_slug_conflict") from error
+            raise
+        except Exception:
+            replay = await self._replay_after_import_failure(
+                actor,
+                operation="import",
+                target_skill_id=None,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                if (replay.request_version or replay.version).object_key != object_key:
+                    await self._discard_prepared_package(object_key)
+                return await self._admin_details_for_replay(actor, replay)
+            # 未知数据库异常无法证明未提交，保留对象供幂等重放与离线回收。
+            raise
+        return SkillAdminDetails(skill, (version,))
+
+    async def _publish_admin_markdown_version(
+        self,
+        actor: AuthContext,
+        *,
+        skill_id: str,
+        version_id: str,
+        expected_revision: int,
+        label: str | None,
+        activate: bool,
+        package: PersonalSkillPackage,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> SkillAdminDetails:
+        """先写入不可变版本包，再在行锁事务内按 CAS 与格式锁发布，异常时保障孤儿清理与幂等重放。"""
+        object_key = self._package_key(package.package_sha256, version_id)
+        try:
+            await self._object_store.put_bytes(
+                object_key,
+                package.content,
+                content_type="application/zip",
+            )
+        except BaseException:
+            await self._discard_prepared_package(object_key)
+            raise
+        try:
+            result = await self._repository.publish_admin_markdown_version(
+                skill_id,
+                version_id=version_id,
+                expected_revision=expected_revision,
+                label=label,
+                activate=activate,
+                manifest=package.manifest,
+                object_key=object_key,
+                package_sha256=package.package_sha256,
+                dependency_check=self._personal_dependency_check(),
+                actor=actor,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                created_at=self._clock(),
+            )
+        except asyncio.CancelledError:
+            raise
+        except PermissionError as error:
+            raise SkillAuthorizationError("admin_required") from error
+        except (SkillConflictError, SkillNotFoundError):
+            replay = await self._replay_after_import_failure(
+                actor,
+                operation="add_version",
+                target_skill_id=skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                if (replay.request_version or replay.version).object_key != object_key:
+                    await self._discard_prepared_package(object_key)
+                return await self._admin_details_for_replay(actor, replay)
+            # 冲突或目标不存在说明事务确定性未提交，立即清理孤儿包对象。
+            await self._discard_prepared_package(object_key)
+            raise
+        except Exception:
+            replay = await self._replay_after_import_failure(
+                actor,
+                operation="add_version",
+                target_skill_id=skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                if (replay.request_version or replay.version).object_key != object_key:
+                    await self._discard_prepared_package(object_key)
+                return await self._admin_details_for_replay(actor, replay)
+            raise
+        if result is None:
+            await self._discard_prepared_package(object_key)
+            raise SkillNotFoundError()
+        published_version = result.request_version or result.version
+        if published_version.object_key != object_key:
+            await self._discard_prepared_package(object_key)
+        return await self._admin_details_for_replay(actor, result)
+
     async def _publish_import(
         self,
         actor: AuthContext,
@@ -755,6 +1117,9 @@ class SkillService:
                 raise
             # add_version 的初始目标读取也可能在事务内发现管理员撤权。
             raise SkillAuthorizationError("admin_required") from error
+        # 反向格式锁定：在线 Markdown 技能禁止上传 ZIP 技能包，在写对象存储前即快速拒绝。
+        if skill.format is not SkillFormat.PACKAGE:
+            raise SkillConflictError("skill_package_upload_unsupported")
         validated = self._package_validator.validate(path)
         if validated.manifest.slug != skill.slug:
             raise SkillConflictError("skill_slug_mismatch")
@@ -779,7 +1144,8 @@ class SkillService:
             # 与导入一致：提交前查询也不得把撤权泄漏成 500。
             raise SkillAuthorizationError("admin_required") from error
         if replay is not None:
-            return replay.version
+            # ZIP add_version 重放返回该幂等请求实际上传创建的版本（request_version）。
+            return replay.request_version or replay.version
         dependency_check = await asyncio.to_thread(
             self._dependency_checker.check,
             validated.manifest.dependencies,
@@ -852,7 +1218,7 @@ class SkillService:
             if replay is not None:
                 if (replay.request_version or replay.version).object_key != object_key:
                     await self._discard_prepared_package(object_key)
-                return replay.version
+                return replay.request_version or replay.version
             await self._discard_prepared_package(object_key)
             raise
         except Exception:
@@ -864,7 +1230,7 @@ class SkillService:
                 request_fingerprint=request_fingerprint,
             )
             if replay is not None:
-                return replay.version
+                return replay.request_version or replay.version
             # 未知异常与取消相同：无法确认是否已提交时保留对象。
             raise
         if version is None:
@@ -884,9 +1250,14 @@ class SkillService:
         current_version_id: str,
         script_requires_approval: bool,
         visibility_grants: Sequence[VisibilityGrantInput] | None = None,
+        featured: bool | UnsetType = UNSET,
+        starter_prompt: str | None | UnsetType = UNSET,
     ) -> Skill:
-        """按目标环境最新检查结果 CAS 切换版本、启停、审批及部门可见性授权。"""
+        """按目标环境最新检查结果 CAS 切换版本、启停、审批、可见性授权及首页推荐元数据。"""
         skill = await self._require_manageable_admin_skill(actor, skill_id)
+        normalized_starter_prompt: str | None | UnsetType = (
+            UNSET if starter_prompt is UNSET else validate_starter_prompt(starter_prompt)
+        )
         resolved_grants: tuple[VisibilityGrantInput, ...] | None = None
         if visibility_grants is not None:
             if self._access_policy is None:
@@ -911,19 +1282,48 @@ class SkillService:
         if version is None or version.skill_id != skill_id:
             raise SkillNotFoundError("skill_version_not_found")
         if enabled:
-            dependency_check = await asyncio.to_thread(
-                self._dependency_checker.check,
-                version.dependency_requirements,
-                checked_at=self._clock(),
-            )
-            if dependency_check.status is not DependencyCheckStatus.SATISFIED:
-                raise SkillDependencyUnsatisfiedError()
+            # 纯 Markdown 无依赖无脚本技能免于触发 Python 解释器子进程探测。
+            if (
+                skill.format is SkillFormat.MARKDOWN
+                and not version.dependency_requirements
+                and not version.manifest.scripts
+            ):
+                dependency_check = self._personal_dependency_check()
+            else:
+                dependency_check = await asyncio.to_thread(
+                    self._dependency_checker.check,
+                    version.dependency_requirements,
+                    checked_at=self._clock(),
+                )
+                if dependency_check.status is not DependencyCheckStatus.SATISFIED:
+                    raise SkillDependencyUnsatisfiedError()
         else:
             # 停用必须始终可执行：保留原检查结论，不伪造一次“新鲜”探测，
             # 即使目标解释器已损坏也允许管理员先关闭 Skill。
             dependency_check = version.dependency_check
         try:
-            if _supports_kwarg(self._repository.update_configuration, "visibility_grants"):
+            supports_grants = _supports_kwarg(
+                self._repository.update_configuration, "visibility_grants"
+            )
+            supports_featured = _supports_kwarg(self._repository.update_configuration, "featured")
+            supports_starter_prompt = _supports_kwarg(
+                self._repository.update_configuration, "starter_prompt"
+            )
+            if supports_grants and supports_featured and supports_starter_prompt:
+                result = await self._repository.update_configuration(
+                    skill_id,
+                    expected_revision=expected_revision,
+                    enabled=enabled,
+                    current_version_id=current_version_id,
+                    script_requires_approval=script_requires_approval,
+                    dependency_check=dependency_check,
+                    actor=actor,
+                    updated_at=self._clock(),
+                    visibility_grants=resolved_grants,
+                    featured=featured,
+                    starter_prompt=normalized_starter_prompt,
+                )
+            elif supports_grants:
                 result = await self._repository.update_configuration(
                     skill_id,
                     expected_revision=expected_revision,
@@ -998,7 +1398,8 @@ class SkillService:
                     [skill.id for skill, _ in entries],
                 )
                 entries = tuple(pair for pair in entries if pair[0].id in readable_ids)
-            return await self._available_directory_entries(entries)
+            available = await self._available_directory_entries(entries)
+            return _sort_user_directory(available)
         candidates = await self._repository.get_user_directory(actor.user.id)
         if self._access_policy is not None and candidates:
             readable_ids = await self._access_policy.filter_readable_ids(
@@ -1007,7 +1408,8 @@ class SkillService:
                 [skill.id for skill in candidates],
             )
             candidates = tuple(skill for skill in candidates if skill.id in readable_ids)
-        return await self._available_directory(candidates)
+        available = await self._available_directory(candidates)
+        return _sort_user_directory(available)
 
     async def build_run_snapshot(
         self,
@@ -1095,6 +1497,14 @@ class SkillService:
                     or skill.script_requires_approval
                 ):
                     raise SkillConflictError("skill_catalog_integrity_invalid")
+                available.append(skill)
+                continue
+            # 纯 Markdown 无依赖无脚本技能直接放行，避免目录查询触发 Python 子进程探测与写放大。
+            if (
+                skill.format is SkillFormat.MARKDOWN
+                and not version.dependency_requirements
+                and not version.manifest.scripts
+            ):
                 available.append(skill)
                 continue
             check = await asyncio.to_thread(
@@ -1458,6 +1868,101 @@ def _personal_fingerprint(
             "name": draft.name,
             "description": draft.description,
             "guide": draft.guide,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sort_user_directory(items: tuple[Skill, ...]) -> tuple[Skill, ...]:
+    """按推荐优先、范围分层（部门 > 公司 > 个人）及更新时间倒序稳定排列用户目录。"""
+    return tuple(
+        sorted(
+            items,
+            key=lambda item: (
+                not item.featured,
+                _DIRECTORY_SCOPE_PRIORITY.get(item.scope, 99),
+                -item.updated_at.timestamp(),
+                item.slug,
+                item.id,
+            ),
+        )
+    )
+
+
+def _admin_markdown_create_fingerprint(
+    *,
+    actor: AuthContext,
+    draft: PersonalSkillDraft,
+    scope: str,
+    owner_department_id: str | None,
+    visibility_grants: Sequence[VisibilityGrantInput],
+    slug: str | None,
+    enabled: bool,
+    featured: bool,
+    starter_prompt: str | None,
+) -> str:
+    """管理端在线 Markdown 创建幂等指纹，覆盖全部可写业务字段并与 ZIP 导入显式隔离。"""
+    normalized_grants = sorted(
+        (
+            grant.target_type.value,
+            grant.target_id,
+            grant.include_subdepartments,
+        )
+        for grant in visibility_grants
+    )
+    payload = json.dumps(
+        {
+            "mode": "admin_markdown",
+            "operation": "import",
+            "owner_id": actor.user.id,
+            "target_skill_id": None,
+            "name": draft.name,
+            "description": draft.description,
+            "guide": draft.guide,
+            "scope": scope,
+            "owner_department_id": owner_department_id,
+            "visibility_grants": normalized_grants,
+            "slug": slug,
+            "enabled": enabled,
+            "featured": featured,
+            "starter_prompt": starter_prompt,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _admin_markdown_version_fingerprint(
+    *,
+    actor: AuthContext,
+    target_skill_id: str,
+    expected_revision: int,
+    draft: PersonalSkillDraft,
+    label: str | None,
+    activate: bool,
+    scope: str,
+    owner_department_id: str | None,
+) -> str:
+    """管理端在线 Markdown 发布新版本幂等指纹，覆盖修订号、版本正文、标签与激活标志。"""
+    payload = json.dumps(
+        {
+            "mode": "admin_markdown_version",
+            "operation": "add_version",
+            "owner_id": actor.user.id,
+            "target_skill_id": target_skill_id,
+            "expected_revision": expected_revision,
+            "name": draft.name,
+            "description": draft.description,
+            "guide": draft.guide,
+            "label": label,
+            "activate": activate,
+            "scope": scope,
+            "owner_department_id": owner_department_id,
         },
         sort_keys=True,
         separators=(",", ":"),

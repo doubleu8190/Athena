@@ -97,9 +97,11 @@ async def _run_personal_skill_migration_scenario(database_url: str) -> None:
             text(
                 "INSERT INTO skills "
                 "(id, slug, scope, owner_id, deleted_at, enabled, "
-                "script_requires_approval, revision, created_by, created_at, updated_at) "
+                "script_requires_approval, format, featured, revision, "
+                "created_by, created_at, updated_at) "
                 "VALUES ('skill_personal_duplicate', 'shared-scope-slug', 'personal', "
-                "'usr_personal_a', NULL, false, false, 1, 'usr_personal_a', :now, :now)"
+                "'usr_personal_a', NULL, false, false, 'markdown', false, 1, "
+                "'usr_personal_a', :now, :now)"
             ),
             {"now": datetime.now(UTC)},
         )
@@ -290,9 +292,10 @@ async def _insert_personal_skill(
             text(
                 "INSERT INTO skills "
                 "(id, slug, scope, owner_id, deleted_at, current_version_id, enabled, "
-                "script_requires_approval, revision, created_by, created_at, updated_at) "
+                "script_requires_approval, format, featured, revision, "
+                "created_by, created_at, updated_at) "
                 "VALUES (:skill_id, :slug, 'personal', :owner_id, NULL, NULL, true, false, "
-                "1, :owner_id, :now, :now)"
+                "'markdown', false, 1, :owner_id, :now, :now)"
             ),
             {
                 "skill_id": skill_id,

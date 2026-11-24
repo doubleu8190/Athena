@@ -2261,7 +2261,8 @@ def test_alembic_migration_0038_single_head_pg_sql_and_sqlite_roundtrip(tmp_path
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(pg_cfg)
-    assert script.get_heads() == ["20261205_0038"]
+    # 保持 Alembic 单一 head，并验证 20261205_0038 位于主干迁移链中（兼容后续 M3.3+ 迁移）。
+    assert len(script.get_heads()) == 1
     rev = script.get_revision("20261205_0038")
     assert rev is not None
     assert rev.down_revision == "20261204_0037"

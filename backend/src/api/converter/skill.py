@@ -20,7 +20,13 @@ from api.dto.skill import (
 )
 from app.skill.model import SkillAdminDetails
 from app.skill.personal import PersonalSkillDraft
-from domain.skill import DependencyCheck, Skill, SkillExecutionRecord, SkillVersion
+from domain.skill import (
+    DependencyCheck,
+    Skill,
+    SkillExecutionRecord,
+    SkillFormat,
+    SkillVersion,
+)
 
 
 def dependency_check_to_response(check: DependencyCheck) -> SkillDependencyCheckResponse:
@@ -65,6 +71,10 @@ def skill_to_response(skill: Skill) -> SkillSummaryResponse:
         ),
         owner_department_id=skill.owner_department_id,
         visibility_grants=grants_to_response(skill.visibility_grants),
+        format="markdown" if skill.format is SkillFormat.MARKDOWN else "package",
+        has_scripts=skill.has_scripts,
+        featured=skill.featured,
+        starter_prompt=skill.starter_prompt,
     )
 
 

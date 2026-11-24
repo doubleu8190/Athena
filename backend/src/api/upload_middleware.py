@@ -100,10 +100,15 @@ def _match_upload_kind(method: str, path: str) -> str | None:
         return "skill"
     if path.startswith("/api/v1/sessions/") and path.endswith("/files"):
         return "session_file"
-    if path == "/api/v1/me/skills/parse":
+    if path in {"/api/v1/me/skills/parse", "/api/v1/admin/skills/parse-markdown"}:
         return "personal_markdown"
-    if path == "/api/v1/me/skills" or (
-        path.startswith("/api/v1/me/skills/") and path.endswith("/versions")
+    if (
+        path in {"/api/v1/me/skills", "/api/v1/admin/skills/markdown"}
+        or (path.startswith("/api/v1/me/skills/") and path.endswith("/versions"))
+        or (
+            path.startswith("/api/v1/admin/skills/")
+            and path.endswith("/versions/markdown")
+        )
     ):
         return "personal_json"
     return None

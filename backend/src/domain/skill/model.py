@@ -19,6 +19,7 @@ MAX_PACKAGE_FILES = 500
 MAX_GUIDE_CHARACTERS = 100_000
 MAX_SKILL_NAME_CHARACTERS = 120
 MAX_SKILL_DESCRIPTION_CHARACTERS = 1_000
+MAX_SKILL_STARTER_PROMPT_CHARACTERS = 500
 MAX_PERSONAL_MARKDOWN_BYTES = 1024 * 1024
 SKILL_LOAD_TOOL_ID = "builtin_skill_load"
 SKILL_READ_RESOURCE_TOOL_ID = "builtin_skill_read_resource"
@@ -41,6 +42,13 @@ class SkillScope(StrEnum):
     COMPANY = "company"
     DEPARTMENT = "department"
     PERSONAL = "personal"
+
+
+class SkillFormat(StrEnum):
+    """Skill 内容形态（在线单文件 Markdown 或完整 ZIP 技能包）。"""
+
+    MARKDOWN = "markdown"
+    PACKAGE = "package"
 
 
 class _FrozenModel(BaseModel):
@@ -185,6 +193,10 @@ class Skill:
     deleted_at: datetime | None = None
     owner_department_id: str | None = None
     visibility_grants: tuple[VisibilityGrant, ...] = ()
+    format: SkillFormat = SkillFormat.PACKAGE
+    has_scripts: bool = False
+    featured: bool = False
+    starter_prompt: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +454,10 @@ __all__ = [
     "MAX_PACKAGE_FILE_BYTES",
     "MAX_PACKAGE_UNCOMPRESSED_BYTES",
     "MAX_PACKAGE_ZIP_BYTES",
+    "MAX_PERSONAL_MARKDOWN_BYTES",
+    "MAX_SKILL_DESCRIPTION_CHARACTERS",
+    "MAX_SKILL_NAME_CHARACTERS",
+    "MAX_SKILL_STARTER_PROMPT_CHARACTERS",
     "SESSION_FILE_LIST_TOOL_ID",
     "SESSION_FILE_READ_TOOL_ID",
     "SKILL_EXECUTE_TOOL_ID",
@@ -465,10 +481,13 @@ __all__ = [
     "SkillExecutionCompletion",
     "SkillExecutionStart",
     "SkillExecutionStatus",
+    "SkillFormat",
+    "SkillImportRequestResult",
     "SkillNotFoundError",
     "SkillPackageError",
     "SkillPackageManifest",
     "SkillParameterSummaryItem",
+    "SkillScope",
     "SkillScriptDefinition",
     "SkillVersion",
     "SkillVersionPage",

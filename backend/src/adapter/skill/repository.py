@@ -44,6 +44,7 @@ from domain.skill.model import (
     SkillExecutionRecord,
     SkillExecutionStart,
     SkillExecutionStatus,
+    SkillFormat,
     SkillImportRequestResult,
     SkillNotFoundError,
     SkillPackageManifest,
@@ -51,7 +52,7 @@ from domain.skill.model import (
     SkillVersion,
     SkillVersionPage,
 )
-from domain.skill.ports import SkillRepository
+from domain.skill.ports import UNSET, SkillRepository, UnsetType
 
 _PERSONAL_REQUEST_OPERATIONS = frozenset({"personal_create", "personal_publish"})
 _ADMIN_MANAGED_SCOPES = (SkillScope.COMPANY.value, SkillScope.DEPARTMENT.value)
@@ -384,8 +385,12 @@ class SqlAlchemySkillRepository(SkillRepository):
         scope: SkillScope = SkillScope.COMPANY,
         owner_department_id: str | None = None,
         visibility_grants: Sequence[VisibilityGrantInput] = (),
+        format: SkillFormat = SkillFormat.PACKAGE,
+        enabled: bool = False,
+        featured: bool = False,
+        starter_prompt: str | None = None,
     ) -> tuple[Skill, SkillVersion]:
-        """原子插入身份、首个未启用版本及可见性授权；事务内复核管理员与管辖范围。"""
+        """原子插入身份、首版及可见性授权；事务内复核管理员与管辖范围。"""
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -403,8 +408,11 @@ class SqlAlchemySkillRepository(SkillRepository):
                         owner_department_id=owner_department_id,
                         deleted_at=None,
                         current_version_id=None,
-                        enabled=False,
+                        enabled=enabled,
                         script_requires_approval=False,
+                        format=format.value,
+                        featured=featured,
+                        starter_prompt=starter_prompt,
                         revision=1,
                         created_by=actor.user.id,
                         created_at=created_at,
@@ -430,6 +438,11 @@ class SqlAlchemySkillRepository(SkillRepository):
                     )
                     session.add(version_row)
                     await session.flush()
+                    # 在线 Markdown 形态（或显式启用创建）首版即写入 current_version_id，
+                    # 保证列表/详情立即展示名称与版本标签；ZIP 首发导入仍保持未激活待核查状态。
+                    if format is SkillFormat.MARKDOWN or enabled:
+                        skill_row.current_version_id = version_id
+                        await session.flush()
                     grants = await sync_resource_grants_in_session(
                         session,
                         ResourceType.SKILL,
@@ -481,6 +494,9 @@ class SqlAlchemySkillRepository(SkillRepository):
                         current_version_id=None,
                         enabled=True,
                         script_requires_approval=False,
+                        format=SkillFormat.MARKDOWN.value,
+                        featured=False,
+                        starter_prompt=None,
                         revision=1,
                         created_by=actor.user.id,
                         created_at=created_at,
@@ -665,6 +681,10 @@ class SqlAlchemySkillRepository(SkillRepository):
                         scope=SkillScope(skill_row.scope),
                         owner_department_id=skill_row.owner_department_id,
                     )
+                    # 反向格式锁定（事务内二次防线）：禁止向在线 Markdown 技能追加 ZIP 包版本，
+                    # 防止把脚本、依赖或多文件资源混入纯文档双形态技能。
+                    if SkillFormat(skill_row.format) is not SkillFormat.PACKAGE:
+                        raise SkillConflictError("skill_package_upload_unsupported")
                     if skill_row.slug != manifest.slug:
                         raise SkillConflictError("skill_slug_mismatch")
                     ordinal = (
@@ -708,7 +728,148 @@ class SqlAlchemySkillRepository(SkillRepository):
                 request_fingerprint=request_fingerprint,
             )
             if replay is not None:
-                return replay.version
+                # ZIP add_version 重放应返回该幂等请求实际创建的版本，而非当前激活指针版本。
+                return replay.request_version or replay.version
+            raise SkillConflictError("skill_version_conflict") from error
+
+    async def publish_admin_markdown_version(
+        self,
+        skill_id: str,
+        *,
+        version_id: str,
+        expected_revision: int,
+        label: str | None,
+        activate: bool,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> SkillImportRequestResult | None:
+        """在行锁事务内强制校验格式锁定与修订号 CAS，发布公司/部门在线 Markdown 新版本。"""
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_skill_manager_session(session, actor)
+                    skill_row = await session.scalar(
+                        select(SkillModel)
+                        .where(
+                            SkillModel.id == skill_id,
+                            SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
+                            SkillModel.deleted_at.is_(None),
+                        )
+                        .with_for_update()
+                    )
+                    if skill_row is None:
+                        return None
+                    # 在行锁事务内重新校验超管或管辖部门管理员身份，消除 TOCTOU。
+                    await self._require_skill_manager(
+                        session,
+                        actor,
+                        scope=SkillScope(skill_row.scope),
+                        owner_department_id=skill_row.owner_department_id,
+                    )
+                    # 同一幂等键的并发请求在拿到身份锁后优先重放胜者，
+                    # 避免因胜者已递增 revision 而误报 CAS 冲突。
+                    replay = await self._read_import_result_in_session(
+                        session,
+                        actor,
+                        operation="add_version",
+                        target_skill_id=skill_id,
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                    )
+                    if replay is not None:
+                        return replay
+                    # 格式锁定底线：禁止对 ZIP 技能包执行在线 Markdown 发布，
+                    # 防止覆盖包内脚本与多文件资源。
+                    if SkillFormat(skill_row.format) is not SkillFormat.MARKDOWN:
+                        raise SkillConflictError("skill_markdown_edit_unsupported")
+                    # 修订号乐观锁：防止并发编辑互相覆盖。
+                    if skill_row.revision != expected_revision:
+                        raise SkillConflictError("skill_revision_conflict")
+                    if skill_row.slug != manifest.slug:
+                        raise SkillConflictError("skill_slug_mismatch")
+                    ordinal = (
+                        int(
+                            (
+                                await session.scalar(
+                                    select(func.max(SkillVersionModel.ordinal)).where(
+                                        SkillVersionModel.skill_id == skill_id
+                                    )
+                                )
+                            )
+                            or 0
+                        )
+                        + 1
+                    )
+                    version_row = self._version_model(
+                        version_id=version_id,
+                        skill_id=skill_id,
+                        ordinal=ordinal,
+                        label=label or f"v{ordinal}",
+                        manifest=manifest,
+                        object_key=object_key,
+                        package_sha256=package_sha256,
+                        dependency_check=dependency_check,
+                        created_by=actor.user.id,
+                        request_operation="add_version",
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        request_target_skill_id=skill_id,
+                        created_at=created_at,
+                    )
+                    session.add(version_row)
+                    await session.flush()
+                    # activate=True 时同事务切换当前版本指针；
+                    # 无论是否激活均递增 revision 以保持严格 CAS 语义。
+                    if activate:
+                        skill_row.current_version_id = version_id
+                    skill_row.revision += 1
+                    skill_row.updated_at = created_at
+                    await session.flush()
+
+                    if activate:
+                        current_version_row: SkillVersionModel | None = version_row
+                    elif skill_row.current_version_id is not None:
+                        current_version_row = await session.get(
+                            SkillVersionModel,
+                            skill_row.current_version_id,
+                        )
+                    else:
+                        current_version_row = None
+
+                    grants_map = await load_grants_map_in_session(
+                        session, ResourceType.SKILL, (skill_row.id,)
+                    )
+                    request_version = skill_version_to_domain(version_row)
+                    active_version = (
+                        request_version
+                        if current_version_row is None
+                        else skill_version_to_domain(current_version_row)
+                    )
+                    return SkillImportRequestResult(
+                        skill=skill_to_domain(
+                            skill_row,
+                            current_version_row,
+                            grants=grants_map.get(skill_row.id, ()),
+                        ),
+                        version=active_version,
+                        request_version=request_version,
+                    )
+        except IntegrityError as error:
+            replay = await self._read_import_result(
+                actor,
+                operation="add_version",
+                target_skill_id=skill_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                return replay
             raise SkillConflictError("skill_version_conflict") from error
 
     async def find_import_result(
@@ -775,8 +936,10 @@ class SqlAlchemySkillRepository(SkillRepository):
         actor: AuthContext,
         updated_at: datetime,
         visibility_grants: Sequence[VisibilityGrantInput] | None = None,
+        featured: bool | UnsetType = UNSET,
+        starter_prompt: str | None | UnsetType = UNSET,
     ) -> Skill | None:
-        """以修订号 CAS 原子切换版本、启停、审批及部门可见性授权。"""
+        """以修订号 CAS 原子切换版本、启停、审批、部门可见性授权及首页推荐元数据。"""
         async with self._session_factory() as session:
             async with session.begin():
                 await self._require_skill_manager_session(session, actor)
@@ -812,15 +975,26 @@ class SqlAlchemySkillRepository(SkillRepository):
                     raise ValueError("skill_dependency_unsatisfied")
                 version_row.dependency_check = dependency_check.model_dump(mode="json")
                 grants_changed = visibility_grants is not None
+                # 使用 UNSET 哨兵严格区分“未传入（保持原值）”与“显式 None（清空 starter_prompt）”。
+                featured_changed = featured is not UNSET and skill_row.featured != featured
+                starter_prompt_changed = (
+                    starter_prompt is not UNSET and skill_row.starter_prompt != starter_prompt
+                )
                 if (
                     skill_row.current_version_id != current_version_id
                     or skill_row.enabled != enabled
                     or skill_row.script_requires_approval != script_requires_approval
                     or grants_changed
+                    or featured_changed
+                    or starter_prompt_changed
                 ):
                     skill_row.current_version_id = current_version_id
                     skill_row.enabled = enabled
                     skill_row.script_requires_approval = script_requires_approval
+                    if featured is not UNSET:
+                        skill_row.featured = featured
+                    if starter_prompt is not UNSET:
+                        skill_row.starter_prompt = starter_prompt
                     skill_row.revision += 1
                     skill_row.updated_at = updated_at
                     await session.flush()
@@ -1214,22 +1388,34 @@ class SqlAlchemySkillRepository(SkillRepository):
             raise SkillConflictError("skill_catalog_integrity_invalid")
         request_version = skill_version_to_domain(row)
         result_version_row = row
-        if (
-            row.request_operation in _PERSONAL_REQUEST_OPERATIONS
-            and skill_row.deleted_at is None
-        ):
-            if skill_row.current_version_id is None:
-                raise SkillConflictError("skill_catalog_integrity_invalid")
-            current_version_row = await session.get(
-                SkillVersionModel,
-                skill_row.current_version_id,
-            )
-            if (
-                current_version_row is None
-                or current_version_row.skill_id != skill_row.id
-            ):
-                raise SkillConflictError("skill_catalog_integrity_invalid")
-            result_version_row = current_version_row
+        if skill_row.deleted_at is None:
+            if row.request_operation in _PERSONAL_REQUEST_OPERATIONS:
+                if skill_row.current_version_id is None:
+                    raise SkillConflictError("skill_catalog_integrity_invalid")
+                current_version_row = await session.get(
+                    SkillVersionModel,
+                    skill_row.current_version_id,
+                )
+                if (
+                    current_version_row is None
+                    or current_version_row.skill_id != skill_row.id
+                ):
+                    raise SkillConflictError("skill_catalog_integrity_invalid")
+                result_version_row = current_version_row
+            elif skill_row.current_version_id is not None:
+                # 管理端操作（含 add_version 且 activate=False 重放）在技能存在当前激活指针时，
+                # 以 current_version_id 构造自洽的 skill 与 version，同时通过 request_version
+                # 精确保留本次幂等请求所创建的版本。
+                current_version_row = await session.get(
+                    SkillVersionModel,
+                    skill_row.current_version_id,
+                )
+                if (
+                    current_version_row is None
+                    or current_version_row.skill_id != skill_row.id
+                ):
+                    raise SkillConflictError("skill_catalog_integrity_invalid")
+                result_version_row = current_version_row
         grants_map = await load_grants_map_in_session(session, ResourceType.SKILL, (skill_row.id,))
         return SkillImportRequestResult(
             skill=skill_to_domain(

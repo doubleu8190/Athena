@@ -17,12 +17,17 @@ from domain.skill import (
     MAX_PERSONAL_MARKDOWN_BYTES,
     MAX_SKILL_DESCRIPTION_CHARACTERS,
     MAX_SKILL_NAME_CHARACTERS,
+    MAX_SKILL_STARTER_PROMPT_CHARACTERS,
     PackageResource,
+    SkillPackageError,
     SkillPackageManifest,
 )
 
 _ALLOWED_METADATA_FIELDS = frozenset({"name", "description", "slug"})
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_ALL_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
+_SKILL_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+_MAX_VERSION_LABEL_CHARACTERS = 64
 _FRONTMATTER = re.compile(
     r"\A---[ \t]*\r?\n(?P<metadata>.*?)(?:\r?\n)---[ \t]*(?:\r?\n|\Z)",
     re.DOTALL,
@@ -162,6 +167,65 @@ def build_personal_package(slug: str, draft: PersonalSkillDraft) -> PersonalSkil
     )
 
 
+def validate_starter_prompt(value: str | None) -> str | None:
+    """校验首页快捷应用起始引导语；空值或纯空白归一为 None，超长或含非法控制字符拒绝。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SkillPackageError("skill_starter_prompt_invalid")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if (
+        len(normalized) > MAX_SKILL_STARTER_PROMPT_CHARACTERS
+        or _CONTROL_CHARACTER.search(normalized)
+    ):
+        raise SkillPackageError("skill_starter_prompt_invalid")
+    return normalized
+
+
+def validate_optional_admin_slug(value: str | None) -> str | None:
+    """校验管理端在线 Markdown 可选 slug；未提供或纯空白返回 None 交由服务端派生。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SkillPackageError("skill_slug_invalid")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if _SKILL_SLUG_PATTERN.fullmatch(normalized) is None:
+        raise SkillPackageError("skill_slug_invalid")
+    return normalized
+
+
+def build_admin_markdown_slug(skill_id: str) -> str:
+    """由稳定 skill_id 自动生成严格符合 slug 规范的不碰撞标识（md-<小写字母数字>）。"""
+    tail = skill_id.removeprefix("skill_")
+    cleaned = re.sub(r"[^a-z0-9]", "", tail.casefold())
+    digest = hashlib.sha256(skill_id.encode("utf-8")).hexdigest()
+    if not cleaned:
+        return f"md-{digest[:32]}"
+    if len(cleaned) <= 61:
+        return f"md-{cleaned}"
+    return f"md-{cleaned[-48:]}-{digest[:12]}"
+
+
+def validate_version_label(value: str | None) -> str | None:
+    """校验在线 Markdown 版本标签；未提供或空白返回 None，否则须 <= 64 字符且无控制字符。"""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SkillPackageError("skill_version_label_invalid")
+    if _ALL_CONTROL_CHARACTER.search(value):
+        raise SkillPackageError("skill_version_label_invalid")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > _MAX_VERSION_LABEL_CHARACTERS:
+        raise SkillPackageError("skill_version_label_invalid")
+    return normalized
+
+
 def _validate_markdown_text(text: str) -> None:
     """拒绝 Markdown 文件中的非法控制字符。"""
     if _CONTROL_CHARACTER.search(text):
@@ -215,7 +279,11 @@ __all__ = [
     "PersonalSkillDraft",
     "PersonalSkillError",
     "PersonalSkillPackage",
+    "build_admin_markdown_slug",
     "build_personal_package",
     "parse_personal_markdown",
+    "validate_optional_admin_slug",
     "validate_personal_content",
+    "validate_starter_prompt",
+    "validate_version_label",
 ]

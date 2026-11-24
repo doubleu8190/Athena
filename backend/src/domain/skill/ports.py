@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Protocol
+from enum import Enum
+from typing import Final, Literal, Protocol
 
 from domain.access import VisibilityGrantInput
 from domain.auth import AuthContext
@@ -16,12 +17,23 @@ from domain.skill.model import (
     SkillExecutionRecord,
     SkillExecutionStart,
     SkillExecutionStatus,
+    SkillFormat,
     SkillImportRequestResult,
     SkillPackageManifest,
     SkillScope,
     SkillVersion,
     SkillVersionPage,
 )
+
+
+class _Unset(Enum):
+    """区分 PATCH 未传字段（保持原值）与显式传入 None（清空可空字段）的哨兵枚举。"""
+
+    TOKEN = "UNSET"
+
+
+UNSET: Final = _Unset.TOKEN
+type UnsetType = Literal[_Unset.TOKEN]
 
 
 class SkillRepository(Protocol):
@@ -78,8 +90,12 @@ class SkillRepository(Protocol):
         scope: SkillScope = SkillScope.COMPANY,
         owner_department_id: str | None = None,
         visibility_grants: Sequence[VisibilityGrantInput] = (),
+        format: SkillFormat = SkillFormat.PACKAGE,
+        enabled: bool = False,
+        featured: bool = False,
+        starter_prompt: str | None = None,
     ) -> tuple[Skill, SkillVersion]:
-        """原子创建首发公司/部门 Skill 与第一个未启用版本及可见性授权。"""
+        """原子创建首发公司/部门 Skill 与首版及可见性授权（支持 ZIP 包与在线 Markdown 双形态）。"""
 
     async def create_personal_skill(
         self,
@@ -113,6 +129,25 @@ class SkillRepository(Protocol):
         created_at: datetime,
     ) -> SkillVersion | None:
         """追加完整更新版本，不改变当前指针和启用状态。"""
+
+    async def publish_admin_markdown_version(
+        self,
+        skill_id: str,
+        *,
+        version_id: str,
+        expected_revision: int,
+        label: str | None,
+        activate: bool,
+        manifest: SkillPackageManifest,
+        object_key: str,
+        package_sha256: str,
+        dependency_check: DependencyCheck,
+        actor: AuthContext,
+        idempotency_key: str,
+        request_fingerprint: str,
+        created_at: datetime,
+    ) -> SkillImportRequestResult | None:
+        """按修订号 CAS 与格式锁发布公司/部门在线 Markdown 新版本，可选原子切换当前版本指针。"""
 
     async def publish_personal_version(
         self,
@@ -165,8 +200,10 @@ class SkillRepository(Protocol):
         actor: AuthContext,
         updated_at: datetime,
         visibility_grants: Sequence[VisibilityGrantInput] | None = None,
+        featured: bool | UnsetType = UNSET,
+        starter_prompt: str | None | UnsetType = UNSET,
     ) -> Skill | None:
-        """按修订号 CAS 切换版本、启停、审批配置及可选的部门可见性授权。"""
+        """按修订号 CAS 切换版本、启停、审批、部门可见性授权及首页快捷推荐元数据。"""
 
     async def delete_admin_skill(
         self,
@@ -275,4 +312,10 @@ def snapshot_from_skill(skill: Skill, version: SkillVersion) -> RunSkillSnapshot
     )
 
 
-__all__ = ["SkillPackageObjectStore", "SkillRepository", "snapshot_from_skill"]
+__all__ = [
+    "UNSET",
+    "SkillPackageObjectStore",
+    "SkillRepository",
+    "UnsetType",
+    "snapshot_from_skill",
+]

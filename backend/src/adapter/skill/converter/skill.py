@@ -12,6 +12,7 @@ from domain.skill.model import (
     SkillExecutionArtifact,
     SkillExecutionRecord,
     SkillExecutionStatus,
+    SkillFormat,
     SkillPackageManifest,
     SkillScope,
     SkillVersion,
@@ -69,6 +70,10 @@ def skill_to_domain(
         deleted_at=None if row.deleted_at is None else _utc(row.deleted_at),
         owner_department_id=row.owner_department_id,
         visibility_grants=grants,
+        format=SkillFormat(row.format),
+        has_scripts=False if current is None else bool(current.manifest.scripts),
+        featured=row.featured,
+        starter_prompt=row.starter_prompt,
     )
 
 

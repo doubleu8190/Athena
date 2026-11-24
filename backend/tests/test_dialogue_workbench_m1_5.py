@@ -542,6 +542,8 @@ async def _seed_skill(
             scope=scope.value,
             owner_id=owner_id,
             owner_department_id=owner_department_id,
+            format="markdown" if scope is SkillScope.PERSONAL else "package",
+            featured=False,
             enabled=enabled,
             script_requires_approval=False,
             current_version_id=None,

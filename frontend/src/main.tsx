@@ -2,12 +2,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 
 import { App } from "./app/App";
-// 先引入 Design Tokens 与 Tailwind CSS v4，再加载旧样式桥接与各模块过渡样式。
+// 按 Cascade 层级顺序引入 Design Tokens、全局样式、最小兼容层与未迁移模块样式表。
 import "./shared/styles/tokens.css";
 import "./shared/styles/global.css";
-import "./app/app.css";
-import "./app/workspace.css";
-import "./features/chat/chat.css";
+import "./shared/styles/legacy-compat.css";
 import "./features/knowledge/knowledge.css";
 import "./features/admin/admin.css";
 import "./features/skills/personalSkills.css";

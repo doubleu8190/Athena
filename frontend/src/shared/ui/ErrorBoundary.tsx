@@ -5,6 +5,7 @@ import {
 } from "react";
 
 import { Brand } from "./Brand";
+import { Button } from "./Button";
 import { Icon } from "./Icons";
 
 interface ErrorBoundaryProps {
@@ -39,28 +40,35 @@ export class ErrorBoundary extends Component<
       return this.props.children;
     }
     return (
-      <main className="error-boundary-page">
+      <main className="flex min-h-dvh flex-col items-center justify-center gap-6 bg-subtle px-4 py-8 sm:px-7">
         <Brand />
         <section
           aria-labelledby="global-error-title"
-          className="error-boundary-card"
+          className="w-full max-w-[540px] rounded-2xl border border-border-default bg-canvas px-6 py-8 text-center shadow-md sm:px-9 sm:py-9"
           role="alert"
         >
-          <span className="error-boundary-icon" aria-hidden="true">
-            <Icon name="shield" size={24} />
+          <span
+            aria-hidden="true"
+            className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-xl border border-danger-border bg-danger-bg text-danger"
+          >
+            <Icon name="shield" size={22} />
           </span>
-          <p className="page-eyebrow">Unexpected UI error</p>
-          <h1 id="global-error-title">页面遇到意外错误</h1>
-          <p>
+          <h1
+            className="text-2xl font-semibold tracking-tight text-text-primary sm:text-[26px]"
+            id="global-error-title"
+          >
+            页面遇到意外错误
+          </h1>
+          <p className="mx-auto mt-2.5 mb-6 max-w-md text-sm leading-relaxed text-text-secondary">
             当前页面无法继续安全渲染。请重新加载；如果问题持续出现，请稍后再试。
           </p>
-          <button
-            className="button-primary"
+          <Button
             onClick={() => window.location.reload()}
             type="button"
+            variant="primary"
           >
             重新加载页面
-          </button>
+          </Button>
         </section>
       </main>
     );

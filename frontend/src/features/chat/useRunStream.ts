@@ -251,6 +251,8 @@ export function useRunStream({
   const reconcileRef = useRef(onReconcile);
   const snapshotRef = useRef(onSnapshot);
   const probeAuthRef = useRef(probeAuth);
+  // 缓存最新 status 供建连初始化读取，避免 queued -> running 等正常流转触发 SSE 断流重连。
+  const statusRef = useRef(status);
   const mode = runStreamMode(status);
   const alreadyTerminalInStream =
     Boolean(runId) &&
@@ -276,6 +278,10 @@ export function useRunStream({
   useEffect(() => {
     probeAuthRef.current = probeAuth;
   }, [probeAuth]);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   const syncStatus = useCallback(
     (targetRunId: string, nextStatus: RunStatus) => {
@@ -332,7 +338,7 @@ export function useRunStream({
       return;
     }
 
-    dispatch({ runId, status, type: "start" });
+    dispatch({ runId, status: statusRef.current, type: "start" });
     let acceptEvents = true;
     let snapshotReceived = false;
     // 为本次连接生命周期绑定独立 AbortController，卸载、切 Run、终态关闭或换线时统一取消探测。

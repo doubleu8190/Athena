@@ -38,7 +38,7 @@ export function SessionFileDownloadButton({
   };
 
   return (
-    <span className="session-file-download">
+    <span className="inline-flex min-w-0 flex-col items-end gap-[3px]">
       <button
         aria-label={`下载文件：${filename}`}
         className={compact ? "text-button" : "button-quiet"}
@@ -50,7 +50,7 @@ export function SessionFileDownloadButton({
         {pending ? "正在准备…" : "下载"}
       </button>
       {error ? (
-        <span className="session-file-inline-error" role="alert">
+        <span className="text-xs leading-normal text-danger" role="alert">
           {error}
         </span>
       ) : null}

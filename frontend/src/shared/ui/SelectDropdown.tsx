@@ -162,7 +162,7 @@ export function SelectDropdown({
   };
 
   return (
-    <div className={classPrefix} ref={rootRef}>
+    <div className={`${classPrefix} relative min-w-0`} ref={rootRef}>
       <button
         aria-activedescendant={
           open && options.length > 0 ? activeOptionId : undefined
@@ -171,7 +171,7 @@ export function SelectDropdown({
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label={label}
-        className={`${classPrefix}-trigger`}
+        className={`${classPrefix}-trigger flex min-h-[38px] w-full min-w-0 items-center justify-between gap-2.5 rounded-lg border border-border-default bg-canvas px-[11px] text-left text-[13px] font-medium text-text-primary transition-colors outline-hidden hover:enabled:border-border-strong focus-visible:border-ring-focus focus-visible:ring-2 focus-visible:ring-ring-focus/20 aria-expanded:border-ring-focus aria-expanded:ring-2 aria-expanded:ring-ring-focus/20 disabled:cursor-not-allowed disabled:bg-muted disabled:text-text-secondary disabled:opacity-70`}
         data-modal-escape-owner={open ? "self" : undefined}
         disabled={disabled}
         id={id}
@@ -224,15 +224,19 @@ export function SelectDropdown({
         role="combobox"
         type="button"
       >
-        <span className={`${classPrefix}-value`}>
+        <span className={`${classPrefix}-value min-w-0 truncate`}>
           {selected?.label ?? placeholder}
         </span>
-        <Icon className={`${classPrefix}-chevron`} name="chevron" size={12} />
+        <Icon
+          className={`${classPrefix}-chevron shrink-0 text-text-tertiary transition-transform duration-150 ${open ? "-rotate-90" : "rotate-90"}`}
+          name="chevron"
+          size={12}
+        />
       </button>
       {open ? (
         <div
           aria-label={listboxLabel}
-          className={`${classPrefix}-menu`}
+          className={`${classPrefix}-menu absolute top-[calc(100%+6px)] right-0 left-0 z-[var(--z-popover)] grid max-h-[min(240px,40vh)] gap-[3px] overflow-y-auto rounded-[10px] border border-border-default bg-canvas p-[5px] shadow-md`}
           id={`${id}-listbox`}
           role="listbox"
         >
@@ -240,7 +244,7 @@ export function SelectDropdown({
             <button
               aria-disabled={option.disabled || undefined}
               aria-selected={option.value === value}
-              className={`${classPrefix}-option`}
+              className={`${classPrefix}-option flex min-h-[34px] min-w-0 items-center justify-between gap-2 rounded-[7px] bg-transparent px-[9px] py-1 text-left text-xs text-text-primary outline-hidden hover:bg-brand-subtle focus-visible:bg-brand-subtle data-[active=true]:bg-brand-subtle aria-selected:bg-brand-subtle aria-selected:font-semibold aria-selected:text-brand disabled:opacity-50`}
               data-active={option.value === effectiveActiveValue}
               disabled={option.disabled}
               id={`${id}-option-${index}`}
@@ -259,16 +263,23 @@ export function SelectDropdown({
               tabIndex={-1}
               type="button"
             >
-              <span className={`${classPrefix}-option-label`}>
+              <span
+                className={`${classPrefix}-option-label min-w-0 flex-1 truncate`}
+              >
                 {option.label}
               </span>
               {option.badge ? (
-                <span className={`${classPrefix}-option-badge`}>
+                <span
+                  className={`${classPrefix}-option-badge shrink-0 rounded-full border border-warning-border bg-warning-bg px-1.5 py-px text-xs font-semibold whitespace-nowrap text-warning`}
+                >
                   {option.badge}
                 </span>
               ) : null}
               {option.value === value ? (
-                <span aria-hidden="true" className={`${classPrefix}-check`}>
+                <span
+                  aria-hidden="true"
+                  className={`${classPrefix}-check shrink-0 font-bold text-brand-hover`}
+                >
                   ✓
                 </span>
               ) : null}

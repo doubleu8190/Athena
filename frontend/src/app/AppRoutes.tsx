@@ -1,3 +1,4 @@
+import { Loader2 } from "lucide-react";
 import { lazy, Suspense } from "react";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 
@@ -89,9 +90,16 @@ const AdminSubagentsPage = lazy(() =>
 
 function RouteLoadingFallback() {
   return (
-    <div className="page-shell">
-      <div className="page-loading" role="status">
-        正在加载页面…
+    <div className="mx-auto flex min-h-[260px] w-full max-w-4xl items-center justify-center px-6 py-12">
+      <div
+        className="inline-flex items-center gap-2.5 rounded-xl border border-border-subtle bg-canvas px-4 py-2.5 text-sm text-text-secondary shadow-xs"
+        role="status"
+      >
+        <Loader2
+          aria-hidden="true"
+          className="h-4 w-4 animate-spin text-brand motion-reduce:animate-none"
+        />
+        <span>正在加载页面…</span>
       </div>
     </div>
   );

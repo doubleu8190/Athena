@@ -539,7 +539,7 @@ function AppShellLayout() {
         ) : null}
 
         <main
-          className="min-h-0 min-w-0 flex-1 overflow-y-auto focus:outline-none"
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto focus:outline-hidden"
           id="main-content"
           ref={mainRef}
           tabIndex={-1}

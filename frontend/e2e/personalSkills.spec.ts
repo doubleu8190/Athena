@@ -2,19 +2,32 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 const NOW = "2026-11-19T08:00:00Z";
 
+// 对齐二期三层角色与企业组织身份投影契约（member）。
 const USER = {
+  auth_provider: "mock" as const,
+  avatar_url: null,
   created_at: "2026-11-01T00:00:00Z",
+  departments: [
+    {
+      id: "dept-product",
+      is_primary: true,
+      name: "产品部",
+    },
+  ],
   display_name: "个人技能验收用户",
   email: "personal-skills@example.com",
+  employee_no: "E1008",
   id: "user-personal-skills",
-  role: "user",
+  job_title: "产品经理",
+  managed_department_ids: [] as string[],
+  role: "member" as const,
 };
 
 interface SkillVersionFixture {
   created_at: string;
-  description: string;
-  dependency_check: null;
   dependencies: string[];
+  dependency_check: null;
+  description: string;
   files: Array<{
     path: string;
     sha256: string;
@@ -40,8 +53,9 @@ interface SkillFixture {
   enabled: boolean;
   id: string;
   name: string;
+  owner_department_id?: string | null;
   revision: number;
-  scope: "public" | "personal";
+  scope: "company" | "personal";
   script_requires_approval: boolean;
   slug: string;
   updated_at: string;
@@ -49,8 +63,8 @@ interface SkillFixture {
 }
 
 interface PersonalSkillFixtureState {
+  companySkill: SkillFixture;
   personal: SkillFixture | null;
-  publicSkill: SkillFixture;
 }
 
 function json(route: Route, body: unknown, status = 200) {
@@ -68,8 +82,8 @@ function makeVersion(
 ): SkillVersionFixture {
   return {
     created_at: NOW,
-    dependency_check: null,
     dependencies: [],
+    dependency_check: null,
     description: input.description,
     files: [
       {
@@ -95,21 +109,22 @@ async function installPersonalSkillsFixtures(
   page: Page,
 ): Promise<PersonalSkillFixtureState> {
   const state: PersonalSkillFixtureState = {
-    personal: null,
-    publicSkill: {
-      current_version_id: "public-version-1",
+    companySkill: {
+      current_version_id: "company-version-1",
       current_version_label: "v1",
       dependency_check: null,
-      description: "需要审批脚本的公共技能。",
+      description: "需要审批脚本的全公司技能。",
       enabled: true,
-      id: "public-skill-1",
-      name: "公共审批技能",
+      id: "company-skill-1",
+      name: "全公司审批技能",
+      owner_department_id: null,
       revision: 1,
-      scope: "public",
+      scope: "company",
       script_requires_approval: true,
-      slug: "public-approval-skill",
+      slug: "company-approval-skill",
       updated_at: NOW,
     },
+    personal: null,
   };
 
   await page.route("**/api/v1/**", async (route) => {
@@ -118,8 +133,38 @@ async function installPersonalSkillsFixtures(
     const path = url.pathname;
     const method = request.method();
 
+    if (path === "/api/v1/auth/providers" && method === "GET") {
+      return json(route, {
+        feishu_enabled: false,
+        local_login_enabled: true,
+        mock_enabled: true,
+      });
+    }
     if (path === "/api/v1/auth/me") {
       return json(route, USER);
+    }
+    if (path === "/api/v1/models" && method === "GET") {
+      return json(route, {
+        default_model_id: "model-general",
+        items: [
+          {
+            id: "model-general",
+            is_default: true,
+            name: "Athena General",
+            scenario_description: "日常办公问答与文档协作",
+            scenario_label: "通用办公",
+            supports_vision: false,
+          },
+        ],
+      });
+    }
+    if (path === "/api/v1/knowledge-bases" && method === "GET") {
+      return json(route, {
+        items: [],
+        page: 1,
+        page_size: Number(url.searchParams.get("page_size") ?? 20),
+        total: 0,
+      });
     }
     if (path === "/api/v1/me/skills" && method === "GET") {
       return json(route, {
@@ -144,6 +189,7 @@ async function installPersonalSkillsFixtures(
         enabled: true,
         id: identity.id,
         name: input.name,
+        owner_department_id: null,
         revision: 1,
         scope: "personal",
         script_requires_approval: false,
@@ -222,7 +268,7 @@ async function installPersonalSkillsFixtures(
     if (path === "/api/v1/skills" && method === "GET") {
       return json(route, {
         items: [
-          state.publicSkill,
+          state.companySkill,
           ...(state.personal?.enabled ? [state.personal] : []),
         ],
       });
@@ -262,27 +308,29 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 test.describe("个人技能前端 mock 浏览器验收", () => {
-  test("技能库视图的键盘切换与浏览器后退保持有效焦点", async ({
+  test("技能库顶部 Tabs 键盘切换与浏览器后退保持有效焦点", async ({
     page,
   }) => {
     await installPersonalSkillsFixtures(page);
     await page.setViewportSize({ height: 900, width: 1280 });
     await page.goto("/skills");
 
-    const viewNav = page.getByRole("navigation", {
+    const viewTabs = page.getByRole("tablist", {
       name: "技能库视图",
     });
-    const mineLink = viewNav.getByRole("link", { name: "我的技能" });
-    await mineLink.focus();
-    await page.keyboard.press("Enter");
+    const availableTab = viewTabs.getByRole("tab", { name: "可用技能" });
+    const mineTab = viewTabs.getByRole("tab", { name: "我的技能" });
+
+    await availableTab.focus();
+    await page.keyboard.press("ArrowRight");
     await expect(page).toHaveURL(/\/skills\?view=mine$/);
-    await expect(mineLink).toBeFocused();
+    await expect(mineTab).toHaveAttribute("aria-selected", "true");
+    await expect(mineTab).toBeFocused();
 
     await page.goBack();
     await expect(page).toHaveURL(/\/skills$/);
-    await expect(
-      viewNav.getByRole("link", { name: "可用技能" }),
-    ).toBeFocused();
+    await expect(availableTab).toHaveAttribute("aria-selected", "true");
+    await expect(availableTab).toBeFocused();
   });
 
   test("桌面主流程：导航、创建、编辑、启停与删除", async ({ page }) => {
@@ -291,7 +339,7 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
 
     await page.goto("/chat");
     await expect(
-      page.getByRole("heading", { level: 1, name: "对话工作台" }),
+      page.getByRole("heading", { level: 1, name: "你好，个人技能验收用户" }),
     ).toBeVisible();
     await page.getByRole("link", { name: "技能库" }).click();
     await expect(page).toHaveURL(/\/skills$/);
@@ -302,11 +350,12 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
       page.getByRole("link", { name: "技能库" }),
     ).toHaveAttribute("aria-current", "page");
     await expect(
-      page.getByRole("heading", { name: "公共审批技能" }),
+      page.getByRole("heading", { name: "全公司审批技能" }),
     ).toBeVisible();
+
     await page
-      .getByRole("navigation", { name: "技能库视图" })
-      .getByRole("link", { name: "我的技能" })
+      .getByRole("tablist", { name: "技能库视图" })
+      .getByRole("tab", { name: "我的技能" })
       .click();
     await expect(page).toHaveURL(/\/skills\?view=mine$/);
 
@@ -393,7 +442,7 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
     await expectNoHorizontalOverflow(page);
   });
 
-  test("窄屏导入、保存与聊天来源标签，并检查 390px 无水平溢出", async ({
+  test("窄屏导入、保存与对话挂载技能 Popover，并检查 390px 无水平溢出", async ({
     page,
   }) => {
     await installPersonalSkillsFixtures(page);
@@ -444,74 +493,47 @@ test.describe("个人技能前端 mock 浏览器验收", () => {
 
     await page.goto("/chat");
     await expect(
-      page.getByRole("heading", { level: 1, name: "对话工作台" }),
+      page.getByRole("heading", { level: 1, name: "你好，个人技能验收用户" }),
     ).toBeVisible();
-    await page
-      .getByRole("button", { name: /本次技能/ })
-      .click();
-    const skillDialog = page.getByRole("dialog", {
-      name: "选择本次技能",
-    });
-    await expect(skillDialog).toHaveAttribute("aria-modal", "true");
-    await expect(skillDialog).toBeFocused();
-    await expect
-      .poll(() => page.evaluate(() => document.body.style.overflow))
-      .toBe("hidden");
-    const skillDialogBox = await skillDialog.boundingBox();
-    expect(skillDialogBox).not.toBeNull();
-    expect(skillDialogBox!.x).toBeGreaterThanOrEqual(0);
-    expect(
-      skillDialogBox!.x + skillDialogBox!.width,
-    ).toBeLessThanOrEqual(390);
-    expect(
-      Math.abs(skillDialogBox!.y + skillDialogBox!.height - 844),
-    ).toBeLessThanOrEqual(1);
-    const publicOption = page
-      .locator(".composer-skill-option.is-public")
-      .filter({ hasText: "公共审批技能" });
-    const personalOption = page
-      .locator(".composer-skill-option.is-personal")
-      .filter({ hasText: "访谈整理" });
-    await expect(publicOption.getByText("公共", { exact: true })).toBeVisible();
-    await expect(
-      publicOption.getByText("脚本执行需审批"),
-    ).toBeVisible();
-    await expect(
-      personalOption.getByText("个人", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      personalOption.getByText("纯文档", { exact: true }),
-    ).toBeVisible();
-    await expect(personalOption).not.toContainText("脚本执行");
-    await expectNoHorizontalOverflow(page);
-
-    await page.keyboard.press("Tab");
-    await expect(
-      skillDialog.getByRole("button", { name: "关闭技能选择面板" }),
-    ).toBeFocused();
-    await page.keyboard.press("Shift+Tab");
-    await expect(
-      skillDialog.getByRole("button", { name: "完成" }),
-    ).toBeFocused();
-    await page.keyboard.press("Escape");
-    await expect(skillDialog).toBeHidden();
-    await expect(
-      page.getByRole("button", { name: /本次技能/ }),
-    ).toBeFocused();
-    await expect
-      .poll(() => page.evaluate(() => document.body.style.overflow))
-      .toBe("");
 
     const trigger = page.getByRole("button", { name: /本次技能/ });
     await trigger.click();
-    await expect(skillDialog).toBeVisible();
-    await page.locator(".composer-skill-scrim").click({
-      position: { x: 12, y: 12 },
+
+    const skillPopover = page.getByRole("dialog", {
+      name: "选择本次技能",
     });
-    await expect(skillDialog).toBeHidden();
+    await expect(skillPopover).toBeVisible();
+    const popoverBox = await skillPopover.boundingBox();
+    expect(popoverBox).not.toBeNull();
+    expect(popoverBox!.x).toBeGreaterThanOrEqual(0);
+    expect(popoverBox!.x + popoverBox!.width).toBeLessThanOrEqual(390);
+
+    // 验证按三层可见性分组并正确展示全公司 / 个人范围标签与执行模式。
+    const companySection = skillPopover.getByRole("region", {
+      name: "全公司技能",
+    });
+    const personalSection = skillPopover.getByRole("region", {
+      name: "我的技能",
+    });
+    await expect(companySection.getByText("全公司审批技能")).toBeVisible();
+    await expect(companySection.getByText("全公司", { exact: true })).toBeVisible();
+    await expect(companySection.getByText("脚本执行需审批")).toBeVisible();
+    await expect(personalSection.getByText("访谈整理")).toBeVisible();
+    await expect(personalSection.getByText("个人", { exact: true })).toBeVisible();
+    await expect(personalSection.getByText("纯文档", { exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+
+    // 勾选个人技能后关闭浮层，验证输入区已回显已挂载技能。
+    await skillPopover.getByRole("checkbox", { name: "访谈整理" }).click();
+    await skillPopover.getByRole("button", { name: "完成" }).click();
+    await expect(skillPopover).toBeHidden();
+    await expect(trigger).toContainText("访谈整理");
+
+    // 再次打开后使用 Escape 关闭，验证焦点稳定归还触发按钮。
+    await trigger.click();
+    await expect(skillPopover).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(skillPopover).toBeHidden();
     await expect(trigger).toBeFocused();
-    await expect
-      .poll(() => page.evaluate(() => document.body.style.overflow))
-      .toBe("");
   });
 });

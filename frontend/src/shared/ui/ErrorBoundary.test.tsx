@@ -24,6 +24,9 @@ describe("全局错误边界", () => {
     );
     expect(screen.getByRole("button", { name: "重新加载页面" })).toBeVisible();
     expect(
+      screen.queryByText(/Unexpected UI error/i),
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByText(/render failed with private data/),
     ).not.toBeInTheDocument();
     consoleError.mockRestore();

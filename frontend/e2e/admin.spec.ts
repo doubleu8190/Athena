@@ -6,7 +6,8 @@ test.beforeEach(async ({ page }) => {
   await installAdminFixtures(page);
 });
 
-test("管理导航在真实页面间切换", async ({ page }) => {
+test("管理导航在单层侧栏的真实页面间切换", async ({ page }) => {
+  await page.setViewportSize({ height: 900, width: 1280 });
   await page.goto("/admin/models");
   await expect(
     page.getByRole("heading", {
@@ -15,13 +16,16 @@ test("管理导航在真实页面间切换", async ({ page }) => {
     }),
   ).toBeVisible();
 
-  const nav = page.getByRole("navigation", { name: "管理子导航" });
-  await nav.getByRole("link", { name: "MCP Server" }).click();
+  // 二期单层侧栏进入 /admin/* 时自动展开「管理后台」折叠分组。
+  const adminGroup = page.getByRole("group", { name: "管理后台" });
+  await expect(adminGroup).toBeVisible();
+
+  await adminGroup.getByRole("link", { name: "MCP 服务" }).click();
   await expect(
     page.getByRole("heading", { level: 1, name: "MCP Server" }),
   ).toBeVisible();
 
-  await nav.getByRole("link", { name: "工具审批策略" }).click();
+  await adminGroup.getByRole("link", { name: "工具审批策略" }).click();
   await expect(
     page.getByRole("heading", {
       level: 1,
@@ -30,13 +34,13 @@ test("管理导航在真实页面间切换", async ({ page }) => {
   ).toBeVisible();
   await expect(page.getByText("后端返回 1 个工具")).toBeVisible();
 
-  await nav.getByRole("link", { name: "公共技能" }).click();
+  await adminGroup.getByRole("link", { name: "企业与部门技能" }).click();
   await expect(
     page.getByRole("heading", { level: 1, name: "公共技能" }),
   ).toBeVisible();
   await expect(page.getByText("还没有技能包")).toBeVisible();
 
-  await nav.getByRole("link", { name: "子智能体" }).click();
+  await adminGroup.getByRole("link", { name: "子智能体" }).click();
   await expect(
     page.getByRole("heading", { level: 1, name: "子智能体管理" }),
   ).toBeVisible();
@@ -65,8 +69,8 @@ test("模型创建表单提交真实字段并更新列表", async ({ page }) => 
     .click();
   const request = await requestPromise;
   expect(request.postDataJSON()).toMatchObject({
-    base_url: "https://llm.example/v1",
     api_key: "test-secret-key",
+    base_url: "https://llm.example/v1",
     model: "atlas-e2e",
     name: "端到端模型",
   });
@@ -161,35 +165,34 @@ test("920px 与 390px 管理页无水平溢出", async ({ page }) => {
   }
 });
 
-test("短视口保留主导航与账户入口", async ({ page }) => {
-  await page.setViewportSize({ height: 360, width: 900 });
+test("短视口保留单层侧栏主导航与底部账户入口", async ({ page }) => {
+  // 桌面断点为 >=1024px，在 1280×420 短视口下核验侧栏内部独立滚动且底部账户区始终可见。
+  await page.setViewportSize({ height: 420, width: 1280 });
   await page.goto("/admin/subagents");
 
-  const rail = page.getByRole("complementary", {
-    name: "应用侧栏",
+  const sidebar = page.getByRole("complementary", {
+    name: "工作区侧栏",
   });
-  await expect(rail).toBeVisible();
-  const account = page.getByRole("button", { name: "账户菜单" });
+  await expect(sidebar).toBeVisible();
+  const navigation = sidebar.getByRole("navigation", { name: "主导航" });
+  const account = sidebar.getByRole("button", { name: "账户菜单" });
+  await expect(navigation).toBeVisible();
   await expect(account).toBeVisible();
-  await expect(
-    page.getByRole("navigation", { name: "主导航" }).getByRole("link"),
-  ).toHaveCount(5);
 
-  const layout = await rail.evaluate((element) => {
-    const navigation = element.querySelector<HTMLElement>(".rail-nav");
-    const account = element.querySelector<HTMLElement>(
-      ".account-menu-anchor",
+  const layout = await sidebar.evaluate((element) => {
+    const nav = element.querySelector<HTMLElement>('nav[aria-label="主导航"]');
+    const accountBtn = element.querySelector<HTMLElement>(
+      'button[aria-label="账户菜单"]',
     );
-    if (!navigation || !account) {
+    if (!nav || !accountBtn) {
       return null;
     }
-    const railRect = element.getBoundingClientRect();
-    const navigationRect = navigation.getBoundingClientRect();
-    const accountRect = account.getBoundingClientRect();
+    const sidebarRect = element.getBoundingClientRect();
+    const navRect = nav.getBoundingClientRect();
+    const accountRect = accountBtn.getBoundingClientRect();
     return {
-      accountVisible: accountRect.bottom <= railRect.bottom + 1,
-      navigationBeforeAccount:
-        navigationRect.bottom <= accountRect.top + 1,
+      accountVisible: accountRect.bottom <= sidebarRect.bottom + 1,
+      navigationBeforeAccount: navRect.bottom <= accountRect.top + 1,
     };
   });
   expect(layout).toEqual({

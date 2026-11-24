@@ -15,6 +15,7 @@ import {
   getFocusableElements,
 } from "./focus";
 import { Icon } from "./Icons";
+import { cn } from "./utils";
 
 interface ModalProps extends PropsWithChildren {
   closeDisabled?: boolean;
@@ -216,7 +217,7 @@ export function Modal({
   return createPortal(
     <ModalDepthContext.Provider value={modalDepth}>
       <div
-        className="modal-backdrop"
+        className="modal-backdrop fixed inset-0 z-[var(--z-dialog)] grid place-items-center overflow-y-auto bg-black/40 p-3 backdrop-blur-[2px] max-sm:items-end sm:px-[18px] sm:py-7"
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) {
             requestClose();
@@ -228,19 +229,34 @@ export function Modal({
           aria-describedby={description ? descriptionId : undefined}
           aria-labelledby={titleId}
           aria-modal={isTopmost ? "true" : undefined}
-          className={`modal-card${panelClassName ? ` ${panelClassName}` : ""}`}
+          className={cn(
+            "modal-card flex flex-col overflow-hidden rounded-[14px] border border-border-default bg-canvas shadow-md",
+            panelClassName,
+          )}
           ref={panelRef}
           role="dialog"
           tabIndex={-1}
         >
-          <header className="modal-header">
+          <header className="modal-header flex shrink-0 items-start justify-between gap-5 border-b border-border-subtle px-4 pt-5 pb-4 sm:px-[22px]">
             <div>
-              <h2 id={titleId}>{title}</h2>
-              {description ? <p id={descriptionId}>{description}</p> : null}
+              <h2
+                className="text-lg font-semibold tracking-tight text-text-primary"
+                id={titleId}
+              >
+                {title}
+              </h2>
+              {description ? (
+                <p
+                  className="mt-1 text-xs leading-relaxed text-text-secondary"
+                  id={descriptionId}
+                >
+                  {description}
+                </p>
+              ) : null}
             </div>
             <button
               aria-label="关闭弹窗"
-              className="modal-close"
+              className="modal-close grid h-[31px] w-[31px] shrink-0 place-items-center rounded-[7px] bg-transparent text-text-tertiary transition-colors hover:enabled:bg-subtle hover:enabled:text-text-primary"
               disabled={closeDisabled}
               onClick={requestClose}
               type="button"
@@ -248,8 +264,14 @@ export function Modal({
               <Icon name="close" size={17} />
             </button>
           </header>
-          <div className="modal-body">{children}</div>
-          {footer ? <footer className="modal-footer">{footer}</footer> : null}
+          <div className="modal-body flex min-h-0 min-w-0 flex-1 flex-col gap-[13px] overflow-y-auto px-4 py-[18px] sm:px-[22px]">
+            {children}
+          </div>
+          {footer ? (
+            <footer className="modal-footer flex min-w-0 shrink-0 flex-wrap justify-end gap-[9px] border-t border-border-subtle px-4 pt-3.5 pb-[18px] sm:px-[22px]">
+              {footer}
+            </footer>
+          ) : null}
         </div>
       </div>
     </ModalDepthContext.Provider>,

@@ -1,59 +1,19 @@
 /*
- * Legacy CSS Variable Bridge：
- * 将一期旧页面与样式表引用的 CSS 变量桥接至 tokens.css 的现代企业语义变量，
- * 确保 M2.2–M2.6 渐进替换期间，尚未重构的页面也同步移除暖黄纸面与衬线字体。
- */
-:root {
-  --bg: var(--bg-subtle);
-  --paper: var(--bg-canvas);
-  --paper-2: var(--bg-subtle);
-  --paper-3: var(--bg-muted);
-  --paper-elevated: rgba(255, 255, 255, 0.94);
-  --ink: var(--text-primary);
-  --ink-2: var(--text-secondary);
-  --muted: var(--text-secondary);
-  --muted-2: var(--text-tertiary);
-  --placeholder: var(--text-placeholder);
-  --line: var(--border-default);
-  --line-soft: var(--border-subtle);
-  --line-strong: var(--border-strong);
-  --forest: var(--brand);
-  --forest-2: var(--brand-hover);
-  --green: var(--brand-hover);
-  --green-soft: var(--brand-subtle);
-  --accent: var(--brand-hover);
-  --accent-soft: rgba(31, 106, 82, 0.1);
-  --gold: var(--warning-fg);
-  --gold-soft: var(--warning-bg);
-  --danger: var(--danger-fg);
-  --danger-soft: var(--danger-bg);
-  --focus: var(--ring-focus);
-  --focus-ring: 0 0 0 3px rgba(31, 106, 82, 0.16);
-  --surface-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.85);
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  /* 统一全站为无衬线现代企业字体，消除旧版衬线体残留。 */
-  --serif: var(--font-sans);
-  --sans: var(--font-sans);
-  --mono: var(--font-mono);
-}
-
-/*
  * Tailwind CSS v4 Cascade Layers 保护：
- * 所有裸元素重置必须放入 @layer base，避免未分层元素选择器覆盖 @layer utilities（p-* / m-* / border-* 等）。
+ * 所有裸元素重置必须放入 @layer base，避免未分层元素选择器覆盖 @layer utilities。
  */
 @layer base {
   * {
     box-sizing: border-box;
   }
 
-  html {
+  html,
+  body {
     min-width: 320px;
     min-height: 100%;
   }
 
   body {
-    min-width: 320px;
-    min-height: 100%;
     margin: 0;
     background: var(--bg-subtle);
     color: var(--text-primary);
@@ -124,7 +84,7 @@
   }
 }
 
-/* 保留过渡期全局无障碍辅助与旧页次级按钮样式，置于 components 层以免阻断原子工具类覆写。 */
+/* 全局无障碍跳链、表单校验与 Markdown 富文本排版样式，置于 components 层以免阻断原子类覆写。 */
 @layer components {
   .skip-link {
     position: fixed;
@@ -140,59 +100,174 @@
     opacity: 0;
     pointer-events: none;
     transform: translateY(-24px);
+
+    &:focus {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0);
+    }
   }
 
-  .skip-link:focus {
-    opacity: 1;
-    pointer-events: auto;
-    transform: translateY(0);
-  }
-
-  .button-secondary {
-    min-height: 38px;
-    padding: 0 16px;
-    border: 1px solid var(--border-default);
-    border-radius: 8px;
-    background: var(--bg-canvas);
-    color: var(--brand);
-    font-size: 14px;
-    font-weight: 600;
-    transition:
-      background 0.16s var(--ease-out),
-      border-color 0.16s var(--ease-out),
-      color 0.16s var(--ease-out);
-  }
-
-  .button-secondary:hover {
-    border-color: var(--border-strong);
-    background: var(--bg-subtle);
-  }
-
-  /* 过渡期表单字段校验提示样式：供 M2.3–M2.6 尚未迁完的 9 个既有业务弹窗与 FieldError 共用。 */
   .field-error {
     margin-top: 4px;
-    color: var(--danger);
+    color: var(--danger-fg);
     font-size: 12px;
     line-height: 1.5;
   }
 
-  /* 恢复既有 Markdown 富文本列表标记，避免 Tailwind Preflight 重置 ul/ol 的 list-style 导致圆点与序号消失。 */
-  .markdown-content ul {
-    list-style: disc;
+  /* 全站 Markdown 富文本排版（MarkdownContent.tsx 专用） */
+  .markdown-content {
+    overflow-wrap: anywhere;
+    color: var(--text-primary);
+    font-size: 14.5px;
+    line-height: 1.75;
+
+    & > :first-child {
+      margin-top: 0;
+    }
+
+    & > :last-child {
+      margin-bottom: 0;
+    }
+
+    & p,
+    & ul,
+    & ol,
+    & blockquote,
+    & pre,
+    & table {
+      margin: 0.65em 0;
+    }
+
+    & ul {
+      list-style: disc;
+      padding-left: 1.55em;
+    }
+
+    & ol {
+      list-style: decimal;
+      padding-left: 1.55em;
+    }
+
+    & li + li {
+      margin-top: 0.25em;
+    }
+
+    & h1,
+    & h2,
+    & h3,
+    & h4 {
+      margin: 0.85em 0 0.4em;
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-weight: 600;
+      line-height: 1.35;
+    }
+
+    & h1 {
+      font-size: 1.38em;
+    }
+
+    & h2 {
+      font-size: 1.24em;
+    }
+
+    & h3 {
+      font-size: 1.12em;
+    }
+
+    & a {
+      color: var(--brand-hover);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    & blockquote {
+      padding: 8px 12px;
+      border-left: 3px solid var(--brand-border);
+      border-radius: 0 6px 6px 0;
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+    }
+
+    & code {
+      padding: 0.14em 0.36em;
+      border-radius: 4px;
+      background: var(--bg-muted);
+      font-family: var(--font-mono);
+      font-size: 0.87em;
+    }
+
+    & pre {
+      overflow-x: auto;
+      padding: 12px 14px;
+      border: 1px solid var(--border-default);
+      border-radius: 10px;
+      background: var(--bg-subtle);
+    }
+
+    & .markdown-code-block pre {
+      margin: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+    }
+
+    & pre code {
+      padding: 0;
+      border-radius: 0;
+      background: transparent;
+    }
+
+    & .markdown-table-wrap table {
+      margin: 0;
+    }
+
+    & table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9em;
+    }
+
+    & th,
+    & td {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border-subtle);
+      border-right: 1px solid var(--border-subtle);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    & th:last-child,
+    & td:last-child {
+      border-right: 0;
+    }
+
+    & tr:last-child td {
+      border-bottom: 0;
+    }
+
+    & th {
+      background: var(--bg-subtle);
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
   }
 
-  .markdown-content ol {
-    list-style: decimal;
+  .markdown-image-link,
+  .markdown-image-fallback {
+    display: inline-flex;
+    padding: 2px 7px;
+    border: 1px solid var(--brand-border);
+    border-radius: 6px;
+    background: var(--brand-subtle);
+    color: var(--brand);
+    font-size: 0.9em;
   }
-}
 
-/*
- * 立即隐藏一期旧版全大写英文眉标（覆盖后续导入的 app.css / workspace.css / knowledge.css）。
- * 待 M2.2–M2.6 逐页重构移除对应 DOM 后清理此桥接规则。
- */
-.page-eyebrow,
-.empty-panel-kicker,
-.profile-kicker,
-.knowledge-card-kicker {
-  display: none !important;
+  .markdown-image-fallback {
+    border-color: var(--border-default);
+    background: var(--bg-subtle);
+    color: var(--text-secondary);
+  }
 }

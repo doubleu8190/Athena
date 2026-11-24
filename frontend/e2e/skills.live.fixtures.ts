@@ -110,11 +110,34 @@ export async function loginThroughUi(
   account: LiveAccount,
 ): Promise<void> {
   await page.goto("/login");
-  await page.getByLabel("工作邮箱").fill(account.email);
+  await expect(
+    page.getByRole("heading", { level: 1, name: "登录工作台" }),
+  ).toBeVisible();
+
+  // 等待登录配置加载完成（出现折叠触发按钮或直接展开的邮箱输入框），避免骨架屏阶段误判。
+  const localToggle = page.getByRole("button", {
+    name: "管理员 / 应急邮箱密码登录",
+  });
+  const emailInput = page.getByLabel("工作邮箱");
+  await expect(localToggle.or(emailInput)).toBeVisible();
+
+  // 当飞书 SSO 或 Mock 模式启用时，本地应急邮箱密码表单默认折叠，需先展开后再填表登录。
+  if (await localToggle.isVisible()) {
+    const expanded = await localToggle.getAttribute("aria-expanded");
+    if (expanded !== "true") {
+      await localToggle.click();
+    }
+  }
+
+  await emailInput.fill(account.email);
   await page.getByLabel("密码", { exact: true }).fill(account.password);
-  await page.getByRole("button", { name: "进入 Athena" }).click();
+  await page.getByRole("button", { name: "使用邮箱登录" }).click();
   await expect(page).not.toHaveURL(/\/login(?:[/?#]|$)/);
-  await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+  await expect(
+    page.getByRole("complementary", { name: "工作区侧栏" }).or(
+      page.getByRole("button", { name: "打开导航菜单" }),
+    ),
+  ).toBeVisible();
 }
 
 export async function apiJSON<T>(

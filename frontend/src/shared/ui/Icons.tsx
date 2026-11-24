@@ -12,10 +12,6 @@ export type IconName =
   | "eye-off"
   | "folder"
   | "history"
-  | "inbox"
-  | "lock"
-  | "logout"
-  | "mail"
   | "plus"
   | "refresh"
   | "search"
@@ -174,80 +170,6 @@ const ICON_CONTENT: Record<IconName, ReactNode> = {
       />
       <path
         d="M12 7.5V12l3 1.8"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.5"
-      />
-    </>
-  ),
-  inbox: (
-    <>
-      <path
-        d="M4.5 5.5h15l1.2 9.2a2.5 2.5 0 0 1-2.5 2.8H5.8a2.5 2.5 0 0 1-2.5-2.8l1.2-9.2Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.45"
-      />
-      <path
-        d="M4.2 13h4l1.2 2h5.2l1.2-2h4.2"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.45"
-      />
-    </>
-  ),
-  lock: (
-    <>
-      <rect
-        x="5"
-        y="10"
-        width="14"
-        height="10"
-        rx="2"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-      <path
-        d="M8 10V7.8a4 4 0 0 1 8 0V10M12 14v2"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.5"
-      />
-    </>
-  ),
-  logout: (
-    <>
-      <path
-        d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10M14.5 8l4 4-4 4M9 12h9"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.55"
-      />
-    </>
-  ),
-  mail: (
-    <>
-      <rect
-        x="3.5"
-        y="5.5"
-        width="17"
-        height="13"
-        rx="2"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-      <path
-        d="m5 7 7 5.3L19 7"
         fill="none"
         stroke="currentColor"
         strokeLinecap="round"

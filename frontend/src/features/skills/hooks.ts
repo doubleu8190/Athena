@@ -6,6 +6,7 @@ import {
 
 import { adminKeys } from "../admin/queryKeys";
 import {
+  createAdminMarkdownSkill,
   createPersonalSkill,
   deleteAdminSkill,
   deletePersonalSkill,
@@ -17,13 +18,17 @@ import {
   listAdminSkillVersions,
   listPersonalSkills,
   listPublicSkills,
+  parseAdminSkillMarkdown,
   parsePersonalSkillFile,
+  publishAdminMarkdownVersion,
   savePersonalSkillVersion,
   setPersonalSkillEnabled,
   updateSkillConfiguration,
   uploadSkillVersion,
 } from "./api";
 import type {
+  AdminSkillMarkdownCreateInput,
+  AdminSkillMarkdownVersionInput,
   ImportSkillPackageOptions,
   PersonalSkillInput,
   SkillConfigurationInput,
@@ -39,16 +44,19 @@ async function refreshSkillCatalogs(
       queryKey: adminKeys.skillsAll(),
     }),
     queryClient.invalidateQueries({
-      queryKey: skillKeys.catalog(),
+      queryKey: skillKeys.adminList(),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: skillKeys.publicList(),
     }),
     skillId
       ? queryClient.invalidateQueries({
-          queryKey: adminKeys.skill(skillId),
+          queryKey: skillKeys.adminDetail(skillId),
         })
       : Promise.resolve(),
     skillId
       ? queryClient.invalidateQueries({
-          queryKey: adminKeys.skillVersionsAll(skillId),
+          queryKey: skillKeys.adminVersions(skillId),
         })
       : Promise.resolve(),
   ]);
@@ -168,6 +176,46 @@ export function useUpdateSkillConfigurationMutation(skillId: string) {
       // PATCH 返回同一修订下的完整详情，先写入缓存可避免保存成功到后台刷新间短暂显示旧草稿。
       queryClient.setQueryData(adminKeys.skill(skillId), details);
       await refreshSkillCatalogs(queryClient, skillId);
+    },
+  });
+}
+
+export function useParseAdminSkillMarkdownMutation() {
+  return useMutation({
+    mutationFn: parseAdminSkillMarkdown,
+  });
+}
+
+export function useCreateAdminMarkdownSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      input,
+      requestId,
+    }: {
+      input: AdminSkillMarkdownCreateInput;
+      requestId: string;
+    }) => createAdminMarkdownSkill(input, requestId),
+    onSuccess: async (details) => {
+      queryClient.setQueryData(skillKeys.adminDetail(details.id), details);
+      await refreshSkillCatalogs(queryClient, details.id);
+    },
+  });
+}
+
+export function usePublishAdminMarkdownVersionMutation(skillId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      input,
+      requestId,
+    }: {
+      input: AdminSkillMarkdownVersionInput;
+      requestId: string;
+    }) => publishAdminMarkdownVersion(skillId, input, requestId),
+    onSuccess: async (details) => {
+      queryClient.setQueryData(skillKeys.adminDetail(details.id), details);
+      await refreshSkillCatalogs(queryClient, details.id);
     },
   });
 }

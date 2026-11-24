@@ -35,12 +35,14 @@ function assertAuthIdentityCurrent(identityEpoch: number): void {
 }
 
 export interface ApiErrorOptions extends ErrorOptions {
+  field?: string;
   memberPath?: string;
 }
 
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: string;
+  readonly field?: string;
   readonly memberPath?: string;
 
   constructor(
@@ -52,6 +54,7 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.field = options.field;
     this.memberPath = options.memberPath;
   }
 }
@@ -87,6 +90,7 @@ function publishAdminForbidden(path: string): void {
 
 interface ParsedErrorDetail {
   code: string;
+  field?: string;
   memberPath?: string;
 }
 
@@ -105,8 +109,8 @@ async function readErrorDetail(
         if (typeof payload.detail === "string") {
           return { code: payload.detail };
         }
-        // 仅管理员技能包 ZIP 422 使用结构化 detail；业务错误码仍是稳定主体，
-        // 成员路径独立保留，不能污染 401/403 等权限判断。
+        // 技能包路径错误与 Markdown 表单字段错误均采用结构化 detail；
+        // 稳定错误码保留在 code，可选 field / member_path 独立透传，不污染权限判断。
         if (
           typeof payload.detail === "object" &&
           payload.detail !== null &&
@@ -115,6 +119,11 @@ async function readErrorDetail(
         ) {
           return {
             code: payload.detail.code,
+            field:
+              "field" in payload.detail &&
+              typeof payload.detail.field === "string"
+                ? payload.detail.field
+                : undefined,
             memberPath:
               "member_path" in payload.detail &&
               typeof payload.detail.member_path === "string"
@@ -171,13 +180,18 @@ async function performRequest(
     ) {
       publishAdminForbidden(path);
     }
-    throw new ApiError(
-      response.status,
-      parsedDetail.code,
-      parsedDetail.memberPath === undefined
-        ? undefined
-        : { memberPath: parsedDetail.memberPath },
-    );
+    const apiErrorOptions: ApiErrorOptions | undefined =
+      parsedDetail.field !== undefined || parsedDetail.memberPath !== undefined
+        ? {
+            ...(parsedDetail.field !== undefined
+              ? { field: parsedDetail.field }
+              : {}),
+            ...(parsedDetail.memberPath !== undefined
+              ? { memberPath: parsedDetail.memberPath }
+              : {}),
+          }
+        : undefined;
+    throw new ApiError(response.status, parsedDetail.code, apiErrorOptions);
   }
   return { identityEpoch: requestIdentityEpoch, response };
 }

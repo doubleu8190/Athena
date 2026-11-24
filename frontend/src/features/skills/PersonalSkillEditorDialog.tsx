@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 
 import { newRequestId } from "../../shared/lib/requestId";
+import { MarkdownSplitEditor } from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
@@ -61,7 +62,6 @@ export function PersonalSkillEditorDialog({
   const guideId = useId();
   const nameErrorId = useId();
   const descriptionErrorId = useId();
-  const guideErrorId = useId();
   const fileInputId = useId();
   const requestIdRef = useRef<string | null>(null);
   const initializedRef = useRef(false);
@@ -351,7 +351,7 @@ export function PersonalSkillEditorDialog({
                   `${fileInputId}-help`,
                   fileError ? `${fileInputId}-error` : undefined,
                 )}
-                aria-invalid={Boolean(fileError)}
+                aria-invalid={fileError ? true : undefined}
                 disabled={savePending || parseMutation.isPending}
                 id={fileInputId}
                 onChange={(event) => {
@@ -369,27 +369,29 @@ export function PersonalSkillEditorDialog({
                   {selectedFile.name}
                 </span>
               ) : null}
-              {fileError ? (
-                <p
-                  className="field-error"
-                  id={`${fileInputId}-error`}
-                  role="alert"
-                >
-                  {fileError}
-                </p>
-              ) : null}
-              {parseMutation.isPending ? (
-                <p className="personal-skill-inline-status" role="status">
-                  正在解析 Markdown…
-                </p>
-              ) : null}
-              {importedMessage ? (
-                <p className="personal-skill-inline-status" role="status">
-                  <Icon name="spark" size={14} />
-                  {importedMessage}
-                </p>
-              ) : null}
             </div>
+          ) : null}
+
+          {/* 将文件校验错误、解析进度与导入提示置于模式分支之外，确保「在线编写」下使用编辑器工具栏「导入 .md」也能完整反馈。 */}
+          {fileError ? (
+            <p
+              className="field-error"
+              id={`${fileInputId}-error`}
+              role="alert"
+            >
+              {fileError}
+            </p>
+          ) : null}
+          {parseMutation.isPending ? (
+            <p className="personal-skill-inline-status" role="status">
+              正在解析 Markdown…
+            </p>
+          ) : null}
+          {importedMessage ? (
+            <p className="personal-skill-inline-status" role="status">
+              <Icon name="spark" size={14} />
+              {importedMessage}
+            </p>
           ) : null}
 
           <div className="personal-skill-fields">
@@ -400,7 +402,7 @@ export function PersonalSkillEditorDialog({
                   `${nameId}-help`,
                   fieldErrors.name ? nameErrorId : undefined,
                 )}
-                aria-invalid={Boolean(fieldErrors.name)}
+                aria-invalid={fieldErrors.name ? true : undefined}
                 autoComplete="off"
                 data-autofocus={mode === "create" ? true : undefined}
                 disabled={fieldsDisabled}
@@ -428,7 +430,7 @@ export function PersonalSkillEditorDialog({
                   `${descriptionId}-help`,
                   fieldErrors.description ? descriptionErrorId : undefined,
                 )}
-                aria-invalid={Boolean(fieldErrors.description)}
+                aria-invalid={fieldErrors.description ? true : undefined}
                 disabled={fieldsDisabled}
                 id={descriptionId}
                 maxLength={PERSONAL_SKILL_DESCRIPTION_MAX_LENGTH}
@@ -456,31 +458,21 @@ export function PersonalSkillEditorDialog({
 
             <div className="workspace-field">
               <label htmlFor={guideId}>Markdown 正文</label>
-              <textarea
-                aria-describedby={errorDescription(
-                  `${guideId}-help`,
-                  fieldErrors.guide ? guideErrorId : undefined,
-                )}
-                aria-invalid={Boolean(fieldErrors.guide)}
-                className="personal-skill-guide"
+              <MarkdownSplitEditor
                 disabled={fieldsDisabled}
+                error={fieldErrors.guide}
                 id={guideId}
+                importTriggerLabel="导入 .md"
+                importingMarkdown={parseMutation.isPending}
+                label="Markdown 正文"
                 maxLength={PERSONAL_SKILL_GUIDE_MAX_LENGTH}
-                onChange={(event) => updateField("guide", event.target.value)}
+                minHeightClassName="min-h-[240px]"
+                onChange={(nextGuide) => updateField("guide", nextGuide)}
+                onImportMarkdownFile={(file) => void handleFileSelection(file)}
                 placeholder={"# 工作方法\n\n1. 核对输入。\n2. 按步骤输出。"}
                 rows={12}
-                spellCheck={false}
                 value={values.guide}
               />
-              <small id={`${guideId}-help`}>
-                {Array.from(values.guide).length} /{" "}
-                {PERSONAL_SKILL_GUIDE_MAX_LENGTH}
-              </small>
-              {fieldErrors.guide ? (
-                <p className="field-error" id={guideErrorId} role="alert">
-                  {fieldErrors.guide}
-                </p>
-              ) : null}
             </div>
           </div>
 

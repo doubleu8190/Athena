@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { FilePenLine, Sparkles } from "lucide-react";
+import { useRef, useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
+import { Badge } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
@@ -10,9 +12,15 @@ import {
   resolveUserDepartmentName,
 } from "../auth/model";
 import { AdminSkillDetailDialog } from "./AdminSkillDetailDialog";
+import { AdminSkillMarkdownDialog } from "./AdminSkillMarkdownDialog";
 import { skillErrorMessage } from "./errorMessages";
 import { useAdminSkills } from "./hooks";
-import { dependencySatisfied, skillScope } from "./model";
+import {
+  dependencySatisfied,
+  skillFormat,
+  skillScope,
+  type SkillAdminDetails,
+} from "./model";
 import { SkillPackageDialog } from "./SkillPackageDialog";
 import { SkillScopeBadge } from "./SkillScopeBadge";
 
@@ -20,9 +28,13 @@ export function AdminSkillsPage() {
   const { user } = useAuth();
   const skills = useAdminSkills();
   const [importOpen, setImportOpen] = useState(false);
-  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(
-    null,
-  );
+  const [createMarkdownOpen, setCreateMarkdownOpen] = useState(false);
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  // 与 selectedSkillId 互斥切换，严禁在旧 <Modal> 详情窗上方叠开 Radix Dialog。
+  const [editingVersionSkill, setEditingVersionSkill] =
+    useState<SkillAdminDetails | null>(null);
+  // 记录进入详情窗的列表按钮，便于从旧 <Modal> 切入在线发版 Dialog 后取消/Escape 时精准归还焦点。
+  const lastDetailTriggerRef = useRef<HTMLElement | null>(null);
   const deptAdmin = isDeptAdmin(user);
 
   return (
@@ -32,18 +44,28 @@ export function AdminSkillsPage() {
           <h1>{deptAdmin ? "部门技能管理" : "公共技能"}</h1>
           <p className="page-description">
             {deptAdmin
-              ? "发布和管理所管辖部门成员可在后续对话中使用的部门技能；导入可信技能包，检查依赖，配置当前版本、启停与脚本审批，并支持按需删除部门技能。"
-              : "发布和管理全公司与各部门可在后续对话中按任务使用的技能；导入可信技能包，检查依赖，查看不可变指南与资源版本，再决定当前版本、启停和脚本审批。"}
+              ? "在线撰写部门 Markdown 模板技能或导入脚本技能包，配置跨部门共享、首页快捷推荐、当前版本与启停策略，并支持按需删除部门技能。"
+              : "在线撰写全公司与各部门 Markdown 模板技能或导入可信脚本技能包，统一管理首页快捷推荐、跨部门共享、版本历史与脚本审批策略。"}
           </p>
         </div>
-        <button
-          className="button-primary"
-          onClick={() => setImportOpen(true)}
-          type="button"
-        >
-          <Icon name="upload" size={14} />
-          导入技能 ZIP
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="button-quiet"
+            onClick={() => setImportOpen(true)}
+            type="button"
+          >
+            <Icon name="upload" size={14} />
+            导入技能 ZIP
+          </button>
+          <button
+            className="button-primary"
+            onClick={() => setCreateMarkdownOpen(true)}
+            type="button"
+          >
+            <FilePenLine aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+            新建在线模板技能
+          </button>
+        </div>
       </header>
 
       {skills.isPending ? (
@@ -58,15 +80,24 @@ export function AdminSkillsPage() {
       ) : skills.data.length === 0 ? (
         <EmptyState
           action={
-            <button
-              className="button-primary"
-              onClick={() => setImportOpen(true)}
-              type="button"
-            >
-              导入第一个技能
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <button
+                className="button-primary"
+                onClick={() => setCreateMarkdownOpen(true)}
+                type="button"
+              >
+                新建在线模板技能
+              </button>
+              <button
+                className="button-quiet"
+                onClick={() => setImportOpen(true)}
+                type="button"
+              >
+                导入第一个技能
+              </button>
+            </div>
           }
-          description="首发导入会完整校验 ZIP，成功后才创建不可变版本；首次导入保持未启用。"
+          description="可直接在线编写纯 Markdown 模板技能（支持导入 .md 与双栏预览），或导入包含 Python 脚本的完整 ZIP 技能包。"
           icon="spark"
           title="还没有技能包"
         />
@@ -87,14 +118,17 @@ export function AdminSkillsPage() {
           <ul className="admin-skill-list">
             {skills.data.map((skill) => {
               const scope = skillScope(skill);
+              const format = skillFormat(skill);
               const departmentName =
                 resolveUserDepartmentName(user, skill.owner_department_id) ??
                 skill.owner_department_id ??
                 null;
+              const starterPromptSummary = skill.starter_prompt?.trim() ?? "";
+
               return (
                 <li className="admin-skill-card" key={skill.id}>
                   <div className="admin-card-heading">
-                    <div>
+                    <div className="min-w-0">
                       <div className="admin-title-line">
                         <h3>{skill.name}</h3>
                         <SkillScopeBadge
@@ -103,6 +137,20 @@ export function AdminSkillsPage() {
                           }
                           scope={scope}
                         />
+                        <Badge
+                          variant={format === "markdown" ? "info" : "neutral"}
+                        >
+                          {format === "markdown" ? "在线模板" : "脚本包"}
+                        </Badge>
+                        {skill.featured ? (
+                          <Badge variant="brand">
+                            <Sparkles
+                              aria-hidden="true"
+                              className="h-3 w-3 shrink-0"
+                            />
+                            首页推荐
+                          </Badge>
+                        ) : null}
                         <span
                           className={`admin-status-badge ${
                             skill.enabled ? " is-success" : " is-muted"
@@ -117,10 +165,21 @@ export function AdminSkillsPage() {
                       <p className="admin-code-line">
                         {skill.slug} · {skill.description}
                       </p>
+                      {starterPromptSummary ? (
+                        <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-text-secondary">
+                          <span className="font-medium text-brand">
+                            首页引导语：
+                          </span>
+                          {starterPromptSummary}
+                        </p>
+                      ) : null}
                     </div>
                     <button
                       className="button-quiet"
-                      onClick={() => setSelectedSkillId(skill.id)}
+                      onClick={(event) => {
+                        lastDetailTriggerRef.current = event.currentTarget;
+                        setSelectedSkillId(skill.id);
+                      }}
                       type="button"
                     >
                       <Icon name="eye" size={14} />
@@ -140,9 +199,11 @@ export function AdminSkillsPage() {
                     <div>
                       <dt>脚本审批</dt>
                       <dd>
-                        {skill.script_requires_approval
-                          ? "每次执行需审批"
-                          : "默认无需审批"}
+                        {format === "markdown"
+                          ? "纯文档（无脚本）"
+                          : skill.script_requires_approval
+                            ? "每次执行需审批"
+                            : "默认无需审批"}
                       </dd>
                     </div>
                     <div>
@@ -182,10 +243,40 @@ export function AdminSkillsPage() {
         }}
         open={importOpen}
       />
+
+      <AdminSkillMarkdownDialog
+        mode="create"
+        onClose={() => setCreateMarkdownOpen(false)}
+        onSaved={(created) => {
+          setCreateMarkdownOpen(false);
+          setSelectedSkillId(created.id);
+          void skills.refetch();
+        }}
+        open={createMarkdownOpen}
+      />
+
+      <AdminSkillMarkdownDialog
+        mode="version"
+        onClose={() => setEditingVersionSkill(null)}
+        onSaved={(updated) => {
+          setEditingVersionSkill(null);
+          setSelectedSkillId(updated.id);
+          void skills.refetch();
+        }}
+        open={Boolean(editingVersionSkill)}
+        returnFocusRef={lastDetailTriggerRef}
+        skill={editingVersionSkill}
+      />
+
       <AdminSkillDetailDialog
         onClose={() => {
           setSelectedSkillId(null);
           void skills.refetch();
+        }}
+        onEditMarkdownVersion={(skillDetails) => {
+          // 先彻底关闭旧 <Modal> 详情窗，再受控打开 Radix 在线发版 Dialog，保证零弹窗层级冲突。
+          setSelectedSkillId(null);
+          setEditingVersionSkill(skillDetails);
         }}
         open={Boolean(selectedSkillId)}
         skillId={selectedSkillId}

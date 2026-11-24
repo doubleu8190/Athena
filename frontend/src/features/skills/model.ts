@@ -8,7 +8,12 @@ export const PERSONAL_SKILL_FILE_MAX_BYTES = 1024 * 1024;
 export const PERSONAL_SKILL_NAME_MAX_LENGTH = 120;
 export const PERSONAL_SKILL_DESCRIPTION_MAX_LENGTH = 1000;
 export const PERSONAL_SKILL_GUIDE_MAX_LENGTH = 100_000;
+export const SKILL_STARTER_PROMPT_MAX_LENGTH = 500;
+export const SKILL_SLUG_MAX_LENGTH = 64;
+export const SKILL_VERSION_LABEL_MAX_LENGTH = 64;
+export const SKILL_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
+export type SkillFormat = "markdown" | "package";
 export type SkillScope = "company" | "department" | "personal";
 /** 兼容后端历史与旧测试夹具可能出现的 "public" 枚举，运行时通过 skillScope() 统一归一为 "company"。 */
 export type LegacyCompatibleSkillScope = SkillScope | "public";
@@ -73,6 +78,11 @@ export interface Skill {
   scope?: LegacyCompatibleSkillScope;
   owner_department_id?: string | null;
   visibility_grants?: VisibilityGrant[];
+  /** M3.3 双形态字段（可选以兼容历史夹具缺省值）。 */
+  format?: SkillFormat;
+  has_scripts?: boolean;
+  featured?: boolean;
+  starter_prompt?: string | null;
   updated_at: string;
   dependency_check: DependencyCheck | null;
 }
@@ -113,8 +123,34 @@ export interface SkillConfigurationInput {
   current_version_id: string;
   enabled: boolean;
   expected_revision: number;
+  featured?: boolean;
   script_requires_approval: boolean;
+  starter_prompt?: string | null;
   visibility_grants?: VisibilityGrantInput[];
+}
+
+/** 契约 3.5：POST /api/v1/admin/skills/markdown（严格 extra="forbid"，不传多余字段）。 */
+export interface AdminSkillMarkdownCreateInput {
+  description: string;
+  enabled: boolean;
+  featured: boolean;
+  guide: string;
+  name: string;
+  owner_department_id?: string | null;
+  scope: "company" | "department";
+  slug?: string | null;
+  starter_prompt?: string | null;
+  visibility_grants?: VisibilityGrantInput[] | null;
+}
+
+/** 契约 3.6：POST /api/v1/admin/skills/{skill_id}/versions/markdown（严格 extra="forbid"）。 */
+export interface AdminSkillMarkdownVersionInput {
+  activate: boolean;
+  description: string;
+  expected_revision: number;
+  guide: string;
+  label?: string | null;
+  name: string;
 }
 
 export interface ImportSkillPackageOptions {
@@ -126,7 +162,10 @@ export interface ImportSkillPackageOptions {
 export interface SkillFormState {
   currentVersionId: string;
   enabled: boolean;
+  featured: boolean;
   scriptRequiresApproval: boolean;
+  starterPrompt: string;
+  visibilityGrants: VisibilityGrantInput[];
 }
 
 export interface PersonalSkillInput {
@@ -193,15 +232,75 @@ export function skillScope(
   return "company";
 }
 
+export function skillFormat(
+  skill: Pick<Skill, "format" | "scope">,
+): SkillFormat {
+  // 个人技能恒为在线 Markdown；其余公共/部门技能在旧夹具缺省 format 时向后兼容回退为 ZIP 包。
+  if (skill.format === "markdown" || skill.format === "package") {
+    return skill.format;
+  }
+  return skillScope(skill) === "personal" ? "markdown" : "package";
+}
+
 export function skillExecutionLabel(
-  skill: Pick<Skill, "scope" | "script_requires_approval">,
+  skill: Pick<Skill, "scope" | "script_requires_approval" | "format">,
 ): string {
-  if (skillScope(skill) === "personal") {
+  if (
+    skillScope(skill) === "personal" ||
+    skillFormat(skill) === "markdown"
+  ) {
     return "纯文档";
   }
   return skill.script_requires_approval
     ? "脚本执行需审批"
     : "脚本执行无需审批";
+}
+
+export function normalizeStarterPrompt(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+export function validateStarterPrompt(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (codePointLength(trimmed) > SKILL_STARTER_PROMPT_MAX_LENGTH) {
+    return `首页默认引导语不能超过 ${SKILL_STARTER_PROMPT_MAX_LENGTH} 个字符。`;
+  }
+  if (INVALID_MULTILINE_CONTROL.test(trimmed)) {
+    return "首页默认引导语不能包含不支持的控制字符。";
+  }
+  return null;
+}
+
+export function validateOptionalAdminSlug(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (
+    codePointLength(trimmed) > SKILL_SLUG_MAX_LENGTH ||
+    !SKILL_SLUG_PATTERN.test(trimmed)
+  ) {
+    return `技能标识仅允许 1–${SKILL_SLUG_MAX_LENGTH} 位小写字母、数字和连字符，且首尾须为字母或数字。`;
+  }
+  return null;
+}
+
+export function validateVersionLabel(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (codePointLength(trimmed) > SKILL_VERSION_LABEL_MAX_LENGTH) {
+    return `版本标签不能超过 ${SKILL_VERSION_LABEL_MAX_LENGTH} 个字符。`;
+  }
+  if (INVALID_SINGLE_LINE_CONTROL.test(trimmed)) {
+    return "版本标签不能包含控制字符。";
+  }
+  return null;
 }
 
 export function validatePersonalSkillFile(file: File | null): string | null {

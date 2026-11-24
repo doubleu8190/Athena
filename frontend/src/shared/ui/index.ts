@@ -64,6 +64,13 @@ export {
 } from "./InlineAlert";
 export { Input, type InputProps } from "./Input";
 export {
+  MarkdownSplitEditor,
+  applyMarkdownFormat,
+  type MarkdownEditorViewMode,
+  type MarkdownFormatAction,
+  type MarkdownSplitEditorProps,
+} from "./MarkdownSplitEditor";
+export {
   Popover,
   PopoverAnchor,
   PopoverClose,

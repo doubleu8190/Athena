@@ -26,6 +26,7 @@ const SKILL_ERROR_COPY: Record<string, string> = {
   skill_guide_invalid:
     "Markdown 正文不能为空、不能超过 100,000 个字符，也不能包含控制字符。",
   skill_guide_too_large: "Skill 指南超过 100,000 个字符上限。",
+  skill_markdown_file_invalid: "请上传单个有效的 .md Markdown 文件。",
   skill_markdown_filename_invalid:
     "只支持 .md 文件，扩展名不区分大小写。",
   skill_markdown_unreadable: "无法读取 Markdown 文件，请重新选择。",
@@ -42,12 +43,26 @@ const SKILL_ERROR_COPY: Record<string, string> = {
     "Markdown 元数据中的 description 不合法。",
   skill_markdown_control_character:
     "Markdown 文件不能包含空字节或其他不支持的控制字符。",
+  skill_markdown_edit_unsupported:
+    "该技能为 ZIP 技能包，不支持在线 Markdown 覆盖，请改用「上传新版本 ZIP」入口。",
+  skill_package_upload_unsupported:
+    "该技能为在线 Markdown 模板技能，不支持上传 ZIP 技能包，请改用「在线编辑并发布新版本」入口。",
   skill_name_invalid:
     "技能名称不能为空、不能超过 120 个字符，也不能包含控制字符。",
   skill_description_invalid:
     "技能描述不能为空、不能超过 1,000 个字符，也不能包含控制字符。",
   skill_guide_control_character:
     "Markdown 正文不能包含空字节或其他不支持的控制字符。",
+  skill_slug_conflict:
+    "同一可见范围下已存在相同技能标识（slug），请更换后重试。",
+  skill_slug_invalid:
+    "技能标识仅允许 1–64 位小写字母、数字和连字符，且首尾须为字母或数字。",
+  skill_featured_invalid:
+    "首页推荐配置值无效，必须为布尔值。",
+  skill_starter_prompt_invalid:
+    "首页默认引导语不能超过 500 个字符，且不能包含不支持的控制字符。",
+  skill_version_label_invalid:
+    "版本标签不能超过 64 个字符，且不能包含控制字符。",
   skill_personal_create_conflict:
     "个人技能创建发生并发冲突，请刷新目录后重试。",
   skill_personal_publish_conflict:
@@ -98,8 +113,22 @@ const SKILL_ERROR_COPY: Record<string, string> = {
   owner_department_not_allowed: "全公司技能不能指定归属部门。",
   visibility_grants_invalid: "可见性授权配置无效，请检查部门或角色设置。",
   visibility_grants_not_allowed: "当前可见范围不支持额外共享授权。",
+  visibility_grant_forbidden:
+    "当前账号没有权限添加该共享授权范围（部门管理员仅可授权自身管辖内的部门，不可按角色共享；未拥有该部门子树管辖权时不可开启「包含下级子部门」）。",
+  visibility_grant_invalid: "可见性授权项格式无效，请检查后重试。",
+  visibility_grant_target_invalid: "可见性授权目标标识无效或超过长度限制。",
+  visibility_grant_duplicate:
+    "可见性授权列表中存在重复的部门或角色，请去重后重试。",
+  visibility_grant_role_invalid:
+    "所选授权角色无效，仅支持员工、部门管理员或超级管理员。",
+  visibility_grant_target_type_invalid:
+    "不支持的授权目标类型，仅支持部门或角色。",
+  visibility_grant_department_not_found:
+    "所选附加共享部门不存在或已归档，请刷新部门列表后重试。",
   admin_required: "你没有权限执行该技能管理操作。",
   permission_denied: "你没有权限执行该技能操作。",
+  origin_not_allowed: "请求来源未通过同源安全校验，请刷新页面后重试。",
+  not_authenticated: "登录状态已失效，请重新登录后再试。",
   skill_parameter_schema_unsupported:
     "技能脚本参数 Schema 使用了当前平台不支持的规则。",
   skill_parameter_schema_invalid:

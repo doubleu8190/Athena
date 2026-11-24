@@ -1,16 +1,29 @@
+import { FilePenLine, Sparkles } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
 import { newRequestId } from "../../shared/lib/requestId";
-import { InlineAlert, toast } from "../../shared/ui";
+import {
+  Badge,
+  Button,
+  InlineAlert,
+  Switch,
+  cn,
+  toast,
+} from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { Modal } from "../../shared/ui/Modal";
 import { SelectDropdown } from "../../shared/ui/SelectDropdown";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
+import {
+  VisibilityGrantsEditor,
+  normalizeVisibilityGrants,
+  visibilityGrantsEqual,
+} from "../access/VisibilityGrantsEditor";
 import { useAuth } from "../auth/AuthProvider";
-import { resolveUserDepartmentName } from "../auth/model";
+import { isSuperAdmin, resolveUserDepartmentName } from "../auth/model";
 import {
   isSkillRevisionConflict,
   skillErrorMessage,
@@ -24,12 +37,17 @@ import {
   useUploadSkillVersionMutation,
 } from "./hooks";
 import {
+  SKILL_STARTER_PROMPT_MAX_LENGTH,
   dependencySatisfied,
+  normalizeStarterPrompt,
+  skillFormat,
   skillScope,
   validateSkillZip,
+  validateStarterPrompt,
   versionLabel,
   type DependencyCheck,
   type SkillAdminDetails,
+  type SkillConfigurationInput,
   type SkillFormState,
   type SkillVersion,
 } from "./model";
@@ -43,11 +61,25 @@ interface ConfigurationBaseline {
   skillId: string;
 }
 
-function formFromSkill(skill: SkillAdminDetails): SkillFormState {
+function formFromSkill(
+  skill: SkillAdminDetails,
+  defaultIncludeSubdepartments: boolean,
+): SkillFormState {
+  const ownerDeptId = skill.owner_department_id?.trim() ?? "";
   return {
     currentVersionId: skill.current_version_id ?? "",
     enabled: skill.enabled,
+    featured: Boolean(skill.featured),
     scriptRequiresApproval: skill.script_requires_approval,
+    starterPrompt: skill.starter_prompt ?? "",
+    visibilityGrants:
+      skillScope(skill) === "department" && ownerDeptId
+        ? normalizeVisibilityGrants(
+            ownerDeptId,
+            skill.visibility_grants,
+            defaultIncludeSubdepartments,
+          )
+        : [],
   };
 }
 
@@ -60,7 +92,11 @@ function formsEqual(
       right &&
       left.currentVersionId === right.currentVersionId &&
       left.enabled === right.enabled &&
-      left.scriptRequiresApproval === right.scriptRequiresApproval,
+      left.featured === right.featured &&
+      left.scriptRequiresApproval === right.scriptRequiresApproval &&
+      normalizeStarterPrompt(left.starterPrompt) ===
+        normalizeStarterPrompt(right.starterPrompt) &&
+      visibilityGrantsEqual(left.visibilityGrants, right.visibilityGrants),
   );
 }
 
@@ -323,17 +359,24 @@ function VersionUpload({
 
 interface AdminSkillDetailDialogProps {
   onClose: () => void;
+  /** 由父页面安全关闭旧 <Modal> 详情窗后受控切换打开 Radix 在线发版 Dialog，严禁在旧 Modal 上叠开低层 Dialog。 */
+  onEditMarkdownVersion?: (skill: SkillAdminDetails) => void;
   open: boolean;
   skillId: string | null;
 }
 
 export function AdminSkillDetailDialog({
   onClose,
+  onEditMarkdownVersion,
   open,
   skillId,
 }: AdminSkillDetailDialogProps) {
   const { user } = useAuth();
+  const superAdmin = isSuperAdmin(user);
   const versionSelectId = useId();
+  const featuredSwitchId = useId();
+  const starterPromptId = useId();
+  const starterPromptErrorId = useId();
   const activeSkillId = open ? skillId : null;
   const detail = useAdminSkill(activeSkillId);
   const [versionPageNumber, setVersionPageNumber] = useState(1);
@@ -352,6 +395,9 @@ export function AdminSkillDetailDialog({
   const [conflictMessage, setConflictMessage] = useState<string | null>(
     null,
   );
+  const [starterPromptError, setStarterPromptError] = useState<string | null>(
+    null,
+  );
   const [requestError, setRequestError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -363,6 +409,7 @@ export function AdminSkillDetailDialog({
     setBaseline(null);
     setRevisionConflict(false);
     setConflictMessage(null);
+    setStarterPromptError(null);
     setRequestError(null);
     setNotice(null);
     setDeleteDialogOpen(false);
@@ -379,14 +426,14 @@ export function AdminSkillDetailDialog({
       return;
     }
     const skill = detail.data;
-    const nextForm = formFromSkill(skill);
+    const nextForm = formFromSkill(skill, superAdmin);
     setBaseline({
       form: nextForm,
       revision: skill.revision,
       skillId: skill.id,
     });
     setForm(nextForm);
-  }, [baseline?.skillId, detail.data, open]);
+  }, [baseline?.skillId, detail.data, open, superAdmin]);
 
   // 详情接口只含最近版本，分页结果才是历史列表；列表外的当前/选中版本单独补取。
   const knownVersions = useMemo(
@@ -472,13 +519,14 @@ export function AdminSkillDetailDialog({
     (selectedVersionNeedsDetail && selectedVersionDetail.isPending);
 
   const acceptServerDetails = (skill: SkillAdminDetails) => {
-    const nextForm = formFromSkill(skill);
+    const nextForm = formFromSkill(skill, superAdmin);
     setBaseline({
       form: nextForm,
       revision: skill.revision,
       skillId: skill.id,
     });
     setForm(nextForm);
+    setStarterPromptError(null);
     setRevisionConflict(false);
     setConflictMessage(null);
   };
@@ -523,17 +571,42 @@ export function AdminSkillDetailDialog({
       setRequestError("所选版本依赖未满足，不能启用。");
       return;
     }
+    const promptValidationError = validateStarterPrompt(form.starterPrompt);
+    setStarterPromptError(promptValidationError);
+    if (promptValidationError) {
+      return;
+    }
+
+    const nextStarterPrompt = normalizeStarterPrompt(form.starterPrompt);
+    const baselineStarterPrompt = normalizeStarterPrompt(
+      baseline.form.starterPrompt,
+    );
+    // 仅在新增配置字段相对基线发生变化时显式携带，未改动时省略以保持向后兼容与契约 3.7 语义。
+    const featuredChanged = form.featured !== baseline.form.featured;
+    const starterPromptChanged = nextStarterPrompt !== baselineStarterPrompt;
+    const grantsChanged =
+      skillScope(detail.data) === "department" &&
+      Boolean(detail.data.owner_department_id) &&
+      !visibilityGrantsEqual(
+        form.visibilityGrants,
+        baseline.form.visibilityGrants,
+      );
+
+    const payload: SkillConfigurationInput = {
+      current_version_id: form.currentVersionId,
+      enabled: form.enabled,
+      expected_revision: baseline.revision,
+      script_requires_approval: form.scriptRequiresApproval,
+      ...(featuredChanged ? { featured: form.featured } : {}),
+      ...(starterPromptChanged ? { starter_prompt: nextStarterPrompt } : {}),
+      ...(grantsChanged ? { visibility_grants: form.visibilityGrants } : {}),
+    };
 
     submitLock.current = true;
     setRequestError(null);
     setNotice(null);
     try {
-      const saved = await update.mutateAsync({
-        current_version_id: form.currentVersionId,
-        enabled: form.enabled,
-        expected_revision: baseline.revision,
-        script_requires_approval: form.scriptRequiresApproval,
-      });
+      const saved = await update.mutateAsync(payload);
       acceptServerDetails(saved);
       setNotice("技能配置已保存；新 Run 才会使用本次当前版本与审批策略。");
     } catch (error) {
@@ -562,6 +635,10 @@ export function AdminSkillDetailDialog({
   };
 
   const currentScope = detail.data ? skillScope(detail.data) : null;
+  const currentFormat = detail.data ? skillFormat(detail.data) : null;
+  // 双向格式锁：format === "markdown" 为在线模板，隐藏 ZIP 上传并开放 Markdown 在线发版；
+  // format === "package" 为 ZIP 技能包，保留 ZIP 上传并隐藏在线 Markdown 编辑器。
+  const isMarkdownSkill = currentFormat === "markdown";
   // 严格遵守后端契约：仅部门级技能允许软删除，全公司（company）技能绝不渲染删除入口。
   const isDepartmentSkill = currentScope === "department";
   const currentDepartmentName = detail.data
@@ -569,6 +646,11 @@ export function AdminSkillDetailDialog({
       detail.data.owner_department_id ??
       null)
     : null;
+  const starterPromptLength = form
+    ? Array.from(form.starterPrompt.trim()).length
+    : 0;
+  const starterPromptOverLimit =
+    starterPromptLength > SKILL_STARTER_PROMPT_MAX_LENGTH;
 
   const handleConfirmDeleteDepartmentSkill = async () => {
     if (
@@ -679,6 +761,15 @@ export function AdminSkillDetailDialog({
                     }
                     scope={detail.data.scope}
                   />
+                  <Badge variant={isMarkdownSkill ? "info" : "neutral"}>
+                    {isMarkdownSkill ? "在线模板" : "脚本包"}
+                  </Badge>
+                  {detail.data.featured ? (
+                    <Badge variant="brand">
+                      <Sparkles aria-hidden="true" className="h-3 w-3" />
+                      首页推荐
+                    </Badge>
+                  ) : null}
                 </div>
                 <p>
                   revision {detail.data.revision} · slug{" "}
@@ -801,6 +892,122 @@ export function AdminSkillDetailDialog({
                 </label>
               </div>
             </div>
+
+            {/* 工作台首页快捷应用推荐与默认引导语配置（纳入同一 expected_revision CAS 事务保存） */}
+            <div className="mt-4 space-y-3 rounded-xl border border-border-default bg-subtle/40 p-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <label
+                    className="cursor-pointer text-xs font-semibold text-text-primary select-none"
+                    htmlFor={featuredSwitchId}
+                  >
+                    推荐至工作台首页
+                  </label>
+                  <p className="text-xs text-text-tertiary">
+                    开启后将在有权限成员的对话首页「常用办公场景与快捷应用」区域优先展示。
+                  </p>
+                </div>
+                <Switch
+                  aria-label="推荐至工作台首页"
+                  checked={form.featured}
+                  disabled={pending}
+                  id={featuredSwitchId}
+                  onCheckedChange={(checked) => {
+                    setForm((current) =>
+                      current ? { ...current, featured: checked } : current,
+                    );
+                    setRequestError(null);
+                    setNotice(null);
+                  }}
+                  size="sm"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    className="text-xs font-semibold text-text-primary"
+                    htmlFor={starterPromptId}
+                  >
+                    首页默认引导语
+                  </label>
+                  <span
+                    className={cn(
+                      "text-xs tabular-nums",
+                      starterPromptOverLimit
+                        ? "font-semibold text-danger"
+                        : "text-text-tertiary",
+                    )}
+                  >
+                    {starterPromptLength} / {SKILL_STARTER_PROMPT_MAX_LENGTH} 字符
+                  </span>
+                </div>
+                <textarea
+                  aria-describedby={
+                    starterPromptError ? starterPromptErrorId : undefined
+                  }
+                  aria-invalid={
+                    starterPromptError || starterPromptOverLimit
+                      ? true
+                      : undefined
+                  }
+                  className={cn(
+                    "block w-full rounded-lg border bg-canvas px-3 py-2 text-sm text-text-primary shadow-xs transition-colors",
+                    "placeholder:text-text-placeholder focus-visible:outline-hidden focus-visible:ring-2",
+                    "disabled:cursor-not-allowed disabled:bg-subtle disabled:text-text-tertiary",
+                    starterPromptError || starterPromptOverLimit
+                      ? "border-danger focus-visible:border-danger focus-visible:ring-danger/20"
+                      : "border-border-default hover:border-border-strong focus-visible:border-ring-focus focus-visible:ring-ring-focus/20",
+                  )}
+                  disabled={pending}
+                  id={starterPromptId}
+                  onChange={(event) => {
+                    setForm((current) =>
+                      current
+                        ? { ...current, starterPrompt: event.target.value }
+                        : current,
+                    );
+                    setStarterPromptError(null);
+                    setRequestError(null);
+                    setNotice(null);
+                  }}
+                  placeholder="用户点击首页快捷应用卡片且输入框为空时自动填入；清空保存即可清除引导语"
+                  rows={2}
+                  value={form.starterPrompt}
+                />
+                {starterPromptError ? (
+                  <p
+                    className="text-xs font-medium text-danger"
+                    id={starterPromptErrorId}
+                    role="alert"
+                  >
+                    {starterPromptError}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+
+            {isDepartmentSkill && detail.data.owner_department_id ? (
+              <VisibilityGrantsEditor
+                className="mt-4"
+                defaultIncludeSubdepartments={superAdmin}
+                disabled={pending}
+                enabled={open && isDepartmentSkill}
+                onChange={(nextGrants) => {
+                  setForm((current) =>
+                    current
+                      ? { ...current, visibilityGrants: nextGrants }
+                      : current,
+                  );
+                  setRequestError(null);
+                  setNotice(null);
+                }}
+                ownerDepartmentId={detail.data.owner_department_id}
+                ownerDepartmentName={currentDepartmentName}
+                resourceLabel="技能"
+                value={form.visibilityGrants}
+              />
+            ) : null}
             {!canEnable ? (
               <p className="admin-inline-warning">
                 所选版本依赖未满足，后端将拒绝启用；可切换至检查通过的版本，或由部署管理员补齐统一 Python 环境。
@@ -828,12 +1035,50 @@ export function AdminSkillDetailDialog({
             ) : null}
           </section>
 
-          <VersionUpload
-            disabled={pending}
-            onUploaded={() => setVersionPageNumber(1)}
-            skillId={detail.data.id}
-            slug={detail.data.slug}
-          />
+          {/* 严格执行双向格式锁 UI：在线模板仅展示 Markdown 发版入口并隐藏 ZIP 上传；ZIP 包仅保留 ZIP 上传 */}
+          {isMarkdownSkill ? (
+            <section
+              aria-labelledby="skill-markdown-version-title"
+              className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border-default bg-canvas p-4"
+              data-testid="markdown-version-publish-section"
+            >
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4
+                    className="text-sm font-semibold text-text-primary"
+                    id="skill-markdown-version-title"
+                  >
+                    在线模板版本编辑
+                  </h4>
+                  <Badge variant="info">在线 Markdown 形态</Badge>
+                </div>
+                <p className="text-xs leading-relaxed text-text-secondary">
+                  本技能受双向格式锁保护（不支持通过 ZIP 覆盖），可直接在双栏 Markdown 编辑器中修改指南并追加不可变新版本。
+                </p>
+              </div>
+              <Button
+                disabled={pending || hasRevisionConflict || !onEditMarkdownVersion}
+                onClick={() => {
+                  if (detail.data) {
+                    onEditMarkdownVersion?.(detail.data);
+                  }
+                }}
+                size="sm"
+                type="button"
+                variant="primary"
+              >
+                <FilePenLine aria-hidden="true" className="h-3.5 w-3.5" />
+                在线编辑并发布新版本
+              </Button>
+            </section>
+          ) : (
+            <VersionUpload
+              disabled={pending}
+              onUploaded={() => setVersionPageNumber(1)}
+              skillId={detail.data.id}
+              slug={detail.data.slug}
+            />
+          )}
 
           <section
             aria-labelledby="skill-versions-title"

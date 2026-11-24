@@ -844,4 +844,62 @@ describe("普通用户个人技能管理", () => {
       within(publicOption as HTMLElement).getByText("脚本执行需审批"),
     ).toBeVisible();
   });
+
+  it("默认「在线编写」模式下通过编辑器工具栏导入空或超限 .md 均清晰展示错误告警", async () => {
+    let parseCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_USER);
+        }
+        if (url.pathname === "/api/v1/me/skills" && method === "GET") {
+          return jsonResponse({ items: [] });
+        }
+        if (url.pathname === "/api/v1/me/skills/parse" && method === "POST") {
+          parseCalls += 1;
+          return jsonResponse({
+            description: "不应调用",
+            guide: "# noop",
+            name: "noop",
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/skills?view=mine");
+    await user.click(
+      await screen.findByRole("button", { name: "新建第一个个人技能" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "新建个人技能" });
+    // 停留在默认「在线编写」模式，直接通过 MarkdownSplitEditor 工具栏「导入 .md」选入空文件与超限文件
+    const toolbarImportInput = within(dialog).getByLabelText("导入 .md");
+
+    fireEvent.change(toolbarImportInput, {
+      target: {
+        files: [new File([], "empty.md", { type: "text/markdown" })],
+      },
+    });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/为空/);
+
+    fireEvent.change(toolbarImportInput, {
+      target: {
+        files: [
+          new File(
+            [new Uint8Array(PERSONAL_SKILL_FILE_MAX_BYTES + 1)],
+            "too-big.md",
+            { type: "text/markdown" },
+          ),
+        ],
+      },
+    });
+    expect(
+      await within(dialog).findByText("Markdown 文件不能超过 1 MiB。"),
+    ).toBeInTheDocument();
+    expect(parseCalls).toBe(0);
+  });
 });

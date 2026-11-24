@@ -1,5 +1,7 @@
 import { apiMultipart, apiRequest } from "../../shared/api/client";
 import type {
+  AdminSkillMarkdownCreateInput,
+  AdminSkillMarkdownVersionInput,
   ImportSkillPackageOptions,
   Skill,
   SkillAdminDetails,
@@ -120,6 +122,47 @@ export function updateSkillConfiguration(
     method: "PATCH",
     body: input,
   });
+}
+
+/** 契约 3.4：解析管理端 .md 技能草稿（纯解析不落库）。 */
+export async function parseAdminSkillMarkdown(
+  file: File,
+): Promise<PersonalSkillDraft> {
+  const form = new FormData();
+  form.set("file", file);
+  return apiMultipart<PersonalSkillDraft>(
+    "/admin/skills/parse-markdown",
+    form,
+    { method: "POST" },
+  );
+}
+
+/** 契约 3.5：在线创建公共或部门 Markdown 模板技能（须携带 Idempotency-Key）。 */
+export function createAdminMarkdownSkill(
+  input: AdminSkillMarkdownCreateInput,
+  requestId: string,
+): Promise<SkillAdminDetails> {
+  return apiRequest<SkillAdminDetails>("/admin/skills/markdown", {
+    method: "POST",
+    body: input,
+    headers: { "Idempotency-Key": requestId },
+  });
+}
+
+/** 契约 3.6：为已有 format="markdown" 技能在线发布不可变新版本（须携带 Idempotency-Key）。 */
+export function publishAdminMarkdownVersion(
+  skillId: string,
+  input: AdminSkillMarkdownVersionInput,
+  requestId: string,
+): Promise<SkillAdminDetails> {
+  return apiRequest<SkillAdminDetails>(
+    `${adminSkillPath(skillId)}/versions/markdown`,
+    {
+      method: "POST",
+      body: input,
+      headers: { "Idempotency-Key": requestId },
+    },
+  );
 }
 
 /** 软删除部门级技能（后端严禁删除 company 级技能，须携带乐观锁 expected_revision）。 */

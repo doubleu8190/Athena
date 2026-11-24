@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { toast } from "../../shared/ui";
 import { makeSkill } from "../../test/adminFixtures";
 import { FakeEventSource } from "../../test/fakeEventSource";
 import {
@@ -1056,5 +1057,96 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
     await waitFor(() => expect(submittedRuns).toHaveLength(1));
     expect(submittedRuns[0].input_file_ids).toEqual([existingArtifact.id]);
     expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("对话首页优先展示 featured 推荐技能并按部门优先排序，点击挂载并自动填入 starter_prompt 且不覆盖已有草稿", async () => {
+    const featuredCompany = makeSkill({
+      description: "公司法务合同风险审查",
+      enabled: true,
+      featured: true,
+      format: "markdown",
+      id: "skill-featured-company",
+      name: "合同审查推荐助手",
+      scope: "company",
+      starter_prompt: "请粘贴合同正文或上传 PDF，我将逐条标注核心风险。",
+    });
+    const featuredDept = makeSkill({
+      description: "财务报销单据合规审核",
+      enabled: true,
+      featured: true,
+      format: "markdown",
+      id: "skill-featured-dept",
+      name: "报销审核推荐助手",
+      scope: "department",
+      starter_prompt: "请上传差旅或费用报销单截图，我将按最新制度核对。",
+    });
+    const ordinaryDept = makeSkill({
+      description: "未推荐的普通部门技能",
+      enabled: true,
+      featured: false,
+      format: "package",
+      id: "skill-ordinary-dept",
+      name: "普通部门技能",
+      scope: "department",
+      starter_prompt: "普通技能引导语",
+    });
+
+    installWorkbenchFetch({
+      skills: [ordinaryDept, featuredCompany, featuredDept],
+      user: TEST_USER,
+    });
+    const user = userEvent.setup();
+
+    renderApp("/chat");
+
+    const scenarioSection = await screen.findByRole("region", {
+      name: "常用办公场景与快捷应用",
+    });
+    await within(scenarioSection).findByText("报销审核推荐助手");
+
+    const cards = within(scenarioSection).getAllByRole("button");
+    // 2 张推荐技能（部门优先于公司）+ 4 张通用办公模板补齐共 6 张；非推荐技能不占推荐位
+    expect(cards).toHaveLength(6);
+    expect(cards[0]).toHaveTextContent("报销审核推荐助手");
+    expect(cards[0]).toHaveTextContent("部门共享");
+    expect(cards[0]).toHaveTextContent("推荐");
+    expect(cards[1]).toHaveTextContent("合同审查推荐助手");
+    expect(cards[1]).toHaveTextContent("全公司");
+    expect(cards[1]).toHaveTextContent("推荐");
+    expect(
+      within(scenarioSection).queryByText("普通部门技能"),
+    ).not.toBeInTheDocument();
+
+    const textarea = screen.getByLabelText("对话草稿");
+    // 1. 输入框为空时点击推荐技能卡：挂载技能 + 自动填入 starter_prompt + 聚焦输入框
+    await user.click(cards[0]);
+    expect(
+      screen.getByRole("button", { name: "移除技能：报销审核推荐助手" }),
+    ).toBeInTheDocument();
+    expect(textarea).toHaveValue(
+      "请上传差旅或费用报销单截图，我将按最新制度核对。",
+    );
+    expect(textarea).toHaveFocus();
+
+    // 再次点击同一已挂载卡片：不取消挂载，且因当前草稿即该引导语不弹出「未覆盖原草稿」冗余 Toast
+    const toastInfoSpy = vi.spyOn(toast, "info");
+    await user.click(cards[0]);
+    expect(
+      screen.getByRole("button", { name: "移除技能：报销审核推荐助手" }),
+    ).toBeInTheDocument();
+    expect(toastInfoSpy).not.toHaveBeenCalled();
+
+    // 2. 输入框已有用户手写草稿时点击另一推荐技能卡：仅挂载新技能并聚焦，绝不覆盖用户草稿并温和提示
+    await user.clear(textarea);
+    await user.type(textarea, "这是我手写的专项合同审批请求");
+    await user.click(cards[1]);
+    expect(
+      screen.getByRole("button", { name: "移除技能：合同审查推荐助手" }),
+    ).toBeInTheDocument();
+    expect(textarea).toHaveValue("这是我手写的专项合同审批请求");
+    expect(textarea).toHaveFocus();
+    expect(toastInfoSpy).toHaveBeenCalledWith(
+      "已挂载技能，当前输入框已有内容，未覆盖原草稿。",
+    );
   });
 });

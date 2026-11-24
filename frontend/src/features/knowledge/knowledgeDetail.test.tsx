@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -1290,6 +1290,58 @@ describe("知识库检索", () => {
     view.navigateTo("/knowledge/no-access");
     expect(
       await screen.findByText("该知识库不存在、已删除，或你当前无权访问。"),
+    ).toBeInTheDocument();
+  });
+
+  it("知识库文本导入支持双栏 Markdown 实时预览与一键导入 .md 自动回填标题和正文", async () => {
+    const fetchMock = createFetchMock((url, init) => {
+      if (url.pathname === `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}`) {
+        return jsonResponse(KNOWLEDGE_BASE_A);
+      }
+      if (
+        url.pathname ===
+        `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}/documents`
+      ) {
+        return jsonResponse(knowledgeListResponse([], 1, 10));
+      }
+      throw new Error(
+        `Unexpected request: ${init?.method ?? "GET"} ${url}`,
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp(`/knowledge/${KNOWLEDGE_BASE_A.id}`);
+    await screen.findByRole("heading", {
+      level: 1,
+      name: KNOWLEDGE_BASE_A.name,
+    });
+    const addButtons = await within(screen.getByRole("main")).findAllByRole(
+      "button",
+      { name: "添加资料" },
+    );
+    await user.click(addButtons[0]);
+    const dialog = screen.getByRole("dialog", { name: "添加资料" });
+    await user.click(within(dialog).getByRole("button", { name: "粘贴文本" }));
+
+    const mdFile = new File(["# 差旅报销规范\n\n- 保留电子发票"], "差旅规范.md", {
+      type: "text/markdown",
+    });
+    fireEvent.change(within(dialog).getByLabelText("导入 .md"), {
+      target: { files: [mdFile] },
+    });
+
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText("文档标题")).toHaveValue("差旅规范"),
+    );
+    expect(within(dialog).getByLabelText("文本内容")).toHaveValue(
+      "# 差旅报销规范\n\n- 保留电子发票",
+    );
+    // 在 jsdom 默认 matchMedia(false) 下验证窄屏「预览」Tab 切换并实时安全渲染 Markdown。
+    await user.click(within(dialog).getByRole("tab", { name: "预览" }));
+    const preview = within(dialog).getByTestId("markdown-split-preview");
+    expect(
+      within(preview).getByRole("heading", { name: "差旅报销规范" }),
     ).toBeInTheDocument();
   });
 });

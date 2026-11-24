@@ -45,7 +45,7 @@ import { projectErrorMessage } from "../projects/errorMessages";
 import { useProject, useProjectDirectory } from "../projects/hooks";
 import { useCreateSessionMutation } from "../sessions/hooks";
 import { usePublicSkills } from "../skills/hooks";
-import { skillScope } from "../skills/model";
+import { skillScope, type Skill } from "../skills/model";
 import { submitRun } from "./api";
 import {
   isImageAttachmentFile,
@@ -232,20 +232,31 @@ export function DraftChatPage() {
   }, [allProjects, selectedProjectQuery.data]);
 
   const featuredSkills = useMemo(() => {
-    const enabledSkills = (skillsQuery.data ?? []).filter(
-      (skill) => skill.enabled !== false,
+    const enabledOrgSkills = (skillsQuery.data ?? []).filter((skill) => {
+      if (skill.enabled === false) {
+        return false;
+      }
+      const scope = skillScope(skill);
+      return scope === "department" || scope === "company";
+    });
+    const orderByScope = (items: Skill[]) => {
+      const departmentSkills = items.filter(
+        (skill) => skillScope(skill) === "department",
+      );
+      const companySkills = items.filter(
+        (skill) => skillScope(skill) === "company",
+      );
+      return [...departmentSkills, ...companySkills];
+    };
+
+    // 对照契约 3.3：优先选取后台标记 featured === true 的推荐技能（保持 department > company 排序，最多 4 项）；
+    // 若后台尚未配置任何推荐技能，则温和回退至既有策略（优先部门/公司已启用技能）。
+    const markedFeatured = enabledOrgSkills.filter(
+      (skill) => skill.featured === true,
     );
-    // 优先展示当前员工所在部门共享技能，其次展示全公司技能，最多取前 4 项。
-    const departmentSkills = enabledSkills.filter(
-      (skill) => skillScope(skill) === "department",
-    );
-    const companySkills = enabledSkills.filter(
-      (skill) => skillScope(skill) === "company",
-    );
-    return [...departmentSkills, ...companySkills].slice(
-      0,
-      MAX_FEATURED_SKILLS,
-    );
+    const prioritized =
+      markedFeatured.length > 0 ? markedFeatured : enabledOrgSkills;
+    return orderByScope(prioritized).slice(0, MAX_FEATURED_SKILLS);
   }, [skillsQuery.data]);
 
   const featuredTemplates = useMemo(() => {
@@ -466,14 +477,34 @@ export function DraftChatPage() {
     submitting,
   ]);
 
-  const handleSelectSkillCard = (skillId: string) => {
+  const handleSelectSkillCard = (skill: Skill) => {
     if (submitting) {
       return;
     }
-    if (!selectedSkillSet.has(skillId)) {
-      setSelectedSkillIds([...selectedSkillIds, skillId]);
+    // 首次点击挂载技能；已挂载时再次点击保留选中状态，避免用户想触发引导语或聚焦输入时误取消挂载。
+    if (!selectedSkillSet.has(skill.id)) {
+      setSelectedSkillIds([...selectedSkillIds, skill.id]);
+    }
+    const starterPrompt = skill.starter_prompt?.trim() ?? "";
+    const currentDraft = draft.trim();
+    if (starterPrompt) {
+      if (!currentDraft) {
+        setDraft(starterPrompt);
+      } else if (currentDraft !== starterPrompt) {
+        // 仅当输入框已有不同于当前引导语的用户草稿时提示未覆盖，避免重复点击同一推荐卡弹出多余 Toast。
+        toast.info("已挂载技能，当前输入框已有内容，未覆盖原草稿。");
+      }
     }
     textareaRef.current?.focus();
+    queueMicrotask(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) {
+        return;
+      }
+      textarea.focus();
+      const length = textarea.value.length;
+      textarea.setSelectionRange(length, length);
+    });
   };
 
   const handleSelectTemplateCard = (template: OfficeScenarioTemplate) => {
@@ -691,6 +722,7 @@ export function DraftChatPage() {
             {featuredSkills.map((skill) => {
               const scope = skillScope(skill);
               const isSelected = selectedSkillSet.has(skill.id);
+              const isFeatured = skill.featured === true;
               return (
                 <button
                   className={cn(
@@ -702,18 +734,29 @@ export function DraftChatPage() {
                       : "border-border-default bg-canvas hover:border-brand-border hover:bg-subtle/60",
                   )}
                   data-scenario-card="skill"
+                  data-skill-featured={isFeatured ? "true" : "false"}
                   data-skill-scope={scope}
                   disabled={submitting}
                   key={skill.id}
-                  onClick={() => handleSelectSkillCard(skill.id)}
+                  onClick={() => handleSelectSkillCard(skill)}
                   type="button"
                 >
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <VisibilityBadge
-                        className="px-1.5 py-0 text-[11px]"
-                        scope={scope}
-                      />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <VisibilityBadge
+                          className="px-1.5 py-0 text-[11px]"
+                          scope={scope}
+                        />
+                        {isFeatured ? (
+                          <Badge
+                            className="px-1.5 py-0 text-[11px]"
+                            variant="brand"
+                          >
+                            推荐
+                          </Badge>
+                        ) : null}
+                      </div>
                       {isSelected ? (
                         <span className="inline-flex items-center gap-0.5 text-[11px] font-medium text-brand">
                           <Check aria-hidden="true" className="h-3 w-3" />

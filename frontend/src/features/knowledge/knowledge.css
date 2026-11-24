@@ -745,6 +745,10 @@
     }
   }
 
+  .knowledge-ingest-split-modal {
+    width: min(960px, 100%);
+  }
+
   @media (max-width: 420px) {
     .knowledge-card {
       min-height: 220px;

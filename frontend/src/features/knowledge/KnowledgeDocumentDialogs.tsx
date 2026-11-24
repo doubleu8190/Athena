@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
 import { newRequestId } from "../../shared/lib/requestId";
+import { MarkdownSplitEditor } from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { Modal } from "../../shared/ui/Modal";
@@ -27,6 +28,8 @@ import { KnowledgeStateBadge } from "./KnowledgeStateBadge";
 import {
   defaultDocumentTitle,
   KNOWLEDGE_FILE_ACCEPT,
+  KNOWLEDGE_FILE_MAX_BYTES,
+  KNOWLEDGE_TEXT_MAX_LENGTH,
   normalizeDocumentTitle,
   validateDocumentTitle,
   validateKnowledgeFile,
@@ -34,6 +37,19 @@ import {
   type KnowledgeDocument,
   type KnowledgeVersion,
 } from "./model";
+
+async function readTextFile(file: File): Promise<string> {
+  if (typeof file.text === "function") {
+    return file.text();
+  }
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(new Error("无法读取 Markdown 文件内容。"));
+    reader.readAsText(file, "utf-8");
+  });
+}
 
 type IngestMode = "upload" | "text";
 
@@ -55,13 +71,13 @@ export function KnowledgeIngestDialog({
   const formId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const titleErrorId = useId();
-  const textErrorId = useId();
   const fileErrorId = useId();
   const fileHintId = useId();
   const [mode, setMode] = useState<IngestMode>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [text, setText] = useState("");
+  const [importingMarkdown, setImportingMarkdown] = useState(false);
   const [titleError, setTitleError] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -94,6 +110,7 @@ export function KnowledgeIngestDialog({
       setTextError(null);
       setFileError(null);
       setRequestError(null);
+      setImportingMarkdown(false);
       setIdempotencyKey(newRequestId());
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -139,6 +156,48 @@ export function KnowledgeIngestDialog({
           ? current
           : defaultDocumentTitle(nextFile.name),
       );
+    }
+  };
+
+  const handleImportMarkdownText = async (mdFile: File) => {
+    if (pending || importingMarkdown) {
+      return;
+    }
+    if (!mdFile.name.toLowerCase().endsWith(".md")) {
+      setTextError("仅支持导入 .md 扩展名的 Markdown 文件。");
+      return;
+    }
+    if (mdFile.size <= 0) {
+      setTextError("所选 Markdown 文件为空。");
+      return;
+    }
+    if (mdFile.size > KNOWLEDGE_FILE_MAX_BYTES) {
+      setTextError("Markdown 文件不能超过 20 MiB。");
+      return;
+    }
+    setImportingMarkdown(true);
+    setTextError(null);
+    setRequestError(null);
+    try {
+      const content = await readTextFile(mdFile);
+      const validation = validateKnowledgeText(content);
+      if (validation) {
+        setTextError(validation);
+        return;
+      }
+      setText(content);
+      rotateIdempotencyKey();
+      // 新建资料时若标题尚未填写，自动从 .md 文件名派生标题，方便一键导入后微调。
+      if (!replacing) {
+        setTitle((current) =>
+          current.trim() ? current : defaultDocumentTitle(mdFile.name),
+        );
+        setTitleError(null);
+      }
+    } catch {
+      setTextError("无法读取所选 Markdown 文件，请确认文件为 UTF-8 编码。");
+    } finally {
+      setImportingMarkdown(false);
     }
   };
 
@@ -230,6 +289,9 @@ export function KnowledgeIngestDialog({
       }
       onClose={close}
       open={open}
+      panelClassName={
+        mode === "text" ? "knowledge-ingest-split-modal" : undefined
+      }
       title={replacing ? "添加文档新版本" : "添加资料"}
     >
       <form
@@ -275,7 +337,7 @@ export function KnowledgeIngestDialog({
             <input
               aria-label="文档标题"
               aria-describedby={titleError ? titleErrorId : undefined}
-              aria-invalid={Boolean(titleError)}
+              aria-invalid={titleError ? true : undefined}
               autoComplete="off"
               data-autofocus
               disabled={pending}
@@ -323,35 +385,35 @@ export function KnowledgeIngestDialog({
             </small>
           </div>
         ) : (
-          <label className="workspace-field" htmlFor={`${formId}-text`}>
-            <span>文本内容</span>
-            <textarea
-              aria-label="文本内容"
-              aria-describedby={textError ? textErrorId : undefined}
-              aria-invalid={Boolean(textError)}
+          <div className="workspace-field">
+            <label htmlFor={`${formId}-text`}>文本内容</label>
+            <MarkdownSplitEditor
               disabled={pending}
+              error={textError}
               id={`${formId}-text`}
-              onChange={(event) => {
-                setText(event.target.value);
+              importTriggerLabel="导入 .md"
+              importingMarkdown={importingMarkdown}
+              label="文本内容"
+              maxLength={KNOWLEDGE_TEXT_MAX_LENGTH}
+              minHeightClassName="min-h-[240px]"
+              onChange={(nextValue) => {
+                setText(nextValue);
                 setTextError(null);
                 setRequestError(null);
                 rotateIdempotencyKey();
               }}
-              placeholder="粘贴需要解析和检索的纯文本"
+              onImportMarkdownFile={(mdFile) =>
+                void handleImportMarkdownText(mdFile)
+              }
+              placeholder="粘贴或在线编写需要解析和检索的 Markdown / 纯文本资料"
               rows={9}
               value={text}
             />
-            <small>最多 1,000,000 个字符。</small>
-          </label>
+          </div>
         )}
         {fileError ? (
           <p className="field-error" id={fileErrorId} role="alert">
             {fileError}
-          </p>
-        ) : null}
-        {textError ? (
-          <p className="field-error" id={textErrorId} role="alert">
-            {textError}
           </p>
         ) : null}
         {pending ? (

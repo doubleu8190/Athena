@@ -255,8 +255,15 @@ cmd_up() {
   ensure_base_image "$force_build_base"
   ensure_dependencies
 
+  # 必须先基于最新源码构建后端镜像，再执行 Alembic 迁移：
+  # 若本机已存在旧版 athena-backend:latest，直接 run backend-migration 会复用旧镜像，
+  # 导致新增迁移脚本被跳过；同时显式指定 migration profile 以避免部分 Docker Compose 版本
+  # 在 build 阶段报 no such service: backend-migration。
+  info "构建最新后端镜像以包含最新数据库迁移脚本 (athena-backend:latest)..."
+  business_compose --profile migration build backend-migration
+
   info "执行测试数据库结构自动迁移 (Alembic migration)..."
-  business_compose run --rm backend-migration
+  business_compose --profile migration run --rm backend-migration
 
   info "构建并启动 Athena 业务测试容器 (frontend、API、Run Worker)..."
   business_compose up -d --build

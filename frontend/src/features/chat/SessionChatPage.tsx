@@ -37,11 +37,19 @@ interface SessionWorkbenchProps {
 function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
   const queryClient = useQueryClient();
   const [filesDrawerOpen, setFilesDrawerOpen] = useState(false);
-  // 统一提升至会话工作台顶层挂载单个 FilePreviewDialog，由消息流、执行进度、输入器与右侧文件抽屉共用，
-  // 避免 Radix Sheet 与 Dialog 重复挂载冲突并保持焦点与关闭层级清晰。
+  // 统一提升至会话工作台顶层挂载单个 FilePreviewDialog，由消息流、执行进度、输入器与右侧文件抽屉共用；
+  // 预览打开期间文件抽屉以 open={filesDrawerOpen && !previewTarget} 主动让位卸载，彻底消除两个兄弟 Radix
+  // 模态层同时挂载引发的 DismissableLayer / Escape 竞态与 FocusScope 争抢。
   const [previewTarget, setPreviewTarget] = useState<FilePreviewTarget | null>(
     null,
   );
+  const previewTargetRef = useRef<FilePreviewTarget | null>(null);
+  previewTargetRef.current = previewTarget;
+  // 仅当预览由 SessionFilesDrawer 内部触发时记录对应文件 ID，关闭预览并恢复抽屉后精准归还焦点；
+  // 非抽屉入口打开预览时会清空此标记，确保完全保留 FilePreviewDialog 自身的原触发元素回焦逻辑。
+  const [drawerRestoreFocusFileId, setDrawerRestoreFocusFileId] = useState<
+    string | null
+  >(null);
   const composerRef = useRef<SessionComposerHandle>(null);
 
   const sessionFilesQuery = useSessionFiles(sessionId, Boolean(sessionId));
@@ -55,8 +63,46 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
     return map;
   }, [sessionFilesQuery.data?.pages]);
 
+  const handleOpenFilesDrawer = useCallback(() => {
+    setDrawerRestoreFocusFileId(null);
+    setFilesDrawerOpen(true);
+  }, []);
+
+  const handleFilesDrawerOpenChange = useCallback((nextOpen: boolean) => {
+    // 顶层预览打开期间抽屉处于受控让位态，屏蔽期间的开关回调以免误清空用户的抽屉打开意图。
+    if (previewTargetRef.current) {
+      return;
+    }
+    if (!nextOpen) {
+      setDrawerRestoreFocusFileId(null);
+    }
+    setFilesDrawerOpen(nextOpen);
+  }, []);
+
+  const handleDrawerFocusRestored = useCallback(() => {
+    setDrawerRestoreFocusFileId(null);
+  }, []);
+
   const handlePreviewFile = useCallback((target: FilePreviewTarget) => {
+    previewTargetRef.current = target;
+    setDrawerRestoreFocusFileId(null);
     setPreviewTarget(target);
+  }, []);
+
+  const handlePreviewFileFromDrawer = useCallback(
+    (target: FilePreviewTarget) => {
+      previewTargetRef.current = target;
+      setDrawerRestoreFocusFileId(target.fileId);
+      setPreviewTarget(target);
+    },
+    [],
+  );
+
+  const handlePreviewDialogOpenChange = useCallback((nextOpen: boolean) => {
+    if (!nextOpen) {
+      previewTargetRef.current = null;
+      setPreviewTarget(null);
+    }
   }, []);
 
   const handlePreviewMetadataUpdated = useCallback(
@@ -407,7 +453,7 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
 
       <ChatHeader
         hasActiveRun={isActive}
-        onOpenFilesDrawer={() => setFilesDrawerOpen(true)}
+        onOpenFilesDrawer={handleOpenFilesDrawer}
         session={session}
         sessionId={sessionId}
       />
@@ -504,9 +550,11 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
       </div>
 
       <SessionFilesDrawer
-        onOpenChange={setFilesDrawerOpen}
-        onPreviewFile={handlePreviewFile}
-        open={filesDrawerOpen}
+        onFocusRestored={handleDrawerFocusRestored}
+        onOpenChange={handleFilesDrawerOpenChange}
+        onPreviewFile={handlePreviewFileFromDrawer}
+        open={filesDrawerOpen && !previewTarget}
+        restoreFocusFileId={drawerRestoreFocusFileId}
         sessionId={sessionId}
       />
 
@@ -514,11 +562,7 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
         file={previewTarget}
         onExtractionFailed={handlePreviewExtractionFailed}
         onFileMetadataUpdated={handlePreviewMetadataUpdated}
-        onOpenChange={(nextOpen) => {
-          if (!nextOpen) {
-            setPreviewTarget(null);
-          }
-        }}
+        onOpenChange={handlePreviewDialogOpenChange}
         open={Boolean(previewTarget)}
         sessionId={sessionId}
       />

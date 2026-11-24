@@ -10,7 +10,7 @@ import {
   RefreshCw,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
 import {
@@ -45,10 +45,42 @@ import {
 import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
 
 export interface SessionFilesDrawerProps {
+  onFocusRestored?: () => void;
   onOpenChange: (open: boolean) => void;
   onPreviewFile?: (target: FilePreviewTarget) => void;
   open: boolean;
+  /** 关闭顶层预览并恢复抽屉时，用于将焦点精准归还至原文件行对应按钮。 */
+  restoreFocusFileId?: string | null;
   sessionId: string;
+}
+
+/**
+ * 在抽屉 DOM 内按稳定 data 属性查找需要归还焦点的按钮：
+ * 优先定位对应文件的「预览」按钮；若文件已变为不可预览，则退回同行首个可用操作按钮（如下载按钮）。
+ */
+function findRestoreFocusTarget(
+  container: HTMLElement,
+  fileId: string,
+): HTMLElement | null {
+  const previewButtons = container.querySelectorAll<HTMLElement>(
+    "[data-drawer-preview-file-id]",
+  );
+  const previewButton = Array.from(previewButtons).find(
+    (element) => element.dataset.drawerPreviewFileId === fileId,
+  );
+  if (previewButton) {
+    return previewButton;
+  }
+
+  const fileRows = container.querySelectorAll<HTMLElement>(
+    "[data-drawer-file-id]",
+  );
+  const matchingRow = Array.from(fileRows).find(
+    (element) => element.dataset.drawerFileId === fileId,
+  );
+  return (
+    matchingRow?.querySelector<HTMLElement>("button:not(:disabled)") ?? null
+  );
 }
 
 function DrawerFileThumbnail({
@@ -145,7 +177,10 @@ function FileRow({
       : "已完成结构化文本提取，支持在线预览与对话阅读";
 
   return (
-    <li className="flex flex-wrap items-start justify-between gap-2.5 rounded-xl border border-border-subtle bg-canvas p-3 transition-colors hover:border-border-default">
+    <li
+      className="flex flex-wrap items-start justify-between gap-2.5 rounded-xl border border-border-subtle bg-canvas p-3 transition-colors hover:border-border-default"
+      data-drawer-file-id={file.id}
+    >
       <div className="flex min-w-0 flex-1 items-start gap-2.5">
         <DrawerFileThumbnail
           displayName={displayName}
@@ -201,6 +236,7 @@ function FileRow({
             aria-label={`预览文件：${displayName}`}
             className="inline-flex items-center gap-1 rounded-md border border-border-default bg-canvas px-2 py-1 text-xs font-medium text-text-primary transition-colors hover:border-brand-border hover:bg-brand-subtle hover:text-brand focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring-focus"
             data-compact-control="true"
+            data-drawer-preview-file-id={file.id}
             onClick={triggerPreview}
             type="button"
           >
@@ -224,11 +260,14 @@ function FileRow({
  * 集中展示本会话的全部「上传附件」与「生成产物」，提供缩略图、解析状态微标、在线预览与一键下载。
  */
 export function SessionFilesDrawer({
+  onFocusRestored,
   onOpenChange,
   onPreviewFile,
   open,
+  restoreFocusFileId = null,
   sessionId,
 }: SessionFilesDrawerProps) {
+  const sheetContentRef = useRef<HTMLDivElement>(null);
   const filesQuery = useSessionFiles(sessionId, Boolean(sessionId));
 
   const uniqueFiles = useMemo(() => {
@@ -251,7 +290,33 @@ export function SessionFilesDrawer({
 
   return (
     <Sheet onOpenChange={onOpenChange} open={open}>
-      <SheetContent side="right">
+      <SheetContent
+        onOpenAutoFocus={(event) => {
+          if (!restoreFocusFileId) {
+            return;
+          }
+          // 预览弹窗关闭并恢复抽屉时，优先把焦点送回原文件预览按钮，维持键盘无障碍闭环；
+          // 若目标已不存在则退回 Radix 默认首焦点，并统一清理待恢复标记避免污染下次打开。
+          const container =
+            sheetContentRef.current ??
+            (event.currentTarget instanceof HTMLElement
+              ? event.currentTarget
+              : null);
+          if (container) {
+            const target = findRestoreFocusTarget(
+              container,
+              restoreFocusFileId,
+            );
+            if (target) {
+              event.preventDefault();
+              target.focus();
+            }
+          }
+          onFocusRestored?.();
+        }}
+        ref={sheetContentRef}
+        side="right"
+      >
         <SheetHeader>
           <SheetTitle className="flex items-center gap-2">
             <span>会话文件</span>

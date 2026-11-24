@@ -215,13 +215,24 @@ def test_session_migration_constraints_and_repository_round_trip() -> None:
                 )
                 is None
             )
-            project_sessions = await repository.list_active(
+            # M1.5 改绑后 session_unbound 已迁至 project_2，且 session_bound 已软删，
+            # 因此 project_1 下应无活跃会话，project_2 下仅保留 session_unbound。
+            project_1_sessions = await repository.list_active(
                 "user_1",
                 project_id="project_1",
                 unbound=False,
                 offset=0,
                 limit=20,
             )
-            assert [item.id for item in project_sessions.items] == ["session_unbound"]
+            assert [item.id for item in project_1_sessions.items] == []
+
+            project_2_sessions = await repository.list_active(
+                "user_1",
+                project_id="project_2",
+                unbound=False,
+                offset=0,
+                limit=20,
+            )
+            assert [item.id for item in project_2_sessions.items] == ["session_unbound"]
 
     asyncio.run(scenario())

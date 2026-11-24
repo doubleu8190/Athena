@@ -186,15 +186,29 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
                         {"id": server_table_id, "nonce": b"partial"},
                     )
 
+            # M1.6 软删除会标记 deleted_at、清空密文凭据三元组并硬删名下工具，
+            # 读接口与工具管理列表均不再可见原记录。
             await repository.delete(actor, initial.id)
             assert await repository.get(initial.id) is None
             assert (await repository.list_admin(offset=0, limit=10)).total == 0
 
-            await repository.create_with_tools(
-                actor,
-                initial,
-                (_tool(initial.id, "existing", f"tool_{suffix}_existing"),),
+            # 软删除保留原主键行并释放活跃名称唯一约束（uq_mcp_servers_name_active），
+            # 因此需使用新 server ID 重建，并复用被软删前已生效的 replacement.name，
+            # 以真实命中部分唯一索引验证 M1.6 软删后重名复用能力。
+            recreated = McpServerWrite(
+                id=f"mcp_recreated_{suffix}",
+                name=replacement.name,
+                config=initial.config,
+                secrets=initial.secrets,
             )
+            recreated_server = await repository.create_with_tools(
+                actor,
+                recreated,
+                (_tool(recreated.id, "existing", f"tool_{suffix}_existing"),),
+            )
+            assert recreated_server.id == recreated.id
+            assert recreated_server.name == replacement.name
+
             async with session_factory() as session:
                 async with session.begin():
                     await session.execute(
@@ -215,7 +229,25 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
                 )
             assert await repository.get(denied.id) is None
             async with session_factory() as session:
-                assert await session.scalar(select(func.count()).select_from(McpServerModel)) == 1
+                # 活跃 MCP Server 仅保留 recreated 1 条；全表共 2 条（含 1 条软删记录 initial）。
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(McpServerModel)
+                        .where(McpServerModel.deleted_at.is_(None))
+                    )
+                    == 1
+                )
+                assert await session.scalar(select(func.count()).select_from(McpServerModel)) == 2
+                deleted_row = await session.get(McpServerModel, initial.id)
+                assert deleted_row is not None
+                assert deleted_row.deleted_at is not None
+                assert deleted_row.enabled is False
+                assert deleted_row.secrets_ciphertext is None
+                assert deleted_row.secrets_nonce is None
+                assert deleted_row.key_version is None
+                # 仅 recreated 的 1 条工具存在，initial 软删与 denied 回滚均未遗留工具记录。
                 assert await session.scalar(select(func.count()).select_from(McpToolModel)) == 1
+                assert await session.scalar(select(McpToolModel.server_id)) == recreated.id
 
     asyncio.run(scenario())

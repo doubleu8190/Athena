@@ -1504,7 +1504,8 @@ describe("消息流原图灯箱、助手交付产物在线预览、文件抽屉�
     ).not.toBeInTheDocument();
     expect(within(drawer).getByText("已解析")).toBeInTheDocument();
 
-    // 在抽屉内点击 PDF「预览」打开顶层弹窗，关闭弹窗后抽屉仍打开且焦点准确归还至原「预览」按钮（绝不跌落 document.body）
+    // 在抽屉内点击 PDF「预览」打开顶层弹窗：抽屉主动让位卸载使页面仅存唯一模态层，
+    // 关闭弹窗后抽屉无缝恢复且焦点精准归还至该文件的「预览」按钮（绝不跌落 document.body）
     const drawerPdfPreviewBtn = within(drawer).getByRole("button", {
       name: "预览文件：报销单明细.pdf",
     });
@@ -1512,6 +1513,7 @@ describe("消息流原图灯箱、助手交付产物在线预览、文件抽屉�
     const pdfDialog = await screen.findByRole("dialog", {
       name: "报销单明细.pdf",
     });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(
       await within(pdfDialog).findByText("报销总额 1280 元"),
     ).toBeInTheDocument();
@@ -1523,11 +1525,14 @@ describe("消息流原图灯箱、助手交付产物在线预览、文件抽屉�
         screen.queryByRole("dialog", { name: "报销单明细.pdf" }),
       ).not.toBeInTheDocument(),
     );
-    expect(
-      screen.getByRole("dialog", { name: /会话文件/ }),
-    ).toBeInTheDocument();
+    const restoredDrawer = screen.getByRole("dialog", { name: /会话文件/ });
+    expect(restoredDrawer).toBeInTheDocument();
     await waitFor(() => {
-      expect(drawerPdfPreviewBtn).toHaveFocus();
+      expect(
+        within(restoredDrawer).getByRole("button", {
+          name: "预览文件：报销单明细.pdf",
+        }),
+      ).toHaveFocus();
     });
   });
 });

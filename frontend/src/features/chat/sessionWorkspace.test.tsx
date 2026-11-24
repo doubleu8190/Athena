@@ -7,9 +7,11 @@ import * as formatLib from "../../shared/lib/format";
 import {
   getRequestUrl,
   listResponse,
+  makeArtifact,
   makeMessage,
   makeRun,
   makeSession,
+  makeSessionFile,
   makeToolCall,
   makeToolCallDetail,
   PROJECT_A,
@@ -19,6 +21,7 @@ import {
   FakeEventSource,
 } from "../../test/fakeEventSource";
 import { jsonResponse, renderApp } from "../../test/testUtils";
+import type { SessionFile } from "../files/model";
 import type {
   ConversationMessagePage,
   Run,
@@ -36,6 +39,11 @@ const SESSION = makeSession({
 });
 
 interface WorkspaceFetchOptions {
+  fileContent?: (
+    fileId: string,
+    signal?: AbortSignal | null,
+  ) => Response | Promise<Response>;
+  files?: SessionFile[];
   getRuns: () => Run[];
   handleWrite: (
     pathname: string,
@@ -117,9 +125,16 @@ function installWorkspaceFetch(options: WorkspaceFetchOptions) {
         method === "GET"
       ) {
         return jsonResponse({
-          items: [],
+          items: options.files ?? [],
           next_after_file_id: null,
         });
+      }
+      const fileContentMatch = new RegExp(
+        `^/api/v1/sessions/${SESSION.id}/files/([^/]+)/content$`,
+      ).exec(url.pathname);
+      if (fileContentMatch && method === "GET" && options.fileContent) {
+        const fileId = decodeURIComponent(fileContentMatch[1]);
+        return await options.fileContent(fileId, init?.signal);
       }
       if (method !== "GET") {
         return options.handleWrite(url.pathname, method, init);
@@ -3237,6 +3252,285 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     );
     expect(cachedRun?.status).toBe("cancelling");
     expect(cachedRun?.event_sequence).toBe(10);
+  });
+});
+
+describe("会话文件抽屉与顶层预览弹窗互斥层叠与焦点归还", () => {
+  it("抽屉点击预览后抽屉主动让位为单模态层，立即按 Escape 关预览恢复抽屉并归还焦点，再按 Escape 关抽屉", async () => {
+    const reportFile = makeSessionFile({
+      filename: "review-report.md",
+      id: "file-drawer-report",
+      label: "复盘报告",
+      mime_type: "text/markdown",
+      session_id: SESSION.id,
+      size_bytes: 1_024,
+      source: "artifact",
+    });
+    const notesFile = makeSessionFile({
+      filename: "meeting-notes.txt",
+      id: "file-drawer-notes",
+      mime_type: "text/plain",
+      session_id: SESSION.id,
+      size_bytes: 512,
+      source: "upload",
+    });
+    const slowContent = deferred<Response>();
+    let previewRequestAborted = false;
+
+    const fetchMock = installWorkspaceFetch({
+      fileContent: (fileId, signal) => {
+        if (fileId === notesFile.id) {
+          signal?.addEventListener("abort", () => {
+            previewRequestAborted = true;
+          });
+          return slowContent.promise;
+        }
+        return jsonResponse({
+          content: "# 复盘报告\n所有关键指标已核对。",
+          eof: true,
+          file: reportFile,
+          next_offset: 32,
+          source_kind: "raw_text",
+          truncated: false,
+        });
+      },
+      files: [reportFile, notesFile],
+      getRuns: () => [],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [],
+        next_before_sequence: null,
+      }),
+    });
+    const user = userEvent.setup();
+
+    renderApp(`/chat/${SESSION.id}`);
+
+    // 1. 打开右侧「会话文件」抽屉，验证列表渲染且页面仅存 1 个 dialog
+    await user.click(await screen.findByRole("button", { name: "会话文件（2）" }));
+    const drawer = await screen.findByRole("dialog", { name: /会话文件/ });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+
+    const countFilesRequests = () =>
+      fetchMock.mock.calls.filter(([input]) => {
+        const url = new URL(getRequestUrl(input), "http://localhost");
+        return url.pathname === `/api/v1/sessions/${SESSION.id}/files`;
+      }).length;
+    const filesRequestsBeforePreview = countFilesRequests();
+
+    // 2. 点击第二个文件（notes.txt）的「预览」：抽屉主动让位卸载，页面仅存在 1 个顶层 file-preview-dialog
+    await user.click(
+      within(drawer).getByRole("button", {
+        name: "预览文件：meeting-notes.txt",
+      }),
+    );
+    const previewDialog = await screen.findByTestId("file-preview-dialog");
+    expect(previewDialog).toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(
+      screen.queryByRole("dialog", { name: /会话文件/ }),
+    ).not.toBeInTheDocument();
+
+    // 3. 在预览内容尚未返回时立即按 Escape：必须关闭顶层预览灯箱并恢复抽屉，且精准回焦至原文件预览按钮
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("file-preview-dialog"),
+      ).not.toBeInTheDocument();
+    });
+    expect(previewRequestAborted).toBe(true);
+
+    const restoredDrawer = await screen.findByRole("dialog", {
+      name: /会话文件/,
+    });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    // 抽屉恢复依赖 TanStack Query 缓存命中，不触发额外的会话文件列表请求
+    expect(countFilesRequests()).toBe(filesRequestsBeforePreview);
+    const restoredNotesPreviewBtn = within(restoredDrawer).getByRole("button", {
+      name: "预览文件：meeting-notes.txt",
+    });
+    await waitFor(() => {
+      expect(restoredNotesPreviewBtn).toHaveFocus();
+    });
+
+    // 4. 再按一次 Escape：抽屉正常关闭，页面无残留 dialog
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: /会话文件/ }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.queryAllByRole("dialog")).toHaveLength(0);
+
+    // 5. 再次从顶栏正常打开抽屉：旧的回焦目标已被清理，不会误聚焦上次预览的文件按钮
+    await user.click(screen.getByRole("button", { name: "会话文件（2）" }));
+    const reopenedDrawer = await screen.findByRole("dialog", {
+      name: /会话文件/,
+    });
+    await waitFor(() => {
+      expect(reopenedDrawer.contains(document.activeElement)).toBe(true);
+    });
+    expect(
+      within(reopenedDrawer).getByRole("button", {
+        name: "预览文件：meeting-notes.txt",
+      }),
+    ).not.toHaveFocus();
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryAllByRole("dialog")).toHaveLength(0);
+    });
+  });
+
+  it("从消息流与输入器直接打开 FilePreviewDialog 并按 Escape 关闭时，抽屉保持关闭且原回焦行为无回归", async () => {
+    const artifactFile = makeSessionFile({
+      filename: "summary.md",
+      id: "file-msg-summary",
+      label: "执行摘要",
+      mime_type: "text/markdown",
+      session_id: SESSION.id,
+      size_bytes: 1_536,
+      source: "artifact",
+    });
+    const uploadedMemo = makeSessionFile({
+      filename: "memo.txt",
+      id: "file-composer-memo",
+      mime_type: "text/plain",
+      session_id: SESSION.id,
+      size_bytes: 256,
+      source: "upload",
+    });
+    const completedRun = makeRun({
+      id: "run-preview-focus-return",
+      session_id: SESSION.id,
+      status: "completed",
+    });
+
+    installWorkspaceFetch({
+      fileContent: (fileId) => {
+        if (fileId === artifactFile.id) {
+          return jsonResponse({
+            content: "# 执行摘要\n本季度目标全部达成。",
+            eof: true,
+            file: artifactFile,
+            next_offset: 36,
+            source_kind: "raw_text",
+            truncated: false,
+          });
+        }
+        return jsonResponse({
+          content: "备忘录正文内容",
+          eof: true,
+          file: uploadedMemo,
+          next_offset: 21,
+          source_kind: "raw_text",
+          truncated: false,
+        });
+      },
+      files: [artifactFile, uploadedMemo],
+      getRuns: () => [completedRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [
+          makeMessage({
+            id: "msg-artifact-preview-return",
+            parts: [
+              {
+                artifact_id: null,
+                artifacts: [
+                  makeArtifact({
+                    file_id: artifactFile.id,
+                    filename: artifactFile.filename,
+                    label: artifactFile.label,
+                    mime_type: artifactFile.mime_type,
+                    size_bytes: artifactFile.size_bytes,
+                  }),
+                ],
+                output: null,
+                status: "success",
+                tool_call_id: "tc-summary",
+                type: "tool_result",
+              },
+            ],
+            role: "assistant",
+            run_id: completedRun.id,
+            sequence: 1,
+            session_id: SESSION.id,
+          }),
+        ],
+        next_before_sequence: null,
+      }),
+    });
+    const user = userEvent.setup();
+
+    renderApp(`/chat/${SESSION.id}`);
+
+    // 1. 消息流交付产物入口：打开预览 -> Escape 关闭 -> 抽屉保持关闭且焦点精准回到原按钮
+    const messagePreviewBtn = await screen.findByRole("button", {
+      name: "在线预览：执行摘要",
+    });
+    await user.click(messagePreviewBtn);
+    const artifactPreviewDialog = await screen.findByTestId(
+      "file-preview-dialog",
+    );
+    expect(
+      await within(artifactPreviewDialog).findByText("本季度目标全部达成。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: /会话文件/ }),
+    ).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("file-preview-dialog"),
+      ).not.toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("dialog", { name: /会话文件/ }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(messagePreviewBtn).toHaveFocus();
+    });
+
+    // 2. 输入器附件芯片入口：勾选已有文件后点击芯片预览 -> Escape 关闭 -> 抽屉保持关闭且焦点回到原芯片按钮
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    const attachPopover = screen.getByRole("dialog", {
+      name: "引用本会话已有文件",
+    });
+    await user.click(
+      within(attachPopover).getByRole("checkbox", { name: "memo.txt" }),
+    );
+    await user.keyboard("{Escape}");
+
+    const composerPreviewBtn = await screen.findByRole("button", {
+      name: "预览附件：memo.txt",
+    });
+    await user.click(composerPreviewBtn);
+    const memoPreviewDialog = await screen.findByTestId("file-preview-dialog");
+    expect(
+      await within(memoPreviewDialog).findByText("备忘录正文内容"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: /会话文件/ }),
+    ).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("file-preview-dialog"),
+      ).not.toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("dialog", { name: /会话文件/ }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(composerPreviewBtn).toHaveFocus();
+    });
   });
 });
 

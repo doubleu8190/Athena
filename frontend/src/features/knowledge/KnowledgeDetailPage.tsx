@@ -34,6 +34,7 @@ import { KnowledgeSearchDialog } from "./KnowledgeSearchDialog";
 import { KnowledgeStateBadge } from "./KnowledgeStateBadge";
 import {
   canManageKnowledgeBase,
+  countExtraVisibilityGrants,
   knowledgeBaseScope,
   type KnowledgeDocument,
 } from "./model";
@@ -339,6 +340,7 @@ export function KnowledgeDetailPage() {
     user,
     base.data.owner_department_id,
   );
+  const extraGrantCount = countExtraVisibilityGrants(base.data);
   const canManage = canManageKnowledgeBase(user, base.data);
 
   return (
@@ -351,6 +353,9 @@ export function KnowledgeDetailPage() {
                 departmentName={departmentName}
                 scope={scope}
               />
+              {extraGrantCount > 0 ? (
+                <Badge variant="info">额外共享 {extraGrantCount} 项</Badge>
+              ) : null}
               {!canManage ? <Badge variant="neutral">只读</Badge> : null}
             </div>
             <h1>{base.data.name}</h1>

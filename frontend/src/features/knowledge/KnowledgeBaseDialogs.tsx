@@ -1,10 +1,17 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { VisibilityBadge, type VisibilityScope } from "../../shared/ui";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
+import {
+  VisibilityGrantsEditor,
+  defaultOwnerGrant,
+  normalizeVisibilityGrants,
+  visibilityGrantsEqual,
+} from "../access/VisibilityGrantsEditor";
 import { useAdminOrgDepartments } from "../admin/hooks";
+import type { OrgDepartment } from "../admin/model";
 import { useAuth } from "../auth/AuthProvider";
 import {
   isDeptAdmin,
@@ -27,6 +34,7 @@ import {
   type KnowledgeBase,
   type KnowledgeBaseInput,
   type KnowledgeBasePatch,
+  type VisibilityGrantInput,
 } from "./model";
 
 function allowedScopesForUser(user: User | null): VisibilityScope[] {
@@ -50,6 +58,22 @@ function scopeOptionLabel(scope: VisibilityScope): string {
   }
 }
 
+function resolveOwnerDepartmentName(
+  user: User | null,
+  activeOrgDepartments: readonly OrgDepartment[],
+  ownerDepartmentId: string,
+): string | null {
+  const trimmed = ownerDepartmentId.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const fromOrg = activeOrgDepartments.find((dept) => dept.id === trimmed);
+  if (fromOrg) {
+    return fromOrg.name;
+  }
+  return resolveUserDepartmentName(user, trimmed) ?? trimmed;
+}
+
 interface VisibilityFieldsProps {
   departmentError: string | null;
   departmentId: string;
@@ -58,6 +82,9 @@ interface VisibilityFieldsProps {
   onDepartmentChange: (value: string) => void;
   onScopeChange: (value: VisibilityScope) => void;
   open: boolean;
+  orgDepartments: readonly OrgDepartment[];
+  orgDepartmentsError: boolean;
+  orgDepartmentsLoading: boolean;
   scope: VisibilityScope;
 }
 
@@ -65,7 +92,7 @@ interface VisibilityFieldsProps {
  * 知识库可见范围与归属部门字段组：
  * - member：固定为个人知识库（只读展示）；
  * - dept_admin：可选个人 / 部门共享，部门列表仅限本人 managed_department_ids；
- * - super_admin：可选个人 / 部门共享 / 全公司，选部门时按需请求组织部门树，失败安全降级为手工输入部门 ID。
+ * - super_admin：可选个人 / 部门共享 / 全公司，与外层弹窗及 VisibilityGrantsEditor 共享同一次组织部门查询结果，失败安全降级为手工输入部门 ID。
  */
 function KnowledgeVisibilityFields({
   departmentError,
@@ -75,6 +102,9 @@ function KnowledgeVisibilityFields({
   onDepartmentChange,
   onScopeChange,
   open,
+  orgDepartments,
+  orgDepartmentsError,
+  orgDepartmentsLoading,
   scope,
 }: VisibilityFieldsProps) {
   const { user } = useAuth();
@@ -85,11 +115,6 @@ function KnowledgeVisibilityFields({
   const deptAdmin = isDeptAdmin(user);
   const allowedScopes = useMemo(() => allowedScopesForUser(user), [user]);
 
-  const orgDepartments = useAdminOrgDepartments(
-    open && superAdmin && scope === "department",
-    false,
-  );
-
   const managedDeptOptions = useMemo(() => {
     if (!user) {
       return [];
@@ -99,14 +124,6 @@ function KnowledgeVisibilityFields({
       name: resolveUserDepartmentName(user, id) ?? id,
     }));
   }, [user]);
-
-  const activeOrgDeptOptions = useMemo(
-    () =>
-      (orgDepartments.data?.items ?? []).filter(
-        (dept) => dept.status === "active",
-      ),
-    [orgDepartments.data?.items],
-  );
 
   // dept_admin 仅管辖 1 个部门时自动预选，减少重复操作。
   useEffect(() => {
@@ -142,7 +159,7 @@ function KnowledgeVisibilityFields({
 
   const noManagedDepartments = deptAdmin && managedDeptOptions.length === 0;
   const hasDepartmentControl =
-    !noManagedDepartments && !(superAdmin && orgDepartments.isPending);
+    !noManagedDepartments && !(superAdmin && orgDepartmentsLoading);
 
   return (
     <>
@@ -167,7 +184,7 @@ function KnowledgeVisibilityFields({
           {scope === "company"
             ? "全公司活跃员工均可检索，仅超级管理员可维护。"
             : scope === "department"
-              ? "归属部门及子部门成员均可检索，对应部门管理员与超管可维护。"
+              ? "默认向归属部门成员开放，支持按需追加跨部门或按角色只读共享；归属部门管理员与超管可维护。"
               : "仅本人可见、检索与维护。"}
         </small>
       </label>
@@ -205,9 +222,9 @@ function KnowledgeVisibilityFields({
                 </option>
               ))}
             </select>
-          ) : orgDepartments.isPending ? (
+          ) : orgDepartmentsLoading ? (
             <small role="status">正在加载企业活跃部门列表…</small>
-          ) : orgDepartments.isError ? (
+          ) : orgDepartmentsError ? (
             <>
               <input
                 aria-describedby={departmentError ? deptErrorId : undefined}
@@ -233,13 +250,13 @@ function KnowledgeVisibilityFields({
               value={departmentId}
             >
               <option value="">请选择归属部门</option>
-              {activeOrgDeptOptions.map((dept) => (
+              {orgDepartments.map((dept) => (
                 <option key={dept.id} value={dept.id}>
                   {dept.name}
                 </option>
               ))}
               {departmentId &&
-              !activeOrgDeptOptions.some((dept) => dept.id === departmentId) ? (
+              !orgDepartments.some((dept) => dept.id === departmentId) ? (
                 <option value={departmentId}>{departmentId}</option>
               ) : null}
             </select>
@@ -268,6 +285,7 @@ export function NewKnowledgeBaseDialog({
   open,
 }: NewKnowledgeBaseDialogProps) {
   const { user } = useAuth();
+  const superAdmin = isSuperAdmin(user);
   const navigate = useNavigate();
   const formId = useId();
   const nameErrorId = useId();
@@ -277,6 +295,11 @@ export function NewKnowledgeBaseDialog({
   const [visibilityScope, setVisibilityScope] =
     useState<VisibilityScope>("personal");
   const [ownerDepartmentId, setOwnerDepartmentId] = useState("");
+  const [visibilityGrants, setVisibilityGrants] = useState<
+    VisibilityGrantInput[]
+  >([]);
+  // 追踪用户是否主动改动过附加授权区：未改动时必须省略 visibility_grants，交由后端按实时管辖子树派生默认授权，防止直属 dept_admin 触发 403。
+  const [visibilityGrantsTouched, setVisibilityGrantsTouched] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
   const [descriptionError, setDescriptionError] = useState<string | null>(
     null,
@@ -285,6 +308,25 @@ export function NewKnowledgeBaseDialog({
   const [requestError, setRequestError] = useState<string | null>(null);
   const mutation = useCreateKnowledgeBaseMutation();
   const { reset: resetMutation } = mutation;
+
+  // 在弹窗顶层统一拉取一次企业活跃部门目录，透传给归属部门选择器与 VisibilityGrantsEditor，避免重复请求与状态失步。
+  const orgDepartmentsQuery = useAdminOrgDepartments(
+    open && superAdmin && visibilityScope === "department",
+    false,
+  );
+  const activeOrgDepartments = useMemo(
+    () =>
+      (orgDepartmentsQuery.data?.items ?? []).filter(
+        (dept) => dept.status === "active",
+      ),
+    [orgDepartmentsQuery.data?.items],
+  );
+  const ownerDepartmentName = useMemo(
+    () =>
+      resolveOwnerDepartmentName(user, activeOrgDepartments, ownerDepartmentId),
+    [activeOrgDepartments, ownerDepartmentId, user],
+  );
+
   const deptAdminMissingManagedDepts =
     isDeptAdmin(user) &&
     visibilityScope === "department" &&
@@ -296,6 +338,8 @@ export function NewKnowledgeBaseDialog({
       setDescription("");
       setVisibilityScope("personal");
       setOwnerDepartmentId("");
+      setVisibilityGrants([]);
+      setVisibilityGrantsTouched(false);
       setNameError(null);
       setDescriptionError(null);
       setDepartmentError(null);
@@ -304,6 +348,37 @@ export function NewKnowledgeBaseDialog({
     }
     // 每次打开都从干净表单开始，避免把上一次失败内容误带入新知识库。
   }, [open, resetMutation]);
+
+  const handleScopeChange = useCallback(
+    (nextScope: VisibilityScope) => {
+      setVisibilityScope(nextScope);
+      const trimmed = ownerDepartmentId.trim();
+      setVisibilityGrants(
+        nextScope === "department" && trimmed
+          ? [defaultOwnerGrant(trimmed, superAdmin)]
+          : [],
+      );
+      setVisibilityGrantsTouched(false);
+      setDepartmentError(null);
+      setRequestError(null);
+    },
+    [ownerDepartmentId, superAdmin],
+  );
+
+  const handleDepartmentChange = useCallback(
+    (nextDeptId: string) => {
+      setOwnerDepartmentId(nextDeptId);
+      const trimmed = nextDeptId.trim();
+      // 同步按新归属部门重置默认授权并清除 touched 标记，避免子编辑器触发冗余同步将未改动状态误判为已改动。
+      setVisibilityGrants(
+        trimmed ? [defaultOwnerGrant(trimmed, superAdmin)] : [],
+      );
+      setVisibilityGrantsTouched(false);
+      setDepartmentError(null);
+      setRequestError(null);
+    },
+    [superAdmin],
+  );
 
   const close = () => {
     if (!mutation.isPending) {
@@ -341,6 +416,14 @@ export function NewKnowledgeBaseDialog({
     } else if (visibilityScope === "department") {
       payload.visibility_scope = "department";
       payload.owner_department_id = trimmedDeptId;
+      // 仅在用户主动改动过附加授权区时携带规范化后的 visibility_grants；未改动时省略，交由后端派生默认归属授权。
+      if (visibilityGrantsTouched) {
+        payload.visibility_grants = normalizeVisibilityGrants(
+          trimmedDeptId,
+          visibilityGrants,
+          superAdmin,
+        );
+      }
     }
     try {
       const created = await mutation.mutateAsync(payload);
@@ -381,6 +464,9 @@ export function NewKnowledgeBaseDialog({
       }
       onClose={close}
       open={open}
+      panelClassName={
+        visibilityScope === "department" ? "w-full max-w-2xl" : undefined
+      }
       title="新建知识库"
     >
       <form
@@ -450,19 +536,36 @@ export function NewKnowledgeBaseDialog({
           departmentId={ownerDepartmentId}
           disabled={mutation.isPending}
           formId={formId}
-          onDepartmentChange={(value) => {
-            setOwnerDepartmentId(value);
-            setDepartmentError(null);
-            setRequestError(null);
-          }}
-          onScopeChange={(value) => {
-            setVisibilityScope(value);
-            setDepartmentError(null);
-            setRequestError(null);
-          }}
+          onDepartmentChange={handleDepartmentChange}
+          onScopeChange={handleScopeChange}
           open={open}
+          orgDepartments={activeOrgDepartments}
+          orgDepartmentsError={orgDepartmentsQuery.isError}
+          orgDepartmentsLoading={orgDepartmentsQuery.isPending}
           scope={visibilityScope}
         />
+
+        {visibilityScope === "department" && ownerDepartmentId.trim() ? (
+          <VisibilityGrantsEditor
+            defaultIncludeSubdepartments={superAdmin}
+            departments={superAdmin ? activeOrgDepartments : undefined}
+            departmentsError={superAdmin ? orgDepartmentsQuery.isError : false}
+            departmentsLoading={
+              superAdmin ? orgDepartmentsQuery.isPending : false
+            }
+            disabled={mutation.isPending}
+            enabled={open}
+            onChange={(nextGrants) => {
+              setVisibilityGrants(nextGrants);
+              setVisibilityGrantsTouched(true);
+              setRequestError(null);
+            }}
+            ownerDepartmentId={ownerDepartmentId}
+            ownerDepartmentName={ownerDepartmentName}
+            resourceLabel="知识库"
+            value={visibilityGrants}
+          />
+        ) : null}
 
         {requestError ? <ErrorBanner message={requestError} /> : null}
       </form>
@@ -482,50 +585,150 @@ export function EditKnowledgeBaseDialog({
   open,
 }: EditKnowledgeBaseDialogProps) {
   const { user } = useAuth();
+  const superAdmin = isSuperAdmin(user);
   const formId = useId();
   const nameErrorId = useId();
   const descriptionErrorId = useId();
   const initialScope = knowledgeBaseScope(base);
   const initialOwnerDeptId = base.owner_department_id ?? "";
+  // 基线授权与后端当前持久化授权对齐，用于精准比较「同部门仅改动附加授权」是否产生真实差异。
+  const initialGrants = useMemo(
+    () =>
+      initialScope === "department" && initialOwnerDeptId
+        ? normalizeVisibilityGrants(
+            initialOwnerDeptId,
+            base.visibility_grants,
+            superAdmin,
+          )
+        : [],
+    [base.visibility_grants, initialOwnerDeptId, initialScope, superAdmin],
+  );
   const [name, setName] = useState(base.name);
   const [description, setDescription] = useState(base.description ?? "");
   const [visibilityScope, setVisibilityScope] =
     useState<VisibilityScope>(initialScope);
   const [ownerDepartmentId, setOwnerDepartmentId] =
     useState(initialOwnerDeptId);
+  const [visibilityGrants, setVisibilityGrants] =
+    useState<VisibilityGrantInput[]>(initialGrants);
+  // 切入部门范围或更换归属部门后，仅当用户显式改动附加授权时才携带 visibility_grants，防止直属 dept_admin 触发 403。
+  const [visibilityGrantsTouched, setVisibilityGrantsTouched] = useState(false);
+  // 归属部门临时切到既有附加部门再切回原归属部门时，通过递增 key 重建 VisibilityGrantsEditor 实例与 prevOwnerIdRef，
+  // 避免其内部归属切换 effect 按旧 prevOwnerId 误滤除原有合法附加授权并反向触发 onChange 标脏表单。
+  const [grantsEditorResetKey, setGrantsEditorResetKey] = useState(0);
   const [nameError, setNameError] = useState<string | null>(null);
   const [descriptionError, setDescriptionError] = useState<string | null>(
     null,
   );
   const [departmentError, setDepartmentError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const lastInitKeyRef = useRef<string | null>(null);
   const mutation = useUpdateKnowledgeBaseMutation(base.id);
   const { reset: resetMutation } = mutation;
+
+  const orgDepartmentsQuery = useAdminOrgDepartments(
+    open && superAdmin && visibilityScope === "department",
+    false,
+  );
+  const activeOrgDepartments = useMemo(
+    () =>
+      (orgDepartmentsQuery.data?.items ?? []).filter(
+        (dept) => dept.status === "active",
+      ),
+    [orgDepartmentsQuery.data?.items],
+  );
+  const ownerDepartmentName = useMemo(
+    () =>
+      resolveOwnerDepartmentName(user, activeOrgDepartments, ownerDepartmentId),
+    [activeOrgDepartments, ownerDepartmentId, user],
+  );
+
   const deptAdminMissingManagedDepts =
     isDeptAdmin(user) &&
     visibilityScope === "department" &&
     (user?.managed_department_ids.length ?? 0) === 0;
 
+  // 仅在弹窗从关闭切为打开或切换编辑目标知识库时初始化草稿，避免编辑期间后台列表刷新冲掉未保存授权修改。
   useEffect(() => {
-    if (open) {
-      setName(base.name);
-      setDescription(base.description ?? "");
-      setVisibilityScope(initialScope);
-      setOwnerDepartmentId(initialOwnerDeptId);
-      setNameError(null);
-      setDescriptionError(null);
-      setDepartmentError(null);
-      setRequestError(null);
-      resetMutation();
+    if (!open) {
+      lastInitKeyRef.current = null;
+      return;
     }
+    if (lastInitKeyRef.current === base.id) {
+      return;
+    }
+    lastInitKeyRef.current = base.id;
+    setName(base.name);
+    setDescription(base.description ?? "");
+    setVisibilityScope(initialScope);
+    setOwnerDepartmentId(initialOwnerDeptId);
+    setVisibilityGrants(initialGrants);
+    setVisibilityGrantsTouched(false);
+    setGrantsEditorResetKey((prev) => prev + 1);
+    setNameError(null);
+    setDescriptionError(null);
+    setDepartmentError(null);
+    setRequestError(null);
+    resetMutation();
   }, [
     base.description,
+    base.id,
     base.name,
+    initialGrants,
     initialOwnerDeptId,
     initialScope,
     open,
     resetMutation,
   ]);
+
+  const handleScopeChange = useCallback(
+    (nextScope: VisibilityScope) => {
+      setVisibilityScope(nextScope);
+      if (nextScope === "department") {
+        const trimmed = ownerDepartmentId.trim();
+        // 切回原归属部门时恢复原持久化基线授权；否则按当前归属部门初始化默认授权。
+        if (initialScope === "department" && trimmed === initialOwnerDeptId) {
+          setVisibilityGrants(initialGrants);
+        } else {
+          setVisibilityGrants(
+            trimmed ? [defaultOwnerGrant(trimmed, superAdmin)] : [],
+          );
+        }
+      } else {
+        setVisibilityGrants([]);
+      }
+      setVisibilityGrantsTouched(false);
+      setDepartmentError(null);
+      setRequestError(null);
+    },
+    [
+      initialGrants,
+      initialOwnerDeptId,
+      initialScope,
+      ownerDepartmentId,
+      superAdmin,
+    ],
+  );
+
+  const handleDepartmentChange = useCallback(
+    (nextDeptId: string) => {
+      setOwnerDepartmentId(nextDeptId);
+      const trimmed = nextDeptId.trim();
+      if (initialScope === "department" && trimmed === initialOwnerDeptId) {
+        // 切回原归属部门恢复基线授权时递增 reset key，确保子编辑器以最新 owner 重建 prevOwnerIdRef，防回写丢授权。
+        setVisibilityGrants(initialGrants);
+        setGrantsEditorResetKey((prev) => prev + 1);
+      } else {
+        setVisibilityGrants(
+          trimmed ? [defaultOwnerGrant(trimmed, superAdmin)] : [],
+        );
+      }
+      setVisibilityGrantsTouched(false);
+      setDepartmentError(null);
+      setRequestError(null);
+    },
+    [initialGrants, initialOwnerDeptId, initialScope, superAdmin],
+  );
 
   const close = () => {
     if (!mutation.isPending) {
@@ -548,7 +751,7 @@ export function EditKnowledgeBaseDialog({
       (visibilityScope === "department" &&
         trimmedDeptId !== initialOwnerDeptId);
     const nextDepartmentError =
-      visibilityChanged && visibilityScope === "department" && !trimmedDeptId
+      visibilityScope === "department" && !trimmedDeptId
         ? "请选择或填写部门共享知识库的归属部门。"
         : null;
     setNameError(nextNameError);
@@ -561,6 +764,22 @@ export function EditKnowledgeBaseDialog({
     const normalizedName = normalizeKnowledgeName(name);
     const normalizedDescription =
       normalizeKnowledgeDescription(description);
+    const stayingSameDepartment =
+      initialScope === "department" &&
+      visibilityScope === "department" &&
+      trimmedDeptId === initialOwnerDeptId;
+    const normalizedGrants =
+      visibilityScope === "department" && trimmedDeptId
+        ? normalizeVisibilityGrants(
+            trimmedDeptId,
+            visibilityGrants,
+            superAdmin,
+          )
+        : [];
+    const grantsChangedInSameDepartment =
+      stayingSameDepartment &&
+      !visibilityGrantsEqual(normalizedGrants, initialGrants);
+
     const patch: KnowledgeBasePatch = {};
     if (normalizedName !== base.name) {
       patch.name = normalizedName;
@@ -573,10 +792,17 @@ export function EditKnowledgeBaseDialog({
     }
     if (visibilityChanged) {
       patch.visibility_scope = visibilityScope;
-      // 仅切换/修改为 department 时透传归属部门；切换至 company/personal 时不传非法 owner_department_id。
+      // 仅切换/修改为 department 时透传归属部门；切换至 company/personal 时严禁携带 owner_department_id 或 visibility_grants。
       if (visibilityScope === "department") {
         patch.owner_department_id = trimmedDeptId;
+        // 切入部门范围或更换归属部门后，仅用户显式调整授权区时才携带 visibility_grants；未改动时省略交由后端重建归属默认授权。
+        if (visibilityGrantsTouched) {
+          patch.visibility_grants = normalizedGrants;
+        }
       }
+    } else if (grantsChangedInSameDepartment) {
+      // 名称、说明、范围及归属部门均未变化但附加授权实际变化时，单独携带 visibility_grants 发起 PATCH。
+      patch.visibility_grants = normalizedGrants;
     }
     if (Object.keys(patch).length === 0) {
       onClose();
@@ -618,6 +844,9 @@ export function EditKnowledgeBaseDialog({
       }
       onClose={close}
       open={open}
+      panelClassName={
+        visibilityScope === "department" ? "w-full max-w-2xl" : undefined
+      }
       title="编辑知识库"
     >
       <form
@@ -686,19 +915,37 @@ export function EditKnowledgeBaseDialog({
           departmentId={ownerDepartmentId}
           disabled={mutation.isPending}
           formId={formId}
-          onDepartmentChange={(value) => {
-            setOwnerDepartmentId(value);
-            setDepartmentError(null);
-            setRequestError(null);
-          }}
-          onScopeChange={(value) => {
-            setVisibilityScope(value);
-            setDepartmentError(null);
-            setRequestError(null);
-          }}
+          onDepartmentChange={handleDepartmentChange}
+          onScopeChange={handleScopeChange}
           open={open}
+          orgDepartments={activeOrgDepartments}
+          orgDepartmentsError={orgDepartmentsQuery.isError}
+          orgDepartmentsLoading={orgDepartmentsQuery.isPending}
           scope={visibilityScope}
         />
+
+        {visibilityScope === "department" && ownerDepartmentId.trim() ? (
+          <VisibilityGrantsEditor
+            defaultIncludeSubdepartments={superAdmin}
+            departments={superAdmin ? activeOrgDepartments : undefined}
+            departmentsError={superAdmin ? orgDepartmentsQuery.isError : false}
+            departmentsLoading={
+              superAdmin ? orgDepartmentsQuery.isPending : false
+            }
+            disabled={mutation.isPending}
+            enabled={open}
+            key={`${base.id}-${grantsEditorResetKey}`}
+            onChange={(nextGrants) => {
+              setVisibilityGrants(nextGrants);
+              setVisibilityGrantsTouched(true);
+              setRequestError(null);
+            }}
+            ownerDepartmentId={ownerDepartmentId}
+            ownerDepartmentName={ownerDepartmentName}
+            resourceLabel="知识库"
+            value={visibilityGrants}
+          />
+        ) : null}
 
         {requestError ? <ErrorBanner message={requestError} /> : null}
       </form>

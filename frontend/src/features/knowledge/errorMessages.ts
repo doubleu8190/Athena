@@ -18,6 +18,18 @@ const KNOWLEDGE_ERROR_COPY: Record<string, string> = {
   owner_department_not_found: "所选归属部门不存在或已归档。",
   visibility_grants_invalid: "可见性授权配置无效，请检查部门或角色设置。",
   visibility_grants_not_allowed: "当前可见范围不支持额外共享授权。",
+  visibility_grant_forbidden:
+    "当前账号没有权限配置所选部门或角色共享（部门管理员仅可授权自身管辖内的部门，不可按角色共享；未拥有目标部门子树管辖权时不可开启「包含下级子部门」）。",
+  visibility_grant_invalid: "可见性授权项格式无效，请检查部门或角色配置后重试。",
+  visibility_grant_target_invalid: "可见性授权目标标识无效或超过长度限制。",
+  visibility_grant_duplicate:
+    "可见性授权列表中存在重复的部门或角色，请去重后重试。",
+  visibility_grant_role_invalid:
+    "所选授权角色无效，仅支持员工、部门管理员或超级管理员。",
+  visibility_grant_target_type_invalid:
+    "不支持的授权目标类型，仅支持部门或角色。",
+  visibility_grant_department_not_found:
+    "所选附加共享部门不存在或已归档，请刷新部门列表后重试。",
   document_title_invalid:
     "文档标题需为 1–255 个字符，且不能包含控制字符。",
   document_text_invalid: "文本内容为空或超过 1,000,000 个字符。",

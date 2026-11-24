@@ -337,12 +337,6 @@
     gap: 14px;
   }
 
-  .personal-skill-guide {
-    min-height: 240px;
-    font-family: var(--font-mono);
-    font-size: 13px !important;
-  }
-
   .personal-skill-save-notice {
     display: flex;
     align-items: flex-start;
@@ -419,10 +413,6 @@
 
     .personal-skill-mode-switch button {
       flex: 1;
-    }
-
-    .personal-skill-guide {
-      min-height: 210px;
     }
   }
 }

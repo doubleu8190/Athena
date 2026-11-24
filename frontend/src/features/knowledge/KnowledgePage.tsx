@@ -24,6 +24,7 @@ import { knowledgeErrorMessage } from "./errorMessages";
 import { useKnowledgeList } from "./hooks";
 import {
   canManageKnowledgeBase,
+  countExtraVisibilityGrants,
   knowledgeBaseScope,
   type KnowledgeBase,
 } from "./model";
@@ -224,6 +225,7 @@ export function KnowledgePage() {
                 user,
                 base.owner_department_id,
               );
+              const extraGrantCount = countExtraVisibilityGrants(base);
               const manageable = canManageKnowledgeBase(user, base);
               return (
                 <li className="knowledge-card" key={base.id}>
@@ -233,6 +235,11 @@ export function KnowledgePage() {
                         departmentName={departmentName}
                         scope={scope}
                       />
+                      {extraGrantCount > 0 ? (
+                        <Badge variant="info">
+                          额外共享 {extraGrantCount} 项
+                        </Badge>
+                      ) : null}
                       {!manageable ? (
                         <Badge variant="neutral">只读</Badge>
                       ) : null}

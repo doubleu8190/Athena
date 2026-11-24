@@ -98,6 +98,42 @@ export function canManageKnowledgeBase(
   return false;
 }
 
+/**
+ * 统计部门共享知识库除归属部门默认授权以外的额外授权数量（按 target_type:target_id 去重）：
+ * - 非 department 范围或缺少归属部门时返回 0；
+ * - 跳过 target_type === "department" 且 target_id === owner_department_id 的归属默认项；
+ * - 供目录卡片与详情页克制展示「额外共享 N 项」徽章。
+ */
+export function countExtraVisibilityGrants(
+  base: Pick<
+    KnowledgeBase,
+    "visibility_scope" | "owner_department_id" | "visibility_grants"
+  >,
+): number {
+  if (knowledgeBaseScope(base) !== "department") {
+    return 0;
+  }
+  const ownerDeptId = base.owner_department_id?.trim() ?? "";
+  if (!ownerDeptId || !base.visibility_grants?.length) {
+    return 0;
+  }
+  const seen = new Set<string>([`department:${ownerDeptId}`]);
+  let count = 0;
+  for (const grant of base.visibility_grants) {
+    const targetId = grant.target_id.trim();
+    if (!targetId) {
+      continue;
+    }
+    const key = `${grant.target_type}:${targetId}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    count += 1;
+  }
+  return count;
+}
+
 export interface KnowledgeBaseListResponse {
   items: KnowledgeBase[];
   page: number;

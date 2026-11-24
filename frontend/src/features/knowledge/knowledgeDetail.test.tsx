@@ -9,6 +9,7 @@ import {
   makeKnowledgeDocument,
   makeKnowledgeHit,
   makeKnowledgeVersion,
+  makeSuperAdmin,
   TEST_USER,
 } from "../../test/fixtures";
 import { jsonResponse, renderApp } from "../../test/testUtils";
@@ -1343,5 +1344,134 @@ describe("知识库检索", () => {
     expect(
       within(preview).getByRole("heading", { name: "差旅报销规范" }),
     ).toBeInTheDocument();
+  });
+
+  it("部门共享知识库详情页展示额外共享徽章，并支持在详情页直接编辑附加授权后同步刷新", async () => {
+    const superAdmin = makeSuperAdmin();
+    let currentBase = {
+      ...KNOWLEDGE_BASE_A,
+      id: "kb-detail-shared",
+      name: "研发与财务共享知识库",
+      owner_department_id: "dept-fin",
+      visibility_grants: [
+        {
+          created_at: "2026-11-24T09:00:00Z",
+          id: "g-owner",
+          include_subdepartments: true,
+          target_id: "dept-fin",
+          target_type: "department" as const,
+        },
+        {
+          created_at: "2026-11-24T09:00:00Z",
+          id: "g-rd",
+          include_subdepartments: true,
+          target_id: "dept-rd",
+          target_type: "department" as const,
+        },
+        {
+          created_at: "2026-11-24T09:00:00Z",
+          id: "g-role",
+          include_subdepartments: false,
+          target_id: "dept_admin",
+          target_type: "role" as const,
+        },
+      ],
+      visibility_scope: "department" as const,
+    };
+
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(superAdmin);
+        }
+        if (url.pathname === "/api/v1/admin/org/departments") {
+          return jsonResponse({
+            items: [
+              {
+                created_at: "2026-10-01T00:00:00Z",
+                external_id: "ext-fin",
+                id: "dept-fin",
+                name: "财务部",
+                order_index: 1,
+                parent_id: "dept-root",
+                path: "/dept-root/dept-fin/",
+                status: "active",
+                synced_at: "2026-11-24T00:00:00Z",
+                updated_at: "2026-11-24T00:00:00Z",
+              },
+              {
+                created_at: "2026-10-01T00:00:00Z",
+                external_id: "ext-rd",
+                id: "dept-rd",
+                name: "研发部",
+                order_index: 2,
+                parent_id: "dept-root",
+                path: "/dept-root/dept-rd/",
+                status: "active",
+                synced_at: "2026-11-24T00:00:00Z",
+                updated_at: "2026-11-24T00:00:00Z",
+              },
+            ],
+          });
+        }
+        if (url.pathname === `/api/v1/knowledge-bases/${currentBase.id}`) {
+          if (init?.method === "PATCH") {
+            const body = JSON.parse(String(init.body)) as {
+              visibility_grants?: Array<{
+                include_subdepartments: boolean;
+                target_id: string;
+                target_type: "department" | "role";
+              }>;
+            };
+            currentBase = {
+              ...currentBase,
+              visibility_grants: (body.visibility_grants ?? []).map(
+                (grant, index) => ({
+                  ...grant,
+                  created_at: "2026-11-24T09:05:00Z",
+                  id: `g-next-${index}`,
+                }),
+              ),
+            };
+            return jsonResponse(currentBase);
+          }
+          return jsonResponse(currentBase);
+        }
+        if (
+          url.pathname === `/api/v1/knowledge-bases/${currentBase.id}/documents`
+        ) {
+          return jsonResponse(knowledgeListResponse([], 1, 10));
+        }
+        if (url.pathname === "/api/v1/knowledge-bases") {
+          return jsonResponse(knowledgeListResponse([currentBase], 1, 12));
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp(`/knowledge/${currentBase.id}`);
+    expect(
+      await screen.findByRole("heading", {
+        level: 1,
+        name: "研发与财务共享知识库",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("额外共享 2 项")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    const editDialog = screen.getByRole("dialog", { name: "编辑知识库" });
+    await user.click(
+      within(editDialog).getByRole("button", {
+        name: "移除附加授权：部门管理员",
+      }),
+    );
+    await user.click(
+      within(editDialog).getByRole("button", { name: "保存知识库" }),
+    );
+
+    expect(await screen.findByText("额外共享 1 项")).toBeInTheDocument();
   });
 });

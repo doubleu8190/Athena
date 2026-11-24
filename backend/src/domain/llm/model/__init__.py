@@ -30,6 +30,10 @@ from domain.llm.model.profile_errors import (
     ModelProfileNotFoundError,
 )
 from domain.llm.model.types import (
+    LlmContentPart,
+    LlmImageDetail,
+    LlmImageMimeType,
+    LlmImagePart,
     LlmMessage,
     LlmOutput,
     LlmRequest,
@@ -37,6 +41,7 @@ from domain.llm.model.types import (
     LlmRole,
     LlmStreamEvent,
     LlmText,
+    LlmTextPart,
     LlmTool,
     LlmToolCall,
     LlmUsage,
@@ -50,7 +55,11 @@ from domain.llm.model.types import (
 __all__ = [
     "LlmCapabilityError",
     "LlmConfigurationError",
+    "LlmContentPart",
     "LlmError",
+    "LlmImageDetail",
+    "LlmImageMimeType",
+    "LlmImagePart",
     "LlmIncompleteError",
     "LlmMessage",
     "LlmOutput",
@@ -62,6 +71,7 @@ __all__ = [
     "LlmRequestError",
     "LlmRole",
     "LlmText",
+    "LlmTextPart",
     "LlmStreamEvent",
     "LlmTool",
     "LlmToolArgumentsError",

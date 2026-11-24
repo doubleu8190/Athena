@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC
 from functools import lru_cache
 from typing import Any, cast
@@ -33,7 +33,14 @@ from common.date import utc_now
 from common.json import utf8_size
 from domain.access import ResourceType, VisibilityScope
 from domain.auth.ports import CurrentSessionReader
-from domain.file import PendingSessionFile, SessionFile, TextFileReadError
+from domain.file import (
+    MAX_VISION_IMAGES_PER_RUN,
+    VISION_IMAGE_MIME_TYPES,
+    PendingSessionFile,
+    SessionFile,
+    TextFileReadError,
+    VisionImageError,
+)
 from domain.knowledge.model import SearchResult
 from domain.mcp import (
     McpCallResult,
@@ -51,7 +58,7 @@ from domain.preference import (
     UserMemorySource,
 )
 from domain.project import ProjectNotFoundError
-from domain.run import Run, RunInputFileContext
+from domain.run import Run, RunInputFileContext, RunInputImageAttachment
 from domain.session import SessionRepository, SessionScope
 from domain.skill import (
     SESSION_FILE_LIST_TOOL_ID,
@@ -889,6 +896,98 @@ class RunToolRuntimeService(RunToolRuntime):
             )
             for file in files
         )
+
+    async def build_run_input_vision_context(
+        self,
+        run: Run,
+        input_files: Sequence[RunInputFileContext],
+        *,
+        supports_vision: bool,
+    ) -> tuple[tuple[RunInputFileContext, ...], tuple[RunInputImageAttachment, ...]]:
+        """按模型识图能力解析输入图片：非识图温柔降级，识图最多加载 5 张且单图失败不阻断。"""
+        if not input_files:
+            return (), ()
+        image_file_ids = tuple(
+            dict.fromkeys(
+                item.file_id for item in input_files if item.mime_type in VISION_IMAGE_MIME_TYPES
+            )
+        )
+        if not image_file_ids:
+            return tuple(input_files), ()
+
+        # 方案 A2（非识图模型温柔降级）：不读取对象存储图片字节，仅回填安全状态交由上下文引导。
+        if not supports_vision:
+            updated = tuple(
+                replace(item, vision_status="unsupported_by_current_model")
+                if item.mime_type in VISION_IMAGE_MIME_TYPES
+                else item
+                for item in input_files
+            )
+            return updated, ()
+
+        if self._session_files is None:
+            updated = tuple(
+                replace(item, vision_status="image_invalid")
+                if item.mime_type in VISION_IMAGE_MIME_TYPES
+                else item
+                for item in input_files
+            )
+            return updated, ()
+
+        # 批量按当前会话权限复核目标图片元数据，确保只读取当前用户可见的本会话图片。
+        session_files = await self._session_files.get_many(
+            run.session_id,
+            run.owner_id,
+            image_file_ids,
+        )
+        file_by_id = {file.id: file for file in session_files}
+
+        updated_contexts: list[RunInputFileContext] = []
+        attachments: list[RunInputImageAttachment] = []
+        for item in input_files:
+            if item.mime_type not in VISION_IMAGE_MIME_TYPES:
+                updated_contexts.append(item)
+                continue
+            # 单次 Run 最多加载 5 张有效视觉图片；超出上限的后续图片直接跳过并标记 skipped_limit。
+            if len(attachments) >= MAX_VISION_IMAGES_PER_RUN:
+                updated_contexts.append(replace(item, vision_status="skipped_limit"))
+                continue
+            session_file = file_by_id.get(item.file_id)
+            if session_file is None:
+                updated_contexts.append(replace(item, vision_status="image_invalid"))
+                continue
+            try:
+                normalized = await self._session_files.load_vision_image(session_file)
+            except asyncio.CancelledError:
+                raise
+            except VisionImageError as error:
+                # 单张损坏、超大或非白名单图片绝不阻断整轮 Run，降级记录安全状态后继续处理后续图片。
+                status = (
+                    "image_too_large" if error.code == "vision_image_too_large" else "image_invalid"
+                )
+                updated_contexts.append(replace(item, vision_status=status))
+                continue
+            except Exception as error:
+                logger.warning(
+                    "run_vision_image_load_failed run_id=%s file_id=%s exception_type=%s",
+                    run.id,
+                    item.file_id,
+                    type(error).__name__,
+                )
+                updated_contexts.append(replace(item, vision_status="image_invalid"))
+                continue
+            attachments.append(
+                RunInputImageAttachment(
+                    file_id=normalized.file_id,
+                    filename=normalized.filename,
+                    mime_type=normalized.mime_type,
+                    data_base64=normalized.data_base64,
+                    width=normalized.width,
+                    height=normalized.height,
+                )
+            )
+            updated_contexts.append(replace(item, vision_status="attached"))
+        return tuple(updated_contexts), tuple(attachments)
 
     def validate_call(
         self,

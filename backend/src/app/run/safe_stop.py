@@ -733,6 +733,8 @@ class SafeStopReporter:
             "conversation": conversation,
             "execution": execution,
             "message_file_references": message_file_references,
+            # 安全止损隔离：仅持久化最小安全文件元数据（含可选 vision_status），
+            # 严禁将执行期内存态视觉图片或任何 base64 数据写入报告或数据库。
             "input_files": [
                 {
                     "file_id": item.file_id,
@@ -744,6 +746,11 @@ class SafeStopReporter:
                     "extraction_status": item.extraction_status,
                     "extracted_text_bytes": item.extracted_text_bytes,
                     "extraction_error_code": item.extraction_error_code,
+                    **(
+                        {"vision_status": item.vision_status}
+                        if item.vision_status is not None
+                        else {}
+                    ),
                 }
                 for item in state.input_files
             ],

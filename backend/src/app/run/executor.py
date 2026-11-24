@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
@@ -26,6 +26,7 @@ from app.run.config import RunWorkerConfig
 from app.run.context import (
     RunContextError,
     RunInputFileContext,
+    RunInputImageAttachment,
     measure_llm_request,
 )
 from app.run.events import publish_pending_events
@@ -44,7 +45,7 @@ from app.tool.runtime import (
 from common.ids import new_id, now_utc
 from common.json import utf8_size
 from domain.access import ResourceType
-from domain.file import PendingSessionFile
+from domain.file import VISION_IMAGE_MIME_TYPES, PendingSessionFile
 from domain.llm.model import (
     LlmError,
     LlmMessage,
@@ -154,6 +155,9 @@ class _ExecutionState:
     round: int = 0
     publish_disabled: bool = False
     trigger_text: str | None = None
+    input_images: tuple[RunInputImageAttachment, ...] = ()
+    vision_resolved: bool = False
+    vision_resolved_supports_vision: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,6 +497,44 @@ class RunExecutor:
             await self._save_final(state, text, response)
             return
 
+    async def _ensure_vision_context(
+        self,
+        state: _ExecutionState,
+        runtime: RuntimeModelProfile,
+    ) -> None:
+        """单次 Run 周期内按需解析并缓存一次视觉图片附件，避免多轮工具循环重复下载重编码。"""
+        supports_vision = runtime.version.supports_vision
+        if state.vision_resolved and state.vision_resolved_supports_vision == supports_vision:
+            return
+        if not state.input_files or not any(
+            item.mime_type in VISION_IMAGE_MIME_TYPES for item in state.input_files
+        ):
+            state.input_images = ()
+            state.vision_resolved = True
+            state.vision_resolved_supports_vision = supports_vision
+            return
+        if self._tool_runtime is None:
+            fallback_status = "image_invalid" if supports_vision else "unsupported_by_current_model"
+            state.input_files = tuple(
+                replace(item, vision_status=fallback_status)
+                if item.mime_type in VISION_IMAGE_MIME_TYPES
+                else item
+                for item in state.input_files
+            )
+            state.input_images = ()
+            state.vision_resolved = True
+            state.vision_resolved_supports_vision = supports_vision
+            return
+        updated_files, input_images = await self._tool_runtime.build_run_input_vision_context(
+            state.run,
+            state.input_files,
+            supports_vision=supports_vision,
+        )
+        state.input_files = updated_files
+        state.input_images = input_images
+        state.vision_resolved = True
+        state.vision_resolved_supports_vision = supports_vision
+
     async def _prepare_request(
         self,
         state: _ExecutionState,
@@ -502,6 +544,8 @@ class RunExecutor:
     ) -> ContextPreparation | None:
         """先尝试合法压缩，再按原业务 tools 的完整输入裁决窗口安全。"""
         run = state.run
+        # 在计算主窗口预算前按需解析一次视觉图片附件（仅存在于本次执行内存，绝不落库）。
+        await self._ensure_vision_context(state, runtime)
         # 每轮重新读取 cutoff 内的正式消息与本 Run 的执行消息，确保工具结果生效。
         messages = await self._repository.list_context_messages(
             run.session_id, run.owner_id, run.id
@@ -597,6 +641,7 @@ class RunExecutor:
                     retry_context=state.retry_context,
                     skill_context=skill_context,
                     input_files=state.input_files,
+                    input_images=state.input_images,
                     preference_context=preference_content,
                     project_context=project_content,
                     budget=state.budget,
@@ -689,6 +734,7 @@ class RunExecutor:
             retry_context=state.retry_context,
             skill_context=skill_context,
             input_files=state.input_files,
+            input_images=state.input_images,
             preference_context=preference_context,
             project_context=project_context,
         )

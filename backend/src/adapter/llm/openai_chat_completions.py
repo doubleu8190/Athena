@@ -26,6 +26,7 @@ from adapter.llm.bounded_http import (
 from domain.llm.model import (
     LlmCapabilityError,
     LlmError,
+    LlmImagePart,
     LlmIncompleteError,
     LlmMessage,
     LlmProtocolError,
@@ -37,6 +38,7 @@ from domain.llm.model import (
     LlmRole,
     LlmStreamEvent,
     LlmText,
+    LlmTextPart,
     LlmToolCall,
     LlmUsage,
     ModelProfileVersion,
@@ -61,6 +63,8 @@ _DIAGNOSTIC_DIGEST_LENGTH = 12
 _SAFE_FINISH_REASONS = frozenset(
     {"stop", "tool_calls", "length", "content_filter", "function_call"}
 )
+_ALLOWED_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+_ALLOWED_IMAGE_DETAILS = frozenset({"auto", "low", "high"})
 
 
 @dataclass(slots=True)
@@ -299,6 +303,9 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
     async def complete(self, runtime: RuntimeModelProfile, request: LlmRequest) -> LlmResponse:
         """使用 runtime 配置执行无工具的单次文本请求。"""
         config = runtime.version
+        # 摘要压缩、自动标题与安全停止报告均属于纯文本路径，严禁误发任何图片部件。
+        if request.has_image_parts():
+            raise LlmProtocolError("llm_compression_image_unsupported")
         if request.tools or request.tool_choice != "none":
             raise LlmRequestError("llm_compression_tools_unsupported")
         if not request.messages or len(request.messages) > 1024:
@@ -350,8 +357,8 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
     ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
         """使用 Run 固定的配置版本发起流式调用，并持有并发名额直到流结束、失败或调用方退出。"""
         config = runtime.version
-        # 先确认绑定版本支持流式与工具，再申请该版本的并发名额。
-        self._validate_capabilities(runtime)
+        # 先确认绑定版本支持流式、工具及（若携带图片）视觉能力，再申请并发名额。
+        self._validate_capabilities(runtime, request)
         semaphore = self._semaphore_for(config)
         stream: Any = None
         timeout = self._request_timeout(config, request)
@@ -400,12 +407,21 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                     semaphore.release()
 
     @staticmethod
-    def _validate_capabilities(runtime: RuntimeModelProfile) -> None:
-        """确保 Run 绑定版本支持所需的流式和澄清调用能力。"""
+    def _validate_capabilities(
+        runtime: RuntimeModelProfile,
+        request: LlmRequest | None = None,
+    ) -> None:
+        """确保 Run 绑定版本支持所需的流式、工具及按需视觉理解能力。"""
         if not runtime.version.supports_stream:
             raise LlmCapabilityError("llm_stream_unsupported")
         if not runtime.version.supports_tools:
             raise LlmCapabilityError("llm_tools_unsupported")
+        if (
+            request is not None
+            and request.has_image_parts()
+            and not runtime.version.supports_vision
+        ):
+            raise LlmCapabilityError("llm_vision_unsupported")
 
     async def aclose(self) -> None:
         """关闭本 Adapter 创建的所有 SDK 客户端。"""
@@ -562,13 +578,55 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
             usage=self._usage(getattr(response, "usage", None)),
         )
 
-    @staticmethod
-    def _messages(messages: tuple[LlmMessage, ...]) -> list[dict[str, Any]]:
+    @classmethod
+    def _serialize_content_parts(cls, message: LlmMessage) -> str | list[dict[str, Any]]:
+        """将非空 content_parts 组装为标准 OpenAI Chat Completions 多模态 content 数组。"""
+        parts: list[dict[str, Any]] = []
+        if message.content:
+            parts.append({"type": "text", "text": message.content})
+        for part in message.content_parts:
+            if isinstance(part, LlmTextPart):
+                if not isinstance(part.text, str):
+                    raise LlmProtocolError("llm_chat_image_invalid")
+                if part.text:
+                    parts.append({"type": "text", "text": part.text})
+            elif isinstance(part, LlmImagePart):
+                # 严格校验 MIME 白名单、非空 ASCII base64 与 detail 枚举；
+                # 校验失败只返回固定安全错误码，绝不打印或回显 data_base64。
+                if (
+                    part.mime_type not in _ALLOWED_IMAGE_MIME_TYPES
+                    or not isinstance(part.data_base64, str)
+                    or not part.data_base64.strip()
+                    or not part.data_base64.isascii()
+                    or any(ch.isspace() for ch in part.data_base64)
+                    or part.detail not in _ALLOWED_IMAGE_DETAILS
+                ):
+                    raise LlmProtocolError("llm_chat_image_invalid")
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{part.mime_type};base64,{part.data_base64}",
+                            "detail": part.detail,
+                        },
+                    }
+                )
+            else:
+                raise LlmProtocolError("llm_chat_image_invalid")
+        if not parts:
+            return ""
+        return parts
+
+    @classmethod
+    def _messages(cls, messages: tuple[LlmMessage, ...]) -> list[dict[str, Any]]:
         """将领域消息转换为 Chat Completions 消息序列。"""
         result: list[dict[str, Any]] = []
         pending_call_ids: set[str] = set()
         for message in messages:
             role = message.role.value
+            # 视觉图片只能通过 USER 角色发送，严禁出现在 SYSTEM / ASSISTANT / TOOL 消息中。
+            if message.has_image_parts() and role != LlmRole.USER.value:
+                raise LlmProtocolError("llm_chat_image_role_invalid")
             if message.tool_calls and role != LlmRole.ASSISTANT.value:
                 raise LlmProtocolError("llm_chat_tool_calls_role_invalid")
             if message.tool_calls:
@@ -579,10 +637,18 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                     or pending_call_ids.intersection(call_ids)
                 ):
                     raise LlmProtocolError("llm_chat_tool_calls_invalid")
+                assistant_text = message.content
+                if message.content_parts:
+                    extra_parts: list[str] = []
+                    for part in message.content_parts:
+                        if not isinstance(part, LlmTextPart) or not isinstance(part.text, str):
+                            raise LlmProtocolError("llm_chat_image_invalid")
+                        extra_parts.append(part.text)
+                    assistant_text = assistant_text + "".join(extra_parts)
                 result.append(
                     {
                         "role": "assistant",
-                        "content": message.content or None,
+                        "content": assistant_text or None,
                         "tool_calls": [
                             {
                                 "id": call.call_id,
@@ -606,13 +672,23 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 if not message.tool_call_id or message.tool_call_id not in pending_call_ids:
                     raise LlmProtocolError("llm_chat_tool_result_orphaned")
                 pending_call_ids.remove(message.tool_call_id)
+                tool_text = message.content
+                if message.content_parts:
+                    extra_parts = []
+                    for part in message.content_parts:
+                        if not isinstance(part, LlmTextPart) or not isinstance(part.text, str):
+                            raise LlmProtocolError("llm_chat_image_invalid")
+                        extra_parts.append(part.text)
+                    tool_text = tool_text + "".join(extra_parts)
                 result.append(
                     {
                         "role": "tool",
                         "tool_call_id": message.tool_call_id,
-                        "content": message.content,
+                        "content": tool_text,
                     }
                 )
+            elif message.content_parts:
+                result.append({"role": role, "content": cls._serialize_content_parts(message)})
             else:
                 result.append({"role": role, "content": message.content})
         if pending_call_ids:

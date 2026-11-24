@@ -9,12 +9,27 @@ from typing import Protocol
 
 from domain.file.model import (
     FileObjectScanEntry,
+    NormalizedVisionImage,
     PendingSessionFile,
     SessionDocumentExtractionResult,
     SessionFile,
     SessionFileExtractionStatus,
     SessionFilePage,
 )
+
+
+class VisionImageNormalizer(Protocol):
+    """对会话图片原件执行方向校正、安全缩放与隐私元数据剥离的领域端口。"""
+
+    async def normalize(
+        self,
+        *,
+        file_id: str,
+        filename: str,
+        declared_mime_type: str,
+        raw_bytes: bytes,
+    ) -> NormalizedVisionImage:
+        """在有界大小、像素与超时内安全归一化图片，失败时抛出 VisionImageError。"""
 
 
 class SessionDocumentExtractor(Protocol):
@@ -150,4 +165,5 @@ __all__ = [
     "FileObjectStore",
     "SessionDocumentExtractor",
     "SessionFileRepository",
+    "VisionImageNormalizer",
 ]

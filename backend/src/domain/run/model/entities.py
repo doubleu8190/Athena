@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from domain.llm.model.types import LlmImageMimeType
 from domain.message import ConversationMessage, ConversationMessageDraft, ExecutionMessageDraft
 from domain.skill import RunSkillSnapshot, SafeSkillApprovalProjection
 from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID
@@ -132,6 +133,19 @@ class RunInputFileContext:
     extraction_status: str = "none"
     extracted_text_bytes: int | None = None
     extraction_error_code: str | None = None
+    vision_status: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunInputImageAttachment:
+    """Run 执行期内存态视觉图片附件；严禁持久化进数据库、safe_stop 或任何日志。"""
+
+    file_id: str
+    filename: str
+    mime_type: LlmImageMimeType
+    data_base64: str = field(repr=False)
+    width: int
+    height: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,7 +677,9 @@ __all__ = [
     "RunFailedPayload",
     "RunInputRequest",
     "RunInputInteraction",
+    "RunInputFileContext",
     "RunInputFiles",
+    "RunInputImageAttachment",
     "RunInputCall",
     "RunLease",
     "RunModelSnapshot",

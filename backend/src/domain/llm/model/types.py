@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
+
+LlmImageDetail = Literal["auto", "low", "high"]
+LlmImageMimeType = Literal["image/png", "image/jpeg", "image/webp"]
 
 
 class LlmRole(StrEnum):
@@ -18,14 +21,40 @@ class LlmRole(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class LlmTextPart:
+    """多模态消息中的不可变文本内容部件。"""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class LlmImagePart:
+    """多模态消息中的不可变图片内容部件；base64 载荷禁止进入 repr，防止日志或异常泄露。"""
+
+    mime_type: LlmImageMimeType
+    data_base64: str = field(repr=False)
+    detail: LlmImageDetail = "auto"
+    width: int | None = None
+    height: int | None = None
+
+
+type LlmContentPart = LlmTextPart | LlmImagePart
+
+
+@dataclass(frozen=True, slots=True)
 class LlmMessage:
-    """一个完整上下文消息。"""
+    """一个完整上下文消息；向后兼容纯文本 content，并支持有序多模态 content_parts。"""
 
     role: LlmRole
     content: str = ""
     tool_call_id: str | None = None
     name: str | None = None
     tool_calls: tuple[LlmToolCall, ...] = ()
+    content_parts: tuple[LlmContentPart, ...] = ()
+
+    def has_image_parts(self) -> bool:
+        """判断当前消息是否携带视觉图片部件。"""
+        return any(isinstance(part, LlmImagePart) for part in self.content_parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +77,10 @@ class LlmRequest:
     max_output_tokens: int | None = None
     temperature: float | None = None
     timeout_seconds: float | None = None
+
+    def has_image_parts(self) -> bool:
+        """判断本次模型请求中是否包含任何视觉图片部件。"""
+        return any(message.has_image_parts() for message in self.messages)
 
 
 @dataclass(frozen=True, slots=True)

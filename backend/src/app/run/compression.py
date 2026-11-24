@@ -13,6 +13,7 @@ from app.run.budget import RunLlmBudget
 from app.run.context import (
     RunContextError,
     RunInputFileContext,
+    RunInputImageAttachment,
     count_plain_text_tokens_async,
     estimate_llm_input_tokens,
     measure_llm_request,
@@ -121,6 +122,7 @@ async def _split_recent_suffix(
     *,
     prefix_tokens: int | None = None,
     project_context: str | None = None,
+    input_images: Sequence[RunInputImageAttachment] = (),
 ) -> tuple[list[tuple[ConversationMessage, ...]], tuple[ConversationMessage, ...]]:
     """按完整主请求计数保留不超过近期预算的连续轮次后缀。"""
     # 增量累加每组消息的 token 增量，避免每轮重拼接并重算固定前缀与已选后缀。
@@ -141,6 +143,7 @@ async def _split_recent_suffix(
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
+            input_images=input_images,
             preference_context=preference_context,
             project_context=project_context,
         )
@@ -262,6 +265,7 @@ class ContextCompressor:
         retry_context: Sequence[ToolRetryContext] = (),
         skill_context: RunSkillPromptContext | None = None,
         input_files: Sequence[RunInputFileContext] = (),
+        input_images: Sequence[RunInputImageAttachment] = (),
         preference_context: str | None = None,
         project_context: str | None = None,
         budget: RunLlmBudget | None = None,
@@ -295,6 +299,7 @@ class ContextCompressor:
         active_messages = self._messages_after_summary(messages, summary)
         summary_text = None if summary is None else summary.text
 
+        # 主请求固定基础预算必须计入当前 Run 携带的视觉图片 Token，以准确扣除可用历史窗口。
         base_tokens, output_tokens = await estimate_llm_input_tokens(
             run,
             (),
@@ -305,6 +310,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
+            input_images=input_images,
             preference_context=preference_context,
             project_context=project_context,
         )
@@ -344,6 +350,7 @@ class ContextCompressor:
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
+                input_images=input_images,
                 preference_context=preference_context,
                 project_context=project_context,
             )
@@ -372,6 +379,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
+            input_images=input_images,
             preference_context=preference_context,
             project_context=project_context,
         )
@@ -390,6 +398,7 @@ class ContextCompressor:
                     retry_context=retry_context,
                     skill_context=skill_context,
                     input_files=input_files,
+                    input_images=input_images,
                     preference_context=preference_context,
                     project_context=project_context,
                 )
@@ -411,6 +420,7 @@ class ContextCompressor:
             summary_text,
             prefix_tokens=prefix_tokens,
             project_context=project_context,
+            input_images=input_images,
         )
         current = await self._measure_context(
             run,
@@ -423,6 +433,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
+            input_images=input_images,
             preference_context=preference_context,
             project_context=project_context,
         )
@@ -541,6 +552,7 @@ class ContextCompressor:
                 retry_context=retry_context,
                 skill_context=skill_context,
                 input_files=input_files,
+                input_images=input_images,
                 preference_context=preference_context,
                 project_context=project_context,
             )
@@ -661,6 +673,8 @@ class ContextCompressor:
                 )
             await budget.reserve()
 
+        # 压缩隔离铁律：发往压缩模型的请求严格为纯文本，绝不附带任何 LlmImagePart；
+        # 历史会话中的图片附件仅保留 _render_messages 产出的 "[附件：xxx]" 占位文本。
         request = LlmRequest(
             model_profile=runtime.version.id,
             messages=(
@@ -791,6 +805,7 @@ class ContextCompressor:
         input_files: Sequence[RunInputFileContext],
         preference_context: str | None,
         project_context: str | None = None,
+        input_images: Sequence[RunInputImageAttachment] = (),
     ) -> ContextPreparation:
         """按完整主请求口径测量当前候选上下文。"""
         llm_messages, selected_tools, input_tokens, output_tokens = await measure_llm_request(
@@ -804,6 +819,7 @@ class ContextCompressor:
             retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
+            input_images=input_images,
             preference_context=preference_context,
             project_context=project_context,
         )

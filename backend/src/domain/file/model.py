@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -13,6 +13,16 @@ MAX_SESSION_FILES = 100
 MAX_SESSION_DOCUMENT_EXTRACT_BYTES = 20 * 1024 * 1024
 MAX_SESSION_EXTRACTED_TEXT_BYTES = 10 * 1024 * 1024
 EXTRACTABLE_DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".xlsx", ".pptx"})
+
+# 多模态视觉输入图片的安全边界：仅接受 PNG/JPEG/WEBP，单轮上限 5 张；
+# 原始字节 <= 20 MiB、归一化后 <= 4 MiB（编码前）、长边 <= 2048px、像素 <= 40M 防解压炸弹。
+VisionImageMimeType = Literal["image/png", "image/jpeg", "image/webp"]
+VISION_IMAGE_MIME_TYPES: frozenset[str] = frozenset({"image/png", "image/jpeg", "image/webp"})
+MAX_VISION_IMAGES_PER_RUN = 5
+MAX_VISION_RAW_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_VISION_ENCODED_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_VISION_IMAGE_EDGE = 2048
+MAX_VISION_IMAGE_PIXELS = 40_000_000
 
 
 class SessionFileSource(StrEnum):
@@ -128,6 +138,28 @@ class FileObjectScanEntry:
     is_candidate: bool
 
 
+@dataclass(frozen=True, slots=True)
+class NormalizedVisionImage:
+    """完成方向校正、安全缩放与隐私元数据剥离后的视觉输入图片；base64 载荷不进入 repr。"""
+
+    file_id: str
+    filename: str
+    mime_type: VisionImageMimeType
+    data_base64: str = field(repr=False)
+    width: int
+    height: int
+    size_bytes: int
+
+
+class VisionImageError(ValueError):
+    """视觉图片加载或归一化失败时携带稳定、可安全公开的错误码。"""
+
+    def __init__(self, code: str) -> None:
+        """保存稳定安全错误码，不暴露底层异常或宿主路径。"""
+        super().__init__(code)
+        self.code = code
+
+
 class TextFileReadError(ValueError):
     """文本读取失败时携带稳定、可安全展示的错误码。"""
 
@@ -144,7 +176,14 @@ __all__ = [
     "MAX_SESSION_EXTRACTED_TEXT_BYTES",
     "MAX_SESSION_FILE_BYTES",
     "MAX_SESSION_FILES",
+    "MAX_VISION_ENCODED_IMAGE_BYTES",
+    "MAX_VISION_IMAGES_PER_RUN",
+    "MAX_VISION_IMAGE_EDGE",
+    "MAX_VISION_IMAGE_PIXELS",
+    "MAX_VISION_RAW_IMAGE_BYTES",
+    "VISION_IMAGE_MIME_TYPES",
     "FileObjectScanEntry",
+    "NormalizedVisionImage",
     "PendingSessionFile",
     "SessionDocumentExtractionResult",
     "SessionFile",
@@ -153,4 +192,6 @@ __all__ = [
     "SessionFileSource",
     "SessionFileTextSlice",
     "TextFileReadError",
+    "VisionImageError",
+    "VisionImageMimeType",
 ]

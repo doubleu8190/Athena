@@ -45,7 +45,7 @@ from bootstrap.tool import (
 )
 from domain.file import FileObjectStore
 from infrastructure.database import Database
-from infrastructure.file import LocalSessionDocumentExtractor
+from infrastructure.file import LocalSessionDocumentExtractor, LocalVisionImageNormalizer
 from infrastructure.security.mcp_secrets import McpSecretCipher
 from infrastructure.storage.config import has_object_storage_env
 
@@ -91,9 +91,7 @@ def build_run_worker_dependencies(
     secret_cipher = McpSecretCipher.from_environment()
     database = build_database(configured_url)
     bundle.database = database
-    access_policy = AccessPolicyService(
-        SqlAlchemyAccessControlRepository(database.session_factory)
-    )
+    access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(database.session_factory))
     profiles = SqlAlchemyModelProfileRepository(database.session_factory, secret_cipher)
     projects_repository = SqlAlchemyProjectRepository(database.session_factory)
     messages = SqlAlchemyMessageRepository(database.session_factory)
@@ -131,6 +129,7 @@ def build_run_worker_dependencies(
             file_repository,
             object_store,
             document_extractor=LocalSessionDocumentExtractor(),
+            image_normalizer=LocalVisionImageNormalizer(),
         )
         temp_root = Path(
             os.getenv(

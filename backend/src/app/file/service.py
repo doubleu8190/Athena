@@ -6,6 +6,7 @@ import asyncio
 import codecs
 import hashlib
 import json
+import logging
 import re
 import shutil
 import tempfile
@@ -25,6 +26,10 @@ from domain.file import (
     MAX_SESSION_DOCUMENT_EXTRACT_BYTES,
     MAX_SESSION_EXTRACTED_TEXT_BYTES,
     MAX_SESSION_FILE_BYTES,
+    MAX_VISION_ENCODED_IMAGE_BYTES,
+    MAX_VISION_RAW_IMAGE_BYTES,
+    VISION_IMAGE_MIME_TYPES,
+    NormalizedVisionImage,
     PendingSessionFile,
     SessionDocumentExtractor,
     SessionFile,
@@ -33,9 +38,13 @@ from domain.file import (
     SessionFileRepository,
     SessionFileTextSlice,
     TextFileReadError,
+    VisionImageError,
+    VisionImageNormalizer,
 )
 from domain.file.ports import FileObjectStore
 from domain.session import SessionNotFoundError
+
+logger = logging.getLogger(__name__)
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")
@@ -79,6 +88,8 @@ _SAFE_PUBLISH_REJECTIONS = {
     "idempotency_conflict",
     "session_file_quota_exceeded",
 }
+
+
 @dataclass(frozen=True, slots=True)
 class _FileInspection:
     """一次线程内完成的文件大小、类型和摘要结果。"""
@@ -107,12 +118,7 @@ def sanitize_filename(value: str) -> str:
         raise FileInputError("file_name_invalid")
     normalized = unicodedata.normalize("NFC", value.replace("\\", "/"))
     filename = PurePosixPath(normalized).name.strip()
-    if (
-        not filename
-        or filename in {".", ".."}
-        or len(filename) > 255
-        or _CONTROL.search(filename)
-    ):
+    if not filename or filename in {".", ".."} or len(filename) > 255 or _CONTROL.search(filename):
         raise FileInputError("file_name_invalid")
     return filename
 
@@ -157,11 +163,7 @@ def validate_file_type(
         ".png": header.startswith(b"\x89PNG\r\n\x1a\n"),
         ".jpg": header.startswith(b"\xff\xd8\xff"),
         ".jpeg": header.startswith(b"\xff\xd8\xff"),
-        ".webp": (
-            len(header) >= 12
-            and header.startswith(b"RIFF")
-            and header[8:12] == b"WEBP"
-        ),
+        ".webp": (len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP"),
     }
     if not signatures[extension]:
         raise FileInputError("file_content_mismatch")
@@ -271,13 +273,15 @@ class SessionFileService:
         object_store: FileObjectStore,
         *,
         document_extractor: SessionDocumentExtractor | None = None,
+        image_normalizer: VisionImageNormalizer | None = None,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
-        """保存文件元数据仓储、对象存储、可选文档提取器和业务标识生成器。"""
+        """保存文件元数据仓储、对象存储、可选文档提取器、图片归一化器和业务标识生成器。"""
         self._repository = repository
         self._object_store = object_store
         self._document_extractor = document_extractor
+        self._image_normalizer = image_normalizer
         self._id_factory = id_factory
         self._clock = clock
 
@@ -582,6 +586,52 @@ class SessionFileService:
         """按鉴权后的对象键分块读取，不暴露存储 URL。"""
         async for chunk in self._object_store.iter_range(file.object_key):
             yield chunk
+
+    async def load_vision_image(self, file: SessionFile) -> NormalizedVisionImage:
+        """按 20 MiB 上限从私有对象存储读取白名单图片并完成隐私剥离与安全归一化。"""
+        if file.mime_type not in VISION_IMAGE_MIME_TYPES:
+            raise VisionImageError("vision_image_unsupported")
+        if self._image_normalizer is None:
+            raise VisionImageError("vision_image_unsupported")
+        # 元数据层面先按 20 MiB 快速拦截，避免超限大文件产生无效对象存储读取。
+        if file.size_bytes > MAX_VISION_RAW_IMAGE_BYTES:
+            raise VisionImageError("vision_image_too_large")
+        try:
+            raw_bytes = await self._object_store.get_bytes(
+                file.object_key,
+                maximum_bytes=MAX_VISION_RAW_IMAGE_BYTES,
+            )
+        except asyncio.CancelledError:
+            raise
+        except ValueError as error:
+            if str(error) == "object_too_large":
+                raise VisionImageError("vision_image_too_large") from None
+            logger.warning(
+                "session_vision_image_read_failed file_id=%s exception_type=%s",
+                file.id,
+                type(error).__name__,
+            )
+            raise VisionImageError("vision_image_invalid") from None
+        except Exception as error:
+            if getattr(error, "code", None) == "file_storage_object_too_large":
+                raise VisionImageError("vision_image_too_large") from None
+            logger.warning(
+                "session_vision_image_read_failed file_id=%s exception_type=%s",
+                file.id,
+                type(error).__name__,
+            )
+            raise VisionImageError("vision_image_invalid") from None
+
+        normalized = await self._image_normalizer.normalize(
+            file_id=file.id,
+            filename=file.filename,
+            declared_mime_type=file.mime_type,
+            raw_bytes=raw_bytes,
+        )
+        # 二次防线：确保自定义或底层归一化实现输出严格不超过 4 MiB（base64 编码前字节）。
+        if normalized.size_bytes > MAX_VISION_ENCODED_IMAGE_BYTES:
+            raise VisionImageError("vision_image_too_large")
+        return normalized
 
     async def read_text(
         self,

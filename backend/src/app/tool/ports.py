@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from typing import Any, Protocol
 
 from domain.file import PendingSessionFile
-from domain.run import Run, RunInputFileContext
+from domain.run import Run, RunInputFileContext, RunInputImageAttachment
 from domain.skill import RunSkillPromptContext
 from domain.tool import (
     AuthorizedRunContext,
@@ -70,6 +70,15 @@ class RunToolRuntime(Protocol):
         run: Run,
     ) -> tuple[RunInputFileContext, ...]:
         """按当前会话权限解析 Run 固定文件的安全引用元数据。"""
+
+    async def build_run_input_vision_context(
+        self,
+        run: Run,
+        input_files: Sequence[RunInputFileContext],
+        *,
+        supports_vision: bool,
+    ) -> tuple[tuple[RunInputFileContext, ...], tuple[RunInputImageAttachment, ...]]:
+        """按模型识图能力构建内存态视觉图片附件，并回填每张图片的安全 vision_status。"""
 
     async def execute(
         self,

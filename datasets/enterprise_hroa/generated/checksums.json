@@ -1,0 +1,244 @@
+{
+  "baseline_date": "2026-11-24",
+  "file_count": 59,
+  "files": {
+    "attachments/ATT-01_陈思远_录用通知书_OFFER-2026-1108.pdf": {
+      "sha256": "f6b0ca92135a0240818da503c0fa9d1b547c52f889141c184f75251b8662edcb",
+      "size_bytes": 11130
+    },
+    "attachments/ATT-02_许知夏_试用期转正评估表_XC1002.docx": {
+      "sha256": "b8414467349d78b5068e8d2fa92ffabf569fb7145805480921eedb14780b981f",
+      "size_bytes": 37734
+    },
+    "attachments/ATT-03_韩景明_离职交接与待清算清单_XC1003.xlsx": {
+      "sha256": "31ec54d270bbd53ab1acfc75148d2f3b1f2d70d6febef5e6df57e3b7f7eb9640",
+      "size_bytes": 7006
+    },
+    "attachments/ATT-04_郑语桐_跨部门调岗交接汇报_XC1004.pptx": {
+      "sha256": "a533be98a14d383fe3814653e98a93c3bf6c3247f0e709caef85770748377cf7",
+      "size_bytes": 31514
+    },
+    "attachments/ATT-05_高明轩_OA年假超额申请截图_XC1005.png": {
+      "sha256": "8cdf098575b582108da6109e09e595c07794dda2607f6fdad5842fa3da1af418",
+      "size_bytes": 63105
+    },
+    "attachments/ATT-06_跨部门调岗三方会签流程图.png": {
+      "sha256": "a68eb5ac7cedc497a799af7743f58842125083a66a8b314bc7b2495faf306e83",
+      "size_bytes": 89679
+    },
+    "attachments/ATT-07_韩景明_IT设备签收单拍照件_XC1003.jpg": {
+      "sha256": "43987c3f7e758247834e3e554ff7dcc0d8c6711f488d0a1da50d78ab96ea455e",
+      "size_bytes": 52291
+    },
+    "attachments/ATT-08_方若琳_三甲门诊病假证明_XC1008.png": {
+      "sha256": "4cc149a916ad378aba47a5829879098ca3841145e97bf7b7775a063f6fda90de",
+      "size_bytes": 68377
+    },
+    "attachments/ATT-09_扫描件无文本层_离职交接确认单_XC1003.pdf": {
+      "sha256": "4acf96d67fa6de559fb8368bff5add2221545170469f7c97bc87ffbc500a285d",
+      "size_bytes": 50199
+    },
+    "attachments/ATT-10_机密_2026薪酬绩效校准密件_加密样本.pdf": {
+      "sha256": "120ad32bab5cb95ee22abac34353d2b30a6736b296c540a82e5c1b566fc89d36",
+      "size_bytes": 816
+    },
+    "attachments/ATT-11_含宏异常_2026年11月差旅报销汇总表.docx": {
+      "sha256": "eab3dd0e27aeafc948cd51c4768324a92cd060944962d855cae0e6a4da91896d",
+      "size_bytes": 37237
+    },
+    "attachments/ATT-12_星辰智联云算力采购框架合同_CTR-2026-1120.pdf": {
+      "sha256": "6460b18dc563720bbd05edfa18f68880993118a960fdfb1cbba9de3adc5cd92f",
+      "size_bytes": 10234
+    },
+    "attachments/ATT-13_高明轩_上海张江酒店电子发票_TRV-2026-1102.png": {
+      "sha256": "0815412ed8e7a722a509a718ebb1d3c6cc433d64f9ed437037af1430ba855d29",
+      "size_bytes": 77927
+    },
+    "attachments/ATT-14_多页扫描件无文本层_2026Q4绩效校准纪要_3页.pdf": {
+      "sha256": "39bdb37a79d9a2d336e4dd5b524f9ec6328416588dc4dc26b032be66eefbd4b3",
+      "size_bytes": 154037
+    },
+    "attachments/ATT-15_成都分部出差登机牌与行程图_TRV-2026-1202.webp": {
+      "sha256": "d22a94c8bf800db2bfbb91998ab9a3366bbb1fb4dbb9a955312026c968a6f9f2",
+      "size_bytes": 34988
+    },
+    "attachments/ATT-16_北京酒店住宿水单_TRV-2026-1203.png": {
+      "sha256": "0de3981bd1cd0525c2bd05385b5ed5590db9b11da2653a6050b5398af6e5721a",
+      "size_bytes": 78098
+    },
+    "attachments/ATT-17_深圳酒店账单_TRV-2026-1206.png": {
+      "sha256": "31c4c904b481d6e9cbc410785fbdbf78c33881515bd0ecd64dfb83d4dd74d1c6",
+      "size_bytes": 86459
+    },
+    "attachments/ATT-18_年终封网发布审批单截图.png": {
+      "sha256": "e35f23d1f2e1e09ae9c203be91f70fb7a45b76123cfc3dfac195da6462e71ce7",
+      "size_bytes": 104200
+    },
+    "attachments/ATT-19_伪装PNG损坏图片_负样本.png": {
+      "sha256": "f250bcff5260dcee6131de800fdb932c424f6b08046f926bcbaccb9783c725b5",
+      "size_bytes": 52
+    },
+    "kb/DOC-01_XC-HR-2026-001-REV2_假勤休假管理办法_v2.md": {
+      "sha256": "8069bf7af21bcfc685eec1d11830ed65e03555cb21a4bebe4913bb3a8d2dcf31",
+      "size_bytes": 2287
+    },
+    "kb/DOC-01_XC-HR-2026-001_假勤休假管理办法.md": {
+      "sha256": "d99e6200027e30dd1756a2271e19c97386731691124697c43415fd675566321b",
+      "size_bytes": 4004
+    },
+    "kb/DOC-02_XC-HR-2026-002_入职与试用期管理规范.docx": {
+      "sha256": "f7edda32847a23804dc2907b3ea0a10f965f4a53ba76a3ccf1649a3d0e070d9a",
+      "size_bytes": 38663
+    },
+    "kb/DOC-03_XC-HR-2026-003_离职交接与清算管理制度.pdf": {
+      "sha256": "53993053a5411e2bc75f5f927a90419f3ec2faa2e5195c32dfca22c61dd57fbb",
+      "size_bytes": 16469
+    },
+    "kb/DOC-04_XC-HR-2026-004_调岗晋升与异动管理办法.pptx": {
+      "sha256": "6405472e6bfb42e4d32ae308d91071922d2c9ed0dbf57cf56c275e8679e01bd1",
+      "size_bytes": 33104
+    },
+    "kb/DOC-05_XC-ADM-FIN-2026_设备与差旅标准表.xlsx": {
+      "sha256": "08227651ca092e9ebb8b606a51e850126e6694c36c5e2abad684bd8edecb8256",
+      "size_bytes": 8209
+    },
+    "kb/DOC-06_假勤与离职审批流程图.png": {
+      "sha256": "774232bc7002d3439a377130d2c1ce65f05400568e00fccf6a2a508e6bb951b3",
+      "size_bytes": 106462
+    },
+    "kb/DOC-07_XC-HR-OPS-010_HR入转调离内部SOP.md": {
+      "sha256": "f1074971a86f22446f3f431dc02c7663eeebffd38df351c626165f81e6bf2b02",
+      "size_bytes": 3334
+    },
+    "kb/DOC-08_2026-11_HR入转调离跟踪台账.xlsx": {
+      "sha256": "60a9b1492f4c1ef2e8958fffc1786f37a1b2a2771890586776ab07035b0a1751",
+      "size_bytes": 7828
+    },
+    "kb/DOC-09_XC-FIN-INT-020_财务离职清算稽核细则.docx": {
+      "sha256": "d3f8795bec92b3ea392469e020407f2789143bc5c0cf06859e40e09c67b2183f",
+      "size_bytes": 38253
+    },
+    "kb/DOC-10_2026Q4_财务HR协同结算指南.pdf": {
+      "sha256": "3bd176c796a3a50e7b2ad611099f95bd30388c5f30033fedb53e0a53ecf447db",
+      "size_bytes": 12687
+    },
+    "kb/DOC-11_XC-RD-ENG-030_研发权限与值班规范.md": {
+      "sha256": "05f05187f0fbe372f6d9846995c58afcdd486ab1019fde211ac06c79a16285d9",
+      "size_bytes": 2654
+    },
+    "kb/DOC-12_苏晚晴个人HR跟进备忘.md": {
+      "sha256": "b3191e61aa91e2fb1eb4c87603e623689c10fc4be5d645ac75a2569f4aea9b58",
+      "size_bytes": 2528
+    },
+    "kb/DOC-13_XC-HR-2026-007-REV2_绩效考核与申诉制度_v2.md": {
+      "sha256": "0c4a0ad51b2041809e8ee3b38a81b32f340592ed789c73b1609578f67de5f891",
+      "size_bytes": 2710
+    },
+    "kb/DOC-13_XC-HR-2026-007_绩效考核与申诉制度.md": {
+      "sha256": "3f521368459e57b9f2f5507846e518943d59d5ed11453cb20762eb4c18f8dc40",
+      "size_bytes": 3269
+    },
+    "kb/DOC-14_XC-LEG-2026-008_合同审批与用印管理规范.docx": {
+      "sha256": "18246764a95e7224bad466c080ee6953c411062f363a60cca111d57132e276fa",
+      "size_bytes": 38466
+    },
+    "kb/DOC-15_XC-IT-2026-009_IT工单服务与权限SLA规范.pdf": {
+      "sha256": "7ea9c134bd5a83caeeed646e7f892a5a286f4850dce3dd4b78058aaa5c3fac9a",
+      "size_bytes": 12525
+    },
+    "kb/DOC-16_XC-CMP-2026-010_员工申诉与合规举报指南.md": {
+      "sha256": "3614084abd5830d58698c03548b15da76dafb5f900109ffe9d5754472075a0aa",
+      "size_bytes": 2471
+    },
+    "kb/DOC-17_XC-HR-PERF-011_2026Q4绩效校准操作手册.pptx": {
+      "sha256": "422838052de4a27c8f3bd4e111b51cddd2c85eaaf9342921b0ed9c175b14603c",
+      "size_bytes": 33127
+    },
+    "kb/DOC-18_2026Q4_全员绩效初评与申诉跟踪台账.xlsx": {
+      "sha256": "5ecd42283c743862189de56ae7b1327f0b5d528ea48318fdbc6d06959d91ee8c",
+      "size_bytes": 8054
+    },
+    "kb/DOC-19_新员工背调核验与录用风控指引.pdf": {
+      "sha256": "a2fcde59bc790f6765434a03a1581765b2e0bc8faa869f0b755e5fe5c9833b28",
+      "size_bytes": 11932
+    },
+    "kb/DOC-20_XC-FIN-TRV-021_差旅超标稽核与发票核验细则.md": {
+      "sha256": "3c391e7e9fd94c472fe1807162a55572ad50a62bff3b97dedfa123d87b8caab9",
+      "size_bytes": 3855
+    },
+    "kb/DOC-21_2026-11_差旅报销与合同付款待审台账.xlsx": {
+      "sha256": "cbabbccb786c3226559096ee86bdd420759d3a5369f328864e666cc844c2c213",
+      "size_bytes": 7471
+    },
+    "kb/DOC-22_XC-RD-ONCALL-031_研发值班补贴与故障复盘规范.docx": {
+      "sha256": "ab7faf220bd36381f826eaeea0360831d03ad0223209bebe546146b9fba8a39e",
+      "size_bytes": 38243
+    },
+    "kb/DOC-23_2026-11-12_研发部OnCall值班排班表.xlsx": {
+      "sha256": "44ba147ced775dc12e808493465b17851cd57fb1380fef4e7aa002a51434c8ca",
+      "size_bytes": 7046
+    },
+    "kb/DOC-24_陆知微个人研发架构笔记.md": {
+      "sha256": "d10f447def5447289473b66e7b87750a40b7d401a97c3239d787d93444d53a68",
+      "size_bytes": 1950
+    },
+    "kb/DOC-25_XC-SEC-2026-011_信息安全与数据分级规范.pdf": {
+      "sha256": "070c64f4b857ba326148846ddeef634821c5e49c5cbd4d358a981342a2695f2f",
+      "size_bytes": 18914
+    },
+    "kb/DOC-26_XC-PRC-2026-012_供应商准入与采购审批制度.docx": {
+      "sha256": "f7dae1e84023fdd5aa635192ae7d632fa53b89497c0d1ef0dad3cf332b56e3c5",
+      "size_bytes": 38687
+    },
+    "kb/DOC-27_XC-HR-2025-001_假勤休假管理办法_2025已废止.md": {
+      "sha256": "173e36e7b794d5ceb4ffb2d7cdf2746e81b5b70c6794a1c1b0983c614a7d064d",
+      "size_bytes": 1794
+    },
+    "kb/DOC-28_XC-ADM-2026-013_三地办公与异地派遣指引.pptx": {
+      "sha256": "6abc7aec35cbcd709d3930e540ebad813c035784da03c85d1798d83ea29ca10b",
+      "size_bytes": 33614
+    },
+    "kb/DOC-29_2026全员入转调离与财务审批全景图.png": {
+      "sha256": "9e874876b27aa8c831742f7fd325c75409d4117dbfb96773308755498232ef8a",
+      "size_bytes": 122310
+    },
+    "kb/DOC-30_2026-12_跨年入转调离与年假结转总台账.xlsx": {
+      "sha256": "c64ce4a7f8586f8af0f3db02f673d5d935ce67660276797b12aba132f5b1be8c",
+      "size_bytes": 8226
+    },
+    "kb/DOC-31_XC-HR-EQT-013_核心员工期权授予与行权指引.pdf": {
+      "sha256": "d397e083393f1227ccd47f41365245cc071e3599c39dd370d451ae1b20963e61",
+      "size_bytes": 16627
+    },
+    "kb/DOC-32_XC-FIN-TAX-022_年终奖与离职补偿金个税实务.pdf": {
+      "sha256": "a51e7e4a44317fb3919ee4f448470f1d9968e6fa0fd451907c2c892b2de1d9b2",
+      "size_bytes": 15185
+    },
+    "kb/DOC-33_2026-12_差旅报销与年度关账待审台账.xlsx": {
+      "sha256": "180269e13fc56cd0ca875e6215e82713f0cc155a675eea3b886b74186d08b292",
+      "size_bytes": 7690
+    },
+    "kb/DOC-34_XC-RD-ARCH-032_生产变更封网与高危发布规范.md": {
+      "sha256": "507b2e43e19d6ec104cc19120a7989df1eae70c03f207756f8a1ec5534e119c6",
+      "size_bytes": 2531
+    },
+    "kb/DOC-35_苏晚晴2026-12跨年年假与面谈备忘.md": {
+      "sha256": "bbdc37ef8221a72f6948e1671be2a299d2ab1cb46959b6c4d2ed6b699e54b6d9",
+      "size_bytes": 2506
+    },
+    "kb/DOC-36_陆知微2026-12封网值班与架构复盘笔记.md": {
+      "sha256": "d11bc4354ea0d562544572271f97470c83c883afda5d2dccda5f3d73be877354",
+      "size_bytes": 2277
+    },
+    "skill_packages/hroa-lifecycle-audit-pack.zip": {
+      "sha256": "73c24b01af8332345e9aa047c1401add4c0c06aae5e445f880fc2c89eb393ea7",
+      "size_bytes": 10487
+    },
+    "skill_packages/travel-expense-audit-pack.zip": {
+      "sha256": "ae5a485380c73a6ba37eee61e1feb79c6e985e0a681fcef9328d2c17edf1e57d",
+      "size_bytes": 10455
+    }
+  },
+  "schema_version": 1,
+  "total_bytes": 1733987
+}

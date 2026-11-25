@@ -1,0 +1,340 @@
+{
+  "schema_version": 1,
+  "dataset": "enterprise_hroa_v2_compression",
+  "company_name": "星辰智联科技有限公司",
+  "baseline_date": "2026-11-24",
+  "scenarios": {
+    "enterprise_12turn_cross_domain": {
+      "description": "12 轮跨绩效校准、合同用印、差旅超标审计与离职清算的真实企业办公长对话，用于触发真实 ContextCompressor 单次历史摘要压缩并验证核心实体、金额与制度锚点不丢失。",
+      "actor_user_id": "mock_super_admin",
+      "required_facts_to_preserve": [
+        "XC-HR-2026-007",
+        "XC1008",
+        "60 天 PIP",
+        "CTR-2026-1120",
+        "360,000.00",
+        "LEG-REV-2026-0418",
+        "TRV-2026-1102",
+        "540.00",
+        "TRV-2026-1103",
+        "300.00",
+        "TRV-2026-1104",
+        "FIN-ADV-2026-0914",
+        "2,400.00",
+        "IT-MBP-2023-088"
+      ],
+      "messages": [
+        {
+          "sequence": 1,
+          "role": "user",
+          "run_id": "run_ent_t01",
+          "context_turn_id": "turn_ent_01",
+          "text": "周总（MOCK001）需要今天下午高管例会前拿到一份跨部门风险简报。第一项请先帮我核对 2026 年度绩效校准窗口和全公司强制分布参考口径（XC-HR-2026-007），同时盘点核心员工 XC1004 郑语桐、XC1007 唐逸凡、XC1005 高明轩、XC1008 方若琳以及待入职/试用期/已离职员工的绩效状态差异。"
+        },
+        {
+          "sequence": 2,
+          "role": "assistant",
+          "run_id": "run_ent_t01",
+          "context_turn_id": "turn_ent_01",
+          "text": "结论与制度依据（XC-HR-2026-007 / XC-HR-PERF-011）：星辰智联 2026 年度绩效校准期为 2026-11-20 至 2026-12-05，全公司强制分布参考比例为 S 10%、A 20%、B+ 30%、B 30%、C 10%。凡最终评定为 C 档的员工，自结果公布次日起自动启动 60 天 PIP 改善计划；如员工对结果存疑，可在公布后 5 个工作日内（2026-12-02 截止）提交书面申诉并附项目交付举证。核心人员基线盘点如下：1. XC1004 郑语桐（财务部税务专员 P5）初评 A，已满足 XC-HR-2026-004 跨部门平调 >= B 门槛，计划 2026-12-01 平调至人力资源部任薪酬绩效专员且年假 4.0 天 100% 全额结转；2. XC1007 唐逸凡（平台架构组测试开发工程师 P5）初评 S，连续两期优异，满足 P5→P6 组内晋升门槛；3. XC1005 高明轩（研发部算法工程师 P6）初评 B+，整体交付稳定；4. XC1008 方若琳（财务部应收会计 P5）初评 C，已触发 60 天 PIP 改善预警，申诉窗口截止 2026-12-02，当前状态 pending_calibration_or_appeal；5. 特殊边界人群：XC1001 陈思远为待入职（not_applicable_preboarding），XC1002 许知夏处于 6 个月试用期将于 2026-11-30 到期（not_applicable_probation，走转正答辩评估而非年度定档），XC1006 叶舒然已于 2026-10-15 离职结算（archived_resigned），档案永久封存严禁校准修改。"
+        },
+        {
+          "sequence": 3,
+          "role": "user",
+          "run_id": "run_ent_t02",
+          "context_turn_id": "turn_ent_02",
+          "text": "针对方若琳（XC1008）初评 C 的情况，请详细拆解她在 2026-12-02 之前提起书面申诉的完整流程，以及如果复议小组维持 C 档或上调为 B 档时，HRBP 苏晚晴（MOCK006）在系统里分别该如何走 hroa_submit_performance_calibration 并落实 PIP 节点跟踪，另外提醒一下她同时还有一张待核验的 2.0 天病假单要注意避免违反 XC-CMP-2026-010 反报复红线。"
+        },
+        {
+          "sequence": 4,
+          "role": "assistant",
+          "run_id": "run_ent_t02",
+          "context_turn_id": "turn_ent_02",
+          "text": "关于方若琳（XC1008）绩效申诉与合规防护的详细处置方案如下：一、申诉复议程序（XC-HR-2026-007）：方若琳须在 2026-12-02（结果公布后 5 个工作日）前向人力资源部提交书面申诉单及客观佐证（如应收对账准确率、账龄催收记录、ERP 结账日志）。人力资源部须联合隔级主管（非原初评主管林清岚单独裁决）组成独立复议小组，在受理后 5 个工作日内完成面谈并出具书面结论。二、HR 系统受控落盘路径：1. 若复议采纳举证将等级调整为 B，由苏晚晴（MOCK006）通过 hroa-hr-ops 调用 hroa_submit_performance_calibration（action_type='appeal_review', proposed_rating='B'），审批通过后系统自动将 pip_required 置为 false、pip_days 归零，状态转为 appeal_resolved；2. 若复议维持 C 档，则调用 action_type='pip_confirm', proposed_rating='C'，立即启动 60 天 PIP 改善计划，并由直属主管、员工本人与 HRBP 三方签字确认第 30 天中期复盘与第 60 天结项验收指标。三、关联病假与反报复合规提示（XC-HR-2026-001 / XC-CMP-2026-010）：方若琳已提交 2026-11-26 至 2026-11-27 病假 2.0 天工单（OA-LVE-2026-1107），并附上海仁济医院三甲门诊病假证明（ATT-08），满足二级甲等及以上公立医院证明要求，HRBP 应按正常病假流程核验放行，严禁将员工合法就医休假或合规申诉作为降档或打击报复依据；员工若认为存在不公亦可随时致信唯一合规举报通道 integrity@xingchen.local，合规委须在 7 个工作日内出具书面受理回执。"
+        },
+        {
+          "sequence": 5,
+          "role": "user",
+          "run_id": "run_ent_t03",
+          "context_turn_id": "turn_ent_03",
+          "text": "好的，绩效板块清楚了。第二项请转到合同用印板块，依据 XC-LEG-2026-008 帮我梳理金额三档审批红线、两条零容忍禁令，并逐项预审当前在办的云算力年度采购框架合同 CTR-2026-1120 和一个缺法务初审编号的测试负样本 CTR-2026-1199，确认哪一单能走审批链、哪一单必须立刻拦截。"
+        },
+        {
+          "sequence": 6,
+          "role": "assistant",
+          "run_id": "run_ent_t03",
+          "context_turn_id": "turn_ent_03",
+          "text": "合同审批与用印合规预审结论（XC-LEG-2026-008）：一、三档金额审批矩阵与特批升级规则：1. 合同总金额 <= 100,000.00 元：部门负责人 + 法务初审后加盖合同专用章（tier_1_dept_and_legal）；2. 合同总金额 100,000.01 至 500,000.00 元：须加签财务负责人林清岚（MOCK002）会签（tier_2_finance_countersign）；3. 合同总金额 > 500,000.00 元，或无论金额高低凡包含排他条款、无限连带责任条款（special_clause_flag=true）：必须升级至集团负责人周明远（MOCK001）终审（tier_3_group_head_final）。二、两条零容忍红线：严禁空白合同用印（blank_contract_forbidden），严禁缺失合法法务初审编号 LEG-REV-YYYY-NNNN 直接申请用印（legal_review_code_required）。三、逐单预审结果：1. 在办合同 CTR-2026-1120《星辰智联云算力年度采购框架合同》（签约方：云枢算力科技有限公司，金额 360,000.00 元，合同专用章，对应附件 ATT-12）：已通过法务初审并取得有效编号 LEG-REV-2026-0418，无空白页且不含排他/无限连带责任条款，落入第二档审批红线，当前在办工单 OA-SEAL-2026-1108 状态为 pending_finance_countersign，需财务负责人林清岚（MOCK002）完成会签后方可盖章归档；2. 负样本 CTR-2026-1199：因未填写或缺失有效法务初审编号，触发 legal_review_code_required 红线，系统自动拦截，必须退回申请人先经法务审阅取得 LEG-REV 编号后方可重新发起。"
+        },
+        {
+          "sequence": 7,
+          "role": "user",
+          "run_id": "run_ent_t04",
+          "context_turn_id": "turn_ent_04",
+          "text": "如果云枢算力科技有限公司在签约前突然要求在 CTR-2026-1120 补充条款里加上“排他采购承诺”或者把年度框架金额从 360,000.00 元上调到 580,000.00 元，审批链会发生什么变化？同时请把财务部 2026 年 11 月差旅报销稽核（XC-FIN-2026-006 / XC-FIN-TRV-021）的标准上限和 6 笔待审差旅单先完整拉出来做第一轮逐笔核对。"
+        },
+        {
+          "sequence": 8,
+          "role": "assistant",
+          "run_id": "run_ent_t04",
+          "context_turn_id": "turn_ent_04",
+          "text": "一、CTR-2026-1120 变更触发升级规则（XC-LEG-2026-008）：无论是补充排他采购条款（special_clause_flag=true）还是金额上调至 580,000.00 元（> 500,000.00 元红线），该合同均立即由第二档升级为第三档 tier_3_group_head_final，不仅需要法务重新复审并更新 LEG-REV 编号，还必须在部门负责人、法务初审、财务负责人林清岚（MOCK002）会签之后，强制报请集团负责人周明远（MOCK001）终审批准。二、2026-11 差旅报销标准与 6 笔待审单据逐笔稽核（XC-FIN-2026-006 / XC-FIN-TRV-021）：统一红线为一线城市（上海/北京/深圳/广州）住宿上限 650.00 元/晚、二线城市（成都/杭州）住宿上限 450.00 元/晚、餐补上限 120.00 元/天、普通员工仅限飞机经济舱或高铁二等座、备用金返程 15 个工作日内核销且离职前 5 个工作日清零。6 笔单据核算明细如下：1. TRV-2026-1101（MOCK005 陆知微，平台架构组，北京一线 2 晚 620.00 元/晚，餐补 110.00 元/天，经济舱 1,180.00 元，申报总额 2,640.00 元）→ 合规放行；2. TRV-2026-1102（XC1005 高明轩，研发部，上海张江一线 2 晚 920.00 元/晚，餐补 100.00 元/天，高铁二等座 553.00 元，关联发票截图 ATT-13）→ 住宿超标拦截，每晚超 270.00 元，2 晚合计超标 540.00 元；3. TRV-2026-1103（XC1004 郑语桐，财务部，成都二线 3 晚 520.00 元/晚，餐补 150.00 元/天，经济舱 1,420.00 元）→ 双项超标拦截，住宿超 210.00 元 + 餐补超 90.00 元，合计超标 300.00 元；4. TRV-2026-1104（XC1007 唐逸凡，平台架构组，北京一线 1 晚 600.00 元/晚，餐补 110.00 元/天，未附特批升级公务舱机票 4,200.00 元）→ 舱位违规拦截；5. TRV-2026-1105（XC1003 韩景明，平台架构组，成都二线，关联未核销备用金 FIN-ADV-2026-0914 金额 2,400.00 元，返程日 2026-10-20 已超 15 个工作日且处于离职前 5 工作日红线）→ 离职备用金阻断预警；6. TRV-2026-1106（MOCK006 苏晚晴，人力资源部，成都二线 2 晚 430.00 元/晚，餐补 100.00 元/天，经济舱 1,280.00 元，申报总额 2,340.00 元）→ 合规放行。"
+        },
+        {
+          "sequence": 9,
+          "role": "user",
+          "run_id": "run_ent_t05",
+          "context_turn_id": "turn_ent_05",
+          "text": "财务部的 SK-7 差旅超标审计技能包（travel-expense-audit-pack）和 hroa-fin-ops MCP 在这 6 笔单据上应该怎样配合落盘？特别核对一下，全公司住宿与餐补合计超标金额是多少，如果研发部成员陆知微（mock_rd_member）或者 HR 苏晚晴（mock_hr_member）尝试直接调用 hroa-fin-ops 里的工具会不会越权看到财务稽核工具？"
+        },
+        {
+          "sequence": 10,
+          "role": "assistant",
+          "run_id": "run_ent_t05",
+          "context_turn_id": "turn_ent_05",
+          "text": "一、SK-7 与 hroa-fin-ops 端到端协作闭环：1. 财务人员（林清岚 mock_fin_admin 或沈佳禾 mock_fin_member）先调用 hroa_list_travel_expenses(month='2026-11', department_id='ALL') 拉取 schema_version=1 聚合快照；2. 将 structuredContent 原样作为 travel_inputs 传入 SK-7 的 scripts/audit_travel_expenses.py，审批通过后确定性输出四表工作簿 travel-audit-2026-11.xlsx（审计总览、超标与违规明细、合规放行清单、备用金逾期预警）和 UTF-8 风险摘要 travel-audit-2026-11-summary.txt；3. 核算汇总指标：全公司 6 笔报销单申报总额 18,313.00 元，合规放行 2 笔（TRV-2026-1101、TRV-2026-1106），超标/违规拦截 3 笔（其中住宿与餐补合计超标金额 540.00 + 300.00 = 840.00 元；另 TRV-2026-1104 为未特批公务舱 4,200.00 元违规），高风险未核销备用金 1 笔（FIN-ADV-2026-0914 金额 2,400.00 元）；4. 财务复核后通过 hroa_flag_expense_audit_result（触发中文审批确认卡片）分别对 TRV-2026-1101/1106 标 approved、对 TRV-2026-1102/1103/1104 标 rejected_over_limit、对 TRV-2026-1105 标 need_supplement 并冻结付款。二、RBAC 权限隔离验证：hroa-fin-ops 与 SK-7 均配置为 visibility_scope='department', owner_department_id='dept_mock_fin' 且仅授权 dept_mock_fin，因此陆知微（dept_mock_platform）与苏晚晴（dept_mock_hr）在 /api/v1/tools 和 /api/v1/skills 均不可见财务专属工具与 SK-7，彻底杜绝跨部门越权操作。"
+        },
+        {
+          "sequence": 11,
+          "role": "user",
+          "run_id": "run_ent_t06",
+          "context_turn_id": "turn_ent_06",
+          "text": "再把韩景明（XC1003）的离职清查和研发部 On-Call 排班补贴（XC-RD-ONCALL-031）串起来核对一次：韩景明目前哪两项处于 blocked、哪一项处于 pending？离职证明能提前签发吗？未休法定年假 3.5 天怎么折算？以及韩景明离职交接给陆知微（MOCK005）之后，11-12 月研发部值班排班和夜间 P0/P1 故障复盘要求有什么关键点？"
+        },
+        {
+          "sequence": 12,
+          "role": "assistant",
+          "run_id": "run_ent_t06",
+          "context_turn_id": "turn_ent_06",
+          "text": "韩景明（XC1003）离职清算与研发交接联合核查（XC-HR-2026-003 / XC-FIN-INT-020 / XC-RD-ENG-030 / XC-RD-ONCALL-031）：一、四项强制离职清查状态：1. work_handover（工作与文档交接）：cleared，已向平台架构师陆知微（MOCK005）完成 K8s 生产集群与发布流水线交接并由顾行知双签；2. it_asset（IT 资产设备归还）：blocked，尚未归还 MacBook Pro 16 寸（资产编号 IT-MBP-2023-088，序列号 XC-SN-88412）；3. finance_advance（财务备用金核销）：blocked，关联未核销差旅备用金 FIN-ADV-2026-0914 金额 2,400.00 元（对应 TRV-2026-1105）；4. account_access（域账号与权限回收）：pending，已预约最后工作日 2026-12-09 18:00 自动吊销域账号、VPN、GitLab、SSH 与 kubeconfig。二、离职证明与年假折算红线：只要存在任意 blocked 或 pending 项，can_issue_certificate 必须为 false，严禁提前签发离职证明；未休法定年假 3.5 天按日薪（月基本工资 ÷ 21.75）× 3.5 × 200% 差额补发（因当月工资已含 100%），于财务 28 日关账核验后随次月 10 日发薪日发放；司龄福利年假离职不折现。三、研发 On-Call 排班与故障复盘规范（XC-RD-ONCALL-031）：11-12 月主值班已切换至陆知微与高明轩轮值，夜间 22:00-08:00 应急响应补贴 300.00 元/次，周末与法定节假日值班分别折算 1.0 天和 1.5 天调休（90 天内有效）；凡发生 P0/P1 生产故障，须在恢复后 48 小时内完成无指责复盘（Blameless Postmortem）并归档至研发知识库 KB-4。"
+        },
+        {
+          "sequence": 13,
+          "role": "user",
+          "run_id": "run_ent_t07",
+          "context_turn_id": "turn_ent_07",
+          "text": "顺便帮我核查一下 IT 服务工单 SLA 规范（XC-IT-2026-009），我们最近有三个 IT 诉求：一是陈思远（XC1001）2026-12-01 入职领 MacBook Pro 14 和开通 GitLab/VPN 账号，二是郑语桐（XC1004）2026-12-01 从财务平调 HR 后原财务 ERP 权限回收，三是如果生产数据库监控告警触发 P0 故障，IT 和安全值班的响应与恢复 SLA 分别是什么？"
+        },
+        {
+          "sequence": 14,
+          "role": "assistant",
+          "run_id": "run_ent_t07",
+          "context_turn_id": "turn_ent_07",
+          "text": "依据《IT 服务工单、权限申请与 SLA 规范》（XC-IT-2026-009）与《调岗晋升管理办法》（XC-HR-2026-004），三项 IT 诉求分级与时限如下：1. P0 生产阻断/安全应急工单（如生产库故障、账号疑似泄露）：15 分钟内响应、4 小时内恢复，立即触发主备双人 On-Call 与安全值守；2. P1 高优权限或核心办公故障（如跨部门平调权限隔离、离职账号应急吊销）：1 小时内响应、1 个工作日内解决；针对郑语桐（XC1004）2026-12-01 平调 HR，其原财务部金税盘/ERP 审批权限必须在生效日后 3 个工作日内（即 2026-12-04 前）彻底回收，同时开通人力资源部薪酬绩效系统最小权限；3. P2 常规设备配发与新员工账号预约：4 小时内响应、3 个工作日内完成；陈思远（XC1001，OFFER-2026-1108）已建立工单 OA-IT-2026-1109（状态 scheduled），将在 T-3 工作日前备齐 MacBook Pro 14 (M4 Pro / 36G / 1TB)（采购基准价 16,999.00 元，36 个月折旧）并预设域账号/VPN/GitLab。此外已离职员工 XC1006 叶舒然不可再提交任何 IT 工单（系统以 employee_already_resigned 自动拦截）。"
+        },
+        {
+          "sequence": 15,
+          "role": "user",
+          "run_id": "run_ent_t08",
+          "context_turn_id": "turn_ent_08",
+          "text": "再核对一下新人陈思远（XC1001）与试用期员工许知夏（XC1002）在入职风控与转正节点上有没有遗漏？特别是新员工背调核验（DOC-19）和试用期请病假、年假冻结的规定，以及高明轩（XC1005）正在申请 3.0 天年假但余额不够的拆假方案。"
+        },
+        {
+          "sequence": 16,
+          "role": "assistant",
+          "run_id": "run_ent_t08",
+          "context_turn_id": "turn_ent_08",
+          "text": "入职背调、试用期转正与超额请假综合核查如下：一、陈思远（XC1001，平台架构组高级后端工程师 P6）：Offer 编号 OFFER-2026-1108，报到日 2026-12-01，试用期 3 个月（2027-02-28 止），导师为陆知微（MOCK005）。依据《新员工背调核验与录用风控指引》（DOC-19），P6 及以上社招核心岗位必须在入职前完成学历学位核验、近两段工作履历及直属主管访谈、竞业限制排查，报到当日须查验上家离职证明原件；待入职状态下禁止提交请假申请（employee_not_onboarded）。二、许知夏（XC1002，研发部前端工程师 P5）：2026-06-01 入职，6 个月试用期将于 2026-11-30 到期，当前 OA-PROB-2026-1102 待顾行知（MOCK003）完成转正答辩（按 XC-HR-2026-002 须到期前 15 个工作日发起）。试用期累计已用病假 1.0 天（远低于 10 个工作日顺延红线），不影响正常转正；但当年折算年假 2.5 天在试用期内暂冻结（probation_annual_leave_frozen），转正通过后自动解锁。三、高明轩（XC1005，研发部算法工程师 P6）：在办工单 OA-LVE-2026-1105 拟请 2026-12-02 至 2026-12-04 年假 3.0 天，当前剩余年假 2.0 天、剩余调休 0.5 天，差额 1.0 天。按 XC-HR-2026-001 固定顺位拆假方案为：2.0 天年假 + 0.5 天调休 + 0.5 天无薪事假（事假按月基本工资 ÷ 21.75 折算扣薪）。"
+        },
+        {
+          "sequence": 17,
+          "role": "user",
+          "run_id": "run_ent_t09",
+          "context_turn_id": "turn_ent_09",
+          "text": "请确认一下我们新规划的 3 个部门 Subagent（hr-policy-auditor、finance-travel-auditor、contract-legal-reviewer）以及 2 个业务专项 Project（PROJ-1 绩效与入转调离专项、PROJ-2 差旅稽核与用印风控专项）的可见范围与工具白名单配置是否遵循最小权限原则，不会互相越权。"
+        },
+        {
+          "sequence": 18,
+          "role": "assistant",
+          "run_id": "run_ent_t09",
+          "context_turn_id": "turn_ent_09",
+          "text": "三套 Subagent 与两套 Project 的最小权限配置复核全部符合平台安全边界：一、Subagent 白名单与可见域：1. SUB-1 hr-policy-auditor（department / dept_mock_hr）：仅配备只读检索与 HR 只读查询工具（knowledge_search、session_file_list、session_file_read、hroa_get_employee_profile、hroa_get_leave_balance、hroa_get_performance_review、hroa_list_oa_tickets），不含任何写操作工具，避免误写档案；2. SUB-2 finance-travel-auditor（department / dept_mock_fin，跨部门授权 dept_mock_hr 协同）：配备 knowledge_search、session_file_read、hroa_list_travel_expenses、hroa_check_offboarding_clearance 及需人工审批的 hroa_flag_expense_audit_result，既能联动核查离职备用金阻断，又受中文审批卡片强管控；3. SUB-3 contract-legal-reviewer（company）：配备 knowledge_search、session_file_list、session_file_read、hroa_get_employee_profile 与受审批保护的 hroa_submit_contract_seal_request。全部 Subagent 严格排除 dispatch_subagents 防止递归派发，统一设置 max_llm_requests=8、timeout_seconds=180、model_profile_id=null。二、专项 Project 绑定：1. PROJ-1（苏晚晴 mock_hr_member）绑定 KB-2/KB-3/KB-5 与默认技能 SK-5/SK-9；2. PROJ-2（林清岚 mock_fin_admin）绑定 KB-1/KB-3 与默认技能 SK-7/SK-8。"
+        },
+        {
+          "sequence": 19,
+          "role": "user",
+          "run_id": "run_ent_t10",
+          "context_turn_id": "turn_ent_10",
+          "text": "我们知识库也已经从 5 个库 12 份文档扩充到了 6 个库 24 份文档，尤其是新增了陆知微的个人研发架构笔记库 KB-6（DOC-24）。请核实一下双个人知识库 KB-5（苏晚晴）与 KB-6（陆知微）之间的交叉隔离规则，以及超级管理员周明远（MOCK001）能否读取这两个个人库。"
+        },
+        {
+          "sequence": 20,
+          "role": "assistant",
+          "run_id": "run_ent_t10",
+          "context_turn_id": "turn_ent_10",
+          "text": "双个人知识库零泄漏隔离规则核验结论：1. KB-5（kb_su_personal_notes，含 DOC-12《苏晚晴个人HR跟进备忘》，密级标识 HRBP-PRIVATE-NOTE-202611）归属 mock_hr_member，visibility_scope='personal'；2. KB-6（kb_lu_personal_notes，含 DOC-24《陆知微个人研发架构与带教工作笔记》，密级标识 LU-PERSONAL-ARCH-202611，记录 athena-core 灰度发布备忘与陈思远带教大纲）归属 mock_rd_member，visibility_scope='personal'。按照 Athena 个人空间严格隐私边界：mock_hr_member 访问 KB-6 必须返回 404，mock_rd_member 访问 KB-5 必须返回 404，且超级管理员 mock_super_admin 访问 KB-5 与 KB-6 同样必须返回 404（防存在性探测），在线混合检索中亦严禁召回任何属于他人个人库的切片。"
+        },
+        {
+          "sequence": 21,
+          "role": "user",
+          "run_id": "run_ent_t11",
+          "context_turn_id": "turn_ent_11",
+          "text": "另外多模态附件安全防线这次也新增了 ATT-10 密码加密 PDF、ATT-11 含 VBA 宏的 DOCX、ATT-12 云算力采购合同 PDF 以及 ATT-13 高明轩上海酒店电子发票截图。请汇总一下这 4 份新附件在上传提取与视觉预览链路中的预期处理结果，避免前端同事误判为系统故障。"
+        },
+        {
+          "sequence": 22,
+          "role": "assistant",
+          "run_id": "run_ent_t11",
+          "context_turn_id": "turn_ent_11",
+          "text": "4 份 V2 新增多模态附件的预期安全处理结论如下：1. ATT-10（ATT-10_机密_2026薪酬绩效校准密件_加密样本.pdf）：真实 PDF 1.4 /Encrypt 密码保护文件，经 LocalSessionDocumentExtractor 提取时触发 pypdfium2 FPDF_ERR_PASSWORD，安全映射为 failed('document_encrypted')，界面应友好提示用户解除加密后重试；2. ATT-11（ATT-11_含宏异常_2026年11月差旅报销汇总表.docx）：内含 word/vbaProject.bin 宏模块，在 Office ZIP 安全校验阶段被拦截，稳定返回 failed('document_macro_unsupported')，防止恶意宏风险；3. ATT-12（ATT-12_星辰智联云算力采购框架合同_CTR-2026-1120.pdf）：纯原生 Type0 中文文本层 PDF，无需 OCR 毫秒级提取为 ready，精准识别 CTR-2026-1120、360,000.00 元与 LEG-REV-2026-0418；4. ATT-13（ATT-13_高明轩_上海张江酒店电子发票_TRV-2026-1102.png）：高清电子发票样张（920.00 元/晚 × 2 晚 = 1,840.00 元），经视觉图片归一化器安全缩放并剥离元数据后送入 VLM 核验，与 TRV-2026-1102 超标 540.00 元稽核结论相互印证。"
+        },
+        {
+          "sequence": 23,
+          "role": "user",
+          "run_id": "run_ent_t12",
+          "context_turn_id": "turn_ent_12",
+          "text": "请把前面 11 轮讨论的所有关键事项浓缩为一份可直接提交今天 15:00 高管例会的行动清单：必须按绩效校准/PIP、合同用印审批、差旅超标与备用金阻断、离职清查四个板块列出编号、责任人、精确人民币金额和截止日期，方便我签字批示。"
+        }
+      ]
+    },
+    "enterprise_8turn_with_clarification": {
+      "description": "8 轮包含相邻多轮澄清问答组（共享 context_turn_id）的企业真实对话，用于验证 _turn_groups 绝不拆断同一逻辑轮次的澄清问答并在压缩切分时整组保留或整组摘要。",
+      "actor_user_id": "mock_fin_admin",
+      "clarification_groups": [
+        {
+          "context_turn_id": "turn_clarify_trv_1102",
+          "expected_sequences": [5, 6, 7, 8]
+        },
+        {
+          "context_turn_id": "turn_clarify_ctr_1120",
+          "expected_sequences": [13, 14, 15, 16]
+        }
+      ],
+      "messages": [
+        {
+          "sequence": 1,
+          "role": "user",
+          "run_id": "run_clr_01",
+          "context_turn_id": "turn_clr_01",
+          "text": "林总（MOCK002）准备今天关账前过一遍 11 月差旅和合同会签事项，先帮我核对一线和二线城市住宿标准与餐补红线。"
+        },
+        {
+          "sequence": 2,
+          "role": "assistant",
+          "run_id": "run_clr_01",
+          "context_turn_id": "turn_clr_01",
+          "text": "依据 XC-FIN-2026-006 与 XC-FIN-TRV-021：普通员工（P5-P7）一线城市（上海/北京/深圳/广州）住宿上限 650.00 元/晚，二线城市（成都/杭州）上限 450.00 元/晚，餐补统一上限 120.00 元/天，机票仅限经济舱，备用金须在返程 15 个工作日内核销且离职前 5 个工作日清零。"
+        },
+        {
+          "sequence": 3,
+          "role": "user",
+          "run_id": "run_clr_02",
+          "context_turn_id": "turn_clr_02",
+          "text": "请列出 2026-11 月份 6 笔待审差旅报销单的初步分类，标出哪些可直接合规放行，哪些存在超标、舱位违规或备用金阻断。"
+        },
+        {
+          "sequence": 4,
+          "role": "assistant",
+          "run_id": "run_clr_02",
+          "context_turn_id": "turn_clr_02",
+          "text": "6 笔差旅单初筛结果：合规放行 2 笔（TRV-2026-1101 陆知微 2,640.00 元、TRV-2026-1106 苏晚晴 2,340.00 元）；超标或违规拦截 3 笔（TRV-2026-1102 高明轩住宿超 540.00 元、TRV-2026-1103 郑语桐住宿与餐补双项合计超 300.00 元、TRV-2026-1104 唐逸凡未特批公务舱 4,200.00 元）；离职备用金阻断预警 1 笔（TRV-2026-1105 韩景明关联 FIN-ADV-2026-0914 金额 2,400.00 元）。"
+        },
+        {
+          "sequence": 5,
+          "role": "user",
+          "run_id": "run_clr_03",
+          "context_turn_id": "turn_clarify_trv_1102",
+          "text": "帮我把高明轩那笔上海酒店超标单（TRV-2026-1102）落盘驳回处理。"
+        },
+        {
+          "sequence": 6,
+          "role": "assistant",
+          "run_id": "run_clr_03",
+          "context_turn_id": "turn_clarify_trv_1102",
+          "text": "【澄清确认】高明轩（XC1005）单号 TRV-2026-1102 关联电子发票 ATT-13（920.00 元/晚 × 2 晚 = 1,840.00 元，合计超标 540.00 元）。请问您希望以 rejected_over_limit 直接核减超标 540.00 元驳回，还是标记 need_supplement 要求员工补充总裁特批件？"
+        },
+        {
+          "sequence": 7,
+          "role": "user",
+          "run_id": "run_clr_03_reply",
+          "context_turn_id": "turn_clarify_trv_1102",
+          "text": "无事前特批一律按制度执行，直接标记 rejected_over_limit，写明依据 XC-FIN-TRV-021 核减超标 540.00 元。"
+        },
+        {
+          "sequence": 8,
+          "role": "assistant",
+          "run_id": "run_clr_03_reply",
+          "context_turn_id": "turn_clarify_trv_1102",
+          "text": "已按您的明确指示准备调用 hroa_flag_expense_audit_result，对 TRV-2026-1102 标记 rejected_over_limit（稽核人 MOCK002，说明：上海张江一线住宿实报 920.00 元/晚超标 270.00 元/晚，2 晚合计核减 540.00 元，依据 XC-FIN-TRV-021）。"
+        },
+        {
+          "sequence": 9,
+          "role": "user",
+          "run_id": "run_clr_04",
+          "context_turn_id": "turn_clr_04",
+          "text": "郑语桐（XC1004）那笔成都差旅单 TRV-2026-1103 的住宿和餐补具体超了多少？会影响她 12 月 1 日平调去人力资源部的成本中心切换吗？"
+        },
+        {
+          "sequence": 10,
+          "role": "assistant",
+          "run_id": "run_clr_04",
+          "context_turn_id": "turn_clr_04",
+          "text": "TRV-2026-1103 成都二线 3 晚实报 520.00 元/晚（标准 450.00 元/晚，超 210.00 元），餐补 3 天实报 150.00 元/天（标准 120.00 元/天，超 90.00 元），双项合计超标 300.00 元。按 XC-FIN-INT-020 核减超标 300.00 元后不影响 2026-12-01 成本中心划转至人力资源部，费用归属 11 月原财务部成本中心。"
+        },
+        {
+          "sequence": 11,
+          "role": "user",
+          "run_id": "run_clr_05",
+          "context_turn_id": "turn_clr_05",
+          "text": "韩景明（XC1003）未核销备用金 FIN-ADV-2026-0914 金额 2,400.00 元现在最晚必须在什么时间前退回或冲账？"
+        },
+        {
+          "sequence": 12,
+          "role": "assistant",
+          "run_id": "run_clr_05",
+          "context_turn_id": "turn_clr_05",
+          "text": "韩景明最后工作日为 2026-12-09，返程日 2026-10-20 已超过 15 个工作日常规核销期；依据 XC-FIN-TRV-021 须在离职前 5 个工作日（T-5，即 2026-12-02 前；财务关账硬底线 T-3）清零 2,400.00 元，未清零前 HR 保持 finance_advance=blocked 且严禁签发离职证明。"
+        },
+        {
+          "sequence": 13,
+          "role": "user",
+          "run_id": "run_clr_06",
+          "context_turn_id": "turn_clarify_ctr_1120",
+          "text": "再看一下云算力采购合同 CTR-2026-1120，给我确认一下财务会签要点并准备审批意见。"
+        },
+        {
+          "sequence": 14,
+          "role": "assistant",
+          "run_id": "run_clr_06",
+          "context_turn_id": "turn_clarify_ctr_1120",
+          "text": "【澄清确认】合同 CTR-2026-1120 金额 360,000.00 元（法务初审 LEG-REV-2026-0418 已过），属于 100,000.01–500,000.00 元第二档审批区间。请确认本次会签是否需要同时核对云枢算力科技有限公司的年度预算占用科目及分期付款里程碑？"
+        },
+        {
+          "sequence": 15,
+          "role": "user",
+          "run_id": "run_clr_06_reply",
+          "context_turn_id": "turn_clarify_ctr_1120",
+          "text": "是的，预算科目归属研发基础设施年度预算，按季度后付 90,000.00 元，需开具 6% 增值税专用发票。"
+        },
+        {
+          "sequence": 16,
+          "role": "assistant",
+          "run_id": "run_clr_06_reply",
+          "context_turn_id": "turn_clarify_ctr_1120",
+          "text": "已记录 CTR-2026-1120 财务会签意见：金额 360,000.00 元计入研发基础设施预算，按季后付 90,000.00 元凭 6% 专票结算，法务初审编号 LEG-REV-2026-0418 完备且无排他/无限连带条款，符合 XC-LEG-2026-008 二档审批要求，准予加盖合同专用章。"
+        },
+        {
+          "sequence": 17,
+          "role": "user",
+          "run_id": "run_clr_07",
+          "context_turn_id": "turn_clr_07",
+          "text": "顺便确认一下沈佳禾（MOCK004）昨天提到的另一份测试合同 CTR-2026-1199 为什么被系统拦掉了？"
+        },
+        {
+          "sequence": 18,
+          "role": "assistant",
+          "run_id": "run_clr_07",
+          "context_turn_id": "turn_clr_07",
+          "text": "CTR-2026-1199 因缺少合法法务初审编号（须满足 LEG-REV-YYYY-NNNN 格式），触犯 XC-LEG-2026-008 红线被返回 legal_review_code_required 拦截，须先提交法务初审取得编号后方可重新送审。"
+        },
+        {
+          "sequence": 19,
+          "role": "user",
+          "run_id": "run_clr_08",
+          "context_turn_id": "turn_clr_08",
+          "text": "最后请把刚才高明轩 TRV-2026-1102 核减 540.00 元、郑语桐 TRV-2026-1103 核减 300.00 元、韩景明 2,400.00 元备用金阻断以及 CTR-2026-1120 会签结论汇总成一页财务关账简表。"
+        }
+      ]
+    }
+  }
+}

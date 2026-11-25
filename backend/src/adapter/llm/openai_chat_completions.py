@@ -10,8 +10,7 @@ import math
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 from typing import Any, cast
 
 import httpx2
@@ -51,6 +50,7 @@ from domain.llm.model import (
 )
 from domain.llm.model.profile import RuntimeModelProfile
 from domain.llm.ports import LlmRuntimeTextProvider, LlmStreamProvider
+from infrastructure.http.retry import parse_retry_after_seconds
 
 logger = logging.getLogger(__name__)
 MAX_STREAM_CHUNKS = 8192
@@ -248,22 +248,7 @@ class _ToolCallDiagnostics:
 
 def _retry_after_seconds(value: str | None, now: datetime | None = None) -> float | None:
     """解析 Retry-After 秒数或 HTTP 日期；无效值不提供重试建议。"""
-    if value is None:
-        return None
-    try:
-        seconds = float(value.strip())
-    except ValueError:
-        try:
-            retry_time = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        if retry_time.tzinfo is None:
-            retry_time = retry_time.replace(tzinfo=UTC)
-        current_time = now or datetime.now(UTC)
-        seconds = (retry_time.astimezone(UTC) - current_time.astimezone(UTC)).total_seconds()
-    if not math.isfinite(seconds) or seconds < 0:
-        return None
-    return min(seconds, 86_400.0)
+    return parse_retry_after_seconds(value, now=now)
 
 
 def _json_value(value: Any) -> Any:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import cast
@@ -15,6 +15,8 @@ import httpx2
 from httpx2 import AsyncByteStream, AsyncHTTPTransport, Request, Response
 from mcp.client._transport import TransportStreams
 from mcp.client.streamable_http import streamable_http_client
+
+from infrastructure.http.bounded import BoundedResponseStream
 
 DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _METADATA_IPS = {
@@ -136,25 +138,6 @@ async def _resolve(hostname: str, port: int) -> tuple[str, ...]:
     return tuple(dict.fromkeys(record[4][0] for record in records))
 
 
-class _LimitedResponseStream(AsyncByteStream):
-    """在下游读取时计数字节，避免把完整响应缓存到内存。"""
-
-    def __init__(self, stream: AsyncByteStream, maximum: int) -> None:
-        self._stream = stream
-        self._maximum = maximum
-        self._consumed = 0
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self._stream:
-            self._consumed += len(chunk)
-            if self._consumed > self._maximum:
-                raise McpResponseTooLargeError("mcp_response_too_large")
-            yield chunk
-
-    async def aclose(self) -> None:
-        await self._stream.aclose()
-
-
 class PinnedHttpTransport(httpx2.AsyncBaseTransport):
     """拒绝私网目标和重定向，并将请求固定到已检查的 DNS 地址。"""
 
@@ -226,9 +209,13 @@ class PinnedHttpTransport(httpx2.AsyncBaseTransport):
             except ValueError:
                 await response.aclose()
                 raise McpEndpointError("mcp_response_invalid") from None
-        response.stream = _LimitedResponseStream(
+        # 复用共享有界流包装器在读取阶段计数字节，超限时抛出 MCP 专用异常。
+        response.stream = BoundedResponseStream(
             cast(AsyncByteStream, response.stream),
             self._maximum_response_bytes,
+            is_sse=False,
+            too_large_code="mcp_response_too_large",
+            error_factory=McpResponseTooLargeError,
         )
         response.request = request
         return response

@@ -28,6 +28,7 @@ dependencies = [
     "pwdlib[argon2]>=0.2,<1",
     "PyYAML>=6,<7",
     "sqlalchemy[asyncio]>=2,<3",
+    "tenacity>=9,<10",
     "tiktoken>=0.12,<1",
     "uvicorn>=0.30,<1",
 ]

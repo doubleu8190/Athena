@@ -6,7 +6,6 @@ import asyncio
 import logging
 import os
 import re
-import ssl
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +21,7 @@ from infrastructure.storage.config import (
     ObjectStorageConfig,
     ObjectStorageConfigError,
 )
+from infrastructure.storage.http import build_minio_http_pool
 
 logger = logging.getLogger(__name__)
 
@@ -474,40 +474,18 @@ class MinioFileObjectStore(FileObjectStore):
     def _build_client(self) -> tuple[_MinioClient, Any]:
         try:
             from minio import Minio
-            from urllib3 import PoolManager
-            from urllib3.util import Retry, Timeout
         except ImportError:
             raise FileStorageError("file_storage_sdk_missing") from None
         pool: Any | None = None
         try:
-            timeout = Timeout(connect=5.0, read=30.0)
-            retries = Retry(
-                total=2,
-                connect=2,
-                read=2,
-                status=2,
-                redirect=0,
-                other=0,
-                backoff_factor=0.2,
-                respect_retry_after_header=False,
-                status_forcelist=(500, 502, 503, 504),
-                allowed_methods=frozenset({"HEAD", "GET", "PUT", "DELETE"}),
-            )
+            configuration = self._configuration()
             # 保持 stream_limit(8) + executor_workers(8) < pool_maxsize(24)，
             # 且 block=False 避免 minio 未传 pool_timeout 时无限阻塞。
-            kwargs: dict[str, Any] = {
-                "maxsize": _HTTP_POOL_MAXSIZE,
-                "block": False,
-                "timeout": timeout,
-                "retries": retries,
-            }
-            configuration = self._configuration()
-            if configuration.secure:
-                context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None)
-                context.verify_mode = ssl.CERT_REQUIRED
-                context.check_hostname = True
-                kwargs["ssl_context"] = context
-            pool = PoolManager(**kwargs)
+            pool = build_minio_http_pool(
+                maxsize=_HTTP_POOL_MAXSIZE,
+                block=False,
+                secure=configuration.secure,
+            )
             client = Minio(
                 configuration.endpoint,
                 access_key=configuration.access_key,
@@ -515,6 +493,10 @@ class MinioFileObjectStore(FileObjectStore):
                 secure=configuration.secure,
                 http_client=pool,
             )
+        except ImportError:
+            if pool is not None:
+                pool.clear()
+            raise FileStorageError("file_storage_sdk_missing") from None
         except Exception:
             if pool is not None:
                 pool.clear()

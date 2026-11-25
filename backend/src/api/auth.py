@@ -248,7 +248,11 @@ def build_auth_router(
         response.headers["Cache-Control"] = "no-store"
         return user_result_to_response(issued.user)
 
-    @router.get("/feishu/authorize")
+    @router.get(
+        "/feishu/authorize",
+        status_code=status.HTTP_302_FOUND,
+        response_class=RedirectResponse,
+    )
     async def feishu_authorize(return_to: str | None = None) -> RedirectResponse:
         """校验站内回跳路径并写入一次性 state，302 跳转至飞书 OAuth 授权页。"""
         try:
@@ -265,7 +269,11 @@ def build_auth_router(
             headers={"Cache-Control": "no-store"},
         )
 
-    @router.get("/feishu/callback")
+    @router.get(
+        "/feishu/callback",
+        status_code=status.HTTP_302_FOUND,
+        response_class=RedirectResponse,
+    )
     async def feishu_callback(
         code: str | None = None,
         state: str | None = None,
@@ -309,7 +317,11 @@ def build_auth_router(
         redirect.headers["Cache-Control"] = "no-store"
         return redirect
 
-    @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+    @router.post(
+        "/logout",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def logout(http_request: Request) -> Response:
         """撤销当前会话并清除 Cookie。"""
         token = http_request.cookies.get(cookie.name)
@@ -344,7 +356,11 @@ def build_auth_router(
         response.headers["Cache-Control"] = "no-store"
         return user_result_to_response(updated_user)
 
-    @router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
+    @router.post(
+        "/password",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def change_password(
         request: ChangePasswordRequest,
         current_auth: CurrentAuth,

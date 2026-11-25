@@ -3,7 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { makeSkill } from "../../test/adminFixtures";
-import { FakeEventSource } from "../../test/fakeEventSource";
+import {
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import {
   getRequestUrl,
   listResponse,
@@ -260,6 +263,9 @@ function installFetch(options: SessionFetchOptions) {
           ? jsonResponse(detail)
           : jsonResponse({ detail: "run_not_found" }, 404);
       }
+      if (url.pathname.endsWith("/stream") && method === "GET") {
+        return createSseStreamResponse(url.pathname, init);
+      }
       throw new Error(`Unexpected request: ${method} ${url}`);
     },
   );
@@ -268,14 +274,13 @@ function installFetch(options: SessionFetchOptions) {
 }
 
 afterEach(() => {
-  FakeEventSource.instances = [];
+  FakeSseStream.instances = [];
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("聊天技能选择与会话文件", () => {
   it("新会话先上传文件，再提交技能 ID 与文件 ID", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let submitBody: Record<string, unknown> | null = null;
     let uploadedFile: File | null = null;
     const fetchMock = installFetch({
@@ -530,7 +535,6 @@ describe("聊天技能选择与会话文件", () => {
   });
 
   it("补充回答只携带新文件 ID，不重新绑定技能", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const waiting = makeRun({
       id: "run-waiting-input",
       pending_input: {
@@ -607,7 +611,6 @@ describe("聊天技能选择与会话文件", () => {
   });
 
   it("刷新后从服务端恢复多文件列表，并可把已发布产物引用到后续 Run", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const completed = makeRun({
       id: "run-artifact-source",
       session_id: SESSION.id,

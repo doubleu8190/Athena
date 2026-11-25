@@ -150,7 +150,11 @@ def build_subagent_admin_router(service: SubagentService) -> APIRouter:
             raise _subagent_error_to_http(error) from error
         return subagent_to_response(profile)
 
-    @router.delete("/{subagent_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.delete(
+        "/{subagent_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def delete_subagent(
         actor: AdminAuth,
         subagent_id: SubagentIdPath,

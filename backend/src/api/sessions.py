@@ -170,6 +170,7 @@ def build_session_router(service: SessionService) -> APIRouter:
     @router.delete(
         "/{session_id}",
         status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
     )
     async def delete_session(
         current_auth: CurrentAuth,

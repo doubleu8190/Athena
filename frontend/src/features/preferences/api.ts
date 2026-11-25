@@ -1,4 +1,4 @@
-import { apiRequest } from "../../shared/api/client";
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from "../../shared/api/client";
 import type {
   CreateUserMemoryInput,
   UpdateUserMemoryInput,
@@ -9,48 +9,37 @@ import type {
 } from "./model";
 
 export function getUserPreferences(): Promise<UserWorkProfile> {
-  return apiRequest<UserWorkProfile>("/me/preferences", { method: "GET" });
+  return apiGet("/api/v1/me/preferences");
 }
 
 export function updateUserPreferences(
   input: UpdateUserWorkProfileInput,
 ): Promise<UserWorkProfile> {
-  return apiRequest<UserWorkProfile>("/me/preferences", {
-    body: input,
-    method: "PUT",
-  });
+  return apiPut("/api/v1/me/preferences", { body: input });
 }
 
 export function listUserMemories(): Promise<UserMemoryListResponse> {
-  return apiRequest<UserMemoryListResponse>("/me/memories", {
-    method: "GET",
-  });
+  return apiGet("/api/v1/me/memories");
 }
 
 export function createUserMemory(
   input: CreateUserMemoryInput,
 ): Promise<UserMemory> {
-  return apiRequest<UserMemory>("/me/memories", {
-    body: input,
-    method: "POST",
-  });
+  return apiPost("/api/v1/me/memories", { body: input });
 }
 
 export function updateUserMemory(
   memoryId: string,
   input: UpdateUserMemoryInput,
 ): Promise<UserMemory> {
-  return apiRequest<UserMemory>(
-    `/me/memories/${encodeURIComponent(memoryId)}`,
-    {
-      body: input,
-      method: "PATCH",
-    },
-  );
+  return apiPatch("/api/v1/me/memories/{memory_id}", {
+    body: input,
+    params: { path: { memory_id: memoryId } },
+  });
 }
 
 export function deleteUserMemory(memoryId: string): Promise<void> {
-  return apiRequest<void>(`/me/memories/${encodeURIComponent(memoryId)}`, {
-    method: "DELETE",
+  return apiDelete("/api/v1/me/memories/{memory_id}", {
+    params: { path: { memory_id: memoryId } },
   });
 }

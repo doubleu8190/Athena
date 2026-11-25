@@ -1,13 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AUTH_UNAUTHORIZED_EVENT } from "../../shared/api/client";
 import {
-  FakeEventSource,
-  fakeEventSourceFactory,
-} from "../../test/fakeEventSource";
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import {
-  TEST_USER,
   getRequestUrl,
   makeMessage,
 } from "../../test/fixtures";
@@ -25,11 +24,32 @@ import {
   runStreamReducer,
   type RunStreamAction,
 } from "./runStream";
-import { AUTH_PROBE_COOLDOWN_MS, useRunStream } from "./useRunStream";
+import { useRunStream } from "./useRunStream";
 
 beforeEach(() => {
-  FakeEventSource.instances = [];
+  FakeSseStream.instances = [];
 });
+
+afterEach(() => {
+  FakeSseStream.instances = [];
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+async function flushStreamTasks(turns = 6): Promise<void> {
+  await act(async () => {
+    for (let index = 0; index < turns; index += 1) {
+      await Promise.resolve();
+    }
+  });
+}
+
+function createFakeSseFetch() {
+  return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+    createSseStreamResponse(getRequestUrl(input), init),
+  );
+}
 
 function event(
   type: string,
@@ -529,17 +549,19 @@ describe("失败报告精确对账", () => {
   });
 });
 
-describe("原生 EventSource Run hook", () => {
-  it("失败快照解析并保留权威报告 ID", () => {
+describe("fetch + eventsource-parser Run SSE hook", () => {
+  it("失败快照解析并保留权威报告 ID 且立即关闭流", async () => {
+    const sseFetch = createFakeSseFetch();
     const { result } = renderHook(() =>
       useRunStream({
-        eventSourceFactory: fakeEventSourceFactory,
+        fetch: sseFetch,
         runId: "run-1",
         sessionId: "session-1",
         status: "running",
       }),
     );
-    const source = FakeEventSource.instances.at(-1);
+    await flushStreamTasks();
+    const source = FakeSseStream.instances.at(-1);
 
     act(() => {
       source?.emit("snapshot", {
@@ -547,35 +569,36 @@ describe("原生 EventSource Run hook", () => {
       });
     });
 
-    expect(result.current.state.status).toBe("failed");
-    expect(result.current.state.reportMessageId).toBe(
-      "msg-report-snapshot",
-    );
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("failed");
+    });
+    expect(result.current.state.reportMessageId).toBe("msg-report-snapshot");
     expect(source?.closed).toBe(true);
   });
 
-  it("running 时收到中断会主动换新连接，由新快照校正文本并阻止终态重连", async () => {
+  it("running 时收到中断会主动换新连接（无旧 Last-Event-ID），由新快照校正文本并阻止终态重连", async () => {
+    const sseFetch = createFakeSseFetch();
     const { result } = renderHook(() =>
       useRunStream({
-        eventSourceFactory: fakeEventSourceFactory,
+        fetch: sseFetch,
         runId: "run-1",
         sessionId: "session-1",
         status: "running",
       }),
     );
-    const firstSource = FakeEventSource.instances.at(-1);
+    await flushStreamTasks();
+    const firstSource = FakeSseStream.instances.at(-1);
     expect(firstSource?.url).toBe(
       "/api/v1/sessions/session-1/runs/run-1/stream",
     );
 
     act(() => {
-      firstSource?.emitOpen();
-      firstSource?.emit("snapshot", {
-        payload: snapshot("running", "初始权威回答"),
-      });
-      firstSource?.emit("text_delta", {
-        payload: { round: 0, text: "临时" },
-      });
+      firstSource?.emit(
+        "snapshot",
+        { payload: snapshot("running", "初始权威回答") },
+        "10",
+      );
+      firstSource?.emit("text_delta", { payload: { round: 0, text: "临时" } }, "11");
     });
     await waitFor(() => {
       expect(result.current.state.transientText).toBe("临时");
@@ -586,15 +609,19 @@ describe("原生 EventSource Run hook", () => {
         payload: { reason: "stream_gap" },
       });
     });
+    await waitFor(() => {
+      expect(FakeSseStream.instances).toHaveLength(2);
+    });
     expect(result.current.state.transientText).toBe("临时");
     expect(result.current.state.notice).toContain("重新同步");
-    await waitFor(() => {
-      expect(FakeEventSource.instances).toHaveLength(2);
-    });
     expect(firstSource?.closed).toBe(true);
-    const replacement = FakeEventSource.instances.at(-1);
+    const replacement = FakeSseStream.instances.at(-1);
     expect(replacement).not.toBe(firstSource);
     expect(replacement?.url).toBe(firstSource?.url);
+    // 换线重连必须是全新连接，不携带旧 Last-Event-ID 以请求服务端重新推送权威 snapshot。
+    expect(
+      new Headers(replacement?.init?.headers).get("Last-Event-ID"),
+    ).toBeNull();
 
     act(() => {
       // 中断后的旧连接事件必须忽略，不能污染新连接等待快照的文本。
@@ -605,8 +632,10 @@ describe("原生 EventSource Run hook", () => {
         payload: snapshot("running", "权威回答"),
       });
     });
+    await waitFor(() => {
+      expect(result.current.state.messages[0]?.text).toBe("权威回答");
+    });
     expect(result.current.state.transientText).toBe("");
-    expect(result.current.state.messages[0].text).toBe("权威回答");
     expect(result.current.state.notice).toBeNull();
     expect(result.current.state.connection).toBe("open");
     expect(replacement?.closed).toBe(false);
@@ -619,22 +648,26 @@ describe("原生 EventSource Run hook", () => {
         payload: { reason: "stream_gap" },
       });
     });
+    await waitFor(() => {
+      expect(result.current.state.connection).toBe("closed");
+    });
     expect(replacement?.closed).toBe(true);
-    expect(FakeEventSource.instances).toHaveLength(2);
-    expect(result.current.state.connection).toBe("closed");
+    expect(FakeSseStream.instances).toHaveLength(2);
     expect(result.current.state.notice).toBeNull();
   });
 
-  it("新连接首个快照前收到中断不会再次换线，避免重连风暴", () => {
+  it("新连接首个快照前收到中断不会再次换线，避免重连风暴", async () => {
+    const sseFetch = createFakeSseFetch();
     const { result } = renderHook(() =>
       useRunStream({
-        eventSourceFactory: fakeEventSourceFactory,
+        fetch: sseFetch,
         runId: "run-1",
         sessionId: "session-1",
         status: "running",
       }),
     );
-    const source = FakeEventSource.instances.at(-1);
+    await flushStreamTasks();
+    const source = FakeSseStream.instances.at(-1);
 
     act(() => {
       source?.emit("stream_interrupted", {
@@ -645,24 +678,29 @@ describe("原生 EventSource Run hook", () => {
       });
     });
 
-    expect(FakeEventSource.instances).toHaveLength(1);
+    await waitFor(() => {
+      expect(result.current.state.notice).toContain("重新同步");
+    });
+    expect(FakeSseStream.instances).toHaveLength(1);
     expect(source?.closed).toBe(false);
-    expect(result.current.state.notice).toContain("重新同步");
 
     act(() => {
       source?.emit("snapshot", {
         payload: snapshot("running", "重连后的权威回答"),
       });
     });
+    await waitFor(() => {
+      expect(result.current.state.messages[0]?.text).toBe("重连后的权威回答");
+    });
     expect(result.current.state.notice).toBeNull();
-    expect(result.current.state.messages[0].text).toBe("重连后的权威回答");
   });
 
-  it("快照等待态关闭后不重连，重新 queued 会重连；终态和卸载不再重连", () => {
+  it("快照等待态关闭后不重连，重新 queued 会重连；终态和卸载不再重连", async () => {
+    const sseFetch = createFakeSseFetch();
     const { rerender, unmount } = renderHook(
       ({ status }) =>
         useRunStream({
-          eventSourceFactory: fakeEventSourceFactory,
+          fetch: sseFetch,
           runId: "run-1",
           sessionId: "session-1",
           status,
@@ -673,43 +711,55 @@ describe("原生 EventSource Run hook", () => {
         },
       },
     );
-    const first = FakeEventSource.instances.at(-1);
+    await flushStreamTasks();
+    const first = FakeSseStream.instances.at(-1);
     act(() => {
       first?.emit("snapshot", {
         payload: snapshot("waiting_for_input"),
       });
     });
-    expect(first?.closed).toBe(true);
+    await waitFor(() => {
+      expect(first?.closed).toBe(true);
+    });
 
     rerender({ status: "waiting_for_input" });
-    expect(FakeEventSource.instances).toHaveLength(1);
+    await flushStreamTasks();
+    expect(FakeSseStream.instances).toHaveLength(1);
 
     rerender({ status: "queued" });
-    expect(FakeEventSource.instances).toHaveLength(2);
-    const second = FakeEventSource.instances.at(-1);
+    await waitFor(() => {
+      expect(FakeSseStream.instances).toHaveLength(2);
+    });
+    const second = FakeSseStream.instances.at(-1);
 
     rerender({ status: "completed" });
-    expect(second?.closed).toBe(true);
-    expect(FakeEventSource.instances).toHaveLength(2);
+    await waitFor(() => {
+      expect(second?.closed).toBe(true);
+    });
+    expect(FakeSseStream.instances).toHaveLength(2);
 
     unmount();
     expect(second?.closed).toBe(true);
   });
 
-  it("heartbeat 写入 ref 保活且不触发重渲染，run_event 携带事件类型触发对账", () => {
+  it("heartbeat 写入 ref 保活且不触发重渲染，run_event 携带事件类型触发对账", async () => {
+    const sseFetch = createFakeSseFetch();
     const onReconcile = vi.fn();
     let renderCount = 0;
     const { result } = renderHook(() => {
       renderCount += 1;
       return useRunStream({
-        eventSourceFactory: fakeEventSourceFactory,
+        fetch: sseFetch,
         onReconcile,
         runId: "run-1",
         sessionId: "session-1",
         status: "queued",
       });
     });
-    const source = FakeEventSource.instances.at(-1);
+    await waitFor(() => {
+      expect(result.current.state.connection).toBe("open");
+    });
+    const source = FakeSseStream.instances.at(-1);
     const rendersBeforeHeartbeat = renderCount;
 
     act(() => {
@@ -720,6 +770,7 @@ describe("原生 EventSource Run hook", () => {
         payload: { at: "2026-11-10T03:01:15Z" },
       });
     });
+    await flushStreamTasks();
     expect(result.current.state.status).toBe("queued");
     expect(result.current.lastHeartbeatAtRef.current).toBe(
       "2026-11-10T03:01:15Z",
@@ -732,12 +783,14 @@ describe("原生 EventSource Run hook", () => {
         payload: { event: event("started", 1) },
       });
     });
-    expect(result.current.state.status).toBe("running");
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("running");
+    });
     expect(onReconcile).toHaveBeenCalledTimes(1);
     expect(onReconcile).toHaveBeenLastCalledWith({ eventType: "started" });
   });
 
-  it("同一帧内连续多个 text_delta 合并为 1 次 state 更新，切 Run 与卸载时取消挂起帧", () => {
+  it("同一帧内连续多个 text_delta 合并为 1 次 state 更新，切 Run 与卸载时取消挂起帧", async () => {
     const queuedFrames = new Map<number, FrameRequestCallback>();
     let nextFrameId = 1;
     const rafSpy = vi
@@ -755,12 +808,13 @@ describe("原生 EventSource Run hook", () => {
       });
 
     try {
+      const sseFetch = createFakeSseFetch();
       let renderCount = 0;
       const { rerender, result, unmount } = renderHook(
         ({ runId }) => {
           renderCount += 1;
           return useRunStream({
-            eventSourceFactory: fakeEventSourceFactory,
+            fetch: sseFetch,
             runId,
             sessionId: "session-1",
             status: "running",
@@ -768,7 +822,10 @@ describe("原生 EventSource Run hook", () => {
         },
         { initialProps: { runId: "run-1" } },
       );
-      const firstSource = FakeEventSource.instances.at(-1);
+      await waitFor(() => {
+        expect(result.current.state.connection).toBe("open");
+      });
+      const firstSource = FakeSseStream.instances.at(-1);
       const rendersBeforeBurst = renderCount;
 
       // 同一帧内收到 4 段增量：仅预约 1 个 rAF，且尚未触发重渲染。
@@ -778,6 +835,7 @@ describe("原生 EventSource Run hook", () => {
         firstSource?.emit("text_delta", { payload: { text: "帧" } });
         firstSource?.emit("text_delta", { payload: { text: "合并" } });
       });
+      await flushStreamTasks();
       expect(rafSpy).toHaveBeenCalledTimes(1);
       expect(renderCount).toBe(rendersBeforeBurst);
       expect(result.current.state.transientText).toBe("");
@@ -795,28 +853,33 @@ describe("原生 EventSource Run hook", () => {
       act(() => {
         firstSource?.emit("text_delta", { payload: { text: "旧Run未刷片段" } });
       });
+      await flushStreamTasks();
       expect(queuedFrames.size).toBe(1);
       rerender({ runId: "run-2" });
+      await flushStreamTasks();
       expect(cancelRafSpy).toHaveBeenCalled();
       expect(queuedFrames.size).toBe(0);
       expect(result.current.state.runId).toBe("run-2");
       expect(result.current.state.transientText).toBe("");
+      expect(firstSource?.closed).toBe(true);
 
       // 卸载前有挂起帧：卸载必须取消挂起帧，不遗留泄漏回调。
-      const secondSource = FakeEventSource.instances.at(-1);
+      const secondSource = FakeSseStream.instances.at(-1);
       act(() => {
         secondSource?.emit("text_delta", { payload: { text: "卸载前未刷片段" } });
       });
+      await flushStreamTasks();
       expect(queuedFrames.size).toBe(1);
       unmount();
       expect(queuedFrames.size).toBe(0);
+      expect(secondSource?.closed).toBe(true);
     } finally {
       rafSpy.mockRestore();
       cancelRafSpy.mockRestore();
     }
   });
 
-  it("text_delta 紧跟 snapshot 或 run_event 时先同步 flush 缓冲并取消挂起帧", () => {
+  it("text_delta 紧跟 snapshot 或 run_event 时先同步 flush 缓冲并取消挂起帧", async () => {
     const queuedFrames = new Map<number, FrameRequestCallback>();
     let nextFrameId = 1;
     const rafSpy = vi
@@ -834,15 +897,19 @@ describe("原生 EventSource Run hook", () => {
       });
 
     try {
+      const sseFetch = createFakeSseFetch();
       const { result } = renderHook(() =>
         useRunStream({
-          eventSourceFactory: fakeEventSourceFactory,
+          fetch: sseFetch,
           runId: "run-1",
           sessionId: "session-1",
           status: "running",
         }),
       );
-      const source = FakeEventSource.instances.at(-1);
+      await waitFor(() => {
+        expect(result.current.state.connection).toBe("open");
+      });
+      const source = FakeSseStream.instances.at(-1);
 
       // 1. text_delta 后紧跟非终态权威 snapshot：取消挂起帧并被 snapshot 清空，不能迟到回写。
       act(() => {
@@ -851,10 +918,12 @@ describe("原生 EventSource Run hook", () => {
           payload: snapshot("running", "权威快照正文"),
         });
       });
+      await waitFor(() => {
+        expect(result.current.state.messages[0]?.text).toBe("权威快照正文");
+      });
       expect(cancelRafSpy).toHaveBeenCalled();
       expect(queuedFrames.size).toBe(0);
       expect(result.current.state.transientText).toBe("");
-      expect(result.current.state.messages[0].text).toBe("权威快照正文");
 
       // 2. text_delta 后紧跟 run_event：先同步刷入缓冲文本，再处理事件。
       act(() => {
@@ -864,11 +933,13 @@ describe("原生 EventSource Run hook", () => {
           payload: { event: event("tool_call_started", 2) },
         });
       });
+      await waitFor(() => {
+        expect(result.current.state.events.map((item) => item.type)).toEqual([
+          "tool_call_started",
+        ]);
+      });
       expect(queuedFrames.size).toBe(0);
       expect(result.current.state.transientText).toBe("事件前缓冲A+B");
-      expect(result.current.state.events.map((item) => item.type)).toEqual([
-        "tool_call_started",
-      ]);
 
       // 3. text_delta 后紧跟终态 snapshot：先同步 flush 最后一帧文本，由终态 snapshot 完整保留。
       act(() => {
@@ -877,8 +948,10 @@ describe("原生 EventSource Run hook", () => {
           payload: snapshot("completed", "旧交付消息"),
         });
       });
+      await waitFor(() => {
+        expect(result.current.state.status).toBe("completed");
+      });
       expect(queuedFrames.size).toBe(0);
-      expect(result.current.state.status).toBe("completed");
       expect(result.current.state.connection).toBe("closed");
       expect(result.current.state.transientText).toBe("事件前缓冲A+B+终态前尾帧");
     } finally {
@@ -887,7 +960,7 @@ describe("原生 EventSource Run hook", () => {
     }
   });
 
-  it("无 requestAnimationFrame 环境兜底通过定时合批 flush text_delta", () => {
+  it("无 requestAnimationFrame 环境兜底通过定时合批 flush text_delta", async () => {
     vi.useFakeTimers();
     const originalRaf = window.requestAnimationFrame;
     const originalCancelRaf = window.cancelAnimationFrame;
@@ -903,20 +976,23 @@ describe("原生 EventSource Run hook", () => {
     });
 
     try {
+      const sseFetch = createFakeSseFetch();
       const { result } = renderHook(() =>
         useRunStream({
-          eventSourceFactory: fakeEventSourceFactory,
+          fetch: sseFetch,
           runId: "run-1",
           sessionId: "session-1",
           status: "running",
         }),
       );
-      const source = FakeEventSource.instances.at(-1);
+      await flushStreamTasks();
+      const source = FakeSseStream.instances.at(-1);
 
       act(() => {
         source?.emit("text_delta", { payload: { text: "兜底" } });
         source?.emit("text_delta", { payload: { text: "定时合批" } });
       });
+      await flushStreamTasks();
       expect(result.current.state.transientText).toBe("");
 
       act(() => {
@@ -938,33 +1014,21 @@ describe("原生 EventSource Run hook", () => {
     }
   });
 
-  it("EventSource error 显示断线提示但保留当前文本", () => {
-    const { result } = renderHook(() =>
-      useRunStream({
-        eventSourceFactory: fakeEventSourceFactory,
-        runId: "run-1",
-        sessionId: "session-1",
-        status: "running",
-      }),
-    );
-    const source = FakeEventSource.instances.at(-1);
-
-    act(() => {
-      source?.emit("text_delta", {
-        payload: { text: "断线前文本" },
-      });
-      source?.emitError();
-    });
-
-    expect(result.current.state.transientText).toBe("断线前文本");
-    expect(result.current.state.connection).toBe("error");
-    expect(result.current.state.notice).toContain("实时连接中断");
-  });
-
-  it("EventSource error 后探测 /auth/me 返回 401 时派发未认证事件并立刻关闭连接", async () => {
+  it("SSE 握手或重连直接返回 401 时立即发布未认证事件、保留当前文本、永久停流且不轮询 /auth/me", async () => {
+    vi.useFakeTimers();
+    let attempt = 0;
     const fetchMock = vi.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit) =>
-        jsonResponse({ detail: "authentication_required" }, 401),
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = getRequestUrl(input);
+        if (url.includes("/auth/me")) {
+          throw new Error("升级 fetch SSE 后禁止再轮询 /auth/me");
+        }
+        attempt += 1;
+        if (attempt === 1) {
+          return createSseStreamResponse(url, init);
+        }
+        return jsonResponse({ detail: "not_authenticated" }, 401);
+      },
     );
     vi.stubGlobal("fetch", fetchMock);
     const unauthorizedListener = vi.fn();
@@ -973,323 +1037,130 @@ describe("原生 EventSource Run hook", () => {
     try {
       const { result } = renderHook(() =>
         useRunStream({
-          eventSourceFactory: fakeEventSourceFactory,
           runId: "run-1",
           sessionId: "session-1",
           status: "running",
         }),
       );
-      const source = FakeEventSource.instances.at(-1);
+      await flushStreamTasks();
+      const firstStream = FakeSseStream.instances[0];
+      expect(firstStream).toBeDefined();
 
+      // 先接收流式文本，随后服务端断流并在退避重连时直接返回 HTTP 401。
       act(() => {
-        source?.emit("text_delta", {
-          payload: { text: "会话过期前文本" },
-        });
-        source?.emitError();
+        firstStream.emit("text_delta", { payload: { text: "会话过期前文本" } });
+        firstStream.end();
       });
+      await flushStreamTasks();
+      expect(result.current.state.transientText).toBe("会话过期前文本");
+      expect(result.current.state.connection).toBe("error");
+      expect(unauthorizedListener).not.toHaveBeenCalled();
 
-      await waitFor(() => {
-        expect(source?.closed).toBe(true);
+      // 触发 1000ms 退避重连，直接命中 401。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
       });
+      await flushStreamTasks();
+
       expect(unauthorizedListener).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      const [requestInput, requestInit] = fetchMock.mock.calls[0];
-      expect(getRequestUrl(requestInput)).toBe("/api/v1/auth/me");
-      expect(requestInit?.method).toBe("GET");
-      expect(requestInit?.cache).toBe("no-store");
-      expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
       expect(result.current.state.connection).toBe("error");
       expect(result.current.state.transientText).toBe("会话过期前文本");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(
+        fetchMock.mock.calls.every(
+          ([input]) =>
+            getRequestUrl(input) ===
+            "/api/v1/sessions/session-1/runs/run-1/stream",
+        ),
+      ).toBe(true);
 
-      // 关闭连接后继续收到迟到 error 或数据片段，不应重复探测或污染文本。
-      act(() => {
-        source?.emitError();
-        source?.emit("text_delta", {
-          payload: { text: "迟到片段" },
-        });
+      // 401 永久停流：即使继续推进 60 秒也绝不再重连。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
       });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(result.current.state.transientText).toBe("会话过期前文本");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     } finally {
       window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorizedListener);
     }
   });
 
-  it.each([
-    [
-      "200 身份仍有效",
-      async () => jsonResponse(TEST_USER, 200),
-    ],
-    [
-      "网络错误",
-      async () => {
-        throw new TypeError("Failed to fetch");
-      },
-    ],
-    [
-      "503 服务端临时不可用",
-      async () => jsonResponse({ detail: "service_unavailable" }, 503),
-    ],
-  ])(
-    "EventSource error 后探测 /auth/me 返回%s时不误登出并保留文本与断线提示",
-    async (_label, respond) => {
-      let resolveProbeRequest: (() => void) | null = null;
-      const probeDone = new Promise<void>((resolve) => {
-        resolveProbeRequest = resolve;
-      });
-      const fetchMock = vi.fn(async () => {
-        try {
-          return await respond();
-        } finally {
-          resolveProbeRequest?.();
-        }
-      });
-      vi.stubGlobal("fetch", fetchMock);
-      const unauthorizedListener = vi.fn();
-      window.addEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorizedListener);
-
-      try {
-        const { result } = renderHook(() =>
-          useRunStream({
-            eventSourceFactory: fakeEventSourceFactory,
-            runId: "run-1",
-            sessionId: "session-1",
-            status: "running",
-          }),
-        );
-        const source = FakeEventSource.instances.at(-1);
-
-        act(() => {
-          source?.emit("text_delta", {
-            payload: { text: "瞬态断网保留文本" },
-          });
-          source?.emitError();
-        });
-
-        await probeDone;
-        // 等待探测 catch/finally 微任务结算完毕后再断言副作用。
-        await act(async () => {
-          await Promise.resolve();
-          await Promise.resolve();
-        });
-
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-        expect(unauthorizedListener).not.toHaveBeenCalled();
-        expect(source?.closed).toBe(false);
-        expect(result.current.state.transientText).toBe("瞬态断网保留文本");
-        expect(result.current.state.connection).toBe("error");
-        expect(result.current.state.notice).toContain("实时连接中断");
-      } finally {
-        window.removeEventListener(
-          AUTH_UNAUTHORIZED_EVENT,
-          unauthorizedListener,
-        );
-      }
-    },
-  );
-
-  it("连续高频触发 error 时在途去重与冷却窗口生效，onopen 恢复后可重新探测", async () => {
+  it("403 / 404 非瞬态错误永久停流不重连；503 / 断流保留文本并指数退避重连恢复", async () => {
     vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date("2026-11-23T00:00:00Z"));
-      const resolvers: (() => void)[] = [];
-      const probeAuth = vi.fn(
-        () =>
-          new Promise<void>((resolve) => {
-            resolvers.push(resolve);
-          }),
-      );
+    const unauthorizedListener = vi.fn();
+    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorizedListener);
 
-      renderHook(() =>
+    try {
+      // 场景 1：404 永久停流，不触发未认证也不重连。
+      const fetch404 = vi.fn(async () =>
+        jsonResponse({ detail: "run_not_found" }, 404),
+      );
+      const hook404 = renderHook(() =>
         useRunStream({
-          eventSourceFactory: fakeEventSourceFactory,
-          probeAuth,
-          runId: "run-1",
+          fetch: fetch404,
+          runId: "run-404",
           sessionId: "session-1",
           status: "running",
         }),
       );
-      const source = FakeEventSource.instances.at(-1);
-
-      // 首次探测在途期间，重复触发 error 必须被去重。
-      act(() => {
-        source?.emitError();
-        source?.emitError();
-        source?.emitError();
-      });
-      expect(probeAuth).toHaveBeenCalledTimes(1);
-
-      // 首次探测完成后进入冷却窗口，冷却期内不会重复刷 /auth/me。
+      await flushStreamTasks();
+      expect(hook404.result.current.state.connection).toBe("error");
       await act(async () => {
-        resolvers.shift()?.();
-        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(30_000);
       });
-      act(() => {
-        source?.emitError();
-      });
-      expect(probeAuth).toHaveBeenCalledTimes(1);
+      expect(fetch404).toHaveBeenCalledTimes(1);
+      expect(unauthorizedListener).not.toHaveBeenCalled();
+      hook404.unmount();
 
+      // 场景 2：断流 + 503 退避重连后恢复，保留文本并由新快照同步。
+      let attempt = 0;
+      const fetchRecover = vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          attempt += 1;
+          if (attempt === 1) {
+            return createSseStreamResponse(getRequestUrl(input), init);
+          }
+          if (attempt === 2) {
+            return jsonResponse({ detail: "service_unavailable" }, 503);
+          }
+          return createSseStreamResponse(getRequestUrl(input), init);
+        },
+      );
+      const hookRecover = renderHook(() =>
+        useRunStream({
+          fetch: fetchRecover,
+          runId: "run-recover",
+          sessionId: "session-1",
+          status: "running",
+        }),
+      );
+      await flushStreamTasks();
+      const s1 = FakeSseStream.instances.at(-1)!;
       act(() => {
-        vi.advanceTimersByTime(AUTH_PROBE_COOLDOWN_MS - 1);
-        source?.emitError();
+        s1.emit("text_delta", { payload: { text: "断线保留草稿" } });
+        s1.error(new TypeError("network reset"));
       });
-      expect(probeAuth).toHaveBeenCalledTimes(1);
+      await flushStreamTasks();
+      expect(hookRecover.result.current.state.transientText).toBe("断线保留草稿");
+      expect(hookRecover.result.current.state.connection).toBe("error");
+      expect(hookRecover.result.current.state.notice).toContain("实时连接中断");
 
-      // 超过冷却窗口后再次出错，允许发起下一轮探测。
-      act(() => {
-        vi.advanceTimersByTime(1);
-        source?.emitError();
-      });
-      expect(probeAuth).toHaveBeenCalledTimes(2);
+      // 1s 后重连命中 503 -> 再 2s 后恢复 200。
       await act(async () => {
-        resolvers.shift()?.();
-        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(1_000);
       });
+      await flushStreamTasks();
+      expect(fetchRecover).toHaveBeenCalledTimes(2);
 
-      // 冷却期内连接重新 onopen 恢复，会清空冷却并在后续出错时立即探测。
-      act(() => {
-        source?.emitOpen();
-        source?.emitError();
-      });
-      expect(probeAuth).toHaveBeenCalledTimes(3);
-
-      // 在途探测期间如果连接先恢复 onopen，探测结束后不得重新套用旧冷却锁死后续探测。
-      act(() => {
-        source?.emitOpen();
-      });
       await act(async () => {
-        resolvers.shift()?.();
-        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(2_000);
       });
-      act(() => {
-        source?.emitError();
-      });
-      expect(probeAuth).toHaveBeenCalledTimes(4);
-      await act(async () => {
-        resolvers.shift()?.();
-        await Promise.resolve();
-      });
+      await flushStreamTasks();
+      expect(fetchRecover).toHaveBeenCalledTimes(3);
+      expect(hookRecover.result.current.state.connection).toBe("open");
+      expect(unauthorizedListener).not.toHaveBeenCalled();
+      hookRecover.unmount();
     } finally {
-      vi.useRealTimers();
+      window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorizedListener);
     }
   });
-
-  it("组件卸载时通过 AbortSignal 取消在途 /auth/me 探测", () => {
-    const signals: AbortSignal[] = [];
-    const fetchMock = vi.fn(
-      (_input: RequestInfo | URL, init?: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          const signal = init?.signal;
-          if (signal) {
-            signals.push(signal);
-            signal.addEventListener("abort", () => {
-              reject(new DOMException("Aborted", "AbortError"));
-            });
-          }
-        }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { unmount } = renderHook(() =>
-      useRunStream({
-        eventSourceFactory: fakeEventSourceFactory,
-        runId: "run-1",
-        sessionId: "session-1",
-        status: "running",
-      }),
-    );
-    const source = FakeEventSource.instances.at(-1);
-
-    act(() => {
-      source?.emitError();
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(signals).toHaveLength(1);
-    expect(signals[0].aborted).toBe(false);
-
-    unmount();
-
-    expect(signals[0].aborted).toBe(true);
-    expect(source?.closed).toBe(true);
-  });
-
-  it("切换 Run、换线重连或收到终态快照时取消旧连接的在途 /auth/me 探测", async () => {
-    const signals: AbortSignal[] = [];
-    const probeAuth = vi.fn(
-      (signal: AbortSignal) =>
-        new Promise<void>((_resolve, reject) => {
-          signals.push(signal);
-          signal.addEventListener("abort", () => {
-            reject(new DOMException("Aborted", "AbortError"));
-          });
-        }),
-    );
-
-    const { rerender } = renderHook(
-      ({ runId }) =>
-        useRunStream({
-          eventSourceFactory: fakeEventSourceFactory,
-          probeAuth,
-          runId,
-          sessionId: "session-1",
-          status: "running",
-        }),
-      {
-        initialProps: { runId: "run-1" },
-      },
-    );
-    const firstSource = FakeEventSource.instances.at(-1);
-
-    act(() => {
-      firstSource?.emitError();
-    });
-    expect(signals).toHaveLength(1);
-    expect(signals[0].aborted).toBe(false);
-
-    // 切换 Run 时必须关闭旧连接并中止旧探测。
-    rerender({ runId: "run-2" });
-    expect(signals[0].aborted).toBe(true);
-    expect(firstSource?.closed).toBe(true);
-    expect(FakeEventSource.instances).toHaveLength(2);
-
-    const secondSource = FakeEventSource.instances.at(-1);
-    act(() => {
-      secondSource?.emit("snapshot", {
-        payload: snapshot("running", "进行中"),
-      });
-      secondSource?.emitError();
-    });
-    expect(signals).toHaveLength(2);
-    expect(signals[1].aborted).toBe(false);
-
-    // 收到 stream_interrupted 主动换线时，旧连接的在途探测必须立刻中止。
-    act(() => {
-      secondSource?.emit("stream_interrupted", {
-        payload: { reason: "stream_gap" },
-      });
-    });
-    expect(signals[1].aborted).toBe(true);
-    expect(secondSource?.closed).toBe(true);
-    await waitFor(() => {
-      expect(FakeEventSource.instances).toHaveLength(3);
-    });
-
-    const thirdSource = FakeEventSource.instances.at(-1);
-    act(() => {
-      thirdSource?.emitError();
-    });
-    expect(signals).toHaveLength(3);
-    expect(signals[2].aborted).toBe(false);
-
-    // 收到终态快照主动关流时，也必须中止在途身份探测。
-    act(() => {
-      thirdSource?.emit("snapshot", {
-        payload: snapshot("completed", "最终回答"),
-      });
-    });
-    expect(signals[2].aborted).toBe(true);
-    expect(thirdSource?.closed).toBe(true);
-  });
 });
-

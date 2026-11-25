@@ -21,6 +21,7 @@ from api.knowledge import build_knowledge_router
 from api.llm import build_llm_admin_router, build_llm_user_router
 from api.mcp import build_mcp_router
 from api.messages import build_message_router
+from api.openapi import install_openapi_normalizer
 from api.org import build_org_admin_router
 from api.preference import build_preference_router
 from api.project_knowledge import build_project_knowledge_router
@@ -177,6 +178,8 @@ def create_app(
             await deps.aclose()
 
     app = FastAPI(title="Athena", version="0.1.0", lifespan=lifespan)
+    # 统一规范化 OpenAPI 文档，消除 openapi_extra 残留局部 $defs 与悬空 #/$defs/ 引用。
+    install_openapi_normalizer(app)
     # Starlette add_middleware 采用 LIFO 栈顺序：后注册的位于外层先执行。
     # 先挂载内层 UploadAdmissionMiddleware，再挂载外层 AuthPrecheckMiddleware，
     # 确保请求按 AuthPrecheckMiddleware -> UploadAdmissionMiddleware -> FastAPI 路由 依次处理。

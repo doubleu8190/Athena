@@ -192,7 +192,11 @@ def build_knowledge_router(
         except KnowledgeInputError as error:
             raise _bad_request(error) from error
 
-    @router.delete("/{base_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.delete(
+        "/{base_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def delete_base(base_id: str, auth: CurrentAuth) -> Response:
         try:
             await service.delete_base(auth.user.id, base_id)
@@ -451,7 +455,11 @@ def build_knowledge_router(
             raise _bad_request(error) from error
         return _document_response(document)
 
-    @router.delete("/{base_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.delete(
+        "/{base_id}/documents/{document_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def delete_document(base_id: str, document_id: str, auth: CurrentAuth) -> Response:
         try:
             await service.delete_document(auth.user.id, base_id, document_id)
@@ -481,7 +489,20 @@ def build_knowledge_router(
             degraded_reasons=list(result.degraded_reasons),
         )
 
-    @router.get("/{base_id}/documents/{document_id}/versions/{version_id}/source")
+    @router.get(
+        "/{base_id}/documents/{document_id}/versions/{version_id}/source",
+        response_class=Response,
+        responses={
+            200: {
+                "description": "Original knowledge document binary content",
+                "content": {
+                    "application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"},
+                    }
+                },
+            }
+        },
+    )
     async def download_source(
         base_id: str, document_id: str, version_id: str, auth: CurrentAuth
     ) -> Response:

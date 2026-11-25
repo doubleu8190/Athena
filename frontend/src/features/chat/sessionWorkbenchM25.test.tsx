@@ -2,7 +2,10 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { FakeEventSource } from "../../test/fakeEventSource";
+import {
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import {
   getRequestUrl,
   listResponse,
@@ -245,6 +248,9 @@ function installM25Fetch(options: M25FetchOptions = {}) {
           }),
         );
       }
+      if (url.pathname.endsWith("/stream") && method === "GET") {
+        return createSseStreamResponse(url.pathname, init);
+      }
       throw new Error(`Unexpected request: ${method} ${url}`);
     },
   );
@@ -253,7 +259,7 @@ function installM25Fetch(options: M25FetchOptions = {}) {
 }
 
 afterEach(() => {
-  FakeEventSource.instances = [];
+  FakeSseStream.instances = [];
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -398,7 +404,6 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
   });
 
   it("活跃 Run 期间锁定项目归属胶囊并阻止调整归属弹窗打开", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const activeRun = makeRun({
       id: "run-active-lock-project",
       session_id: "session-m25",
@@ -426,7 +431,6 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
   });
 
   it("消息气泡展示模型快照标签，支持复制、用户消息「编辑重发」回填聚焦与 5 节点 aria-live 通告", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
 
     const runningRun = makeRun({
       id: "run-model-badge",
@@ -510,7 +514,10 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
     expect(liveRegion).not.toBeNull();
     expect(liveRegion?.textContent).toBe("开始生成回复");
 
-    const source = FakeEventSource.instances[0];
+    await waitFor(() => {
+      expect(FakeSseStream.instances.length).toBeGreaterThan(0);
+    });
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("text_delta", { payload: { text: "第一段流式" } });
       source.emit("text_delta", { payload: { text: "第二段流式" } });
@@ -519,7 +526,6 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
   });
 
   it("ExecutionProgressAccordion 运行态展示业务步骤文案，完成后自动折叠为单行摘要并支持展开", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let currentRun = makeRun({
       first_started_at: "2026-11-20T09:00:00Z",
       finished_at: null,
@@ -610,7 +616,10 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
       }),
     ];
 
-    const source = FakeEventSource.instances[0];
+    await waitFor(() => {
+      expect(FakeSseStream.instances.length).toBeGreaterThan(0);
+    });
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("snapshot", {
         payload: {
@@ -640,7 +649,6 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
   });
 
   it("业务化审批卡片直接渲染 display_name / approval_summary / formatted_arguments，不请求原始详情，并支持 Skill can_approve=false 门禁", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const blockedSkillProjection: SafeSkillApprovalProjection = {
       call_id: "call-skill-blocked",
       can_approve: false,
@@ -966,7 +974,6 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
   });
 
   it("失败态柔和红框卡片弹出温和重试 AlertDialog，隐藏工程字段且仍透传 confirm_unknown: true", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const retryBodies: Array<{ confirm_unknown: boolean; request_id: string }> =
       [];
     const failedRun = makeRun({
@@ -1055,7 +1062,6 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
   });
 
   it("审批卡片兜底详情返回技能 tool_id 或 safe_skill_projection(can_approve=false) 时严格拦截并不泄漏 arguments", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const blockedDetailProjection: SafeSkillApprovalProjection = {
       call_id: "call-opaque-blocked-proj",
       can_approve: false,

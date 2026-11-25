@@ -255,7 +255,11 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
         except ValueError as error:
             raise HTTPException(422, _safe_code(error)) from error
 
-    @router.delete("/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.delete(
+        "/skills/{skill_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def delete_personal_skill(
         actor: CurrentAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
@@ -657,7 +661,11 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         except SkillPackageError as error:
             raise _skill_package_http_error(error) from error
 
-    @router.delete("/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.delete(
+        "/skills/{skill_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def delete_skill(
         actor: SkillManagerAuth,
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
@@ -698,7 +706,18 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         except SkillNotFoundError as error:
             raise HTTPException(404, error.code) from error
 
-    @router.get("/skill-executions/{call_id}/log")
+    @router.get(
+        "/skill-executions/{call_id}/log",
+        response_class=Response,
+        responses={
+            200: {
+                "description": "Plain-text skill execution log",
+                "content": {
+                    "text/plain": {"schema": {"type": "string"}},
+                },
+            }
+        },
+    )
     async def get_skill_execution_log(
         actor: AdminAuth,
         call_id: Annotated[str, Path(min_length=1, max_length=128)],

@@ -1,31 +1,67 @@
-import { apiRequest } from "../../shared/api/client";
+import {
+  apiGet,
+  apiPatch,
+  apiPost,
+  type ApiSchemas,
+} from "../../shared/api/client";
 import type {
   AuthProvidersResponse,
   LoginInput,
+  MockUser,
   MockUsersResponse,
   User,
 } from "./model";
 import { sanitizeReturnTo } from "./returnTo";
 
-export function getAuthProviders(): Promise<AuthProvidersResponse> {
-  return apiRequest<AuthProvidersResponse>("/auth/providers", {
-    method: "GET",
-    cache: "no-store",
-  });
+function toUser(raw: ApiSchemas["UserResponse"]): User {
+  // 对齐 Pydantic 含默认值的可选响应字段，确保业务层始终拿到完整结构。
+  return {
+    ...raw,
+    auth_provider: raw.auth_provider ?? "local",
+    avatar_url: raw.avatar_url ?? null,
+    departments: raw.departments ?? [],
+    employee_no: raw.employee_no ?? null,
+    job_title: raw.job_title ?? null,
+    managed_department_ids: raw.managed_department_ids ?? [],
+  };
 }
 
-export function listMockUsers(): Promise<MockUsersResponse> {
-  return apiRequest<MockUsersResponse>("/auth/mock/users", {
-    method: "GET",
-    cache: "no-store",
-  });
+function toMockUser(raw: ApiSchemas["MockUserResponse"]): MockUser {
+  return {
+    ...raw,
+    avatar_url: raw.avatar_url ?? null,
+    departments: raw.departments ?? [],
+    employee_no: raw.employee_no ?? null,
+    job_title: raw.job_title ?? null,
+    managed_department_ids: raw.managed_department_ids ?? [],
+  };
 }
 
-export function mockLogin(userId: string): Promise<User> {
-  return apiRequest<User>("/auth/mock/login", {
-    method: "POST",
-    body: { user_id: userId },
+export async function getAuthProviders(): Promise<AuthProvidersResponse> {
+  const response = await apiGet("/api/v1/auth/providers", {
+    cache: "no-store",
   });
+  return {
+    ...response,
+    local_login_enabled: response.local_login_enabled ?? true,
+  };
+}
+
+export async function listMockUsers(): Promise<MockUsersResponse> {
+  const response = await apiGet("/api/v1/auth/mock/users", {
+    cache: "no-store",
+  });
+  return {
+    items: response.items.map(toMockUser),
+  };
+}
+
+export async function mockLogin(userId: string): Promise<User> {
+  return toUser(
+    await apiPost("/api/v1/auth/mock/login", {
+      body: { user_id: userId },
+    }),
+  );
 }
 
 /**
@@ -37,39 +73,39 @@ export function buildFeishuAuthorizeUrl(returnTo: string): string {
   return `/api/v1/auth/feishu/authorize?return_to=${encodeURIComponent(safeReturnTo)}`;
 }
 
-export function getCurrentUser(): Promise<User> {
-  return apiRequest<User>("/auth/me", {
-    method: "GET",
-    cache: "no-store",
-  });
+export async function getCurrentUser(): Promise<User> {
+  return toUser(
+    await apiGet("/api/v1/auth/me", {
+      cache: "no-store",
+    }),
+  );
 }
 
-export function login(input: LoginInput): Promise<User> {
-  return apiRequest<User>("/auth/login", {
-    method: "POST",
-    body: input,
-  });
+export async function login(input: LoginInput): Promise<User> {
+  return toUser(
+    await apiPost("/api/v1/auth/login", {
+      body: input,
+    }),
+  );
 }
 
 export function logout(): Promise<void> {
-  return apiRequest<void>("/auth/logout", {
-    method: "POST",
-  });
+  return apiPost("/api/v1/auth/logout");
 }
 
-export function updateCurrentUser(displayName: string): Promise<User> {
-  return apiRequest<User>("/auth/me", {
-    method: "PATCH",
-    body: { display_name: displayName },
-  });
+export async function updateCurrentUser(displayName: string): Promise<User> {
+  return toUser(
+    await apiPatch("/api/v1/auth/me", {
+      body: { display_name: displayName },
+    }),
+  );
 }
 
 export function changePassword(input: {
   current_password: string;
   new_password: string;
 }): Promise<void> {
-  return apiRequest<void>("/auth/password", {
-    method: "POST",
+  return apiPost("/api/v1/auth/password", {
     body: input,
   });
 }

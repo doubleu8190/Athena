@@ -430,7 +430,9 @@ def test_injected_tool_manager_mounts_mcp_routes_without_database() -> None:
 
 def test_admin_write_openapi_declares_valid_transport_request_bodies() -> None:
     app = create_app(tool_manager=cast(ToolManager, _PublicOnlyManager()))
-    paths = app.openapi()["paths"]
+    openapi_doc = app.openapi()
+    paths = openapi_doc["paths"]
+    component_schemas = openapi_doc["components"]["schemas"]
     post_body = paths["/api/v1/admin/mcp/servers"]["post"]["requestBody"]
     put_body = paths["/api/v1/admin/mcp/servers/{server_id}"]["put"]["requestBody"]
     assert post_body["required"] is True
@@ -440,15 +442,20 @@ def test_admin_write_openapi_declares_valid_transport_request_bodies() -> None:
     create_schema = post_body["content"]["application/json"]["schema"]
     update_schema = put_body["content"]["application/json"]["schema"]
     for schema in (create_schema, update_schema):
-        Draft202012Validator.check_schema(schema)
-        validator = Draft202012Validator(schema)
+        assert "$defs" not in schema
+        resolved_schema = {**schema, "components": openapi_doc["components"]}
+        Draft202012Validator.check_schema(resolved_schema)
+        validator = Draft202012Validator(resolved_schema)
         assert schema["discriminator"]["propertyName"] == "transport"
         assert len(schema["oneOf"]) == 2
-        defs = schema["$defs"]
-        stdio_ref = schema["discriminator"]["mapping"]["stdio"].rsplit("/", 1)[-1]
-        http_ref = schema["discriminator"]["mapping"]["streamable_http"].rsplit("/", 1)[-1]
-        stdio_rule = defs[stdio_ref]
-        http_rule = defs[http_ref]
+        stdio_pointer = schema["discriminator"]["mapping"]["stdio"]
+        http_pointer = schema["discriminator"]["mapping"]["streamable_http"]
+        assert stdio_pointer.startswith("#/components/schemas/")
+        assert http_pointer.startswith("#/components/schemas/")
+        stdio_ref = stdio_pointer.rsplit("/", 1)[-1]
+        http_ref = http_pointer.rsplit("/", 1)[-1]
+        stdio_rule = component_schemas[stdio_ref]
+        http_rule = component_schemas[http_ref]
         assert {"name", "transport", "command", "args"} <= set(stdio_rule["required"])
         assert stdio_rule["properties"]["command"] == {"title": "Command", "type": "string"}
         assert stdio_rule["properties"]["args"] == {

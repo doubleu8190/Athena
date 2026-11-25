@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { toast } from "../../shared/ui";
 import { makeSkill } from "../../test/adminFixtures";
-import { FakeEventSource } from "../../test/fakeEventSource";
+import {
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import {
   getRequestUrl,
   knowledgeListResponse,
@@ -222,6 +225,9 @@ function installWorkbenchFetch(options: WorkbenchFetchOptions = {}) {
           status: 200,
         });
       }
+      if (url.pathname.endsWith("/stream") && method === "GET") {
+        return createSseStreamResponse(url.pathname, init);
+      }
       throw new Error(`Unexpected request: ${method} ${url}`);
     },
   );
@@ -231,14 +237,13 @@ function installWorkbenchFetch(options: WorkbenchFetchOptions = {}) {
 }
 
 afterEach(() => {
-  FakeEventSource.instances = [];
+  FakeSseStream.instances = [];
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("M2.4 对话首页与一体化吸底输入器", () => {
   it("场景化模型选择器：加载默认模型、支持切换并携带 model_profile_id，图片附件配非视觉模型展示琥珀提示", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const { submittedRuns } = installWorkbenchFetch();
     const user = userEvent.setup();
 
@@ -295,7 +300,6 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
   });
 
   it("模型目录加载失败或为空时优雅降级显示「默认模型」，绝不阻塞发送", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const { submittedRuns } = installWorkbenchFetch({
       models: () => jsonResponse({ detail: "service_unavailable" }, 503),
     });
@@ -325,7 +329,6 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
   });
 
   it("知识库三态选择器：默认 null、显式多选（分组/搜索/20上限/恢复默认）、关闭 [] 均精确写入 Run 请求体", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const twentyOneKbs: KnowledgeBase[] = [
       COMPANY_KB,
       DEPT_KB,
@@ -580,7 +583,6 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
   });
 
   it("一体化输入器支持拖拽与粘贴即传、Session 失败重试复用 Idempotency-Key，且彻底移除旧夹层 SessionFilesPanel", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let failFirstUpload = true;
     const { submittedRuns, uploadRecords } = installWorkbenchFetch({
       onUploadFile: (file) => {
@@ -673,7 +675,6 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
   });
 
   it("草稿提交失败移交会话页时完整保留已选模型与知识库范围，切换范围后刷新 request_id 避免幂等冲突", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let failFirstSubmit = true;
     const { submittedRuns } = installWorkbenchFetch({
       onSubmitRun: (body) => {
@@ -804,7 +805,6 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
   });
 
   it("知识库取消最后一个显式勾选项自动回落 null，且恢复默认范围将焦点转交完成按钮", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const { submittedRuns } = installWorkbenchFetch();
     const user = userEvent.setup();
 
@@ -848,7 +848,6 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
   });
 
   it("草稿上传 503 移交重试复用 Idempotency-Key、4xx 移交重试换新键，且快速双击重试不并发双传", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     // 场景 A：503 服务端异常中断移交 -> 重试必须复用同一 Idempotency-Key，且双击仅发 1 次请求
     let fail503Once = true;
     let resolveDelayedRetry: ((res: Response) => void) | undefined;
@@ -942,7 +941,6 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
   });
 
   it("拖拽遮罩在 Escape、dragend 与进入禁用态时自动复位，且不吞掉纯文本拖放", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     installWorkbenchFetch({
       onSubmitRun: () =>
         jsonResponse(

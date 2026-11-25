@@ -148,6 +148,7 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
     @router.delete(
         "/memories/{memory_id}",
         status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
     )
     async def delete_memory(
         memory_id: Annotated[str, Path(min_length=1, max_length=64)],

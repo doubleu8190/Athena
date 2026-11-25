@@ -1,4 +1,9 @@
-import { apiRequest } from "../../shared/api/client";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+} from "../../shared/api/client";
 import {
   normalizeSessionSearchQuery,
   type Session,
@@ -8,46 +13,46 @@ import {
   type SessionUpdateInput,
 } from "./model";
 
-function toSessionListQuery(query: SessionListQuery): string {
-  const params = new URLSearchParams();
-  if (query.page !== undefined) {
-    params.set("page", String(query.page));
-  }
-  if (query.pageSize !== undefined) {
-    params.set("page_size", String(query.pageSize));
-  }
-  if (query.projectId !== undefined) {
-    params.set("project_id", query.projectId);
-  }
-  if (query.unbound) {
-    params.set("unbound", "true");
-  }
-  const normalizedQ = normalizeSessionSearchQuery(query.q);
-  if (normalizedQ) {
-    params.set("q", normalizedQ);
-  }
-  const serialized = params.toString();
-  return serialized ? `?${serialized}` : "";
-}
-
 export function listSessions(
   query: SessionListQuery = {},
 ): Promise<SessionListResponse> {
-  return apiRequest<SessionListResponse>(
-    `/sessions${toSessionListQuery(query)}`,
-    { method: "GET" },
-  );
+  // 保持与既有查询参数顺序一致，仅在有效传入时序列化，避免多余空查询项。
+  const queryParams: {
+    page?: number;
+    page_size?: number;
+    project_id?: string;
+    unbound?: boolean;
+    q?: string;
+  } = {};
+  if (query.page !== undefined) {
+    queryParams.page = query.page;
+  }
+  if (query.pageSize !== undefined) {
+    queryParams.page_size = query.pageSize;
+  }
+  if (query.projectId !== undefined) {
+    queryParams.project_id = query.projectId;
+  }
+  if (query.unbound) {
+    queryParams.unbound = true;
+  }
+  const normalizedQ = normalizeSessionSearchQuery(query.q);
+  if (normalizedQ) {
+    queryParams.q = normalizedQ;
+  }
+  return apiGet("/api/v1/sessions", {
+    params: { query: queryParams },
+  });
 }
 
 export function getSession(sessionId: string): Promise<Session> {
-  return apiRequest<Session>(`/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "GET",
+  return apiGet("/api/v1/sessions/{session_id}", {
+    params: { path: { session_id: sessionId } },
   });
 }
 
 export function createSession(input: SessionCreateInput): Promise<Session> {
-  return apiRequest<Session>("/sessions", {
-    method: "POST",
+  return apiPost("/api/v1/sessions", {
     body: input,
   });
 }
@@ -56,18 +61,14 @@ export function updateSession(
   sessionId: string,
   input: SessionUpdateInput,
 ): Promise<Session> {
-  return apiRequest<Session>(
-    `/sessions/${encodeURIComponent(sessionId)}`,
-    {
-      method: "PATCH",
-      body: input,
-    },
-  );
-}
-
-export function deleteSession(sessionId: string): Promise<void> {
-  return apiRequest<void>(`/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "DELETE",
+  return apiPatch("/api/v1/sessions/{session_id}", {
+    body: input,
+    params: { path: { session_id: sessionId } },
   });
 }
 
+export function deleteSession(sessionId: string): Promise<void> {
+  return apiDelete("/api/v1/sessions/{session_id}", {
+    params: { path: { session_id: sessionId } },
+  });
+}

@@ -1,4 +1,9 @@
-import { apiRequest } from "../../shared/api/client";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+} from "../../shared/api/client";
 import type {
   Project,
   ProjectCreateInput,
@@ -13,25 +18,19 @@ export interface DeleteProjectOptions {
   detachSessions?: boolean;
 }
 
-function toProjectListQuery(query: ProjectListQuery): string {
-  const params = new URLSearchParams();
-  if (query.page !== undefined) {
-    params.set("page", String(query.page));
-  }
-  if (query.pageSize !== undefined) {
-    params.set("page_size", String(query.pageSize));
-  }
-  const serialized = params.toString();
-  return serialized ? `?${serialized}` : "";
-}
-
 export function listProjects(
   query: ProjectListQuery = {},
 ): Promise<ProjectListResponse> {
-  return apiRequest<ProjectListResponse>(
-    `/projects${toProjectListQuery(query)}`,
-    { method: "GET" },
-  );
+  const queryParams: { page?: number; page_size?: number } = {};
+  if (query.page !== undefined) {
+    queryParams.page = query.page;
+  }
+  if (query.pageSize !== undefined) {
+    queryParams.page_size = query.pageSize;
+  }
+  return apiGet("/api/v1/projects", {
+    params: { query: queryParams },
+  });
 }
 
 export async function listAllProjects(): Promise<Project[]> {
@@ -54,15 +53,14 @@ export async function listAllProjects(): Promise<Project[]> {
 }
 
 export function getProject(projectId: string): Promise<Project> {
-  return apiRequest<Project>(`/projects/${encodeURIComponent(projectId)}`, {
-    method: "GET",
+  return apiGet("/api/v1/projects/{project_id}", {
+    params: { path: { project_id: projectId } },
   });
 }
 
 export function createProject(input: ProjectCreateInput): Promise<Project> {
-  return apiRequest<Project>("/projects", {
+  return apiPost("/api/v1/projects", {
     body: input,
-    method: "POST",
   });
 }
 
@@ -70,9 +68,9 @@ export function updateProject(
   projectId: string,
   input: ProjectUpdateInput,
 ): Promise<Project> {
-  return apiRequest<Project>(`/projects/${encodeURIComponent(projectId)}`, {
+  return apiPatch("/api/v1/projects/{project_id}", {
     body: input,
-    method: "PATCH",
+    params: { path: { project_id: projectId } },
   });
 }
 
@@ -88,11 +86,10 @@ export function deleteProject(
   projectId: string,
   options?: DeleteProjectOptions,
 ): Promise<void> {
-  const query = options?.detachSessions ? "?detach_sessions=true" : "";
-  return apiRequest<void>(
-    `/projects/${encodeURIComponent(projectId)}${query}`,
-    {
-      method: "DELETE",
+  return apiDelete("/api/v1/projects/{project_id}", {
+    params: {
+      path: { project_id: projectId },
+      query: options?.detachSessions ? { detach_sessions: true } : undefined,
     },
-  );
+  });
 }

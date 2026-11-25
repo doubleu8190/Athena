@@ -1,14 +1,25 @@
-import { apiRequest } from "../../shared/api/client";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  apiPut,
+  type ApiSchemas,
+} from "../../shared/api/client";
 import type {
   AdminPageQuery,
   AdminTool,
   AdminToolListResponse,
   CompressionPolicy,
   CompressionPolicyInput,
+  McpHttpConfig,
+  McpSecretMetadata,
   McpServer,
   McpServerListResponse,
   McpServerUpdateInput,
   McpServerWriteInput,
+  McpStdioConfig,
+  McpTransport,
   ModelProfile,
   ModelProfileCreateInput,
   ModelProfileListResponse,
@@ -21,153 +32,211 @@ import type {
   SystemPromptKind,
   SystemPromptVersion,
   SystemPromptVersionListResponse,
+  TokenizerEncoding,
 } from "./model";
 
-function pageQuery(query: AdminPageQuery): string {
-  return `?page=${query.page}&page_size=${query.pageSize}`;
+function toTokenizerEncoding(value: string): TokenizerEncoding {
+  return value === "cl100k_base" ? "cl100k_base" : "o200k_base";
 }
 
-export function listModelProfiles(): Promise<ModelProfileListResponse> {
-  return apiRequest<ModelProfileListResponse>(
-    "/admin/llm/model-profiles",
-    { method: "GET" },
+function toModelProfile(raw: ApiSchemas["ModelProfileResponse"]): ModelProfile {
+  return {
+    ...raw,
+    tokenizer_encoding: toTokenizerEncoding(raw.tokenizer_encoding),
+  };
+}
+
+function toMcpTransport(value: string): McpTransport {
+  return value === "stdio" ? "stdio" : "streamable_http";
+}
+
+function toMcpConfig(
+  transport: McpTransport,
+  raw: Record<string, unknown>,
+): McpHttpConfig | McpStdioConfig {
+  if (transport === "stdio") {
+    return {
+      args: Array.isArray(raw.args)
+        ? raw.args.filter((item): item is string => typeof item === "string")
+        : [],
+      command: typeof raw.command === "string" ? raw.command : "",
+      cwd: typeof raw.cwd === "string" ? raw.cwd : null,
+    };
+  }
+  return {
+    url: typeof raw.url === "string" ? raw.url : "",
+  };
+}
+
+function toMcpSecrets(raw: Record<string, unknown>[]): McpSecretMetadata[] {
+  return raw.map((item) => ({
+    has_value: Boolean(item.has_value),
+    name: typeof item.name === "string" ? item.name : "",
+  }));
+}
+
+function toMcpServer(raw: ApiSchemas["McpServerResponse"]): McpServer {
+  const transport = toMcpTransport(raw.transport);
+  return {
+    ...raw,
+    config: toMcpConfig(transport, raw.config),
+    secrets: toMcpSecrets(raw.secrets),
+    transport,
+  };
+}
+
+export async function listModelProfiles(): Promise<ModelProfileListResponse> {
+  const response = await apiGet("/api/v1/admin/llm/model-profiles");
+  return {
+    default_profile_id: response.default_profile_id,
+    items: response.items.map(toModelProfile),
+  };
+}
+
+export async function createModelProfile(
+  input: ModelProfileCreateInput,
+): Promise<ModelProfile> {
+  return toModelProfile(
+    await apiPost("/api/v1/admin/llm/model-profiles", {
+      body: input,
+    }),
   );
 }
 
-export function createModelProfile(
-  input: ModelProfileCreateInput,
-): Promise<ModelProfile> {
-  return apiRequest<ModelProfile>("/admin/llm/model-profiles", {
-    method: "POST",
-    body: input,
-  });
-}
-
-export function setModelProfileEnabled(
+export async function setModelProfileEnabled(
   profileId: string,
   enabled: boolean,
 ): Promise<ModelProfile> {
-  return apiRequest<ModelProfile>(
-    `/admin/llm/model-profiles/${encodeURIComponent(profileId)}/enabled`,
-    { method: "PUT", body: { enabled } },
+  return toModelProfile(
+    await apiPut("/api/v1/admin/llm/model-profiles/{profile_id}/enabled", {
+      body: { enabled },
+      params: { path: { profile_id: profileId } },
+    }),
   );
 }
 
-export function setDefaultModelProfile(
+export async function setDefaultModelProfile(
   profileId: string,
 ): Promise<ModelProfile> {
-  return apiRequest<ModelProfile>(
-    "/admin/llm/model-profiles/default",
-    { method: "PUT", body: { profile_id: profileId } },
+  return toModelProfile(
+    await apiPut("/api/v1/admin/llm/model-profiles/default", {
+      body: { profile_id: profileId },
+    }),
   );
 }
 
 export function getCompressionPolicy(): Promise<CompressionPolicy> {
-  return apiRequest<CompressionPolicy>(
-    "/admin/llm/compression-policy",
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/llm/compression-policy");
 }
 
 export function updateCompressionPolicy(
   input: CompressionPolicyInput,
 ): Promise<CompressionPolicy> {
-  return apiRequest<CompressionPolicy>(
-    "/admin/llm/compression-policy",
-    { method: "PUT", body: input },
-  );
-}
-
-export function listMcpServers(
-  query: AdminPageQuery,
-): Promise<McpServerListResponse> {
-  return apiRequest<McpServerListResponse>(
-    `/admin/mcp/servers${pageQuery(query)}`,
-    { method: "GET" },
-  );
-}
-
-export function getMcpServer(serverId: string): Promise<McpServer> {
-  return apiRequest<McpServer>(
-    `/admin/mcp/servers/${encodeURIComponent(serverId)}`,
-    { method: "GET" },
-  );
-}
-
-export function createMcpServer(
-  input: McpServerWriteInput,
-): Promise<McpServer> {
-  return apiRequest<McpServer>("/admin/mcp/servers", {
-    method: "POST",
+  return apiPut("/api/v1/admin/llm/compression-policy", {
     body: input,
   });
 }
 
-export function updateMcpServer(
+export async function listMcpServers(
+  query: AdminPageQuery,
+): Promise<McpServerListResponse> {
+  const response = await apiGet("/api/v1/admin/mcp/servers", {
+    params: { query: { page: query.page, page_size: query.pageSize } },
+  });
+  return {
+    ...response,
+    items: response.items.map(toMcpServer),
+  };
+}
+
+export async function getMcpServer(serverId: string): Promise<McpServer> {
+  return toMcpServer(
+    await apiGet("/api/v1/admin/mcp/servers/{server_id}", {
+      params: { path: { server_id: serverId } },
+    }),
+  );
+}
+
+export async function createMcpServer(
+  input: McpServerWriteInput,
+): Promise<McpServer> {
+  return toMcpServer(
+    await apiPost("/api/v1/admin/mcp/servers", {
+      body: input,
+    }),
+  );
+}
+
+export async function updateMcpServer(
   serverId: string,
   input: McpServerUpdateInput,
 ): Promise<McpServer> {
-  return apiRequest<McpServer>(
-    `/admin/mcp/servers/${encodeURIComponent(serverId)}`,
-    {
-      method: "PUT",
-      body: {
-        ...input.server,
-        expected_config_version: input.expected_config_version,
-      },
-    },
+  // 按传输类型收窄判别联合，确保 OpenAPI 请求体在编译期受严格字段校验。
+  const body:
+    | ApiSchemas["HttpServerUpdateRequest"]
+    | ApiSchemas["StdioServerUpdateRequest"] =
+    input.server.transport === "streamable_http"
+      ? {
+          ...input.server,
+          expected_config_version: input.expected_config_version,
+        }
+      : {
+          ...input.server,
+          expected_config_version: input.expected_config_version,
+        };
+  return toMcpServer(
+    await apiPut("/api/v1/admin/mcp/servers/{server_id}", {
+      body,
+      params: { path: { server_id: serverId } },
+    }),
   );
 }
 
 export function listAdminTools(
   query: AdminPageQuery,
 ): Promise<AdminToolListResponse> {
-  return apiRequest<AdminToolListResponse>(
-    `/admin/tools${pageQuery(query)}`,
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/tools", {
+    params: { query: { page: query.page, page_size: query.pageSize } },
+  });
 }
 
 export function updateToolApprovalPolicy(
   toolId: string,
   requiresApproval: boolean,
 ): Promise<AdminTool> {
-  return apiRequest<AdminTool>(
-    `/admin/tools/${encodeURIComponent(toolId)}`,
-    {
-      method: "PATCH",
-      body: { requires_approval: requiresApproval },
-    },
-  );
+  return apiPatch("/api/v1/admin/tools/{tool_id}", {
+    body: { requires_approval: requiresApproval },
+    params: { path: { tool_id: toolId } },
+  });
 }
 
 export function getSystemPrompt(
   kind: SystemPromptKind,
 ): Promise<SystemPromptVersion> {
-  return apiRequest<SystemPromptVersion>(
-    `/admin/system-prompts/${kind}`,
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/system-prompts/{kind}", {
+    params: { path: { kind } },
+  });
 }
 
 export function listSystemPromptVersions(
   kind: SystemPromptKind,
   query: AdminPageQuery,
 ): Promise<SystemPromptVersionListResponse> {
-  return apiRequest<SystemPromptVersionListResponse>(
-    `/admin/system-prompts/${kind}/versions${pageQuery(query)}`,
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/system-prompts/{kind}/versions", {
+    params: {
+      path: { kind },
+      query: { page: query.page, page_size: query.pageSize },
+    },
+  });
 }
 
 export function getSystemPromptVersion(
   kind: SystemPromptKind,
   versionId: string,
 ): Promise<SystemPromptVersion> {
-  return apiRequest<SystemPromptVersion>(
-    `/admin/system-prompts/${kind}/versions/${encodeURIComponent(versionId)}`,
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/system-prompts/{kind}/versions/{version_id}", {
+    params: { path: { kind, version_id: versionId } },
+  });
 }
 
 export function saveSystemPrompt(
@@ -175,16 +244,13 @@ export function saveSystemPrompt(
   content: string,
   expectedCurrentVersionId: string,
 ): Promise<SystemPromptVersion> {
-  return apiRequest<SystemPromptVersion>(
-    `/admin/system-prompts/${kind}/versions`,
-    {
-      method: "POST",
-      body: {
-        content,
-        expected_current_version_id: expectedCurrentVersionId,
-      },
+  return apiPost("/api/v1/admin/system-prompts/{kind}/versions", {
+    body: {
+      content,
+      expected_current_version_id: expectedCurrentVersionId,
     },
-  );
+    params: { path: { kind } },
+  });
 }
 
 export function restoreSystemPrompt(
@@ -192,16 +258,13 @@ export function restoreSystemPrompt(
   sourceVersionId: string,
   expectedCurrentVersionId: string,
 ): Promise<SystemPromptVersion> {
-  return apiRequest<SystemPromptVersion>(
-    `/admin/system-prompts/${kind}/restore`,
-    {
-      method: "POST",
-      body: {
-        source_version_id: sourceVersionId,
-        expected_current_version_id: expectedCurrentVersionId,
-      },
+  return apiPost("/api/v1/admin/system-prompts/{kind}/restore", {
+    body: {
+      expected_current_version_id: expectedCurrentVersionId,
+      source_version_id: sourceVersionId,
     },
-  );
+    params: { path: { kind } },
+  });
 }
 
 // ---------------- Subagent 管理 API ----------------
@@ -210,31 +273,28 @@ export function listSubagents(
   query: AdminPageQuery & { enabled?: boolean },
 ): Promise<SubagentListResponse> {
   const offset = Math.max(0, (query.page - 1) * query.pageSize);
-  const params = new URLSearchParams({
-    offset: String(offset),
-    limit: String(query.pageSize),
-  });
+  const queryParams: { offset: number; limit: number; enabled?: boolean } = {
+    offset,
+    limit: query.pageSize,
+  };
   if (query.enabled !== undefined) {
-    params.set("enabled", String(query.enabled));
+    queryParams.enabled = query.enabled;
   }
-  return apiRequest<SubagentListResponse>(
-    `/admin/subagents?${params.toString()}`,
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/subagents", {
+    params: { query: queryParams },
+  });
 }
 
 export function getSubagent(subagentId: string): Promise<SubagentProfile> {
-  return apiRequest<SubagentProfile>(
-    `/admin/subagents/${encodeURIComponent(subagentId)}`,
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/subagents/{subagent_id}", {
+    params: { path: { subagent_id: subagentId } },
+  });
 }
 
 export function createSubagent(
   input: SubagentCreateInput,
 ): Promise<SubagentProfile> {
-  return apiRequest<SubagentProfile>("/admin/subagents", {
-    method: "POST",
+  return apiPost("/api/v1/admin/subagents", {
     body: input,
   });
 }
@@ -243,49 +303,47 @@ export function updateSubagent(
   subagentId: string,
   input: SubagentUpdateInput,
 ): Promise<SubagentProfile> {
-  return apiRequest<SubagentProfile>(
-    `/admin/subagents/${encodeURIComponent(subagentId)}`,
-    {
-      method: "PATCH",
-      body: input,
-    },
-  );
+  return apiPatch("/api/v1/admin/subagents/{subagent_id}", {
+    body: input,
+    params: { path: { subagent_id: subagentId } },
+  });
 }
 
 export function setSubagentEnabled(
   subagentId: string,
   enabled: boolean,
 ): Promise<SubagentProfile> {
-  return apiRequest<SubagentProfile>(
-    `/admin/subagents/${encodeURIComponent(subagentId)}/enabled`,
-    {
-      method: "PUT",
-      body: { enabled },
-    },
-  );
+  return apiPut("/api/v1/admin/subagents/{subagent_id}/enabled", {
+    body: { enabled },
+    params: { path: { subagent_id: subagentId } },
+  });
 }
 
 export function deleteSubagent(subagentId: string): Promise<void> {
-  return apiRequest<void>(
-    `/admin/subagents/${encodeURIComponent(subagentId)}`,
-    { method: "DELETE" },
-  );
+  return apiDelete("/api/v1/admin/subagents/{subagent_id}", {
+    params: { path: { subagent_id: subagentId } },
+  });
 }
 
-export function listSubagentAvailableTools(): Promise<SubagentAvailableToolsResponse> {
-  return apiRequest<SubagentAvailableToolsResponse>(
-    "/admin/subagents/available-tools",
-    { method: "GET" },
-  );
+export async function listSubagentAvailableTools(): Promise<SubagentAvailableToolsResponse> {
+  const response = await apiGet("/api/v1/admin/subagents/available-tools");
+  return {
+    groups: response.groups.map((group) => ({
+      ...group,
+      items: group.items.map((item) => ({
+        ...item,
+        server_id: item.server_id ?? null,
+        server_name: item.server_name ?? null,
+      })),
+    })),
+  };
 }
 
 /** 查询企业组织部门树扁平列表（仅超管可调用，供部门共享知识库与部门技能选择器复用）。 */
 export function listAdminOrgDepartments(
   includeArchived = false,
 ): Promise<OrgDepartmentListResponse> {
-  return apiRequest<OrgDepartmentListResponse>(
-    `/admin/org/departments?include_archived=${String(includeArchived)}`,
-    { method: "GET" },
-  );
+  return apiGet("/api/v1/admin/org/departments", {
+    params: { query: { include_archived: includeArchived } },
+  });
 }
-

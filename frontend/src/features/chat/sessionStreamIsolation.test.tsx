@@ -1,7 +1,10 @@
 import { act, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { FakeEventSource } from "../../test/fakeEventSource";
+import {
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import {
   getRequestUrl,
   listResponse,
@@ -34,7 +37,7 @@ function isMemoComponent(component: unknown): boolean {
 }
 
 afterEach(() => {
-  FakeEventSource.instances = [];
+  FakeSseStream.instances = [];
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -49,7 +52,6 @@ describe("流式渲染期间非流式兄弟组件重渲染隔离", () => {
   });
 
   it("多帧高频 text_delta 流式更新期间，ChatHeader / SessionComposer / SessionFilesDrawer 零重渲染", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const session = makeSession({
       id: "session-memo-isolation",
       project_id: PROJECT_A.id,
@@ -63,7 +65,7 @@ describe("流式渲染期间非流式兄弟组件重渲染隔离", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
         if (url.pathname.endsWith("/auth/me")) {
           return jsonResponse(TEST_USER);
@@ -118,6 +120,12 @@ describe("流式渲染期间非流式兄弟组件重渲染隔离", () => {
         ) {
           return jsonResponse({ items: [], next_after_ordinal: null });
         }
+        if (
+          url.pathname ===
+          `/api/v1/sessions/${session.id}/runs/${running.id}/stream`
+        ) {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
@@ -137,12 +145,13 @@ describe("流式渲染期间非流式兄弟组件重渲染隔离", () => {
       await screen.findByRole("heading", { name: "流式渲染隔离验证" }),
     ).toBeInTheDocument();
 
-    const source = FakeEventSource.instances[0];
-    expect(source).toBeDefined();
+    await waitFor(() => {
+      expect(FakeSseStream.instances).toHaveLength(1);
+    });
+    const source = FakeSseStream.instances[0];
 
     // 先发送初始 running 快照，等页面进入稳定流式接收态后再清空渲染计数基线。
     act(() => {
-      source.emitOpen();
       source.emit("snapshot", {
         payload: {
           event_sequence: 1,
@@ -156,6 +165,10 @@ describe("流式渲染期间非流式兄弟组件重渲染隔离", () => {
           status: "running",
         },
       });
+    });
+
+    await waitFor(() => {
+      expect(source.closed).toBe(false);
     });
 
     projectDirectorySpy.mockClear();

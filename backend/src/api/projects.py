@@ -143,6 +143,7 @@ def build_project_router(service: ProjectService) -> APIRouter:
     @router.delete(
         "/{project_id}",
         status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
     )
     async def delete_project(
         current_auth: CurrentAuth,

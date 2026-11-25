@@ -31,7 +31,11 @@ def build_project_knowledge_router(
             raise HTTPException(status_code=404, detail="project_not_found") from error
         return [knowledge_base_to_response(base) for base in bases]
 
-    @router.put("/{base_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.put(
+        "/{base_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def bind(project_id: str, base_id: str, auth: CurrentAuth) -> Response:
         try:
             await service.bind(auth.user.id, project_id, base_id)
@@ -46,7 +50,11 @@ def build_project_knowledge_router(
             ) from error
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    @router.delete("/{base_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.delete(
+        "/{base_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def unbind(project_id: str, base_id: str, auth: CurrentAuth) -> Response:
         try:
             await service.unbind(auth.user.id, project_id, base_id)

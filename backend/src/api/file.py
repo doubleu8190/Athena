@@ -194,7 +194,20 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
         except FileInputError as error:
             raise HTTPException(404, error.code) from error
 
-    @router.get("/{file_id}/download")
+    @router.get(
+        "/{file_id}/download",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Binary file attachment stream",
+                "content": {
+                    "application/octet-stream": {
+                        "schema": {"type": "string", "format": "binary"},
+                    }
+                },
+            }
+        },
+    )
     async def download_file(
         session_id: Annotated[str, Path(min_length=1, max_length=64)],
         file_id: Annotated[str, Path(min_length=1, max_length=128)],
@@ -212,7 +225,20 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
             disposition="attachment",
         )
 
-    @router.get("/{file_id}/preview")
+    @router.get(
+        "/{file_id}/preview",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Inline safe bitmap image preview stream",
+                "content": {
+                    "image/png": {"schema": {"type": "string", "format": "binary"}},
+                    "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                    "image/webp": {"schema": {"type": "string", "format": "binary"}},
+                },
+            }
+        },
+    )
     async def preview_file(
         session_id: Annotated[str, Path(min_length=1, max_length=64)],
         file_id: Annotated[str, Path(min_length=1, max_length=128)],

@@ -333,7 +333,18 @@ def build_run_router(
 
     if stream_service is not None:
 
-        @router.get("/{run_id}/stream")
+        @router.get(
+            "/{run_id}/stream",
+            response_class=StreamingResponse,
+            responses={
+                200: {
+                    "description": "Server-Sent Events stream for run execution",
+                    "content": {
+                        "text/event-stream": {"schema": {"type": "string"}},
+                    },
+                }
+            },
+        )
         async def stream_run(
             request: Request,
             session_id: Annotated[str, Path(min_length=1, max_length=64)],

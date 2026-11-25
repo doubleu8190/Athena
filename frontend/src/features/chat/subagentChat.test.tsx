@@ -1,7 +1,11 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import {
   getRequestUrl,
   listResponse,
@@ -54,19 +58,12 @@ function makeRun(overrides: Partial<Run> = {}): Run {
   };
 }
 
-function stubNoopEventSource() {
-  class MockEventSource {
-    onopen: ((event: Event) => void) | null = null;
-    onerror: ((event: Event) => void) | null = null;
-    addEventListener() {}
-    close() {}
-  }
-  vi.stubGlobal("EventSource", MockEventSource);
-}
+afterEach(() => {
+  FakeSseStream.instances = [];
+});
 
 describe("Chat 子智能体与并发 HITL 交互", () => {
   it("展示子任务进度面板并按需加载子 Run 执行轨迹", async () => {
-    stubNoopEventSource();
     const session = makeSession({
       id: "session-1",
       project_id: PROJECT_A.id,
@@ -191,6 +188,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
             next_after_ordinal: null,
           });
         }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
     );
@@ -221,7 +221,6 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
   });
 
   it("多子 Run 并发提问队列支持切换目标并精确路由提交", async () => {
-    stubNoopEventSource();
     const session = makeSession({
       id: "session-1",
       project_id: PROJECT_A.id,
@@ -325,6 +324,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
             makeRun({ id: "sub-run-2", status: "queued" }),
           );
         }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
     );
@@ -369,7 +371,6 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
   });
 
   it("按 sub_run_id 分组展示工具审批，提交互不阻塞", async () => {
-    stubNoopEventSource();
     const session = makeSession({
       id: "session-1",
       project_id: PROJECT_A.id,
@@ -480,6 +481,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
             makeRun({ id: "sub-run-2", status: "queued" }),
           );
         }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
     );
@@ -507,7 +511,6 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
   });
 
   it("waiting_for_subagents 状态锁定普通发送并支持停止取消", async () => {
-    stubNoopEventSource();
     const session = makeSession({
       id: "session-1",
       project_id: PROJECT_A.id,
@@ -580,6 +583,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
           parentRun = { ...parentRun, status: "cancelled" };
           return jsonResponse(parentRun);
         }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
     );
@@ -606,7 +612,6 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
   });
 
   it("同一 Subagent 并发派发 2 个任务并提出相同问题时可通过序号与 task_summary 区分路由", async () => {
-    stubNoopEventSource();
     const session = makeSession({
       id: "session-1",
       project_id: PROJECT_A.id,
@@ -740,6 +745,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
             makeRun({ id: "sub-run-2", status: "queued" }),
           );
         }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
     );
@@ -792,7 +800,6 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
   });
 
   it("展开已完成且有问答记录的子任务详情时展示提问与回答，即使 tool_calls 为空", async () => {
-    stubNoopEventSource();
     const session = makeSession({
       id: "session-1",
       project_id: PROJECT_A.id,
@@ -879,6 +886,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
         ) {
           return jsonResponse({ items: [], next_after_ordinal: null });
         }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
     );
@@ -911,7 +921,6 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
   });
 
   it("展开 waiting_for_input 子任务后提交定向回答，即使返回空 input_interactions 也不丢失问答记录并刷新详情", async () => {
-    stubNoopEventSource();
     const session = makeSession({
       id: "session-1",
       project_id: PROJECT_A.id,
@@ -1035,6 +1044,9 @@ describe("Chat 子智能体与并发 HITL 交互", () => {
               input_interactions: [],
             }),
           );
+        }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
         }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },

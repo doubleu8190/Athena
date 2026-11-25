@@ -285,7 +285,11 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_to_response(result)
 
-    @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @router.delete(
+        "/{server_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def delete_server(
         actor: AdminAuth,
         server_id: Annotated[str, Path(min_length=1)],

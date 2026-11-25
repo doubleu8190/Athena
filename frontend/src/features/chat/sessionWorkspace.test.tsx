@@ -18,8 +18,9 @@ import {
   TEST_USER,
 } from "../../test/fixtures";
 import {
-  FakeEventSource,
-} from "../../test/fakeEventSource";
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import { jsonResponse, renderApp } from "../../test/testUtils";
 import type { SessionFile } from "../files/model";
 import type {
@@ -199,6 +200,9 @@ function installWorkspaceFetch(options: WorkspaceFetchOptions) {
           ? jsonResponse(detail)
           : jsonResponse({ detail: "run_not_found" }, 404);
       }
+      if (url.pathname.endsWith("/stream") && method === "GET") {
+        return createSseStreamResponse(url.pathname, init);
+      }
       throw new Error(`Unexpected request: ${method} ${url}`);
     },
   );
@@ -208,7 +212,7 @@ function installWorkspaceFetch(options: WorkspaceFetchOptions) {
 
 afterEach(() => {
   window.innerWidth = INITIAL_WINDOW_WIDTH;
-  FakeEventSource.instances = [];
+  FakeSseStream.instances = [];
   vi.unstubAllGlobals();
 });
 
@@ -262,7 +266,6 @@ describe("会话工作台初始加载与历史", () => {
   });
 
   it("加载 Session、消息、最新 Run、详情和工具调用，并连接真实 SSE 地址", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const runningRun = makeRun({
       id: "run-1",
       session_id: SESSION.id,
@@ -308,8 +311,8 @@ describe("会话工作台初始加载与历史", () => {
       await within(progress).findByRole("button", { name: /展开/ }),
     );
     expect(await within(progress).findByText("web_search")).toBeInTheDocument();
-    expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.instances[0].url).toBe(
+    expect(FakeSseStream.instances).toHaveLength(1);
+    expect(FakeSseStream.instances[0].url).toBe(
       `/api/v1/sessions/${SESSION.id}/runs/run-1/stream`,
     );
 
@@ -412,7 +415,6 @@ describe("会话工作台初始加载与历史", () => {
 
 describe("Run 命令与真实状态", () => {
   it("普通发送成功后等待目标用户消息进入列表再定位最新", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const triggerMessage = makeMessage({
       id: "message-sent-after-http",
       parts: [{ text: "等待真实消息进入列表再滚动", type: "text" }],
@@ -633,7 +635,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("查询终态关闭流并在持久消息到达后收敛同一 Run 的临时输出", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let latestMessagesPage: ConversationMessagePage = {
       items: [],
       next_before_sequence: null,
@@ -696,7 +697,7 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("snapshot", {
         payload: {
@@ -799,7 +800,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("同 Run 缓存交付消息时，终态 refetch 503 仍保留草稿并等待最终回答", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let completed = false;
     let failTerminalReconcile = true;
     const runs = [
@@ -880,7 +880,7 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("text_delta", {
         payload: { text: "失败时保留的草稿" },
@@ -929,7 +929,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("completed 的消息页耗尽时保留草稿且不回退旧交付消息", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       id: "run-message-exhausted",
       session_id: SESSION.id,
@@ -991,7 +990,7 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("text_delta", {
         payload: { text: "消息耗尽时仍需保留" },
@@ -1030,7 +1029,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("completed 的事件页耗尽时保留草稿且不读取 latest assistant", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       id: "run-event-exhausted",
       session_id: SESSION.id,
@@ -1078,7 +1076,7 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("text_delta", {
         payload: { text: "事件耗尽时仍需保留" },
@@ -1120,7 +1118,6 @@ describe("Run 命令与真实状态", () => {
   ] as const)(
     "%s 终态保留旧交付旁的未完成回答且不猜测 settle",
     async (terminalStatus, statusLabel, retentionLabel) => {
-      vi.stubGlobal("EventSource", FakeEventSource);
       const running = makeRun({
         id: `run-${terminalStatus}-delivery`,
         session_id: SESSION.id,
@@ -1159,7 +1156,7 @@ describe("Run 命令与真实状态", () => {
       expect(
         await screen.findByRole("button", { name: "运行中，暂不可发送" }),
       ).toBeDisabled();
-      const source = FakeEventSource.instances[0];
+      const source = FakeSseStream.instances[0];
       act(() => {
         source.emit("text_delta", {
           payload: { text: `${terminalStatus} 时仍需保留的回答` },
@@ -1206,7 +1203,6 @@ describe("Run 命令与真实状态", () => {
   );
 
   it("failed 事件有报告 ID 时跨消息页恢复权威报告并清除瞬时文本", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       id: "run-failed-report",
       session_id: SESSION.id,
@@ -1286,7 +1282,7 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("text_delta", {
         payload: { text: "不能当作报告的瞬时回答" },
@@ -1409,7 +1405,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("failed 报告身份不匹配时保留瞬时文本并显示明确安全状态", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       id: "run-invalid-report",
       session_id: SESSION.id,
@@ -1449,7 +1444,7 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("text_delta", {
         payload: { text: "身份不符时必须保留的瞬时文本" },
@@ -1482,7 +1477,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("SSE run_event 先于查询刷新投影取消中，终态快照关闭连接", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       id: "run-stream-state",
       session_id: SESSION.id,
@@ -1501,7 +1495,7 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("run_event", {
         payload: {
@@ -1538,7 +1532,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("停止返回 cancelling 时不提前显示已取消，重复点击仍请求服务端", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let runs = [
       makeRun({
         id: "run-running",
@@ -1575,7 +1568,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("run_already_active 保留草稿并同步为服务端活跃状态", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let runs: Run[] = [];
     const running = makeRun({
       id: "run-active",
@@ -1652,7 +1644,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("提交响应延迟期间继续输入时，只清空仍等于原始草稿的输入", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const submitGate = deferred<Response>();
     const started = deferred<void>();
     const queued = makeRun({
@@ -1701,7 +1692,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("提交 HTTP 成功但响应投影过期时仍确认成功，并保留新编辑", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const submitGate = deferred<Response>();
     const submitStarted = deferred<void>();
     const responseRun = makeRun({
@@ -1787,7 +1777,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("补充回答在途时停止与快速重复提交都被共享锁阻止，最终状态不倒退", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const answerGate = deferred<Response>();
     const answerStarted = deferred<void>();
     let runs = [
@@ -1879,7 +1868,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("回答 HTTP 成功但响应投影过期时仍清空原始回答并确认成功", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const answerGate = deferred<Response>();
     const answerStarted = deferred<void>();
     const waiting = makeRun({
@@ -1989,7 +1977,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("已知 request_id 冲突保留草稿，下一次提交改用新的 request_id", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let attempt = 0;
     let runs: Run[] = [];
     const requestIds: string[] = [];
@@ -2043,7 +2030,6 @@ describe("Run 命令与真实状态", () => {
   });
 
   it("补充输入失败保留文本，重试复用 request_id，成功后回到 queued", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let runs = [
       makeRun({
         id: "run-input",
@@ -2102,7 +2088,7 @@ describe("Run 命令与真实状态", () => {
 
     const questions = await screen.findAllByText("请确认季度统计口径？");
     expect(questions.length).toBeGreaterThan(0);
-    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(FakeSseStream.instances).toHaveLength(0);
     const answerInput = screen.getByLabelText("补充信息");
     await user.type(answerInput, "季度口径按自然季度");
     await user.click(screen.getByRole("button", { name: "提交回答" }));
@@ -2118,12 +2104,11 @@ describe("Run 命令与真实状态", () => {
     expect(requestIds[0]).toBe(requestIds[1]);
     expect(answerInput).toHaveValue("");
     await waitFor(() => {
-      expect(FakeEventSource.instances).toHaveLength(1);
+      expect(FakeSseStream.instances).toHaveLength(1);
     });
   });
 
   it("补充输入请求失效时保留原文并重新同步服务端活跃状态", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     let runs = [
       makeRun({
         id: "run-stale-input",
@@ -2193,7 +2178,6 @@ describe("Run 命令与真实状态", () => {
 
 describe("审批与失败重试", () => {
   it("展示真实审批字段与参数，并逐项 approve/reject", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const pendingOne: RunPendingApproval = {
       batch_message_id: "batch-1",
       call_id: "call-record-1",
@@ -2267,7 +2251,7 @@ describe("审批与失败重试", () => {
     renderApp(`/chat/${SESSION.id}`);
 
     expect(await screen.findByText("等待工具审批")).toBeInTheDocument();
-    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(FakeSseStream.instances).toHaveLength(0);
     expect(screen.getByText("write_crm")).toBeInTheDocument();
     expect(screen.getByText("send_email")).toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
@@ -2290,12 +2274,11 @@ describe("审批与失败重试", () => {
       await screen.findByText("任务排队中，即将开始处理…"),
     ).toBeInTheDocument();
     await waitFor(() => {
-      expect(FakeEventSource.instances).toHaveLength(1);
+      expect(FakeSseStream.instances).toHaveLength(1);
     });
   });
 
   it("审批请求串行提交，延迟响应不会覆盖最后的 queued 状态", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const pendingOne: RunPendingApproval = {
       batch_message_id: "batch-serial",
       call_id: "call-serial-1",
@@ -2402,7 +2385,6 @@ describe("审批与失败重试", () => {
   });
 
   it("审批响应迟到时不能回退先完成的取消状态", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const pending: RunPendingApproval = {
       batch_message_id: "batch-stale-approval",
       call_id: "call-stale-approval",
@@ -2475,7 +2457,6 @@ describe("审批与失败重试", () => {
   });
 
   it("取消请求在途时审批入口被共享锁阻止，最终保持已取消", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const pending: RunPendingApproval = {
       batch_message_id: "batch-cancel-lock",
       call_id: "call-cancel-lock",
@@ -2538,7 +2519,6 @@ describe("审批与失败重试", () => {
   });
 
   it("失败 Run 先展示完整风险，网络失败复用 request_id，确认后切换新 Run", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const failed = makeRun({
       finished_at: "2026-11-10T03:05:00Z",
       id: "run-failed",
@@ -2625,12 +2605,11 @@ describe("审批与失败重试", () => {
     expect(requestIds).toHaveLength(2);
     expect(requestIds[0]).toBe(requestIds[1]);
     await waitFor(() => {
-      expect(FakeEventSource.instances).toHaveLength(1);
+      expect(FakeSseStream.instances).toHaveLength(1);
     });
   });
 
   it("重试弹窗原样展示服务端 warning，新 Run 的 warning 也会展示", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const serverWarning =
       "服务端补充：该任务包含一次结果未知的外部写入，请确认影响范围。";
     const retriedWarning =
@@ -2689,7 +2668,6 @@ describe("审批与失败重试", () => {
   });
 
   it("服务端 warning 与固定风险完全相同时只展示一次", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const fixedWarning =
       "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。";
     const failed = makeRun({
@@ -2786,7 +2764,6 @@ describe("窄屏消息内执行进度与输入区", () => {
 describe("新草稿创建与提交部分失败", () => {
   it("Session 创建成功但 Run 结果不明时进入会话，保留原文和 request_id 且不重复创建 Session", async () => {
     window.innerWidth = 1024;
-    vi.stubGlobal("EventSource", FakeEventSource);
     const created = makeSession({
       id: "session-created",
       project_id: null,
@@ -2859,6 +2836,9 @@ describe("新草稿创建与提交部分失败", () => {
             next_after_file_id: null,
           });
         }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
+        }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
     );
@@ -2892,7 +2872,6 @@ describe("新草稿创建与提交部分失败", () => {
 
   it("草稿页与会话页均支持 Enter 直接发送、Shift+Enter 换行，且忽略 IME 组合态与锁定态", async () => {
     window.innerWidth = 1024;
-    vi.stubGlobal("EventSource", FakeEventSource);
     const created = makeSession({
       id: "session-shortcut",
       project_id: null,
@@ -2977,6 +2956,9 @@ describe("新草稿创建与提交部分失败", () => {
             items: [],
             next_after_file_id: null,
           });
+        }
+        if (url.pathname.endsWith("/stream") && method === "GET") {
+          return createSseStreamResponse(url.pathname, init);
         }
         throw new Error(`Unexpected request: ${method} ${url}`);
       },
@@ -3160,7 +3142,6 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
   });
 
   it("高频连续纯进度 SSE run_event 在 500ms 窗口内合并为一次对账且不盲目重拉消息历史，并阻止旧快照回退缓存", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       event_sequence: 5,
       id: "run-throttle-monotonic",
@@ -3179,7 +3160,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
 
     const countRunDetailRequests = () =>
       fetchMock.mock.calls.filter(([input]) => {
@@ -3314,7 +3295,6 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
   });
 
   it("completed 终态对账优先复用 SSE 内存 completed 事件，跳过 /events 分页请求", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       event_sequence: 2,
       id: "run-completed-reuse-memory",
@@ -3358,7 +3338,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
 
     currentRun = {
       ...running,
@@ -3404,7 +3384,6 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
   });
 
   it("运行中无产物 tool_call_finished 不重拉消息；但 live snapshot 出现未缓存交付消息 ID 时精准补拉消息与文件并渲染附件卡片", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       event_sequence: 2,
       id: "run-live-delivery",
@@ -3471,7 +3450,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
       screen.getByRole("button", { name: "会话文件（0）" }),
     ).toBeInTheDocument();
 
-    const source = FakeEventSource.instances[0];
+    const source = FakeSseStream.instances[0];
     const countRequests = (suffix: string) =>
       fetchMock.mock.calls.filter(([input]) =>
         new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(

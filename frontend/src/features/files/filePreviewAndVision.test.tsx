@@ -8,7 +8,10 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { FakeEventSource } from "../../test/fakeEventSource";
+import {
+  FakeSseStream,
+  createSseStreamResponse,
+} from "../../test/fakeSseStream";
 import {
   getRequestUrl,
   listResponse,
@@ -287,6 +290,9 @@ function installSessionFetch(options: M34SessionFetchOptions = {}) {
           ? jsonResponse(detail)
           : jsonResponse({ detail: "run_not_found" }, 404);
       }
+      if (url.pathname.endsWith("/stream") && method === "GET") {
+        return createSseStreamResponse(url.pathname, init);
+      }
       throw new Error(`Unexpected request: ${method} ${url}`);
     },
   );
@@ -296,7 +302,7 @@ function installSessionFetch(options: M34SessionFetchOptions = {}) {
 }
 
 afterEach(() => {
-  FakeEventSource.instances = [];
+  FakeSseStream.instances = [];
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -935,7 +941,6 @@ describe("FilePreviewDialog 5 种内容形态与分页/中止隔离", () => {
 
 describe("输入器解析状态微标、识图一键切换（方案 A2）与 5 张上限提示", () => {
   it("PDF 展示已解析/未提取微标且可点击预览；非识图模型展示温和条与一键切至识图模型，且永不禁用发送按钮", async () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
     const readyPdf = makeSessionFile({
       extracted_text_bytes: 18_432,
       extraction_error_code: null,

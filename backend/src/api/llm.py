@@ -216,7 +216,11 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
             raise HTTPException(422, error.code) from error
         return model_profile_to_response(item)
 
-    @profile_router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @profile_router.delete(
+        "/{profile_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
     async def delete_profile(
         actor: AdminAuth,
         profile_id: Annotated[str, Path(min_length=1, max_length=64)],

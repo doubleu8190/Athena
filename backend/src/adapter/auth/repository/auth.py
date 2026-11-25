@@ -8,7 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adapter.auth.converter.auth import auth_session_to_domain, user_to_domain
+from adapter.auth.converter.auth import user_to_domain
 from adapter.auth.model.auth import AuthSessionModel, UserModel
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
 from domain.auth import (
@@ -335,29 +335,27 @@ class SqlAlchemyAuthRepository(AuthRepository, CurrentSessionReader):
         token_hash: str,
         now: datetime,
     ) -> AuthContext | None:
-        """按 token 摘要读取有效会话与可用用户。"""
+        """按 token 摘要以单条 JOIN 读取有效会话与可用用户，消除每请求的二次串行 SQL。"""
         async with self._session_factory() as session:
-            auth_row = await session.scalar(
-                select(AuthSessionModel).where(
-                    AuthSessionModel.token_hash == token_hash,
-                    AuthSessionModel.revoked_time.is_(None),
-                    AuthSessionModel.expires_at > now,
+            row = (
+                await session.execute(
+                    select(UserModel, AuthSessionModel.id)
+                    .join(AuthSessionModel, AuthSessionModel.user_id == UserModel.id)
+                    .where(
+                        AuthSessionModel.token_hash == token_hash,
+                        AuthSessionModel.revoked_time.is_(None),
+                        AuthSessionModel.expires_at > now,
+                        UserModel.status == UserStatus.ACTIVE.value,
+                        UserModel.deleted_time.is_(None),
+                    )
                 )
-            )
-            if auth_row is None:
-                return None
-            user_row = await session.scalar(
-                select(UserModel).where(
-                    UserModel.id == auth_row.user_id,
-                    UserModel.status == UserStatus.ACTIVE.value,
-                    UserModel.deleted_time.is_(None),
-                )
-            )
-        if user_row is None:
+            ).one_or_none()
+        if row is None:
             return None
+        user_row, session_id = row
         return AuthContext(
             user=user_to_domain(user_row),
-            session_id=auth_session_to_domain(auth_row).id,
+            session_id=session_id,
         )
 
     async def get_current_session_user(

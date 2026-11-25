@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 
 from app.access import AccessPolicyService
 from app.skill.dependency import DependencyChecker
@@ -319,9 +320,7 @@ class SkillService:
         except PermissionError as error:
             raise SkillUserAuthorizationError("not_authenticated") from error
 
-    async def get_version(
-        self, actor: AuthContext, skill_id: str, version_id: str
-    ) -> SkillVersion:
+    async def get_version(self, actor: AuthContext, skill_id: str, version_id: str) -> SkillVersion:
         """读取目标 Skill 下不可变版本的完整正文。"""
         await self._require_manageable_admin_skill(actor, skill_id)
         version = await self._repository.get_version(version_id)
@@ -375,13 +374,15 @@ class SkillService:
         starter_prompt: str | None = None,
     ) -> SkillAdminDetails:
         """在线创建公司级或部门级纯 Markdown 技能（复用三层分权、确定性打包与幂等重放）。"""
-        resolved_scope, resolved_department_id, resolved_grants = (
-            await self._resolve_admin_create_visibility(
-                actor,
-                scope=scope,
-                owner_department_id=owner_department_id,
-                visibility_grants=visibility_grants,
-            )
+        (
+            resolved_scope,
+            resolved_department_id,
+            resolved_grants,
+        ) = await self._resolve_admin_create_visibility(
+            actor,
+            scope=scope,
+            owner_department_id=owner_department_id,
+            visibility_grants=visibility_grants,
         )
         idempotency_key = _validate_idempotency_key(idempotency_key)
         draft = validate_personal_content(name, description, guide)
@@ -513,13 +514,15 @@ class SkillService:
         visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> SkillAdminDetails:
         """首发导入完整 ZIP；支持 company 与 department 级三层分权校验。"""
-        resolved_scope, resolved_department_id, resolved_grants = (
-            await self._resolve_admin_create_visibility(
-                actor,
-                scope=scope,
-                owner_department_id=owner_department_id,
-                visibility_grants=visibility_grants,
-            )
+        (
+            resolved_scope,
+            resolved_department_id,
+            resolved_grants,
+        ) = await self._resolve_admin_create_visibility(
+            actor,
+            scope=scope,
+            owner_department_id=owner_department_id,
+            visibility_grants=visibility_grants,
         )
 
         idempotency_key = _validate_idempotency_key(idempotency_key)
@@ -1389,6 +1392,16 @@ class SkillService:
 
     async def user_directory(self, actor: AuthContext) -> tuple[Skill, ...]:
         """返回对当前用户实时可读的 company、department 及本人 personal 启用 Skill。"""
+        # 注入统一权限引擎且仓储支持单 Session SQL 下推时优先直走下推路径（5 -> 1 Session）。
+        if self._access_policy is not None:
+            get_readable = getattr(self._repository, "get_readable_user_directory_entries", None)
+            if callable(get_readable):
+                readable_entries = cast(
+                    tuple[tuple[Skill, SkillVersion], ...],
+                    await get_readable(actor.user.id),
+                )
+                available = await self._available_directory_entries(readable_entries)
+                return _sort_user_directory(available)
         if callable(getattr(self._repository, "get_user_directory_entries", None)):
             entries = await self._repository.get_user_directory_entries(actor.user.id)
             if self._access_policy is not None and entries:
@@ -1420,26 +1433,33 @@ class SkillService:
         selected_tuple = tuple(selected_skill_ids)
         if len(selected_tuple) != len(set(selected_tuple)):
             raise SkillConflictError("skill_selection_invalid")
-        if callable(getattr(self._repository, "get_user_directory_entries", None)):
-            entries = await self._repository.get_user_directory_entries(user_id)
-        else:
-            candidates = await self._repository.get_user_directory(user_id)
-            resolved: list[tuple[Skill, SkillVersion]] = []
-            for skill in candidates:
-                if skill.current_version_id is None:
-                    continue
-                version = await self._repository.get_version(skill.current_version_id)
-                if version is not None and version.skill_id == skill.id:
-                    resolved.append((skill, version))
-            entries = tuple(resolved)
-
-        if self._access_policy is not None and entries:
-            readable_ids = await self._access_policy.filter_readable_ids(
-                user_id,
-                ResourceType.SKILL,
-                [skill.id for skill, _ in entries],
+        get_readable = getattr(self._repository, "get_readable_user_directory_entries", None)
+        if self._access_policy is not None and callable(get_readable):
+            entries = cast(
+                tuple[tuple[Skill, SkillVersion], ...],
+                await get_readable(user_id),
             )
-            entries = tuple(pair for pair in entries if pair[0].id in readable_ids)
+        else:
+            if callable(getattr(self._repository, "get_user_directory_entries", None)):
+                entries = await self._repository.get_user_directory_entries(user_id)
+            else:
+                candidates = await self._repository.get_user_directory(user_id)
+                resolved: list[tuple[Skill, SkillVersion]] = []
+                for skill in candidates:
+                    if skill.current_version_id is None:
+                        continue
+                    version = await self._repository.get_version(skill.current_version_id)
+                    if version is not None and version.skill_id == skill.id:
+                        resolved.append((skill, version))
+                entries = tuple(resolved)
+
+            if self._access_policy is not None and entries:
+                readable_ids = await self._access_policy.filter_readable_ids(
+                    user_id,
+                    ResourceType.SKILL,
+                    [skill.id for skill, _ in entries],
+                )
+                entries = tuple(pair for pair in entries if pair[0].id in readable_ids)
 
         available_ids = {skill.id for skill, _ in entries}
         if not set(selected_tuple) <= available_ids:
@@ -1554,11 +1574,7 @@ class SkillService:
             )
             for entry, version in await self.active_entries(
                 snapshot,
-                tuple(
-                    item.skill_id
-                    for item in snapshot.skills
-                    if item.skill_id in active_ids
-                ),
+                tuple(item.skill_id for item in snapshot.skills if item.skill_id in active_ids),
             )
         )
         return RunSkillPromptContext(catalog=snapshot.skills, active=active)
@@ -1760,10 +1776,12 @@ class SkillService:
         if self._access_policy is None:
             raise SkillAuthorizationError("admin_required")
         target = _skill_access_target(skill)
-        if await self._access_policy.can_manage_resource(user.id, target):
+        # 单次快照合并可读与可管双判定，避免重复加载用户组织树。
+        can_read, can_manage = await self._access_policy.evaluate_target_access(user.id, target)
+        if can_manage:
             return skill
         # 对不可读的他部门技能返回 404 防止探测存在性；对可读但无管理权（如 company 级）返回 403。
-        if await self._access_policy.can_read_target(user.id, target):
+        if can_read:
             raise SkillAuthorizationError("admin_required")
         raise SkillNotFoundError()
 

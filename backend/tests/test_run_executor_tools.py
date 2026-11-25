@@ -580,9 +580,7 @@ class _Profiles:
     async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
         return _runtime_profile(supports_parallel_tool_calls=self._supports_parallel_tool_calls)
 
-    async def get_compression_policy(
-        self, policy_id: str
-    ) -> CompressionPolicyVersion | None:
+    async def get_compression_policy(self, policy_id: str) -> CompressionPolicyVersion | None:
         del policy_id
         return self._compression_policy
 
@@ -879,9 +877,7 @@ class _ValidatingToolRuntime(_ToolRuntime):
 class _InputFileRuntime(_ToolRuntime):
     """返回已授权的文件安全投影，用于断言真实 provider 请求。"""
 
-    async def build_run_input_file_context(
-        self, run: Run
-    ) -> tuple[RunInputFileContext, ...]:
+    async def build_run_input_file_context(self, run: Run) -> tuple[RunInputFileContext, ...]:
         return tuple(
             RunInputFileContext(
                 file_id=file_id,
@@ -946,9 +942,7 @@ def test_run_input_file_projection_is_in_the_actual_provider_request() -> None:
         lease = _lease(input_file_ids=("file_initial",))
         repository = _Repository(lease.run)
         tool_runtime = _InputFileRuntime(
-            ToolExecutionResult(
-                ToolOutcome(status=ToolOutcomeStatus.OK, code="tool_completed")
-            )
+            ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="tool_completed"))
         )
         provider = _ScriptedProvider(
             [_response(text="initial done"), _response(text="answer done")]
@@ -965,19 +959,13 @@ def test_run_input_file_projection_is_in_the_actual_provider_request() -> None:
             lease,
             run=replace(
                 lease.run,
-                input_files=RunInputFiles(
-                    file_ids=("file_initial", "file_answer")
-                ),
+                input_files=RunInputFiles(file_ids=("file_initial", "file_answer")),
             ),
         )
         await executor.execute(answer_lease)
 
-        initial_request = "\n".join(
-            message.content for message in provider.requests[0].messages
-        )
-        answer_request = "\n".join(
-            message.content for message in provider.requests[1].messages
-        )
+        initial_request = "\n".join(message.content for message in provider.requests[0].messages)
+        answer_request = "\n".join(message.content for message in provider.requests[1].messages)
         assert '"file_id":"file_initial"' in initial_request
         assert '"file_id":"file_answer"' not in initial_request
         assert '"file_id":"file_initial"' in answer_request
@@ -1787,22 +1775,16 @@ def test_dynamic_skill_preparation_only_sends_valid_call_to_approval_barrier() -
         assert len(provider.requests) == 1
         assert tool_runtime.calls == 0
         assert repository.run.status is RunStatus.WAITING_FOR_APPROVAL
-        records = {
-            record.tool_call_id: record
-            for record in repository.records.values()
-        }
+        records = {record.tool_call_id: record for record in repository.records.values()}
         assert records["call-invalid-skill"].status is ToolCallStatus.FAILED
         assert records["call-invalid-skill"].outcome is not None
-        assert (
-            records["call-invalid-skill"].outcome.code
-            == "skill_not_in_run_snapshot"
-        )
+        assert records["call-invalid-skill"].outcome.code == "skill_not_in_run_snapshot"
         assert records["call-valid-skill"].status is ToolCallStatus.PENDING_APPROVAL
         assert records["call-valid-skill"].requires_approval is True
-        assert [
-            item.requires_approval
-            for item in repository.last_batch_command.calls
-        ] == [False, True]
+        assert [item.requires_approval for item in repository.last_batch_command.calls] == [
+            False,
+            True,
+        ]
 
     asyncio.run(scenario())
 
@@ -2132,7 +2114,9 @@ def test_context_safety_gate_covers_final_only_without_compression_policy(
             cast(LlmStreamProvider, SimpleNamespace()),
             tool_runtime=cast(
                 RunToolRuntime,
-                SimpleNamespace(build_skill_context=AsyncMock(return_value=RunSkillPromptContext())),
+                SimpleNamespace(
+                    build_skill_context=AsyncMock(return_value=RunSkillPromptContext())
+                ),
             ),
         )
         stop = AsyncMock()
@@ -2182,7 +2166,9 @@ def test_hard_window_stop_preserves_compression_failure_reason(
             cast(LlmStreamProvider, SimpleNamespace()),
             tool_runtime=cast(
                 RunToolRuntime,
-                SimpleNamespace(build_skill_context=AsyncMock(return_value=RunSkillPromptContext())),
+                SimpleNamespace(
+                    build_skill_context=AsyncMock(return_value=RunSkillPromptContext())
+                ),
             ),
         )
         monkeypatch.setattr(
@@ -2233,9 +2219,7 @@ def test_hard_window_stop_preserves_compression_failure_reason(
         assert "压缩输入无法一次装入模型窗口" in report
         assert "code: compression_input_too_large" in report
         report_without_compression_fact = "\n".join(
-            line
-            for line in report.splitlines()
-            if not line.startswith("- 压缩尝试结论：")
+            line for line in report.splitlines() if not line.startswith("- 压缩尝试结论：")
         )
         assert not executor._is_context_report_text_valid(
             report_without_compression_fact,
@@ -2330,7 +2314,9 @@ def test_resumable_batch_is_blocked_before_side_effect_at_safety_line(
             cast(LlmStreamProvider, SimpleNamespace()),
             tool_runtime=cast(
                 RunToolRuntime,
-                SimpleNamespace(build_skill_context=AsyncMock(return_value=RunSkillPromptContext())),
+                SimpleNamespace(
+                    build_skill_context=AsyncMock(return_value=RunSkillPromptContext())
+                ),
             ),
         )
         stop = AsyncMock()
@@ -2546,9 +2532,7 @@ def test_context_report_falls_back_to_system_text_when_provider_fails() -> None:
     async def scenario() -> None:
         lease = _lease()
         repository = _Repository(lease.run)
-        provider = SimpleNamespace(
-            complete=AsyncMock(side_effect=LlmProviderError("llm_timeout"))
-        )
+        provider = SimpleNamespace(complete=AsyncMock(side_effect=LlmProviderError("llm_timeout")))
         executor = RunExecutor(
             cast(RunRepository, repository),
             cast(ModelProfileRepository, _Profiles()),
@@ -2743,10 +2727,7 @@ def test_context_report_with_missing_sections_uses_system_fallback() -> None:
         assert command.report_message is not None
         report_text = command.report_message.parts[0]
         assert isinstance(report_text, TextPart)
-        assert all(
-            label in report_text.text
-            for label in ("已完成", "产出", "未完成", "停止原因")
-        )
+        assert all(label in report_text.text for label in ("已完成", "产出", "未完成", "停止原因"))
         assert command.report_message.metadata.provider == "system_context_safety"
         assert len(command.usage.attempts) == 1
         assert command.usage.attempts[0].total_tokens == 25
@@ -2897,9 +2878,7 @@ def test_context_report_state_preserves_files_skills_retry_and_tool_results() ->
                     file_id="file_input",
                     filename="input.xlsx",
                     label="输入",
-                    mime_type=(
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    ),
+                    mime_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                     size_bytes=44,
                     source="session",
                 ),
@@ -3367,3 +3346,333 @@ def test_executor_abandons_artifacts_and_converges_when_session_file_quota_excee
         assert repository.run.status is RunStatus.COMPLETED
 
     asyncio.run(scenario())
+
+
+def test_executor_text_delta_batching_fast_pushes_first_and_flushes_by_bytes_time_and_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TextDelta 首包零延迟快推，后续按 256B / 40ms 合批，遇工具/完成事件与流结束强制 flush。"""
+    from domain.llm.model import TextDelta, ToolCallStarted
+    from domain.run.ports import RunEventTransport
+
+    now_clock = [100.0]
+    monkeypatch.setattr("app.run.executor.time.monotonic", lambda: now_clock[0])
+
+    published: list[tuple[str, int, str, int]] = []
+    call_log: list[str] = []
+
+    class RecordingPublisher:
+        async def publish_text(
+            self,
+            run_id: str,
+            execution_epoch: int,
+            text: str,
+            *,
+            round: int = 0,
+        ) -> None:
+            published.append((run_id, execution_epoch, text, round))
+            call_log.append(f"publish:{text}")
+
+        async def publish_persisted(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+    class StreamingProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @asynccontextmanager
+        async def stream(
+            self, runtime: RuntimeModelProfile, request: LlmRequest
+        ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
+            del runtime, request
+            self.calls += 1
+            call_no = self.calls
+
+            async def _events() -> AsyncIterator[LlmStreamEvent]:
+                if call_no == 1:
+                    # 1. 先来空 TextDelta（置 emitted_output，但不消费首包快推名额）
+                    yield TextDelta(0, 0, "")
+                    # 2. 首条非空 TextDelta 立即快推（TTFT 零额外延迟）
+                    yield TextDelta(0, 0, "首包")
+                    assert published == [("run-tools", 1, "首包", 1)]
+                    # 3. 连续短分片在 40ms 和 256B 之内累积缓冲
+                    now_clock[0] += 0.01
+                    yield TextDelta(0, 0, "a")
+                    now_clock[0] += 0.01
+                    yield TextDelta(0, 0, "b")
+                    assert len(published) == 1
+                    # 4. 超过 40ms 时间窗触发合批 flush（"ab" + "c"）
+                    now_clock[0] += 0.035
+                    yield TextDelta(0, 0, "c")
+                    assert len(published) == 2
+                    assert published[1][2] == "abc"
+                    # 5. 多字节中文达到 >= 256 UTF-8 字节立即触发合批 flush
+                    now_clock[0] += 0.005
+                    yield TextDelta(0, 0, "中" * 50)  # 150B < 256B
+                    assert len(published) == 2
+                    now_clock[0] += 0.005
+                    yield TextDelta(0, 0, "文" * 40)  # +120B = 270B >= 256B
+                    assert len(published) == 3
+                    assert published[2][2] == ("中" * 50) + ("文" * 40)
+                    # 6. 尾部短文本在 ToolCallStarted 前强制 flush
+                    now_clock[0] += 0.005
+                    yield TextDelta(0, 0, "tail-before-tool")
+                    assert len(published) == 3
+                    call_log.append("yield:tool_start")
+                    yield ToolCallStarted(output_index=0, call_id="call-batch-1", name="test_tool")
+                    yield ResponseCompleted(
+                        _response(
+                            text="首包abc" + ("中" * 50) + ("文" * 40) + "tail-before-tool",
+                            call=LlmToolCall("call-batch-1", "test_tool", {"query": "q"}),
+                        )
+                    )
+                else:
+                    # 第 2 轮：首包快推 + 短尾片在 ResponseCompleted 前强制 flush
+                    yield TextDelta(0, 0, "二轮首")
+                    now_clock[0] += 0.005
+                    yield TextDelta(0, 0, "尾1")
+                    now_clock[0] += 0.005
+                    yield TextDelta(0, 0, "尾2")
+                    yield ResponseCompleted(_response(text="二轮首尾1尾2"))
+
+            yield _events()
+
+    async def scenario() -> None:
+        lease = _lease()
+        repository = _Repository(lease.run)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, StreamingProvider()),
+            tool_runtime=cast(
+                RunToolRuntime,
+                _ToolRuntime(
+                    ToolExecutionResult(ToolOutcome(status=ToolOutcomeStatus.OK, code="ok"))
+                ),
+            ),
+            publisher=cast(RunEventTransport, RecordingPublisher()),
+        )
+        await executor.execute(lease)
+        assert repository.run.status is RunStatus.COMPLETED
+
+    asyncio.run(scenario())
+    assert [item[2] for item in published] == [
+        "首包",
+        "abc",
+        ("中" * 50) + ("文" * 40),
+        "tail-before-tool",
+        "二轮首",
+        "尾1尾2",
+    ]
+    assert [item[3] for item in published] == [1, 1, 1, 1, 2, 2]
+    assert "publish:tail-before-tool" in call_log
+
+
+def test_executor_text_delta_batching_error_and_cancellation_boundaries() -> None:
+    """首条 TextDelta 即禁重试、普通异常前 flush，取消路径跳过 flush 且不吞 CancelledError。"""
+    import time
+
+    from domain.llm.model import TextDelta
+    from domain.run.ports import RunEventTransport
+
+    # 场景 1：收到 TextDelta 后立刻抛可重试异常，严守已吐字禁重试契约且 flush 已缓冲分片。
+    async def scenario_no_retry_on_first_delta() -> None:
+        attempts = 0
+        published: list[str] = []
+
+        class Publisher:
+            async def publish_text(
+                self, run_id: str, execution_epoch: int, text: str, *, round: int = 0
+            ) -> None:
+                del run_id, execution_epoch, round
+                published.append(text)
+
+            async def publish_persisted(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+        class MidStreamFailingProvider:
+            @asynccontextmanager
+            async def stream(
+                self, runtime: RuntimeModelProfile, request: LlmRequest
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
+                nonlocal attempts
+                del runtime, request
+                attempts += 1
+
+                async def _events() -> AsyncIterator[LlmStreamEvent]:
+                    yield TextDelta(0, 0, "first")
+                    yield TextDelta(0, 0, "buffered-before-err")
+                    raise LlmProviderError("llm_temporary_upstream_error", retry_safe=True)
+
+                yield _events()
+
+        lease = _lease()
+        repository = _Repository(lease.run)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, MidStreamFailingProvider()),
+            publisher=cast(RunEventTransport, Publisher()),
+        )
+        await executor.execute(lease)
+        assert attempts == 1
+        assert published == ["first", "buffered-before-err"]
+        assert repository.run.status is RunStatus.FAILED
+
+    # 场景 2：CancelledError 路径跳过 flush，防止慢 Redis 阻塞取消收尾或吞掉 CancelledError。
+    async def scenario_cancel_skips_flush() -> None:
+        published: list[str] = []
+        entered_block = asyncio.Event()
+
+        class BlockingPublisher:
+            async def publish_text(
+                self, run_id: str, execution_epoch: int, text: str, *, round: int = 0
+            ) -> None:
+                del run_id, execution_epoch, round
+                published.append(text)
+                if len(published) > 1:
+                    raise AssertionError("cancel_path_must_not_flush_pending_batch")
+
+            async def publish_persisted(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+        class BlockingProvider:
+            @asynccontextmanager
+            async def stream(
+                self, runtime: RuntimeModelProfile, request: LlmRequest
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
+                del runtime, request
+
+                async def _events() -> AsyncIterator[LlmStreamEvent]:
+                    yield TextDelta(0, 0, "first-fast")
+                    yield TextDelta(0, 0, "buffered-must-skip-on-cancel")
+                    entered_block.set()
+                    await asyncio.Event().wait()
+
+                yield _events()
+
+        lease = _lease()
+        repository = _Repository(lease.run)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, BlockingProvider()),
+            publisher=cast(RunEventTransport, BlockingPublisher()),
+        )
+        state = _ExecutionState(
+            lease=lease,
+            run=lease.run,
+            loop_deadline=time.monotonic() + 30.0,
+            authorized=None,
+            snapshot=_snapshot(),
+            main_prompt="prompt",
+            compression_prompt="compress",
+            budget=RunLlmBudget(
+                cast(RunRepository, repository),
+                ToolExecutionContext(
+                    owner_id=lease.run.owner_id,
+                    chat_session_id=lease.run.session_id,
+                    project_id=None,
+                    run_id=lease.run.id,
+                    execution_epoch=lease.run.execution_epoch,
+                    auth_session_id=lease.run.auth_session_id or "",
+                    deadline_at=lease.execution_deadline_at,
+                ),
+                used=0,
+                maximum=4,
+                worker_id=lease.run.worker_id or "",
+            ),
+            retry_context=(),
+            input_files=(),
+            event_cursor=0,
+            round=1,
+        )
+        task = asyncio.create_task(
+            executor._complete_with_retry(
+                state,
+                LlmRequest("tools-model", ()),
+                allow_retry=True,
+            )
+        )
+        await entered_block.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert published == ["first-fast"]
+
+    # 场景 3：仅收到空 TextDelta("") 后抛可重试异常，同样立即置 emitted_output=True 禁止重试。
+    async def scenario_empty_delta_forbids_retry() -> None:
+        attempts = 0
+
+        class EmptyDeltaFailingProvider:
+            @asynccontextmanager
+            async def stream(
+                self, runtime: RuntimeModelProfile, request: LlmRequest
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
+                nonlocal attempts
+                del runtime, request
+                attempts += 1
+
+                async def _events() -> AsyncIterator[LlmStreamEvent]:
+                    yield TextDelta(0, 0, "")
+                    raise LlmProviderError("llm_temporary_upstream_error", retry_safe=True)
+
+                yield _events()
+
+        lease = _lease()
+        repository = _Repository(lease.run)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, EmptyDeltaFailingProvider()),
+        )
+        await executor.execute(lease)
+        assert attempts == 1
+        assert repository.run.status is RunStatus.FAILED
+
+    # 场景 4：publish_text 抛错仅记 warning，不中断模型调用且清空缓冲不重发。
+    async def scenario_publish_error_is_tolerated() -> None:
+        attempts_publish: list[str] = []
+
+        class FailingPublisher:
+            async def publish_text(
+                self, run_id: str, execution_epoch: int, text: str, *, round: int = 0
+            ) -> None:
+                del run_id, execution_epoch, round
+                attempts_publish.append(text)
+                raise RuntimeError("redis down")
+
+            async def publish_persisted(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+
+        class NormalProvider:
+            @asynccontextmanager
+            async def stream(
+                self, runtime: RuntimeModelProfile, request: LlmRequest
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
+                del runtime, request
+
+                async def _events() -> AsyncIterator[LlmStreamEvent]:
+                    yield TextDelta(0, 0, "p1")
+                    yield TextDelta(0, 0, "p2")
+                    yield TextDelta(0, 0, "p3")
+                    yield ResponseCompleted(_response(text="p1p2p3"))
+
+                yield _events()
+
+        lease = _lease()
+        repository = _Repository(lease.run)
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, _Profiles()),
+            cast(LlmStreamProvider, NormalProvider()),
+            publisher=cast(RunEventTransport, FailingPublisher()),
+        )
+        await executor.execute(lease)
+        assert repository.run.status is RunStatus.COMPLETED
+        assert attempts_publish == ["p1", "p2p3"]
+
+    asyncio.run(scenario_no_retry_on_first_delta())
+    asyncio.run(scenario_cancel_skips_flush())
+    asyncio.run(scenario_empty_delta_forbids_retry())
+    asyncio.run(scenario_publish_error_is_tolerated())

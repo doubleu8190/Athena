@@ -413,6 +413,19 @@ class RunService:
         return result
 
     async def get(self, session_id: str, owner_id: str, run_id: str) -> RunDetailsResult:
+        """读取 Run 详情及待交互/待审批/子任务视图；优先走单会话聚合读取，兼容内存替身。"""
+        if callable(getattr(self._repository, "get_details", None)):
+            details = await self._repository.get_details(session_id, owner_id, run_id)
+            if details is None:
+                raise RunNotFoundError("run_not_found")
+            return RunDetailsResult(
+                details.run,
+                details.pending_input,
+                details.pending_approvals,
+                subagent_tasks=details.subagent_tasks,
+                pending_subagent_inputs=details.pending_subagent_inputs,
+                pending_subagent_approvals=details.pending_subagent_approvals,
+            )
         run = await self._repository.get(session_id, owner_id, run_id)
         if run is None:
             raise RunNotFoundError("run_not_found")
@@ -524,9 +537,24 @@ class RunService:
         after_sequence: int,
         limit: int,
     ) -> tuple[RunEvent, ...]:
+        """按序号游标读取 Run 状态事件；优先走单会话可见性合并查询。"""
         if after_sequence < 0 or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
             raise InvalidRunInputError("run_event_page_invalid")
-        await self.get(session_id, owner_id, run_id)
+        if callable(getattr(self._repository, "list_visible_events", None)):
+            events = await self._repository.list_visible_events(
+                session_id,
+                owner_id,
+                run_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+            if events is None:
+                raise RunNotFoundError("run_not_found")
+            return events
+        # 回退路径：仅做轻量的 Run 存在性校验，不再调用重型 self.get() 触发 6 次冗余查询。
+        run = await self._repository.get(session_id, owner_id, run_id)
+        if run is None:
+            raise RunNotFoundError("run_not_found")
         return await self._repository.list_events(
             session_id,
             owner_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime
+from typing import cast
 
 from common.ids import now_utc
 from domain.access import (
@@ -51,38 +52,91 @@ class AccessPolicyService:
         user_id: str,
         resource_type: ResourceType,
         resource_id: str,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
     ) -> bool:
-        """实时判定用户是否对指定 ID 的未删除资源拥有读权限。"""
-        snapshot = await self.get_user_snapshot(user_id)
-        if snapshot is None or not snapshot.is_active:
+        """实时判定用户是否对指定 ID 的未删除资源拥有读权限（支持复用已有权限快照）。"""
+        normalized = user_id.strip()
+        if snapshot is None and not normalized:
+            return False
+        if snapshot is not None and not snapshot.is_active:
+            return False
+        # 优先走仓储单 Session SQL EXISTS 下推，兼容仅实现基础端口的测试替身。
+        repo_can_read = getattr(self._repository, "can_read_resource", None)
+        if callable(repo_can_read):
+            return bool(
+                await repo_can_read(
+                    normalized or (snapshot.user_id if snapshot is not None else ""),
+                    resource_type,
+                    resource_id,
+                    snapshot=snapshot,
+                )
+            )
+        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
+        if resolved is None or not resolved.is_active:
             return False
         target = await self._repository.get_resource_target(resource_type, resource_id)
         if target is None:
             return False
-        return await self._can_read_with_snapshot(snapshot, target)
+        return await self._can_read_with_snapshot(resolved, target)
 
     async def can_read_target(
         self,
         user_id: str,
         target: ResourceAccessTarget,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
     ) -> bool:
-        """已知资源归属元数据时实时判定读权限。"""
-        snapshot = await self.get_user_snapshot(user_id)
-        if snapshot is None or not snapshot.is_active:
+        """已知资源归属元数据时实时判定读权限（支持复用已有权限快照）。"""
+        normalized = user_id.strip()
+        if snapshot is None and not normalized:
             return False
-        return await self._can_read_with_snapshot(snapshot, target)
+        if snapshot is not None and not snapshot.is_active:
+            return False
+        repo_can_read_target = getattr(self._repository, "can_read_target", None)
+        if callable(repo_can_read_target):
+            return bool(
+                await repo_can_read_target(
+                    normalized or (snapshot.user_id if snapshot is not None else ""),
+                    target,
+                    snapshot=snapshot,
+                )
+            )
+        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
+        if resolved is None or not resolved.is_active:
+            return False
+        return await self._can_read_with_snapshot(resolved, target)
 
     async def filter_readable_targets(
         self,
         user_id: str,
         resource_type: ResourceType,
         resource_ids: Sequence[str] | None = None,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
     ) -> tuple[ResourceAccessTarget, ...]:
         """批量实时过滤并返回当前用户拥有读权限的资源目标元数据（含可见层级）。"""
         if resource_ids is not None and not resource_ids:
             return ()
-        snapshot = await self.get_user_snapshot(user_id)
-        if snapshot is None or not snapshot.is_active:
+        normalized = user_id.strip()
+        if snapshot is None and not normalized:
+            return ()
+        if snapshot is not None and not snapshot.is_active:
+            return ()
+        # 优先走仓储单 Session SQL EXISTS 下推（4 Session -> 1 Session），未实现时回退。
+        repo_filter = getattr(self._repository, "filter_readable_targets", None)
+        if callable(repo_filter):
+            return cast(
+                tuple[ResourceAccessTarget, ...],
+                await repo_filter(
+                    normalized or (snapshot.user_id if snapshot is not None else ""),
+                    resource_type,
+                    resource_ids,
+                    snapshot=snapshot,
+                ),
+            )
+        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
+        if resolved is None or not resolved.is_active:
             return ()
         targets = await self._repository.list_resource_targets(resource_type, resource_ids)
         if not targets:
@@ -96,7 +150,7 @@ class AccessPolicyService:
         ]
         grants_by_id: dict[str, tuple[VisibilityGrant, ...]] = {}
         active_grant_depts: frozenset[str] = frozenset()
-        if dept_resource_ids and snapshot.role is not UserRole.SUPER_ADMIN:
+        if dept_resource_ids and resolved.role is not UserRole.SUPER_ADMIN:
             grants_by_id = await self._repository.list_grants_for_resources(
                 resource_type,
                 dept_resource_ids,
@@ -118,7 +172,7 @@ class AccessPolicyService:
             target
             for target in targets
             if evaluate_can_read(
-                snapshot,
+                resolved,
                 target,
                 grants_by_id.get(target.resource_id, ()),
                 active_grant_department_ids=active_grant_depts,
@@ -130,9 +184,16 @@ class AccessPolicyService:
         user_id: str,
         resource_type: ResourceType,
         resource_ids: Sequence[str] | None = None,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
     ) -> set[str]:
         """批量实时过滤出当前用户拥有读权限的资源 ID 集合。"""
-        targets = await self.filter_readable_targets(user_id, resource_type, resource_ids)
+        targets = await self.filter_readable_targets(
+            user_id,
+            resource_type,
+            resource_ids,
+            snapshot=snapshot,
+        )
         return {target.resource_id for target in targets}
 
     async def can_create_resource(
@@ -157,16 +218,54 @@ class AccessPolicyService:
         self,
         user_id: str,
         target: ResourceAccessTarget,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
     ) -> bool:
-        """实时判定用户是否拥有指定已有资源的写/管理权限。"""
-        snapshot = await self.get_user_snapshot(user_id)
+        """实时判定用户是否拥有指定已有资源的写/管理权限（支持复用已有权限快照）。"""
+        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
         return evaluate_can_manage(
-            snapshot,
+            resolved,
             target.resource_type,
             target.visibility_scope,
             owner_id=target.owner_id,
             owner_department_id=target.owner_department_id,
         )
+
+    async def evaluate_target_access(
+        self,
+        user_id: str,
+        target: ResourceAccessTarget,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> tuple[bool, bool]:
+        """单次快照内联合评估目标资源的 (can_read, can_manage)，合并 404/403 双校验。"""
+        normalized = user_id.strip()
+        if snapshot is None and not normalized:
+            return False, False
+        if snapshot is not None and not snapshot.is_active:
+            return False, False
+        repo_eval = getattr(self._repository, "evaluate_target_access", None)
+        if callable(repo_eval):
+            return cast(
+                tuple[bool, bool],
+                await repo_eval(
+                    normalized or (snapshot.user_id if snapshot is not None else ""),
+                    target,
+                    snapshot=snapshot,
+                ),
+            )
+        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
+        if resolved is None or not resolved.is_active:
+            return False, False
+        can_manage = evaluate_can_manage(
+            resolved,
+            target.resource_type,
+            target.visibility_scope,
+            owner_id=target.owner_id,
+            owner_department_id=target.owner_department_id,
+        )
+        can_read = await self._can_read_with_snapshot(resolved, target)
+        return can_read, can_manage
 
     async def resolve_and_validate_visibility(
         self,

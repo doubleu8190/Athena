@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access.repository import (
+    build_readable_resource_clause,
     delete_resource_grants_in_session,
     filter_readable_targets_in_session,
     load_grants_map_in_session,
@@ -27,6 +28,7 @@ from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionMod
 from domain.access import (
     ResourceAccessTarget,
     ResourceType,
+    UserAccessSnapshot,
     VisibilityGrantInput,
     VisibilityScope,
     evaluate_can_manage,
@@ -64,55 +66,91 @@ async def build_run_skill_snapshot(
     *,
     owner_id: str,
     fallback_selected_skill_ids: tuple[str, ...] = (),
+    snapshot: UserAccessSnapshot | None = None,
 ) -> RunSkillSnapshot:
     """在当前 Run 事务中按统一三层权限引擎实时过滤并固定一致 Skill 目录。
 
     - selected_skill_ids：用户显式指定，任一不可用/无权均抛出 SkillConflictError；
     - fallback_selected_skill_ids：仅在用户未显式指定时生效（如项目默认技能），
-      只保留当前用户仍可读且已启用的子集，失效项自动静默忽略。
+      只保留当前用户仍可读且已启用的子集，失效项自动静默忽略；
+    - snapshot：调用方在同一事务内已加载的用户权限快照，传入时直接下推为单条 SQL EXISTS，
+      避免与同事务的显式知识库校验重复查询用户部门树。
     """
     if len(selected_skill_ids) != len(set(selected_skill_ids)):
         raise SkillConflictError("skill_selection_invalid")
-    rows = (
-        await session.execute(
-            select(SkillModel, SkillVersionModel)
-            .join(
-                SkillVersionModel,
-                SkillVersionModel.id == SkillModel.current_version_id,
-            )
-            .where(
-                SkillModel.enabled.is_(True),
-                SkillModel.deleted_at.is_(None),
-                or_(
-                    SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
-                    and_(
-                        SkillModel.scope == SkillScope.PERSONAL.value,
-                        SkillModel.owner_id == owner_id,
-                    ),
-                ),
-            )
-            .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
-        )
-    ).all()
 
-    # 同一事务快照内通过统一权限引擎实时过滤 department/company/personal 可读技能，
-    # 员工调岗后无法将旧部门技能选入新 Run。
-    targets = tuple(
-        ResourceAccessTarget(
-            resource_type=ResourceType.SKILL,
-            resource_id=skill_row.id,
-            visibility_scope=VisibilityScope(skill_row.scope),
-            owner_id=skill_row.owner_id,
-            owner_department_id=skill_row.owner_department_id,
+    if snapshot is not None:
+        if not snapshot.is_active:
+            readable_rows: list[tuple[SkillModel, SkillVersionModel]] = []
+        else:
+            # 复用同事务快照并将三层可读性直接下推至 SQL WHERE，跳过未授权技能的 JSONB 读取。
+            raw_rows = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .join(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .where(
+                        SkillModel.enabled.is_(True),
+                        SkillModel.deleted_at.is_(None),
+                        build_readable_resource_clause(
+                            snapshot,
+                            ResourceType.SKILL,
+                            id_col=SkillModel.id,
+                            scope_col=SkillModel.scope,
+                            owner_id_col=SkillModel.owner_id,
+                            owner_department_id_col=SkillModel.owner_department_id,
+                        ),
+                    )
+                    .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
+                )
+            ).all()
+            readable_rows = [(skill_row, version_row) for skill_row, version_row in raw_rows]
+    else:
+        rows = (
+            await session.execute(
+                select(SkillModel, SkillVersionModel)
+                .join(
+                    SkillVersionModel,
+                    SkillVersionModel.id == SkillModel.current_version_id,
+                )
+                .where(
+                    SkillModel.enabled.is_(True),
+                    SkillModel.deleted_at.is_(None),
+                    or_(
+                        SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
+                        and_(
+                            SkillModel.scope == SkillScope.PERSONAL.value,
+                            SkillModel.owner_id == owner_id,
+                        ),
+                    ),
+                )
+                .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
+            )
+        ).all()
+
+        # 同一事务快照内通过统一权限引擎实时过滤 department/company/personal 可读技能，
+        # 员工调岗后无法将旧部门技能选入新 Run。
+        targets = tuple(
+            ResourceAccessTarget(
+                resource_type=ResourceType.SKILL,
+                resource_id=skill_row.id,
+                visibility_scope=VisibilityScope(skill_row.scope),
+                owner_id=skill_row.owner_id,
+                owner_department_id=skill_row.owner_department_id,
+            )
+            for skill_row, _ in rows
         )
-        for skill_row, _ in rows
-    )
-    readable_ids = await filter_readable_targets_in_session(session, owner_id, targets)
+        readable_ids = await filter_readable_targets_in_session(session, owner_id, targets)
+        readable_rows = [
+            (skill_row, version_row)
+            for skill_row, version_row in rows
+            if skill_row.id in readable_ids
+        ]
 
     available: list[tuple[SkillModel, SkillVersionModel]] = []
-    for skill_row, version_row in rows:
-        if skill_row.id not in readable_ids:
-            continue
+    for skill_row, version_row in readable_rows:
         # 持久化 dependency_check 只是上次探测快照，不能成为新 Run 的永久门禁；
         # 实际脚本执行前仍会实时复核，这里只验证目录和不可变清单完整性。
         # 清单解析失败说明不可变记录损坏，不能让 Run 以不完整目录继续。
@@ -236,6 +274,62 @@ class SqlAlchemySkillRepository(SkillRepository):
         """读取全部已启用公司级候选，依赖状态由服务层实时探测。"""
         entries = await self.get_public_directory_entries()
         return tuple(skill for skill, _ in entries)
+
+    async def get_readable_user_directory_entries(
+        self,
+        owner_id: str,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> tuple[tuple[Skill, SkillVersion], ...]:
+        """单 Session 加载/复用权限快照并以 SQL EXISTS 下推读取用户可读的已启用 Skill 目录。"""
+        normalized_owner_id = owner_id.strip()
+        if snapshot is None and not normalized_owner_id:
+            return ()
+        if snapshot is not None and not snapshot.is_active:
+            return ()
+        async with self._session_factory() as session:
+            resolved = (
+                snapshot
+                if snapshot is not None
+                else await load_user_access_snapshot_in_session(session, normalized_owner_id)
+            )
+            if resolved is None or not resolved.is_active:
+                return ()
+            rows = (
+                await session.execute(
+                    select(SkillModel, SkillVersionModel)
+                    .join(
+                        SkillVersionModel,
+                        SkillVersionModel.id == SkillModel.current_version_id,
+                    )
+                    .where(
+                        SkillModel.enabled.is_(True),
+                        SkillModel.deleted_at.is_(None),
+                        build_readable_resource_clause(
+                            resolved,
+                            ResourceType.SKILL,
+                            id_col=SkillModel.id,
+                            scope_col=SkillModel.scope,
+                            owner_id_col=SkillModel.owner_id,
+                            owner_department_id_col=SkillModel.owner_department_id,
+                        ),
+                    )
+                    .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
+                )
+            ).all()
+            if not rows:
+                return ()
+            # 仅对当前用户可读的 Skill 行加载 grants，跳过无权部门技能的 JSONB 与授权查询。
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.SKILL, [row.id for row, _ in rows]
+            )
+        return tuple(
+            (
+                skill_to_domain(row, version, grants=grants_map.get(row.id, ())),
+                skill_version_to_domain(version),
+            )
+            for row, version in rows
+        )
 
     async def get_user_directory_entries(
         self, owner_id: str
@@ -1177,10 +1271,7 @@ class SqlAlchemySkillRepository(SkillRepository):
                         raise SkillNotFoundError("skill_tool_call_not_found")
                     existing = await session.scalar(
                         select(SkillExecutionModel)
-                        .where(
-                            SkillExecutionModel.tool_call_record_id
-                            == tool_call_record_id
-                        )
+                        .where(SkillExecutionModel.tool_call_record_id == tool_call_record_id)
                         .with_for_update()
                     )
                     if existing is not None:
@@ -1322,9 +1413,7 @@ class SqlAlchemySkillRepository(SkillRepository):
                 await session.flush()
                 return skill_execution_to_domain(row)
 
-    async def get_script_execution(
-        self, tool_call_record_id: str
-    ) -> SkillExecutionRecord | None:
+    async def get_script_execution(self, tool_call_record_id: str) -> SkillExecutionRecord | None:
         """读取与现有工具调用一对一的附加记录。"""
         async with self._session_factory() as session:
             row = await session.scalar(
@@ -1396,10 +1485,7 @@ class SqlAlchemySkillRepository(SkillRepository):
                     SkillVersionModel,
                     skill_row.current_version_id,
                 )
-                if (
-                    current_version_row is None
-                    or current_version_row.skill_id != skill_row.id
-                ):
+                if current_version_row is None or current_version_row.skill_id != skill_row.id:
                     raise SkillConflictError("skill_catalog_integrity_invalid")
                 result_version_row = current_version_row
             elif skill_row.current_version_id is not None:
@@ -1410,10 +1496,7 @@ class SqlAlchemySkillRepository(SkillRepository):
                     SkillVersionModel,
                     skill_row.current_version_id,
                 )
-                if (
-                    current_version_row is None
-                    or current_version_row.skill_id != skill_row.id
-                ):
+                if current_version_row is None or current_version_row.skill_id != skill_row.id:
                     raise SkillConflictError("skill_catalog_integrity_invalid")
                 result_version_row = current_version_row
         grants_map = await load_grants_map_in_session(session, ResourceType.SKILL, (skill_row.id,))

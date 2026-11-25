@@ -17,6 +17,7 @@ from typing import Any, cast
 import httpx2
 import openai
 from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 from adapter.llm.bounded_http import (
     BoundedResponseTransport,
@@ -60,6 +61,7 @@ MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
 MAX_TOOL_CALLS = 8
 MAX_DIAGNOSTIC_FRAGMENTS = 16
 _DIAGNOSTIC_DIGEST_LENGTH = 12
+_MAX_STREAM_VALUE_DEPTH = 64
 _SAFE_FINISH_REASONS = frozenset(
     {"stop", "tool_calls", "length", "content_filter", "function_call"}
 )
@@ -276,6 +278,106 @@ def _json_value(value: Any) -> Any:
         return {key: _json_value(item) for key, item in vars(value).items()}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    raise LlmProtocolError("llm_stream_event_invalid")
+
+
+def _estimate_json_string_bytes(value: str) -> int:
+    """估算 JSON 字符串含首尾引号的 UTF-8 字节数；纯 ASCII 走零拷贝 len()。"""
+    return (len(value) if value.isascii() else len(value.encode("utf-8"))) + 2
+
+
+def _estimate_stream_value_bytes(value: Any, *, depth: int = 0) -> int:
+    """零中间字典/JSON 分配地递归估算流式分片近似 JSON UTF-8 字节数。"""
+    if depth > _MAX_STREAM_VALUE_DEPTH:
+        raise LlmProtocolError("llm_stream_event_invalid")
+    if value is None:
+        return 4
+    if isinstance(value, str):
+        return _estimate_json_string_bytes(value)
+    if isinstance(value, bool):
+        return 4 if value else 5
+    if isinstance(value, int):
+        return len(str(value))
+    if isinstance(value, float):
+        # 严格沿用 allow_nan=False 协议校验，拒绝 NaN / Inf。
+        if not math.isfinite(value):
+            raise LlmProtocolError("llm_stream_event_invalid")
+        return len(repr(value))
+    if isinstance(value, BaseModel):
+        # OpenAI SDK Pydantic 模型直接遍历 __dict__ 与 model_extra（跳过 None），
+        # 消除每分片 model_dump(mode="json") + json.dumps 的中间对象分配。
+        total = 2
+        first = True
+        next_depth = depth + 1
+        for key, item in value.__dict__.items():
+            if item is None:
+                continue
+            if not first:
+                total += 1
+            first = False
+            total += (
+                _estimate_json_string_bytes(key)
+                + 1
+                + _estimate_stream_value_bytes(item, depth=next_depth)
+            )
+        extra = value.model_extra
+        if extra:
+            for key, item in extra.items():
+                if item is None:
+                    continue
+                if not first:
+                    total += 1
+                first = False
+                key_str = key if isinstance(key, str) else str(key)
+                total += (
+                    _estimate_json_string_bytes(key_str)
+                    + 1
+                    + _estimate_stream_value_bytes(item, depth=next_depth)
+                )
+        return total
+    if isinstance(value, Mapping):
+        total = 2
+        first = True
+        next_depth = depth + 1
+        for key, item in value.items():
+            if not first:
+                total += 1
+            first = False
+            key_str = key if isinstance(key, str) else str(key)
+            total += (
+                _estimate_json_string_bytes(key_str)
+                + 1
+                + _estimate_stream_value_bytes(item, depth=next_depth)
+            )
+        return total
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        total = 2
+        next_depth = depth + 1
+        for index, item in enumerate(value):
+            if index:
+                total += 1
+            total += _estimate_stream_value_bytes(item, depth=next_depth)
+        return total
+    if hasattr(value, "model_dump"):
+        return _estimate_stream_value_bytes(
+            value.model_dump(mode="json", exclude_none=True),
+            depth=depth + 1,
+        )
+    if hasattr(value, "__dict__"):
+        # 兼容单测使用的 SimpleNamespace 等轻量属性容器。
+        total = 2
+        first = True
+        next_depth = depth + 1
+        for key, item in vars(value).items():
+            if not first:
+                total += 1
+            first = False
+            total += (
+                _estimate_json_string_bytes(key)
+                + 1
+                + _estimate_stream_value_bytes(item, depth=next_depth)
+            )
+        return total
     raise LlmProtocolError("llm_stream_event_invalid")
 
 
@@ -731,14 +833,12 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         chunk_count: int,
         total_raw_bytes: int,
     ) -> tuple[int, int]:
-        """执行分片数量、单分片和累计原始字节检查。"""
+        """执行分片数量、单分片和累计原始字节检查；动态读取模块级上限兼容单测 monkeypatch。"""
         chunk_count += 1
         if chunk_count > MAX_STREAM_CHUNKS:
             raise LlmProtocolError("llm_stream_too_large")
         try:
-            chunk_bytes = len(
-                json.dumps(_json_value(chunk), ensure_ascii=False, allow_nan=False).encode("utf-8")
-            )
+            chunk_bytes = _estimate_stream_value_bytes(chunk)
         except (TypeError, ValueError, UnicodeError):
             raise LlmProtocolError("llm_stream_event_invalid") from None
         if chunk_bytes > MAX_RAW_EVENT_BYTES:

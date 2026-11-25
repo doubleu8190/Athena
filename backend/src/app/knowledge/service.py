@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import PurePath
-from typing import Final
+from typing import Final, cast
 
 from app.access import AccessPolicyService
 from common.ids import new_id, now_utc
@@ -158,11 +158,26 @@ class KnowledgeService:
     async def _require_manageable_base(self, actor_user_id: str, base_id: str) -> KnowledgeBase:
         """校验知识库管理权限：不可读返回 404，可读但无管理权返回 403。"""
         owner = _required(actor_user_id, "owner_id_required")
-        base = await self._require_readable_base(owner, base_id)
-        if self._access_policy is not None:
-            if not await self._access_policy.can_manage_resource(owner, _kb_access_target(base)):
-                raise KnowledgePermissionDeniedError("knowledge_permission_denied")
-        return base
+        if self._access_policy is None:
+            return await self._require_readable_base(owner, base_id)
+        get_by_id = getattr(self._repository, "get_base_by_id", None)
+        base = (
+            await get_by_id(base_id)
+            if callable(get_by_id)
+            else await self._repository.get_base(owner, base_id)
+        )
+        if base is None:
+            raise KnowledgeNotFoundError("knowledge_base_not_found")
+        # 单次权限快照内同时完成可读与可管双判定，避免重复加载组织树。
+        can_read, can_manage = await self._access_policy.evaluate_target_access(
+            owner,
+            _kb_access_target(base),
+        )
+        if not can_read:
+            raise KnowledgeNotFoundError("knowledge_base_not_found")
+        if not can_manage:
+            raise KnowledgePermissionDeniedError("knowledge_permission_denied")
+        return cast(KnowledgeBase, base)
 
     async def create_base(
         self,
@@ -241,6 +256,19 @@ class KnowledgeService:
                 owner,
                 offset=(page - 1) * page_size,
                 limit=page_size,
+            )
+        # 优先走仓储单 Session SQL EXISTS 下推过滤/排序/分页，兼容未实现该方法的测试替身。
+        list_readable = getattr(self._repository, "list_readable_bases", None)
+        if callable(list_readable):
+            return cast(
+                list[KnowledgeBase],
+                await list_readable(
+                    owner,
+                    offset=(page - 1) * page_size,
+                    limit=page_size,
+                    visibility_scope=visibility_scope,
+                    owner_department_id=owner_department_id,
+                ),
             )
         readable_ids = await self._access_policy.filter_readable_ids(
             owner,
@@ -748,6 +776,7 @@ class KnowledgeService:
         *,
         limit: int = 8,
         context_budget: int = DEFAULT_CONTEXT_BUDGET,
+        skip_access_check: bool = False,
     ) -> SearchResult:
         """隔离运行两路检索、RRF合并邻接片段并限制上下文token预算。"""
         normalized = query.strip()
@@ -761,14 +790,21 @@ class KnowledgeService:
         if not base_ids or len(base_ids) > 20:
             raise KnowledgeInputError("knowledge_base_ids_invalid")
         if self._access_policy is not None:
-            readable_ids = await self._access_policy.filter_readable_ids(
-                owner_id,
-                ResourceType.KNOWLEDGE_BASE,
-                base_ids,
-            )
-            if not set(base_ids) <= readable_ids:
-                raise KnowledgeNotFoundError("knowledge_base_not_found")
-        await self._repository.validate_search_scope(owner_id, base_ids)
+            # skip_access_check=True 仅允许在调用方（如 Agent knowledge_search 工具）
+            # 已于检索前后分别完成实时范围鉴权时传入，避免单次工具调用触发第 3 次重复鉴权。
+            if not skip_access_check:
+                readable_ids = await self._access_policy.filter_readable_ids(
+                    owner_id,
+                    ResourceType.KNOWLEDGE_BASE,
+                    base_ids,
+                )
+                if not set(base_ids) <= readable_ids:
+                    raise KnowledgeNotFoundError("knowledge_base_not_found")
+            # filter_readable_ids 已校验 deleted_time IS NULL 及三层可读权限，
+            # 无需冗余再查 validate_search_scope。
+        else:
+            # 未注入统一权限引擎的测试/旧调用路径仍保留仓储级基础范围校验。
+            await self._repository.validate_search_scope(owner_id, base_ids)
         tokens: tuple[str, ...] = ()
         keyword_reason: str | None = None
         try:

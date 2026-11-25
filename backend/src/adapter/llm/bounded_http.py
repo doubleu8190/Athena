@@ -48,27 +48,118 @@ class BoundedResponseStream(httpx2.AsyncByteStream):
         self._pending_cr = False
 
     def _scan_sse(self, chunk: bytes) -> None:
-        # 逐字节扫描，保证 LF、CRLF、CR 不受网络分片边界影响。
-        for byte in chunk:
-            self._event_bytes += 1
-            if self._event_bytes > self._event_limit:
-                raise ResponseLimitError("llm_stream_event_too_large")
-            if self._pending_cr:
-                self._pending_cr = False
-                if byte == 0x0A:
-                    continue
-            if byte == 0x0D:
-                self._finish_sse_line()
-                self._pending_cr = True
-            elif byte == 0x0A:
-                self._finish_sse_line()
-            else:
-                self._line_bytes += 1
+        # 基于 C 层 bytes.find 扫描 LF/CRLF/CR，在任意网络分片边界下与逐字节状态机位级等价。
+        length = len(chunk)
+        if length == 0:
+            return
+        event_bytes = self._event_bytes
+        line_bytes = self._line_bytes
+        pending_cr = self._pending_cr
+        event_limit = self._event_limit
+        pos = 0
 
-    def _finish_sse_line(self) -> None:
-        if self._line_bytes == 0:
-            self._event_bytes = 0
-        self._line_bytes = 0
+        # 处理跨分片遗留的孤立 CR：若首字节是 LF 则作为 CRLF 后半字节计入事件长度并跳过行结束。
+        if pending_cr:
+            pending_cr = False
+            if chunk[0] == 0x0A:
+                event_bytes += 1
+                if event_bytes > event_limit:
+                    self._event_bytes = event_bytes
+                    self._line_bytes = line_bytes
+                    self._pending_cr = False
+                    raise ResponseLimitError("llm_stream_event_too_large")
+                pos = 1
+
+        next_cr = chunk.find(b"\r", pos)
+        if next_cr == -1:
+            # 无 CR 快路径：常见 SSE 仅使用 LF，全程借助 C 层 bytes.find 跳过行内普通字节。
+            while pos < length:
+                next_lf = chunk.find(b"\n", pos)
+                if next_lf == -1:
+                    rem = length - pos
+                    event_bytes += rem
+                    if event_bytes > event_limit:
+                        self._event_bytes = event_bytes
+                        self._line_bytes = line_bytes
+                        self._pending_cr = False
+                        raise ResponseLimitError("llm_stream_event_too_large")
+                    line_bytes += rem
+                    break
+                seg_len = next_lf - pos
+                event_bytes += seg_len + 1
+                if event_bytes > event_limit:
+                    self._event_bytes = event_bytes
+                    self._line_bytes = line_bytes
+                    self._pending_cr = False
+                    raise ResponseLimitError("llm_stream_event_too_large")
+                if line_bytes + seg_len == 0:
+                    event_bytes = 0
+                line_bytes = 0
+                pos = next_lf + 1
+            self._event_bytes = event_bytes
+            self._line_bytes = line_bytes
+            self._pending_cr = False
+            return
+
+        # 含 CR 双指针路径：同步推进 next_cr 与 next_lf，精确处理 CRLF、裸 CR 与跨块尾部 CR。
+        next_lf = chunk.find(b"\n", pos)
+        while pos < length:
+            if next_cr == -1 and next_lf == -1:
+                rem = length - pos
+                event_bytes += rem
+                if event_bytes > event_limit:
+                    self._event_bytes = event_bytes
+                    self._line_bytes = line_bytes
+                    self._pending_cr = False
+                    raise ResponseLimitError("llm_stream_event_too_large")
+                line_bytes += rem
+                break
+            if next_cr != -1 and (next_lf == -1 or next_cr < next_lf):
+                seg_len = next_cr - pos
+                event_bytes += seg_len + 1
+                if event_bytes > event_limit:
+                    self._event_bytes = event_bytes
+                    self._line_bytes = line_bytes
+                    self._pending_cr = False
+                    raise ResponseLimitError("llm_stream_event_too_large")
+                if line_bytes + seg_len == 0:
+                    event_bytes = 0
+                line_bytes = 0
+                pos = next_cr + 1
+                if pos == length:
+                    # 分片末尾停在 CR：保留 pending_cr，交由下一分片首字节判定是否组成 CRLF。
+                    pending_cr = True
+                    break
+                if chunk[pos] == 0x0A:
+                    # 紧随 CR 的 LF 仅累加入事件字节上限，不重复触发空行重置。
+                    event_bytes += 1
+                    if event_bytes > event_limit:
+                        self._event_bytes = event_bytes
+                        self._line_bytes = line_bytes
+                        self._pending_cr = False
+                        raise ResponseLimitError("llm_stream_event_too_large")
+                    pos += 1
+                    next_cr = chunk.find(b"\r", pos)
+                    next_lf = chunk.find(b"\n", pos)
+                else:
+                    next_cr = chunk.find(b"\r", pos)
+            else:
+                seg_len = next_lf - pos
+                event_bytes += seg_len + 1
+                if event_bytes > event_limit:
+                    self._event_bytes = event_bytes
+                    self._line_bytes = line_bytes
+                    self._pending_cr = False
+                    raise ResponseLimitError("llm_stream_event_too_large")
+                if line_bytes + seg_len == 0:
+                    event_bytes = 0
+                line_bytes = 0
+                pos = next_lf + 1
+                next_lf = chunk.find(b"\n", pos)
+
+        self._event_bytes = event_bytes
+        self._line_bytes = line_bytes
+        self._pending_cr = pending_cr
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._stream:

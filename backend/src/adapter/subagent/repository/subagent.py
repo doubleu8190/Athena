@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access.repository import (
+    build_readable_resource_clause,
     delete_resource_grants_in_session,
     load_grants_map_in_session,
     sync_resource_grants_in_session,
@@ -18,7 +19,7 @@ from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionG
 from adapter.llm.model import ModelProfileVersionModel
 from adapter.subagent.converter import subagent_to_domain
 from adapter.subagent.model import SubagentModel
-from domain.access import ResourceType, VisibilityGrantInput, VisibilityScope
+from domain.access import ResourceType, UserAccessSnapshot, VisibilityGrantInput, VisibilityScope
 from domain.auth import AuthContext, UserRole
 from domain.subagent import (
     SubagentAdminRequiredError,
@@ -147,13 +148,46 @@ class SqlAlchemySubagentRepository(SubagentRepository):
                 session, ResourceType.SUBAGENT, [row.id for row in rows]
             )
         return SubagentPage(
-            items=tuple(
-                subagent_to_domain(row, grants=grants_map.get(row.id, ())) for row in rows
-            ),
+            items=tuple(subagent_to_domain(row, grants=grants_map.get(row.id, ())) for row in rows),
             total=int(total),
             offset=offset,
             limit=limit,
         )
+
+    async def list_readable_enabled(
+        self,
+        snapshot: UserAccessSnapshot | None,
+    ) -> tuple[SubagentProfile, ...]:
+        """单 Session 以 SQL EXISTS 下推读取当前用户快照可读且已启用的 Subagent 列表。"""
+        if snapshot is None or not snapshot.is_active:
+            return ()
+        async with self._session_factory() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(SubagentModel)
+                        .where(
+                            SubagentModel.deleted_at.is_(None),
+                            SubagentModel.enabled.is_(True),
+                            build_readable_resource_clause(
+                                snapshot,
+                                ResourceType.SUBAGENT,
+                                id_col=SubagentModel.id,
+                                scope_col=SubagentModel.visibility_scope,
+                                owner_id_col=None,
+                                owner_department_id_col=SubagentModel.owner_department_id,
+                            ),
+                        )
+                        .order_by(SubagentModel.slug.asc(), SubagentModel.id.asc())
+                    )
+                ).all()
+            )
+            if not rows:
+                return ()
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.SUBAGENT, [row.id for row in rows]
+            )
+        return tuple(subagent_to_domain(row, grants=grants_map.get(row.id, ())) for row in rows)
 
     async def list_enabled(self) -> tuple[SubagentProfile, ...]:
         """读取全部未软删除且已启用的 Subagent 配置。"""

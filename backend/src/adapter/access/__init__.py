@@ -3,6 +3,7 @@
 from adapter.access.model import ResourceVisibilityGrantModel
 from adapter.access.repository import (
     SqlAlchemyAccessControlRepository,
+    build_readable_resource_clause,
     delete_resource_grants_in_session,
     filter_readable_targets_in_session,
     grant_to_domain,
@@ -15,6 +16,7 @@ from adapter.access.repository import (
 __all__ = [
     "ResourceVisibilityGrantModel",
     "SqlAlchemyAccessControlRepository",
+    "build_readable_resource_clause",
     "delete_resource_grants_in_session",
     "filter_readable_targets_in_session",
     "grant_to_domain",

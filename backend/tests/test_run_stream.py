@@ -14,7 +14,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from redis.asyncio import Redis
-from redis.asyncio.client import PubSub
 from starlette.types import Message, Send
 from system_prompt_support import (
     TEST_COMPRESSION_PROMPT_ID,
@@ -22,7 +21,7 @@ from system_prompt_support import (
 )
 
 from adapter.run import redis_transport as redis_module
-from adapter.run.redis_transport import RedisRunTransport, _RedisRunSubscription
+from adapter.run.redis_transport import RedisRunTransport
 from api.runs import _RunEventSourceResponse, build_run_router
 from app.run.service import RunService
 from app.run.stream import RunStreamService
@@ -796,6 +795,7 @@ def test_redis_subscription_overflow_surfaces_for_reconnect(
         stream_sequence=1,
         payload=RunTextDeltaPayload(text="delta"),
     )
+    channel = RedisRunTransport._channel("run_stream_test").encode("utf-8")
 
     class FakePubSub:
         def __init__(self) -> None:
@@ -804,11 +804,19 @@ def test_redis_subscription_overflow_surfaces_for_reconnect(
                 self.messages.append(
                     {
                         "type": "message",
+                        "channel": channel,
                         "data": event.model_dump_json().encode(),
                     }
                 )
 
+        async def subscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            del channel_name
+
         async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
             if self.messages:
                 return self.messages.popleft()
             await asyncio.sleep(0.01)
@@ -817,13 +825,20 @@ def test_redis_subscription_overflow_surfaces_for_reconnect(
         async def aclose(self) -> None:
             return None
 
+    class FakeRedis:
+        def pubsub(self) -> FakePubSub:
+            return FakePubSub()
+
+        async def aclose(self) -> None:
+            return None
+
     async def scenario() -> None:
-        subscription = _RedisRunSubscription(cast(PubSub, FakePubSub()))
-        subscription.start()
-        await asyncio.sleep(0)
-        with pytest.raises(RunEventTransportError, match="run_stream_buffer_overflow"):
-            await subscription.get(timeout=0.1)
-        await subscription.aclose()
+        transport = RedisRunTransport(cast(Redis, FakeRedis()))
+        async with transport.subscribe("run_stream_test") as subscription:
+            await asyncio.sleep(0.02)
+            with pytest.raises(RunEventTransportError, match="run_stream_buffer_overflow"):
+                await subscription.get(timeout=0.1)
+        await transport.aclose()
 
     asyncio.run(scenario())
 
@@ -838,16 +853,34 @@ def test_publisher_failure_before_sequence_is_reported_before_next_delta() -> No
             self.fail_next_sequence = True
             self.published: list[bytes] = []
 
-        async def eval(self, *args: object) -> int:
+        async def _exec_publish_script(
+            self,
+            numkeys: int,
+            key: str,
+            ttl: int,
+            prefix: bytes,
+            suffix: bytes,
+            channel: str,
+            max_bytes: int,
+        ) -> int:
+            del numkeys, key, ttl, channel
             if self.fail_next_sequence:
                 self.fail_next_sequence = False
                 raise RedisError("sequence unavailable")
             self.sequence += 1
+            raw = prefix + str(self.sequence).encode("utf-8") + suffix
+            if len(raw) > int(max_bytes):
+                return -1
+            self.published.append(raw)
             return self.sequence
 
-        async def publish(self, channel: str, data: bytes) -> int:
-            self.published.append(data)
-            return 1
+        async def evalsha(self, sha: str, *args: object) -> int:
+            del sha
+            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
+
+        async def eval(self, script: str, *args: object) -> int:
+            del script
+            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
 
     async def scenario() -> list[RunStreamEvent]:
         client = FailingRedis()
@@ -872,26 +905,30 @@ def test_publisher_to_public_sse_suppresses_failed_epoch_suffixes() -> None:
     session_id = "session_full_stream_test"
 
     class FakePubSub:
-        subscribed_channel: str | None
-
         def __init__(self, redis: FakeRedis) -> None:
             self.redis = redis
-            self.subscribed_channel = None
+            self.subscribed_channels: set[str] = set()
             self.messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
         async def subscribe(self, channel_name: str) -> None:
-            self.subscribed_channel = channel_name
+            self.subscribed_channels.add(channel_name)
             self.redis.subscribers.add(self)
+            channel_bytes = channel_name.encode("utf-8")
             for raw in self.redis.history.get(channel_name, []):
-                self.messages.put_nowait({"type": "message", "data": raw})
+                self.messages.put_nowait({"type": "message", "channel": channel_bytes, "data": raw})
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            self.subscribed_channels.discard(channel_name)
 
         async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
             try:
                 return await asyncio.wait_for(self.messages.get(), timeout=1.0)
             except TimeoutError:
                 return None
 
         async def aclose(self) -> None:
+            self.subscribed_channels.clear()
             self.redis.subscribers.discard(self)
 
     class FakeRedis:
@@ -904,19 +941,41 @@ def test_publisher_to_public_sse_suppresses_failed_epoch_suffixes() -> None:
         def pubsub(self) -> FakePubSub:
             return FakePubSub(self)
 
-        async def eval(self, script: str, key_count: int, key: str) -> int:
+        async def _exec_publish_script(
+            self,
+            numkeys: int,
+            key: str,
+            ttl: int,
+            prefix: bytes,
+            suffix: bytes,
+            channel: str,
+            max_bytes: int,
+        ) -> int:
+            del numkeys, ttl
             if self.fail_next_sequence:
                 self.fail_next_sequence = False
                 raise RedisError("sequence temporarily unavailable")
             self.counters[key] = self.counters.get(key, 0) + 1
-            return self.counters[key]
-
-        async def publish(self, channel: str, raw: bytes) -> int:
+            sequence = self.counters[key]
+            raw = prefix + str(sequence).encode("utf-8") + suffix
+            if len(raw) > int(max_bytes):
+                return -1
             self.history.setdefault(channel, []).append(raw)
+            channel_bytes = channel.encode("utf-8")
             for subscriber in tuple(self.subscribers):
-                if subscriber.subscribed_channel == channel:
-                    subscriber.messages.put_nowait({"type": "message", "data": raw})
-            return 1
+                if channel in subscriber.subscribed_channels:
+                    subscriber.messages.put_nowait(
+                        {"type": "message", "channel": channel_bytes, "data": raw}
+                    )
+            return sequence
+
+        async def evalsha(self, sha: str, *args: object) -> int:
+            del sha
+            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
+
+        async def eval(self, script: str, *args: object) -> int:
+            del script
+            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
 
         async def aclose(self) -> None:
             return None
@@ -1007,10 +1066,16 @@ def test_sse_disconnects_when_asgi_send_exceeds_timeout() -> None:
 
 
 def test_redis_pump_translates_client_errors_to_transport_error() -> None:
-    """订阅泵内的 Redis 客户端异常翻译为领域传输异常并保留原因。"""
+    """订阅泵内的 Redis 客户端异常翻译为领域传输异常、保留原因并立即唤醒消费者。"""
     from redis.exceptions import RedisError
 
     class FailingPubSub:
+        async def subscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            del channel_name
+
         async def get_message(self, **kwargs: object) -> dict[str, object] | None:
             del kwargs
             raise RedisError("pump failed")
@@ -1018,16 +1083,25 @@ def test_redis_pump_translates_client_errors_to_transport_error() -> None:
         async def aclose(self) -> None:
             return None
 
+    class FailingRedis:
+        def pubsub(self) -> FailingPubSub:
+            return FailingPubSub()
+
+        async def aclose(self) -> None:
+            return None
+
     async def scenario() -> None:
-        subscription = _RedisRunSubscription(cast(PubSub, FailingPubSub()))
-        subscription.start()
-        pump = subscription._pump_task
-        assert pump is not None
-        await asyncio.wait_for(pump, timeout=1.0)
-        with pytest.raises(RunEventTransportError, match="run_stream_transport_failed") as caught:
-            await subscription.get(timeout=0.1)
-        assert isinstance(caught.value.__cause__, RedisError)
-        await subscription.aclose()
+        transport = RedisRunTransport(cast(Redis, FailingRedis()))
+        async with transport.subscribe("run_pump_fail") as subscription:
+            pump = transport._pump_task
+            assert pump is not None
+            await asyncio.wait_for(pump, timeout=1.0)
+            with pytest.raises(
+                RunEventTransportError, match="run_stream_transport_failed"
+            ) as caught:
+                await subscription.get(timeout=0.1)
+            assert isinstance(caught.value.__cause__, RedisError)
+        await transport.aclose()
 
     asyncio.run(scenario())
 
@@ -1141,9 +1215,13 @@ def test_stream_caches_live_execution_within_ttl_and_invalidates_on_interrupt_or
         return items
 
     events = asyncio.run(collect())
-    assert [
-        event.payload.text for event in events if isinstance(event, RunTextDeltaEvent)
-    ] == ["a", "b", "c", "d", "e"]
+    assert [event.payload.text for event in events if isinstance(event, RunTextDeltaEvent)] == [
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+    ]
     # epoch=1 连续 3 条增量只查库 1 次；收到中断强制复核 1 次；切到 epoch=2 后 2 条增量只查库 1 次。
     assert repository.live_checks == [1, 1, 2]
 
@@ -1361,3 +1439,772 @@ def test_stream_still_reconciles_child_forwarded_persisted_event(
     assert repository.snapshot_calls == 2
     assert isinstance(emitted[-1], RunSnapshotEvent)
     assert emitted[-1].payload.status is RunStatus.COMPLETED
+
+
+def test_redis_publish_falls_back_from_noscript_evalsha_to_eval() -> None:
+    """EVALSHA 遇到 NoScriptError 时自动回退 EVAL，不误报传输故障且正确替换顶层序号。"""
+    from redis.exceptions import NoScriptError
+
+    class NoScriptFallbackRedis:
+        def __init__(self) -> None:
+            self.loaded_sha: str | None = None
+            self.evalsha_calls = 0
+            self.eval_calls = 0
+            self.sequence = 0
+            self.published: list[tuple[str, bytes]] = []
+            self.force_limit_error = False
+
+        async def evalsha(
+            self,
+            sha: str,
+            numkeys: int,
+            key: str,
+            ttl: int,
+            prefix: bytes,
+            suffix: bytes,
+            channel: str,
+            max_bytes: int,
+        ) -> int:
+            del numkeys, key, ttl
+            self.evalsha_calls += 1
+            if self.loaded_sha != sha:
+                raise NoScriptError("NOSCRIPT No matching script.")
+            return self._finish(prefix, suffix, channel, max_bytes)
+
+        async def eval(
+            self,
+            script: str,
+            numkeys: int,
+            key: str,
+            ttl: int,
+            prefix: bytes,
+            suffix: bytes,
+            channel: str,
+            max_bytes: int,
+        ) -> int:
+            del numkeys, key, ttl
+            self.eval_calls += 1
+            assert script == redis_module._PUBLISH_LUA_SCRIPT
+            self.loaded_sha = redis_module._PUBLISH_SCRIPT_SHA
+            return self._finish(prefix, suffix, channel, max_bytes)
+
+        def _finish(self, prefix: bytes, suffix: bytes, channel: str, max_bytes: int) -> int:
+            if self.force_limit_error:
+                return -1
+            self.sequence += 1
+            raw = prefix + str(self.sequence).encode("utf-8") + suffix
+            if len(raw) > int(max_bytes):
+                return -1
+            self.published.append((channel, raw))
+            return self.sequence
+
+    async def scenario() -> None:
+        client = NoScriptFallbackRedis()
+        transport = RedisRunTransport(cast(Redis, client))
+        # run_id 与 text 内故意包含与顶层占位符相似的文本，验证只替换真正的顶层 stream_sequence。
+        tricky_run_id = 'run_"stream_sequence":0'
+        tricky_text = ',"stream_sequence":0,"payload":{"fake":1}'
+        await transport.publish_text(tricky_run_id, 7, tricky_text, round=2)
+        await transport.publish_text(tricky_run_id, 7, "second chunk", round=2)
+
+        assert client.evalsha_calls == 2
+        assert client.eval_calls == 1
+        assert len(client.published) == 2
+
+        first = redis_module._EVENT_ADAPTER.validate_json(client.published[0][1])
+        second = redis_module._EVENT_ADAPTER.validate_json(client.published[1][1])
+        assert isinstance(first, RunTextDeltaEvent)
+        assert first.run_id == tricky_run_id
+        assert first.stream_sequence == 1
+        assert first.payload.text == tricky_text
+        assert first.payload.round == 2
+        assert isinstance(second, RunTextDeltaEvent)
+        assert second.stream_sequence == 2
+        assert second.payload.text == "second chunk"
+
+        # Lua 返回 -1 时按超限错误处理，不吞掉错误。
+        client.force_limit_error = True
+        with pytest.raises(ValueError, match="run_stream_event_exceeds_redis_limit"):
+            await transport.publish_text(tricky_run_id, 7, "overflow")
+
+    asyncio.run(scenario())
+
+
+def test_redis_max_text_chunk_length_fast_paths_and_binary_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_max_text_chunk_length 覆盖 O(1) 小包快路径、中包整串快路径与超长包二分回退。"""
+    # 小包命中 O(1) 上界快路径：ASCII、多字节 UTF-8、控制字符与转义引号均可完整放行。
+    small = 'hello 世界🙂\x00"\\' * 50
+    assert RedisRunTransport._max_text_chunk_length("run_fast", 1, small, round=3) == len(small)
+
+    # 中包超出 len*6 上界但实际 UTF-8 JSON 仍在预算内，命中二级整串快路径。
+    medium = "a" * 20_000
+    assert RedisRunTransport._max_text_chunk_length("run_med", 1, medium, round=0) == len(medium)
+
+    # 超长多字节文本触发二分切分，且每片满足 Redis 与 SSE 双重字节预算。
+    large = "界🙂" * 20_000
+    chunk_len = RedisRunTransport._max_text_chunk_length("run_big", 9, large, round=4)
+    assert 0 < chunk_len < len(large)
+    fitted = RunTextDeltaEvent(
+        run_id="run_big",
+        execution_epoch=9,
+        stream_sequence=9_999_999_999_999_999_999,
+        payload=RunTextDeltaPayload(text=large[:chunk_len], round=4),
+    )
+    fitted_len = len(fitted.model_dump_json(exclude_none=True).encode("utf-8"))
+    assert fitted_len <= redis_module.MAX_REDIS_EVENT_BYTES
+    assert fitted_len + redis_module.SSE_PREFIX_RESERVE <= redis_module.MAX_SSE_EVENT_BYTES
+
+    next_one = RunTextDeltaEvent(
+        run_id="run_big",
+        execution_epoch=9,
+        stream_sequence=9_999_999_999_999_999_999,
+        payload=RunTextDeltaPayload(text=large[: chunk_len + 1], round=4),
+    )
+    next_len = len(next_one.model_dump_json(exclude_none=True).encode("utf-8"))
+    assert (
+        next_len > redis_module.MAX_REDIS_EVENT_BYTES
+        or next_len + redis_module.SSE_PREFIX_RESERVE > redis_module.MAX_SSE_EVENT_BYTES
+    )
+
+    # 动态读取 monkeypatch 后的极小上限，单字符即超限时明确报错。
+    monkeypatch.setattr(redis_module, "MAX_REDIS_EVENT_BYTES", 32)
+    with pytest.raises(ValueError, match="run_stream_text_chunk_exceeds_redis_limit"):
+        RedisRunTransport._max_text_chunk_length("run_tiny", 1, "a", round=0)
+
+
+def test_redis_multiplexer_shares_single_pubsub_and_fans_out_with_single_deserialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同 run_id 多订阅者复用单条 Pub/Sub 连接且单次反序列化扇出；跨频道按引用计数退订。"""
+
+    class SharedPubSub:
+        def __init__(self) -> None:
+            self.subscribed: list[str] = []
+            self.unsubscribed: list[str] = []
+            self.closed = False
+            self.queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        async def subscribe(self, channel_name: str) -> None:
+            self.subscribed.append(channel_name)
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            self.unsubscribed.append(channel_name)
+
+        async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
+            try:
+                return await asyncio.wait_for(self.queue.get(), timeout=0.05)
+            except TimeoutError:
+                return None
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class SharedRedis:
+        def __init__(self) -> None:
+            self.pubsubs: list[SharedPubSub] = []
+
+        def pubsub(self) -> SharedPubSub:
+            ps = SharedPubSub()
+            self.pubsubs.append(ps)
+            return ps
+
+        async def aclose(self) -> None:
+            return None
+
+    validate_calls = 0
+    original_adapter = redis_module._EVENT_ADAPTER
+
+    class CountingAdapter:
+        def validate_json(self, raw: bytes) -> RunStreamEvent:
+            nonlocal validate_calls
+            validate_calls += 1
+            return cast(RunStreamEvent, original_adapter.validate_json(raw))
+
+    monkeypatch.setattr(redis_module, "_EVENT_ADAPTER", CountingAdapter())
+
+    async def scenario() -> None:
+        client = SharedRedis()
+        transport = RedisRunTransport(cast(Redis, client))
+        chan_a = RedisRunTransport._channel("run_a")
+        chan_b = RedisRunTransport._channel("run_b")
+        ev_a = RunTextDeltaEvent(
+            run_id="run_a",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="fanout-a"),
+        )
+        ev_b = RunTextDeltaEvent(
+            run_id="run_b",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="only-b"),
+        )
+
+        async with transport.subscribe("run_a") as sub_a1:
+            async with transport.subscribe("run_a") as sub_a2:
+                async with transport.subscribe("run_b") as sub_b:
+                    assert len(client.pubsubs) == 1
+                    ps = client.pubsubs[0]
+                    # 同频道第二个订阅者零 Redis subscribe 往返；不同频道各 subscribe 一次。
+                    assert ps.subscribed == [chan_a, chan_b]
+
+                    ps.queue.put_nowait(
+                        {
+                            "type": "message",
+                            "channel": chan_a.encode("utf-8"),
+                            "data": ev_a.model_dump_json().encode("utf-8"),
+                        }
+                    )
+                    got_a1 = await sub_a1.get(timeout=1.0)
+                    got_a2 = await sub_a2.get(timeout=1.0)
+                    assert got_a1 == ev_a
+                    assert got_a2 == ev_a
+                    # 单次反序列化扇出给两个订阅者。
+                    assert validate_calls == 1
+                    assert await sub_b.get(timeout=0.05) is None
+
+                # sub_b 退出后，run_b 频道引用归零且 run_a 仍活跃：精确调用一次 unsubscribe。
+                assert ps.unsubscribed == [chan_b]
+                assert not ps.closed
+
+            # sub_a2 退出但 sub_a1 仍在：不退订 chan_a。
+            assert ps.unsubscribed == [chan_b]
+            assert not ps.closed
+
+            ps.queue.put_nowait(
+                {
+                    "type": "message",
+                    "channel": chan_a.encode("utf-8"),
+                    "data": ev_a.model_dump_json().encode("utf-8"),
+                }
+            )
+            assert await sub_a1.get(timeout=1.0) == ev_a
+
+            # 已退订频道的迟到消息被忽略。
+            ps.queue.put_nowait(
+                {
+                    "type": "message",
+                    "channel": chan_b.encode("utf-8"),
+                    "data": ev_b.model_dump_json().encode("utf-8"),
+                }
+            )
+            assert await sub_a1.get(timeout=0.05) is None
+
+        # 全局订阅数归零：自动停止后台泵并关闭共享 PubSub，空载零连接占用。
+        assert client.pubsubs[0].closed is True
+        assert transport._pubsub is None
+        assert transport._pump_task is None
+
+    asyncio.run(scenario())
+
+
+def test_redis_multiplexer_isolates_slow_subscriber_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同频道慢客户端队列溢出仅使其自身报错，不影响快客户端持续接收消息。"""
+    monkeypatch.setattr(redis_module, "MAX_SUBSCRIPTION_EVENTS", 1)
+
+    class SharedPubSub:
+        def __init__(self) -> None:
+            self.queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        async def subscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
+            try:
+                return await asyncio.wait_for(self.queue.get(), timeout=0.05)
+            except TimeoutError:
+                return None
+
+        async def aclose(self) -> None:
+            return None
+
+    class SharedRedis:
+        def __init__(self) -> None:
+            self.ps = SharedPubSub()
+
+        def pubsub(self) -> SharedPubSub:
+            return self.ps
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        client = SharedRedis()
+        transport = RedisRunTransport(cast(Redis, client))
+        chan = RedisRunTransport._channel("run_iso").encode("utf-8")
+
+        def make_msg(seq: int) -> dict[str, object]:
+            ev = RunTextDeltaEvent(
+                run_id="run_iso",
+                execution_epoch=1,
+                stream_sequence=seq,
+                payload=RunTextDeltaPayload(text=f"m{seq}"),
+            )
+            return {
+                "type": "message",
+                "channel": chan,
+                "data": ev.model_dump_json().encode("utf-8"),
+            }
+
+        async with transport.subscribe("run_iso") as slow_sub:
+            async with transport.subscribe("run_iso") as fast_sub:
+                client.ps.queue.put_nowait(make_msg(1))
+                first = await fast_sub.get(timeout=1.0)
+                assert isinstance(first, RunTextDeltaEvent) and first.payload.text == "m1"
+
+                # 第 2 条消息到达时 slow_sub 队列已满（上限 1），slow_sub 溢出但 fast_sub 正常接收。
+                client.ps.queue.put_nowait(make_msg(2))
+                second = await fast_sub.get(timeout=1.0)
+                assert isinstance(second, RunTextDeltaEvent) and second.payload.text == "m2"
+
+                with pytest.raises(RunEventTransportError, match="run_stream_buffer_overflow"):
+                    await slow_sub.get(timeout=0.1)
+
+                # slow_sub 溢出后 fast_sub 依然能持续正常消费。
+                client.ps.queue.put_nowait(make_msg(3))
+                third = await fast_sub.get(timeout=1.0)
+                assert isinstance(third, RunTextDeltaEvent) and third.payload.text == "m3"
+
+    asyncio.run(scenario())
+
+
+def test_redis_multiplexer_broadcasts_shared_disconnect_and_wakes_all_subscribers() -> None:
+    """共享 Pub/Sub 断连故障广播至全部活跃订阅者，立即唤醒阻塞的 get() 且支持后续重建。"""
+    from redis.exceptions import RedisError
+
+    class FlakyPubSub:
+        def __init__(self, *, fail_gate: asyncio.Event | None) -> None:
+            self.fail_gate = fail_gate
+            self.closed = False
+            self.queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        async def subscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
+            if self.fail_gate is not None:
+                await self.fail_gate.wait()
+                raise RedisError("connection dropped")
+            try:
+                return await asyncio.wait_for(self.queue.get(), timeout=0.05)
+            except TimeoutError:
+                return None
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class FlakyRedis:
+        def __init__(self) -> None:
+            self.fail_gate = asyncio.Event()
+            self.pubsubs: list[FlakyPubSub] = []
+
+        def pubsub(self) -> FlakyPubSub:
+            ps = FlakyPubSub(fail_gate=self.fail_gate if not self.pubsubs else None)
+            self.pubsubs.append(ps)
+            return ps
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        client = FlakyRedis()
+        transport = RedisRunTransport(cast(Redis, client))
+        async with transport.subscribe("run_d1") as sub1:
+            async with transport.subscribe("run_d2") as sub2:
+                # 两个订阅者均阻塞在较长超时（5s）的 get() 上。
+                waiter1 = asyncio.create_task(sub1.get(timeout=5.0))
+                waiter2 = asyncio.create_task(sub2.get(timeout=5.0))
+                await asyncio.sleep(0.01)
+
+                client.fail_gate.set()
+                for waiter in (waiter1, waiter2):
+                    with pytest.raises(
+                        RunEventTransportError, match="run_stream_transport_failed"
+                    ) as caught:
+                        await asyncio.wait_for(waiter, timeout=1.0)
+                    assert isinstance(caught.value.__cause__, RedisError)
+
+        assert client.pubsubs[0].closed is True
+        assert transport._pubsub is None
+
+        # 故障清池后再次订阅自动新建健康共享 Pub/Sub。
+        async with transport.subscribe("run_recovered") as sub3:
+            assert len(client.pubsubs) == 2
+            ev = RunTextDeltaEvent(
+                run_id="run_recovered",
+                execution_epoch=1,
+                stream_sequence=1,
+                payload=RunTextDeltaPayload(text="recovered"),
+            )
+            client.pubsubs[1].queue.put_nowait(
+                {
+                    "type": "message",
+                    "channel": RedisRunTransport._channel("run_recovered").encode("utf-8"),
+                    "data": ev.model_dump_json().encode("utf-8"),
+                }
+            )
+            assert await sub3.get(timeout=1.0) == ev
+
+    asyncio.run(scenario())
+
+
+def test_redis_multiplexer_trips_shared_pubsub_when_new_channel_subscribe_fails() -> None:
+    """共享连接新增频道 subscribe 抛 RedisError 时，熔断旧连接并通知既有订阅者，再向调用方报错。"""
+    from redis.exceptions import RedisError
+
+    class HalfBrokenPubSub:
+        def __init__(self) -> None:
+            self.closed = False
+            self.calls = 0
+
+        async def subscribe(self, channel_name: str) -> None:
+            del channel_name
+            self.calls += 1
+            if self.calls == 2:
+                raise RedisError("broken pipe on second subscribe")
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
+            await asyncio.sleep(0.05)
+            return None
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class HalfBrokenRedis:
+        def __init__(self) -> None:
+            self.ps = HalfBrokenPubSub()
+
+        def pubsub(self) -> HalfBrokenPubSub:
+            return self.ps
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        client = HalfBrokenRedis()
+        transport = RedisRunTransport(cast(Redis, client))
+        async with transport.subscribe("run_existing") as existing_sub:
+            waiter = asyncio.create_task(existing_sub.get(timeout=5.0))
+            await asyncio.sleep(0.01)
+
+            with pytest.raises(
+                RunEventTransportError, match="run_stream_subscribe_failed"
+            ) as caught:
+                async with transport.subscribe("run_new"):
+                    pass
+            assert isinstance(caught.value.__cause__, RedisError)
+
+            with pytest.raises(
+                RunEventTransportError, match="run_stream_transport_failed"
+            ) as existing_caught:
+                await asyncio.wait_for(waiter, timeout=1.0)
+            assert isinstance(existing_caught.value.__cause__, RedisError)
+
+        assert client.ps.closed is True
+        assert transport._pubsub is None
+
+    asyncio.run(scenario())
+
+
+def test_redis_transport_aclose_respects_owns_client_while_closing_shared_pubsub() -> None:
+    """aclose() 始终关闭共享 Pub/Sub 与后台泵，仅在 owns_client=True 时关闭 Redis 客户端。"""
+
+    class TrackedPubSub:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def subscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def unsubscribe(self, channel_name: str) -> None:
+            del channel_name
+
+        async def get_message(self, **kwargs: object) -> dict[str, object] | None:
+            del kwargs
+            await asyncio.sleep(0.05)
+            return None
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class TrackedRedis:
+        def __init__(self) -> None:
+            self.client_closed = 0
+            self.pubsubs: list[TrackedPubSub] = []
+
+        def pubsub(self) -> TrackedPubSub:
+            ps = TrackedPubSub()
+            self.pubsubs.append(ps)
+            return ps
+
+        async def aclose(self) -> None:
+            self.client_closed += 1
+
+    async def scenario() -> None:
+        shared_client = TrackedRedis()
+        borrowed = RedisRunTransport(cast(Redis, shared_client), owns_client=False)
+        async with borrowed.subscribe("run_borrowed"):
+            await borrowed.aclose()
+            assert shared_client.pubsubs[0].closed is True
+            assert borrowed._pubsub is None
+            assert borrowed._pump_task is None
+            assert shared_client.client_closed == 0
+
+        owned_client = TrackedRedis()
+        owned = RedisRunTransport(cast(Redis, owned_client), owns_client=True)
+        async with owned.subscribe("run_owned"):
+            await owned.aclose()
+            assert owned_client.pubsubs[0].closed is True
+            assert owned_client.client_closed == 1
+
+    asyncio.run(scenario())
+
+
+def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_stream_snapshot 在释放事务与连接后再执行消息与 512KB 快照裁剪。"""
+    from collections.abc import Sequence
+    from types import SimpleNamespace
+
+    from adapter.run.model import RunModel
+    from adapter.run.repository import context_events as ctx_module
+    from adapter.run.repository.context_events import RunContextEventsMixin
+    from domain.run.model import RunSnapshotEvent
+
+    now = datetime.now(UTC)
+    tx_active = False
+    session_active = False
+    tx_active_during_snapshot_dump: list[bool] = []
+    session_active_during_snapshot_dump: list[bool] = []
+
+    original_snapshot_dump = RunSnapshotEvent.model_dump_json
+
+    def spy_snapshot_dump(self: RunSnapshotEvent, *args: object, **kwargs: object) -> str:
+        tx_active_during_snapshot_dump.append(tx_active)
+        session_active_during_snapshot_dump.append(session_active)
+        return original_snapshot_dump(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(RunSnapshotEvent, "model_dump_json", spy_snapshot_dump)
+    monkeypatch.setattr(ctx_module, "_STREAM_SNAPSHOT_BYTES", 2048)
+
+    run_row = RunModel(
+        id="run_snap_1",
+        session_id="ses_snap_1",
+        owner_id="usr_snap_1",
+        status="running",
+        trigger_message_id="msg_1",
+        context_cutoff_sequence=1,
+        retry_of_run_id=None,
+        model_config_version_id="profile_1",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
+        prompt_template_version="run-v2",
+        event_sequence=2,
+        execution_epoch=1,
+        worker_id="worker-1",
+        lease_expires_at=now + timedelta(seconds=30),
+        execution_started_at=now,
+        execution_deadline_at=now + timedelta(seconds=60),
+        queued_at=now,
+        first_started_at=now,
+        finished_at=None,
+        created_at=now,
+        updated_at=now,
+        cancel_requested_at=None,
+        safe_error_code=None,
+        report_message_id=None,
+        usage={},
+        compression_policy_version_id=None,
+        model_snapshot_json=None,
+        tool_snapshot=None,
+        auth_session_id=None,
+        llm_request_count=0,
+        skill_snapshot=None,
+        input_file_ids=[],
+        knowledge_base_ids=None,
+        parent_run_id=None,
+        root_run_id="run_snap_1",
+        parent_tool_call_id=None,
+        subagent_profile_id=None,
+        subagent_slug=None,
+        subagent_name=None,
+        subagent_system_prompt=None,
+        max_llm_requests=None,
+        timeout_seconds=None,
+        depth=1,  # 子 Run 跳过 subagent metadata 查询，专注测试快照事务边界与裁剪
+    )
+
+    msg_rows = [
+        SimpleNamespace(
+            id="msg_3",
+            session_id="ses_snap_1",
+            role="assistant",
+            status="completed",
+            sequence=3,
+            parts=[{"type": "text", "text": "B" * 600}],
+            reply_to_message_id=None,
+            run_id="run_snap_1",
+            managed_run_id="run_snap_1",
+            client_message_id=None,
+            created_at=now,
+            completed_at=now,
+            metadata_json={},
+            context_turn_id=None,
+        ),
+        SimpleNamespace(
+            id="msg_2",
+            session_id="ses_snap_1",
+            role="assistant",
+            status="completed",
+            sequence=2,
+            parts=[{"type": "text", "text": "A" * 1700}],
+            reply_to_message_id=None,
+            run_id="run_snap_1",
+            managed_run_id="run_snap_1",
+            client_message_id=None,
+            created_at=now,
+            completed_at=now,
+            metadata_json={},
+            context_turn_id=None,
+        ),
+    ]
+    evt_rows = [
+        SimpleNamespace(
+            id="evt_1",
+            run_id="run_snap_1",
+            session_id="ses_snap_1",
+            sequence=1,
+            type="queued",
+            created_at=now,
+            payload={"trigger_message_id": "msg_1"},
+        ),
+        SimpleNamespace(
+            id="evt_2",
+            run_id="run_snap_1",
+            session_id="ses_snap_1",
+            sequence=2,
+            type="queued",
+            created_at=now,
+            payload={"trigger_message_id": "msg_1"},
+        ),
+    ]
+
+    class _FakeScalarResult:
+        def __init__(self, items: Sequence[object]) -> None:
+            self._items = list(items)
+
+        def all(self) -> list[object]:
+            return self._items
+
+    class _FakeBegin:
+        async def __aenter__(self) -> None:
+            nonlocal tx_active
+            tx_active = True
+
+        async def __aexit__(self, *args: object) -> None:
+            nonlocal tx_active
+            del args
+            tx_active = False
+
+    class _FakeSession:
+        bind = None
+
+        def __init__(self) -> None:
+            self._scalars_call = 0
+
+        def begin(self) -> _FakeBegin:
+            return _FakeBegin()
+
+        async def scalar(self, stmt: object) -> object:
+            del stmt
+            return run_row
+
+        async def scalars(self, stmt: object) -> _FakeScalarResult:
+            del stmt
+            self._scalars_call += 1
+            if self._scalars_call == 1:
+                return _FakeScalarResult(msg_rows)
+            return _FakeScalarResult(evt_rows)
+
+        async def __aenter__(self) -> _FakeSession:
+            nonlocal session_active
+            session_active = True
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            nonlocal session_active
+            del args
+            session_active = False
+
+    class _Repo(RunContextEventsMixin):
+        def __init__(self) -> None:
+            self._session_factory = lambda: _FakeSession()  # type: ignore[assignment]
+
+    snapshot = asyncio.run(_Repo().get_stream_snapshot("ses_snap_1", "usr_snap_1", "run_snap_1"))
+    assert snapshot is not None
+    # 步骤 7 序列化全部发生在事务与会话完全退出之后。
+    assert tx_active_during_snapshot_dump
+    assert all(not active for active in tx_active_during_snapshot_dump)
+    assert all(not active for active in session_active_during_snapshot_dump)
+    # 较旧的超长消息 msg_2 被裁掉，保留 msg_3 且游标推进至 2 + 1 = 3。
+    assert [message.id for message in snapshot.messages] == ["msg_3"]
+    assert snapshot.messages_complete is False
+    assert snapshot.messages_before_sequence == 3
+    assert [event.sequence for event in snapshot.events] == [1, 2]
+
+
+def test_public_sse_stream_yields_bytes_and_rejects_oversize_frame() -> None:
+    """公开 SSE 响应直接产出 UTF-8 bytes，且超限帧仍抛 run_stream_event_exceeds_size_limit。"""
+    session_id = "session_bytes_stream"
+    run_id = "run_bytes_stream"
+
+    class OversizeService:
+        async def authorize(self, session: str, owner: str, run: str) -> bool:
+            return session == session_id and run == run_id and owner == "user_stream_test"
+
+        async def events(
+            self,
+            session: str,
+            owner: str,
+            run: str,
+            token: str,
+            *,
+            last_event_id: str | None = None,
+        ) -> AsyncIterator[RunStreamEvent]:
+            del session, owner, token, last_event_id
+            yield RunTextDeltaEvent(
+                run_id=run,
+                execution_epoch=1,
+                stream_sequence=1,
+                payload=RunTextDeltaPayload(text="x" * (64 * 1024)),
+            )
+
+    app = FastAPI()
+    app.state.authenticator = _FakeAuthenticator()
+    app.include_router(
+        build_run_router(cast(RunService, object()), cast(RunStreamService, OversizeService()))
+    )
+    with TestClient(app, raise_server_exceptions=True) as client:
+        with pytest.raises(RuntimeError, match="run_stream_event_exceeds_size_limit"):
+            client.get(
+                f"/api/v1/sessions/{session_id}/runs/{run_id}/stream",
+                cookies={"athena_session": "valid-token"},
+            )

@@ -499,7 +499,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     async def get_stream_snapshot(
         self, session_id: str, owner_id: str, run_id: str
     ) -> RunStreamSnapshot | None:
-        """同一 PostgreSQL MVCC 快照内读取正式消息、状态和事件游标。"""
+        """同一 PostgreSQL MVCC 快照内读取消息、状态和事件游标，事务外执行裁剪序列化。"""
         async with self._session_factory() as session:
             async with session.begin():
                 # 步骤 1：设置可重复读隔离级别（SET TRANSACTION ISOLATION LEVEL REPEATABLE READ），
@@ -547,46 +547,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     )
                 ).all()
 
-                # 步骤 4：倒序查询的消息还原为时间正序，提取纯文本片段并记录历史消息排他游标；
-                # 对极端超长消息做多字节文本内存尺寸初步防爆修剪。
-                messages = list(
-                    RunStreamMessage(
-                        id=message.id,
-                        role=cast(Literal["user", "assistant"], message.role),
-                        status=message.status,
-                        text="".join(
-                            part.text
-                            for part in conversation_to_domain(message).parts
-                            if isinstance(part, TextPart)
-                        ),
-                        sequence=message.sequence,
-                        created_at=message.created_at,
-                    )
-                    for message in reversed(conversation_rows[:_STREAM_SNAPSHOT_MESSAGES])
-                )
-                messages_before_sequence = (
-                    messages[0].sequence
-                    if len(conversation_rows) > _STREAM_SNAPSHOT_MESSAGES
-                    else None
-                )
-                while (
-                    messages
-                    and sum(len(message.model_dump_json().encode("utf-8")) for message in messages)
-                    > _STREAM_SNAPSHOT_BYTES
-                ):
-                    removed = messages.pop(0)
-                    messages_before_sequence = removed.sequence + 1
-
-                # 步骤 5：状态事件转换并标记首屏完整度与后续补齐游标。
-                events = list(
-                    event_to_domain(event) for event in event_rows[:_STREAM_SNAPSHOT_EVENTS]
-                )
-                events_after_sequence = (
-                    events[-1].sequence if len(event_rows) > _STREAM_SNAPSHOT_EVENTS else None
-                )
-                events_complete = events_after_sequence is None
-
-                # 步骤 6：仅根任务（row.depth == 0）聚合并发 Subagent 任务树及
+                # 步骤 4（事务内只读查询）：仅根任务（row.depth == 0）聚合并发 Subagent 任务树及
                 # 人工协同（HITL）待审批/待澄清状态。
                 subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
                 pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
@@ -612,61 +573,106 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                             )
                         )
 
-                # 步骤 7：模拟完整 SSE 序列化，在 512KB 硬预算内执行两级优雅降级裁剪
-                # （先裁旧消息，后裁事件），同步推进排他游标。
-                # 预算覆盖完整 JSON envelope 与 SSE event/id/data 前缀；超出时只裁掉
-                # 可由既有消息/事件分页接口恢复的首屏内容，并同步推进排他游标。
-                while True:
-                    payload = RunSnapshotPayload(
-                        status=RunStatus(row.status),
-                        event_sequence=row.event_sequence,
-                        report_message_id=row.report_message_id,
-                        messages=tuple(messages),
-                        events=tuple(events),
-                        messages_complete=messages_before_sequence is None,
-                        messages_before_sequence=messages_before_sequence,
-                        events_complete=events_complete,
-                        events_after_sequence=events_after_sequence,
-                        subagent_tasks=subagent_tasks,
-                        pending_subagent_inputs=pending_subagent_inputs,
-                        pending_subagent_approvals=pending_subagent_approvals,
+                # 在退出事务与归还连接前完成全部轻量领域对象转换，避免事务外访问 ORM 实体。
+                run = run_to_domain(row)
+                has_more_messages = len(conversation_rows) > _STREAM_SNAPSHOT_MESSAGES
+                messages = [
+                    RunStreamMessage(
+                        id=message.id,
+                        role=cast(Literal["user", "assistant"], message.role),
+                        status=message.status,
+                        text="".join(
+                            part.text
+                            for part in conversation_to_domain(message).parts
+                            if isinstance(part, TextPart)
+                        ),
+                        sequence=message.sequence,
+                        created_at=message.created_at,
                     )
-                    encoded = (
-                        RunSnapshotEvent(
-                            run_id=row.id,
-                            execution_epoch=row.execution_epoch,
-                            stream_sequence=9_999_999_999_999_999_999,
-                            payload=payload,
-                        )
-                        .model_dump_json(exclude_none=True)
-                        .encode("utf-8")
-                    )
-                    if len(encoded) + _STREAM_SNAPSHOT_PREFIX_RESERVE <= _STREAM_SNAPSHOT_BYTES:
-                        break
-                    if messages:
-                        removed = messages.pop(0)
-                        messages_before_sequence = removed.sequence + 1
-                    elif events:
-                        events.pop()
-                        events_after_sequence = events[-1].sequence if events else 0
-                        events_complete = False
-                    else:
-                        raise ValueError("run_stream_snapshot_exceeds_size_limit")
+                    for message in reversed(conversation_rows[:_STREAM_SNAPSHOT_MESSAGES])
+                ]
+                has_more_events = len(event_rows) > _STREAM_SNAPSHOT_EVENTS
+                events = [event_to_domain(event) for event in event_rows[:_STREAM_SNAPSHOT_EVENTS]]
+        # 事务边界结束：数据库只读快照已完整取出，连接立即归还连接池，
+        # 后续 CPU 密集的消息字节预裁剪与 512KB 快照序列化裁剪全部在事务外执行。
 
-                # 步骤 8：组装并返回不可变快照对象，安全离开事务上下文。
-                snapshot = RunStreamSnapshot(
-                    run_to_domain(row),
-                    tuple(messages),
-                    tuple(events),
-                    messages_complete=messages_before_sequence is None,
-                    messages_before_sequence=messages_before_sequence,
-                    events_complete=events_complete,
-                    events_after_sequence=events_after_sequence,
-                    subagent_tasks=subagent_tasks,
-                    pending_subagent_inputs=pending_subagent_inputs,
-                    pending_subagent_approvals=pending_subagent_approvals,
+        # 步骤 5：还原历史消息排他游标，并以 O(1) 保守上界预判 + 单次运行和消除 O(M²) 重算。
+        messages_before_sequence = messages[0].sequence if has_more_messages and messages else None
+        # 单码点 JSON 转义至多占 6 UTF-8 字节，叠加每条固定字段裕量 256 字节作为保守上界。
+        upper_bound_bytes = sum(
+            len(message.text) * 6 + len(message.id) * 6 + len(message.status) * 6 + 256
+            for message in messages
+        )
+        if messages and upper_bound_bytes > _STREAM_SNAPSHOT_BYTES:
+            message_sizes = [len(message.model_dump_json().encode("utf-8")) for message in messages]
+            total_message_bytes = sum(message_sizes)
+            trim_index = 0
+            while trim_index < len(messages) and total_message_bytes > _STREAM_SNAPSHOT_BYTES:
+                removed = messages[trim_index]
+                total_message_bytes -= message_sizes[trim_index]
+                messages_before_sequence = removed.sequence + 1
+                trim_index += 1
+            if trim_index:
+                messages = messages[trim_index:]
+
+        # 步骤 6：计算状态事件首屏完整度与后续补齐游标。
+        events_after_sequence = events[-1].sequence if has_more_events and events else None
+        events_complete = events_after_sequence is None
+
+        # 步骤 7：在事务外模拟完整 SSE 序列化，在 512KB 硬预算内执行两级优雅降级裁剪
+        # （先裁旧消息，后裁事件），同步推进排他游标。
+        # 预算覆盖完整 JSON envelope 与 SSE event/id/data 前缀；超出时只裁掉
+        # 可由既有消息/事件分页接口恢复的首屏内容，并同步推进排他游标。
+        while True:
+            payload = RunSnapshotPayload(
+                status=run.status,
+                event_sequence=run.event_sequence,
+                report_message_id=run.report_message_id,
+                messages=tuple(messages),
+                events=tuple(events),
+                messages_complete=messages_before_sequence is None,
+                messages_before_sequence=messages_before_sequence,
+                events_complete=events_complete,
+                events_after_sequence=events_after_sequence,
+                subagent_tasks=subagent_tasks,
+                pending_subagent_inputs=pending_subagent_inputs,
+                pending_subagent_approvals=pending_subagent_approvals,
+            )
+            encoded = (
+                RunSnapshotEvent(
+                    run_id=run.id,
+                    execution_epoch=run.execution_epoch,
+                    stream_sequence=9_999_999_999_999_999_999,
+                    payload=payload,
                 )
-        return snapshot
+                .model_dump_json(exclude_none=True)
+                .encode("utf-8")
+            )
+            if len(encoded) + _STREAM_SNAPSHOT_PREFIX_RESERVE <= _STREAM_SNAPSHOT_BYTES:
+                break
+            if messages:
+                removed = messages.pop(0)
+                messages_before_sequence = removed.sequence + 1
+            elif events:
+                events.pop()
+                events_after_sequence = events[-1].sequence if events else 0
+                events_complete = False
+            else:
+                raise ValueError("run_stream_snapshot_exceeds_size_limit")
+
+        # 步骤 8：组装并返回不可变快照对象。
+        return RunStreamSnapshot(
+            run,
+            tuple(messages),
+            tuple(events),
+            messages_complete=messages_before_sequence is None,
+            messages_before_sequence=messages_before_sequence,
+            events_complete=events_complete,
+            events_after_sequence=events_after_sequence,
+            subagent_tasks=subagent_tasks,
+            pending_subagent_inputs=pending_subagent_inputs,
+            pending_subagent_approvals=pending_subagent_approvals,
+        )
 
     async def list_events(
         self,

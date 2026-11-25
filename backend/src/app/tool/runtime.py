@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -31,7 +32,7 @@ from app.skill.tooling import summarize_parameters
 from app.tool.ports import RunToolRuntime
 from common.date import utc_now
 from common.json import utf8_size
-from domain.access import ResourceType, VisibilityScope
+from domain.access import ResourceAccessTarget, ResourceType, UserAccessSnapshot, VisibilityScope
 from domain.auth.ports import CurrentSessionReader
 from domain.file import (
     MAX_VISION_IMAGES_PER_RUN,
@@ -100,6 +101,22 @@ MCP_TOOL_WATCHDOG_GRACE_SECONDS = 0.25
 MCP_DELIVERY_AUTH_ERROR = "run_auth_session_invalid"
 
 logger = logging.getLogger(__name__)
+
+
+def _accepts_keyword_argument(func: object, name: str) -> bool:
+    """探测可调用对象是否接受指定关键字参数，兼容既有测试替身签名。"""
+    if not callable(func):
+        return False
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return parameters[name].kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +495,8 @@ class RunToolRuntimeService(RunToolRuntime):
         *,
         strict_project_limit: bool,
         ignore_missing_project: bool = False,
+        snapshot: UserAccessSnapshot | None = None,
+        snapshot_loaded: bool = False,
     ) -> _KnowledgeScopeResolution:
         """统一解析本次对话的有效知识库集合，供 build_snapshot 与 _knowledge_search 共用。
 
@@ -489,6 +508,10 @@ class RunToolRuntimeService(RunToolRuntime):
            - 计算并集：当前项目关联的可读知识库（若 project_id 非空）
              ∪ 当前用户有权访问的 company 与 department 共享知识库（不自动混入未绑项目的个人库）；
            - 按确定优先级去重排序（项目绑定库 > 部门库 > 公司库），超过 20 个时截取前 20 个。
+
+        安全边界：
+        - 仅允许在单次范围解析或单次 build_snapshot 内复用 snapshot；
+        - _knowledge_search 的 before_scope 与 after_scope 严禁共享 snapshot，确保调岗即时撤权。
         """
         if self._knowledge is None:
             return _KnowledgeScopeResolution(
@@ -515,11 +538,15 @@ class RunToolRuntimeService(RunToolRuntime):
                     "指定的知识库数量超过单次检索上限。",
                 )
             if self._access_policy is not None:
-                readable_ids = await self._access_policy.filter_readable_ids(
-                    owner_id,
-                    ResourceType.KNOWLEDGE_BASE,
-                    ordered_ids,
-                )
+                if snapshot_loaded and (snapshot is None or not snapshot.is_active):
+                    readable_ids: set[str] = set()
+                else:
+                    readable_ids = await self._access_policy.filter_readable_ids(
+                        owner_id,
+                        ResourceType.KNOWLEDGE_BASE,
+                        ordered_ids,
+                        snapshot=snapshot,
+                    )
                 effective = tuple(kb_id for kb_id in ordered_ids if kb_id in readable_ids)
             else:
                 get_base = getattr(self._knowledge, "get_base", None)
@@ -544,10 +571,27 @@ class RunToolRuntimeService(RunToolRuntime):
             return _KnowledgeScopeResolution(effective, frozenset(effective))
 
         # 默认企业工作台模式：先收集项目绑定库，再合并企业共享库（部门库 > 公司库）。
+        resolved_snapshot = snapshot
+        resolved_loaded = snapshot_loaded
         project_ids: list[str] = []
         if project_id is not None and self._project_knowledge is not None:
+            supports_project_snapshot = _accepts_keyword_argument(
+                self._project_knowledge.list,
+                "snapshot",
+            )
+            if self._access_policy is not None and supports_project_snapshot:
+                if not resolved_loaded and resolved_snapshot is None:
+                    resolved_snapshot = await self._access_policy.get_user_snapshot(owner_id)
+                    resolved_loaded = True
             try:
-                project_bases = await self._project_knowledge.list(owner_id, project_id)
+                if self._access_policy is not None and supports_project_snapshot:
+                    project_bases = await cast(Any, self._project_knowledge).list(
+                        owner_id,
+                        project_id,
+                        snapshot=resolved_snapshot,
+                    )
+                else:
+                    project_bases = await self._project_knowledge.list(owner_id, project_id)
             except (ProjectNotFoundError, ProjectKnowledgeNotFoundError):
                 if not ignore_missing_project:
                     raise
@@ -564,10 +608,15 @@ class RunToolRuntimeService(RunToolRuntime):
         dept_ids: list[str] = []
         company_ids: list[str] = []
         if self._access_policy is not None:
-            readable_targets = await self._access_policy.filter_readable_targets(
-                owner_id,
-                ResourceType.KNOWLEDGE_BASE,
-            )
+            readable_targets: tuple[ResourceAccessTarget, ...]
+            if resolved_loaded and (resolved_snapshot is None or not resolved_snapshot.is_active):
+                readable_targets = ()
+            else:
+                readable_targets = await self._access_policy.filter_readable_targets(
+                    owner_id,
+                    ResourceType.KNOWLEDGE_BASE,
+                    snapshot=resolved_snapshot,
+                )
             # 仅自动纳入 company 与 department 共享知识库，未绑定项目的个人库不自动混入。
             dept_ids = sorted(
                 target.resource_id
@@ -607,6 +656,14 @@ class RunToolRuntimeService(RunToolRuntime):
         if prompt_template_version != "run-v2":
             raise ValueError("run_prompt_template_unsupported")
 
+        # 入口仅加载 1 次实时用户权限快照，统一透传给知识库、MCP 与 Subagent 过滤路径，
+        # 避免单次快照构造重复查询用户组织树。
+        access_snapshot: UserAccessSnapshot | None = None
+        access_snapshot_loaded = False
+        if self._access_policy is not None:
+            access_snapshot = await self._access_policy.get_user_snapshot(context.owner_id)
+            access_snapshot_loaded = True
+
         definitions: list[RuntimeToolDefinition] = [REQUEST_USER_INPUT_DEFINITION]
         # 仅主 Run 且用户开启显式记忆开关时，暴露免审批的 save_user_memory 工具。
         if depth == 0 and self._preferences is not None:
@@ -622,6 +679,8 @@ class RunToolRuntimeService(RunToolRuntime):
                     knowledge_base_ids,
                     strict_project_limit=False,
                     ignore_missing_project=True,
+                    snapshot=access_snapshot,
+                    snapshot_loaded=access_snapshot_loaded,
                 )
             except Exception:
                 scope = _KnowledgeScopeResolution((), frozenset())
@@ -639,35 +698,76 @@ class RunToolRuntimeService(RunToolRuntime):
                     SESSION_FILE_READ_DEFINITION,
                 )
             )
-        # 合并 MCP 目录中的工具定义，并按统一三层权限引擎实时过滤掉无权访问的部门 MCP 工具。
-        mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
-        if self._access_policy is not None and mcp_tools:
-            server_ids = tuple(
-                dict.fromkeys(cast(McpToolSource, item.source).server_id for item in mcp_tools)
-            )
-            readable_server_ids = await self._access_policy.filter_readable_ids(
-                context.owner_id,
-                ResourceType.MCP_SERVER,
-                server_ids,
-            )
-            mcp_tools = tuple(
-                item
-                for item in mcp_tools
-                if cast(McpToolSource, item.source).server_id in readable_server_ids
-            )
+        # 合并 MCP 目录中的工具定义：优先走单 Session SQL EXISTS 下推，
+        # 避免未授权部门工具占用 limit=201 额度。
+        if self._access_policy is not None:
+            if access_snapshot is None or not access_snapshot.is_active:
+                mcp_tools: tuple[RuntimeToolDefinition, ...] = ()
+            else:
+                list_readable_mcp = getattr(
+                    self._mcp_catalog,
+                    "list_readable_runtime_tools",
+                    None,
+                )
+                if callable(list_readable_mcp):
+                    mcp_tools = cast(
+                        tuple[RuntimeToolDefinition, ...],
+                        await list_readable_mcp(access_snapshot, limit=201),
+                    )
+                else:
+                    mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
+                    if mcp_tools:
+                        server_ids = tuple(
+                            dict.fromkeys(
+                                cast(McpToolSource, item.source).server_id for item in mcp_tools
+                            )
+                        )
+                        readable_server_ids = await self._access_policy.filter_readable_ids(
+                            context.owner_id,
+                            ResourceType.MCP_SERVER,
+                            server_ids,
+                            snapshot=access_snapshot,
+                        )
+                        mcp_tools = tuple(
+                            item
+                            for item in mcp_tools
+                            if cast(McpToolSource, item.source).server_id in readable_server_ids
+                        )
+        else:
+            mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
         definitions.extend(mcp_tools)
 
         if depth == 0 and self._subagents is not None:
-            enabled_subagents = await self._subagents.list_enabled()
-            if self._access_policy is not None and enabled_subagents:
-                readable_subagent_ids = await self._access_policy.filter_readable_ids(
-                    context.owner_id,
-                    ResourceType.SUBAGENT,
-                    [item.id for item in enabled_subagents],
-                )
-                enabled_subagents = tuple(
-                    item for item in enabled_subagents if item.id in readable_subagent_ids
-                )
+            if self._access_policy is not None:
+                if access_snapshot is None or not access_snapshot.is_active:
+                    enabled_subagents: tuple[SubagentProfile, ...] = ()
+                else:
+                    list_readable_subagents = getattr(
+                        self._subagents,
+                        "list_readable_enabled",
+                        None,
+                    )
+                    if callable(list_readable_subagents):
+                        enabled_subagents = cast(
+                            tuple[SubagentProfile, ...],
+                            await list_readable_subagents(access_snapshot),
+                        )
+                    else:
+                        enabled_subagents = await self._subagents.list_enabled()
+                        if enabled_subagents:
+                            readable_subagent_ids = await self._access_policy.filter_readable_ids(
+                                context.owner_id,
+                                ResourceType.SUBAGENT,
+                                [item.id for item in enabled_subagents],
+                                snapshot=access_snapshot,
+                            )
+                            enabled_subagents = tuple(
+                                item
+                                for item in enabled_subagents
+                                if item.id in readable_subagent_ids
+                            )
+            else:
+                enabled_subagents = await self._subagents.list_enabled()
             if enabled_subagents:
                 definitions.append(build_dispatch_subagents_definition(enabled_subagents))
         elif depth >= 1:
@@ -1369,13 +1469,28 @@ class RunToolRuntimeService(RunToolRuntime):
         except ValueError:
             return _error("tool_arguments_invalid", "limit 必须是 1 到 8 之间的整数。")
         try:
-            result = await self._knowledge.search(
-                context.owner_id,
-                base_ids,
-                query,
-                limit=limit,
-                context_budget=2000,
-            )
+            # 执行前后均有独立实时范围鉴权（before_scope / after_scope，严禁共享 snapshot），
+            # 此处向支持 skip_access_check 的 KnowledgeService 透传跳过第 3 次重复鉴权。
+            if self._access_policy is not None and _accepts_keyword_argument(
+                self._knowledge.search,
+                "skip_access_check",
+            ):
+                result = await self._knowledge.search(
+                    context.owner_id,
+                    base_ids,
+                    query,
+                    limit=limit,
+                    context_budget=2000,
+                    skip_access_check=True,
+                )
+            else:
+                result = await self._knowledge.search(
+                    context.owner_id,
+                    base_ids,
+                    query,
+                    limit=limit,
+                    context_budget=2000,
+                )
         except (KnowledgeInputError, KnowledgeNotFoundError):
             return _error("knowledge_scope_unavailable", "知识库查询范围已不可用。")
         except KnowledgeSearchUnavailableError:

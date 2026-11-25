@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import ColumnElement, and_, delete, exists, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import SQLColumnExpression
 
 from adapter.access.model import ResourceVisibilityGrantModel
 from adapter.auth.model import UserModel
@@ -21,7 +22,7 @@ from domain.access import (
     VisibilityGrant,
     VisibilityGrantInput,
     VisibilityScope,
-    evaluate_can_read,
+    evaluate_can_manage,
     parse_department_path_ids,
 )
 from domain.auth import UserRole, UserStatus
@@ -273,51 +274,191 @@ async def delete_resource_grants_in_session(
     )
 
 
+def _build_grant_match_clause(snapshot: UserAccessSnapshot) -> ColumnElement[bool]:
+    """构造单条 resource_visibility_grants 命中活跃用户快照的 SQL 匹配条件。
+
+    权限等价性说明：
+    - GrantTargetType 仅有 department 与 role 两类；
+    - load_user_access_snapshot_in_session 在构造 direct_department_ids 与
+      ancestor_department_ids 时已强制过滤 departments.status == 'active'，
+      故此处无需二次 JOIN departments，与 evaluate_can_read 规则 100% 等价；
+    - 空集合严禁生成 .in_(())，仅对非空部门集追加对应分支。
+    """
+    clauses: list[ColumnElement[bool]] = [
+        and_(
+            ResourceVisibilityGrantModel.target_type == GrantTargetType.ROLE.value,
+            ResourceVisibilityGrantModel.target_id == snapshot.role.value,
+        )
+    ]
+    if snapshot.ancestor_department_ids:
+        clauses.append(
+            and_(
+                ResourceVisibilityGrantModel.target_type == GrantTargetType.DEPARTMENT.value,
+                ResourceVisibilityGrantModel.include_subdepartments.is_(True),
+                ResourceVisibilityGrantModel.target_id.in_(
+                    tuple(sorted(snapshot.ancestor_department_ids))
+                ),
+            )
+        )
+    if snapshot.direct_department_ids:
+        clauses.append(
+            and_(
+                ResourceVisibilityGrantModel.target_type == GrantTargetType.DEPARTMENT.value,
+                ResourceVisibilityGrantModel.include_subdepartments.is_(False),
+                ResourceVisibilityGrantModel.target_id.in_(
+                    tuple(sorted(snapshot.direct_department_ids))
+                ),
+            )
+        )
+    return or_(*clauses)
+
+
+def build_readable_resource_clause(
+    snapshot: UserAccessSnapshot | None,
+    resource_type: ResourceType,
+    *,
+    id_col: SQLColumnExpression[str],
+    scope_col: SQLColumnExpression[str],
+    owner_id_col: SQLColumnExpression[str] | SQLColumnExpression[str | None] | None = None,
+    owner_department_id_col: SQLColumnExpression[str] | SQLColumnExpression[str | None],
+) -> ColumnElement[bool]:
+    """生成与 domain.access.evaluate_can_read 规则 100% 等价的 SQL WHERE 可读谓词。
+
+    兼容 PostgreSQL 与 SQLite，覆盖四类资产列名差异：
+    - KnowledgeBaseModel：visibility_scope / owner_id / owner_department_id；
+    - SkillModel：scope / owner_id / owner_department_id；
+    - McpServerModel / SubagentModel：visibility_scope / 无 owner_id / owner_department_id。
+    """
+    # 停用或不存在用户一律保守拒绝。
+    if snapshot is None or not snapshot.is_active:
+        return false()
+
+    branches: list[ColumnElement[bool]] = [
+        scope_col == VisibilityScope.COMPANY.value,
+    ]
+    # 仅支持个人私有层级的资源表追加 personal 匹配，超管同样不得越权读他人私有资产。
+    if owner_id_col is not None:
+        branches.append(
+            and_(
+                scope_col == VisibilityScope.PERSONAL.value,
+                owner_id_col == snapshot.user_id,
+            )
+        )
+
+    # department 层级：超管直接放行无 EXISTS；非超管按管辖部门或授权表 EXISTS 放行。
+    if snapshot.role is UserRole.SUPER_ADMIN:
+        branches.append(scope_col == VisibilityScope.DEPARTMENT.value)
+    else:
+        dept_conditions: list[ColumnElement[bool]] = []
+        if snapshot.role is UserRole.DEPT_ADMIN and snapshot.managed_department_ids:
+            dept_conditions.append(
+                owner_department_id_col.in_(tuple(sorted(snapshot.managed_department_ids)))
+            )
+        # 命中 uq_resource_visibility_grant(resource_type, resource_id, ...) 最左前缀索引。
+        dept_conditions.append(
+            exists(
+                select(1).where(
+                    ResourceVisibilityGrantModel.resource_type == resource_type.value,
+                    ResourceVisibilityGrantModel.resource_id == id_col,
+                    _build_grant_match_clause(snapshot),
+                )
+            )
+        )
+        branches.append(
+            and_(
+                scope_col == VisibilityScope.DEPARTMENT.value,
+                or_(*dept_conditions),
+            )
+        )
+    return or_(*branches)
+
+
+def _fast_can_read_target(
+    snapshot: UserAccessSnapshot,
+    target: ResourceAccessTarget,
+) -> bool | None:
+    """在不查询授权表的前提下做快速路径判定；仅 department 需查 grants 时返回 None。"""
+    if not snapshot.is_active:
+        return False
+    if target.visibility_scope is VisibilityScope.PERSONAL:
+        return target.owner_id is not None and target.owner_id == snapshot.user_id
+    if target.visibility_scope is VisibilityScope.COMPANY:
+        return True
+    if target.visibility_scope is not VisibilityScope.DEPARTMENT:
+        return False
+    if snapshot.role is UserRole.SUPER_ADMIN:
+        return True
+    if (
+        snapshot.role is UserRole.DEPT_ADMIN
+        and target.owner_department_id is not None
+        and target.owner_department_id in snapshot.managed_department_ids
+    ):
+        return True
+    return None
+
+
+async def _has_matching_grant_in_session(
+    session: AsyncSession,
+    snapshot: UserAccessSnapshot,
+    resource_type: ResourceType,
+    resource_id: str,
+) -> bool:
+    """在当前只读会话内通过唯一索引最左前缀判定单资源是否命中可见性授权。"""
+    matched = await session.scalar(
+        select(ResourceVisibilityGrantModel.id)
+        .where(
+            ResourceVisibilityGrantModel.resource_type == resource_type.value,
+            ResourceVisibilityGrantModel.resource_id == resource_id,
+            _build_grant_match_clause(snapshot),
+        )
+        .limit(1)
+    )
+    return matched is not None
+
+
 async def filter_readable_targets_in_session(
     session: AsyncSession,
     user_id: str,
     targets: Sequence[ResourceAccessTarget],
+    *,
+    snapshot: UserAccessSnapshot | None = None,
 ) -> set[str]:
-    """在同一数据库事务快照内批量过滤当前用户可读的资源 ID（供 Run 快照等原子路径复用）。"""
+    """在同一数据库事务快照内批量过滤当前用户可读的资源 ID（支持透传已有快照复用）。"""
     if not targets:
         return set()
-    snapshot = await load_user_access_snapshot_in_session(session, user_id)
-    if snapshot is None or not snapshot.is_active:
+    resolved = (
+        snapshot
+        if snapshot is not None
+        else await load_user_access_snapshot_in_session(session, user_id)
+    )
+    if resolved is None or not resolved.is_active:
         return set()
 
-    resource_type = targets[0].resource_type
-    dept_resource_ids = [
-        target.resource_id
-        for target in targets
-        if target.visibility_scope is VisibilityScope.DEPARTMENT
-    ]
-    grants_by_id: dict[str, tuple[VisibilityGrant, ...]] = {}
-    active_grant_depts: frozenset[str] = frozenset()
-    if dept_resource_ids and snapshot.role is not UserRole.SUPER_ADMIN:
-        grants_by_id = await load_grants_map_in_session(session, resource_type, dept_resource_ids)
-        dept_target_ids = tuple(
-            dict.fromkeys(
-                grant.target_id
-                for grants in grants_by_id.values()
-                for grant in grants
-                if grant.target_type is GrantTargetType.DEPARTMENT
-            )
-        )
-        if dept_target_ids:
-            active_grant_depts = await list_active_department_ids_in_session(
-                session, dept_target_ids
-            )
+    readable: set[str] = set()
+    pending_by_type: dict[ResourceType, list[str]] = {}
+    for target in targets:
+        fast = _fast_can_read_target(resolved, target)
+        if fast is True:
+            readable.add(target.resource_id)
+        elif fast is None:
+            pending_by_type.setdefault(target.resource_type, []).append(target.resource_id)
 
-    return {
-        target.resource_id
-        for target in targets
-        if evaluate_can_read(
-            snapshot,
-            target,
-            grants_by_id.get(target.resource_id, ()),
-            active_grant_department_ids=active_grant_depts,
-        )
-    }
+    # 仅对无法通过角色/管辖部门快速判定的 department 目标执行单条 SQL 授权匹配。
+    for resource_type, pending_ids in pending_by_type.items():
+        unique_pending = tuple(dict.fromkeys(pending_ids))
+        matched_ids = (
+            await session.scalars(
+                select(ResourceVisibilityGrantModel.resource_id)
+                .where(
+                    ResourceVisibilityGrantModel.resource_type == resource_type.value,
+                    ResourceVisibilityGrantModel.resource_id.in_(unique_pending),
+                    _build_grant_match_clause(resolved),
+                )
+                .distinct()
+            )
+        ).all()
+        readable.update(matched_ids)
+    return readable
 
 
 class SqlAlchemyAccessControlRepository(AccessControlRepository):
@@ -505,9 +646,401 @@ class SqlAlchemyAccessControlRepository(AccessControlRepository):
         async with self._session_factory() as session, session.begin():
             await delete_resource_grants_in_session(session, resource_type, resource_id)
 
+    async def filter_readable_targets(
+        self,
+        user_id: str,
+        resource_type: ResourceType,
+        resource_ids: Sequence[str] | None = None,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> tuple[ResourceAccessTarget, ...]:
+        """单 Session 内加载/复用用户权限快照并通过 SQL EXISTS 下推过滤可读目标元数据。"""
+        unique_ids: tuple[str, ...] | None = None
+        if resource_ids is not None:
+            unique_ids = tuple(dict.fromkeys(resource_ids))
+            if not unique_ids:
+                return ()
+        normalized_user_id = user_id.strip()
+        if snapshot is None and not normalized_user_id:
+            return ()
+        if snapshot is not None and not snapshot.is_active:
+            return ()
+
+        async with self._session_factory() as session:
+            resolved = (
+                snapshot
+                if snapshot is not None
+                else await load_user_access_snapshot_in_session(session, normalized_user_id)
+            )
+            if resolved is None or not resolved.is_active:
+                return ()
+            return await self._query_readable_targets_in_session(
+                session,
+                resolved,
+                resource_type,
+                unique_ids,
+            )
+
+    async def can_read_resource(
+        self,
+        user_id: str,
+        resource_type: ResourceType,
+        resource_id: str,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> bool:
+        """单 Session 内加载/复用用户权限快照并通过 SQL EXISTS 实时判定单个资源读权限。"""
+        normalized_user_id = user_id.strip()
+        if snapshot is None and not normalized_user_id:
+            return False
+        if snapshot is not None and not snapshot.is_active:
+            return False
+
+        async with self._session_factory() as session:
+            resolved = (
+                snapshot
+                if snapshot is not None
+                else await load_user_access_snapshot_in_session(session, normalized_user_id)
+            )
+            if resolved is None or not resolved.is_active:
+                return False
+            return await self._exists_readable_resource_in_session(
+                session,
+                resolved,
+                resource_type,
+                resource_id,
+            )
+
+    async def can_read_target(
+        self,
+        user_id: str,
+        target: ResourceAccessTarget,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> bool:
+        """已知资源归属元数据时单 Session（命中快速路径时零 Session）判定读权限。"""
+        normalized_user_id = user_id.strip()
+        if snapshot is None and not normalized_user_id:
+            return False
+        if snapshot is not None:
+            fast = _fast_can_read_target(snapshot, target)
+            if fast is not None:
+                return fast
+            async with self._session_factory() as session:
+                return await _has_matching_grant_in_session(
+                    session,
+                    snapshot,
+                    target.resource_type,
+                    target.resource_id,
+                )
+
+        async with self._session_factory() as session:
+            resolved = await load_user_access_snapshot_in_session(session, normalized_user_id)
+            if resolved is None or not resolved.is_active:
+                return False
+            fast = _fast_can_read_target(resolved, target)
+            if fast is not None:
+                return fast
+            return await _has_matching_grant_in_session(
+                session,
+                resolved,
+                target.resource_type,
+                target.resource_id,
+            )
+
+    async def evaluate_target_access(
+        self,
+        user_id: str,
+        target: ResourceAccessTarget,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> tuple[bool, bool]:
+        """在单次快照与单 Session 内联合返回目标资源的 (可读, 可管) 双判定结果。"""
+        normalized_user_id = user_id.strip()
+        if snapshot is None and not normalized_user_id:
+            return False, False
+        if snapshot is not None:
+            if not snapshot.is_active:
+                return False, False
+            can_manage = evaluate_can_manage(
+                snapshot,
+                target.resource_type,
+                target.visibility_scope,
+                owner_id=target.owner_id,
+                owner_department_id=target.owner_department_id,
+            )
+            fast = _fast_can_read_target(snapshot, target)
+            if fast is not None:
+                return fast, can_manage
+            async with self._session_factory() as session:
+                can_read = await _has_matching_grant_in_session(
+                    session,
+                    snapshot,
+                    target.resource_type,
+                    target.resource_id,
+                )
+            return can_read, can_manage
+
+        async with self._session_factory() as session:
+            resolved = await load_user_access_snapshot_in_session(session, normalized_user_id)
+            if resolved is None or not resolved.is_active:
+                return False, False
+            can_manage = evaluate_can_manage(
+                resolved,
+                target.resource_type,
+                target.visibility_scope,
+                owner_id=target.owner_id,
+                owner_department_id=target.owner_department_id,
+            )
+            fast = _fast_can_read_target(resolved, target)
+            if fast is not None:
+                return fast, can_manage
+            can_read = await _has_matching_grant_in_session(
+                session,
+                resolved,
+                target.resource_type,
+                target.resource_id,
+            )
+            return can_read, can_manage
+
+    @staticmethod
+    async def _query_readable_targets_in_session(
+        session: AsyncSession,
+        snapshot: UserAccessSnapshot,
+        resource_type: ResourceType,
+        unique_ids: tuple[str, ...] | None,
+    ) -> tuple[ResourceAccessTarget, ...]:
+        """在给定会话内按四类资源表差异列名执行 SQL 下推可读过滤。"""
+        if resource_type is ResourceType.KNOWLEDGE_BASE:
+            from adapter.knowledge.model import KnowledgeBaseModel
+
+            kb_stmt = select(
+                KnowledgeBaseModel.id,
+                KnowledgeBaseModel.visibility_scope,
+                KnowledgeBaseModel.owner_id,
+                KnowledgeBaseModel.owner_department_id,
+            ).where(
+                KnowledgeBaseModel.deleted_time.is_(None),
+                build_readable_resource_clause(
+                    snapshot,
+                    ResourceType.KNOWLEDGE_BASE,
+                    id_col=KnowledgeBaseModel.id,
+                    scope_col=KnowledgeBaseModel.visibility_scope,
+                    owner_id_col=KnowledgeBaseModel.owner_id,
+                    owner_department_id_col=KnowledgeBaseModel.owner_department_id,
+                ),
+            )
+            if unique_ids is not None:
+                kb_stmt = kb_stmt.where(KnowledgeBaseModel.id.in_(unique_ids))
+            kb_rows = (await session.execute(kb_stmt)).all()
+            return tuple(
+                ResourceAccessTarget(
+                    resource_type=ResourceType.KNOWLEDGE_BASE,
+                    resource_id=row[0],
+                    visibility_scope=VisibilityScope(row[1]),
+                    owner_id=row[2],
+                    owner_department_id=row[3],
+                )
+                for row in kb_rows
+            )
+
+        if resource_type is ResourceType.SKILL:
+            from adapter.skill.model import SkillModel
+
+            skill_stmt = select(
+                SkillModel.id,
+                SkillModel.scope,
+                SkillModel.owner_id,
+                SkillModel.owner_department_id,
+            ).where(
+                SkillModel.deleted_at.is_(None),
+                build_readable_resource_clause(
+                    snapshot,
+                    ResourceType.SKILL,
+                    id_col=SkillModel.id,
+                    scope_col=SkillModel.scope,
+                    owner_id_col=SkillModel.owner_id,
+                    owner_department_id_col=SkillModel.owner_department_id,
+                ),
+            )
+            if unique_ids is not None:
+                skill_stmt = skill_stmt.where(SkillModel.id.in_(unique_ids))
+            skill_rows = (await session.execute(skill_stmt)).all()
+            return tuple(
+                ResourceAccessTarget(
+                    resource_type=ResourceType.SKILL,
+                    resource_id=row[0],
+                    visibility_scope=VisibilityScope(row[1]),
+                    owner_id=row[2],
+                    owner_department_id=row[3],
+                )
+                for row in skill_rows
+            )
+
+        if resource_type is ResourceType.MCP_SERVER:
+            from adapter.mcp.model import McpServerModel
+
+            mcp_stmt = select(
+                McpServerModel.id,
+                McpServerModel.visibility_scope,
+                McpServerModel.owner_department_id,
+            ).where(
+                McpServerModel.deleted_at.is_(None),
+                build_readable_resource_clause(
+                    snapshot,
+                    ResourceType.MCP_SERVER,
+                    id_col=McpServerModel.id,
+                    scope_col=McpServerModel.visibility_scope,
+                    owner_id_col=None,
+                    owner_department_id_col=McpServerModel.owner_department_id,
+                ),
+            )
+            if unique_ids is not None:
+                mcp_stmt = mcp_stmt.where(McpServerModel.id.in_(unique_ids))
+            mcp_rows = (await session.execute(mcp_stmt)).all()
+            return tuple(
+                ResourceAccessTarget(
+                    resource_type=ResourceType.MCP_SERVER,
+                    resource_id=row[0],
+                    visibility_scope=VisibilityScope(row[1]),
+                    owner_id=None,
+                    owner_department_id=row[2],
+                )
+                for row in mcp_rows
+            )
+
+        if resource_type is ResourceType.SUBAGENT:
+            from adapter.subagent.model import SubagentModel
+
+            subagent_stmt = select(
+                SubagentModel.id,
+                SubagentModel.visibility_scope,
+                SubagentModel.owner_department_id,
+            ).where(
+                SubagentModel.deleted_at.is_(None),
+                build_readable_resource_clause(
+                    snapshot,
+                    ResourceType.SUBAGENT,
+                    id_col=SubagentModel.id,
+                    scope_col=SubagentModel.visibility_scope,
+                    owner_id_col=None,
+                    owner_department_id_col=SubagentModel.owner_department_id,
+                ),
+            )
+            if unique_ids is not None:
+                subagent_stmt = subagent_stmt.where(SubagentModel.id.in_(unique_ids))
+            subagent_rows = (await session.execute(subagent_stmt)).all()
+            return tuple(
+                ResourceAccessTarget(
+                    resource_type=ResourceType.SUBAGENT,
+                    resource_id=row[0],
+                    visibility_scope=VisibilityScope(row[1]),
+                    owner_id=None,
+                    owner_department_id=row[2],
+                )
+                for row in subagent_rows
+            )
+
+        return ()
+
+    @staticmethod
+    async def _exists_readable_resource_in_session(
+        session: AsyncSession,
+        snapshot: UserAccessSnapshot,
+        resource_type: ResourceType,
+        resource_id: str,
+    ) -> bool:
+        """单条 LIMIT 1 存在性查询判定指定资源未删除且对当前用户快照可读。"""
+        if resource_type is ResourceType.KNOWLEDGE_BASE:
+            from adapter.knowledge.model import KnowledgeBaseModel
+
+            found = await session.scalar(
+                select(KnowledgeBaseModel.id)
+                .where(
+                    KnowledgeBaseModel.id == resource_id,
+                    KnowledgeBaseModel.deleted_time.is_(None),
+                    build_readable_resource_clause(
+                        snapshot,
+                        ResourceType.KNOWLEDGE_BASE,
+                        id_col=KnowledgeBaseModel.id,
+                        scope_col=KnowledgeBaseModel.visibility_scope,
+                        owner_id_col=KnowledgeBaseModel.owner_id,
+                        owner_department_id_col=KnowledgeBaseModel.owner_department_id,
+                    ),
+                )
+                .limit(1)
+            )
+            return found is not None
+
+        if resource_type is ResourceType.SKILL:
+            from adapter.skill.model import SkillModel
+
+            found = await session.scalar(
+                select(SkillModel.id)
+                .where(
+                    SkillModel.id == resource_id,
+                    SkillModel.deleted_at.is_(None),
+                    build_readable_resource_clause(
+                        snapshot,
+                        ResourceType.SKILL,
+                        id_col=SkillModel.id,
+                        scope_col=SkillModel.scope,
+                        owner_id_col=SkillModel.owner_id,
+                        owner_department_id_col=SkillModel.owner_department_id,
+                    ),
+                )
+                .limit(1)
+            )
+            return found is not None
+
+        if resource_type is ResourceType.MCP_SERVER:
+            from adapter.mcp.model import McpServerModel
+
+            found = await session.scalar(
+                select(McpServerModel.id)
+                .where(
+                    McpServerModel.id == resource_id,
+                    McpServerModel.deleted_at.is_(None),
+                    build_readable_resource_clause(
+                        snapshot,
+                        ResourceType.MCP_SERVER,
+                        id_col=McpServerModel.id,
+                        scope_col=McpServerModel.visibility_scope,
+                        owner_id_col=None,
+                        owner_department_id_col=McpServerModel.owner_department_id,
+                    ),
+                )
+                .limit(1)
+            )
+            return found is not None
+
+        if resource_type is ResourceType.SUBAGENT:
+            from adapter.subagent.model import SubagentModel
+
+            found = await session.scalar(
+                select(SubagentModel.id)
+                .where(
+                    SubagentModel.id == resource_id,
+                    SubagentModel.deleted_at.is_(None),
+                    build_readable_resource_clause(
+                        snapshot,
+                        ResourceType.SUBAGENT,
+                        id_col=SubagentModel.id,
+                        scope_col=SubagentModel.visibility_scope,
+                        owner_id_col=None,
+                        owner_department_id_col=SubagentModel.owner_department_id,
+                    ),
+                )
+                .limit(1)
+            )
+            return found is not None
+
+        return False
+
 
 __all__ = [
     "SqlAlchemyAccessControlRepository",
+    "build_readable_resource_clause",
     "delete_resource_grants_in_session",
     "filter_readable_targets_in_session",
     "grant_to_domain",

@@ -15,6 +15,7 @@ from domain.skill import RunSkillSnapshot, SafeSkillApprovalProjection
 from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID
 from domain.tool import (
     FormattedToolArgument,
+    PendingToolApproval,
     RuntimeToolSnapshot,
     ToolApprovalDecision,
     ToolCallStatus,
@@ -624,6 +625,18 @@ class PendingSubagentApproval(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
+class RunDetails:
+    """单会话聚合读取的 Run 详情及其待交互、待审批与子任务投影。"""
+
+    run: Run
+    pending_input: RunInputRequest | None
+    pending_approvals: tuple[PendingToolApproval, ...] = ()
+    subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
+    pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
+    pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class BeginSubagentBatchItem:
     """单个待创建子 Run 的冻结配置与初始任务输入。"""
 
@@ -681,6 +694,7 @@ __all__ = [
     "RunCancelledPayload",
     "RunCancelRequestedPayload",
     "RunCompletedPayload",
+    "RunDetails",
     "RunEvent",
     "RunEventPayload",
     "RunFailedPayload",

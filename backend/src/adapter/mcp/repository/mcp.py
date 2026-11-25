@@ -11,8 +11,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access.repository import (
+    build_readable_resource_clause,
     delete_resource_grants_in_session,
     load_grants_map_in_session,
+    load_user_access_snapshot_in_session,
     sync_resource_grants_in_session,
 )
 from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
@@ -23,7 +25,7 @@ from adapter.mcp.converter.mcp import (
 )
 from adapter.mcp.model import McpServerModel, McpToolModel
 from common.ids import now_utc
-from domain.access import ResourceType, VisibilityGrant, VisibilityScope
+from domain.access import ResourceType, UserAccessSnapshot, VisibilityGrant, VisibilityScope
 from domain.auth import AuthContext, UserRole
 from domain.mcp import (
     McpAuthorizationChangedError,
@@ -562,23 +564,65 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     .limit(limit)
                 )
             ).all()
-        return tuple(
-            RuntimeToolDefinition(
-                tool_id=tool.id,
-                model_name=tool.model_name,
-                description=tool.description,
-                input_schema=dict(tool.input_schema_json),
-                source=McpToolSource(
-                    server_id=server.id,
-                    remote_name=tool.remote_name,
-                    config_version=server.config_version,
-                ),
-                requires_approval=tool.requires_approval,
-                display_name=tool.display_name,
-                approval_summary_template=tool.approval_summary_template,
-                parameter_labels=dict(tool.parameter_labels_json or {}),
-            )
-            for tool, server in rows
+        return tuple(self._runtime_tool_projection(tool, server) for tool, server in rows)
+
+    async def list_readable_runtime_tools(
+        self,
+        snapshot: UserAccessSnapshot | None,
+        *,
+        limit: int = 201,
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        """单 Session 以 SQL EXISTS 下推读取当前用户快照可读的已启用运行时 MCP 工具。
+
+        同时修复先 LIMIT 201 再内存过滤导致未授权部门 MCP 占用有效工具额度的问题。
+        """
+        if not 1 <= limit <= 201:
+            raise ValueError("mcp_runtime_tool_limit_invalid")
+        if snapshot is None or not snapshot.is_active:
+            return ()
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(McpToolModel, McpServerModel)
+                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                    .where(
+                        McpServerModel.deleted_at.is_(None),
+                        McpServerModel.enabled.is_(True),
+                        build_readable_resource_clause(
+                            snapshot,
+                            ResourceType.MCP_SERVER,
+                            id_col=McpServerModel.id,
+                            scope_col=McpServerModel.visibility_scope,
+                            owner_id_col=None,
+                            owner_department_id_col=McpServerModel.owner_department_id,
+                        ),
+                    )
+                    .order_by(McpToolModel.server_id, McpToolModel.model_name)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(self._runtime_tool_projection(tool, server) for tool, server in rows)
+
+    @staticmethod
+    def _runtime_tool_projection(
+        tool: McpToolModel,
+        server: McpServerModel,
+    ) -> RuntimeToolDefinition:
+        """将 ORM 联表行投影为运行时工具定义，保持与全量读取一致。"""
+        return RuntimeToolDefinition(
+            tool_id=tool.id,
+            model_name=tool.model_name,
+            description=tool.description,
+            input_schema=dict(tool.input_schema_json),
+            source=McpToolSource(
+                server_id=server.id,
+                remote_name=tool.remote_name,
+                config_version=server.config_version,
+            ),
+            requires_approval=tool.requires_approval,
+            display_name=tool.display_name,
+            approval_summary_template=tool.approval_summary_template,
+            parameter_labels=dict(tool.parameter_labels_json or {}),
         )
 
     async def get_call_target(
@@ -653,6 +697,71 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             ),
             total=total,
         )
+
+    async def list_readable_public(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> ToolPage[PublicToolDefinition]:
+        """单 Session 加载/复用用户权限快照并以 SQL EXISTS 下推读取可读且已启用工具分页。"""
+        if offset < 0 or not 1 <= limit <= 100:
+            raise ValueError("mcp_page_invalid")
+        normalized_user_id = user_id.strip()
+        if snapshot is None and not normalized_user_id:
+            return ToolPage(items=(), total=0)
+        if snapshot is not None and not snapshot.is_active:
+            return ToolPage(items=(), total=0)
+        async with self._session_factory() as session:
+            resolved = (
+                snapshot
+                if snapshot is not None
+                else await load_user_access_snapshot_in_session(session, normalized_user_id)
+            )
+            if resolved is None or not resolved.is_active:
+                return ToolPage(items=(), total=0)
+            readable_clause = build_readable_resource_clause(
+                resolved,
+                ResourceType.MCP_SERVER,
+                id_col=McpServerModel.id,
+                scope_col=McpServerModel.visibility_scope,
+                owner_id_col=None,
+                owner_department_id_col=McpServerModel.owner_department_id,
+            )
+            total = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(McpToolModel)
+                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                    .where(
+                        McpServerModel.deleted_at.is_(None),
+                        McpServerModel.enabled.is_(True),
+                        readable_clause,
+                    )
+                )
+                or 0
+            )
+            if total == 0:
+                return ToolPage(items=(), total=0)
+            rows = list(
+                (
+                    await session.scalars(
+                        select(McpToolModel)
+                        .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                        .where(
+                            McpServerModel.deleted_at.is_(None),
+                            McpServerModel.enabled.is_(True),
+                            readable_clause,
+                        )
+                        .order_by(McpToolModel.model_name)
+                        .offset(offset)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        return ToolPage(items=tuple(tool_to_public(row) for row in rows), total=total)
 
     async def list_public(
         self,

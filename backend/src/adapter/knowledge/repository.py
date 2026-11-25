@@ -13,8 +13,10 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql import Select
 
 from adapter.access.repository import (
+    build_readable_resource_clause,
     delete_resource_grants_in_session,
     load_grants_map_in_session,
+    load_user_access_snapshot_in_session,
     sync_resource_grants_in_session,
 )
 from adapter.auth.model import UserModel
@@ -32,7 +34,13 @@ from adapter.knowledge.model import (
 )
 from adapter.project.model import ProjectModel
 from common.ids import new_id
-from domain.access import ResourceType, VisibilityGrant, VisibilityGrantInput, VisibilityScope
+from domain.access import (
+    ResourceType,
+    UserAccessSnapshot,
+    VisibilityGrant,
+    VisibilityGrantInput,
+    VisibilityScope,
+)
 from domain.knowledge.model import (
     MAX_PROJECT_KNOWLEDGE_BASES,
     ChunkLocator,
@@ -1117,6 +1125,62 @@ class KnowledgeRepository:
                     .limit(limit)
                 )
             )
+            grants_map = await load_grants_map_in_session(
+                session, ResourceType.KNOWLEDGE_BASE, [row.id for row in rows]
+            )
+            return [_base(item, grants=grants_map.get(item.id, ())) for item in rows]
+
+    async def list_readable_bases(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> list[KnowledgeBase]:
+        """单 Session 加载/复用用户权限快照并以 SQL EXISTS 下推过滤、排序与分页知识库。"""
+        normalized_user_id = user_id.strip()
+        if snapshot is None and not normalized_user_id:
+            return []
+        if snapshot is not None and not snapshot.is_active:
+            return []
+        async with self._sessions() as session:
+            resolved = (
+                snapshot
+                if snapshot is not None
+                else await load_user_access_snapshot_in_session(session, normalized_user_id)
+            )
+            if resolved is None or not resolved.is_active:
+                return []
+            conditions: list[ColumnElement[bool]] = [
+                KnowledgeBaseModel.deleted_time.is_(None),
+                build_readable_resource_clause(
+                    resolved,
+                    ResourceType.KNOWLEDGE_BASE,
+                    id_col=KnowledgeBaseModel.id,
+                    scope_col=KnowledgeBaseModel.visibility_scope,
+                    owner_id_col=KnowledgeBaseModel.owner_id,
+                    owner_department_id_col=KnowledgeBaseModel.owner_department_id,
+                ),
+            ]
+            if visibility_scope is not None:
+                conditions.append(KnowledgeBaseModel.visibility_scope == visibility_scope.value)
+            if owner_department_id is not None:
+                conditions.append(KnowledgeBaseModel.owner_department_id == owner_department_id)
+            rows = list(
+                await session.scalars(
+                    select(KnowledgeBaseModel)
+                    .where(*conditions)
+                    .order_by(KnowledgeBaseModel.updated_at.desc(), KnowledgeBaseModel.id.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+            )
+            if not rows:
+                return []
+            # 仅对当前分页命中的知识库加载可见性授权，避免全表加载 grants。
             grants_map = await load_grants_map_in_session(
                 session, ResourceType.KNOWLEDGE_BASE, [row.id for row in rows]
             )

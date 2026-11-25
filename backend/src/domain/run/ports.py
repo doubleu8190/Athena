@@ -19,6 +19,7 @@ from domain.run.model import (
     RecordRunUsageCommand,
     RequestRunInputCommand,
     Run,
+    RunDetails,
     RunEvent,
     RunEventPayload,
     RunInputCall,
@@ -186,6 +187,10 @@ class RunRepository(Protocol):
     async def get(self, session_id: str, owner_id: str, run_id: str) -> Run | None:
         """读取 owner 可见的 Run。"""
 
+    async def get_details(self, session_id: str, owner_id: str, run_id: str) -> RunDetails | None:
+        """单会话聚合读取 owner 可见 Run 及其待回答输入、待审批与子任务投影。"""
+        ...
+
     async def get_lease_state(
         self, session_id: str, owner_id: str, run_id: str
     ) -> RunLeaseState | None:
@@ -214,6 +219,19 @@ class RunRepository(Protocol):
         through_sequence: int | None = None,
     ) -> tuple[RunEvent, ...]:
         """按 Run 内序号读取状态事件，可限制在固定快照游标内。"""
+        ...
+
+    async def list_visible_events(
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+        through_sequence: int | None = None,
+    ) -> tuple[RunEvent, ...] | None:
+        """单会话内校验 Run 可见性并分页读取状态事件，不可见时返回 None。"""
         ...
 
     async def get_pending_input(

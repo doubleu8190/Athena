@@ -131,6 +131,9 @@ logger = logging.getLogger(__name__)
 MAX_MODEL_ATTEMPTS = 3
 CONTEXT_SAFETY_NUMERATOR = 9
 CONTEXT_SAFETY_DENOMINATOR = 10
+# TextDelta 帧级合批阈值：首包快推后，后续分片按字节上限或时间窗合批推送至 Redis。
+_TEXT_DELTA_BATCH_BYTES = 256
+_TEXT_DELTA_BATCH_SECONDS = 0.04
 
 
 class _UseFinalAnswerSlot(Exception):
@@ -768,6 +771,24 @@ class RunExecutor:
             for item in definitions
         )
 
+    async def _publish_text_batch(self, state: _ExecutionState, pending_parts: list[str]) -> None:
+        """先清空合批缓冲再尽力推送文本增量；推送失败只记告警，不中断模型调用。"""
+        if not pending_parts:
+            return
+        batched_text = "".join(pending_parts)
+        pending_parts.clear()
+        if self._publisher is None:
+            return
+        try:
+            await self._publisher.publish_text(
+                state.run.id,
+                state.run.execution_epoch,
+                batched_text,
+                round=state.round,
+            )
+        except Exception:
+            logger.warning("run_progress_publish_failed run_id=%s", state.run.id)
+
     async def _complete_with_retry(
         self,
         state: _ExecutionState,
@@ -791,45 +812,102 @@ class RunExecutor:
             response: LlmResponse | None = None
             # 是否已向客户端产生可见输出；一旦有输出就不能安全重试。
             emitted_output = False
+            # 单次 attempt 内的同步合批缓冲：无需额外后台定时任务，避免乱序与并发竞态。
+            pending_parts: list[str] = []
+            pending_bytes = 0
+            batch_started_at = 0.0
+            first_text_published = False
             provider_error: LlmProviderError | None = None
             fatal_error: Exception | None = None
             cancelled = False
             usage = None
             started = time.monotonic()
+
             try:
                 async with self._provider.stream(attempt_runtime, request) as events:
                     async for event in events:
-                        # 文本增量尽力实时推送；推送失败只影响实时性，不中断模型调用。
+                        # 文本增量收到即置位 emitted_output（严守已吐字禁重试契约）；
+                        # 本次 attempt 首条非空增量立即快推保证 TTFT 零额外延迟，后续增量合批推送。
                         if isinstance(event, TextDelta):
                             emitted_output = True
-                            if self._publisher is not None:
-                                try:
-                                    await self._publisher.publish_text(
-                                        run.id,
-                                        run.execution_epoch,
-                                        event.text,
-                                        round=state.round,
+                            if self._publisher is not None and event.text:
+                                if not first_text_published:
+                                    first_text_published = True
+                                    pending_parts.append(event.text)
+                                    pending_bytes = 0
+                                    batch_started_at = 0.0
+                                    await self._publish_text_batch(state, pending_parts)
+                                else:
+                                    now_monotonic = time.monotonic()
+                                    if not pending_parts:
+                                        batch_started_at = now_monotonic
+                                    pending_parts.append(event.text)
+                                    pending_bytes += (
+                                        len(event.text)
+                                        if event.text.isascii()
+                                        else len(event.text.encode("utf-8"))
                                     )
-                                except Exception:
-                                    logger.warning("run_progress_publish_failed run_id=%s", run.id)
-                        # 工具调用分片同样视为已产生输出，禁止后续重试。
+                                    if (
+                                        pending_bytes >= _TEXT_DELTA_BATCH_BYTES
+                                        or (now_monotonic - batch_started_at)
+                                        >= _TEXT_DELTA_BATCH_SECONDS
+                                    ):
+                                        pending_bytes = 0
+                                        batch_started_at = 0.0
+                                        await self._publish_text_batch(state, pending_parts)
+                        # 工具调用分片同样视为已产生输出，禁止后续重试；切出文本流前先强制 flush。
                         elif isinstance(
                             event, (ToolCallStarted, ToolArgumentsDelta, ToolCallCompleted)
                         ):
                             emitted_output = True
-                        # 只有完整的 ResponseCompleted 才代表本次调用成功。
+                            if pending_parts:
+                                pending_bytes = 0
+                                batch_started_at = 0.0
+                                await self._publish_text_batch(state, pending_parts)
+                        # 只有完整的 ResponseCompleted 才代表调用成功；进入完成态前强制 flush。
                         elif isinstance(event, ResponseCompleted):
+                            if pending_parts:
+                                pending_bytes = 0
+                                batch_started_at = 0.0
+                                await self._publish_text_batch(state, pending_parts)
                             response = event.response
                             usage = response.usage
+                        elif pending_parts:
+                            pending_bytes = 0
+                            batch_started_at = 0.0
+                            await self._publish_text_batch(state, pending_parts)
+                    # 流循环正常结束后冲刷尾部残留分片，避免漏推最后一批短文本。
+                    if pending_parts:
+                        pending_bytes = 0
+                        batch_started_at = 0.0
+                        await self._publish_text_batch(state, pending_parts)
                 if response is None:
                     raise LlmError("llm_incomplete")
             except asyncio.CancelledError:
+                # 取消/超时路径跳过 flush，避免 Redis 1.0s 超时拖慢取消收尾或吞掉 CancelledError。
                 cancelled = True
                 raise
             except LlmProviderError as error:
                 provider_error = error
+                # 非取消异常在返回重试/失败分支前强制 flush 已到达的文本分片。
+                if pending_parts:
+                    pending_bytes = 0
+                    batch_started_at = 0.0
+                    try:
+                        await self._publish_text_batch(state, pending_parts)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        raise
             except Exception as error:
                 fatal_error = error
+                if pending_parts:
+                    pending_bytes = 0
+                    batch_started_at = 0.0
+                    try:
+                        await self._publish_text_batch(state, pending_parts)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        raise
             finally:
                 # 无论成功、失败还是取消，都记录本次尝试的用量与耗时。
                 elapsed = max(0, int((time.monotonic() - started) * 1000))

@@ -349,7 +349,7 @@ def build_run_router(
             if authenticator is None or token is None:
                 raise HTTPException(status_code=401, detail="not_authenticated")
 
-            async def body() -> AsyncIterator[str]:
+            async def body() -> AsyncIterator[bytes]:
                 async for event in stream_service.events(
                     session_id,
                     current_auth.user.id,
@@ -363,12 +363,13 @@ def build_run_router(
                         if event.type == "snapshot"
                         else MAX_RUN_SSE_EVENT_BYTES
                     )
-                    wire_event = (
+                    # 单次 UTF-8 编码同时完成字节上限校验与响应体输出，消除 Starlette 二次编码开销。
+                    wire_bytes = (
                         f"event: {event.type}\nid: {event.stream_sequence}\ndata: {data}\n\n"
-                    )
-                    if len(wire_event.encode("utf-8")) > max_bytes:
+                    ).encode()
+                    if len(wire_bytes) > max_bytes:
                         raise RuntimeError("run_stream_event_exceeds_size_limit")
-                    yield wire_event
+                    yield wire_bytes
 
             return _RunEventSourceResponse(
                 body(),

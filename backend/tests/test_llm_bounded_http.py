@@ -272,3 +272,73 @@ def test_caused_by_response_limit_walks_cause_and_context_without_cycles() -> No
     second.__context__ = first
     assert caused_by_response_limit(first) is False
     assert caused_by_response_limit(limit_error) is True
+
+
+def test_scan_sse_matches_reference_byte_state_machine_across_mixed_endings_and_splits() -> None:
+    """C 层 bytes.find 扫描与原逐字节状态机在混合行尾、空分片及边界上限下位级等价。"""
+
+    def reference_scan(chunks: Sequence[bytes], event_limit: int) -> tuple[bool, int, int, bool]:
+        event_bytes = 0
+        line_bytes = 0
+        pending_cr = False
+        for chunk in chunks:
+            for byte in chunk:
+                event_bytes += 1
+                if event_bytes > event_limit:
+                    return (True, event_bytes, line_bytes, pending_cr)
+                if pending_cr:
+                    pending_cr = False
+                    if byte == 0x0A:
+                        continue
+                if byte == 0x0D:
+                    if line_bytes == 0:
+                        event_bytes = 0
+                    line_bytes = 0
+                    pending_cr = True
+                elif byte == 0x0A:
+                    if line_bytes == 0:
+                        event_bytes = 0
+                    line_bytes = 0
+                else:
+                    line_bytes += 1
+        return (False, event_bytes, line_bytes, pending_cr)
+
+    payloads = [
+        b"data: hello\n\ndata: world\n\n",
+        b"data: a\r\n\r\ndata: b\r\n\r\n",
+        b"data: a\r\rdata: b\r\r",
+        b"data: a\r\n\ndata: b\n\r\n",
+        b"\r\n\r\n\r\r\n\n",
+        b"event: delta\ndata: 123\r\ndata: 456\r\r\ndata: end\n\n",
+        b"abcdef",
+    ]
+    for payload in payloads:
+        for event_limit in (1, 5, 9, 10, 11, 12, 16, 32, len(payload)):
+            # 1) 整块输入
+            chunk_sets: list[list[bytes]] = [
+                [payload],
+                # 2) 含空分片的逐字节切分
+                [item for b in payload for item in (b"", bytes([b]))] + [b""],
+            ]
+            # 3) 全部单点二分切分
+            for split in range(1, len(payload)):
+                chunk_sets.append([payload[:split], payload[split:]])
+            for chunks in chunk_sets:
+                ref_raised, ref_eb, ref_lb, ref_cr = reference_scan(chunks, event_limit)
+                stream = BoundedResponseStream(
+                    _TrackedStream(chunks),
+                    max(len(payload) + 1, 1),
+                    True,
+                    event_limit=event_limit,
+                )
+                raised = False
+                try:
+                    for piece in chunks:
+                        stream._scan_sse(piece)
+                except ResponseLimitError:
+                    raised = True
+                assert raised is ref_raised, (payload, event_limit, chunks)
+                if not raised:
+                    assert stream._event_bytes == ref_eb, (payload, event_limit, chunks)
+                    assert stream._line_bytes == ref_lb, (payload, event_limit, chunks)
+                    assert stream._pending_cr == ref_cr, (payload, event_limit, chunks)

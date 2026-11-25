@@ -10,6 +10,12 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from adapter.access.repository import (
+    build_readable_resource_clause,
+    load_user_access_snapshot_in_session,
+)
+from adapter.file.model import SessionFileModel
+from adapter.knowledge.model import KnowledgeBaseModel
 from adapter.llm.model.profile import (
     ModelProfileVersionModel,
 )
@@ -17,10 +23,12 @@ from adapter.message.converter.message import conversation_to_domain, execution_
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.project.model import ProjectModel
 from adapter.run.converter import (
+    event_to_domain,
     input_request_to_domain,
     run_to_domain,
 )
 from adapter.run.model import (
+    RunEventModel,
     RunInputRequestModel,
     RunModel,
     RunToolCallModel,
@@ -31,6 +39,8 @@ from adapter.skill.repository import build_run_skill_snapshot
 from adapter.subagent.model import SubagentModel
 from adapter.system_prompt.repository import current_system_prompts
 from common.ids import new_id, now_utc
+from domain.access import ResourceType, UserAccessSnapshot
+from domain.auth import UserRole
 from domain.message import (
     ConversationMessageDraft,
     ConversationRole,
@@ -50,11 +60,15 @@ from domain.run.model import (
     FailRunCommand,
     FinishRunCommand,
     InputRequestStatus,
+    PendingSubagentApproval,
+    PendingSubagentInput,
     RequestRunInputCommand,
     Run,
     RunCancelledPayload,
     RunCancelRequestedPayload,
     RunCompletedPayload,
+    RunDetails,
+    RunEvent,
     RunEventPayload,
     RunFailedPayload,
     RunInputCall,
@@ -71,21 +85,26 @@ from domain.run.model import (
     RunUsage,
     RunWaitingForSubagentsPayload,
     RunWaitingPayload,
+    SubagentTaskSummary,
     SubmitRunCommand,
     SubmitRunResult,
 )
 from domain.run.model.errors import (
     RunConflictError,
+    RunInputResourceError,
+    RunKnowledgeBaseNotFoundError,
     RunNotFoundError,
     RunStateError,
     ToolRetryConfirmationRequiredError,
 )
 from domain.skill import (
     RunSkillSnapshot,
+    SafeSkillApprovalProjection,
 )
 from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID
 from domain.tool import (
     InitializeRunToolsCommand,
+    PendingToolApproval,
     ReserveLlmRequestCommand,
     RuntimeToolSnapshot,
     ToolCallStatus,
@@ -144,11 +163,15 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                                     if isinstance(item, str) and item.strip()
                                 )
                             )
+                    # 同事务内仅加载 1 次用户权限快照，供技能快照与显式知识库校验复用，
+                    # 避免单次提交重复扫描用户部门树。
+                    access_snapshot = await self._load_tx_access_snapshot(session, owner_id)
                     skill_snapshot = await build_run_skill_snapshot(
                         session,
                         command.selected_skill_ids,
                         owner_id=owner_id,
                         fallback_selected_skill_ids=project_default_skill_ids,
+                        snapshot=access_snapshot,
                     )
                     input_file_ids = await self._validate_and_merge_input_file_ids(
                         session,
@@ -161,6 +184,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         session,
                         owner_id,
                         command.knowledge_base_ids,
+                        snapshot=access_snapshot,
                     )
                     if (
                         command.message.session_id != session_id
@@ -1179,10 +1203,13 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                             source.skill_snapshot
                         ).selected_skill_ids
                     )
+                    # 同事务内仅加载 1 次用户权限快照，复用于技能快照构建与显式知识库复核。
+                    access_snapshot = await self._load_tx_access_snapshot(session, owner_id)
                     skill_snapshot = await build_run_skill_snapshot(
                         session,
                         selected_skill_ids,
                         owner_id=owner_id,
+                        snapshot=access_snapshot,
                     )
                     input_file_ids = await self._validate_and_merge_input_file_ids(
                         session,
@@ -1199,6 +1226,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         None
                         if source.knowledge_base_ids is None
                         else tuple(source.knowledge_base_ids),
+                        snapshot=access_snapshot,
                     )
                     created_at = await self._next_run_created_at(session, session_id)
                     row = RunModel(
@@ -1279,6 +1307,68 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
             execution_epoch=int(row.execution_epoch),
         )
 
+    @staticmethod
+    async def _load_tx_access_snapshot(
+        session: AsyncSession,
+        owner_id: str,
+    ) -> UserAccessSnapshot:
+        """在提交/重试写事务内加载一次权限快照；用户缺失时返回非活跃占位快照避免重复查库。"""
+        snapshot = await load_user_access_snapshot_in_session(session, owner_id)
+        if snapshot is not None:
+            return snapshot
+        return UserAccessSnapshot(
+            user_id=owner_id,
+            role=UserRole.MEMBER,
+            is_active=False,
+            direct_department_ids=frozenset(),
+            ancestor_department_ids=frozenset(),
+            managed_department_ids=frozenset(),
+            subtree_managed_department_ids=frozenset(),
+        )
+
+    async def _validate_explicit_knowledge_base_ids(
+        self,
+        session: AsyncSession,
+        owner_id: str,
+        knowledge_base_ids: tuple[str, ...] | None,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> list[str] | None:
+        """在同事务内复用用户权限快照并通过 SQL EXISTS 校验显式知识库存在与可读性。"""
+        if knowledge_base_ids is None:
+            return None
+        ordered_ids = tuple(dict.fromkeys(knowledge_base_ids))
+        if len(ordered_ids) > 20:
+            raise RunInputResourceError("run_knowledge_base_ids_invalid")
+        if not ordered_ids:
+            return []
+        resolved = (
+            snapshot
+            if snapshot is not None
+            else await load_user_access_snapshot_in_session(session, owner_id)
+        )
+        if resolved is None or not resolved.is_active:
+            raise RunKnowledgeBaseNotFoundError("knowledge_base_not_found")
+        readable_rows = (
+            await session.scalars(
+                select(KnowledgeBaseModel.id).where(
+                    KnowledgeBaseModel.id.in_(ordered_ids),
+                    KnowledgeBaseModel.deleted_time.is_(None),
+                    build_readable_resource_clause(
+                        resolved,
+                        ResourceType.KNOWLEDGE_BASE,
+                        id_col=KnowledgeBaseModel.id,
+                        scope_col=KnowledgeBaseModel.visibility_scope,
+                        owner_id_col=KnowledgeBaseModel.owner_id,
+                        owner_department_id_col=KnowledgeBaseModel.owner_department_id,
+                    ),
+                )
+            )
+        ).all()
+        if set(readable_rows) != set(ordered_ids):
+            raise RunKnowledgeBaseNotFoundError("knowledge_base_not_found")
+        return list(ordered_ids)
+
     async def get(self, session_id: str, owner_id: str, run_id: str) -> Run | None:
         """通过未删除 Session 作用域读取 Run，并附带已关联的问答记录。"""
         async with self._session_factory() as session:
@@ -1298,11 +1388,121 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
             interactions = await self._load_input_interactions_in_session(session, row.id)
         return replace(run_to_domain(row), input_interactions=interactions)
 
-    @staticmethod
+    async def get_details(self, session_id: str, owner_id: str, run_id: str) -> RunDetails | None:
+        """在单数据库会话内聚合读取 Run 详情、待回答输入、待审批调用与子任务投影。
+
+        将原 RunService.get() 的 6 次串行会话合并为 1 个只读会话：
+        - 仅复查 1 次 RunModel JOIN SessionModel 可见性；
+        - 复用 _load_input_interactions_and_pending_in_session 顺带提取 pending_input；
+        - depth == 0 时一次拉取子 Run 列表，无子任务时跳过全部子任务输入/审批查询，
+          有子任务时仅加载 1 次初始任务摘要元数据，消除 3 次重复查询；
+        - depth >= 1 仍完整保留 input_interactions 供子任务详情页回看。
+        """
+        async with self._session_factory() as session:
+            row = await session.scalar(
+                select(RunModel)
+                .join(SessionModel, SessionModel.id == RunModel.session_id)
+                .where(
+                    RunModel.id == run_id,
+                    RunModel.session_id == session_id,
+                    RunModel.owner_id == owner_id,
+                    SessionModel.owner_id == owner_id,
+                    SessionModel.deleted_time.is_(None),
+                )
+            )
+            if row is None:
+                return None
+
+            (
+                interactions,
+                pending_input,
+            ) = await self._load_input_interactions_and_pending_in_session(session, row.id)
+            run = replace(run_to_domain(row), input_interactions=interactions)
+            pending_approvals = await self._load_pending_approvals_in_session(
+                session,
+                row,
+                session_id,
+            )
+
+            subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
+            pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
+            pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
+            if row.depth == 0:
+                (
+                    subagent_tasks,
+                    pending_subagent_inputs,
+                    pending_subagent_approvals,
+                ) = await self._load_subagent_details_in_session(session, session_id, row.id)
+
+        return RunDetails(
+            run=run,
+            pending_input=pending_input,
+            pending_approvals=pending_approvals,
+            subagent_tasks=subagent_tasks,
+            pending_subagent_inputs=pending_subagent_inputs,
+            pending_subagent_approvals=pending_subagent_approvals,
+        )
+
+    async def list_visible_events(
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+        through_sequence: int | None = None,
+    ) -> tuple[RunEvent, ...] | None:
+        """在单数据库会话内合并 Run 可见性校验与事件分页读取，不可见时返回 None。"""
+        async with self._session_factory() as session:
+            visible = await session.scalar(
+                select(RunModel.id)
+                .join(SessionModel, SessionModel.id == RunModel.session_id)
+                .where(
+                    RunModel.id == run_id,
+                    RunModel.session_id == session_id,
+                    RunModel.owner_id == owner_id,
+                    SessionModel.owner_id == owner_id,
+                    SessionModel.deleted_time.is_(None),
+                )
+            )
+            if visible is None:
+                return None
+            rows = (
+                await session.scalars(
+                    select(RunEventModel)
+                    .where(
+                        RunEventModel.run_id == run_id,
+                        RunEventModel.session_id == session_id,
+                        RunEventModel.sequence > after_sequence,
+                        *(
+                            (RunEventModel.sequence <= through_sequence,)
+                            if through_sequence is not None
+                            else ()
+                        ),
+                    )
+                    .order_by(RunEventModel.sequence)
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(event_to_domain(row) for row in rows)
+
+    @classmethod
     async def _load_input_interactions_in_session(
-        session: AsyncSession, run_id: str
+        cls,
+        session: AsyncSession,
+        run_id: str,
     ) -> tuple[RunInputInteraction, ...]:
         """读取该 Run 的提问与回答摘要，供子任务详情页回看。"""
+        interactions, _ = await cls._load_input_interactions_and_pending_in_session(session, run_id)
+        return interactions
+
+    @staticmethod
+    async def _load_input_interactions_and_pending_in_session(
+        session: AsyncSession,
+        run_id: str,
+    ) -> tuple[tuple[RunInputInteraction, ...], RunInputRequest | None]:
+        """单次查询同步提取 Run 的历史问答记录与当前 pending 输入请求，省去二次查表。"""
         question_msg = aliased(ConversationMessageModel)
         answer_msg = aliased(ConversationMessageModel)
         rows = (
@@ -1321,7 +1521,10 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
             )
         ).all()
         items: list[RunInputInteraction] = []
+        pending_input: RunInputRequest | None = None
         for req, q_row, a_row in rows:
+            if pending_input is None and req.status == InputRequestStatus.PENDING.value:
+                pending_input = input_request_to_domain(req)
             q_text = "".join(
                 part.text
                 for part in conversation_to_domain(q_row).parts
@@ -1346,7 +1549,292 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     answered_at=req.answered_at,
                 )
             )
-        return tuple(items)
+        return tuple(items), pending_input
+
+    async def _load_pending_approvals_in_session(
+        self,
+        session: AsyncSession,
+        run_row: RunModel,
+        session_id: str,
+    ) -> tuple[PendingToolApproval, ...]:
+        """在当前只读会话内加载主/子 Run 的待人工审批工具调用及展示摘要。"""
+        rows = (
+            await session.scalars(
+                select(RunToolCallModel)
+                .where(
+                    RunToolCallModel.run_id == run_row.id,
+                    RunToolCallModel.session_id == session_id,
+                    RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
+                )
+                .order_by(RunToolCallModel.ordinal)
+            )
+        ).all()
+        if not rows:
+            return ()
+        skill_projections: list[SafeSkillApprovalProjection | None] = []
+        for row in rows:
+            if row.requested_at is None:
+                raise RuntimeError("run_tool_call_requested_at_missing")
+            skill_projections.append(
+                await self._refresh_safe_skill_projection_in_session(session, row)
+            )
+        enriched = await self._enrich_pending_approvals_in_session(
+            session,
+            [
+                (row, run_row, skill_proj)
+                for row, skill_proj in zip(rows, skill_projections, strict=True)
+            ],
+        )
+        pending: list[PendingToolApproval] = []
+        for row, skill_proj, (display_name, approval_summary, formatted_arguments) in zip(
+            rows, skill_projections, enriched, strict=True
+        ):
+            assert row.requested_at is not None
+            pending.append(
+                PendingToolApproval(
+                    call_id=row.id,
+                    batch_message_id=row.call_message_id,
+                    ordinal=row.ordinal,
+                    model_name=row.model_name,
+                    tool_kind=(None if row.tool_kind is None else ToolKind(row.tool_kind)),
+                    requested_at=row.requested_at,
+                    safe_skill_projection=skill_proj,
+                    display_name=display_name,
+                    approval_summary=approval_summary,
+                    formatted_arguments=formatted_arguments,
+                )
+            )
+        return tuple(pending)
+
+    @staticmethod
+    async def _refresh_safe_skill_projection_in_session(
+        session: AsyncSession,
+        row: RunToolCallModel,
+    ) -> SafeSkillApprovalProjection | None:
+        """按冻结摘要复核 Skill 审批输入文件存在性，语义与 tool_calls 仓储保持一致。"""
+        if row.safe_skill_projection is None:
+            return None
+        projection = SafeSkillApprovalProjection.model_validate(row.safe_skill_projection)
+        if not projection.input_files:
+            return projection
+        file_ids = tuple(item.file_id for item in projection.input_files)
+        visible_ids = set(
+            (
+                await session.scalars(
+                    select(SessionFileModel.id).where(
+                        SessionFileModel.session_id == row.session_id,
+                        SessionFileModel.id.in_(file_ids),
+                    )
+                )
+            ).all()
+        )
+        files = tuple(
+            item.model_copy(update={"available": item.file_id in visible_ids})
+            for item in projection.input_files
+        )
+        all_available = all(item.available for item in files)
+        return projection.model_copy(
+            update={
+                "input_files": files,
+                "can_approve": projection.can_approve and all_available,
+                "unavailable_reason": (
+                    projection.unavailable_reason
+                    if all_available
+                    else "skill_approval_input_unavailable"
+                ),
+            }
+        )
+
+    @staticmethod
+    def _extract_subagent_task_summary(raw_text: str) -> str:
+        """从子 Run 初始任务文本提取精简摘要，去除模板前缀并截断至 120 字符内。"""
+        text = raw_text.strip()
+        if not text:
+            return ""
+        if text.startswith("任务：\n"):
+            text = text[len("任务：\n") :]
+        elif text.startswith("任务："):
+            text = text[len("任务：") :]
+        marker = "\n\n补充上下文："
+        if marker in text:
+            head, _ = text.split(marker, 1)
+            if head.strip():
+                text = head
+        normalized = " ".join(text.split())
+        if len(normalized) <= 120:
+            return normalized
+        return normalized[:119] + "…"
+
+    async def _load_subagent_details_in_session(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        parent_run_id: str,
+    ) -> tuple[
+        tuple[SubagentTaskSummary, ...],
+        tuple[PendingSubagentInput, ...],
+        tuple[PendingSubagentApproval, ...],
+    ]:
+        """在当前只读会话内一次加载主 Run 的子任务摘要、待回答澄清与待审批调用。"""
+        sub_rows = (
+            await session.scalars(
+                select(RunModel)
+                .where(
+                    RunModel.session_id == session_id,
+                    RunModel.parent_run_id == parent_run_id,
+                )
+                .order_by(RunModel.created_at, RunModel.id)
+            )
+        ).all()
+        # 无子任务时直接短路返回，省去元数据、澄清与审批三类查询。
+        if not sub_rows:
+            return (), (), ()
+
+        sub_ids = tuple(sub.id for sub in sub_rows)
+        sub_by_id = {sub.id: sub for sub in sub_rows}
+        task_index_by_id = {sub.id: idx for idx, sub in enumerate(sub_rows, start=1)}
+
+        # 仅加载 1 次各子 Run 的首条 user 执行消息以提取任务摘要，供三个视图共享。
+        exec_rows = (
+            await session.scalars(
+                select(ExecutionMessageModel)
+                .where(
+                    ExecutionMessageModel.session_id == session_id,
+                    ExecutionMessageModel.run_id.in_(sub_ids),
+                    ExecutionMessageModel.role == ExecutionRole.USER.value,
+                )
+                .order_by(ExecutionMessageModel.sequence, ExecutionMessageModel.id)
+            )
+        ).all()
+        task_summary_by_id: dict[str, str] = {}
+        for exec_row in exec_rows:
+            if exec_row.run_id in task_summary_by_id:
+                continue
+            domain_exec = execution_to_domain(exec_row)
+            raw_text = "".join(
+                part.text for part in domain_exec.parts if isinstance(part, TextPart)
+            )
+            task_summary_by_id[exec_row.run_id] = self._extract_subagent_task_summary(raw_text)
+
+        subagent_tasks = tuple(
+            SubagentTaskSummary(
+                sub_run_id=sub.id,
+                parent_tool_call_id=sub.parent_tool_call_id or "",
+                subagent_profile_id=sub.subagent_profile_id,
+                subagent_slug=sub.subagent_slug or "",
+                subagent_name=sub.subagent_name or "",
+                task_index=task_index_by_id[sub.id],
+                task_summary=task_summary_by_id.get(sub.id, ""),
+                status=RunStatus(sub.status),
+                safe_error_code=sub.safe_error_code,
+                created_at=sub.created_at,
+                first_started_at=sub.first_started_at,
+                finished_at=sub.finished_at,
+            )
+            for sub in sub_rows
+        )
+
+        # 仅当存在处于 waiting_for_input 的子任务时才查询待回答澄清请求。
+        waiting_input_ids = tuple(
+            sub.id for sub in sub_rows if sub.status == RunStatus.WAITING_FOR_INPUT.value
+        )
+        pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
+        if waiting_input_ids:
+            input_rows = (
+                await session.execute(
+                    select(RunInputRequestModel, ConversationMessageModel)
+                    .join(
+                        ConversationMessageModel,
+                        ConversationMessageModel.id == RunInputRequestModel.question_message_id,
+                    )
+                    .where(
+                        RunInputRequestModel.run_id.in_(waiting_input_ids),
+                        RunInputRequestModel.status == InputRequestStatus.PENDING.value,
+                    )
+                    .order_by(RunInputRequestModel.created_at, RunInputRequestModel.id)
+                )
+            ).all()
+            input_items: list[PendingSubagentInput] = []
+            for req, msg_row in input_rows:
+                sub_run = sub_by_id[req.run_id]
+                domain_msg = conversation_to_domain(msg_row)
+                question_text = "".join(
+                    part.text for part in domain_msg.parts if isinstance(part, TextPart)
+                )
+                input_items.append(
+                    PendingSubagentInput(
+                        sub_run_id=sub_run.id,
+                        subagent_slug=sub_run.subagent_slug or "",
+                        subagent_name=sub_run.subagent_name or "",
+                        task_index=task_index_by_id.get(sub_run.id, 1),
+                        task_summary=task_summary_by_id.get(sub_run.id, ""),
+                        input_request_id=req.id,
+                        question_message_id=req.question_message_id,
+                        question_text=question_text,
+                        created_at=req.created_at,
+                    )
+                )
+            pending_subagent_inputs = tuple(input_items)
+
+        # 仅当存在处于 waiting_for_approval 的子任务时才查询待人工审批调用。
+        waiting_approval_ids = tuple(
+            sub.id for sub in sub_rows if sub.status == RunStatus.WAITING_FOR_APPROVAL.value
+        )
+        pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
+        if waiting_approval_ids:
+            approval_rows = (
+                await session.execute(
+                    select(RunToolCallModel, RunModel)
+                    .join(RunModel, RunModel.id == RunToolCallModel.run_id)
+                    .where(
+                        RunToolCallModel.run_id.in_(waiting_approval_ids),
+                        RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
+                    )
+                    .order_by(RunModel.created_at, RunToolCallModel.ordinal, RunToolCallModel.id)
+                )
+            ).all()
+            if approval_rows:
+                skill_projections = [
+                    None
+                    if call_row.safe_skill_projection is None
+                    else SafeSkillApprovalProjection.model_validate(call_row.safe_skill_projection)
+                    for call_row, _ in approval_rows
+                ]
+                enriched = await self._enrich_pending_approvals_in_session(
+                    session,
+                    [
+                        (call_row, sub_run, skill_proj)
+                        for (call_row, sub_run), skill_proj in zip(
+                            approval_rows, skill_projections, strict=True
+                        )
+                    ],
+                )
+                pending_subagent_approvals = tuple(
+                    PendingSubagentApproval(
+                        sub_run_id=sub_run.id,
+                        subagent_slug=sub_run.subagent_slug or "",
+                        subagent_name=sub_run.subagent_name or "",
+                        task_index=task_index_by_id.get(sub_run.id, 1),
+                        task_summary=task_summary_by_id.get(sub_run.id, ""),
+                        call_id=call_row.id,
+                        batch_message_id=call_row.call_message_id,
+                        ordinal=call_row.ordinal,
+                        model_name=call_row.model_name,
+                        tool_kind=call_row.tool_kind,
+                        requested_at=call_row.requested_at or sub_run.updated_at,
+                        safe_skill_projection=skill_proj,
+                        display_name=display_name,
+                        approval_summary=approval_summary,
+                        formatted_arguments=formatted_arguments,
+                    )
+                    for (call_row, sub_run), skill_proj, (
+                        display_name,
+                        approval_summary,
+                        formatted_arguments,
+                    ) in zip(approval_rows, skill_projections, enriched, strict=True)
+                )
+
+        return subagent_tasks, pending_subagent_inputs, pending_subagent_approvals
 
     async def list_runs(
         self,

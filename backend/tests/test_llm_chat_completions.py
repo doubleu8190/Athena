@@ -1614,3 +1614,62 @@ def test_serialize_content_parts_accepts_valid_large_ascii_base64() -> None:
             ],
         }
     ]
+
+
+def test_measure_stream_chunk_covers_pydantic_extra_utf8_and_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """轻量流式字节计量器覆盖 SDK Pydantic 字段、model_extra、多字节 UTF-8 与非法值校验。"""
+    from openai.types.chat import ChatCompletionChunk
+
+    import adapter.llm.openai_chat_completions as chat_adapter
+
+    # 1. 正常 OpenAI SDK chunk（含中文内容与 model_extra）可正确累计字节。
+    sdk_chunk = ChatCompletionChunk.model_validate(
+        {
+            "id": "chatcmpl-measure",
+            "choices": [{"index": 0, "delta": {"content": "你好世界"}, "finish_reason": None}],
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "object": "chat.completion.chunk",
+            "vendor_blob": "ok",
+        }
+    )
+    count, total = OpenAIChatCompletionsAdapter._measure_stream_chunk(sdk_chunk, 0, 0)
+    assert count == 1
+    assert total > len("你好世界".encode())
+
+    # 2. model_extra 超出动态 MAX_RAW_EVENT_BYTES 时拒绝。
+    monkeypatch.setattr(chat_adapter, "MAX_RAW_EVENT_BYTES", 256)
+    oversize_extra = ChatCompletionChunk.model_validate(
+        {
+            "id": "chatcmpl-extra",
+            "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}],
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "object": "chat.completion.chunk",
+            "vendor_blob": "x" * 300,
+        }
+    )
+    with pytest.raises(LlmProtocolError, match="llm_stream_event_too_large"):
+        OpenAIChatCompletionsAdapter._measure_stream_chunk(oversize_extra, 0, 0)
+
+    # 3. 非有限浮点（NaN / Inf / -Inf）与不可序列化对象均按 llm_stream_event_invalid 拒绝。
+    monkeypatch.setattr(chat_adapter, "MAX_RAW_EVENT_BYTES", 1024 * 1024)
+    for bad_float in (float("nan"), float("inf"), float("-inf")):
+        bad_chunk = SimpleNamespace(id="c1", choices=[], score=bad_float)
+        with pytest.raises(LlmProtocolError, match="llm_stream_event_invalid"):
+            OpenAIChatCompletionsAdapter._measure_stream_chunk(bad_chunk, 0, 0)
+
+    with pytest.raises(LlmProtocolError, match="llm_stream_event_invalid"):
+        OpenAIChatCompletionsAdapter._measure_stream_chunk(
+            SimpleNamespace(id="c2", raw=object()),
+            0,
+            0,
+        )
+
+    # 4. 循环引用触发深度上限保护，拒绝而非栈溢出。
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    with pytest.raises(LlmProtocolError, match="llm_stream_event_invalid"):
+        OpenAIChatCompletionsAdapter._measure_stream_chunk(cyclic, 0, 0)

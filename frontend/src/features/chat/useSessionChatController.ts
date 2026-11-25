@@ -38,7 +38,10 @@ import {
   reconcileFailedRun,
 } from "./runStream";
 import { subagentApprovalKey, subagentInputKey } from "./SubagentHitlPanels";
-import { useRunStream } from "./useRunStream";
+import {
+  useRunStream,
+  type RunStreamReconcileContext,
+} from "./useRunStream";
 
 interface FailedComposerCommand {
   fileIds: string[];
@@ -77,8 +80,35 @@ type LiveAnnouncementPhase =
   | "completed"
   | "failed";
 
-// SSE 高频 run_event 对账的合并节流窗口，避免连续事件触发 4 路失效请求风暴。
-const RECONCILE_THROTTLE_MS = 200;
+// SSE 高频 run_event 对账的合并节流窗口，避免连续事件触发查询失效请求风暴。
+const RECONCILE_THROTTLE_MS = 500;
+
+// 仅推进任务状态、工具调用进度、审批中间态、子智能体状态或上下文压缩的事件不会新增会话消息；
+// 这类事件只失效 latestRun/run/toolCalls，避免触发 useInfiniteQuery 全历史消息页串行重拉。
+const PROGRESS_ONLY_RUN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "started",
+  "tool_call_started",
+  "tool_call_finished",
+  "tool_approval_decided",
+  "approval_resumed",
+  "cancel_requested",
+  "compression_started",
+  "compression_completed",
+  "compression_failed",
+  "waiting_for_subagents",
+  "subagents_resumed",
+  "subagent_status_changed",
+]);
+
+function shouldReconcileMessages(
+  context?: RunStreamReconcileContext,
+): boolean {
+  // 缺省上下文、显式 forceMessages、终态/等待态或未知新事件类型均保守全量失效消息流。
+  if (!context || context.forceMessages || !context.eventType) {
+    return true;
+  }
+  return !PROGRESS_ONLY_RUN_EVENT_TYPES.has(context.eventType);
+}
 
 // 首轮无标题会话完成后的有界退避静默复查计划（最多 2 次，title 到达或卸载立即清理）。
 export const AUTO_TITLE_RETRY_DELAYS_MS = [1_000, 2_500] as const;
@@ -142,7 +172,7 @@ export interface UseSessionChatControllerOptions {
 
 /**
  * 会话工作台控制器 Hook：
- * 统一封装 SSE 实时流连接与单调快照投影、200ms 节流对账、终态权威消息对账、
+ * 统一封装 SSE 实时流连接与单调快照投影、500ms 精细化节流对账、终态权威消息对账、
  * 命令共享锁与幂等重放指纹、多子智能体并发 HITL、首轮异步自动标题静默刷新
  * 以及仅在 5 个生命周期节点更新的 aria-live 无障碍通告。
  */
@@ -248,7 +278,11 @@ export function useSessionChatController({
   } | null>(null);
   const settledTerminalRunsRef = useRef(new Set<string>());
   const reconcileTimerRef = useRef<number | null>(null);
+  // 同一节流窗口内若先收到纯进度事件、后收到需刷新消息的事件，合并保留消息失效意图不丢失。
+  const pendingMessagesReconcileRef = useRef(false);
   const suppressNextScheduledReconcileRef = useRef(false);
+  // 记录运行中 live snapshot 已触发过结构化消息补拉的消息 ID，防止周期快照重复失效。
+  const requestedSnapshotMessageIdsRef = useRef(new Set<string>());
 
   // 自动标题静默刷新状态：
   // - autoTitleFinishedRunIdsRef 仅在「标题已非空」或「全部退避次数执行完毕」后写入，
@@ -279,6 +313,7 @@ export function useSessionChatController({
   const latestRuns = useLatestRun(sessionId);
   const {
     isError: latestRunsIsError,
+    isSuccess: latestRunsIsSuccess,
     refetch: refetchLatestRunsQuery,
   } = latestRuns;
   const latestRun = latestRuns.data?.items[0] ?? null;
@@ -308,6 +343,7 @@ export function useSessionChatController({
       window.clearTimeout(reconcileTimerRef.current);
       reconcileTimerRef.current = null;
     }
+    pendingMessagesReconcileRef.current = false;
   }, []);
 
   const clearAutoTitleTimer = useCallback(() => {
@@ -317,48 +353,64 @@ export function useSessionChatController({
     }
   }, []);
 
-  const invalidateRunQueries = useCallback(() => {
-    void queryClient.invalidateQueries({
-      queryKey: chatKeys.latestRun(sessionId),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: chatKeys.messages(sessionId),
-    });
-    if (currentRunId) {
+  const invalidateRunQueries = useCallback(
+    (options?: { includeMessages?: boolean }) => {
+      const includeMessages = options?.includeMessages ?? true;
       void queryClient.invalidateQueries({
-        queryKey: chatKeys.run(sessionId, currentRunId),
+        queryKey: chatKeys.latestRun(sessionId),
       });
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.toolCalls(sessionId, currentRunId),
-      });
-    }
-  }, [currentRunId, queryClient, sessionId]);
+      if (includeMessages) {
+        void queryClient.invalidateQueries({
+          queryKey: chatKeys.messages(sessionId),
+        });
+      }
+      if (currentRunId) {
+        void queryClient.invalidateQueries({
+          queryKey: chatKeys.run(sessionId, currentRunId),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: chatKeys.toolCalls(sessionId, currentRunId),
+        });
+      }
+    },
+    [currentRunId, queryClient, sessionId],
+  );
 
-  // 命令纠偏以及终态/等待态快照需要零延迟刷新，先清掉尚未触发的节流定时器避免重复请求。
+  // 命令纠偏以及终态/等待态快照需要零延迟全量刷新（含消息流），先清掉尚未触发的节流定时器避免重复请求。
   const flushReconcile = useCallback(() => {
     clearReconcileTimer();
-    invalidateRunQueries();
+    invalidateRunQueries({ includeMessages: true });
   }, [clearReconcileTimer, invalidateRunQueries]);
 
-  // 高频连续 SSE run_event 在 200ms 窗口内合并为一次 4 路失效，避免请求风暴。
-  const scheduleReconcile = useCallback(() => {
-    if (suppressNextScheduledReconcileRef.current) {
-      suppressNextScheduledReconcileRef.current = false;
-      return;
-    }
-    if (reconcileTimerRef.current !== null) {
-      return;
-    }
-    reconcileTimerRef.current = window.setTimeout(() => {
-      reconcileTimerRef.current = null;
-      invalidateRunQueries();
-    }, RECONCILE_THROTTLE_MS);
-  }, [invalidateRunQueries]);
+  // 高频连续 SSE run_event 在 500ms 窗口内合并，并按事件语义决定是否连带刷新历史消息流。
+  const scheduleReconcile = useCallback(
+    (context?: RunStreamReconcileContext) => {
+      if (suppressNextScheduledReconcileRef.current) {
+        suppressNextScheduledReconcileRef.current = false;
+        return;
+      }
+      if (shouldReconcileMessages(context)) {
+        pendingMessagesReconcileRef.current = true;
+      }
+      if (reconcileTimerRef.current !== null) {
+        return;
+      }
+      reconcileTimerRef.current = window.setTimeout(() => {
+        reconcileTimerRef.current = null;
+        const includeMessages = pendingMessagesReconcileRef.current;
+        pendingMessagesReconcileRef.current = false;
+        invalidateRunQueries({ includeMessages });
+      }, RECONCILE_THROTTLE_MS);
+    },
+    [invalidateRunQueries],
+  );
 
   useEffect(() => {
-    // 卸载或切换 sessionId / currentRunId 时立即清理对账节流定时器。
+    // 卸载或切换 sessionId / currentRunId 时立即清理对账节流定时器与快照消息补拉去重集。
+    const requestedSnapshotMessageIds = requestedSnapshotMessageIdsRef.current;
     return () => {
       suppressNextScheduledReconcileRef.current = false;
+      requestedSnapshotMessageIds.clear();
       clearReconcileTimer();
     };
   }, [clearReconcileTimer, currentRunId, sessionId]);
@@ -368,6 +420,16 @@ export function useSessionChatController({
       if (!currentRunId) {
         return;
       }
+      const existingRun = selectRunProjection(
+        currentRunId,
+        queryClient
+          .getQueryData<RunListResponse>(chatKeys.latestRun(sessionId))
+          ?.items.find((item) => item.id === currentRunId) ?? null,
+        queryClient.getQueryData<Run>(chatKeys.run(sessionId, currentRunId)) ??
+          null,
+      );
+      const snapshotAccepted =
+        !existingRun || shouldApplyStreamSnapshot(existingRun, snapshot);
       // SSE 快照包含子任务与并发 HITL 最新投影；写入前校验单调性，禁止终态、取消态或旧序号回退覆盖。
       const patchRun = (existing: Run): Run =>
         shouldApplyStreamSnapshot(existing, snapshot)
@@ -406,7 +468,48 @@ export function useSessionChatController({
       ) {
         suppressNextScheduledReconcileRef.current = true;
         flushReconcile();
+        return;
       }
+      // 运行中快照仅承载纯文本投影（不含 FileRefPart 等结构化附件块）。
+      // 当主 Run 在运行期间写入 Skill 交付消息并在快照中出现尚未缓存的新消息 ID 时，
+      // 精准失效消息流与会话文件列表以补齐附件卡片并同步文件抽屉，同时保持普通无产物进度事件零重拉。
+      if (!snapshotAccepted || snapshot.messages.length === 0) {
+        return;
+      }
+      const cachedMessages = queryClient.getQueryData<MessageInfiniteData>(
+        chatKeys.messages(sessionId),
+      );
+      // 首屏消息缓存尚未就绪时不重复失效，避免冷启动首帧并发重拉。
+      if (!cachedMessages) {
+        return;
+      }
+      const cachedMessageIds = new Set<string>();
+      for (const page of cachedMessages.pages) {
+        for (const message of page.items) {
+          cachedMessageIds.add(message.id);
+        }
+      }
+      const unseenMessageIds: string[] = [];
+      for (const message of snapshot.messages) {
+        if (
+          !cachedMessageIds.has(message.id) &&
+          !requestedSnapshotMessageIdsRef.current.has(message.id)
+        ) {
+          unseenMessageIds.push(message.id);
+        }
+      }
+      if (unseenMessageIds.length === 0) {
+        return;
+      }
+      for (const messageId of unseenMessageIds) {
+        requestedSnapshotMessageIdsRef.current.add(messageId);
+      }
+      void queryClient.invalidateQueries({
+        queryKey: chatKeys.messages(sessionId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: sessionFileKeys.list(sessionId),
+      });
     },
     [currentRunId, flushReconcile, queryClient, sessionId],
   );
@@ -695,7 +798,12 @@ export function useSessionChatController({
             projectedReportMessageId,
             streamEvents,
           )
-        : reconcileCompletedRun(sessionId, terminalRunId, triggerMessageId);
+        : reconcileCompletedRun(
+            sessionId,
+            terminalRunId,
+            triggerMessageId,
+            streamEvents,
+          );
     void reconciliation
       .then((result) => {
         if (result.kind === "not_found") {
@@ -894,227 +1002,255 @@ export function useSessionChatController({
     ],
   );
 
-  const handleSubmit = async (submittedDraft: string): Promise<boolean> => {
-    const text = submittedDraft.trim();
-    if (!text || commandLockRef.current) {
-      return false;
-    }
-    if (hasBlockingUploads || handoffUploads.length > 0) {
-      setCommandError(
-        "请先等待附件上传完成，或重试/移除失败的附件后再提交。",
+  // 稳定提交回调引用，避免高频流式 text_delta 导致 memo 化的 SessionComposer 无效重渲染。
+  const handleSubmit = useCallback(
+    async (submittedDraft: string): Promise<boolean> => {
+      const text = submittedDraft.trim();
+      if (!text || commandLockRef.current) {
+        return false;
+      }
+      if (hasBlockingUploads || handoffUploads.length > 0) {
+        setCommandError(
+          "请先等待附件上传完成，或重试/移除失败的附件后再提交。",
+        );
+        return false;
+      }
+      if (isWaitingInput && !run?.pending_input) {
+        setCommandError("服务端尚未返回可回答的输入请求，正在同步状态。");
+        flushReconcile();
+        return false;
+      }
+      if (isActive && !isWaitingInput && !isTargetedSubagentAnswer) {
+        return false;
+      }
+      if (!run && !latestRunsIsSuccess) {
+        return false;
+      }
+
+      const inputRequestId = activeSubagentInput
+        ? activeSubagentInput.input_request_id
+        : isWaitingInput
+          ? run?.pending_input?.id
+          : undefined;
+      const targetRunId = activeSubagentInput
+        ? activeSubagentInput.sub_run_id
+        : (run?.id ?? null);
+      const sequenceAtSubmit = messages.reduce(
+        (latestSequence, message) => Math.max(latestSequence, message.sequence),
+        0,
       );
-      return false;
-    }
-    if (isWaitingInput && !run?.pending_input) {
-      setCommandError("服务端尚未返回可回答的输入请求，正在同步状态。");
-      flushReconcile();
-      return false;
-    }
-    if (isActive && !isWaitingInput && !isTargetedSubagentAnswer) {
-      return false;
-    }
-    if (!run && !latestRuns.isSuccess) {
-      return false;
-    }
-
-    const inputRequestId = activeSubagentInput
-      ? activeSubagentInput.input_request_id
-      : isWaitingInput
-        ? run?.pending_input?.id
-        : undefined;
-    const targetRunId = activeSubagentInput
-      ? activeSubagentInput.sub_run_id
-      : (run?.id ?? null);
-    const sequenceAtSubmit = messages.reduce(
-      (latestSequence, message) => Math.max(latestSequence, message.sequence),
-      0,
-    );
-    const isAnswering = isWaitingInput || isTargetedSubagentAnswer;
-    const submittedSkillIds = isAnswering ? [] : [...selectedSkillIds];
-    const submittedFileIds = [...selectedFileIds];
-    const submittedKnowledgeBaseIds = isAnswering
-      ? null
-      : knowledgeBaseIds === null
+      const isAnswering = isWaitingInput || isTargetedSubagentAnswer;
+      const submittedSkillIds = isAnswering ? [] : [...selectedSkillIds];
+      const submittedFileIds = [...selectedFileIds];
+      const submittedKnowledgeBaseIds = isAnswering
         ? null
-        : [...knowledgeBaseIds];
-    const submittedModelProfileId = isAnswering ? null : modelProfileId;
-    const commandKind: RunCommandKind = isAnswering ? "answer" : "submit";
-    const commandToken = beginRunCommand(commandKind, targetRunId);
-    if (commandToken === null) {
-      return false;
-    }
-    const canReuse =
-      failedCommand?.reuseRequestId === true &&
-      failedCommand?.text === text &&
-      failedCommand.fileIds.join("\u0000") ===
-        submittedFileIds.join("\u0000") &&
-      failedCommand.skillIds.join("\u0000") ===
-        submittedSkillIds.join("\u0000") &&
-      knowledgeScopeEqual(
-        failedCommand.knowledgeBaseIds,
-        submittedKnowledgeBaseIds,
-      ) &&
-      (failedCommand.modelProfileId ?? null) ===
-        (submittedModelProfileId ?? null) &&
-      (isAnswering
-        ? failedCommand.kind === "answer" &&
-          failedCommand.inputRequestId === inputRequestId
-        : failedCommand?.kind === "submit");
-    const requestId = canReuse ? failedCommand.requestId : newRequestId();
+        : knowledgeBaseIds === null
+          ? null
+          : [...knowledgeBaseIds];
+      const submittedModelProfileId = isAnswering ? null : modelProfileId;
+      const commandKind: RunCommandKind = isAnswering ? "answer" : "submit";
+      const commandToken = beginRunCommand(commandKind, targetRunId);
+      if (commandToken === null) {
+        return false;
+      }
+      const canReuse =
+        failedCommand?.reuseRequestId === true &&
+        failedCommand?.text === text &&
+        failedCommand.fileIds.join("\u0000") ===
+          submittedFileIds.join("\u0000") &&
+        failedCommand.skillIds.join("\u0000") ===
+          submittedSkillIds.join("\u0000") &&
+        knowledgeScopeEqual(
+          failedCommand.knowledgeBaseIds,
+          submittedKnowledgeBaseIds,
+        ) &&
+        (failedCommand.modelProfileId ?? null) ===
+          (submittedModelProfileId ?? null) &&
+        (isAnswering
+          ? failedCommand.kind === "answer" &&
+            failedCommand.inputRequestId === inputRequestId
+          : failedCommand?.kind === "submit");
+      const requestId = canReuse ? failedCommand.requestId : newRequestId();
 
-    setCommandError(null);
-    try {
-      const nextRun =
-        activeSubagentInput && inputRequestId
-          ? await answerRunInput(
-              sessionId,
-              activeSubagentInput.sub_run_id,
-              inputRequestId,
-              requestId,
-              text,
-              submittedFileIds,
-            )
-          : isWaitingInput && run && inputRequestId
+      setCommandError(null);
+      try {
+        const nextRun =
+          activeSubagentInput && inputRequestId
             ? await answerRunInput(
                 sessionId,
-                run.id,
+                activeSubagentInput.sub_run_id,
                 inputRequestId,
                 requestId,
                 text,
                 submittedFileIds,
               )
-            : await submitRun(
-                sessionId,
-                requestId,
-                text,
-                submittedSkillIds,
-                submittedFileIds,
-                {
-                  knowledgeBaseIds: submittedKnowledgeBaseIds,
-                  modelProfileId: submittedModelProfileId,
-                },
-              );
-
-      if (activeSubagentInput) {
-        // 子智能体定向回答返回的是子 Run，不能切换 selectedRunId；
-        // 若回答接口未携带完整 input_interactions，则乐观保留并更新已缓存的提问记录再刷新详情。
-        queryClient.setQueryData<Run>(
-          chatKeys.run(sessionId, nextRun.id),
-          (existing) => {
-            if (
-              !nextRun.input_interactions?.length &&
-              existing?.input_interactions?.length
-            ) {
-              return {
-                ...nextRun,
-                input_interactions: existing.input_interactions.map((item) =>
-                  item.input_request_id === activeSubagentInput.input_request_id
-                    ? {
-                        ...item,
-                        answer_text: text,
-                        answered_at:
-                          item.answered_at ?? new Date().toISOString(),
-                        status: "answered",
-                      }
-                    : item,
-                ),
-              };
-            }
-            return nextRun;
-          },
-        );
-        void queryClient.invalidateQueries({
-          queryKey: chatKeys.run(sessionId, nextRun.id),
-        });
-        void queryClient.invalidateQueries({
-          queryKey: chatKeys.toolCalls(sessionId, nextRun.id),
-        });
-        if (currentRunId) {
-          const removeAnswered = (existing: Run): Run => ({
-            ...existing,
-            pending_subagent_inputs: (
-              existing.pending_subagent_inputs ?? []
-            ).filter(
-              (item) =>
-                item.input_request_id !== activeSubagentInput.input_request_id,
-            ),
-          });
-          queryClient.setQueryData<Run>(
-            chatKeys.run(sessionId, currentRunId),
-            (existing) => (existing ? removeAnswered(existing) : existing),
-          );
-          queryClient.setQueryData<RunListResponse>(
-            chatKeys.latestRun(sessionId),
-            (existing) =>
-              existing
-                ? {
-                    ...existing,
-                    items: existing.items.map((item) =>
-                      item.id === currentRunId ? removeAnswered(item) : item,
-                    ),
-                  }
-                : existing,
-          );
-        }
-        flushReconcile();
-      } else {
-        applyRunResult(nextRun, commandToken);
-      }
-
-      if (isCurrentRunCommand(commandToken)) {
-        setFailedCommand(null);
-        setSelectedFileIds([]);
-        setSelectedSkillIds([]);
-        setHandoffUploads([]);
-        clearSessionHandoff(sessionId);
-        if (!activeSubagentInput) {
-          setAutoScrollRequest(
-            isAnswering
-              ? {
-                  afterSequence: sequenceAtSubmit,
-                  key: `${commandToken}:${requestId}`,
+            : isWaitingInput && run && inputRequestId
+              ? await answerRunInput(
+                  sessionId,
+                  run.id,
+                  inputRequestId,
+                  requestId,
                   text,
-                }
-              : {
-                  key: `${commandToken}:${requestId}`,
-                  messageId: nextRun.trigger_message_id,
-                },
-          );
-        }
-        setCommandNotice(
-          activeSubagentInput
-            ? `已向「${activeSubagentInput.subagent_name}」提交回复，正在继续处理。`
-            : isWaitingInput
-              ? "补充回答已提交，正在按服务端最新运行状态同步。"
-              : "消息已提交，正在按服务端最新运行状态同步。",
-        );
-        return true;
-      }
-      return false;
-    } catch (error) {
-      if (isCurrentRunCommand(commandToken)) {
-        setFailedCommand({
-          fileIds: submittedFileIds,
-          inputRequestId,
-          kind: isAnswering ? "answer" : "submit",
-          knowledgeBaseIds: submittedKnowledgeBaseIds,
-          modelProfileId: submittedModelProfileId,
-          requestId,
-          reuseRequestId: requestIdCanBeReused(error),
-          skillIds: submittedSkillIds,
-          text,
-        });
-        setCommandNotice(null);
-        setCommandError(chatErrorMessage(error));
-        flushReconcile();
-      }
-      return false;
-    } finally {
-      endRunCommand(commandToken);
-    }
-  };
+                  submittedFileIds,
+                )
+              : await submitRun(
+                  sessionId,
+                  requestId,
+                  text,
+                  submittedSkillIds,
+                  submittedFileIds,
+                  {
+                    knowledgeBaseIds: submittedKnowledgeBaseIds,
+                    modelProfileId: submittedModelProfileId,
+                  },
+                );
 
-  const handleCancel = async () => {
+        if (activeSubagentInput) {
+          // 子智能体定向回答返回的是子 Run，不能切换 selectedRunId；
+          // 若回答接口未携带完整 input_interactions，则乐观保留并更新已缓存的提问记录再刷新详情。
+          queryClient.setQueryData<Run>(
+            chatKeys.run(sessionId, nextRun.id),
+            (existing) => {
+              if (
+                !nextRun.input_interactions?.length &&
+                existing?.input_interactions?.length
+              ) {
+                return {
+                  ...nextRun,
+                  input_interactions: existing.input_interactions.map((item) =>
+                    item.input_request_id === activeSubagentInput.input_request_id
+                      ? {
+                          ...item,
+                          answer_text: text,
+                          answered_at:
+                            item.answered_at ?? new Date().toISOString(),
+                          status: "answered",
+                        }
+                      : item,
+                  ),
+                };
+              }
+              return nextRun;
+            },
+          );
+          void queryClient.invalidateQueries({
+            queryKey: chatKeys.run(sessionId, nextRun.id),
+          });
+          void queryClient.invalidateQueries({
+            queryKey: chatKeys.toolCalls(sessionId, nextRun.id),
+          });
+          if (currentRunId) {
+            const removeAnswered = (existing: Run): Run => ({
+              ...existing,
+              pending_subagent_inputs: (
+                existing.pending_subagent_inputs ?? []
+              ).filter(
+                (item) =>
+                  item.input_request_id !== activeSubagentInput.input_request_id,
+              ),
+            });
+            queryClient.setQueryData<Run>(
+              chatKeys.run(sessionId, currentRunId),
+              (existing) => (existing ? removeAnswered(existing) : existing),
+            );
+            queryClient.setQueryData<RunListResponse>(
+              chatKeys.latestRun(sessionId),
+              (existing) =>
+                existing
+                  ? {
+                      ...existing,
+                      items: existing.items.map((item) =>
+                        item.id === currentRunId ? removeAnswered(item) : item,
+                      ),
+                    }
+                  : existing,
+            );
+          }
+          flushReconcile();
+        } else {
+          applyRunResult(nextRun, commandToken);
+        }
+
+        if (isCurrentRunCommand(commandToken)) {
+          setFailedCommand(null);
+          setSelectedFileIds([]);
+          setSelectedSkillIds([]);
+          setHandoffUploads([]);
+          clearSessionHandoff(sessionId);
+          if (!activeSubagentInput) {
+            setAutoScrollRequest(
+              isAnswering
+                ? {
+                    afterSequence: sequenceAtSubmit,
+                    key: `${commandToken}:${requestId}`,
+                    text,
+                  }
+                : {
+                    key: `${commandToken}:${requestId}`,
+                    messageId: nextRun.trigger_message_id,
+                  },
+            );
+          }
+          setCommandNotice(
+            activeSubagentInput
+              ? `已向「${activeSubagentInput.subagent_name}」提交回复，正在继续处理。`
+              : isWaitingInput
+                ? "补充回答已提交，正在按服务端最新运行状态同步。"
+                : "消息已提交，正在按服务端最新运行状态同步。",
+          );
+          return true;
+        }
+        return false;
+      } catch (error) {
+        if (isCurrentRunCommand(commandToken)) {
+          setFailedCommand({
+            fileIds: submittedFileIds,
+            inputRequestId,
+            kind: isAnswering ? "answer" : "submit",
+            knowledgeBaseIds: submittedKnowledgeBaseIds,
+            modelProfileId: submittedModelProfileId,
+            requestId,
+            reuseRequestId: requestIdCanBeReused(error),
+            skillIds: submittedSkillIds,
+            text,
+          });
+          setCommandNotice(null);
+          setCommandError(chatErrorMessage(error));
+          flushReconcile();
+        }
+        return false;
+      } finally {
+        endRunCommand(commandToken);
+      }
+    },
+    [
+      activeSubagentInput,
+      applyRunResult,
+      beginRunCommand,
+      clearSessionHandoff,
+      currentRunId,
+      endRunCommand,
+      failedCommand,
+      flushReconcile,
+      handoffUploads.length,
+      hasBlockingUploads,
+      isActive,
+      isCurrentRunCommand,
+      isTargetedSubagentAnswer,
+      isWaitingInput,
+      knowledgeBaseIds,
+      latestRunsIsSuccess,
+      messages,
+      modelProfileId,
+      queryClient,
+      run,
+      selectedFileIds,
+      selectedSkillIds,
+      sessionId,
+    ],
+  );
+
+  const handleCancel = useCallback(async () => {
     if (!run || commandLockRef.current) {
       return;
     }
@@ -1134,7 +1270,15 @@ export function useSessionChatController({
     } finally {
       endRunCommand(commandToken);
     }
-  };
+  }, [
+    applyRunResult,
+    beginRunCommand,
+    endRunCommand,
+    flushReconcile,
+    isCurrentRunCommand,
+    run,
+    sessionId,
+  ]);
 
   const activeRunId = run?.id ?? null;
 
@@ -1311,7 +1455,7 @@ export function useSessionChatController({
     setRetryOpen(false);
   }, []);
 
-  const handleRetry = async () => {
+  const handleRetry = useCallback(async () => {
     if (
       !run ||
       !isLatestRun ||
@@ -1349,7 +1493,18 @@ export function useSessionChatController({
     } finally {
       endRunCommand(commandToken);
     }
-  };
+  }, [
+    applyRunResult,
+    beginRunCommand,
+    clearSessionHandoff,
+    endRunCommand,
+    flushReconcile,
+    isCurrentRunCommand,
+    isLatestRun,
+    run,
+    sessionId,
+    status,
+  ]);
 
   // 仍有上传中或上传失败的附件时阻止提交，避免静默漏掉用户选择的资料。
   const canSendWithoutDraft =
@@ -1358,7 +1513,7 @@ export function useSessionChatController({
     handoffUploads.length === 0 &&
     (isTargetedSubagentAnswer ||
       (isWaitingInput && Boolean(run?.pending_input)) ||
-      (!isActive && Boolean(run || latestRuns.isSuccess)));
+      (!isActive && Boolean(run || latestRunsIsSuccess)));
   const streamNotice = streamMatchesRun ? stream.state.notice : null;
   const transientUnfinished =
     Boolean(transientText) && (status === "failed" || status === "cancelled");

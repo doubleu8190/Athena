@@ -1,3 +1,4 @@
+import { countCodePoints } from "../../shared/lib/text";
 import { isDeptAdmin, isSuperAdmin, type User } from "../auth/model";
 import type { VisibilityScope } from "../../shared/ui/VisibilityBadge";
 
@@ -237,7 +238,7 @@ export interface KnowledgeTextInput {
 }
 
 export function countUnicodeCodePoints(value: string): number {
-  return Array.from(value).length;
+  return countCodePoints(value);
 }
 
 export function normalizeKnowledgeName(value: string): string {

@@ -10,7 +10,7 @@ import {
   RefreshCw,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
 import {
@@ -258,8 +258,9 @@ function FileRow({
 /**
  * 右侧会话文件抽屉（Radix Sheet）：
  * 集中展示本会话的全部「上传附件」与「生成产物」，提供缩略图、解析状态微标、在线预览与一键下载。
+ * 包裹 React.memo 隔离流式输出期间的无关重渲染。
  */
-export function SessionFilesDrawer({
+export const SessionFilesDrawer = memo(function SessionFilesDrawer({
   onFocusRestored,
   onOpenChange,
   onPreviewFile,
@@ -434,4 +435,4 @@ export function SessionFilesDrawer({
       </SheetContent>
     </Sheet>
   );
-}
+});

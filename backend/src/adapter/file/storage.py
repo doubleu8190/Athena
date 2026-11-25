@@ -45,6 +45,10 @@ _ORPHAN_KEY = re.compile(
 )
 _ResultT = TypeVar("_ResultT")
 _LIST_PAGE_SIZE = 1000
+# 流式读取并发上限 + 有界线程池大小 < 连接池容量，且禁用无超时阻塞，彻底消除 AB-BA 死锁。
+MAX_CONCURRENT_RANGE_STREAMS = 8
+_EXECUTOR_MAX_WORKERS = 8
+_HTTP_POOL_MAXSIZE = 24
 
 
 class FileStorageError(RuntimeError):
@@ -130,7 +134,7 @@ class _BoundedExecutor:
 
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(
-            max_workers=4,
+            max_workers=_EXECUTOR_MAX_WORKERS,
             thread_name_prefix="athena-file-minio",
         )
         self._closed = False
@@ -175,6 +179,7 @@ class MinioFileObjectStore(FileObjectStore):
         self._pool: Any | None = None
         self._started = client is not None
         self._executor = _BoundedExecutor()
+        self._range_stream_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RANGE_STREAMS)
         self._clock = clock
         self._close_lock = threading.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -311,21 +316,53 @@ class MinioFileObjectStore(FileObjectStore):
         _validate_key(key)
         if offset < 0 or not 1 <= chunk_size <= 1024 * 1024:
             raise ValueError("file_storage_range_invalid")
-        response = await self._call(
-            lambda: self._require_client().get_object(
-                self._configuration().bucket,
-                key,
-                offset=offset,
-            )
-        )
+        # 限制并发打开的长生命周期流式响应上限，避免流句柄占满连接池引发 AB-BA 死锁。
+        await self._range_stream_semaphore.acquire()
+        response: _HTTPResponse | None = None
         try:
+            active_response = await self._call(
+                lambda: self._require_client().get_object(
+                    self._configuration().bucket,
+                    key,
+                    offset=offset,
+                )
+            )
+            response = active_response
             while True:
-                chunk = await self._call(lambda: response.read(chunk_size))
+                chunk = await self._call(lambda: active_response.read(chunk_size))
                 if not chunk:
                     break
                 yield chunk
         finally:
-            await self._call(lambda: _close_response(response))
+            # 无论正常 EOF、异常还是客户端断开取消，都通过 shield 安全归还底层连接并释放信号量。
+            try:
+                if response is not None:
+                    await asyncio.shield(self._close_stream_response(response))
+            finally:
+                self._range_stream_semaphore.release()
+
+    async def _close_stream_response(self, response: _HTTPResponse) -> None:
+        """在受保护协程内关闭流式响应，防止取消或停机竞态下连接泄漏。"""
+        closed_invoked = False
+
+        def _close() -> None:
+            nonlocal closed_invoked
+            closed_invoked = True
+            _close_response(response)
+
+        try:
+            if self._started and self._client is not None:
+                try:
+                    await self._call(_close)
+                    return
+                except FileStorageError:
+                    # 停机竞态下 aclose() 可能已关闭 _BoundedExecutor 但尚未置 _started=False；
+                    # 若关闭回调尚未真正执行，则回退到默认线程完成底层连接归还。
+                    if closed_invoked:
+                        raise
+            await asyncio.to_thread(_close_response, response)
+        except Exception:
+            logger.warning("file_storage_stream_close_failed")
 
     async def delete(self, key: str) -> None:
         """幂等删除对象。"""
@@ -456,9 +493,11 @@ class MinioFileObjectStore(FileObjectStore):
                 status_forcelist=(500, 502, 503, 504),
                 allowed_methods=frozenset({"HEAD", "GET", "PUT", "DELETE"}),
             )
+            # 保持 stream_limit(8) + executor_workers(8) < pool_maxsize(24)，
+            # 且 block=False 避免 minio 未传 pool_timeout 时无限阻塞。
             kwargs: dict[str, Any] = {
-                "maxsize": 4,
-                "block": True,
+                "maxsize": _HTTP_POOL_MAXSIZE,
+                "block": False,
                 "timeout": timeout,
                 "retries": retries,
             }
@@ -560,6 +599,7 @@ def _error_code(error: Exception) -> str:
 
 __all__ = [
     "FILE_OBJECT_PREFIXES",
+    "MAX_CONCURRENT_RANGE_STREAMS",
     "FileStorageError",
     "MinioFileObjectStore",
     "MinioFileStorageConfig",

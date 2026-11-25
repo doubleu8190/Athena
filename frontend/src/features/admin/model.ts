@@ -1,3 +1,4 @@
+import { countCodePoints } from "../../shared/lib/text";
 import type { VisibilityGrant } from "../knowledge/model";
 
 export const MODEL_PROFILE_NAME_MAX_LENGTH = 120;
@@ -300,7 +301,7 @@ const RESERVED_HTTP_SECRET_NAMES = new Set([
 ]);
 
 function unicodeLength(value: string): number {
-  return Array.from(value).length;
+  return countCodePoints(value);
 }
 
 export function validateSystemPromptContent(content: string): string | null {

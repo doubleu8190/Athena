@@ -34,6 +34,7 @@ from domain.run.model import (
     Run,
     RunContextSafetyCommitError,
     RunLease,
+    RunLeaseState,
     RunStatus,
     RunUsage,
 )
@@ -1089,5 +1090,284 @@ def test_worker_drive_lease_cleanup_exception_does_not_crash_sibling_consumer(
         assert any(
             "run_worker_drive_database_retry" in record.message for record in caplog.records
         )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("poll_state", "expect_settled"),
+    [
+        ("cancelling", True),
+        ("lost_worker", False),
+        ("lost_epoch", False),
+        ("deleted", False),
+    ],
+)
+def test_worker_drive_lease_prefers_lightweight_get_lease_state_for_poll_branches(
+    poll_state: str,
+    expect_settled: bool,
+) -> None:
+    """1s 取消轮询应优先走轻量 get_lease_state，正确处理取消、失租与删除分支且不调用完整 get。"""
+
+    async def scenario() -> None:
+        lease = _lease()
+        execution_cancelled = asyncio.Event()
+
+        class LightweightRepo:
+            def __init__(self) -> None:
+                self.lease_state_calls = 0
+                self.get_calls = 0
+                self.settle_calls = 0
+                self.fail_calls = 0
+
+            async def get_lease_state(
+                self, session_id: str, owner_id: str, run_id: str
+            ) -> RunLeaseState | None:
+                assert (session_id, owner_id, run_id) == (
+                    lease.run.session_id,
+                    lease.run.owner_id,
+                    lease.run.id,
+                )
+                self.lease_state_calls += 1
+                if self.lease_state_calls == 1:
+                    return RunLeaseState(
+                        status=RunStatus.RUNNING,
+                        worker_id=lease.run.worker_id,
+                        execution_epoch=lease.run.execution_epoch,
+                    )
+                if poll_state == "cancelling":
+                    return RunLeaseState(
+                        status=RunStatus.CANCELLING,
+                        worker_id=lease.run.worker_id,
+                        execution_epoch=lease.run.execution_epoch,
+                    )
+                if poll_state == "lost_worker":
+                    return RunLeaseState(
+                        status=RunStatus.RUNNING,
+                        worker_id="other-worker",
+                        execution_epoch=lease.run.execution_epoch,
+                    )
+                if poll_state == "lost_epoch":
+                    return RunLeaseState(
+                        status=RunStatus.RUNNING,
+                        worker_id=lease.run.worker_id,
+                        execution_epoch=lease.run.execution_epoch + 1,
+                    )
+                return None
+
+            async def get(self, *args: object, **kwargs: object) -> Run | None:
+                del args, kwargs
+                self.get_calls += 1
+                raise AssertionError("poll loop should use get_lease_state instead of full get")
+
+            async def heartbeat(self, *args: object, **kwargs: object) -> Run:
+                del args, kwargs
+                return lease.run
+
+            async def settle_cancelled(self, *args: object, **kwargs: object) -> Run:
+                del args, kwargs
+                self.settle_calls += 1
+                return replace(lease.run, status=RunStatus.CANCELLED)
+
+            async def fail(self, *args: object, **kwargs: object) -> Run:
+                del args, kwargs
+                self.fail_calls += 1
+                return replace(lease.run, status=RunStatus.FAILED)
+
+        class HangingExecutor:
+            async def execute(self, active_lease: RunLease) -> None:
+                del active_lease
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    execution_cancelled.set()
+                    raise
+
+        repo = LightweightRepo()
+        worker = RunWorker(
+            cast(RunRepository, repo),
+            cast(_RunExecutor, HangingExecutor()),
+            RunWorkerConfig(
+                concurrency=1,
+                lease_seconds=3,
+                heartbeat_seconds=1,
+                execution_seconds=30,
+                cancel_poll_seconds=0.01,
+                queue_poll_seconds=0.05,
+                reclaim_seconds=5,
+            ),
+        )
+        await asyncio.wait_for(worker._drive_lease(lease), timeout=2.0)
+        assert execution_cancelled.is_set()
+        assert repo.lease_state_calls >= 2
+        assert repo.get_calls == 0
+        assert repo.fail_calls == 0
+        assert repo.settle_calls == (1 if expect_settled else 0)
+
+    asyncio.run(scenario())
+
+
+def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces_scope() -> None:
+    """SqlAlchemyRunRepository.get_lease_state 只投影三标量列，并严格隔离 owner 与软删会话。"""
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from adapter.auth.model import UserModel
+    from adapter.llm.model.profile import ModelProfileVersionModel
+    from adapter.message.model import ConversationMessageModel
+    from adapter.message.repository import SqlAlchemyMessageRepository
+    from adapter.models import Base
+    from adapter.run.model import RunModel
+    from adapter.run.repository import SqlAlchemyRunRepository
+    from adapter.session.model import SessionModel
+    from adapter.system_prompt.model import SystemPromptVersionModel
+
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        executed_sql: list[str] = []
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def _capture_sql(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _params: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            executed_sql.append(statement)
+
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            now = datetime.now(UTC)
+            async with factory() as session:
+                async with session.begin():
+                    session.add(
+                        UserModel(
+                            id="usr_lease",
+                            email="lease@example.test",
+                            password_hash="hash",
+                            display_name="Lease User",
+                            status="active",
+                            role="member",
+                            auth_provider="local",
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    session.add(
+                        ModelProfileVersionModel(
+                            id="mpv_lease",
+                            name="lease-model",
+                            protocol="chat_completions",
+                            base_url="https://llm.example.test/v1",
+                            model="gpt-test",
+                            context_window_tokens=8192,
+                            tokenizer_encoding="o200k_base",
+                            supports_stream=True,
+                            supports_tools=True,
+                            supports_parallel_tool_calls=True,
+                            max_output_tokens=512,
+                            request_timeout_seconds=30,
+                            execution_timeout_seconds=60,
+                            max_concurrency=1,
+                            enabled=True,
+                            created_at=now,
+                        )
+                    )
+                    session.add_all(
+                        [
+                            SystemPromptVersionModel(
+                                id="spv_main_lease",
+                                kind="main",
+                                content="main prompt",
+                                created_at=now,
+                            ),
+                            SystemPromptVersionModel(
+                                id="spv_comp_lease",
+                                kind="compression",
+                                content="comp prompt",
+                                created_at=now,
+                            ),
+                        ]
+                    )
+                    session.add(
+                        SessionModel(
+                            id="ses_lease",
+                            owner_id="usr_lease",
+                            title="lease session",
+                            last_message_sequence=1,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    await session.flush()
+                    session.add(
+                        ConversationMessageModel(
+                            id="msg_lease_1",
+                            session_id="ses_lease",
+                            role="user",
+                            status="completed",
+                            sequence=1,
+                            parts=[{"type": "text", "text": "hi"}],
+                            created_at=now,
+                            metadata_json={},
+                        )
+                    )
+                    session.add(
+                        RunModel(
+                            id="run_lease_1",
+                            session_id="ses_lease",
+                            owner_id="usr_lease",
+                            status=RunStatus.RUNNING.value,
+                            trigger_message_id="msg_lease_1",
+                            context_cutoff_sequence=1,
+                            model_config_version_id="mpv_lease",
+                            main_prompt_version_id="spv_main_lease",
+                            compression_prompt_version_id="spv_comp_lease",
+                            prompt_template_version="run-v2",
+                            event_sequence=1,
+                            execution_epoch=3,
+                            worker_id="worker-light-0",
+                            queued_at=now,
+                            created_at=now,
+                            updated_at=now,
+                            usage={},
+                            tool_snapshot={"tools": []},
+                        )
+                    )
+
+            repo = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            executed_sql.clear()
+
+            state = await repo.get_lease_state("ses_lease", "usr_lease", "run_lease_1")
+            assert state == RunLeaseState(
+                status=RunStatus.RUNNING,
+                worker_id="worker-light-0",
+                execution_epoch=3,
+            )
+            # 确认只执行 1 条标量 SELECT，不拉取大 JSONB 快照且不查 run_input_requests。
+            assert len(executed_sql) == 1
+            sql = executed_sql[0]
+            assert "run_input_requests" not in sql
+            assert "tool_snapshot" not in sql
+            assert "skill_snapshot" not in sql
+            assert "model_snapshot_json" not in sql
+            assert "usage" not in sql
+
+            # 非 owner 不可见。
+            assert await repo.get_lease_state("ses_lease", "other_user", "run_lease_1") is None
+
+            # 会话软删后返回 None。
+            async with factory() as session:
+                async with session.begin():
+                    ses = await session.get(SessionModel, "ses_lease")
+                    assert ses is not None
+                    ses.deleted_time = now
+            assert await repo.get_lease_state("ses_lease", "usr_lease", "run_lease_1") is None
+        finally:
+            await engine.dispose()
 
     asyncio.run(scenario())

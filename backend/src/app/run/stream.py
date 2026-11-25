@@ -290,9 +290,16 @@ class RunStreamService:
                             )
                             output_sequence += 1
                     if incoming.run_id == run_id:
-                        # 正式通知只负责触发 DB 对账，同时失效短 TTL 缓存避免状态切换前延迟感知。
-                        verified_live_epoch = None
-                        last_reconcile = 0.0
+                        # 仅当事件来自子 Run 转发、或尚未被已对账游标/执行轮次覆盖时才触发 DB 对账；
+                        # 避免同批持久化事件已被首次快照推进 event_cursor 后重复执行全量快照。
+                        event_belongs_to_child = incoming.payload.event.run_id != run_id
+                        if (
+                            event_belongs_to_child
+                            or incoming.payload.event.sequence > event_cursor
+                            or incoming.execution_epoch != current_epoch
+                        ):
+                            verified_live_epoch = None
+                            last_reconcile = 0.0
 
                 now = loop.time()
                 if now - last_reconcile >= DATABASE_RECONCILE_SECONDS:

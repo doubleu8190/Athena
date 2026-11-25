@@ -18,7 +18,7 @@ import { ChatHeader } from "./ChatHeader";
 import { ChatMessageList } from "./ChatMessageList";
 import { ExecutionProgressAccordion } from "./ExecutionProgressAccordion";
 import { FailedRunCard, RetryRunAlertDialog } from "./FailedRunCard";
-import { messageText } from "./model";
+import { messageText, type PendingSubagentInput } from "./model";
 import {
   SessionComposer,
   type SessionComposerHandle,
@@ -199,10 +199,17 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
     return triggerMessage ? messageText(triggerMessage).trim() || null : null;
   }, [messages, run?.trigger_message_id]);
 
-  // 稳定回调保证 ChatMessageList 与历史 MessageRow 保持记忆化隔离。
+  // 稳定回调保证 ChatMessageList、WaitingInputBanner 与历史 MessageRow 保持记忆化隔离。
   const handleEditResend = useCallback((text: string) => {
     composerRef.current?.fillDraft(text);
   }, []);
+
+  const handleSelectSubagentInput = useCallback(
+    (item: PendingSubagentInput) => {
+      setSelectedSubagentInputKey(subagentInputKey(item));
+    },
+    [setSelectedSubagentInputKey],
+  );
 
   // 仅当最新一轮失败，或已取消且当前消息分页包含触发提问文本时，助手消息才展示「重新执行」快捷操作。
   const canRetryFromAssistantMessage =
@@ -496,9 +503,7 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
             activeSubagentInput={activeSubagentInput}
             isWaitingMainInput={isWaitingInput && Boolean(run)}
             mainQuestionText={questionText}
-            onSelectSubagentInput={(item) =>
-              setSelectedSubagentInputKey(subagentInputKey(item))
-            }
+            onSelectSubagentInput={handleSelectSubagentInput}
             pendingSubagentInputs={pendingSubagentInputs}
           />
 

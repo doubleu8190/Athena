@@ -95,6 +95,7 @@ async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
         await originals.start()
         await models.embedding.start()
         await models.counter.start()
+        await models.start_tokenizer()
         concurrency = build_knowledge_worker(bundle)
         worker = bundle.worker
         assert worker is not None

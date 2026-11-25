@@ -114,6 +114,14 @@ class RunModel(Base):
         ),
         Index("ix_runs_claim", "status", "queued_at", "id"),
         Index("ix_runs_lease", "status", "lease_expires_at"),
+        # 加速按会话分页倒序列出 Run 及按会话检查活跃 Run 状态的高频查询。
+        Index(
+            "ix_runs_session_created",
+            "session_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+        Index("ix_runs_session_status", "session_id", "status"),
         Index("ix_runs_parent_run_id", "parent_run_id"),
         Index("ix_runs_root_run_id", "root_run_id"),
     )

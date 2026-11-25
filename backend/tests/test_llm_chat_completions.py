@@ -21,6 +21,7 @@ from adapter.llm.bounded_http import ResponseLimitError
 from adapter.llm.openai_chat_completions import OpenAIChatCompletionsAdapter, _retry_after_seconds
 from domain.llm.model import (
     LlmCapabilityError,
+    LlmImagePart,
     LlmIncompleteError,
     LlmMessage,
     LlmProtocolError,
@@ -1548,3 +1549,68 @@ def test_complete_allows_runtime_without_stream_or_tool_capabilities() -> None:
     assert isinstance(result.output[0], LlmText)
     assert result.output[0].text == "summary"
     assert result.usage is not None and result.usage.total_tokens == 12
+
+
+@pytest.mark.parametrize(
+    "bad_base64",
+    [
+        "",
+        " ",
+        "   ",
+        "\t",
+        "\n",
+        "\r",
+        "\x0b",
+        "\x0c",
+        " AAAA==",
+        "AAAA== ",
+        "\tAAAA==",
+        "AAAA==\n",
+        "AA AA==",
+        "AA\tAA==",
+        "AA\nAA==",
+        "AA\rAA==",
+        "AA\x0bAA==",
+        "AA\x0cAA==",
+        "AA\r\nAA==",
+        "AA " * 1000 + "==",
+        "中文base64==",
+        cast(Any, None),
+        cast(Any, 12345),
+    ],
+)
+def test_serialize_content_parts_rejects_all_ascii_whitespace_and_invalid_base64(
+    bad_base64: Any,
+) -> None:
+    """多模态图片 base64 快速 C 层校验必须严格拦截全部 ASCII 空白符、空值、非 ASCII 与非字符串。"""
+    message = LlmMessage(
+        LlmRole.USER,
+        content_parts=(LlmImagePart(mime_type="image/png", data_base64=bad_base64),),
+    )
+    with pytest.raises(LlmProtocolError) as error:
+        OpenAIChatCompletionsAdapter._messages((message,))
+    assert error.value.code == "llm_chat_image_invalid"
+
+
+def test_serialize_content_parts_accepts_valid_large_ascii_base64() -> None:
+    """合法无空白纯 ASCII base64（含较大负载）应正常序列化为标准 data URL。"""
+    payload = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0NTY3ODkw+/" * 1024 + "=="
+    message = LlmMessage(
+        LlmRole.USER,
+        content_parts=(LlmImagePart(mime_type="image/webp", data_base64=payload, detail="low"),),
+    )
+    serialized = OpenAIChatCompletionsAdapter._messages((message,))
+    assert serialized == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/webp;base64,{payload}",
+                        "detail": "low",
+                    },
+                }
+            ],
+        }
+    ]

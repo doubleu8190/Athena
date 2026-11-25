@@ -8,6 +8,7 @@ import random
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
+from typing import cast
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
@@ -18,8 +19,10 @@ from app.run.executor import RunExecutor
 from common.ids import new_id, now_utc
 from domain.run.model import (
     FailRunCommand,
+    Run,
     RunContextSafetyCommitError,
     RunLease,
+    RunLeaseState,
     RunStatus,
 )
 from domain.run.ports import RunEventTransport, RunRepository
@@ -168,8 +171,8 @@ class RunWorker:
                 if remaining <= 0:
                     # 超时：先取消执行并等待模型流等上游资源清理完毕。
                     await self._cancel_and_join(execution, lease)
-                    # 清理可能耗时，期间租约可能易主，因此重读数据库后再决定终态。
-                    current = await self._repository.get(run.session_id, run.owner_id, run.id)
+                    # 清理可能耗时，期间租约可能易主，因此重读轻量租约状态后再决定终态。
+                    current = await self._read_lease_state(run.session_id, run.owner_id, run.id)
                     # 记录不存在或所有权/执行轮次已变，说明已被回收，交给新 owner 处理。
                     if (
                         current is None
@@ -245,8 +248,8 @@ class RunWorker:
                     await self._finalize_execution(lease, execution)
                     return
 
-                # 轮询数据库确认状态：取消指令与所有权变更都以数据库为准。
-                current = await self._repository.get(run.session_id, run.owner_id, run.id)
+                # 轮询数据库确认状态：优先只读轻量租约标量列，取消指令与所有权变更以数据库为准。
+                current = await self._read_lease_state(run.session_id, run.owner_id, run.id)
                 if current is None:
                     # Run 已被删除，直接关闭本地执行。
                     await self._cancel_and_join(execution, lease)
@@ -491,6 +494,18 @@ class RunWorker:
                 lease.run.id,
                 type(error).__name__,
             )
+
+    async def _read_lease_state(
+        self, session_id: str, owner_id: str, run_id: str
+    ) -> RunLeaseState | Run | None:
+        """优先调用轻量标量租约查询，兼容测试中仅实现 get() 的最小仓储替身。"""
+        get_lease_state = getattr(self._repository, "get_lease_state", None)
+        if callable(get_lease_state):
+            return cast(
+                RunLeaseState | None,
+                await get_lease_state(session_id, owner_id, run_id),
+            )
+        return await self._repository.get(session_id, owner_id, run_id)
 
     def _now(self) -> datetime:
         """读取并规范化应用时钟，用于比较数据库返回的租约快照。"""

@@ -12,6 +12,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  useDeferredValue,
   useEffect,
   useId,
   useLayoutEffect,
@@ -23,6 +24,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { countCodePoints } from "../lib/text";
 import { MarkdownContent } from "./MarkdownContent";
 import { cn } from "./utils";
 
@@ -43,7 +45,7 @@ export interface MarkdownSplitEditorProps {
   onChange: (value: string) => void;
   disabled?: boolean;
   placeholder?: string;
-  /** Unicode 码点上限（使用 Array.from(value).length 统计，避免代理对计数偏差）。 */
+  /** Unicode 码点上限（使用零分配 countCodePoints 统计，避免代理对计数偏差）。 */
   maxLength?: number;
   error?: string | null;
   describedBy?: string;
@@ -298,7 +300,9 @@ export function MarkdownSplitEditor({
   const viewTabs = isDesktop ? DESKTOP_VIEW_TABS : NARROW_VIEW_TABS;
   const activeTabId = `${tabIdPrefix}-${effectiveMode}`;
 
-  const codePoints = useMemo(() => Array.from(value).length, [value]);
+  const codePoints = useMemo(() => countCodePoints(value), [value]);
+  // 预览区使用低优先级延迟值，大文档连续击键时优先保证编辑区响应，避免同步 Markdown AST 解析冻结输入。
+  const deferredPreviewValue = useDeferredValue(value);
   const isOverLimit = maxLength !== undefined && codePoints > maxLength;
   const hasError = Boolean(error) || isOverLimit;
   const showEditorPane = effectiveMode !== "preview";
@@ -591,8 +595,8 @@ export function MarkdownSplitEditor({
               )}
               data-testid="markdown-split-preview"
             >
-              {value.trim().length > 0 ? (
-                <MarkdownContent text={value} />
+              {deferredPreviewValue.trim().length > 0 ? (
+                <MarkdownContent text={deferredPreviewValue} />
               ) : (
                 <p className="py-6 text-center text-xs leading-relaxed text-text-tertiary">
                   实时预览区：开始输入 Markdown 正文，此处将同步渲染标题、列表、表格与代码块效果。

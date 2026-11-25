@@ -388,7 +388,7 @@ def test_alembic_migration_0039_single_head_pg_sql_and_sqlite_roundtrip(
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(pg_cfg)
-    assert script.get_heads() == ["20261206_0039"]
+    assert len(script.get_heads()) == 1
     rev = script.get_revision("20261206_0039")
     assert rev is not None
     assert rev.down_revision == "20261205_0038"

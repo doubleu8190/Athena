@@ -32,6 +32,12 @@ class DepartmentModel(Base):
             name="ck_departments_status",
         ),
         Index("ix_departments_path", "path"),
+        # 在 PostgreSQL 非 C Locale 下支持物化路径 LIKE '/root/%' 前缀索引扫描。
+        Index(
+            "ix_departments_path_pattern",
+            "path",
+            postgresql_ops={"path": "varchar_pattern_ops"},
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

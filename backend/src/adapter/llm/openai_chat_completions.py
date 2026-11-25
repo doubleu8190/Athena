@@ -592,13 +592,16 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                     parts.append({"type": "text", "text": part.text})
             elif isinstance(part, LlmImagePart):
                 # 严格校验 MIME 白名单、非空 ASCII base64 与 detail 枚举；
+                # 使用 C 层 strip/split 快速检测全部 ASCII 空白符，避免逐字符遍历阻塞事件循环。
                 # 校验失败只返回固定安全错误码，绝不打印或回显 data_base64。
+                data_base64 = part.data_base64
                 if (
                     part.mime_type not in _ALLOWED_IMAGE_MIME_TYPES
-                    or not isinstance(part.data_base64, str)
-                    or not part.data_base64.strip()
-                    or not part.data_base64.isascii()
-                    or any(ch.isspace() for ch in part.data_base64)
+                    or not isinstance(data_base64, str)
+                    or not data_base64
+                    or not data_base64.isascii()
+                    or data_base64 != data_base64.strip()
+                    or len(data_base64.split(None, 1)) != 1
                     or part.detail not in _ALLOWED_IMAGE_DETAILS
                 ):
                     raise LlmProtocolError("llm_chat_image_invalid")

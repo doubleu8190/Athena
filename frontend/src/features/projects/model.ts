@@ -1,3 +1,5 @@
+import { countCodePoints } from "../../shared/lib/text";
+
 export const PROJECT_NAME_MAX_LENGTH = 120;
 export const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
 export const PROJECT_INSTRUCTIONS_MAX_LENGTH = 8000;
@@ -49,7 +51,7 @@ export interface ProjectUpdateInput {
 const CONTROL_CHARACTER_PATTERN = /\p{Cc}/u;
 
 export function countProjectCodePoints(value: string): number {
-  return Array.from(value).length;
+  return countCodePoints(value);
 }
 
 function hasDisallowedMultilineControlChar(value: string): boolean {

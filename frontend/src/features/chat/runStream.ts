@@ -325,7 +325,8 @@ function completedAssistantMessageId(
   events: RunEvent[],
   runId: string,
 ): string | null {
-  for (const event of events) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
     if (
       event.run_id !== runId ||
       event.type !== "completed" ||
@@ -342,7 +343,17 @@ function completedAssistantMessageId(
 async function findCompletedAssistantMessageId(
   sessionId: string,
   runId: string,
+  knownEvents: RunEvent[] = [],
 ): Promise<string | null> {
+  // 优先复用 SSE 内存中已收到的 completed 事件，命中后免去分页拉取 /events。
+  const knownAssistantMessageId = completedAssistantMessageId(
+    knownEvents,
+    runId,
+  );
+  if (knownAssistantMessageId) {
+    return knownAssistantMessageId;
+  }
+
   let afterSequence = 0;
   while (true) {
     const page = await listRunEvents(sessionId, runId, afterSequence, 100);
@@ -505,11 +516,13 @@ export async function reconcileCompletedRun(
   sessionId: string,
   runId: string,
   triggerMessageId: string,
+  knownEvents: RunEvent[] = [],
 ): Promise<CompletedRunReconciliation> {
-  // completed 事件携带权威消息 ID；事件或消息任一游标耗尽都明确失败。
+  // completed 事件携带权威消息 ID；优先复用内存事件，事件或消息任一游标耗尽都明确失败。
   const assistantMessageId = await findCompletedAssistantMessageId(
     sessionId,
     runId,
+    knownEvents,
   );
   if (!assistantMessageId) {
     return { kind: "not_found", reason: "completed_event" };

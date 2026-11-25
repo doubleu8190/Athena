@@ -44,6 +44,13 @@ class RunInputRequestModel(Base):
             postgresql_where=text("status = 'pending'"),
             sqlite_where=text("status = 'pending'"),
         ),
+        # 加速按 run_id 顺序拉取用户输入问答摘要的高频热路径。
+        Index(
+            "ix_run_input_requests_run_created",
+            "run_id",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)

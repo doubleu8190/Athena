@@ -557,6 +557,15 @@ class RunLease:
     execution_deadline_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class RunLeaseState:
+    """Worker 高频取消与失租轮询所需的最小标量状态投影。"""
+
+    status: RunStatus
+    worker_id: str | None
+    execution_epoch: int
+
+
 class SubagentTaskSummary(BaseModel):
     """主 Run 下单个子任务的聚合状态投影。"""
 
@@ -682,6 +691,7 @@ __all__ = [
     "RunInputImageAttachment",
     "RunInputCall",
     "RunLease",
+    "RunLeaseState",
     "RunModelSnapshot",
     "RunQueuedPayload",
     "RecordRunUsageCommand",

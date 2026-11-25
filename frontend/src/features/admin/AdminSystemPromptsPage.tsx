@@ -7,6 +7,7 @@ import {
   isAuthIdentityCurrent,
 } from "../../shared/api/client";
 import { formatDateTime } from "../../shared/lib/format";
+import { countCodePoints } from "../../shared/lib/text";
 import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
@@ -108,10 +109,6 @@ function editorFromVersion(version: SystemPromptVersion): EditorState {
 
 function sourceLabel(createdBy: string | null): string {
   return createdBy?.trim() || "系统初始化";
-}
-
-function characterCount(value: string): number {
-  return Array.from(value).length;
 }
 
 function isUncertainWriteError(error: unknown): boolean {
@@ -762,7 +759,7 @@ export function AdminSystemPromptsPage() {
 
               <div className="admin-system-prompt-editor-status">
                 <span>
-                  {characterCount(editor.draft).toLocaleString()} /{" "}
+                  {countCodePoints(editor.draft).toLocaleString()} /{" "}
                   {SYSTEM_PROMPT_CONTENT_MAX_LENGTH.toLocaleString()} 字符
                 </span>
                 <span>
@@ -1043,7 +1040,7 @@ export function AdminSystemPromptsPage() {
         title={confirmationCopy?.title ?? ""}
       >
         <p className="admin-system-prompt-confirm-preview">
-          当前正文 {characterCount(editor?.draft ?? "")} 个字符。
+          当前正文 {countCodePoints(editor?.draft ?? "")} 个字符。
           {copyStatus ? ` ${copyStatus}` : ""}
         </p>
       </Modal>

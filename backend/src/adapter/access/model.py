@@ -44,11 +44,6 @@ class ResourceVisibilityGrantModel(Base):
             "target_type",
             "target_id",
         ),
-        Index(
-            "ix_resource_visibility_grants_resource",
-            "resource_type",
-            "resource_id",
-        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

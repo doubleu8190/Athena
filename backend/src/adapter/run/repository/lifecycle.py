@@ -61,6 +61,7 @@ from domain.run.model import (
     RunInputInteraction,
     RunInputRequest,
     RunLease,
+    RunLeaseState,
     RunQueuedPayload,
     RunRequestOperation,
     RunRequestResult,
@@ -1246,6 +1247,37 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     result = run_to_domain(row)
         return result
+
+    async def get_lease_state(
+        self, session_id: str, owner_id: str, run_id: str
+    ) -> RunLeaseState | None:
+        """仅投影 status/worker_id/execution_epoch 三个标量列并校验活跃 Session 归属。"""
+        async with self._session_factory() as session:
+            # 避免 1s 取消轮询拉取大 JSONB 快照列、查询 run_input_requests 或反序列化完整 Run。
+            row = (
+                await session.execute(
+                    select(
+                        RunModel.status,
+                        RunModel.worker_id,
+                        RunModel.execution_epoch,
+                    )
+                    .join(SessionModel, SessionModel.id == RunModel.session_id)
+                    .where(
+                        RunModel.id == run_id,
+                        RunModel.session_id == session_id,
+                        RunModel.owner_id == owner_id,
+                        SessionModel.owner_id == owner_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return RunLeaseState(
+            status=RunStatus(row.status),
+            worker_id=row.worker_id,
+            execution_epoch=int(row.execution_epoch),
+        )
 
     async def get(self, session_id: str, owner_id: str, run_id: str) -> Run | None:
         """通过未删除 Session 作用域读取 Run，并附带已关联的问答记录。"""

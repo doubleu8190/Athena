@@ -15,6 +15,7 @@ import {
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { countCodePoints } from "../../shared/lib/text";
 import {
   Badge,
   Button,
@@ -315,7 +316,7 @@ export function DraftChatPage() {
     if (!text || submitting || !contextReady) {
       return;
     }
-    if (Array.from(text).length > 32_000) {
+    if (countCodePoints(text) > 32_000) {
       setSubmitError("消息内容不能超过 32,000 个字符。");
       return;
     }

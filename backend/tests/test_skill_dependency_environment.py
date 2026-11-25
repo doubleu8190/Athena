@@ -740,3 +740,278 @@ def test_directory_uses_joined_entries_and_skips_noop_writes_after_ttl(
     assert [write.status for write in repository.dependency_writes] == [
         DependencyCheckStatus.UNSATISFIED,
     ]
+
+
+def test_recheck_version_dependencies_skips_write_when_unchanged_and_updates_on_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """依赖结论语义未变仅 checked_at 变化时不触发写库，结论变化时正常落库。"""
+    probe = _ProbeRecorder("2.1", "2.1", "1.0")
+    monkeypatch.setattr(dependency_module, "_probe_target_environment", probe)
+    wall_clock = [CHECKED_AT]
+    initial_check = DependencyCheck(
+        status=DependencyCheckStatus.SATISFIED,
+        python_version="3.14.0",
+        python_implementation="CPython",
+        items=(
+            DependencyCheckItem(
+                requirement="demo-package>=2",
+                package="demo-package",
+                satisfied=True,
+                installed_version="2.1",
+                detail_code=None,
+            ),
+        ),
+        checked_at=CHECKED_AT - timedelta(hours=1),
+    )
+    version = SimpleNamespace(
+        id="skillver_recheck",
+        skill_id="skill_recheck",
+        dependency_requirements=("demo-package>=2",),
+        dependency_check=initial_check,
+    )
+    repository = _DirectoryRepository((), (version,))
+    checker = DependencyChecker(
+        python_executable=sys.executable,
+        clock=lambda: wall_clock[0],
+        monotonic_clock=_ManualMonotonicClock(),
+    )
+    service = SkillService(
+        cast(Any, repository),
+        cast(Any, object()),
+        cast(Any, object()),
+        dependency_checker=checker,
+        clock=lambda: wall_clock[0],
+    )
+
+    async def scenario() -> None:
+        # 连续两次实时复核均命中相同版本 2.1，仅 checked_at 推进，必须零写库。
+        v1, c1 = await service.recheck_version_dependencies(cast(Any, version))
+        assert c1.status is DependencyCheckStatus.SATISFIED
+        assert cast(object, v1) is version
+        wall_clock[0] = CHECKED_AT + timedelta(minutes=10)
+        v2, c2 = await service.recheck_version_dependencies(cast(Any, version))
+        assert c2.status is DependencyCheckStatus.SATISFIED
+        assert cast(object, v2) is version
+        assert repository.dependency_writes == []
+
+        # 环境变为 1.0 后依赖不满足，应立即写回数据库一次。
+        wall_clock[0] = CHECKED_AT + timedelta(minutes=20)
+        _v3, c3 = await service.recheck_version_dependencies(cast(Any, version))
+        assert c3.status is DependencyCheckStatus.UNSATISFIED
+        assert len(repository.dependency_writes) == 1
+        assert repository.dependency_writes[0].status is DependencyCheckStatus.UNSATISFIED
+        assert repository.dependency_writes[0].items[0].installed_version == "1.0"
+
+    asyncio.run(scenario())
+    assert probe.calls == 3
+
+
+def test_prepare_call_uses_cached_dependency_probe_and_avoids_duplicate_probe_before_execute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prepare_call 复用缓存探针、execute 执行实时探针并刷新快照，避免单次调用双倍探针。"""
+    from app.tool.runtime import SKILL_EXECUTE_DEFINITION, RunToolRuntimeService
+    from domain.run.model import Run, RunStatus, RunUsage
+    from domain.skill import (
+        PackageResource,
+        RunSkillEntry,
+        RunSkillSnapshot,
+        SkillPackageManifest,
+        SkillScope,
+        SkillScriptDefinition,
+        SkillVersion,
+    )
+    from domain.tool import AuthorizedRunContext
+
+    probe = _ProbeRecorder("2.1", "2.1", "2.1")
+    monkeypatch.setattr(dependency_module, "_probe_target_environment", probe)
+    monotonic_clock = _ManualMonotonicClock()
+    wall_clock = [CHECKED_AT]
+    initial_check = DependencyCheck(
+        status=DependencyCheckStatus.SATISFIED,
+        python_version="3.14.0",
+        python_implementation="CPython",
+        items=(
+            DependencyCheckItem(
+                requirement="demo-package>=2",
+                package="demo-package",
+                satisfied=True,
+                installed_version="2.1",
+                detail_code=None,
+            ),
+        ),
+        checked_at=CHECKED_AT - timedelta(minutes=5),
+    )
+    manifest = SkillPackageManifest(
+        slug="report-skill",
+        name="Report Skill",
+        description="Generate report",
+        guide="Guide",
+        files=(
+            PackageResource(
+                path="SKILL.md",
+                size_bytes=5,
+                sha256="a" * 64,
+                text=True,
+            ),
+            PackageResource(
+                path="scripts/run.py",
+                size_bytes=10,
+                sha256="b" * 64,
+                text=True,
+            ),
+        ),
+        scripts=(
+            SkillScriptDefinition(
+                path="scripts/run.py",
+                label="Run report",
+                purpose="Build monthly report",
+                parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+        ),
+    )
+    version = SkillVersion(
+        id="skillver_exec_dedup",
+        skill_id="skill_exec_dedup",
+        ordinal=1,
+        label="v1",
+        manifest=manifest,
+        object_key="skills/aa/dedup.zip",
+        package_sha256="c" * 64,
+        dependency_requirements=("demo-package>=2",),
+        dependency_check=initial_check,
+        created_by="usr_admin",
+        created_at=CHECKED_AT,
+    )
+    repository = _DirectoryRepository((), (cast(Any, version),))
+    checker = DependencyChecker(
+        python_executable=sys.executable,
+        clock=lambda: wall_clock[0],
+        monotonic_clock=monotonic_clock,
+    )
+    service = SkillService(
+        cast(Any, repository),
+        cast(Any, object()),
+        cast(Any, object()),
+        dependency_checker=checker,
+        clock=lambda: wall_clock[0],
+    )
+
+    class _FakeFiles:
+        async def get_many(
+            self,
+            session_id: str,
+            owner_id: str,
+            file_ids: tuple[str, ...],
+        ) -> tuple[object, ...]:
+            del session_id, owner_id, file_ids
+            return ()
+
+    runtime = RunToolRuntimeService(
+        auth=cast(Any, object()),
+        sessions=cast(Any, object()),
+        mcp_catalog=cast(Any, object()),
+        mcp_executor=cast(Any, object()),
+        knowledge=None,
+        project_knowledge=None,
+        skills=service,
+        session_files=cast(Any, _FakeFiles()),
+    )
+    snapshot = RunSkillSnapshot(
+        skills=(
+            RunSkillEntry(
+                skill_id=version.skill_id,
+                slug="report-skill",
+                name="Report Skill",
+                description="Generate report",
+                version_id=version.id,
+                version_label="v1",
+                requires_approval=False,
+                scope=SkillScope.COMPANY,
+            ),
+        ),
+        selected_skill_ids=(version.skill_id,),
+    )
+    run = Run(
+        id="run_skill_dedup",
+        session_id="ses_skill_dedup",
+        owner_id="usr_member",
+        status=RunStatus.RUNNING,
+        trigger_message_id="msg_1",
+        context_cutoff_sequence=1,
+        retry_of_run_id=None,
+        model_config_version_id="mpv_1",
+        main_prompt_version_id="prompt_main",
+        compression_prompt_version_id="prompt_comp",
+        prompt_template_version="run-v2",
+        event_sequence=1,
+        execution_epoch=1,
+        worker_id="worker_1",
+        lease_expires_at=CHECKED_AT + timedelta(minutes=1),
+        execution_started_at=CHECKED_AT,
+        execution_deadline_at=CHECKED_AT + timedelta(minutes=1),
+        queued_at=CHECKED_AT,
+        first_started_at=CHECKED_AT,
+        finished_at=None,
+        created_at=CHECKED_AT,
+        updated_at=CHECKED_AT,
+        cancel_requested_at=None,
+        safe_error_code=None,
+        usage=RunUsage(),
+        skill_snapshot=snapshot,
+    )
+    auth_ctx = AuthorizedRunContext(
+        owner_id="usr_member",
+        chat_session_id="ses_skill_dedup",
+        project_id=None,
+        auth_session_id="auth_1",
+    )
+    arguments: dict[str, Any] = {
+        "skill_id": version.skill_id,
+        "script_path": "scripts/run.py",
+        "parameters": {},
+        "input_file_ids": [],
+    }
+
+    async def scenario() -> None:
+        # 1. 预热共享环境缓存（模拟目录查询或前一次执行后 60s 内）。
+        checker.check_cached(version.dependency_requirements)
+        assert probe.calls == 1
+
+        # 2. 一次完整的 prepare_call（走缓存） + execute 目标准备（实时复核并刷新快照）
+        #    只应新增 1 次实时探测，而非双倍探测，且依赖未变时零写库。
+        prep = await runtime.prepare_call(
+            SKILL_EXECUTE_DEFINITION,
+            "skill_execute",
+            arguments,
+            run,
+            auth_ctx,
+            call_id="tc_1",
+        )
+        assert prep.outcome is None
+        assert probe.calls == 1
+
+        wall_clock[0] = CHECKED_AT + timedelta(seconds=2)
+        await service.prepare_script_target(
+            snapshot,
+            skill_id=version.skill_id,
+            script_path="scripts/run.py",
+            parameters={},
+        )
+        assert probe.calls == 2
+
+        # 3. 紧接着第二轮 prepare_call 命中刚由 execute 刷新的缓存，仍然 0 新增探针。
+        prep_second = await runtime.prepare_call(
+            SKILL_EXECUTE_DEFINITION,
+            "skill_execute",
+            arguments,
+            run,
+            auth_ctx,
+            call_id="tc_2",
+        )
+        assert prep_second.outcome is None
+        assert probe.calls == 2
+        assert repository.dependency_writes == []
+
+    asyncio.run(scenario())

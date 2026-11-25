@@ -1,3 +1,5 @@
+import { countCodePoints as countUnicodeCodePoints } from "../../shared/lib/text";
+
 export const CUSTOM_INSTRUCTIONS_MAX_LENGTH = 4000;
 export const USER_MEMORY_CONTENT_MAX_LENGTH = 500;
 export const USER_MEMORY_DEFAULT_LIMIT = 50;
@@ -68,7 +70,7 @@ export const WORK_INSTRUCTION_PRESETS: readonly WorkInstructionPreset[] = [
 const UNICODE_CONTROL_CHAR_PATTERN = /\p{Cc}/u;
 
 export function countCodePoints(value: string): number {
-  return Array.from(value).length;
+  return countUnicodeCodePoints(value);
 }
 
 export function hasForbiddenMultilineControlChar(value: string): boolean {

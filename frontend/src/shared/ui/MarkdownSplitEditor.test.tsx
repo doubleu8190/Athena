@@ -344,4 +344,34 @@ describe("MarkdownSplitEditor", () => {
     expect(textarea.selectionStart).toBe(4);
     expect(textarea.selectionEnd).toBe(6);
   });
+
+  it("大文档连续输入下零分配码点计数准确且延迟预览区正确收敛到最新正文", () => {
+    mockMatchMedia(true);
+
+    render(
+      <ControlledEditor
+        id="large-doc-guide"
+        initialValue=""
+        label="大文档正文"
+        maxLength={20_000}
+      />,
+    );
+
+    const textarea = screen.getByLabelText("大文档正文");
+    const counter = screen.getByTestId("markdown-char-count");
+    const repeatedParagraph = "财务制度规范😀\n\n".repeat(1_000);
+    const largeDoc = `${repeatedParagraph}## 最终章节标题\n\n**关键结论收敛**`;
+
+    fireEvent.change(textarea, { target: { value: largeDoc } });
+
+    expect(counter).toHaveTextContent(
+      `${Array.from(largeDoc).length.toLocaleString()} / 20,000 字符`,
+    );
+    expect(counter).toHaveAttribute("data-over-limit", "false");
+    const preview = screen.getByTestId("markdown-split-preview");
+    expect(
+      within(preview).getByRole("heading", { name: "最终章节标题" }),
+    ).toBeInTheDocument();
+    expect(within(preview).getByText("关键结论收敛")).toBeInTheDocument();
+  });
 });

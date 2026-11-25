@@ -772,7 +772,8 @@ class KnowledgeService:
         tokens: tuple[str, ...] = ()
         keyword_reason: str | None = None
         try:
-            tokens = self._tokenizer.tokenize(normalized)
+            # 将同步分词卸载到工作线程，避免首次加载或长查询分词阻塞事件循环。
+            tokens = await asyncio.to_thread(self._tokenizer.tokenize, normalized)
         except Exception:
             keyword_reason = "keyword_tokenizer_unavailable"
         vector, semantic_reason = await self._query_vector(normalized)

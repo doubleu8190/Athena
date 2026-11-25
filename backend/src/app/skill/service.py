@@ -1570,13 +1570,14 @@ class SkillService:
         skill_id: str,
         script_path: str,
         parameters: dict[str, object],
+        use_cached_dependency_check: bool = False,
     ) -> tuple[
         RunSkillEntry,
         SkillVersion,
         SkillScriptDefinition,
         DependencyCheck,
     ]:
-        """解析固定版本，并返回已刷新到当前 Worker 环境的依赖结论。"""
+        """解析固定版本，并返回已刷新或缓存复用的当前 Worker 环境依赖结论。"""
         entry, version = await self.resolve_run_entry(snapshot, skill_id)
         if entry.scope is SkillScope.PERSONAL:
             # 个人 Skill 只提供 Markdown 指南，任何脚本调用都按未登记目标拒绝。
@@ -1590,7 +1591,10 @@ class SkillService:
         validation_error = validate_parameter_schema(script.parameters, parameters)
         if validation_error is not None:
             raise ValueError("skill_parameters_invalid")
-        version, dependency_check = await self.recheck_version_dependencies(version)
+        version, dependency_check = await self.recheck_version_dependencies(
+            version,
+            use_cached_dependency_check=use_cached_dependency_check,
+        )
         if dependency_check.status is not DependencyCheckStatus.SATISFIED:
             raise SkillDependencyUnsatisfiedError()
         return entry, version, script, dependency_check
@@ -1615,14 +1619,25 @@ class SkillService:
     async def recheck_version_dependencies(
         self,
         version: SkillVersion,
+        *,
+        use_cached_dependency_check: bool = False,
     ) -> tuple[SkillVersion, DependencyCheck]:
-        """执行前复核并显式返回本次结论及可能刷新后的版本。"""
-        check = await asyncio.to_thread(
-            self._dependency_checker.check,
-            version.dependency_requirements,
-            checked_at=self._clock(),
-        )
-        if check != version.dependency_check:
+        """执行前复核依赖并仅在实质结果变化时写回数据库，消除 checked_at 导致的写放大。"""
+        if use_cached_dependency_check and callable(
+            getattr(self._dependency_checker, "check_cached", None)
+        ):
+            check = await asyncio.to_thread(
+                self._dependency_checker.check_cached,
+                version.dependency_requirements,
+            )
+        else:
+            check = await asyncio.to_thread(
+                self._dependency_checker.check,
+                version.dependency_requirements,
+                checked_at=self._clock(),
+            )
+        # 忽略仅 checked_at 推进、状态与包版本未变的探测结果，避免无意义 FOR UPDATE 写事务。
+        if _dependency_check_changed(version.dependency_check, check):
             refreshed = await self._repository.record_dependency_check(version.id, check)
             if refreshed is None:
                 raise SkillNotFoundError("skill_version_unavailable")

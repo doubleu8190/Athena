@@ -2396,3 +2396,158 @@ def test_model_unavailable_failed_candidate_is_not_retried(
         assert profiles.get_runtime.await_count == 1
 
     asyncio.run(scenario())
+
+
+def test_prepare_short_circuits_with_single_measurement_below_thresholds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多轮历史但未触及压缩线、90% 安全线与硬窗时，prepare 仅执行 1 次主请求测量。"""
+    now = datetime.now(UTC)
+    provider = SimpleNamespace(complete=AsyncMock())
+    base, lease, compression_runtime, policy, _ = _prepare_test_context(
+        previous_summary=None,
+        provider=provider,
+    )
+    # 构造 5 组历史轮次（10 条消息）+ 触发消息 msg_11，设置较高触发阈值避免进入压缩。
+    long_run = replace(base, trigger_message_id="msg_11", context_cutoff_sequence=11)
+    long_lease = replace(lease, run=long_run)
+    high_policy = replace(policy, trigger_tokens=800)
+    messages = tuple(
+        _message(i, ConversationRole.USER if i % 2 else ConversationRole.ASSISTANT)
+        for i in range(1, 12)
+    )
+    repository = _RecoverableCompressionRepository(long_run)
+    estimate_calls = 0
+    measure_calls = 0
+
+    async def counting_estimate(*args: object, **kwargs: object) -> tuple[int, int]:
+        del args, kwargs
+        nonlocal estimate_calls
+        estimate_calls += 1
+        return 120, 100
+
+    async def counting_measure(
+        run: Run,
+        active: Sequence[ConversationMessage | ExecutionMessage],
+        profile: ModelProfileVersion,
+        **kwargs: object,
+    ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
+        del run, profile, kwargs
+        nonlocal measure_calls
+        measure_calls += 1
+        return (
+            tuple(LlmMessage(LlmRole.USER, item.id) for item in active),
+            (),
+            250,
+            100,
+        )
+
+    async def scenario() -> None:
+        monkeypatch.setattr(compression_module, "estimate_llm_input_tokens", counting_estimate)
+        monkeypatch.setattr(compression_module, "measure_llm_request", counting_measure)
+        result = await ContextCompressor(
+            cast(RunRepository, repository),
+            SimpleNamespace(get_runtime=AsyncMock(return_value=compression_runtime)),
+            cast(LlmRuntimeTextProvider, provider),
+            SimpleNamespace(publish_persisted=AsyncMock()),
+        ).prepare(
+            long_lease,
+            messages,
+            _main_runtime_for_prepare(context_window_tokens=1000),
+            policy=high_policy,
+            main_prompt=TEST_MAIN_PROMPT,
+            compression_prompt=TEST_COMPRESSION_PROMPT,
+            timeout_seconds=30,
+        )
+        assert result.input_tokens == 250
+        assert result.output_tokens == 100
+        assert not result.compression_called
+        assert not result.compression_completed
+        assert result.stop_reason_hint is None
+        assert len(result.messages) == 11
+
+    asyncio.run(scenario())
+    # 未达触发线/安全线/硬窗时完全跳过 base/prefix/protected 与 _split_recent_suffix 测量。
+    assert measure_calls == 1
+    assert estimate_calls == 0
+    assert cast(AsyncMock, provider.complete).await_count == 0
+    assert now is not None
+
+
+def test_prepare_reuses_base_tokens_as_prefix_when_no_prior_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超过触发线且无既有摘要时，复用 base_tokens 作 prefix_tokens 且不重复测 current。"""
+    provider = SimpleNamespace(
+        complete=AsyncMock(
+            return_value=LlmResponse(
+                output=(LlmText("short summary"),),
+                status="completed",
+                incomplete_reason=None,
+                model="summary-model",
+                response_id="resp-reuse",
+                request_id=None,
+                usage=LlmUsage(input_tokens=10, output_tokens=2, total_tokens=12),
+            )
+        )
+    )
+    base, lease, compression_runtime, policy, messages = _prepare_test_context(
+        previous_summary=None,
+        provider=provider,
+    )
+    repository = _RecoverableCompressionRepository(base)
+    empty_estimate_calls = 0
+    measure_calls = 0
+
+    async def tracking_estimate(*args: object, **kwargs: object) -> tuple[int, int]:
+        del kwargs
+        nonlocal empty_estimate_calls
+        active = cast(Sequence[object], args[1])
+        if not active:
+            empty_estimate_calls += 1
+        return 500 + 10 * len(active), 100
+
+    async def fake_count(text: str, *_: object, **__: object) -> int:
+        return 2 if text == "short summary" else 10
+
+    async def tracking_measure(
+        run: Run,
+        active: Sequence[ConversationMessage | ExecutionMessage],
+        profile: ModelProfileVersion,
+        **kwargs: object,
+    ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
+        del run, profile, kwargs
+        nonlocal measure_calls
+        measure_calls += 1
+        return (
+            tuple(LlmMessage(LlmRole.USER, item.id) for item in active),
+            (),
+            600,
+            100,
+        )
+
+    async def scenario() -> None:
+        monkeypatch.setattr(compression_module, "estimate_llm_input_tokens", tracking_estimate)
+        monkeypatch.setattr(compression_module, "count_plain_text_tokens_async", fake_count)
+        monkeypatch.setattr(compression_module, "measure_llm_request", tracking_measure)
+        result = await ContextCompressor(
+            cast(RunRepository, repository),
+            SimpleNamespace(get_runtime=AsyncMock(return_value=compression_runtime)),
+            cast(LlmRuntimeTextProvider, provider),
+            SimpleNamespace(publish_persisted=AsyncMock()),
+        ).prepare(
+            lease,
+            messages,
+            _main_runtime_for_prepare(),
+            policy=policy,
+            main_prompt=TEST_MAIN_PROMPT,
+            compression_prompt=TEST_COMPRESSION_PROMPT,
+            timeout_seconds=30,
+        )
+        assert result.compression_completed
+
+    asyncio.run(scenario())
+    # 无历史摘要时，空消息基础预算只测量 1 次（base_tokens 与 prefix_tokens 合并），
+    # 主上下文测量仅 2 次（压缩前 1 次 + 压缩后校验 1 次）。
+    assert empty_estimate_calls == 1
+    assert measure_calls == 2

@@ -24,6 +24,7 @@ from domain.run.model import (
     RunInputCall,
     RunInputRequest,
     RunLease,
+    RunLeaseState,
     RunStreamEvent,
     RunStreamSnapshot,
     SaveContextSummaryCommand,
@@ -184,6 +185,12 @@ class RunRepository(Protocol):
 
     async def get(self, session_id: str, owner_id: str, run_id: str) -> Run | None:
         """读取 owner 可见的 Run。"""
+
+    async def get_lease_state(
+        self, session_id: str, owner_id: str, run_id: str
+    ) -> RunLeaseState | None:
+        """仅查询 status、worker_id 与 execution_epoch 三个标量列并校验活跃 Session 归属。"""
+        ...
 
     async def list_runs(
         self,

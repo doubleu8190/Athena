@@ -35,6 +35,8 @@ from domain.run.model import (
     RunEvent,
     RunFailedPayload,
     RunInterruptedEvent,
+    RunPersistedEvent,
+    RunPersistedEventPayload,
     RunQueuedPayload,
     RunSnapshotEvent,
     RunStatus,
@@ -1164,3 +1166,198 @@ def test_stream_caches_live_execution_within_ttl_and_invalidates_on_interrupt_or
 
     asyncio.run(collect_no_cache())
     assert no_cache_repo.live_checks == [1, 1, 1]
+
+
+def test_stream_deduplicates_batch_persisted_events_already_covered_by_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同批 5 条持久化事件在首次对账覆盖后不再重复触发全量快照，同时保留 gap 检测。"""
+    import app.run.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "DATABASE_RECONCILE_SECONDS", 60.0)
+    now = datetime.now(UTC)
+
+    def persisted_run_event(sequence: int) -> RunEvent:
+        return RunEvent(
+            id=f"evt_{sequence}",
+            run_id="run_stream_test",
+            sequence=sequence,
+            type="queued",
+            created_at=now,
+            payload=RunQueuedPayload(trigger_message_id="message_stream_test"),
+        )
+
+    class BatchSnapshotRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.RUNNING, epoch=1)
+            self.snapshot_calls = 0
+
+        async def get_stream_snapshot(
+            self, session_id: str, owner_id: str, run_id: str
+        ) -> RunStreamSnapshot:
+            assert self.subscribed
+            self.snapshot_calls += 1
+            if self.snapshot_calls == 1:
+                # 首屏快照只包含 sequence=1。
+                return RunStreamSnapshot(
+                    replace(_run(RunStatus.RUNNING, 1), event_sequence=1),
+                    (),
+                    (persisted_run_event(1),),
+                )
+            # 收到同批第 1 条通知触发对账时，数据库已提交 sequence 2..6 共 5 条事件。
+            return RunStreamSnapshot(
+                replace(_run(RunStatus.RUNNING, 1), event_sequence=6),
+                (),
+                tuple(persisted_run_event(seq) for seq in range(1, 7)),
+            )
+
+        async def list_events(
+            self,
+            session_id: str,
+            owner_id: str,
+            run_id: str,
+            *,
+            after_sequence: int,
+            limit: int,
+            through_sequence: int | None = None,
+        ) -> tuple[RunEvent, ...]:
+            upper = min(through_sequence or 6, 6)
+            return tuple(persisted_run_event(seq) for seq in range(after_sequence + 1, upper + 1))[
+                :limit
+            ]
+
+    # 模拟同一批 5 条 RunPersistedEvent（seq 2..6）按 Pub/Sub 依次到达，
+    # 并在第 5 条故意跳号 stream_sequence 验证 transport_cursor 与 stream_gap 检测未被绕过。
+    batch_incoming: list[RunStreamEvent] = [
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunPersistedEventPayload(event=persisted_run_event(2)),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=2,
+            payload=RunPersistedEventPayload(event=persisted_run_event(3)),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=3,
+            payload=RunPersistedEventPayload(event=persisted_run_event(4)),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=4,
+            payload=RunPersistedEventPayload(event=persisted_run_event(5)),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=6,
+            payload=RunPersistedEventPayload(event=persisted_run_event(6)),
+        ),
+    ]
+    repository = BatchSnapshotRepository()
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository, batch_incoming)),
+    )
+
+    async def collect() -> list[RunStreamEvent]:
+        iterator = service.events(
+            "session_stream_test", "user_stream_test", "run_stream_test", "token"
+        )
+        # 1 初始 snapshot + 5 条补齐的 persisted events (seq 2..6) + 1 条 stream_gap 中断事件 = 7
+        emitted = [await anext(iterator) for _ in range(7)]
+        await iterator.aclose()
+        return emitted
+
+    emitted = asyncio.run(collect())
+    assert isinstance(emitted[0], RunSnapshotEvent)
+    assert [
+        item.payload.event.sequence for item in emitted[1:6] if isinstance(item, RunPersistedEvent)
+    ] == [2, 3, 4, 5, 6]
+    assert isinstance(emitted[6], RunInterruptedEvent)
+    assert emitted[6].payload.reason == "stream_gap"
+    # 首屏 1 次 + 首批首条触发 1 次 = 2 次；后续 4 条已被 event_cursor=6 覆盖，不再触发快照。
+    assert repository.snapshot_calls == 2
+
+
+def test_stream_still_reconciles_child_forwarded_persisted_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """父 Run 收到子 Run 转发的 RunPersistedEvent（子序 <= 父游标）时仍必须立即对账。"""
+    import app.run.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "DATABASE_RECONCILE_SECONDS", 60.0)
+    now = datetime.now(UTC)
+
+    parent_event = RunEvent(
+        id="evt_parent_5",
+        run_id="run_stream_test",
+        sequence=5,
+        type="queued",
+        created_at=now,
+        payload=RunQueuedPayload(trigger_message_id="message_stream_test"),
+    )
+    child_event = RunEvent(
+        id="evt_child_1",
+        run_id="sub_run_child_1",
+        sequence=1,
+        type="queued",
+        created_at=now,
+        payload=RunQueuedPayload(trigger_message_id="message_stream_test"),
+    )
+
+    class ParentStreamRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.WAITING_FOR_SUBAGENTS, epoch=1)
+            self.snapshot_calls = 0
+
+        async def get_stream_snapshot(
+            self, session_id: str, owner_id: str, run_id: str
+        ) -> RunStreamSnapshot:
+            self.snapshot_calls += 1
+            if self.snapshot_calls == 1:
+                return RunStreamSnapshot(
+                    replace(_run(RunStatus.WAITING_FOR_SUBAGENTS, 1), event_sequence=5),
+                    (),
+                    (parent_event,),
+                )
+            return RunStreamSnapshot(
+                replace(_run(RunStatus.COMPLETED, 1), event_sequence=5),
+                (),
+                (parent_event,),
+            )
+
+    repository = ParentStreamRepository()
+    incoming: list[RunStreamEvent] = [
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunPersistedEventPayload(event=child_event),
+        )
+    ]
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository, incoming)),
+    )
+
+    async def collect() -> list[RunStreamEvent]:
+        return [
+            item
+            async for item in service.events(
+                "session_stream_test", "user_stream_test", "run_stream_test", "token"
+            )
+        ]
+
+    emitted = asyncio.run(collect())
+    assert repository.snapshot_calls == 2
+    assert isinstance(emitted[-1], RunSnapshotEvent)
+    assert emitted[-1].payload.status is RunStatus.COMPLETED

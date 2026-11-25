@@ -68,7 +68,6 @@ class RunToolCallModel(Base):
             name="ck_run_tool_calls_approval_decision",
         ),
         Index("ix_run_tool_calls_call_message", "call_message_id"),
-        Index("ix_run_tool_calls_run_ordinal", "run_id", "ordinal"),
         Index("ix_run_tool_calls_run_status", "run_id", "status"),
     )
 

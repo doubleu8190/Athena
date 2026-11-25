@@ -13,6 +13,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -259,9 +260,10 @@ export interface FilePreviewDialogProps {
  * 统一文件在线预览与原图灯箱弹窗（Radix Dialog）：
  * - 统一承载白名单位图灯箱（PNG/JPEG/WEBP）、Markdown、CSV 表格、JSON/纯文本与 PDF/Office 提取文本；
  * - 严格按后端返回的 next_offset 续读分页（直至 eof === true），并在切文件/关弹窗时通过 AbortController 彻底中止在途请求防止串染；
- * - 提取失败或格式不支持时展示温和中文原因并保留「下载原件」入口。
+ * - 提取失败或格式不支持时展示温和中文原因并保留「下载原件」入口；
+ * - 包裹 React.memo 隔离流式消息更新引发的无关重渲染。
  */
-export function FilePreviewDialog({
+export const FilePreviewDialog = memo(function FilePreviewDialog({
   file,
   onExtractionFailed,
   onFileMetadataUpdated,
@@ -1049,4 +1051,4 @@ export function FilePreviewDialog({
       </DialogContent>
     </Dialog>
   );
-}
+});

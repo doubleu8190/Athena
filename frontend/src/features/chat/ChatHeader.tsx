@@ -9,7 +9,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   DeleteSessionAlertDialog,
@@ -48,8 +48,9 @@ export interface ChatHeaderProps {
  * 48px 极简单行会话顶栏：
  * - 左侧：支持内联点击编辑的会话标题（严格防 IME 误触）+ 所属项目胶囊（闲置可切换归属、运行中锁定并提示）；
  * - 右侧：[📎 N] 会话文件抽屉触发钮 + 紧凑 `...` 更多菜单（重命名、调整所属项目、删除对话）。
+ * 包裹 React.memo 隔离流式 text_delta 高频更新时的无关重渲染。
  */
-export function ChatHeader({
+export const ChatHeader = memo(function ChatHeader({
   hasActiveRun,
   onOpenFilesDrawer,
   session,
@@ -407,4 +408,4 @@ export function ChatHeader({
       />
     </>
   );
-}
+});

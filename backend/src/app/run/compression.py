@@ -299,6 +299,50 @@ class ContextCompressor:
         active_messages = self._messages_after_summary(messages, summary)
         summary_text = None if summary is None else summary.text
 
+        trigger_prefix = tuple(
+            item
+            for item in conversations
+            if item.sequence < trigger.sequence
+            and (summary is None or item.sequence > summary.covered_through_sequence)
+        )
+        groups = list(_turn_groups(trigger_prefix))
+        # 先执行 1 次完整主上下文测量；常规未触及压缩线、90% 安全线和硬窗上限时直接短路径返回，
+        # 避免每个普通轮次都反复测量固定基础预算、前缀预算与逐轮次后缀拆分。
+        current = await self._measure_context(
+            run,
+            active_messages,
+            main_runtime,
+            main_prompt=main_prompt,
+            timeout_seconds=timeout_seconds,
+            summary_text=summary_text,
+            tools=tools,
+            retry_context=retry_context,
+            skill_context=skill_context,
+            input_files=input_files,
+            input_images=input_images,
+            preference_context=preference_context,
+            project_context=project_context,
+        )
+        if not groups:
+            return ContextPreparation(
+                messages=current.messages,
+                tools=current.tools,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
+                had_new_history=False,
+                stop_reason_hint=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
+            )
+
+        # 常规触发使用绝对阈值；达到硬窗口 90% 或输入加输出超出硬窗时才进入拆分与压缩裁决。
+        safety_threshold = (main_runtime.version.context_window_tokens * 9 + 9) // 10
+        if (
+            current.input_tokens < policy.trigger_tokens
+            and current.input_tokens < safety_threshold
+            and current.input_tokens + current.output_tokens
+            <= main_runtime.version.context_window_tokens
+        ):
+            return current
+
         # 主请求固定基础预算必须计入当前 Run 携带的视觉图片 Token，以准确扣除可用历史窗口。
         base_tokens, output_tokens = await estimate_llm_input_tokens(
             run,
@@ -331,18 +375,18 @@ class ContextCompressor:
             feasible_history,
         )
 
-        trigger_prefix = tuple(
-            item
-            for item in conversations
-            if item.sequence < trigger.sequence
-            and (summary is None or item.sequence > summary.covered_through_sequence)
+        group_message_ids = {message.id for group in groups for message in group}
+        protected_messages = tuple(
+            item for item in active_messages if item.id not in group_message_ids
         )
-        groups = list(_turn_groups(trigger_prefix))
-        if not groups:
-            current = await self._measure_context(
+        # 无既有摘要时，固定前缀预算与 base_tokens 完全等价，直接复用避免重复测量。
+        if summary_text is None:
+            prefix_tokens = base_tokens
+        else:
+            prefix_tokens, _ = await estimate_llm_input_tokens(
                 run,
-                active_messages,
-                main_runtime,
+                (),
+                main_runtime.version,
                 main_prompt=main_prompt,
                 timeout_seconds=timeout_seconds,
                 summary_text=summary_text,
@@ -354,35 +398,6 @@ class ContextCompressor:
                 preference_context=preference_context,
                 project_context=project_context,
             )
-            return ContextPreparation(
-                messages=current.messages,
-                tools=current.tools,
-                input_tokens=current.input_tokens,
-                output_tokens=current.output_tokens,
-                had_new_history=False,
-                stop_reason_hint=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
-            )
-
-        group_message_ids = {message.id for group in groups for message in group}
-        protected_messages = tuple(
-            item for item in active_messages if item.id not in group_message_ids
-        )
-        # 缓存固定前缀 token 数，供 _split_recent_suffix 增量计算每组预算，避免重复测量前缀。
-        prefix_tokens, _ = await estimate_llm_input_tokens(
-            run,
-            (),
-            main_runtime.version,
-            main_prompt=main_prompt,
-            timeout_seconds=timeout_seconds,
-            summary_text=summary_text,
-            tools=tools,
-            retry_context=retry_context,
-            skill_context=skill_context,
-            input_files=input_files,
-            input_images=input_images,
-            preference_context=preference_context,
-            project_context=project_context,
-        )
         protected_tokens = (
             prefix_tokens
             if not protected_messages
@@ -422,21 +437,6 @@ class ContextCompressor:
             project_context=project_context,
             input_images=input_images,
         )
-        current = await self._measure_context(
-            run,
-            active_messages,
-            main_runtime,
-            main_prompt=main_prompt,
-            timeout_seconds=timeout_seconds,
-            summary_text=summary_text,
-            tools=tools,
-            retry_context=retry_context,
-            skill_context=skill_context,
-            input_files=input_files,
-            input_images=input_images,
-            preference_context=preference_context,
-            project_context=project_context,
-        )
         if not remaining_groups:
             return ContextPreparation(
                 messages=current.messages,
@@ -447,9 +447,8 @@ class ContextCompressor:
                 stop_reason_hint=ContextStopReason.NO_COMPRESSIBLE_HISTORY,
             )
 
-        # 常规触发使用绝对阈值；达到硬窗口 90% 时也允许一次提前救援，
-        # 最终是否停止仍由执行器按原业务 tools 的完整输入统一裁决。
-        safety_threshold = (main_runtime.version.context_window_tokens * 9 + 9) // 10
+        # 当仅因 I+O 超硬窗但输入未达触发线和 90% 安全线进入此处且仍有剩余历史时，
+        # 保持既有行为不触发压缩，交由执行器按原业务 tools 的完整输入统一裁决硬窗停止。
         if current.input_tokens < policy.trigger_tokens and current.input_tokens < safety_threshold:
             return current
         candidate_messages = tuple(message for group in remaining_groups for message in group)

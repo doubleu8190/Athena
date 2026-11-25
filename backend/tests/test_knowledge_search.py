@@ -367,3 +367,119 @@ def test_mixed_profile_min_score_empty_hit_keeps_semantic_channel_when_compatibl
     assert degraded_result.channels == ("keyword",)
     assert "semantic_profile_incompatible" in degraded_result.degraded_reasons
     assert repo_no_compat.semantic_calls_log == [(40, 0.35), (1, 0.0)]
+
+
+def test_jieba_tokenizer_warmup_is_idempotent_and_handles_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JiebaChineseTokenizer.warmup 须幂等初始化词典，且缺依赖时安全兼容不崩溃。"""
+    import builtins
+    import sys
+    import threading
+    from typing import Any
+
+    from bootstrap.tool import QueryServiceBundle
+    from infrastructure.knowledge.tokenizer import JiebaChineseTokenizer
+
+    init_threads: list[int] = []
+
+    class _FakeJieba:
+        def initialize(self) -> None:
+            init_threads.append(threading.get_ident())
+
+        def cut_for_search(self, text: str) -> list[str]:
+            return text.split()
+
+    monkeypatch.setitem(sys.modules, "jieba", cast(Any, _FakeJieba()))
+    tokenizer = JiebaChineseTokenizer()
+    tokenizer.warmup()
+    tokenizer.warmup()
+    assert len(init_threads) == 1
+    assert tokenizer.tokenize("企业知识库 v2.1") == ("企业知识库", "v2.1")
+
+    # 通过 QueryServiceBundle.start() 异步预热时，应在工作线程而非事件循环主线程运行。
+    worker_threads: list[int] = []
+    main_thread_id = threading.get_ident()
+
+    class _RecordingTokenizer:
+        def warmup(self) -> None:
+            worker_threads.append(threading.get_ident())
+
+    async def start_bundle() -> None:
+        bundle = QueryServiceBundle(
+            knowledge=None,
+            project_knowledge=None,
+            knowledge_repository=None,
+            knowledge_original_store=None,
+            knowledge_enabled=True,
+            _startables=(_RecordingTokenizer(),),
+            _closables=(),
+        )
+        await bundle.start()
+
+    asyncio.run(start_bundle())
+    assert len(worker_threads) == 1
+    assert worker_threads[0] != main_thread_id
+
+    # 模拟 jieba 未安装：warmup 安全返回，tokenize 仍按契约抛缺失依赖错误。
+    monkeypatch.delitem(sys.modules, "jieba", raising=False)
+    real_import = builtins.__import__
+
+    def blocked_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "jieba" or name.startswith("jieba."):
+            raise ImportError("jieba unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    missing_tokenizer = JiebaChineseTokenizer()
+    missing_tokenizer.warmup()
+    with pytest.raises(RuntimeError, match="knowledge_tokenizer_dependency_missing"):
+        missing_tokenizer.tokenize("测试查询")
+
+
+def test_knowledge_service_search_runs_tokenizer_off_event_loop() -> None:
+    """KnowledgeService.search 须在工作线程执行中文分词，不阻塞事件循环。"""
+    import threading
+    import time
+
+    tokenize_threads: list[int] = []
+    event_loop_thread_id = threading.get_ident()
+
+    class _SlowThreadTrackingTokenizer:
+        def tokenize(self, text: str) -> tuple[str, ...]:
+            tokenize_threads.append(threading.get_ident())
+            time.sleep(0.05)
+            return tuple(text.split())
+
+    async def scenario() -> None:
+        repository = _Repository()
+        repository.keyword_hits = (_hit("chunk-1", 0, "async tokenized", "keyword", 1),)
+        service = KnowledgeService(
+            cast(KnowledgeRepositoryPort, repository),
+            _SlowThreadTrackingTokenizer(),
+            _Embedding(),
+            counter=_Counter(),
+        )
+        ticks = 0
+        stop_ticker = asyncio.Event()
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while not stop_ticker.is_set():
+                ticks += 1
+                await asyncio.sleep(0.005)
+
+        tick_task = asyncio.create_task(ticker())
+        try:
+            result = await service.search("owner", ["base"], "query")
+        finally:
+            stop_ticker.set()
+            await tick_task
+
+        assert result.hits[0].chunk_id == "chunk-1"
+        assert len(tokenize_threads) == 1
+        assert tokenize_threads[0] != event_loop_thread_id
+        # 确认分词在工作线程等待期间事件循环保持响应。
+        assert ticks >= 2
+
+    asyncio.run(scenario())

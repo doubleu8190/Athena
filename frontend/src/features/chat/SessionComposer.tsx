@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -727,14 +728,14 @@ export interface SessionComposerProps {
 /**
  * 会话页吸底一体化输入器：
  * - 独立承载高频击键的 draft 状态，避免输入过程触发消息历史与进度条重渲染；
+ * - 包裹 React.memo 隔离流式 text_delta 高频刷新对输入器子树的穿透；
  * - 通过 forwardRef 暴露 fillDraft 命令句柄，支持用户消息「编辑重发」无额外重渲染回填并聚焦；
  * - 吸收旧版 SessionFilesPanel：选文件/拖入/粘贴后立即调用 uploadSessionFile 自动上传，
  *   并在 📎 菜单中支持勾选引用本会话已有文件与产物。
  */
-export const SessionComposer = forwardRef<
-  SessionComposerHandle,
-  SessionComposerProps
->(function SessionComposer(
+export const SessionComposer = memo(
+  forwardRef<SessionComposerHandle, SessionComposerProps>(
+    function SessionComposer(
   {
     activeSubagentInput,
     canSendWithoutDraft,
@@ -1465,4 +1466,5 @@ export const SessionComposer = forwardRef<
       validationErrors={validationErrors}
     />
   );
-});
+  }),
+);

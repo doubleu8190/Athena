@@ -64,7 +64,11 @@ class KnowledgeBaseModel(Base):
 
 class KnowledgeSourceModel(Base):
     __tablename__ = "knowledge_sources"
-    __table_args__ = (UniqueConstraint("id", "owner_id", name="uq_knowledge_sources_id_owner"),)
+    __table_args__ = (
+        UniqueConstraint("id", "owner_id", name="uq_knowledge_sources_id_owner"),
+        # 加速按 owner_id 统计与检索用户上传原件。
+        Index("ix_knowledge_sources_owner_id", "owner_id"),
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     storage_key: Mapped[str] = mapped_column(String(256), unique=True)
@@ -87,6 +91,15 @@ class KnowledgeDocumentModel(Base):
             ondelete="CASCADE",
         ),
         Index("ix_knowledge_documents_owner_kb", "owner_id", "knowledge_base_id", "updated_at"),
+        # 加速共享知识库按更新时间倒序分页查询未删除文档。
+        Index(
+            "ix_knowledge_documents_kb_active_updated",
+            "knowledge_base_id",
+            text("updated_at DESC"),
+            text("id DESC"),
+            postgresql_where=text("deleted_time IS NULL"),
+            sqlite_where=text("deleted_time IS NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     # 语义明确为文档创建/上传者 ID，不再与所属知识库 owner_id 强制绑定。
@@ -122,6 +135,19 @@ class KnowledgeVersionModel(Base):
         CheckConstraint(
             "state IN ('queued','processing','ready','failed')", name="ck_knowledge_version_state"
         ),
+        # 加速按文档倒序查看版本历史及按原件反查引用关系。
+        Index(
+            "ix_knowledge_versions_doc_created",
+            "document_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+        Index(
+            "ix_knowledge_versions_source_id",
+            "source_id",
+            postgresql_where=text("source_id IS NOT NULL"),
+            sqlite_where=text("source_id IS NOT NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     document_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -148,7 +174,6 @@ class KnowledgeChunkModel(Base):
             ["knowledge_document_versions.id", "knowledge_document_versions.document_id"],
             ondelete="CASCADE",
         ),
-        Index("ix_knowledge_chunks_version", "version_id"),
         Index("ix_knowledge_chunks_fts", "search_document", postgresql_using="gin"),
         # 与迁移 20261123_0032 对齐：PostgreSQL 上使用 pgvector HNSW 余弦距离部分索引。
         Index(

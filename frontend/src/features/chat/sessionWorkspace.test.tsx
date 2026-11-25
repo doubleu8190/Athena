@@ -44,6 +44,7 @@ interface WorkspaceFetchOptions {
     signal?: AbortSignal | null,
   ) => Response | Promise<Response>;
   files?: SessionFile[];
+  getFiles?: () => SessionFile[];
   getRuns: () => Run[];
   handleWrite: (
     pathname: string,
@@ -125,7 +126,7 @@ function installWorkspaceFetch(options: WorkspaceFetchOptions) {
         method === "GET"
       ) {
         return jsonResponse({
-          items: options.files ?? [],
+          items: options.getFiles ? options.getFiles() : (options.files ?? []),
           next_after_file_id: null,
         });
       }
@@ -714,7 +715,7 @@ describe("Run 命令与真实状态", () => {
       });
     });
     expect(
-      screen.getByLabelText("Athena 的临时流式输出"),
+      await screen.findByLabelText("Athena 的临时流式输出"),
     ).toBeInTheDocument();
 
     const completed = {
@@ -3158,7 +3159,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     expect(countDetailRequests()).toBe(1);
   });
 
-  it("高频连续 SSE run_event 在 200ms 窗口内合并为一次对账失效，并阻止旧快照回退缓存", async () => {
+  it("高频连续纯进度 SSE run_event 在 500ms 窗口内合并为一次对账且不盲目重拉消息历史，并阻止旧快照回退缓存", async () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const running = makeRun({
       event_sequence: 5,
@@ -3188,30 +3189,88 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
         ).pathname;
         return pathname === `/api/v1/sessions/${SESSION.id}/runs/${running.id}`;
       }).length;
+    const countMessageRequests = () =>
+      fetchMock.mock.calls.filter(([input]) => {
+        const pathname = new URL(
+          getRequestUrl(input),
+          "http://localhost",
+        ).pathname;
+        return pathname === `/api/v1/sessions/${SESSION.id}/messages`;
+      }).length;
 
     const baselineDetailCalls = countRunDetailRequests();
+    const baselineMessageCalls = countMessageRequests();
 
-    // 同一 200ms 窗口内连续到达 5 个 run_event，应合并为 1 次失效而非 5 次。
+    // 同一 500ms 窗口内连续到达 5 个纯中间进度事件，应合并为 1 次 Run/ToolCalls 失效且不刷新 messages。
+    const progressTypes = [
+      "started",
+      "tool_call_started",
+      "tool_call_finished",
+      "compression_started",
+      "subagent_status_changed",
+    ] as const;
     act(() => {
-      for (let seq = 6; seq <= 10; seq += 1) {
+      progressTypes.forEach((eventType, index) => {
+        const seq = 6 + index;
         source.emit("run_event", {
           payload: {
             event: {
-              created_at: `2026-11-10T03:00:0${seq - 5}Z`,
+              created_at: `2026-11-10T03:00:0${index + 1}Z`,
               id: `event-burst-${seq}`,
               payload: {},
               run_id: running.id,
               sequence: seq,
-              type: "started",
+              type: eventType,
             },
           },
         });
-      }
+      });
     });
 
     await waitFor(
       () => {
         expect(countRunDetailRequests()).toBe(baselineDetailCalls + 1);
+      },
+      { timeout: 1_500 },
+    );
+    expect(countMessageRequests()).toBe(baselineMessageCalls);
+
+    // 同一 500ms 窗口内先收到纯进度事件、后收到产生消息的事件（waiting_for_input），必须合并升级为刷新 messages。
+    const detailCallsBeforeUpgrade = countRunDetailRequests();
+    act(() => {
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:11Z",
+            id: "event-upgrade-progress",
+            payload: {},
+            run_id: running.id,
+            sequence: 11,
+            type: "tool_call_started",
+          },
+        },
+      });
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:12Z",
+            id: "event-upgrade-message",
+            payload: {
+              input_request_id: "input-req-1",
+              question_message_id: "msg-question-1",
+            },
+            run_id: running.id,
+            sequence: 12,
+            type: "waiting_for_input",
+          },
+        },
+      });
+    });
+
+    await waitFor(
+      () => {
+        expect(countRunDetailRequests()).toBe(detailCallsBeforeUpgrade + 1);
+        expect(countMessageRequests()).toBe(baselineMessageCalls + 1);
       },
       { timeout: 1_500 },
     );
@@ -3252,6 +3311,311 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     );
     expect(cachedRun?.status).toBe("cancelling");
     expect(cachedRun?.event_sequence).toBe(10);
+  });
+
+  it("completed 终态对账优先复用 SSE 内存 completed 事件，跳过 /events 分页请求", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const running = makeRun({
+      event_sequence: 2,
+      id: "run-completed-reuse-memory",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "帮我生成季度汇总", type: "text" }],
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    const finalAnswer = makeMessage({
+      id: "msg-final-reused",
+      parts: [{ text: "季度汇总已完成。", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 2,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    let currentRun: Run = running;
+    let currentMessages = [trigger];
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [currentRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: currentMessages,
+        next_before_sequence: null,
+      }),
+      runEvents: () => {
+        throw new Error("命中内存 completed 事件时不应发起 /events 分页查询");
+      },
+    });
+
+    renderApp(`/chat/${SESSION.id}`);
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
+    const source = FakeEventSource.instances[0];
+
+    currentRun = {
+      ...running,
+      event_sequence: 3,
+      finished_at: "2026-11-10T03:00:05Z",
+      status: "completed",
+    };
+    currentMessages = [finalAnswer, trigger];
+
+    act(() => {
+      source.emit("text_delta", { payload: { text: "季度汇总已完成。" } });
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:05Z",
+            id: "event-completed-memory",
+            payload: { assistant_message_id: finalAnswer.id },
+            run_id: running.id,
+            sequence: 3,
+            type: "completed",
+          },
+        },
+      });
+    });
+
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 2",
+      }),
+    ).toHaveTextContent("季度汇总已完成。");
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
+    });
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/events",
+        ),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("运行中无产物 tool_call_finished 不重拉消息；但 live snapshot 出现未缓存交付消息 ID 时精准补拉消息与文件并渲染附件卡片", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const running = makeRun({
+      event_sequence: 2,
+      id: "run-live-delivery",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "请执行财务技能导出报表并继续分析", type: "text" }],
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    const deliveredFile = makeSessionFile({
+      filename: "q4-budget.xlsx",
+      id: "file-live-artifact-1",
+      label: "Q4 预算导出表",
+      mime_type:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      session_id: SESSION.id,
+      size_bytes: 8_192,
+      source: "artifact",
+    });
+    const deliveryMessage = makeMessage({
+      id: "msg-live-delivery-1",
+      parts: [
+        { text: "已生成以下交付文件。", type: "text" },
+        {
+          file_id: deliveredFile.id,
+          filename: deliveredFile.filename,
+          mime_type: deliveredFile.mime_type,
+          size_bytes: deliveredFile.size_bytes,
+          type: "file_ref",
+        },
+      ],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 2,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+
+    let currentMessages = [trigger];
+    let currentFiles: SessionFile[] = [];
+    const fetchMock = installWorkspaceFetch({
+      getFiles: () => currentFiles,
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: currentMessages,
+        next_before_sequence: null,
+      }),
+    });
+
+    renderApp(`/chat/${SESSION.id}`);
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
+    expect(await screen.findByText("请执行财务技能导出报表并继续分析")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "会话文件（0）" }),
+    ).toBeInTheDocument();
+
+    const source = FakeEventSource.instances[0];
+    const countRequests = (suffix: string) =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          suffix,
+        ),
+      ).length;
+
+    const baselineRunCalls = countRequests(`/runs/${running.id}`);
+    const baselineMessageCalls = countRequests("/messages");
+    const baselineFileCalls = countRequests("/files");
+
+    // 1. 普通无产物 tool_call_finished + 无新消息 ID 的 running snapshot：
+    //    仅刷新 Run/ToolCalls，不触发 /messages 或 /files 重拉。
+    act(() => {
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:02Z",
+            id: "event-plain-tool-finished",
+            payload: { call_id: "call-1", ordinal: 1, status: "succeeded" },
+            run_id: running.id,
+            sequence: 3,
+            type: "tool_call_finished",
+          },
+        },
+      });
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: 3,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "running",
+        },
+      });
+    });
+
+    await waitFor(
+      () => {
+        expect(countRequests(`/runs/${running.id}`)).toBe(baselineRunCalls + 1);
+      },
+      { timeout: 1_500 },
+    );
+    expect(countRequests("/messages")).toBe(baselineMessageCalls);
+    expect(countRequests("/files")).toBe(baselineFileCalls);
+
+    // 2. Skill 脚本完成产出交付文件，后端在 running 态推送含新消息 ID（纯文本投影）的 snapshot：
+    //    精准触发 /messages 与 /files 补拉，运行期间立即渲染 FileRefPart 附件卡片并同步文件计数。
+    currentMessages = [deliveryMessage, trigger];
+    currentFiles = [deliveredFile];
+    act(() => {
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:04Z",
+            id: "event-skill-tool-finished",
+            payload: { call_id: "call-2", ordinal: 2, status: "succeeded" },
+            run_id: running.id,
+            sequence: 4,
+            type: "tool_call_finished",
+          },
+        },
+      });
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: 4,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              created_at: deliveryMessage.created_at,
+              id: deliveryMessage.id,
+              role: "assistant",
+              sequence: deliveryMessage.sequence,
+              status: "completed",
+              text: "已生成以下交付文件。",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "running",
+        },
+      });
+    });
+
+    const deliveryArticle = await screen.findByRole("article", {
+      name: "Athena的消息，序号 2",
+    });
+    expect(deliveryArticle).toHaveTextContent("已生成以下交付文件。");
+    expect(
+      await within(deliveryArticle).findByRole("button", {
+        name: "下载文件：q4-budget.xlsx",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(deliveryArticle).getByRole("button", {
+        name: "预览文件：q4-budget.xlsx",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "会话文件（1）" }),
+    ).toBeInTheDocument();
+    expect(countRequests("/messages")).toBe(baselineMessageCalls + 1);
+    expect(countRequests("/files")).toBe(baselineFileCalls + 1);
+
+    // 3. 同一交付消息 ID 的后续周期 running snapshot 不得重复触发 /messages 或 /files 失效。
+    act(() => {
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: 5,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              created_at: deliveryMessage.created_at,
+              id: deliveryMessage.id,
+              role: "assistant",
+              sequence: deliveryMessage.sequence,
+              status: "completed",
+              text: "已生成以下交付文件。",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "running",
+        },
+      });
+    });
+
+    // 等待一个短事件循环后确认没有发起任何新的 /messages 或 /files 请求。
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(countRequests("/messages")).toBe(baselineMessageCalls + 1);
+    expect(countRequests("/files")).toBe(baselineFileCalls + 1);
   });
 });
 

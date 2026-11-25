@@ -1,3 +1,4 @@
+import { countCodePoints } from "../../shared/lib/text";
 import type {
   VisibilityGrant,
   VisibilityGrantInput,
@@ -190,7 +191,7 @@ const INVALID_MULTILINE_CONTROL =
   /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
 
 function codePointLength(value: string): number {
-  return Array.from(value).length;
+  return countCodePoints(value);
 }
 
 export function validateSkillZip(file: File | null): string | null {

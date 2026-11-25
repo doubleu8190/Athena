@@ -74,6 +74,13 @@ class ConversationMessageModel(Base):
             "created_at",
             "id",
         ),
+        # 加速按会话与 Run 顺序扫描关联正式消息的热路径查询。
+        Index(
+            "ix_conversation_messages_session_run_seq",
+            "session_id",
+            "run_id",
+            "sequence",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

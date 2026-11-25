@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type Dispatch,
+  type RefObject,
 } from "react";
 
 import { ApiError, apiRequest } from "../../shared/api/client";
@@ -55,10 +56,15 @@ const defaultProbeAuth: RunStreamAuthProbe = async (signal) => {
   });
 };
 
+export interface RunStreamReconcileContext {
+  eventType?: RunEvent["type"];
+  forceMessages?: boolean;
+}
+
 interface UseRunStreamOptions {
   enabled?: boolean;
   eventSourceFactory?: RunEventSourceFactory;
-  onReconcile?: () => void;
+  onReconcile?: (context?: RunStreamReconcileContext) => void;
   onSnapshot?: (snapshot: RunSnapshotPayload) => void;
   probeAuth?: RunStreamAuthProbe;
   runId: string | null;
@@ -68,6 +74,8 @@ interface UseRunStreamOptions {
 
 interface UseRunStreamResult {
   closeTerminal: (runId: string, status: RunStatus) => void;
+  /** 最近一次 SSE 心跳时间戳（仅保活观测使用，存放在 ref 避免每 15s 触发整页重渲染）。 */
+  lastHeartbeatAtRef: RefObject<string | null>;
   settleTerminal: (runId: string, status: RunStatus) => void;
   source: RunEventSource | null;
   state: RunStreamState;
@@ -160,48 +168,63 @@ function parseRunEvent(value: unknown): RunEvent | null {
   return value as unknown as RunEvent;
 }
 
+type WireEventOutcome =
+  | { kind: "snapshot_waiting" }
+  | { kind: "snapshot_terminal" }
+  | { kind: "snapshot_live" }
+  | { eventType?: RunEvent["type"]; kind: "run_event" }
+  | { kind: "interrupted" }
+  | null;
+
+interface DispatchWireEventHandlers {
+  enqueueTextDelta: (text: string) => void;
+  flushPendingText: () => void;
+  onHeartbeat: (at: string) => void;
+  onSnapshot?: (snapshot: RunSnapshotPayload) => void;
+}
+
 function dispatchWireEvent(
   eventName: string,
   data: Record<string, unknown>,
   dispatch: Dispatch<RunStreamAction>,
-  onSnapshot?: (snapshot: RunSnapshotPayload) => void,
-):
-  | "snapshot_waiting"
-  | "snapshot_terminal"
-  | "snapshot_live"
-  | "run_event"
-  | "interrupted"
-  | null {
+  handlers: DispatchWireEventHandlers,
+): WireEventOutcome {
   const payload = data.payload;
   if (eventName === "snapshot") {
     const snapshot = parseSnapshotPayload(payload);
     if (!snapshot) {
       return null;
     }
+    // 权威快照落地前先同步清空本帧文本缓冲并取消挂起帧：
+    // - 终态快照会保留缓冲草稿直至最终消息对账完成；
+    // - 非终态快照随后以权威消息覆盖清空 transientText，避免旧帧迟到回写。
+    handlers.flushPendingText();
     dispatch({ payload: snapshot, type: "snapshot" });
-    onSnapshot?.(snapshot);
+    handlers.onSnapshot?.(snapshot);
     if (
       snapshot.status === "waiting_for_input" ||
       snapshot.status === "waiting_for_approval"
     ) {
-      return "snapshot_waiting";
+      return { kind: "snapshot_waiting" };
     }
     if (
       snapshot.status === "completed" ||
       snapshot.status === "failed" ||
       snapshot.status === "cancelled"
     ) {
-      return "snapshot_terminal";
+      return { kind: "snapshot_terminal" };
     }
-    return "snapshot_live";
+    return { kind: "snapshot_live" };
   }
   if (eventName === "text_delta") {
-    if (isRecord(payload) && typeof payload.text === "string") {
-      dispatch({ text: payload.text, type: "text_delta" });
+    if (isRecord(payload) && typeof payload.text === "string" && payload.text) {
+      handlers.enqueueTextDelta(payload.text);
     }
     return null;
   }
   if (eventName === "stream_interrupted") {
+    // 断流提示前先刷出已收到的增量文本，防止最后一帧草稿滞留在缓冲中丢失。
+    handlers.flushPendingText();
     dispatch({
       reason:
         isRecord(payload) && typeof payload.reason === "string"
@@ -209,24 +232,25 @@ function dispatchWireEvent(
           : "stream_gap",
       type: "stream_interrupted",
     });
-    return "interrupted";
+    return { kind: "interrupted" };
   }
   if (eventName === "heartbeat") {
-    dispatch({
-      at:
-        isRecord(payload) && typeof payload.at === "string"
-          ? payload.at
-          : new Date().toISOString(),
-      type: "heartbeat",
-    });
+    // 心跳仅做保活记录，写入 ref 而不派发 React state，消除每 15s 一次的整页重渲染。
+    handlers.onHeartbeat(
+      isRecord(payload) && typeof payload.at === "string"
+        ? payload.at
+        : new Date().toISOString(),
+    );
     return null;
   }
   if (eventName === "run_event" && isRecord(payload)) {
     const event = parseRunEvent(payload.event);
+    // 持久事件（尤其是终态/等待态）前先同步 flush 文本缓冲，严格维持事件顺序。
+    handlers.flushPendingText();
     if (event) {
       dispatch({ event, type: "run_event" });
     }
-    return "run_event";
+    return { eventType: event?.type, kind: "run_event" };
   }
   return null;
 }
@@ -253,6 +277,18 @@ export function useRunStream({
   const probeAuthRef = useRef(probeAuth);
   // 缓存最新 status 供建连初始化读取，避免 queued -> running 等正常流转触发 SSE 断流重连。
   const statusRef = useRef(status);
+  // 同步记录最新 runId 与挂载状态，便于连接清理时精确区分「同 Run 终态收尾」与「切 Run / 卸载」。
+  const latestRunIdRef = useRef(runId);
+  latestRunIdRef.current = runId;
+  const activeRunIdRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const lastHeartbeatAtRef = useRef<string | null>(null);
+  // 同帧高频 text_delta 合批缓冲：同一渲染帧内多次增量仅合并为 1 次 dispatch。
+  const pendingTextRef = useRef("");
+  const textFlushHandleRef = useRef<{
+    id: number;
+    kind: "raf" | "timeout";
+  } | null>(null);
   const mode = runStreamMode(status);
   const alreadyTerminalInStream =
     Boolean(runId) &&
@@ -266,6 +302,14 @@ export function useRunStream({
     () => (runId ? runStreamUrl(sessionId, runId) : ""),
     [runId, sessionId],
   );
+
+  // 声明在连接 effect 之前：卸载时先置 mountedRef = false，确保连接清理走丢弃缓冲路径而非派发更新。
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     reconcileRef.current = onReconcile;
@@ -283,19 +327,90 @@ export function useRunStream({
     statusRef.current = status;
   }, [status]);
 
+  const cancelScheduledTextFlush = useCallback(() => {
+    const handle = textFlushHandleRef.current;
+    if (!handle) {
+      return;
+    }
+    textFlushHandleRef.current = null;
+    if (
+      handle.kind === "raf" &&
+      typeof window !== "undefined" &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      window.cancelAnimationFrame(handle.id);
+      return;
+    }
+    globalThis.clearTimeout(handle.id);
+  }, []);
+
+  const discardPendingText = useCallback(() => {
+    cancelScheduledTextFlush();
+    pendingTextRef.current = "";
+  }, [cancelScheduledTextFlush]);
+
+  const flushPendingText = useCallback(() => {
+    cancelScheduledTextFlush();
+    const buffered = pendingTextRef.current;
+    if (!buffered) {
+      return;
+    }
+    pendingTextRef.current = "";
+    dispatch({ text: buffered, type: "text_delta" });
+  }, [cancelScheduledTextFlush]);
+
+  const enqueueTextDelta = useCallback((text: string) => {
+    pendingTextRef.current += text;
+    if (textFlushHandleRef.current !== null) {
+      return;
+    }
+    const flushFrame = () => {
+      textFlushHandleRef.current = null;
+      const buffered = pendingTextRef.current;
+      if (!buffered) {
+        return;
+      }
+      pendingTextRef.current = "";
+      dispatch({ text: buffered, type: "text_delta" });
+    };
+    if (
+      typeof window !== "undefined" &&
+      typeof window.requestAnimationFrame === "function"
+    ) {
+      const id = window.requestAnimationFrame(flushFrame);
+      textFlushHandleRef.current = { id, kind: "raf" };
+      return;
+    }
+    // 非浏览器或无 rAF 环境回退至 16ms 定时合批。
+    const id = globalThis.setTimeout(flushFrame, 16) as unknown as number;
+    textFlushHandleRef.current = { id, kind: "timeout" };
+  }, []);
+
   const syncStatus = useCallback(
     (targetRunId: string, nextStatus: RunStatus) => {
+      if (activeRunIdRef.current !== targetRunId) {
+        discardPendingText();
+      } else if (isTerminalRunStatus(nextStatus)) {
+        flushPendingText();
+      }
+      activeRunIdRef.current = targetRunId;
       dispatch({
         runId: targetRunId,
         status: nextStatus,
         type: "sync_status",
       });
     },
-    [],
+    [discardPendingText, flushPendingText],
   );
 
   const closeTerminal = useCallback(
     (targetRunId: string, nextStatus: RunStatus) => {
+      // 查询确认同一 Run 进入终态时，先同步刷出最后一帧缓冲草稿，避免对账完成前丢失未落盘文本。
+      if (activeRunIdRef.current === targetRunId) {
+        flushPendingText();
+      } else {
+        discardPendingText();
+      }
       // 终态关闭实时流时同步中止在途身份探测，避免旧连接回调继续操作已结束的 Run。
       probeControllerRef.current?.abort();
       probeControllerRef.current = null;
@@ -311,18 +426,22 @@ export function useRunStream({
         type: "query_terminal",
       });
     },
-    [],
+    [discardPendingText, flushPendingText],
   );
 
   const settleTerminal = useCallback(
     (targetRunId: string, nextStatus: RunStatus) => {
+      // 终态权威消息已对账收敛，立刻清理任何残留文本缓冲与挂起帧，避免延迟回写旧草稿。
+      if (activeRunIdRef.current === targetRunId) {
+        discardPendingText();
+      }
       dispatch({
         runId: targetRunId,
         status: nextStatus,
         type: "settle_terminal",
       });
     },
-    [],
+    [discardPendingText],
   );
 
   useEffect(() => {
@@ -338,6 +457,11 @@ export function useRunStream({
       return;
     }
 
+    if (activeRunIdRef.current !== runId) {
+      discardPendingText();
+      lastHeartbeatAtRef.current = null;
+    }
+    activeRunIdRef.current = runId;
     dispatch({ runId, status: statusRef.current, type: "start" });
     let acceptEvents = true;
     let snapshotReceived = false;
@@ -363,6 +487,7 @@ export function useRunStream({
 
     const closeSource = (abortProbe: boolean) => {
       acceptEvents = false;
+      cancelScheduledTextFlush();
       if (abortProbe) {
         probeController.abort();
         if (probeControllerRef.current === probeController) {
@@ -399,6 +524,7 @@ export function useRunStream({
           error.status === 401
         ) {
           // 探测确认 401 时，apiRequest 已派发全局未认证事件；立刻关闭 SSE 阻止浏览器自动重连。
+          flushPendingText();
           closeSource(false);
         }
         // 其他错误（瞬态网络故障、5xx 或生命周期中止）均静默吞掉，保留断线提示与当前文本。
@@ -422,32 +548,38 @@ export function useRunStream({
       }
       const data = parseEventData(event.data);
       if (!data) {
+        flushPendingText();
         dispatch({ type: "error" });
         return;
       }
-      const outcome = dispatchWireEvent(
-        eventName,
-        data,
-        dispatch,
-        snapshotRef.current,
-      );
-      if (outcome === "snapshot_live") {
+      const outcome = dispatchWireEvent(eventName, data, dispatch, {
+        enqueueTextDelta,
+        flushPendingText,
+        onHeartbeat: (at) => {
+          lastHeartbeatAtRef.current = at;
+        },
+        onSnapshot: snapshotRef.current,
+      });
+      if (!outcome) {
+        return;
+      }
+      if (outcome.kind === "snapshot_live") {
         snapshotReceived = true;
       }
-      if (outcome === "run_event") {
-        reconcileRef.current?.();
+      if (outcome.kind === "run_event") {
+        reconcileRef.current?.({ eventType: outcome.eventType });
       }
       if (
-        outcome === "snapshot_terminal" ||
-        outcome === "snapshot_waiting"
+        outcome.kind === "snapshot_terminal" ||
+        outcome.kind === "snapshot_waiting"
       ) {
         // 服务端在这些状态会主动结束流；本地立刻关闭并中止探测，阻止 EventSource 自动重连。
         closeSource(true);
         dispatch({ type: "closed" });
-        reconcileRef.current?.();
+        reconcileRef.current?.({ forceMessages: true });
         return;
       }
-      if (outcome === "interrupted") {
+      if (outcome.kind === "interrupted") {
         if (!snapshotReceived) {
           // 新连接尚未收到首个权威快照时，服务端会继续发送 snapshot；
           // 此处不再次换线，避免持续中断信号导致重连风暴。
@@ -473,6 +605,8 @@ export function useRunStream({
       if (!acceptEvents || probeController.signal.aborted) {
         return;
       }
+      // 断线前先刷出缓冲草稿，保证用户看到的断线保留文本不缺失最后 1 帧。
+      flushPendingText();
       dispatch({ type: "error" });
       // 原生 EventSource 不暴露 HTTP 状态码，断流后通过轻量身份探测识别 401 会话过期。
       void probeAuthentication();
@@ -490,10 +624,21 @@ export function useRunStream({
     }
 
     return () => {
+      // 仅当同一 Run 仍处于挂载态收尾关流（例如查询先确认终态）时同步 flush 缓冲；
+      // 切 Run 或组件卸载时直接丢弃缓冲并取消挂起帧，避免跨 Run 串染或卸载后派发。
+      if (mountedRef.current && latestRunIdRef.current === runId) {
+        flushPendingText();
+      } else {
+        discardPendingText();
+      }
       closeSource(true);
     };
   }, [
+    cancelScheduledTextFlush,
+    discardPendingText,
+    enqueueTextDelta,
     eventSourceFactory,
+    flushPendingText,
     mode,
     runId,
     shouldConnect,
@@ -503,6 +648,7 @@ export function useRunStream({
 
   return {
     closeTerminal,
+    lastHeartbeatAtRef,
     settleTerminal,
     source: sourceRef.current,
     state,

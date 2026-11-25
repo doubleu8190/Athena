@@ -1,4 +1,5 @@
 import { MessageCircleQuestion } from "lucide-react";
+import { memo } from "react";
 
 import { Badge, cn } from "../../shared/ui";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
@@ -17,8 +18,9 @@ export interface WaitingInputBannerProps {
  * 澄清问答引导条：
  * 仅在主任务等待补充信息或存在待回复协作助手提问时，紧贴输入器上方以柔和浅蓝卡片展示。
  * 当多个协作助手同时提问时，顶部展示紧凑 Pill 支持切换当前回复目标并同步更新输入器路由。
+ * 包裹 React.memo 隔离流式输出期间的无关重渲染。
  */
-export function WaitingInputBanner({
+export const WaitingInputBanner = memo(function WaitingInputBanner({
   activeSubagentInput,
   isWaitingMainInput,
   mainQuestionText,
@@ -142,4 +144,4 @@ export function WaitingInputBanner({
       </div>
     </section>
   );
-}
+});

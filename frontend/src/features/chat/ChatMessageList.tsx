@@ -958,11 +958,59 @@ export const ChatMessageList = memo(function ChatMessageList({
   const hasInitializedScrollRef = useRef(false);
   const followingLatestRef = useRef(true);
   const handledAutoScrollRequestRef = useRef<string | null>(null);
+  const scrollFrameRef = useRef<number | null>(null);
   const [followingLatest, setFollowingLatest] = useState(true);
   const showingSkeleton = isLoading && !transientText;
   const autoScrollTargetMessage = autoScrollRequest
     ? findAutoScrollTargetMessage(messages, autoScrollRequest)
     : null;
+
+  const cancelScheduledScroll = useCallback(() => {
+    if (
+      scrollFrameRef.current !== null &&
+      typeof window !== "undefined" &&
+      typeof window.cancelAnimationFrame === "function"
+    ) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+    scrollFrameRef.current = null;
+  }, []);
+
+  // 将内容变更与 ResizeObserver 触发的跟底滚动合并至单一动画帧，避免高频流式 chunk 反复同步回流。
+  const scheduleScrollToLatest = useCallback(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.requestAnimationFrame !== "function"
+    ) {
+      // 无 requestAnimationFrame 的测试或受限环境优雅降级为同步滚动。
+      const node = scrollContainerRef.current;
+      if (
+        node &&
+        hasInitializedScrollRef.current &&
+        followingLatestRef.current
+      ) {
+        scrollNodeToLatest(node);
+      }
+      return;
+    }
+    if (scrollFrameRef.current !== null) {
+      return;
+    }
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const node = scrollContainerRef.current;
+      if (
+        !node ||
+        !hasInitializedScrollRef.current ||
+        !followingLatestRef.current
+      ) {
+        return;
+      }
+      scrollNodeToLatest(node);
+    });
+  }, []);
+
+  useEffect(() => cancelScheduledScroll, [cancelScheduledScroll]);
 
   const handleRowNodeChange = useCallback(
     (messageId: string, node: HTMLElement | null) => {
@@ -1057,6 +1105,7 @@ export const ChatMessageList = memo(function ChatMessageList({
     }
     // HTTP 成功只登记目标消息；必须等目标用户消息真实进入列表后再定位，
     // 避免异步持久化或 SSE 顺序尚未到达时滚到旧末尾并误判成功。
+    cancelScheduledScroll();
     handledAutoScrollRequestRef.current = autoScrollRequest.key;
     followingLatestRef.current = true;
     setFollowingLatest(true);
@@ -1065,7 +1114,7 @@ export const ChatMessageList = memo(function ChatMessageList({
       rowNodesRef.current.get(autoScrollTargetMessage.id) ?? null,
       node,
     );
-  }, [autoScrollRequest, autoScrollTargetMessage]);
+  }, [autoScrollRequest, autoScrollTargetMessage, cancelScheduledScroll]);
 
   useLayoutEffect(() => {
     const node = scrollContainerRef.current;
@@ -1076,9 +1125,15 @@ export const ChatMessageList = memo(function ChatMessageList({
     ) {
       return;
     }
-    // 流式文本、新消息、执行进度条或底部审批/失败卡片挂载更新时，仅在跟底态下保持视口贴底。
-    scrollNodeToLatest(node);
-  }, [beforeLatestAssistantSlot, footerSlot, messages, transientText]);
+    // 流式文本、新消息、执行进度条或底部审批/失败卡片挂载更新时，仅在跟底态下按帧合并滚至底部。
+    scheduleScrollToLatest();
+  }, [
+    beforeLatestAssistantSlot,
+    footerSlot,
+    messages,
+    scheduleScrollToLatest,
+    transientText,
+  ]);
 
   useEffect(() => {
     const contentNode = contentWrapperRef.current;
@@ -1090,7 +1145,7 @@ export const ChatMessageList = memo(function ChatMessageList({
       return;
     }
     // 跟底态下监听消息内容容器的实际高度变化（如进度条内部异步拉取步骤或审批卡片展开参数），
-    // 严格遵守 followingLatestRef 守卫，避免打断用户主动上滑回看历史。
+    // 与上方布局副作用共用同一 rAF 帧，且严格遵守 followingLatestRef 守卫。
     const observer = new ResizeObserver(() => {
       const scrollNode = scrollContainerRef.current;
       if (
@@ -1100,11 +1155,11 @@ export const ChatMessageList = memo(function ChatMessageList({
       ) {
         return;
       }
-      scrollNodeToLatest(scrollNode);
+      scheduleScrollToLatest();
     });
     observer.observe(contentNode);
     return () => observer.disconnect();
-  }, [showingSkeleton]);
+  }, [scheduleScrollToLatest, showingSkeleton]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -1113,7 +1168,7 @@ export const ChatMessageList = memo(function ChatMessageList({
         return;
       }
       if (followingLatestRef.current) {
-        scrollNodeToLatest(node);
+        scheduleScrollToLatest();
         return;
       }
       const nextFollowingLatest = nodeIsNearLatest(node);
@@ -1122,7 +1177,7 @@ export const ChatMessageList = memo(function ChatMessageList({
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  }, [scheduleScrollToLatest]);
 
   if (showingSkeleton) {
     return (
@@ -1154,7 +1209,8 @@ export const ChatMessageList = memo(function ChatMessageList({
     (messages.length > 0 || Boolean(transientText) || Boolean(footerSlot));
 
   const handleLoadMore = () => {
-    // 更早消息由浏览器原生滚动锚定保持当前位置；同时退出跟底，避免加载完毕后被强行拉到底部。
+    // 更早消息由浏览器原生滚动锚定保持当前位置；同时退出跟底并取消挂起帧，避免加载完毕后被强行拉到底部。
+    cancelScheduledScroll();
     followingLatestRef.current = false;
     setFollowingLatest(false);
     onLoadMore();
@@ -1166,6 +1222,9 @@ export const ChatMessageList = memo(function ChatMessageList({
       return;
     }
     const nextFollowingLatest = nodeIsNearLatest(node);
+    if (!nextFollowingLatest) {
+      cancelScheduledScroll();
+    }
     if (nextFollowingLatest === followingLatestRef.current) {
       return;
     }
@@ -1175,6 +1234,7 @@ export const ChatMessageList = memo(function ChatMessageList({
 
   const handleJumpToBottom = () => {
     const node = scrollContainerRef.current;
+    cancelScheduledScroll();
     followingLatestRef.current = true;
     setFollowingLatest(true);
     if (node) {

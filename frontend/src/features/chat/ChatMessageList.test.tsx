@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import * as formatLib from "../../shared/lib/format";
@@ -80,7 +80,7 @@ function stubScrollIntoView() {
 }
 
 describe("会话消息滚动", () => {
-  it("首次载入定位最新，流式增长只跟随消息容器且不夺焦点", () => {
+  it("首次载入定位最新，流式增长只跟随消息容器且不夺焦点", async () => {
     const scrollHeightSpy = vi
       .spyOn(HTMLElement.prototype, "scrollHeight", "get")
       .mockReturnValue(900);
@@ -97,7 +97,9 @@ describe("会话消息滚动", () => {
     scrollHeightSpy.mockReturnValue(1200);
     rerender(makeMessageList({ transientText: "第一段实时输出" }));
 
-    expect(list.scrollTop).toBe(1200);
+    await waitFor(() => {
+      expect(list.scrollTop).toBe(1200);
+    });
     expect(list).toHaveFocus();
     expect(windowScrollSpy).not.toHaveBeenCalled();
     expect(scrollIntoView).not.toHaveBeenCalled();
@@ -297,7 +299,7 @@ describe("会话消息滚动", () => {
     expect(formatDateTimeSpy).not.toHaveBeenCalled();
   });
 
-  it("跟底态下仅 footerSlot 挂载增高时自动滚至底部，非跟底态下保持原滚动位置不变", () => {
+  it("跟底态下仅 footerSlot 挂载增高时自动滚至底部，非跟底态下保持原滚动位置不变", async () => {
     const messages = [
       makeMessage({
         id: "slot-msg-1",
@@ -341,7 +343,9 @@ describe("会话消息滚动", () => {
         transientText: "",
       }),
     );
-    expect(list.scrollTop).toBe(1150);
+    await waitFor(() => {
+      expect(list.scrollTop).toBe(1150);
+    });
 
     // 场景 2：用户主动上滑离开底部，随后 footerSlot 更新增高 -> 严格保留原滚动位置
     list.scrollTop = 120;
@@ -361,5 +365,138 @@ describe("会话消息滚动", () => {
       }),
     );
     expect(list.scrollTop).toBe(120);
+  });
+
+  it("流式更新与 ResizeObserver 同帧触发合并为单次 rAF 滚动，离开底部或卸载时取消挂起帧", () => {
+    const resizeCallbacks: ResizeObserverCallback[] = [];
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class CapturingResizeObserver implements ResizeObserver {
+      private readonly callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        resizeCallbacks.push(callback);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      trigger() {
+        this.callback([], this);
+      }
+    }
+    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
+
+    const queuedFrames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 1;
+    const rafSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        const id = nextFrameId;
+        nextFrameId += 1;
+        queuedFrames.set(id, callback);
+        return id;
+      });
+    const cancelRafSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((id: number) => {
+        queuedFrames.delete(id);
+      });
+
+    try {
+      const { rerender, unmount } = render(makeMessageList());
+      const list = screen.getByRole("region", { name: "消息历史" });
+      let currentScrollTop = 900;
+      let currentScrollHeight = 900;
+      let scrollTopWrites = 0;
+      Object.defineProperties(list, {
+        clientHeight: { configurable: true, value: 300 },
+        scrollHeight: { configurable: true, get: () => currentScrollHeight },
+        scrollTop: {
+          configurable: true,
+          get: () => currentScrollTop,
+          set: (next: number) => {
+            scrollTopWrites += 1;
+            currentScrollTop = next;
+          },
+        },
+      });
+
+      // 同帧内连续流式更新 + ResizeObserver 回调 -> 仅预约 1 个 rAF，帧内合并为 1 次 scrollTop 写入。
+      currentScrollHeight = 1280;
+      rerender(makeMessageList({ transientText: "流式片段 A" }));
+      rerender(makeMessageList({ transientText: "流式片段 A+B" }));
+      act(() => {
+        for (const cb of resizeCallbacks) {
+          cb([], {} as ResizeObserver);
+        }
+      });
+      expect(rafSpy).toHaveBeenCalledTimes(1);
+      expect(scrollTopWrites).toBe(0);
+
+      act(() => {
+        const callbacks = Array.from(queuedFrames.values());
+        queuedFrames.clear();
+        callbacks.forEach((cb) => cb(16));
+      });
+      expect(scrollTopWrites).toBe(1);
+      expect(currentScrollTop).toBe(1280);
+
+      // 挂起帧尚未执行时用户主动上滑离开底部 -> 取消挂起帧且不得拉回底部。
+      currentScrollHeight = 1480;
+      rerender(makeMessageList({ transientText: "流式片段 A+B+C" }));
+      expect(queuedFrames.size).toBe(1);
+      currentScrollTop = 100;
+      fireEvent.scroll(list);
+      expect(cancelRafSpy).toHaveBeenCalled();
+      expect(queuedFrames.size).toBe(0);
+
+      // 恢复跟底后再次预约帧，卸载时必须取消挂起帧。
+      fireEvent.click(screen.getByRole("button", { name: "回到底部" }));
+      currentScrollHeight = 1600;
+      rerender(makeMessageList({ transientText: "卸载前最后一段" }));
+      expect(queuedFrames.size).toBe(1);
+      unmount();
+      expect(queuedFrames.size).toBe(0);
+    } finally {
+      rafSpy.mockRestore();
+      cancelRafSpy.mockRestore();
+      vi.stubGlobal("ResizeObserver", OriginalResizeObserver);
+    }
+  });
+
+  it("无 requestAnimationFrame 环境下降级同步跟底滚动", () => {
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancelRaf = window.cancelAnimationFrame;
+    Object.defineProperty(window, "requestAnimationFrame", {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+    Object.defineProperty(window, "cancelAnimationFrame", {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+
+    try {
+      const { rerender } = render(makeMessageList());
+      const list = screen.getByRole("region", { name: "消息历史" });
+      const metrics = setMessageListMetrics(list, 900);
+      list.scrollTop = 900;
+
+      metrics.setScrollHeight(1350);
+      rerender(makeMessageList({ transientText: "同步降级流式输出" }));
+      expect(list.scrollTop).toBe(1350);
+    } finally {
+      Object.defineProperty(window, "requestAnimationFrame", {
+        configurable: true,
+        value: originalRaf,
+        writable: true,
+      });
+      Object.defineProperty(window, "cancelAnimationFrame", {
+        configurable: true,
+        value: originalCancelRaf,
+        writable: true,
+      });
+    }
   });
 });

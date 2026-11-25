@@ -781,11 +781,13 @@ class RunToolRuntimeService(RunToolRuntime):
                     False,
                 )
         try:
+            # 审批准备阶段复用进程级 TTL 缓存探针，真正执行时由 SkillExecutionService 实时复核。
             entry, version, script, _dependency_check = await self._skills.prepare_script_target(
                 snapshot,
                 skill_id=skill_id,
                 script_path=script_path,
                 parameters=cast(dict[str, Any], parameters),
+                use_cached_dependency_check=True,
             )
             files = await self._session_files.get_many(
                 context.chat_session_id,

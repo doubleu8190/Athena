@@ -20,6 +20,7 @@ import type {
 import {
   INITIAL_RUN_STREAM_STATE,
   projectRunStatus,
+  reconcileCompletedRun,
   reconcileFailedRun,
   runStreamReducer,
   type RunStreamAction,
@@ -255,6 +256,118 @@ describe("Run 状态投影", () => {
     expect(switched.messages).toEqual([]);
     expect(switched.events).toEqual([]);
   });
+
+  it("runStreamReducer 保留 heartbeat action 的纯函数更新契约", () => {
+    const updated = runStreamReducer(
+      { ...INITIAL_RUN_STREAM_STATE, runId: "run-1", status: "running" },
+      { at: "2026-11-10T03:01:00Z", type: "heartbeat" },
+    );
+    expect(updated.lastHeartbeatAt).toBe("2026-11-10T03:01:00Z");
+    expect(updated.status).toBe("running");
+  });
+});
+
+describe("完成态精确对账与内存事件复用", () => {
+  it("knownEvents 已含当前 Run 的 completed 事件时直接跳过 /events 分页请求", async () => {
+    const trigger = makeMessage({
+      id: "msg-completed-trigger",
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: "session-1",
+    });
+    const finalAnswer = makeMessage({
+      id: "msg-completed-answer",
+      role: "assistant",
+      run_id: "run-1",
+      sequence: 2,
+      session_id: "session-1",
+      status: "completed",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(getRequestUrl(input), "http://localhost");
+      if (url.pathname.endsWith("/events")) {
+        throw new Error("命中内存 completed 事件时不应请求 /events");
+      }
+      return jsonResponse({
+        items: [finalAnswer, trigger],
+        next_before_sequence: null,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await reconcileCompletedRun(
+      "session-1",
+      "run-1",
+      trigger.id,
+      [
+        event("started", 1),
+        event("completed", 2, { assistant_message_id: finalAnswer.id }),
+      ],
+    );
+
+    expect(result.kind).toBe("settled");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      new URL(getRequestUrl(fetchMock.mock.calls[0][0]), "http://localhost")
+        .pathname,
+    ).toBe("/api/v1/sessions/session-1/messages");
+  });
+
+  it("knownEvents 未命中当前 Run 的 completed 事件时回退分页拉取 /events", async () => {
+    const trigger = makeMessage({
+      id: "msg-fallback-trigger",
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: "session-1",
+    });
+    const finalAnswer = makeMessage({
+      id: "msg-fallback-answer",
+      role: "assistant",
+      run_id: "run-1",
+      sequence: 2,
+      session_id: "session-1",
+      status: "completed",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(getRequestUrl(input), "http://localhost");
+      if (url.pathname.endsWith("/events")) {
+        return jsonResponse({
+          items: [
+            event("completed", 3, { assistant_message_id: finalAnswer.id }),
+          ],
+          next_after_sequence: null,
+        });
+      }
+      return jsonResponse({
+        items: [finalAnswer, trigger],
+        next_before_sequence: null,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // 传入其他 Run 的 completed 事件不应被误复用。
+    const otherRunEvent: RunEvent = {
+      ...event("completed", 2, { assistant_message_id: "msg-other" }),
+      run_id: "run-other",
+    };
+    const result = await reconcileCompletedRun(
+      "session-1",
+      "run-1",
+      trigger.id,
+      [otherRunEvent],
+    );
+
+    expect(result.kind).toBe("settled");
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/events",
+        ),
+      ),
+    ).toHaveLength(1);
+  });
 });
 
 describe("失败报告精确对账", () => {
@@ -464,7 +577,9 @@ describe("原生 EventSource Run hook", () => {
         payload: { round: 0, text: "临时" },
       });
     });
-    expect(result.current.state.transientText).toBe("临时");
+    await waitFor(() => {
+      expect(result.current.state.transientText).toBe("临时");
+    });
 
     act(() => {
       firstSource?.emit("stream_interrupted", {
@@ -581,28 +696,35 @@ describe("原生 EventSource Run hook", () => {
     expect(second?.closed).toBe(true);
   });
 
-  it("heartbeat 只保活，run_event 触发对账", () => {
+  it("heartbeat 写入 ref 保活且不触发重渲染，run_event 携带事件类型触发对账", () => {
     const onReconcile = vi.fn();
-    const { result } = renderHook(() =>
-      useRunStream({
+    let renderCount = 0;
+    const { result } = renderHook(() => {
+      renderCount += 1;
+      return useRunStream({
         eventSourceFactory: fakeEventSourceFactory,
         onReconcile,
         runId: "run-1",
         sessionId: "session-1",
         status: "queued",
-      }),
-    );
+      });
+    });
     const source = FakeEventSource.instances.at(-1);
+    const rendersBeforeHeartbeat = renderCount;
 
     act(() => {
       source?.emit("heartbeat", {
         payload: { at: "2026-11-10T03:01:00Z" },
       });
+      source?.emit("heartbeat", {
+        payload: { at: "2026-11-10T03:01:15Z" },
+      });
     });
     expect(result.current.state.status).toBe("queued");
-    expect(result.current.state.lastHeartbeatAt).toBe(
-      "2026-11-10T03:01:00Z",
+    expect(result.current.lastHeartbeatAtRef.current).toBe(
+      "2026-11-10T03:01:15Z",
     );
+    expect(renderCount).toBe(rendersBeforeHeartbeat);
     expect(onReconcile).not.toHaveBeenCalled();
 
     act(() => {
@@ -612,6 +734,208 @@ describe("原生 EventSource Run hook", () => {
     });
     expect(result.current.state.status).toBe("running");
     expect(onReconcile).toHaveBeenCalledTimes(1);
+    expect(onReconcile).toHaveBeenLastCalledWith({ eventType: "started" });
+  });
+
+  it("同一帧内连续多个 text_delta 合并为 1 次 state 更新，切 Run 与卸载时取消挂起帧", () => {
+    const queuedFrames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 1;
+    const rafSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        const id = nextFrameId;
+        nextFrameId += 1;
+        queuedFrames.set(id, callback);
+        return id;
+      });
+    const cancelRafSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((id: number) => {
+        queuedFrames.delete(id);
+      });
+
+    try {
+      let renderCount = 0;
+      const { rerender, result, unmount } = renderHook(
+        ({ runId }) => {
+          renderCount += 1;
+          return useRunStream({
+            eventSourceFactory: fakeEventSourceFactory,
+            runId,
+            sessionId: "session-1",
+            status: "running",
+          });
+        },
+        { initialProps: { runId: "run-1" } },
+      );
+      const firstSource = FakeEventSource.instances.at(-1);
+      const rendersBeforeBurst = renderCount;
+
+      // 同一帧内收到 4 段增量：仅预约 1 个 rAF，且尚未触发重渲染。
+      act(() => {
+        firstSource?.emit("text_delta", { payload: { text: "第" } });
+        firstSource?.emit("text_delta", { payload: { text: "一" } });
+        firstSource?.emit("text_delta", { payload: { text: "帧" } });
+        firstSource?.emit("text_delta", { payload: { text: "合并" } });
+      });
+      expect(rafSpy).toHaveBeenCalledTimes(1);
+      expect(renderCount).toBe(rendersBeforeBurst);
+      expect(result.current.state.transientText).toBe("");
+
+      // 帧回调触发后，一次性合并为 1 次 React 更新并完整拼接文本。
+      act(() => {
+        const entries = Array.from(queuedFrames.entries());
+        queuedFrames.clear();
+        entries.forEach(([, cb]) => cb(16));
+      });
+      expect(renderCount).toBe(rendersBeforeBurst + 1);
+      expect(result.current.state.transientText).toBe("第一帧合并");
+
+      // 切 Run 前有未刷新的缓冲：必须丢弃并取消挂起帧，不能串染到 run-2。
+      act(() => {
+        firstSource?.emit("text_delta", { payload: { text: "旧Run未刷片段" } });
+      });
+      expect(queuedFrames.size).toBe(1);
+      rerender({ runId: "run-2" });
+      expect(cancelRafSpy).toHaveBeenCalled();
+      expect(queuedFrames.size).toBe(0);
+      expect(result.current.state.runId).toBe("run-2");
+      expect(result.current.state.transientText).toBe("");
+
+      // 卸载前有挂起帧：卸载必须取消挂起帧，不遗留泄漏回调。
+      const secondSource = FakeEventSource.instances.at(-1);
+      act(() => {
+        secondSource?.emit("text_delta", { payload: { text: "卸载前未刷片段" } });
+      });
+      expect(queuedFrames.size).toBe(1);
+      unmount();
+      expect(queuedFrames.size).toBe(0);
+    } finally {
+      rafSpy.mockRestore();
+      cancelRafSpy.mockRestore();
+    }
+  });
+
+  it("text_delta 紧跟 snapshot 或 run_event 时先同步 flush 缓冲并取消挂起帧", () => {
+    const queuedFrames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 1;
+    const rafSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        const id = nextFrameId;
+        nextFrameId += 1;
+        queuedFrames.set(id, callback);
+        return id;
+      });
+    const cancelRafSpy = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((id: number) => {
+        queuedFrames.delete(id);
+      });
+
+    try {
+      const { result } = renderHook(() =>
+        useRunStream({
+          eventSourceFactory: fakeEventSourceFactory,
+          runId: "run-1",
+          sessionId: "session-1",
+          status: "running",
+        }),
+      );
+      const source = FakeEventSource.instances.at(-1);
+
+      // 1. text_delta 后紧跟非终态权威 snapshot：取消挂起帧并被 snapshot 清空，不能迟到回写。
+      act(() => {
+        source?.emit("text_delta", { payload: { text: "将被快照覆盖的临时文本" } });
+        source?.emit("snapshot", {
+          payload: snapshot("running", "权威快照正文"),
+        });
+      });
+      expect(cancelRafSpy).toHaveBeenCalled();
+      expect(queuedFrames.size).toBe(0);
+      expect(result.current.state.transientText).toBe("");
+      expect(result.current.state.messages[0].text).toBe("权威快照正文");
+
+      // 2. text_delta 后紧跟 run_event：先同步刷入缓冲文本，再处理事件。
+      act(() => {
+        source?.emit("text_delta", { payload: { text: "事件前缓冲A" } });
+        source?.emit("text_delta", { payload: { text: "+B" } });
+        source?.emit("run_event", {
+          payload: { event: event("tool_call_started", 2) },
+        });
+      });
+      expect(queuedFrames.size).toBe(0);
+      expect(result.current.state.transientText).toBe("事件前缓冲A+B");
+      expect(result.current.state.events.map((item) => item.type)).toEqual([
+        "tool_call_started",
+      ]);
+
+      // 3. text_delta 后紧跟终态 snapshot：先同步 flush 最后一帧文本，由终态 snapshot 完整保留。
+      act(() => {
+        source?.emit("text_delta", { payload: { text: "+终态前尾帧" } });
+        source?.emit("snapshot", {
+          payload: snapshot("completed", "旧交付消息"),
+        });
+      });
+      expect(queuedFrames.size).toBe(0);
+      expect(result.current.state.status).toBe("completed");
+      expect(result.current.state.connection).toBe("closed");
+      expect(result.current.state.transientText).toBe("事件前缓冲A+B+终态前尾帧");
+    } finally {
+      rafSpy.mockRestore();
+      cancelRafSpy.mockRestore();
+    }
+  });
+
+  it("无 requestAnimationFrame 环境兜底通过定时合批 flush text_delta", () => {
+    vi.useFakeTimers();
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancelRaf = window.cancelAnimationFrame;
+    Object.defineProperty(window, "requestAnimationFrame", {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+    Object.defineProperty(window, "cancelAnimationFrame", {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+
+    try {
+      const { result } = renderHook(() =>
+        useRunStream({
+          eventSourceFactory: fakeEventSourceFactory,
+          runId: "run-1",
+          sessionId: "session-1",
+          status: "running",
+        }),
+      );
+      const source = FakeEventSource.instances.at(-1);
+
+      act(() => {
+        source?.emit("text_delta", { payload: { text: "兜底" } });
+        source?.emit("text_delta", { payload: { text: "定时合批" } });
+      });
+      expect(result.current.state.transientText).toBe("");
+
+      act(() => {
+        vi.advanceTimersByTime(16);
+      });
+      expect(result.current.state.transientText).toBe("兜底定时合批");
+    } finally {
+      Object.defineProperty(window, "requestAnimationFrame", {
+        configurable: true,
+        value: originalRaf,
+        writable: true,
+      });
+      Object.defineProperty(window, "cancelAnimationFrame", {
+        configurable: true,
+        value: originalCancelRaf,
+        writable: true,
+      });
+      vi.useRealTimers();
+    }
   });
 
   it("EventSource error 显示断线提示但保留当前文本", () => {

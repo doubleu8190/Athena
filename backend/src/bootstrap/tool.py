@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
@@ -79,9 +80,15 @@ class QueryServiceBundle:
     knowledge_upload_slots: KnowledgeUploadSlotRepository | None = None
 
     async def start(self) -> None:
-        """在首个请求前预热已装配的外部存储与无状态客户端资源。"""
+        """在首个请求前预热已装配的外部存储、无状态客户端与中文分词词典。"""
         for resource in self._startables:
-            await resource.start()
+            start = getattr(resource, "start", None)
+            if callable(start):
+                await start()
+                continue
+            warmup = getattr(resource, "warmup", None)
+            if callable(warmup):
+                await asyncio.to_thread(warmup)
 
     async def aclose(self) -> None:
         """按逆序独立释放所有进程级查询资源。"""
@@ -156,8 +163,8 @@ def build_query_services(
             profile_id=models.profile_id,
             semantic_min_score=semantic_min_score,
         )
-        # 启动顺序沿用存储 → 计数 → 远程向量客户端，关闭时按相反依赖顺序释放。
-        startables.extend((minio_originals, models.counter, models.embedding))
+        # 启动顺序沿用存储 → 计数 → 远程向量客户端 → 中文分词词典预热，关闭时按相反依赖顺序释放。
+        startables.extend((minio_originals, models.counter, models.embedding, models.tokenizer))
         closables.extend((minio_originals, models.embedding, models.counter))
     elif knowledge is not None and knowledge_repository is None:
         concrete_repository = KnowledgeRepository(sessions)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from adapter.knowledge.storage import MinioOriginalStore, MinioStorageConfig
@@ -25,6 +26,12 @@ class KnowledgeModelResources:
     counter: TiktokenTokenCounter
     tokenizer: JiebaChineseTokenizer
     profile_id: str
+
+    async def start_tokenizer(self) -> None:
+        """在工作线程中幂等预热中文分词器，兼容未实现 warmup 的测试替身。"""
+        warmup = getattr(self.tokenizer, "warmup", None)
+        if callable(warmup):
+            await asyncio.to_thread(warmup)
 
 
 def knowledge_embedding_config() -> OpenAICompatibleEmbeddingConfig:

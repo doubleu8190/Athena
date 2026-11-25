@@ -16,6 +16,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "httpx2==2.16.0",
     "jsonschema>=4.26,<5",
+    "lark-oapi==1.9.0",
     "mcp==2.3.0",
     "minio==7.2.20",
     "packaging>=25,<27",
@@ -98,4 +99,8 @@ files = ["backend/src", "backend/scripts", "backend/tests", "mcp_servers"]
 
 [[tool.mypy.overrides]]
 module = ["minio", "minio.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["lark_oapi", "lark_oapi.*"]
 ignore_missing_imports = true

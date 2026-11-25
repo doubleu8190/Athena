@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -15,12 +16,15 @@ import pytest
 from cli.bootstrap_super_admin import bootstrap_super_admin
 from cli.sync_feishu_org import run_feishu_org_sync
 from fastapi.testclient import TestClient
+from lark_oapi.core.http import Transport as LarkTransport
+from lark_oapi.core.model import BaseRequest, Config, RawResponse, RequestOption
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+import infrastructure.feishu.client as feishu_client_module
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.models import Base
@@ -152,12 +156,54 @@ def test_feishu_config_enforces_https_in_production_and_hides_secret() -> None:
             "ATHENA_ENV": "development",
             "ATHENA_FEISHU_APP_ID": "cli_app",
             "ATHENA_FEISHU_APP_SECRET": secret,
-            "ATHENA_FEISHU_REDIRECT_URI": "http://127.0.0.1:8000/api/v1/auth/feishu/callback",
+            "ATHENA_FEISHU_REDIRECT_URI": "http://dev.local:8000/api/v1/auth/feishu/callback?next=1",
             "ATHENA_FEISHU_BASE_URL": "http://127.0.0.1:18080",
         }
     )
     assert secret not in repr(dev_cfg)
     assert dev_cfg.base_url == "http://127.0.0.1:18080"
+    assert dev_cfg.redirect_uri == "http://dev.local:8000/api/v1/auth/feishu/callback?next=1"
+
+    # base_url 与 lark_oapi._validate_domain 校验提前对齐：禁止路径段与非回环明文 HTTP。
+    for bad_base_url in (
+        "https://open.feishu.cn/proxy",
+        "https://open.feishu.cn/v1/",
+        "http://feishu-mock.internal:18080",
+        "http://127.0.0.1:18080/api",
+    ):
+        with pytest.raises(FeishuConfigurationError, match="feishu_base_url_invalid"):
+            FeishuConfig(
+                app_id="cli_app",
+                app_secret=secret,
+                redirect_uri="https://app.example.com/api/v1/auth/feishu/callback",
+                base_url=bad_base_url,
+                allow_http_for_testing=True,
+            )
+        with pytest.raises(FeishuConfigurationError, match="feishu_base_url_invalid"):
+            FeishuConfig.from_environment(
+                {
+                    "ATHENA_ENV": "development",
+                    "ATHENA_FEISHU_APP_ID": "cli_app",
+                    "ATHENA_FEISHU_APP_SECRET": secret,
+                    "ATHENA_FEISHU_REDIRECT_URI": "http://dev.local:8000/callback",
+                    "ATHENA_FEISHU_BASE_URL": bad_base_url,
+                }
+            )
+
+    # 回环地址（localhost / [::1]）及带尾部斜杠的纯 HTTPS origin 应通过校验。
+    for ok_base_url in (
+        "https://open.feishu.cn/",
+        "http://localhost:18080",
+        "http://[::1]:18080",
+    ):
+        ok_cfg = FeishuConfig(
+            app_id="cli_app",
+            app_secret=secret,
+            redirect_uri="http://dev.local:8000/api/v1/auth/feishu/callback",
+            base_url=ok_base_url,
+            allow_http_for_testing=True,
+        )
+        assert ok_cfg.base_url == ok_base_url
 
 
 def test_feishu_client_caches_token_retries_429_5xx_and_never_leaks_secrets(
@@ -390,6 +436,429 @@ def test_feishu_client_rejects_redirects_oversized_body_and_masks_errors() -> No
             assert err.value.__cause__ is None
         finally:
             await timeout_client.aclose()
+
+    _run(scenario())
+
+
+def test_feishu_client_never_invokes_sync_lark_transport_and_refreshes_expired_token(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """5 个端点全程禁走同步 Transport.execute；SDK Config 不存 app_secret；99991663 自动刷新。"""
+    secret = "cli_sync_guard_secret_xyz"
+    oauth_code = "oauth-code-all-five-endpoints"
+    tok_1 = "t-expired-secret-1"
+    tok_2 = "t-refreshed-secret-2"
+    user_tok = "u-all-five-secret"
+    token_calls = 0
+    dept_calls = 0
+    seen_paths: list[str] = []
+
+    def forbid_sync_execute(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("lark_oapi 同步 Transport.execute 绝不可在异步路径中被调用")
+
+    monkeypatch.setattr(LarkTransport, "execute", staticmethod(forbid_sync_execute))
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal token_calls, dept_calls
+        path = request.url.path
+        seen_paths.append(path)
+        if path == "/open-apis/auth/v3/tenant_access_token/internal":
+            token_calls += 1
+            tok = tok_1 if token_calls == 1 else tok_2
+            return httpx2.Response(
+                200,
+                json={"code": 0, "tenant_access_token": tok, "expire": 7200},
+            )
+        if path == "/open-apis/authen/v1/oidc/access_token":
+            assert request.headers.get("authorization") == f"Bearer {tok_2}"
+            return httpx2.Response(200, json={"code": 0, "data": {"access_token": user_tok}})
+        if path == "/open-apis/authen/v1/user_info":
+            assert request.headers.get("authorization") == f"Bearer {user_tok}"
+            return httpx2.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "union_id": "on_sync_1",
+                        "open_id": "ou_sync_1",
+                        "name": "全路径用户",
+                        "job_title": "工程师",
+                    },
+                },
+            )
+        if path == "/open-apis/contact/v3/departments/0/children":
+            dept_calls += 1
+            if request.headers.get("authorization") == f"Bearer {tok_1}":
+                return httpx2.Response(
+                    200,
+                    json={
+                        "code": 99991663,
+                        "msg": f"token expired {tok_1} {secret}",
+                        "data": "unexpected-shape-on-error",
+                    },
+                )
+            assert request.headers.get("authorization") == f"Bearer {tok_2}"
+            return httpx2.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "has_more": False,
+                        "items": [
+                            {
+                                "open_department_id": "od_refreshed",
+                                "parent_department_id": "0",
+                                "name": "刷新后部门",
+                                "order": 1,
+                            }
+                        ],
+                    },
+                },
+            )
+        if path == "/open-apis/contact/v3/users/find_by_department":
+            assert request.headers.get("authorization") == f"Bearer {tok_2}"
+            return httpx2.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {
+                        "has_more": False,
+                        "items": [
+                            {
+                                "union_id": "on_sync_1",
+                                "open_id": "ou_sync_1",
+                                "name": "全路径用户",
+                                "department_ids": ["od_refreshed"],
+                            }
+                        ],
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected path: {path}")
+
+    async def scenario() -> None:
+        config = FeishuConfig(
+            app_id="cli_refresh",
+            app_secret=secret,
+            redirect_uri="https://app.example.com/callback",
+        )
+        client = FeishuClient(config, transport=httpx2.MockTransport(handler))
+        try:
+            departments = await client.list_departments()
+            assert [d.external_id for d in departments] == ["od_refreshed"]
+            assert token_calls == 2
+            assert dept_calls == 2
+            # 确认 SDK Config 未持久化明文 app_secret，结构性阻断同步 TokenManager 回退。
+            assert client._sdk_client is not None
+            assert client._sdk_client.config is not None
+            assert client._sdk_client.config.app_secret is None
+
+            identity = await client.exchange_code_for_user(oauth_code)
+            assert identity.open_id == "ou_sync_1"
+            assert identity.job_title == "工程师"
+
+            users = await client.list_department_users("od_refreshed")
+            assert len(users) == 1
+            assert users[0].open_id == "ou_sync_1"
+            assert {
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                "/open-apis/authen/v1/oidc/access_token",
+                "/open-apis/authen/v1/user_info",
+                "/open-apis/contact/v3/departments/0/children",
+                "/open-apis/contact/v3/users/find_by_department",
+            }.issubset(set(seen_paths))
+            assert client._cached_token is not None
+        finally:
+            await client.aclose()
+        # aclose 后一并清空缓存 token，避免关闭后残留明文凭据。
+        assert client._cached_token is None
+
+        # 若刷新后仍返回过期业务码，仅刷新重试一次后即失败，避免无限递归。
+        always_expired_tokens = 0
+
+        def always_expired(request: httpx2.Request) -> httpx2.Response:
+            nonlocal always_expired_tokens
+            if request.url.path == "/open-apis/auth/v3/tenant_access_token/internal":
+                always_expired_tokens += 1
+                return httpx2.Response(
+                    200,
+                    json={
+                        "code": 0,
+                        "tenant_access_token": f"t-bad-{always_expired_tokens}",
+                        "expire": 7200,
+                    },
+                )
+            return httpx2.Response(200, json={"code": 99991663, "msg": "still expired"})
+
+        failing_client = FeishuClient(config, transport=httpx2.MockTransport(always_expired))
+        try:
+            with pytest.raises(FeishuUpstreamError, match="feishu_api_error") as err:
+                await failing_client.list_departments()
+            assert err.value.api_code == 99991663
+            assert always_expired_tokens == 2
+        finally:
+            await failing_client.aclose()
+
+    with caplog.at_level(logging.DEBUG):
+        _run(scenario())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    for sensitive in (secret, oauth_code, tok_1, tok_2, user_tok):
+        assert sensitive not in joined
+
+
+def test_feishu_client_pagination_loop_stream_limits_close_before_retry_and_lifecycle() -> None:
+    """验证分页环路拦截、重试前 0 字节关流、协议校验、并发隔离、取消透传与关闭后拒绝。"""
+
+    class _TrackedStream(httpx2.AsyncByteStream):
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self.iterated = False
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            self.iterated = True
+            for chunk in self._chunks:
+                yield chunk
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    config = FeishuConfig(
+        app_id="cli_guard",
+        app_secret="cli_guard_secret",
+        redirect_uri="https://app.example.com/callback",
+    )
+
+    async def scenario() -> None:
+        # 1. 分页 page_token 循环必须立即抛 feishu_pagination_loop_detected。
+        def loop_handler(request: httpx2.Request) -> httpx2.Response:
+            if request.url.path == "/open-apis/auth/v3/tenant_access_token/internal":
+                return httpx2.Response(
+                    200,
+                    json={"code": 0, "tenant_access_token": "t-loop", "expire": 7200},
+                )
+            return httpx2.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": {"has_more": True, "page_token": "same_cursor", "items": []},
+                },
+            )
+
+        loop_client = FeishuClient(config, transport=httpx2.MockTransport(loop_handler))
+        try:
+            with pytest.raises(FeishuProtocolError, match="feishu_pagination_loop_detected"):
+                await loop_client.list_departments()
+            with pytest.raises(FeishuProtocolError, match="feishu_pagination_loop_detected"):
+                await loop_client.list_department_users("od_1")
+        finally:
+            await loop_client.aclose()
+
+        # 2. 429 压缩错误流在进入 sleep 前以 0 字节读取关闭并遵守 Retry-After。
+        error_stream = _TrackedStream([gzip.compress(b"E" * 65_536)])
+        ok_stream = _TrackedStream(
+            [json.dumps({"code": 0, "tenant_access_token": "t-ok", "expire": 7200}).encode()]
+        )
+        attempts = 0
+        sleeps: list[float] = []
+        closed_before_sleep: list[tuple[bool, bool]] = []
+
+        class _RetryStreamTransport(httpx2.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    return httpx2.Response(
+                        429,
+                        headers={"content-encoding": "gzip", "retry-after": "1.5"},
+                        stream=error_stream,
+                        request=request,
+                    )
+                return httpx2.Response(200, stream=ok_stream, request=request)
+
+            async def aclose(self) -> None:
+                return None
+
+        async def verify_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            closed_before_sleep.append((error_stream.iterated, error_stream.closed))
+
+        retry_client = FeishuClient(
+            config,
+            transport=_RetryStreamTransport(),
+            sleep=verify_sleep,
+        )
+        try:
+            assert await retry_client.get_tenant_access_token() == "t-ok"
+            assert sleeps == [1.5]
+            assert closed_before_sleep == [(False, True)]
+            assert ok_stream.closed is True
+        finally:
+            await retry_client.aclose()
+
+        # 3. 200 响应协议边界：非 identity 编码、非法/负值长度、流式超限、非法 JSON、bool code。
+        protocol_cases: list[tuple[dict[str, str], list[bytes], str]] = [
+            ({"content-encoding": "gzip"}, [gzip.compress(b"{}")], "feishu_response_decode_failed"),
+            ({"content-length": "bad-len"}, [b"{}"], "feishu_response_length_invalid"),
+            ({"content-length": "-5"}, [b"{}"], "feishu_response_length_invalid"),
+            ({}, [b"x" * 100, b"y" * 100], "feishu_response_too_large"),
+            ({}, [b"not-valid-json"], "feishu_response_invalid_json"),
+            (
+                {},
+                [b'{"code": false, "tenant_access_token": "t", "expire": 10}'],
+                "feishu_response_code_invalid",
+            ),
+        ]
+        for headers, chunks, expected_code in protocol_cases:
+            stream = _TrackedStream(chunks)
+
+            class _OneShotTransport(httpx2.AsyncBaseTransport):
+                def __init__(self, hdrs: dict[str, str], st: _TrackedStream) -> None:
+                    self._hdrs = hdrs
+                    self._st = st
+
+                async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+                    return httpx2.Response(
+                        200, headers=self._hdrs, stream=self._st, request=request
+                    )
+
+                async def aclose(self) -> None:
+                    return None
+
+            p_client = FeishuClient(
+                config,
+                transport=_OneShotTransport(headers, stream),
+                max_retries=0,
+                max_response_bytes=128,
+            )
+            try:
+                with pytest.raises(FeishuProtocolError, match=expected_code):
+                    await p_client.get_tenant_access_token()
+                assert stream.closed is True
+            finally:
+                await p_client.aclose()
+
+        # 4. 并发 FeishuClient 实例通过 ContextVar 严格隔离，互不串流。
+        def make_token_transport(token_value: str) -> httpx2.MockTransport:
+            async def slow_handler(_request: httpx2.Request) -> httpx2.Response:
+                await asyncio.sleep(0.01)
+                return httpx2.Response(
+                    200,
+                    json={"code": 0, "tenant_access_token": token_value, "expire": 7200},
+                )
+
+            return httpx2.MockTransport(slow_handler)
+
+        client_a = FeishuClient(config, transport=make_token_transport("t-client-a"))
+        client_b = FeishuClient(config, transport=make_token_transport("t-client-b"))
+        try:
+            tok_a, tok_b = await asyncio.gather(
+                client_a.get_tenant_access_token(),
+                client_b.get_tenant_access_token(),
+            )
+            assert tok_a == "t-client-a"
+            assert tok_b == "t-client-b"
+        finally:
+            await client_a.aclose()
+            await client_b.aclose()
+
+        # 5. aclose 幂等且关闭后所有请求抛出 feishu_client_closed；CancelledError 不重试。
+        await client_a.aclose()
+        with pytest.raises(FeishuUpstreamError, match="feishu_client_closed"):
+            await client_a.get_tenant_access_token()
+
+        cancel_attempts = 0
+
+        def cancel_handler(_request: httpx2.Request) -> httpx2.Response:
+            nonlocal cancel_attempts
+            cancel_attempts += 1
+            raise asyncio.CancelledError()
+
+        cancel_client = FeishuClient(config, transport=httpx2.MockTransport(cancel_handler))
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await cancel_client.get_tenant_access_token()
+            assert cancel_attempts == 1
+            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
+        finally:
+            await cancel_client.aclose()
+
+    _run(scenario())
+
+
+def test_feishu_client_rejects_null_items_and_resets_lark_context_with_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 data.items=[null] 映射为协议错、异常/正常退出均重置 ContextVar 及上下文外回退。"""
+    config = FeishuConfig(
+        app_id="cli_null_items",
+        app_secret="cli_null_secret",
+        redirect_uri="https://app.example.com/callback",
+    )
+
+    def null_items_handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/open-apis/auth/v3/tenant_access_token/internal":
+            return httpx2.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "t-null", "expire": 7200},
+            )
+        return httpx2.Response(
+            200,
+            json={"code": 0, "data": {"has_more": False, "items": [None]}},
+        )
+
+    async def scenario() -> None:
+        # 1. items=[null] 不得触发未捕获 AttributeError，必须映射为稳定 FeishuProtocolError。
+        client = FeishuClient(config, transport=httpx2.MockTransport(null_items_handler))
+        try:
+            with pytest.raises(FeishuProtocolError, match="feishu_department_item_invalid"):
+                await client.list_departments()
+            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
+
+            with pytest.raises(FeishuProtocolError, match="feishu_user_item_invalid"):
+                await client.list_department_users("od_1")
+            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
+        finally:
+            await client.aclose()
+
+        # 2. 正常返回与 FeishuUpstreamError 退出后，_ACTIVE_LARK_CONTEXT 均已重置为 None。
+        err_client = FeishuClient(
+            config,
+            transport=httpx2.MockTransport(lambda _req: httpx2.Response(400, text="bad")),
+            max_retries=0,
+        )
+        try:
+            with pytest.raises(FeishuUpstreamError, match="feishu_upstream_rejected"):
+                await err_client.get_tenant_access_token()
+            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
+        finally:
+            await err_client.aclose()
+
+        # 3. FeishuClient 上下文外调用 LarkTransport.aexecute 透明回退至 _ORIGINAL_LARK_AEXECUTE。
+        fallback_calls: list[tuple[Config, BaseRequest, RequestOption | None]] = []
+
+        async def fake_original(
+            conf: Config,
+            req: BaseRequest,
+            option: RequestOption | None = None,
+        ) -> RawResponse:
+            fallback_calls.append((conf, req, option))
+            raw = RawResponse()
+            raw.status_code = 200
+            raw.content = b'{"code": 0}'
+            return raw
+
+        monkeypatch.setattr(feishu_client_module, "_ORIGINAL_LARK_AEXECUTE", fake_original)
+        feishu_client_module._ensure_lark_transport_bridge()
+        assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
+        dummy_conf = Config()
+        dummy_req = BaseRequest()
+        raw_resp = await LarkTransport.aexecute(dummy_conf, dummy_req, None)
+        assert raw_resp.status_code == 200
+        assert len(fallback_calls) == 1
+        assert fallback_calls[0] == (dummy_conf, dummy_req, None)
 
     _run(scenario())
 

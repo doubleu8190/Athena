@@ -1,24 +1,70 @@
-"""飞书开放平台原生 SSO 与通讯录异步 HTTP 客户端。"""
+"""飞书开放平台原生 SSO 与通讯录异步客户端（基于官方 lark-oapi 异步 SDK）。"""
 
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
 import math
 import os
-import re
+import threading
 import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import httpx2
+import lark_oapi as lark
+from lark_oapi.api.auth.v3.model import (
+    InternalTenantAccessTokenRequest,
+    InternalTenantAccessTokenRequestBody,
+    InternalTenantAccessTokenResponse,
+)
+from lark_oapi.api.authen.v1.model import (
+    CreateOidcAccessTokenRequest,
+    CreateOidcAccessTokenRequestBody,
+    CreateOidcAccessTokenResponse,
+    GetUserInfoRequest,
+    GetUserInfoResponse,
+)
+from lark_oapi.api.contact.v3.model import (
+    ChildrenDepartmentRequest,
+    ChildrenDepartmentResponse,
+    Department,
+    FindByDepartmentUserRequest,
+    FindByDepartmentUserResponse,
+    User,
+)
+from lark_oapi.core.exception import (
+    AccessDeniedException,
+    AccessTokenException,
+    ClientAssertionException,
+    InvalidArgsException,
+    NoAuthorizationException,
+    ObtainAccessTokenException,
+    UnmarshalException,
+)
+from lark_oapi.core.http import Transport as LarkTransport
+from lark_oapi.core.http.transport import (
+    _build_header as _lark_build_header,
+)
+from lark_oapi.core.http.transport import (
+    _build_url as _lark_build_url,
+)
+from lark_oapi.core.json import JSON as LARK_JSON
+from lark_oapi.core.model import BaseRequest, Config, RawResponse, RequestOption
 
 from domain.org import FeishuDirectoryClient, RemoteDepartment, RemoteEmployee
+from infrastructure.http import (
+    RetryableHttpError,
+    build_bounded_async_client,
+    has_control_characters,
+    run_with_http_retry,
+    validate_http_base_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +82,7 @@ _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 _FEISHU_TOKEN_EXPIRED_CODES = frozenset({99991663, 99991664, 99991668})
 _BASE_BACKOFF_SECONDS = 0.25
 _MAX_BACKOFF_SECONDS = 5.0
-_HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class FeishuError(RuntimeError):
@@ -76,6 +122,129 @@ class FeishuProtocolError(FeishuError):
 
     def __init__(self, code: str = "feishu_response_invalid") -> None:
         super().__init__(code)
+
+
+class _FeishuHttpStatusSignal(Exception):
+    """内部控制异常：在 lark_oapi 执行 JSON 反序列化前拦截非 2xx 状态码并保留 Retry-After。"""
+
+    def __init__(self, *, status_code: int, retry_after_header: str | None) -> None:
+        self.status_code = status_code
+        self.retry_after_header = retry_after_header
+        super().__init__("feishu_http_status")
+
+
+@dataclass(slots=True)
+class _BoundedLarkExecutionContext:
+    """绑定到当前协程的飞书有界 HTTP 客户端、体积上限与解析后的原始信封快照。"""
+
+    http_client: httpx2.AsyncClient
+    max_response_bytes: int
+    operation: str
+    last_payload: dict[str, Any] | None = None
+
+
+# 通过 ContextVar 将 lark_oapi.Transport.aexecute 按协程隔离桥接到 FeishuClient 自持有的
+# 有界连接池 httpx2.AsyncClient，既复用连接池、流式限制响应体积、在反序列化前拦截非 2xx
+# 响应，又不影响同进程内其他独立使用 lark_oapi 的调用方。
+_ACTIVE_LARK_CONTEXT: ContextVar[_BoundedLarkExecutionContext | None] = ContextVar(
+    "athena_feishu_lark_context",
+    default=None,
+)
+_ORIGINAL_LARK_AEXECUTE: Callable[..., Awaitable[RawResponse]] = LarkTransport.aexecute
+_LARK_BRIDGE_LOCK = threading.Lock()
+_LARK_BRIDGE_INSTALLED = False
+
+
+async def _read_bounded_success_body(
+    response: httpx2.Response,
+    *,
+    max_response_bytes: int,
+) -> bytes:
+    """在 2xx 响应阶段强制校验编码与字节上限，防止压缩炸弹或超大响应体耗尽内存。"""
+    content_encoding = response.headers.get("content-encoding", "").strip().lower()
+    if content_encoding not in {"", "identity"}:
+        raise FeishuProtocolError("feishu_response_decode_failed")
+
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared = int(content_length.strip())
+        except ValueError:
+            raise FeishuProtocolError("feishu_response_length_invalid") from None
+        if declared < 0:
+            raise FeishuProtocolError("feishu_response_length_invalid")
+        if declared > max_response_bytes:
+            raise FeishuProtocolError("feishu_response_too_large")
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > max_response_bytes:
+            raise FeishuProtocolError("feishu_response_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _bridged_lark_aexecute(
+    conf: Config,
+    req: BaseRequest,
+    option: RequestOption | None = None,
+) -> RawResponse:
+    """拦截 lark_oapi 异步传输：若在 FeishuClient 上下文内则走有界 httpx2 连接池。"""
+    ctx = _ACTIVE_LARK_CONTEXT.get()
+    if ctx is None:
+        return await _ORIGINAL_LARK_AEXECUTE(conf, req, option)
+
+    effective_option = RequestOption() if option is None else option
+    url = _lark_build_url(conf.domain, req.uri, req.paths)
+    headers = dict(_lark_build_header(req, effective_option, conf))
+
+    json_body: Any = None
+    if req.body is not None:
+        marshaled = LARK_JSON.marshal(req.body)
+        if marshaled is not None:
+            json_body = json.loads(marshaled)
+
+    async with ctx.http_client.stream(
+        str(req.http_method.name),
+        url,
+        headers=headers,
+        params=req.queries or None,
+        json=json_body,
+    ) as response:
+        status_code = response.status_code
+        if not (200 <= status_code < 300):
+            # 非 2xx 响应不读取错误正文（0 字节读取并随 async with 关闭流），避免大错误体
+            # 或非 JSON 响应破坏 lark_oapi 反序列化并杜绝凭据回显。
+            raise _FeishuHttpStatusSignal(
+                status_code=status_code,
+                retry_after_header=response.headers.get("retry-after"),
+            )
+        raw_body = await _read_bounded_success_body(
+            response,
+            max_response_bytes=ctx.max_response_bytes,
+        )
+        # 在返回给 lark_oapi 反序列化前先校验标准 JSON 信封与业务码（过滤 bool 伪装 0，
+        # 且在 code != 0 时直接抛出安全业务异常而不回显上游 msg）。
+        ctx.last_payload = _parse_feishu_envelope(raw_body, operation=ctx.operation)
+        raw_resp = RawResponse()
+        raw_resp.status_code = status_code
+        raw_resp.headers = dict(response.headers)
+        raw_resp.content = raw_body
+        return raw_resp
+
+
+def _ensure_lark_transport_bridge() -> None:
+    """幂等安装 lark_oapi.Transport.aexecute 的协程隔离有界传输桥接。"""
+    global _LARK_BRIDGE_INSTALLED
+    if _LARK_BRIDGE_INSTALLED:
+        return
+    with _LARK_BRIDGE_LOCK:
+        if _LARK_BRIDGE_INSTALLED:
+            return
+        LarkTransport.aexecute = staticmethod(_bridged_lark_aexecute)
+        _LARK_BRIDGE_INSTALLED = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,11 +290,9 @@ class FeishuConfig:
             raise FeishuConfigurationError("feishu_config_invalid")
         if not isinstance(self.base_url, str):
             raise FeishuConfigurationError("feishu_base_url_invalid")
-        _validate_feishu_url(
+        _validate_feishu_base_url(
             self.base_url,
             allow_http=self.allow_http_for_testing,
-            allow_query=False,
-            code="feishu_base_url_invalid",
         )
         if not isinstance(self.redirect_uri, str):
             raise FeishuConfigurationError("feishu_redirect_uri_invalid")
@@ -193,7 +360,7 @@ class _CachedTenantToken:
 
 
 class FeishuClient(FeishuDirectoryClient):
-    """基于有界 httpx2 连接池的飞书 OAuth SSO 与通讯录客户端。"""
+    """基于官方异步 lark-oapi SDK 与共享有界 HTTP 基座的飞书 SSO 与通讯录客户端。"""
 
     def __init__(
         self,
@@ -215,7 +382,8 @@ class FeishuClient(FeishuDirectoryClient):
         self._clock = clock
         self._max_retries = max_retries
         self._max_response_bytes = max_response_bytes
-        self._client: httpx2.AsyncClient | None = None
+        self._sdk_client: lark.Client | None = None
+        self._http_client: httpx2.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._token_lock = asyncio.Lock()
         self._cached_token: _CachedTenantToken | None = None
@@ -240,29 +408,49 @@ class FeishuClient(FeishuDirectoryClient):
         return f"{self._config.base_url.rstrip('/')}/open-apis/authen/v1/authorize?{query}"
 
     async def get_tenant_access_token(self, *, force_refresh: bool = False) -> str:
-        """获取有效的 tenant_access_token，进程内缓存并在过期前自动刷新。"""
+        """通过 SDK 异步接口获取 tenant_access_token，进程内缓存并在过期前自动刷新。"""
+        if self._closed:
+            raise FeishuUpstreamError("feishu_client_closed")
         now = self._clock()
         cached = self._cached_token
         if not force_refresh and cached is not None and now < cached.expires_at:
             return cached.value
 
         async with self._token_lock:
+            if self._closed:
+                raise FeishuUpstreamError("feishu_client_closed")
             now = self._clock()
             cached = self._cached_token
             if not force_refresh and cached is not None and now < cached.expires_at:
                 return cached.value
 
-            payload = await self._request_json(
-                "POST",
-                "/open-apis/auth/v3/tenant_access_token/internal",
-                json_body={
-                    "app_id": self._config.app_id,
-                    "app_secret": self._config.app_secret,
-                },
+            async def _call(sdk: lark.Client) -> InternalTenantAccessTokenResponse:
+                request = (
+                    InternalTenantAccessTokenRequest.builder()
+                    .request_body(
+                        InternalTenantAccessTokenRequestBody.builder()
+                        .app_id(self._config.app_id)
+                        .app_secret(self._config.app_secret)
+                        .build()
+                    )
+                    .build()
+                )
+                return await sdk.auth.v3.tenant_access_token.ainternal(request)
+
+            sdk_resp, raw_payload = await self._invoke_sdk(
+                _call,
                 operation="tenant_access_token",
+                invalid_data_code="feishu_token_response_invalid",
             )
-            token = payload.get("tenant_access_token")
-            expire_raw = payload.get("expire")
+            # 飞书 /auth/v3/tenant_access_token/internal 返回顶层字段（SDK 模型嵌套在 data 下），
+            # 优先读取原始 JSON 顶层字段并在缺失时回退 SDK data 对象。
+            token = raw_payload.get("tenant_access_token")
+            expire_raw = raw_payload.get("expire")
+            if token is None and sdk_resp.data is not None:
+                token = sdk_resp.data.tenant_access_token
+            if expire_raw is None and sdk_resp.data is not None:
+                expire_raw = sdk_resp.data.expire
+
             if (
                 not isinstance(token, str)
                 or not token.strip()
@@ -274,6 +462,8 @@ class FeishuClient(FeishuDirectoryClient):
                 raise FeishuProtocolError("feishu_token_response_invalid")
 
             # 提前刷新窗口取 300 秒或有效期的 1/4（较小值），避免临近过期时竞态失效。
+            if self._closed:
+                raise FeishuUpstreamError("feishu_client_closed")
             lead = min(_TOKEN_REFRESH_LEAD_SECONDS, float(expire_raw) * 0.25)
             effective_ttl = max(1.0, float(expire_raw) - lead)
             self._cached_token = _CachedTenantToken(
@@ -284,55 +474,82 @@ class FeishuClient(FeishuDirectoryClient):
 
     async def exchange_code_for_user(self, code: str) -> FeishuUserIdentity:
         """使用一次性 OAuth code 换取飞书用户身份资料（不记录或回显敏感凭据）。"""
+        if self._closed:
+            raise FeishuUpstreamError("feishu_client_closed")
         if not code or not code.strip() or len(code) > 512 or _has_control_characters(code):
             raise FeishuProtocolError("feishu_oauth_code_invalid")
 
-        token_payload = await self._request_tenant_json(
-            "POST",
-            "/open-apis/authen/v1/oidc/access_token",
-            json_body={
-                "grant_type": "authorization_code",
-                "code": code.strip(),
-            },
+        cleaned_code = code.strip()
+
+        async def _call_oidc(
+            sdk: lark.Client,
+            tenant_token: str,
+        ) -> CreateOidcAccessTokenResponse:
+            request = (
+                CreateOidcAccessTokenRequest.builder()
+                .request_body(
+                    CreateOidcAccessTokenRequestBody.builder()
+                    .grant_type("authorization_code")
+                    .code(cleaned_code)
+                    .build()
+                )
+                .build()
+            )
+            # CreateOidcAccessTokenRequest 声明 token_types={APP}；自建应用使用
+            # tenant_access_token 作为 Bearer 凭据，经 app_access_token 注入可命中
+            # enable_set_token 异步直通分支，严禁触发同步阻塞的 TokenManager。
+            option = RequestOption.builder().app_access_token(tenant_token).build()
+            return await sdk.authen.v1.oidc_access_token.acreate(request, option)
+
+        oidc_resp, oidc_payload = await self._invoke_tenant_sdk(
+            _call_oidc,
             operation="oidc_access_token",
+            invalid_data_code="feishu_oidc_response_invalid",
         )
-        token_data = token_payload.get("data")
-        if not isinstance(token_data, dict):
+        if not isinstance(oidc_payload.get("data"), dict) or oidc_resp.data is None:
             raise FeishuProtocolError("feishu_oidc_response_invalid")
-        user_access_token = token_data.get("access_token")
+        user_access_token = oidc_resp.data.access_token
         if not isinstance(user_access_token, str) or not user_access_token.strip():
             raise FeishuProtocolError("feishu_oidc_response_invalid")
 
-        user_payload = await self._request_json(
-            "GET",
-            "/open-apis/authen/v1/user_info",
-            headers={"Authorization": f"Bearer {user_access_token.strip()}"},
+        cleaned_user_token = user_access_token.strip()
+
+        async def _call_user_info(sdk: lark.Client) -> GetUserInfoResponse:
+            request = GetUserInfoRequest.builder().build()
+            option = RequestOption.builder().user_access_token(cleaned_user_token).build()
+            return await sdk.authen.v1.user_info.aget(request, option)
+
+        user_resp, user_payload = await self._invoke_sdk(
+            _call_user_info,
             operation="user_info",
+            invalid_data_code="feishu_user_info_invalid",
         )
-        user_data = user_payload.get("data")
-        if not isinstance(user_data, dict):
+        raw_user_data = user_payload.get("data")
+        if not isinstance(raw_user_data, dict) or user_resp.data is None:
             raise FeishuProtocolError("feishu_user_info_invalid")
 
-        union_id = _optional_text(user_data.get("union_id"), max_length=128)
-        open_id = _optional_text(user_data.get("open_id"), max_length=128)
+        user_data = user_resp.data
+        union_id = _optional_text(user_data.union_id, max_length=128)
+        open_id = _optional_text(user_data.open_id, max_length=128)
         if union_id is None and open_id is None:
             raise FeishuProtocolError("feishu_user_identity_missing")
 
-        name = _optional_text(user_data.get("name"), max_length=80) or _optional_text(
-            user_data.get("en_name"),
+        name = _optional_text(user_data.name, max_length=80) or _optional_text(
+            user_data.en_name,
             max_length=80,
         )
-        email = _optional_text(user_data.get("enterprise_email"), max_length=320) or _optional_text(
-            user_data.get("email"),
+        email = _optional_text(user_data.enterprise_email, max_length=320) or _optional_text(
+            user_data.email,
             max_length=320,
         )
         avatar_url = (
-            _optional_text(user_data.get("avatar_url"), max_length=1024)
-            or _optional_text(user_data.get("avatar_middle"), max_length=1024)
-            or _optional_text(user_data.get("avatar_thumb"), max_length=1024)
+            _optional_text(user_data.avatar_url, max_length=1024)
+            or _optional_text(user_data.avatar_middle, max_length=1024)
+            or _optional_text(user_data.avatar_thumb, max_length=1024)
         )
-        employee_no = _optional_text(user_data.get("employee_no"), max_length=64)
-        job_title = _optional_text(user_data.get("job_title"), max_length=120)
+        employee_no = _optional_text(user_data.employee_no, max_length=64)
+        # GetUserInfoResponseBody 未建模 job_title 字段，因此从校验后的原始 data 字典补充读取。
+        job_title = _optional_text(raw_user_data.get("job_title"), max_length=120)
         return FeishuUserIdentity(
             union_id=union_id,
             open_id=open_id,
@@ -344,41 +561,54 @@ class FeishuClient(FeishuDirectoryClient):
         )
 
     async def list_departments(self) -> list[RemoteDepartment]:
-        """分页拉取应用可见范围内的全部飞书部门。"""
+        """通过 SDK 异步分页接口拉取应用可见范围内的全部飞书部门。"""
+        if self._closed:
+            raise FeishuUpstreamError("feishu_client_closed")
         departments: list[RemoteDepartment] = []
         page_token: str | None = None
         seen_tokens: set[str] = set()
 
         for _ in range(MAX_FEISHU_PAGES):
-            params: dict[str, str] = {
-                "department_id_type": "open_department_id",
-                "fetch_child": "true",
-                "page_size": str(DEFAULT_FEISHU_PAGE_SIZE),
-            }
-            if page_token is not None:
-                params["page_token"] = page_token
-            payload = await self._request_tenant_json(
-                "GET",
-                "/open-apis/contact/v3/departments/0/children",
-                params=params,
+            current_page_token = page_token
+
+            async def _call_page(
+                sdk: lark.Client,
+                tenant_token: str,
+                token_arg: str | None = current_page_token,
+            ) -> ChildrenDepartmentResponse:
+                builder = (
+                    ChildrenDepartmentRequest.builder()
+                    .department_id("0")
+                    .department_id_type("open_department_id")
+                    .fetch_child(True)
+                    .page_size(DEFAULT_FEISHU_PAGE_SIZE)
+                )
+                if token_arg is not None:
+                    builder = builder.page_token(token_arg)
+                option = RequestOption.builder().tenant_access_token(tenant_token).build()
+                return await sdk.contact.v3.department.achildren(builder.build(), option)
+
+            sdk_resp, raw_payload = await self._invoke_tenant_sdk(
+                _call_page,
                 operation="list_departments",
+                invalid_data_code="feishu_departments_response_invalid",
+                invalid_item_code="feishu_department_item_invalid",
             )
-            data = payload.get("data")
-            if not isinstance(data, dict):
+            raw_data = raw_payload.get("data")
+            if not isinstance(raw_data, dict) or sdk_resp.data is None:
                 raise FeishuProtocolError("feishu_departments_response_invalid")
-            items = data.get("items")
-            if items is None:
-                items = []
-            if not isinstance(items, list):
+            raw_items = raw_data.get("items")
+            if raw_items is not None and not isinstance(raw_items, list):
                 raise FeishuProtocolError("feishu_departments_response_invalid")
 
-            for item in items:
-                if not isinstance(item, dict):
+            sdk_items = sdk_resp.data.items or []
+            for sdk_dept in sdk_items:
+                if not isinstance(sdk_dept, Department):
                     raise FeishuProtocolError("feishu_department_item_invalid")
-                departments.append(_parse_remote_department(item))
+                departments.append(_parse_remote_department(sdk_dept))
 
-            has_more = bool(data.get("has_more", False))
-            next_token = _optional_text(data.get("page_token"), max_length=512)
+            has_more = bool(sdk_resp.data.has_more)
+            next_token = _optional_text(sdk_resp.data.page_token, max_length=512)
             if not has_more or next_token is None:
                 return departments
             if next_token in seen_tokens:
@@ -389,7 +619,9 @@ class FeishuClient(FeishuDirectoryClient):
         raise FeishuProtocolError("feishu_pagination_limit_exceeded")
 
     async def list_department_users(self, department_external_id: str) -> list[RemoteEmployee]:
-        """分页拉取指定飞书部门下的直属员工列表。"""
+        """通过 SDK 异步分页接口拉取指定飞书部门下的直属员工列表。"""
+        if self._closed:
+            raise FeishuUpstreamError("feishu_client_closed")
         if not department_external_id or _has_control_characters(department_external_id):
             raise FeishuProtocolError("feishu_department_id_invalid")
 
@@ -398,36 +630,51 @@ class FeishuClient(FeishuDirectoryClient):
         seen_tokens: set[str] = set()
 
         for _ in range(MAX_FEISHU_PAGES):
-            params: dict[str, str] = {
-                "department_id": department_external_id,
-                "department_id_type": "open_department_id",
-                "user_id_type": "open_id",
-                "page_size": str(DEFAULT_FEISHU_PAGE_SIZE),
-            }
-            if page_token is not None:
-                params["page_token"] = page_token
-            payload = await self._request_tenant_json(
-                "GET",
-                "/open-apis/contact/v3/users/find_by_department",
-                params=params,
+            current_page_token = page_token
+
+            async def _call_page(
+                sdk: lark.Client,
+                tenant_token: str,
+                token_arg: str | None = current_page_token,
+            ) -> FindByDepartmentUserResponse:
+                builder = (
+                    FindByDepartmentUserRequest.builder()
+                    .department_id(department_external_id)
+                    .department_id_type("open_department_id")
+                    .user_id_type("open_id")
+                    .page_size(DEFAULT_FEISHU_PAGE_SIZE)
+                )
+                if token_arg is not None:
+                    builder = builder.page_token(token_arg)
+                option = RequestOption.builder().tenant_access_token(tenant_token).build()
+                return await sdk.contact.v3.user.afind_by_department(builder.build(), option)
+
+            sdk_resp, raw_payload = await self._invoke_tenant_sdk(
+                _call_page,
                 operation="list_department_users",
+                invalid_data_code="feishu_users_response_invalid",
+                invalid_item_code="feishu_user_item_invalid",
             )
-            data = payload.get("data")
-            if not isinstance(data, dict):
+            raw_data = raw_payload.get("data")
+            if not isinstance(raw_data, dict) or sdk_resp.data is None:
                 raise FeishuProtocolError("feishu_users_response_invalid")
-            items = data.get("items")
-            if items is None:
-                items = []
-            if not isinstance(items, list):
+            raw_items = raw_data.get("items")
+            if raw_items is None:
+                raw_items = []
+            if not isinstance(raw_items, list):
                 raise FeishuProtocolError("feishu_users_response_invalid")
 
-            for item in items:
-                if not isinstance(item, dict):
+            sdk_items = sdk_resp.data.items or []
+            for index, sdk_user in enumerate(sdk_items):
+                if not isinstance(sdk_user, User):
                     raise FeishuProtocolError("feishu_user_item_invalid")
-                employees.append(_parse_remote_employee(item, department_external_id))
+                raw_item = raw_items[index] if index < len(raw_items) else {}
+                if not isinstance(raw_item, Mapping):
+                    raise FeishuProtocolError("feishu_user_item_invalid")
+                employees.append(_parse_remote_employee(sdk_user, raw_item, department_external_id))
 
-            has_more = bool(data.get("has_more", False))
-            next_token = _optional_text(data.get("page_token"), max_length=512)
+            has_more = bool(sdk_resp.data.has_more)
+            next_token = _optional_text(sdk_resp.data.page_token, max_length=512)
             if not has_more or next_token is None:
                 return employees
             if next_token in seen_tokens:
@@ -438,175 +685,172 @@ class FeishuClient(FeishuDirectoryClient):
         raise FeishuProtocolError("feishu_pagination_limit_exceeded")
 
     async def aclose(self) -> None:
-        """关闭底层有界 HTTP 连接池，可安全重复调用。"""
+        """关闭底层有界 HTTP 连接池、释放 SDK 引用并清空缓存 token，可安全重复调用。"""
         async with self._client_lock:
             self._closed = True
-            client = self._client
-            self._client = None
-        if client is not None:
-            await client.aclose()
+            self._cached_token = None
+            http_client = self._http_client
+            self._http_client = None
+            self._sdk_client = None
+        if http_client is not None:
+            await http_client.aclose()
 
-    def _build_client(self) -> httpx2.AsyncClient:
-        """构造有界超时、有界连接池且禁止重定向的 httpx2 客户端，防止凭据跳转泄露。"""
-        timeout = httpx2.Timeout(
-            timeout=self._config.timeout_seconds,
-            connect=min(10.0, self._config.timeout_seconds),
-        )
-        limits = httpx2.Limits(
-            max_connections=32,
-            max_keepalive_connections=16,
-            keepalive_expiry=30.0,
-        )
-        kwargs: dict[str, Any] = {
-            "timeout": timeout,
-            "limits": limits,
-            "follow_redirects": False,
-            "headers": {
+    def _build_sdk_client(self) -> lark.Client:
+        """构造启用显式异步 token 注入并压制日志级别的官方 lark-oapi 客户端。"""
+        domain = self._config.base_url.rstrip("/")
+        try:
+            # 必须开启 enable_set_token(True) 且不向 SDK Config 写入 app_secret：
+            # 1) 减少内存中明文密钥副本，app_secret 仅在异步换取 tenant_access_token 时发送；
+            # 2) 从结构上杜绝意外跌落到 lark_oapi 同步阻塞的 TokenManager（requests.request）。
+            # 日志级别压制为 ERROR，避免 SDK 默认 stdout Handler 输出多余或敏感诊断信息。
+            return (
+                lark.Client.builder()
+                .app_id(self._config.app_id)
+                .domain(domain)
+                .timeout(self._config.timeout_seconds)
+                .enable_set_token(True)
+                .log_level(lark.LogLevel.ERROR)
+                .build()
+            )
+        except ValueError:
+            raise FeishuConfigurationError("feishu_base_url_invalid") from None
+
+    def _build_http_client(self) -> httpx2.AsyncClient:
+        """通过共享 HTTP 基座构造有界超时、有界连接池、禁重定向且仅声明 identity 的客户端。"""
+        return build_bounded_async_client(
+            timeout_seconds=self._config.timeout_seconds,
+            transport=self._transport,
+            headers={
                 "Accept": "application/json",
                 "Accept-Encoding": "identity",
             },
-        }
-        if self._transport is not None:
-            kwargs["transport"] = self._transport
-        return httpx2.AsyncClient(**kwargs)
+        )
 
-    async def _ensure_client(self) -> httpx2.AsyncClient:
-        """锁内获取或懒创建连接池，避免与并发关闭产生竞态。"""
+    async def _ensure_runtime(self) -> tuple[lark.Client, httpx2.AsyncClient]:
+        """在锁内原子获取或懒创建 SDK 与 HTTP 连接池，避免与并发 aclose() 竞态。"""
         async with self._client_lock:
             if self._closed:
                 raise FeishuUpstreamError("feishu_client_closed")
-            if self._client is None:
-                self._client = self._build_client()
-            return self._client
+            if self._sdk_client is None:
+                self._sdk_client = self._build_sdk_client()
+            if self._http_client is None:
+                self._http_client = self._build_http_client()
+            return self._sdk_client, self._http_client
 
-    async def _request_tenant_json(
+    async def _invoke_tenant_sdk[RespT](
         self,
-        method: str,
-        path: str,
+        call: Callable[[lark.Client, str], Awaitable[RespT]],
         *,
-        params: Mapping[str, str] | None = None,
-        json_body: Mapping[str, Any] | None = None,
         operation: str,
-    ) -> dict[str, Any]:
-        """附带 tenant_access_token 发起请求；遇到 token 过期业务码时自动刷新并重试一次。"""
+        invalid_data_code: str = "feishu_response_invalid",
+        invalid_item_code: str | None = None,
+    ) -> tuple[RespT, dict[str, Any]]:
+        """附带 tenant_access_token 调用 SDK；遇过期业务码时强制刷新 token 并重试一次。"""
         token = await self.get_tenant_access_token()
         try:
-            return await self._request_json(
-                method,
-                path,
-                params=params,
-                json_body=json_body,
-                headers={"Authorization": f"Bearer {token}"},
+            return await self._invoke_sdk(
+                lambda sdk: call(sdk, token),
                 operation=operation,
+                invalid_data_code=invalid_data_code,
+                invalid_item_code=invalid_item_code,
             )
         except FeishuUpstreamError as error:
             if error.api_code in _FEISHU_TOKEN_EXPIRED_CODES:
                 refreshed = await self.get_tenant_access_token(force_refresh=True)
-                return await self._request_json(
-                    method,
-                    path,
-                    params=params,
-                    json_body=json_body,
-                    headers={"Authorization": f"Bearer {refreshed}"},
+                return await self._invoke_sdk(
+                    lambda sdk: call(sdk, refreshed),
                     operation=operation,
+                    invalid_data_code=invalid_data_code,
+                    invalid_item_code=invalid_item_code,
                 )
             raise
 
-    async def _request_json(
+    async def _invoke_sdk[RespT](
         self,
-        method: str,
-        path: str,
+        call: Callable[[lark.Client], Awaitable[RespT]],
         *,
-        params: Mapping[str, str] | None = None,
-        json_body: Mapping[str, Any] | None = None,
-        headers: Mapping[str, str] | None = None,
         operation: str,
-    ) -> dict[str, Any]:
-        """发起有界响应体与有界重试的飞书 API 请求，严格屏蔽任何凭据泄露。"""
-        client = await self._ensure_client()
-        endpoint = f"{self._config.base_url.rstrip('/')}{path}"
-        request_headers = dict(headers) if headers is not None else {}
-        if json_body is not None:
-            request_headers["Content-Type"] = "application/json"
+        invalid_data_code: str = "feishu_response_invalid",
+        invalid_item_code: str | None = None,
+    ) -> tuple[RespT, dict[str, Any]]:
+        """在有界上下文与 tenacity 退避重试保护下执行一次官方 lark-oapi 异步调用。"""
+        _ensure_lark_transport_bridge()
+        sdk_client, http_client = await self._ensure_runtime()
 
-        for attempt in range(self._max_retries + 1):
-            retry_delay: float | None = None
+        def _on_retry(attempt_number: int, delay: float, error: RetryableHttpError) -> None:
+            if error.status_code is not None:
+                logger.warning(
+                    "feishu_upstream_retry operation=%s status_code=%d attempt=%d delay=%.2f",
+                    operation,
+                    error.status_code,
+                    attempt_number,
+                    delay,
+                )
+            else:
+                logger.warning(
+                    "feishu_timeout_retry operation=%s attempt=%d delay=%.2f",
+                    operation,
+                    attempt_number,
+                    delay,
+                )
+
+        async def _sleep_if_open(seconds: float) -> None:
+            if self._closed:
+                raise FeishuUpstreamError("feishu_client_closed")
+            await self._sleep(seconds)
+            if self._closed:
+                raise FeishuUpstreamError("feishu_client_closed")
+
+        async def _attempt(_attempt_index: int) -> tuple[RespT, dict[str, Any]]:
+            if self._closed:
+                raise FeishuUpstreamError("feishu_client_closed")
+            exec_ctx = _BoundedLarkExecutionContext(
+                http_client=http_client,
+                max_response_bytes=self._max_response_bytes,
+                operation=operation,
+            )
+            ctx_token = _ACTIVE_LARK_CONTEXT.set(exec_ctx)
             try:
-                async with client.stream(
-                    method,
-                    endpoint,
-                    params=params,
-                    json=json_body,
-                    headers=request_headers,
-                ) as response:
-                    status_code = response.status_code
-                    if 200 <= status_code < 300:
-                        raw_body = await self._read_bounded_body(response)
-                        return self._parse_feishu_envelope(raw_body, operation=operation)
-
-                    if status_code in _RETRYABLE_STATUS_CODES:
-                        if attempt < self._max_retries:
-                            retry_delay = self._retry_delay(
-                                attempt,
-                                response.headers.get("retry-after"),
-                            )
-                            logger.warning(
-                                "feishu_upstream_retry operation=%s status_code=%d "
-                                "attempt=%d delay=%.2f",
-                                operation,
-                                status_code,
-                                attempt + 1,
-                                retry_delay,
-                            )
-                        else:
-                            code = (
-                                "feishu_rate_limited"
-                                if status_code == 429
-                                else "feishu_upstream_unavailable"
-                            )
-                            logger.warning(
-                                "feishu_upstream_failed operation=%s code=%s status_code=%d",
-                                operation,
-                                code,
-                                status_code,
-                            )
-                            raise FeishuUpstreamError(
-                                code,
-                                retryable=True,
-                                status_code=status_code,
-                            )
-                    else:
-                        # 非重试状态码（如 3xx 重定向、400/401/403）立刻拒绝，绝不回显响应内容。
-                        logger.warning(
-                            "feishu_upstream_failed operation=%s status_code=%d",
-                            operation,
-                            status_code,
-                        )
-                        raise FeishuUpstreamError(
-                            "feishu_upstream_rejected",
-                            retryable=False,
-                            status_code=status_code,
-                        )
+                response = await call(sdk_client)
             except asyncio.CancelledError:
                 raise
             except FeishuError:
                 raise
+            except _FeishuHttpStatusSignal as signal:
+                status_code = signal.status_code
+                if status_code in _RETRYABLE_STATUS_CODES:
+                    code = (
+                        "feishu_rate_limited"
+                        if status_code == 429
+                        else "feishu_upstream_unavailable"
+                    )
+                    raise RetryableHttpError(
+                        retry_after_header=signal.retry_after_header,
+                        final_error=FeishuUpstreamError(
+                            code,
+                            retryable=True,
+                            status_code=status_code,
+                        ),
+                        status_code=status_code,
+                    ) from None
+                # 非重试状态码（3xx 重定向、400/401/403 等）立即拒绝且绝不回显响应内容。
+                logger.warning(
+                    "feishu_upstream_failed operation=%s status_code=%d",
+                    operation,
+                    status_code,
+                )
+                raise FeishuUpstreamError(
+                    "feishu_upstream_rejected",
+                    retryable=False,
+                    status_code=status_code,
+                ) from None
             except httpx2.TimeoutException:
-                if attempt < self._max_retries:
-                    retry_delay = self._retry_delay(attempt, None)
-                    logger.warning(
-                        "feishu_timeout_retry operation=%s attempt=%d delay=%.2f",
-                        operation,
-                        attempt + 1,
-                        retry_delay,
-                    )
-                else:
-                    logger.warning(
-                        "feishu_upstream_failed operation=%s code=feishu_timeout",
-                        operation,
-                    )
-                    # 截断底层 httpx2 异常链，防止请求体或 Authorization 头进入异常上下文。
-                    raise FeishuUpstreamError("feishu_timeout", retryable=True) from None
+                # 截断底层 httpx2 异常链，防止请求体或 Authorization 头进入异常上下文。
+                raise RetryableHttpError(
+                    retry_after_header=None,
+                    final_error=FeishuUpstreamError("feishu_timeout", retryable=True),
+                    status_code=None,
+                ) from None
             except httpx2.DecodingError as error:
                 logger.warning(
                     "feishu_protocol_failed operation=%s exception_type=%s",
@@ -615,6 +859,8 @@ class FeishuClient(FeishuDirectoryClient):
                 )
                 raise FeishuProtocolError("feishu_response_decode_failed") from None
             except (httpx2.TransportError, httpx2.HTTPError, httpx2.StreamError) as error:
+                if self._closed:
+                    raise FeishuUpstreamError("feishu_client_closed") from None
                 logger.warning(
                     "feishu_upstream_failed operation=%s code=feishu_transport_error "
                     "exception_type=%s",
@@ -622,85 +868,108 @@ class FeishuClient(FeishuDirectoryClient):
                     type(error).__name__,
                 )
                 raise FeishuUpstreamError("feishu_transport_error", retryable=False) from None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise FeishuProtocolError("feishu_response_invalid_json") from None
+            except UnmarshalException as error:
+                if (
+                    invalid_item_code is not None
+                    and error.field == "items"
+                    and getattr(error.dst, "__origin__", None) is not list
+                ):
+                    raise FeishuProtocolError(invalid_item_code) from None
+                raise FeishuProtocolError(invalid_data_code) from None
+            except (
+                AccessDeniedException,
+                AccessTokenException,
+                ClientAssertionException,
+                InvalidArgsException,
+                NoAuthorizationException,
+                ObtainAccessTokenException,
+            ) as error:
+                logger.warning(
+                    "feishu_upstream_failed operation=%s code=feishu_upstream_error "
+                    "exception_type=%s",
+                    operation,
+                    type(error).__name__,
+                )
+                raise FeishuUpstreamError("feishu_upstream_error", retryable=False) from None
+            except RuntimeError:
+                if self._closed:
+                    raise FeishuUpstreamError("feishu_client_closed") from None
+                raise
+            finally:
+                _ACTIVE_LARK_CONTEXT.reset(ctx_token)
 
-            if retry_delay is not None:
-                await self._sleep(retry_delay)
+            if exec_ctx.last_payload is None:
+                raise FeishuProtocolError("feishu_response_invalid")
+            return response, exec_ctx.last_payload
 
-        raise FeishuUpstreamError("feishu_upstream_unavailable", retryable=True)
-
-    async def _read_bounded_body(self, response: httpx2.Response) -> bytes:
-        """按字节上限流式读取响应体，防止异常上游耗尽进程内存。"""
-        content_length = response.headers.get("content-length")
-        if content_length is not None:
-            try:
-                declared = int(content_length.strip())
-            except ValueError:
-                raise FeishuProtocolError("feishu_response_length_invalid") from None
-            if declared < 0 or declared > self._max_response_bytes:
-                raise FeishuProtocolError("feishu_response_too_large")
-
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > self._max_response_bytes:
-                raise FeishuProtocolError("feishu_response_too_large")
-            chunks.append(chunk)
-        return b"".join(chunks)
-
-    @staticmethod
-    def _parse_feishu_envelope(raw_body: bytes, *, operation: str) -> dict[str, Any]:
-        """校验飞书标准 JSON 响应结构与业务码 code == 0，不回显上游明文消息。"""
         try:
-            payload = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise FeishuProtocolError("feishu_response_invalid_json") from None
-
-        if not isinstance(payload, dict):
-            raise FeishuProtocolError("feishu_response_invalid")
-        api_code = payload.get("code")
-        if not isinstance(api_code, int) or isinstance(api_code, bool):
-            raise FeishuProtocolError("feishu_response_code_invalid")
-        if api_code != 0:
-            logger.warning(
-                "feishu_api_error operation=%s api_code=%d",
-                operation,
-                api_code,
+            return await run_with_http_retry(
+                _attempt,
+                max_retries=self._max_retries,
+                sleep=_sleep_if_open,
+                base_seconds=_BASE_BACKOFF_SECONDS,
+                max_seconds=_MAX_BACKOFF_SECONDS,
+                on_retry=_on_retry,
             )
-            raise FeishuUpstreamError(
-                "feishu_api_error",
-                retryable=False,
-                api_code=api_code,
-            )
-        return payload
-
-    @staticmethod
-    def _retry_delay(attempt: int, retry_after_header: str | None) -> float:
-        """计算有界指数退避时间，并在合法范围内遵守上游 Retry-After。"""
-        delay = float(min(_MAX_BACKOFF_SECONDS, _BASE_BACKOFF_SECONDS * (2**attempt)))
-        if retry_after_header is not None:
-            try:
-                parsed = float(retry_after_header.strip())
-            except ValueError:
-                parsed = math.nan
-            if math.isfinite(parsed) and parsed >= 0.0:
-                delay = min(_MAX_BACKOFF_SECONDS, max(delay, parsed))
-        return delay
+        except FeishuUpstreamError as error:
+            if error.retryable:
+                if error.status_code is not None:
+                    logger.warning(
+                        "feishu_upstream_failed operation=%s code=%s status_code=%d",
+                        operation,
+                        error.code,
+                        error.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "feishu_upstream_failed operation=%s code=%s",
+                        operation,
+                        error.code,
+                    )
+            raise
 
 
-def _parse_remote_department(item: Mapping[str, Any]) -> RemoteDepartment:
-    """将飞书部门字典转换为领域 RemoteDepartment。"""
-    external_id = _optional_text(item.get("open_department_id"), max_length=128) or _optional_text(
-        item.get("department_id"),
+def _parse_feishu_envelope(raw_body: bytes, *, operation: str) -> dict[str, Any]:
+    """校验飞书标准 JSON 响应结构与业务码 code == 0，不回显上游明文消息。"""
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise FeishuProtocolError("feishu_response_invalid_json") from None
+
+    if not isinstance(payload, dict):
+        raise FeishuProtocolError("feishu_response_invalid")
+    api_code = payload.get("code")
+    if not isinstance(api_code, int) or isinstance(api_code, bool):
+        raise FeishuProtocolError("feishu_response_code_invalid")
+    if api_code != 0:
+        logger.warning(
+            "feishu_api_error operation=%s api_code=%d",
+            operation,
+            api_code,
+        )
+        raise FeishuUpstreamError(
+            "feishu_api_error",
+            retryable=False,
+            api_code=api_code,
+        )
+    return payload
+
+
+def _parse_remote_department(item: Department) -> RemoteDepartment:
+    """将 lark-oapi Department 对象转换为领域 RemoteDepartment。"""
+    external_id = _optional_text(item.open_department_id, max_length=128) or _optional_text(
+        item.department_id,
         max_length=128,
     )
-    name = _optional_text(item.get("name"), max_length=120)
+    name = _optional_text(item.name, max_length=120)
     if external_id is None or name is None:
         raise FeishuProtocolError("feishu_department_item_invalid")
-    raw_parent = _optional_text(item.get("parent_department_id"), max_length=128)
+    raw_parent = _optional_text(item.parent_department_id, max_length=128)
     parent_external_id = None if raw_parent in {None, "0"} else raw_parent
 
-    raw_order = item.get("order", 0)
+    raw_order: object = item.order if item.order is not None else 0
     if isinstance(raw_order, bool):
         order_index = 0
     elif isinstance(raw_order, int):
@@ -713,10 +982,8 @@ def _parse_remote_department(item: Mapping[str, Any]) -> RemoteDepartment:
     else:
         order_index = 0
 
-    status_obj = item.get("status")
-    is_deleted = False
-    if isinstance(status_obj, dict):
-        is_deleted = bool(status_obj.get("is_deleted", False))
+    status_obj = item.status
+    is_deleted = bool(status_obj.is_deleted) if status_obj is not None else False
 
     return RemoteDepartment(
         external_id=external_id,
@@ -728,39 +995,39 @@ def _parse_remote_department(item: Mapping[str, Any]) -> RemoteDepartment:
 
 
 def _parse_remote_employee(
-    item: Mapping[str, Any],
+    item: User,
+    raw_item: Mapping[str, Any],
     queried_department_external_id: str,
 ) -> RemoteEmployee:
-    """将飞书员工字典转换为领域 RemoteEmployee。"""
-    union_id = _optional_text(item.get("union_id"), max_length=128)
-    open_id = _optional_text(item.get("open_id"), max_length=128)
+    """将 lark-oapi User 对象（辅以原始兼容字段）转换为领域 RemoteEmployee。"""
+    union_id = _optional_text(item.union_id, max_length=128)
+    open_id = _optional_text(item.open_id, max_length=128)
     if union_id is None and open_id is None:
         raise FeishuProtocolError("feishu_user_item_invalid")
 
-    name = _optional_text(item.get("name"), max_length=80) or _optional_text(
-        item.get("en_name"),
+    name = _optional_text(item.name, max_length=80) or _optional_text(
+        item.en_name,
         max_length=80,
     )
-    email = _optional_text(item.get("enterprise_email"), max_length=320) or _optional_text(
-        item.get("email"),
+    email = _optional_text(item.enterprise_email, max_length=320) or _optional_text(
+        item.email,
         max_length=320,
     )
-    employee_no = _optional_text(item.get("employee_no"), max_length=64)
-    job_title = _optional_text(item.get("job_title"), max_length=120)
+    employee_no = _optional_text(item.employee_no, max_length=64)
+    job_title = _optional_text(item.job_title, max_length=120)
 
-    avatar_url = _optional_text(item.get("avatar_url"), max_length=1024)
-    avatar_obj = item.get("avatar")
-    if avatar_url is None and isinstance(avatar_obj, dict):
+    avatar_url = _optional_text(raw_item.get("avatar_url"), max_length=1024)
+    avatar_obj = item.avatar
+    if avatar_url is None and avatar_obj is not None:
         avatar_url = (
-            _optional_text(avatar_obj.get("avatar_origin"), max_length=1024)
-            or _optional_text(avatar_obj.get("avatar_240"), max_length=1024)
-            or _optional_text(avatar_obj.get("avatar_72"), max_length=1024)
+            _optional_text(avatar_obj.avatar_origin, max_length=1024)
+            or _optional_text(avatar_obj.avatar_240, max_length=1024)
+            or _optional_text(avatar_obj.avatar_72, max_length=1024)
         )
 
-    raw_department_ids = item.get("department_ids")
     dept_ids: list[str] = []
-    if isinstance(raw_department_ids, list):
-        for dept_id in raw_department_ids:
+    if isinstance(item.department_ids, list):
+        for dept_id in item.department_ids:
             cleaned = _optional_text(dept_id, max_length=128)
             if cleaned is not None and cleaned != "0" and cleaned not in dept_ids:
                 dept_ids.append(cleaned)
@@ -768,16 +1035,15 @@ def _parse_remote_employee(
         dept_ids.append(queried_department_external_id)
 
     is_active = True
-    if isinstance(item.get("is_active"), bool):
-        is_active = bool(item["is_active"])
-    status_obj = item.get("status")
-    if isinstance(status_obj, dict):
-        if (
-            bool(status_obj.get("is_resigned", False))
-            or bool(status_obj.get("is_exited", False))
-            or bool(status_obj.get("is_frozen", False))
-        ):
-            is_active = False
+    if isinstance(raw_item.get("is_active"), bool):
+        is_active = bool(raw_item["is_active"])
+    if item.is_frozen is True:
+        is_active = False
+    status_obj = item.status
+    if status_obj is not None and (
+        bool(status_obj.is_resigned) or bool(status_obj.is_exited) or bool(status_obj.is_frozen)
+    ):
+        is_active = False
 
     return RemoteEmployee(
         union_id=union_id,
@@ -816,8 +1082,28 @@ def _require_secret_or_value(
 
 
 def _has_control_characters(value: str) -> bool:
-    """检测全部 Unicode Cc 控制字符（含 C0/DEL/C1），防止请求头注入或日志污染。"""
+    """检测 ASCII 及全部 Unicode Cc 控制字符（含 C0/DEL/C1），防止请求头注入或日志污染。"""
+    if has_control_characters(value):
+        return True
+    if value.isascii():
+        return False
     return any(unicodedata.category(ch) == "Cc" for ch in value)
+
+
+def _validate_feishu_base_url(url: str, *, allow_http: bool) -> None:
+    """校验飞书 Open API 域名前缀：与 lark_oapi._validate_domain 对齐，要求纯 origin。"""
+    _validate_feishu_url(
+        url,
+        allow_http=allow_http,
+        allow_query=False,
+        code="feishu_base_url_invalid",
+    )
+    parsed = urlsplit(url.rstrip("/"))
+    # 与 lark_oapi 域名安全策略在配置期提前对齐：禁止携带路径段，且测试用明文 HTTP 仅限回环地址。
+    if parsed.path != "":
+        raise FeishuConfigurationError("feishu_base_url_invalid")
+    if parsed.scheme.lower() == "http" and (parsed.hostname or "").lower() not in _LOOPBACK_HOSTS:
+        raise FeishuConfigurationError("feishu_base_url_invalid")
 
 
 def _validate_feishu_url(
@@ -827,41 +1113,13 @@ def _validate_feishu_url(
     allow_query: bool,
     code: str,
 ) -> None:
-    """校验飞书端点或回调地址：默认强制 HTTPS，禁止空白、控制字符与凭据片段。"""
-    if not url or _has_control_characters(url) or any(ch.isspace() for ch in url) or "\\" in url:
+    """复用共享 HTTP URL 校验并叠加 Unicode Cc 控制字符拦截。"""
+    if not url or _has_control_characters(url):
         raise FeishuConfigurationError(code)
     try:
-        parsed = urlsplit(url)
-        host = parsed.hostname
-        port = parsed.port
+        validate_http_base_url(url, allow_http=allow_http, allow_query=allow_query)
     except ValueError:
         raise FeishuConfigurationError(code) from None
-
-    allowed_schemes = {"https", "http"} if allow_http else {"https"}
-    if (
-        parsed.scheme.lower() not in allowed_schemes
-        or not host
-        or parsed.username is not None
-        or parsed.password is not None
-        or "@" in parsed.netloc
-        or parsed.fragment
-        or (not allow_query and parsed.query)
-    ):
-        raise FeishuConfigurationError(code)
-
-    trailing = parsed.netloc.rsplit("]", 1)[-1] if parsed.netloc.startswith("[") else parsed.netloc
-    if (":" in trailing and port is None) or (port is not None and not 1 <= port <= 65535):
-        raise FeishuConfigurationError(code)
-
-    try:
-        ipaddress.ip_address(host)
-        return
-    except ValueError:
-        if host.replace(".", "").isdigit() and "." in host:
-            raise FeishuConfigurationError(code) from None
-
-    if len(host) > 253 or any(_HOST_LABEL.fullmatch(label) is None for label in host.split(".")):
-        raise FeishuConfigurationError(code)
 
 
 __all__ = [

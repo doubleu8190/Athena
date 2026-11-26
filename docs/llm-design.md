@@ -1,6 +1,6 @@
 # LLM 调用模块设计
 
-> **废弃状态（2026-11-12）**：`backend/src/adapter/llm/openai_responses.py`、`backend/src/app/llm/service.py`、`backend/src/app/llm/config.py` 及相关 `OpenAIResponsesAdapter`、`LlmService`、`LlmProfile` 和结构化输出契约已删除。本文仅保留历史 Responses 设计；当前生产 Run 路径只使用管理员后台管理的 Chat Completions 配置与 `OpenAIChatCompletionsAdapter`。共享 HTTP 响应限流工具已迁移到 `backend/src/adapter/llm/bounded_http.py`。
+> **废弃状态（2026-11-12）**：`backend/src/adapter/llm/openai_responses.py`、`backend/src/app/llm/service.py`、`backend/src/app/llm/config.py` 及相关 `OpenAIResponsesAdapter`、`LlmService`、`LlmProfile` 和结构化输出契约已删除。本文仅保留历史 Responses 设计；当前生产 Run 路径只使用管理员后台管理的 Chat Completions 配置与 `OpenAIChatCompletionsAdapter`。共享 HTTP 响应限流工具位于 `backend/src/infrastructure/http/bounded.py`。
 
 状态：历史设计，已废弃；不再代表当前生产实现。
 

@@ -48,19 +48,16 @@ python-pptx 1.0.2、Pillow 13.0.0。Python 3.14 当前没有兼容的 OCR 引擎
 
 worker 使用本地缓存中的 `BAAI/bge-m3` revision，不会在运行时联网下载模型。
 OCR 模型由 PaddleOCR 首次加载时写入 `PADDLE_PDX_CACHE_HOME`，worker 会将
-`ATHENA_KNOWLEDGE_OCR_CACHE_ROOT` 映射到该变量。解析子进程默认限制为
-`ATHENA_KNOWLEDGE_PARSE_MEMORY_MB=4096` MiB。Linux 使用 `RLIMIT_AS`；macOS
-由父进程每 250 ms 通过 psutil 采样子进程 RSS 并在超限时终止，无法读取 RSS 时
-返回明确错误。其他平台须提供 `resource.RLIMIT_AS`，否则解析明确失败。关闭
-worker 会让未完成任务在租约到期后重新排队。
+`ATHENA_KNOWLEDGE_OCR_CACHE_ROOT` 映射到该变量。隔离文档解析通过标准库
+`ProcessPoolExecutor`（`spawn` 模式，`max_tasks_per_child=50`）复用解析子进程，
+单文档解析超时或子进程异常崩溃后会自动强杀并重建子进程池；内存边界由容器部署层统一
+配额控制。关闭 worker 会让未完成任务在租约到期后重新排队。
 
-文件上传入口在 PostgreSQL 中共享 4 个并发 slot；每个请求的 ASGI body 上限为
-22 MiB，spool 阈值为 1 MiB，整个 slot 持有期限最长 600 秒。按同时占用估算，
-ASGI body 与 API 文件缓冲总量不超过约 168 MiB。API 会在系统临时目录可用空间
-低于 `ATHENA_KNOWLEDGE_UPLOAD_MIN_FREE_BYTES` 时返回 503，默认水位为 384 MiB。
-上传 reservation 在幂等检查和 owner 配额预留之后才写 MinIO；写入、
-对象哈希复核和数据库提交完成前不会登记可处理文档。结果不确定时 reservation
-继续占用配额，worker 先确认清理 fencing 和来源/预留引用，再删除对象并释放预留。
+文件上传入口使用进程内并发槽位（默认 4 个）限制同时上传数；每个请求的 ASGI body 上限为
+22 MiB，spool 阈值为 1 MiB，整个上传请求超时上限 600 秒。写入 MinIO 前先执行无锁只读
+预检（核对幂等重放/冲突、目标知识库与文档进行中状态及用户配额），拦截重放、冲突与超配额
+请求避免写入无谓孤儿；因网络中断或极端并发遗留的未引用对象，由 worker 降频执行超过
+24 小时宽限期的孤儿对象扫描兜底回收。
 
 当前不提供用于清理知识库测试数据的专用脚本。写入过新对象后不能直接退回旧本地
 存储版本；切换失败时应暂停写入并修复 MinIO 配置。

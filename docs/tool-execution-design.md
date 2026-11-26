@@ -3,7 +3,7 @@
 状态：产品闭环和首期实施范围已确认，并已授权按精简方案实施；待独立 Review 与最终验收。
 核对日期：2026-11-09。本文不表示 Review PASS，实际验证结果以交付报告为准。
 
-首期精简范围：原 Worker 失租恢复、deadline 或取消后的迟到结果结算、同一 Run 内 MCP 会话复用、跨 Run 自动结果复用，以及细粒度 unknown/retry 链暂不进入首期实现。本文只描述首期规则，后续能力仅保留末尾清单；具体实施以 docs/tool-execution-implementation-plan.md 为准。
+首期精简范围：原 Worker 失租恢复、deadline 或取消后的迟到结果结算、同一 Run 内 MCP 会话复用、跨 Run 自动结果复用，以及细粒度 unknown/retry 链暂不进入首期实现。本文只保留首期设计规则，历史实施方案与旧重型记忆设计已归档清理（当前生产工具与审批契约以源码及 [`docs/phase1-enterprise-backend-api-contract.md`](phase1-enterprise-backend-api-contract.md) 为准）。
 
 ## 1. 目标与已确认范围
 
@@ -78,7 +78,7 @@
 | backend/src/app/project/knowledge.py | 已有带项目可见性校验的关联知识库列表 |
 | backend/src/app/knowledge/service.py | search 接收 owner_id 与明确 base_ids，已有混合检索及预算限制 |
 
-历史 docs/memory-query-tool-design.md 仍写“尚无 Run”，该描述已被当前工作树替代；其只读记忆查询参数和结果建议可复用，但不代表整份旧草案获确认。docs/tools-mcp-design.md 的“调用后续设计”由本文补充，不改变已有 MCP 管理边界。
+历史只读记忆查询草案已随重型记忆子系统下线而归档清理；`docs/tools-mcp-design.md` 的“调用后续设计”由本文补充，不改变已有 MCP 管理边界。
 
 ## 3. 架构与职责（实施建议）
 
@@ -155,9 +155,9 @@ Run 工具快照建议作为 Run 上类型化 JSON 字段保存；所有数据�
 
 两者均为只读，不改变查询核心服务权限模型。模型参数只接收 query、limit；拒绝额外字段、空查询、布尔 limit 及越界数量。
 
-### memory_search
+### memory_search（历史重型记忆方案，已下线）
 
-复用 docs/memory-query-tool-design.md 的 query 最大 2000 字符、limit 默认 5/最大 8、召回预算 1200 tokens 建议。服务端由当前用户与聊天项目构造 personal/project scope；集中复用映射，不让模型提交 scope_key。返回 memory_id、version、content、personal/project 范围；首期不输出未经权限接入的原始记忆来源。
+原设计采用 query 最大 2000 字符、limit 默认 5/最大 8、召回预算 1200 tokens。服务端由当前用户与聊天项目构造 personal/project scope；集中复用映射，不让模型提交 scope_key。返回 memory_id、version、content、personal/project 范围；首期不输出未经权限接入的原始记忆来源。注：重型记忆子系统及 `memory_search` 已于 `20261130_0033` 下线，当前改为轻量工作偏好与 `save_user_memory`。
 
 区分正常空结果、降级、读取关闭、服务不可用、参数无效和权限拒绝；不可把禁用或检索失败说成没有历史记忆。
 
@@ -205,7 +205,7 @@ MCP 原生明确错误结果转为失败；请求可能已发出后的协议错�
 
 ## 11. 可观察验收条件
 
-首期验收以 docs/tool-execution-implementation-plan.md 的第 9 节为准。
+首期验收条件记录如下（历史实施方案已归档清理）：
 
 - 模型同一 Run 连续调用 MCP、memory_search、knowledge_search 后正常回答；真实 HTTP 和 stdio 调用均各只发出一次。
 - 禁用依赖、无项目、无关联知识库时相应内置工具不进入模型目录；模型猜测工具名也不能绕过快照。
@@ -231,7 +231,7 @@ MCP 原生明确错误结果转为失败；请求可能已发出后的协议错�
 
 ## 12. 准备程度与后续优化
 
-首期规则已收敛，代码按 `docs/tool-execution-implementation-plan.md` 实施；MCP SDK
+首期规则已收敛并完成实施（历史实施方案已归档清理）；MCP SDK
 真实调用、取消与清理仍需按交付报告中的实际验证结果复核。只交付后端记录、查询和
 事件，不含前端或存量迁移。
 

@@ -1,197 +1,96 @@
-# 架构起点
+# Athena v2 系统架构说明
 
-## 已确认需求
+## 1. 系统定位与总体形态
 
-- 面向多用户，支持直接回答问题。
-- 支持搜索、阅读、分析及生成文件。
-- 支持 MCP 和 Skill。
-- 支持自定义业务型 Subagent。
-- 支持知识库和记忆系统。
+Athena v2 是面向企业内部使用的多用户 AI 智能工作台，采用 **SPA 前端 + 模块化单体 API + 独立异步 Worker + 运维 CLI** 架构：
 
-## 当前实现
+- **前端工作台（`frontend/`）**：React 18 + TypeScript + Vite + React Router + TanStack Query，经 Nginx（生产）或 Vite Proxy（开发）同源反代 `/api` 与 SSE 流。
+- **后端 API（`backend/src/main.py`）**：Python 3.12+ + FastAPI + Uvicorn，提供 REST API、SSE 实时事件流、同源 HttpOnly Cookie 鉴权、前置鉴权与上传准入中间件。
+- **独立异步 Worker**：
+  - `run_worker.py`：领取排队 Run，执行模型多轮推理、并行工具批次、MCP/Skill/Subagent 编排、上下文压缩与会话自动标题生成。
+  - `knowledge_worker.py`（可选）：消费知识库解析与清理任务，使用常驻隔离解析子进程提取文本，经远程 Embedding 写入向量与全文索引，并执行孤儿对象回收。
+- **运维 CLI（`backend/src/cli/`）**：提供应急超管初始化（`bootstrap_super_admin.py`）、账号提权（`promote_admin.py`）、飞书组织树全量同步（`sync_feishu_org.py`）及文件孤儿维护（`file_maintenance.py`）。
 
-已有 Python 包、FastAPI 应用工厂、进程存活检查、项目目录 CRUD、Session
-CRUD，以及消息存储和只读会话历史。项目、Session 与消息模块使用 async
-SQLAlchemy 访问 PostgreSQL，使用 Alembic 管理迁移。邮箱密码认证、用户与
-登录会话持久化、Argon2id 密码哈希、进程内限流和 Cookie 路由已接入应用工厂。
-项目、Session 和消息接口从有效登录 Cookie 取得请求级用户身份。Run 后端闭环
-已接入持久化编排、独立 Worker 和 SSE 增量，并支持提交、澄清恢复、取消、
-失败重试、审批与补充输入；模型配置、MCP 工具目录/审批、知识库与记忆检索
-也已提供对应后端能力。生产前端阶段 1–3 已实施，待评审验收：真实认证与
-受保护路由、项目和 Session 目录、对话侧栏项目树、新对话草稿、项目中心四
-Tab，以及 `/chat/:sessionId` 的消息、Run/SSE、停止、补充输入、工具审批、
-失败重试和执行轨迹。完整知识库管理和管理业务页面仍待阶段 4–5 接入。
+### 核心基础设施底座
 
-项目主键由 `app.project.service` 中进程级共享的
-`common.ids.monotonic_timestamp_id_factory()` 生成，格式为 UTC 毫秒时间字符串。
-项目名去除首尾空白后必须为 1–120 个字符且不包含 Unicode 通用类别 `Cc`
-的控制字符，允许重名。删除采用软删除，
-所有公开查询都过滤 `deleted_time IS NULL`。
+- **PostgreSQL 16+（配合 `pgvector` HNSW）**：作为业务状态、组织树物化路径、行锁并发控制、任务队列、向量检索与 `TSVECTOR` 全文检索的唯一权威持久层。数据库仅依赖 `pgvector` 扩展，**不再依赖 `zhparser` C 扩展**（中文分词在应用侧由 `jieba` 预处理后写入 `TSVECTOR`，历史遗留对象已由迁移 `20261208_0041` 清理）。
+- **Redis 7+**：承载 Run SSE 实时事件 Pub/Sub 推送、分布式认证限流与飞书 OAuth 一次性 `state` 原子防重放。`ATHENA_ENV=production` 模式下强制要求配置 `ATHENA_REDIS_URL`。
+- **统一单桶对象存储（MinIO / S3，`ATHENA_STORAGE_*`）**：在单一私有桶内通过前缀严格隔离 `knowledge/`、`session-files/`、`session-files-extracted/`、`session-artifacts/`、`skill-logs/`、`skills/` 等业务对象。
+- **无状态远程 Embedding 服务**：通过 OpenAI 兼容 HTTP 接口完成向量化（默认 1024 维 `BAAI/bge-m3`），应用与 Worker 进程不加载本地重型向量模型权重。
 
-该 ID 生成器仅在单进程内保证单调，不保证跨进程、跨重启或跨实例唯一。
-多进程/多实例部署前必须改为数据库序列、分布式 ID 或其他集群级唯一方案，
-不能将其视为全局唯一主键。
+## 2. 企业身份、组织架构与三层权限
 
-认证、项目和 Session（含消息读取）路由将 SQLAlchemy 存储异常以及建连阶段的
-`OSError` 统一映射为 `503`，响应只包含 `database_unavailable`；业务校验和
-资源不存在仍分别保持 `422`、`404`。该 `OSError` 映射按数据库路由前缀限定，
-未来外部 I/O 路由不会被全局吞掉。
-项目存在未删除绑定 Session 时拒绝软删除，返回
-`409 project_has_sessions`；项目行锁和 Session 写入时的项目共享锁使检查与
-写入并发安全。
+### 2.1 认证与会话边界（开放自助注册已下线）
 
-项目已落地必填的 `owner_id VARCHAR(128)`。所有者只能来自请求级
-`CurrentAuth` 中已通过 Cookie 验证的用户，不接受请求体、query、客户端自报
-身份、旧式用户 ID 请求头或应用级固定 principal。项目和消息路由在服务存在时
-始终挂载，认证失败统一返回 `401 not_authenticated`。
+- **企业登录模式**：
+  - **飞书原生 OAuth SSO 与通讯录同步**：支持一键授权登录与全量组织树原子同步；生产环境启用飞书时强制要求配置 Redis（一次性 `state` 防重放）且接口与回调必须为 `https://`。
+  - **本地应急超级管理员**：开放自助注册已下线，仅通过 `cli.bootstrap_super_admin` 幂等创建或重置本地 `super_admin` 账号（密码使用 Argon2id 哈希，重置密码同事务吊销全部历史会话）。
+  - **非生产本地 Mock 多角色模式**：`ATHENA_AUTH_MOCK_ENABLED=true` 仅限开发与联调，启动时自动幂等预置多部门组织树与 6 个典型角色账号；`ATHENA_ENV=production` 时开启会立即阻断启动。
+- **同源 Cookie 会话与实时吊销**：服务端仅保存高熵随机 token 的 SHA-256 摘要，Cookie 为 `HttpOnly`、`SameSite=Lax`（生产须启用 `ATHENA_COOKIE_SECURE=true`），非安全写请求强制校验 `Origin`（配合 `ATHENA_PUBLIC_ORIGIN`）。员工离职同步或管理员停用账号会在同一事务内吊销其全部活跃会话。
 
-项目的创建、列表、详情、改名和软删除都按 owner 限定；跨 owner 的资源统一
-按不存在处理并返回 `404`，软删除幂等也只在同一 owner 内成立。HTTP 响应不
-暴露 `owner_id`。
+### 2.2 三级角色与统一三层权限引擎
 
-迁移 `20261105_0003` 为已有 `projects` 表增加非空 `owner_id`，把活动列表
-索引替换为
-`(owner_id, updated_at DESC, id DESC) WHERE deleted_time IS NULL`。迁移不会
-为已有数据伪造所有者；已有行必须先由运维显式回填，再执行升级。
+- **角色分层**：`super_admin`（全公司超级管理员）、`dept_admin`（部门管理员，通过 `dept_admin_scopes` 管辖指定部门及其子树）与 `member`（普通员工）。
+- **组织树与物化路径**：`departments` 表维护物化 `path`（搭配 PostgreSQL `varchar_pattern_ops` 前缀索引），高效支持子树归属与管理范围判定。
+- **四条业务线统一隔离**：知识库（`knowledge`）、技能（`skill`）、MCP Server（`mcp`）与子智能体（`subagent`）共享 `app/access`（`AccessPolicyService`）与 `resource_visibility_grants` 授权表，统一落实 `company`（公司公共）/ `department`（部门级 + 精准跨部门/指定人员授权）/ `personal`（个人私有）三层可见性模型；员工调岗后无需重新登录即可在下一次查询或工具执行时实时生效。
 
-迁移 `20261105_0004` 创建 `users`、`auth_sessions`，并为
-`projects.owner_id`、`sessions.owner_id` 添加指向 `users.id` 的外键。因此
-PostgreSQL 上的项目和 Session 写入要求 owner 对应真实用户。已有项目和
-Session 的回填必须使用最终会存在于 `users` 的真实用户 ID；含存量数据的
-实例需要受控停写、归属核对和迁移演练，不能使用占位 owner。
+## 3. 后端分层与当前模块结构
 
-迁移 `20261105_0005` 为 Session 增加 `title`、`project_id`、复合
-`(project_id, owner_id)` 项目外键、活动列表索引和约束。Session 由
-`app/session` 提供 CRUD，项目绑定必须属于同一 owner；首个消息写入后绑定
-不可变。Session 主键使用 `sess_<uuid4hex>`，与项目使用的进程内单调毫秒 ID
-不同。
+后端源码位于 `backend/src/`，按职责划分为以下层次：
 
-认证首版以邮箱为登录标识并开放注册。密码使用 Argon2id；登录 token 使用
-高熵随机值，数据库只保存 SHA-256 摘要。会话默认 7 天，`remember_me` 为
-30 天，登出和改密可撤销服务端会话。Cookie 为 HttpOnly、SameSite=Lax，
-生产必须通过 `ATHENA_COOKIE_SECURE=true` 启用 Secure。非安全方法的认证和
-项目请求会校验 `Origin`，适用于同源部署。登录失败同时受账号和 IP 两个独立
-窗口限制；账号键只依赖规范化邮箱，不随客户端地址变化。当前没有邮箱验证、
-找回密码、CORS 或多实例共享限流；这些能力不能由现有首版推断为已完成。
+- `api/`：FastAPI 路由、HTTP/SSE 请求响应 Schema、前置鉴权与上传准入中间件。
+- `app/`：业务用例编排、权限策略与后台 Worker 消费逻辑。
+- `domain/`：纯领域实体、值对象、业务异常与必要端口定义（不依赖 FastAPI、SQLAlchemy 或外部框架）。
+- `adapter/`：SQLAlchemy ORM 模型（共享声明式基类与 `json_column_type()` 位于 `adapter/base.py`，全量聚合在 `adapter/models.py`）、仓储实现与 LLM / Redis / MinIO 适配器。
+- `infrastructure/`：数据库连接池、AES-GCM 凭据加密、飞书开放平台客户端、MCP 传输（HTTP / stdio）、有界 HTTP 限流与重试、文档解析及远程 Embedding / Tiktoken 计数驱动。
+- `bootstrap/`：API 与各 Worker 进程的组合根装配、生命周期管理及生产环境安全护栏。
+- `cli/`：独立运维命令行入口。
+- `common/`：跨层共享基础工具（`common.date` 统一提供 `utc_now`/`as_utc`，`common.ids` 提供 `new_id` 与兼容别名 `now_utc`，`common.json` 提供规范序列化与 UTF-8 截断）。
 
-消息模块已建立 Session `owner_id`、会话消息与执行消息两条持久化流。
-当前读取接口只返回会话消息，并从已验证登录 Cookie 取得 owner，再在同一
-SQL 中筛选可见 Session。工具和 Subagent 执行内容不得写入会话流，执行消息
-也不提供公开读取接口。内部消息追加必须携带已认证 `owner_id`，并在写入事务
-内对 owner 匹配的 Session 行执行 `FOR UPDATE` 后串行化写入；owner 不匹配与
-不可见 Session 一样按不存在拒绝。assistant 回复目标、execution 来源和
-tool call/result 关联必须在同一事务内通过引用校验。Session 更新、软删除和
-消息追加共享同一个数据库行锁边界，不再维护额外锁对象。消息历史不调用
-Session 端口做两阶段检查，而是在
-同一 SQL 中 JOIN Session 表并筛选 session ID、owner 和 `deleted_time`，
-使可见性判断与消息读取处于同一数据库快照。
+### 当前业务模块清单
 
-领域代码按业务领域分包。项目领域在 `domain/project` 下用 `model/` 保存
-实体、分页对象和业务异常，用 `ports.py` 声明仓储接口；领域包不依赖
-FastAPI、SQLAlchemy、应用层或适配器。
+| 模块 | 目录（`app/` / `domain/` / `adapter/`） | 核心职责 |
+| --- | --- | --- |
+| **认证与会话** | `auth` | 本地应急登录、飞书 SSO、非生产 Mock 登录、Cookie 会话、限流与改密 |
+| **组织架构** | `org` | 部门树物化路径、企业员工分页查询、部门管理员分权任命、停用吊销、飞书通讯录同步 |
+| **统一权限** | `access` | 三层可见性判定（`company`/`department`/`personal`）与 `resource_visibility_grants` 授权管理 |
+| **项目目录** | `project` | 项目 CRUD、简介/背景指令/默认技能、关联知识库管理、`detach_sessions=true` 温和删项；主键使用 `new_id("proj")` |
+| **对话会话** | `session` | 无项目日常对话与项目绑定会话、关键词搜索（`?q=`）、首条消息前调整归属、软删除行锁 |
+| **消息存储** | `message` | 用户可见会话消息流（`conversation_messages`）与内部模型执行流（`execution_messages`）双流隔离持久化 |
+| **Run 与编排** | `run` | 异步任务状态机、租约心跳与回收、SSE 增量与数据库对账、澄清/审批/取消/重试、上下文压缩、自动生成会话标题 |
+| **轻量偏好与显式记忆** | `preference` | 个人工作背景指令（`user_work_profiles`）与最多 50 条显式备忘记忆（`user_memories`）及 `save_user_memory` 免审批内置工具；**历史重型自动记忆五表与归档 Worker 已于 `20261130_0033` 正式下线** |
+| **模型目录与调用** | `llm` | 管理员模型版本、局部保密更新（`PATCH`）、强引用保护软删、场景化普通用户目录（`GET /api/v1/models`）、Run 模型快照固化、压缩策略及 Chat Completions 流式适配器 |
+| **系统提示词** | `system_prompt` | 主对话与压缩系统提示词版本化管理与回滚恢复 |
+| **MCP 与工具** | `mcp` / `tool` | MCP Server 凭据 AES-GCM 加密与局部保密更新、启停、无损增量重发现、内置工具与 MCP 统一调度、工具中文审批映射、批量审批与业务化待审批卡片 |
+| **文件与附件** | `file` | 会话附件上传、文本抽取缓存与预览、多模态图片读取、执行产物安全下载与孤儿清理 |
+| **技能系统** | `skill` | 公司/部门级脚本技能包、个人 Markdown Skills、依赖校验与隔离脚本执行 |
+| **知识库与检索** | `knowledge` | 三层可见性知识库、多格式文档解析（含可选 PaddleOCR）、无状态远程向量化、`pgvector` HNSW + `jieba`/`TSVECTOR` 混合检索 |
+| **子智能体** | `subagent` | 自定义业务型 Subagent 定义、部门可见范围、工具白名单与父子 Run 编排 |
 
-适配器同样按领域分包：共享声明式基类位于 `adapter/base.py`，
-`adapter/models.py` 聚合导入 auth、project、message、session 的全部 ORM
-模型；认证、项目、消息和 Session 分别在
-`adapter/<domain>/{model,repository,converter}` 下实现 ORM、持久化和纯转换。
-仓储只承担持久化编排并调用 converter，不把 ORM 到领域对象的转换埋回查询
-逻辑。应用层依赖领域 `model`/`ports`，适配器实现领域端口，HTTP 层通过应用
-结果模型和 DTO 输出，不直接暴露领域或数据库内部字段。
+## 4. 关键运行时约束与并发边界
 
-并发控制完全依赖 Repository 在数据库事务内的行锁：Session 创建/改绑项目
-使用 Project 行 `FOR SHARE`，Project 删除使用 Project 行 `FOR UPDATE` 并
-检查未删除绑定 Session；Session 更新、软删除和三类消息追加使用 Session 行
-`FOR UPDATE`。这些约束跨连接、跨进程生效，并在事务提交或回滚时自动释放，
-不需要额外锁层或连接清理协议。
+- **数据库行锁边界**：并发一致性完全依赖数据库事务内行锁，不维护跨请求的内存锁对象：
+  - Session 创建/改绑项目对目标 Project 行持有 `FOR SHARE`，Project 软删除对 Project 行持有 `FOR UPDATE` 并校验未解绑活跃 Session；
+  - Session 更新、软删除、消息追加与 Run 写入按统一锁序锁定 Session 行（`FOR UPDATE`）后再锁 Run 行；
+  - 管理写操作（LLM/MCP/组织/Skill/Subagent/系统提示词）在目标写事务内复用无锁单条 `JOIN` 复核函数 `verify_active_session_user` 校验有效会话与当前角色，消除对 `users`/`auth_sessions` 表的跨域行锁争用；仅认证仓储自身改密/改显示名在修改 `users` 行时继续使用 `SqlAlchemyAuthTransactionGuard` 锁定自身行。
+- **有界数据库连接池**：`Database` 维护单套有界业务 `AsyncEngine`（`ATHENA_DATABASE_POOL_SIZE`、`ATHENA_DATABASE_MAX_OVERFLOW`）；长耗时 LLM 网络请求、MCP 工具调用、脚本执行与文档解析均在事务之外执行，严禁持锁跨越外部 I/O。
+- **服务端可信身份与权限边界**：所有资源归属（`owner_id`）与权限快照均由服务端认证上下文解析，绝不信任客户端或模型提交的用户/部门/知识库标识；跨租户/跨部门越权遵循安全 403/404 约定。
+- **数据库迁移单主干**：Alembic 保持单一线性 head（当前为 `20261208_0041`），所有结构与索引变更均需同步维护 ORM 元数据与迁移脚本。
 
-数据库资源由 `Database` 统一管理，只保留一套有界业务 `AsyncEngine` 和连接池。
-容量由 `ATHENA_DATABASE_POOL_SIZE`、`ATHENA_DATABASE_MAX_OVERFLOW` 控制，
-`dispose()` 释放该池。行锁等待会占用一个业务连接，因此容量要覆盖正常查询与
-并发锁等待，并受 PostgreSQL 连接数上限约束。
+## 5. 前端工作台现状
 
-## 初始技术选择
+前端工作台（`frontend/`）已完整落地企业多角色交互闭环：
 
-本次初始化采用 Python + FastAPI 后端和模块化单体结构。
-这是本次工程初始化的技术选择，后续可在明确需求后调整。
-模块化单体指在一个代码库内按业务职责分模块，不要求拆分微服务。
-执行器将来是否独立进程部署，由任务时长、隔离与恢复需求决定。
+- **企业登录与会话守卫**：支持飞书 SSO 回调登录、本地应急管理员登录及非生产 Mock 角色一键登录；基于 `/api/v1/auth/me` 与能力接口驱动受保护路由和角色菜单。
+- **日常对话工作台**：支持无项目即时对话、场景化模型选择、显式知识库范围勾选、附件上传预览与图片多模态、SSE 实时流式输出与断线数据库对账、停止/重试/补充输入、中文业务化待审批卡片、以及工具与子智能体执行轨迹展示。
+- **个人与协作资产中心**：提供项目中心（简介/指令/默认技能/知识库绑定/温和解绑删项）、三层知识库管理与检索调试、个人工作偏好与显式记忆管理、个人 Markdown Skills 管理。
+- **分级管理后台**：面向 `super_admin` 与 `dept_admin` 提供组织架构与飞书同步、模型与系统提示词运维、MCP Server 保密运维与批量审批配置、三层技能包管理、Subagent 编排等完整页面。
 
-采用 DDD 的业务语言、职责边界和业务不变量思想；暂不统一套用聚合根、
-领域事件、CQRS、事件溯源或通用仓储框架。具体模块出现复杂规则时，
-再引入能够解决实际问题的模式。
+## 6. 精简架构约定（架构收敛准则）
 
-## 模块边界
+为避免模块化单体过度抽象导致样板代码与空壳目录膨胀，后续新增功能与重构必须遵守以下收敛准则（同时固化于仓库根目录 `AGENTS.md`）：
 
-| 模块 | 职责 |
-| --- | --- |
-| 项目 | 项目目录、名称维护、查询和软删除 |
-| 用户与授权 | 身份、资源归属、权限和用户工具凭据 |
-| 会话 | Session 目录、消息及用户交互 |
-| 执行 | Agent 循环、任务、子任务、取消和恢复 |
-| 能力 | 内置工具、MCP、Skill 的发现和调用 |
-| Subagent 定义 | 业务指令、能力配置、版本与可见范围 |
-| 文件 | 上传、中间文件、最终产物及访问权限 |
-| 知识库 | 资料解析、索引、检索与引用 |
-| 记忆 | 跨会话信息的提取、读取、修订与删除 |
-
-按实际开发进度创建模块，避免预先生成大量空目录和接口。
-认证、项目、Session、消息、Run、LLM、MCP、知识库和记忆检索等后端模块已按
-领域边界接入 `create_app`；前端认证、项目和 Session 目录、对话消息与
-Run/SSE 运行态已接入，知识库管理和前端管理业务仍按实施阶段推进。
-简单模块可以直接采用服务与存储适配器；复杂规则可在模块内部增加领域层。
-HTTP 入口负责协议转换，业务服务负责用例，外部 SDK 和存储实现在适配器边界。
-模块之间通过明确的公共接口协作，不直接修改其他模块的持久化数据。
-不创建包揽所有业务的公共模型目录或基础服务类。
-
-## 设计约束建议（需要在后续实现中落实）
-
-- 项目 `owner_id` 只能由服务端验证后的 `CurrentAuth` 注入，不能依赖客户端
-  自报用户身份；新增资源必须继续保留这一约束。
-- `users` 和 `auth_sessions` 已由 0004 建立，
-  `projects/sessions.owner_id` 已指向 `users.id`；仍需明确删除用户时项目、
-  Session 和消息的保留或级联策略。
-- `ATHENA_COOKIE_SECURE` 控制登录 Cookie 的 Secure 属性，生产必须开启；
-  `ATHENA_PUBLIC_ORIGIN` 用于同源写请求校验。公网部署前需要补齐邮箱验证、
-  找回密码和共享限流；Session CRUD 已按 owner 完成资源权限检查。
-- 已有项目和 Session 数据升级到 `0003 -> 0005` 前必须由运维显式回填真实
-  owner；不得在迁移或应用启动过程中猜测、伪造或静默忽略未知归属。
-- Session 更新、软删除和消息追加必须锁定同一 Session 行；Session 创建/改绑
-  必须锁定目标 Project 行并重新检查可见性；Project 删除必须锁定 Project 行
-  后检查未删除绑定 Session。不得在应用服务中增加绕过仓储行锁的写路径。
-- `Database` 只保留一套有界业务 engine。行锁等待占用业务连接，池容量通过
-  `ATHENA_DATABASE_POOL_SIZE/MAX_OVERFLOW` 配置，并同时覆盖正常查询、锁等待
-  和 PostgreSQL 总连接数限制。
-- 当前并发方案只保护数据库已有行。没有数据库行的资源不能依赖该机制；若未来
-  出现真实需求，必须重新设计并确认，不预先引入通用锁抽象。
-- 身份与资源权限由服务端检查；不能依赖模型提供的用户标识。
-- 主 Agent 和 Subagent 复用执行机制；Subagent 的权限不能超出用户授权。
-- MCP 提供能力，Skill 提供操作指引；加载 Skill 不会获得额外权限。
-- 会话记录、任务执行记录、知识库和长期记忆分别管理。
-- 任务恢复依赖持久化执行状态；有外部副作用的工具需明确重试和幂等语义。
-- 用户文件和代码执行需要隔离环境，产物下载也需要检查权限。
-
-## 当前前端决策
-
-生产前端采用 React 18 + TypeScript + Vite + React Router + TanStack Query，
-阶段 1–3 已实施，待评审验收。`/chat/:sessionId` 已接入真实消息历史、Run
-命令和现有 SSE 协议：`snapshot` 是权威快照，`text_delta` 只作为临时文本，
-`run_event` 触发数据库对账，等待态与终态关闭连接，重新 queued/running 后
-再接回。前端使用安全 Markdown、逐命令 `request_id`、工具审批、补充输入、
-失败重试风险确认和真实工具轨迹；新对话只在首次发送时创建数据库 Session，
-标题不会由前端自动生成。项目知识库、完整知识库管理和管理员业务仍显示后续
-阶段空态，前端未修改现有后端、数据库或 SSE 协议。具体边界见
-[frontend-implementation-plan.md](frontend-implementation-plan.md)。
-
-## 待决策
-
-- 首个端到端用例、模型提供方和模型调用协议。
-- 邮箱验证、找回密码、登录设备管理，以及项目是否需要组织级共享或额外的
-  成员权限模型。
-- 文件存储和后台任务机制。
-- 生产前端构建产物由 FastAPI 托管还是由反向代理托管，以及对应的同源部署、
-  发布与回滚流程。
-- MCP 接入方式、Skill 格式及可信来源。
-- 知识检索方案和自动记忆的写入策略。
-
-先实现身份隔离下的单轮问答闭环，再逐步接入工具、文件与其他能力；
-具体实施顺序需要在选定首个用例后确认。
+1. **按需抽象端口，拒绝默认 1:1 样板 `Protocol`**：不再为只有一个生产实现（且无多后端切换需求）的模块默认新建 1:1 `Protocol` 端口；仅在确实存在多个生产实现（如多种存储/模型/认证后端）或明确需要复杂领域边界隔离时引入抽象接口。
+2. **精简应用层中间转换与叶子子包**：不再为简单模块默认创建 `app/<module>/{model,converter}/result.py` 中间结果转换层，也不创建仅含单个文件的叶子子包（如仅有一个文件的 `model/`、`converter/`、`repository/` 子目录）；可直接由应用服务返回清晰的领域对象或轻量 dataclass，并在模块顶层使用扁平单文件（如 `model.py`、`repository.py`、`converter.py`）。
+3. **复用跨模块共享基础工具**：时间规范化统一复用 `common.date.as_utc` / `utc_now`，跨方言 JSON 列统一复用 `adapter.base.json_column_type()`，有界 HTTP 限流与重试统一复用 `infrastructure.http`，禁止在各业务模块间复制粘贴同类辅助函数或保留无意义的 re-export 垫片。
+4. **保持模块边界与持久化归属清晰**：精简目录层级不改变模块数据归属原则——业务模块之间通过明确的应用服务或只读共享查询接口协作，不绕过目标模块的事务与行锁约定直接篡改其持久化状态。

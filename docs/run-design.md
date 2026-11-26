@@ -1,7 +1,7 @@
 # Run 首期设计
 
-状态：设计方案已获用户整体确认；实施方案见 `run-implementation-plan.md`，S1–S6 已完成实施、独立审查及 Root 验收。真实供应商联调尚未执行。
-核对日期：2026-11-08。本文保留已确认设计及设计时的代码基线；最终实施与验证结果见实施方案第 9 节。
+状态：历史首期设计文档；首期 S1–S6 实施已完成，对应历史实施方案文档已归档清理。
+核对日期：2026-11-08。本文保留首期设计脉络；当前企业级 Run 接口与能力以源码及 [`docs/phase1-enterprise-backend-api-contract.md`](phase1-enterprise-backend-api-contract.md) 为准。
 
 > **后续代码状态（2026-11-12）**：设计时引用的 `app/llm/config.py`、`app/llm/service.py` 和 `adapter/llm/openai_responses.py` 已删除；当前只有管理员模型版本、`ModelProfileService` 和 `OpenAIChatCompletionsAdapter`，不再保留 Responses 低层调用通路。
 
@@ -13,7 +13,7 @@ Run 表示用户一次任务从发起、执行、澄清到结束的生命周期�
 
 不包含：业务工具和子 Agent 实际接入、执行中用户追加或纠正指令、上下文压缩、多模态、跨用户运维内容查询、完整观测平台、前端页面实现。SSE 事件需足以支持前端展示、替换澄清文本和标记中断。
 
-本节记录 Run 首期的范围。后续上下文压缩实施范围和当前规则见[上下文压缩设计](context-compression-design.md)与[实施方案](context-compression-implementation-plan.md)。
+本节记录 Run 首期的范围。后续上下文压缩设计规则见[上下文压缩设计](context-compression-design.md)（历史实施方案已归档清理）。
 
 ## 2. 设计时的代码基线与差异
 

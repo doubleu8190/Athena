@@ -78,3 +78,4 @@ Root → Product Manager → Designer → Root → Implementer → Reviewer → 
 - 角色之间不得随意替代。
 - 改变既定架构需用户重新确认。
 - 关键步骤必须写简体中文注释，说明业务意图、状态变更或事务边界；注释只服务理解，不替代清晰代码。
+- 架构收敛准则：不再为单实现模块默认新建 1:1 `Protocol` 端口、`app/<m>/{model,converter}/result.py` 中间转换层或单文件叶子子包；仅在确实存在多生产实现或复杂领域边界隔离时引入抽象。

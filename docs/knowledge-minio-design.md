@@ -5,7 +5,9 @@
 
 本文替代旧知识库设计中“原件存本地、API 与 Worker 共享目录”的约定。其他知识库职责不变。
 
-具体任务拆分、端口调整、测试矩阵和切换步骤见[实施文档](knowledge-minio-implementation-plan.md)。
+历史分步实施文档已归档清理；当前统一单桶配置与运维步骤以 [`docs/knowledge-base-operations.md`](knowledge-base-operations.md) 与 [`.env.example`](../.env.example) 为准。
+
+> 演进说明（2026-12-10，迁移 `20261210_0043`）：后续架构瘦身已移除 `knowledge_upload_reservations` 与 `knowledge_upload_slots` 两张协调表，上传入口改为进程内并发槽位（默认 4）+ 写 MinIO 前无锁只读 `preflight_file_upload` 预检；孤儿扫描仅核对 `knowledge_sources` 来源引用并保留 24 小时宽限期兜底回收。
 
 ## 1. 已确认范围
 
@@ -90,7 +92,7 @@ Worker 保留现有解析隔离、临时文件及发布 fencing。网络超时�
 提供显式执行、仅面向此次测试环境的清理脚本；不放进应用启动或普遍生效的 Alembic 迁移。实施和清理执行分开汇报，不能仅因脚本已写好就声称已切换。
 
 1. 停止 API 写入、知识库 Worker 及可能访问知识库的 Run Worker，等待在途任务退出。
-2. 核对目标数据库；在事务中清除 `knowledge_jobs`、`knowledge_requests`、`knowledge_upload_reservations`、`knowledge_chunks`、`knowledge_document_versions`、`knowledge_documents`、`knowledge_sources`，按实际外键顺序执行。清空上传槽位租约，保留槽位行。
+2. 核对目标数据库；在事务中清除 `knowledge_jobs`、`knowledge_requests`、`knowledge_chunks`、`knowledge_document_versions`、`knowledge_documents`、`knowledge_sources`，按实际外键顺序执行（`knowledge_upload_reservations` 与 `knowledge_upload_slots` 已于迁移 `20261210_0043` 移除）。
 3. 保留 `knowledge_bases`、`project_knowledge_bases`，以及用户、项目、会话和其他领域数据。事务提交后核对保留配置及文档计数。
 4. 确认本地原件目录只用于已清除的测试数据，再清理该目录；不得误删 OCR、模型缓存或其他数据。不导入旧对象。
 5. 配置已创建的私有桶，部署 MinIO 存储实现，启动各进程并执行上传、解析、下载、删除冒烟验收。

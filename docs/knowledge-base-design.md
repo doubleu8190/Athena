@@ -4,8 +4,7 @@
 [MinIO 设计与实施方案](knowledge-minio-design.md)收敛；本文中“本地磁盘”旧约定
 不再适用。
 
-详细实施步骤、当前代码基线、建议选型及验收标准见
-[知识库详细实施方案](knowledge-base-implementation-plan.md)。接口细节以该方案为准。
+历史实施计划文档已归档清理；当前生产接口与运维约定以源码、[`docs/phase1-enterprise-backend-api-contract.md`](phase1-enterprise-backend-api-contract.md) 与 [`docs/knowledge-base-operations.md`](knowledge-base-operations.md) 为准。
 
 ## 1. 当前基础与目标
 

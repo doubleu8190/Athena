@@ -21,7 +21,7 @@
 
 ## 📖 项目简介
 
-Athena v2 是一个面向企业内部使用的智能工作台，采用 **SPA 前端 + 模块化单体 API + 独立异步 Worker** 架构，以 PostgreSQL（`pgvector` HNSW + `zhparser`）作为核心状态持久化与混合检索底座，搭配统一单桶对象存储（MinIO/S3）、无状态远程 Embedding 服务与可选 Redis 实时事件通道，支撑多部门协同办公、资产隔离与安全可控的 Agent 执行。
+Athena v2 是一个面向企业内部使用的智能工作台，采用 **SPA 前端 + 模块化单体 API + 独立异步 Worker** 架构，以 PostgreSQL（`pgvector` HNSW）作为核心状态持久化与混合检索底座，搭配统一单桶对象存储（MinIO/S3）、无状态远程 Embedding 服务与可选 Redis 实时事件通道，支撑多部门协同办公、资产隔离与安全可控的 Agent 执行。
 
 ### 核心设计理念
 
@@ -89,7 +89,7 @@ flowchart TB
     end
 
     subgraph Infra["数据与基础设施层"]
-        PG[("PostgreSQL (pgvector HNSW + zhparser)")]
+        PG[("PostgreSQL (pgvector HNSW)")]
         Redis[("Redis (Pub/Sub / 限流 / OAuth State)")]
         MinIO[("MinIO / S3 (统一单桶按前缀隔离)")]
     end
@@ -134,7 +134,7 @@ flowchart TB
 | **前端界面** | React 18 + TypeScript + Vite + React Router + TanStack Query | 多用户企业工作台 SPA、SSE 实时渲染与状态缓存 |
 | **网关与托管** | Nginx（生产）/ Vite Proxy（开发） | 静态资源托管、同源 `/api` 与 SSE 反向代理 |
 | **后端 API** | Python 3.12+ + FastAPI + Uvicorn + Pydantic | REST API、SSE 推送、同源 Cookie 鉴权、三层权限引擎与上传准入 |
-| **持久化与检索** | PostgreSQL + SQLAlchemy (asyncio) + Alembic + `pgvector` (HNSW) + `zhparser` | 业务状态、组织树物化路径、行锁并发队列、向量与中文全文混合检索 |
+| **持久化与检索** | PostgreSQL + SQLAlchemy (asyncio) + Alembic + `pgvector` (HNSW) | 业务状态、组织树物化路径、行锁并发队列、向量与全文混合检索 |
 | **缓存与事件通道** | Redis (`redis-py`) | Run SSE 增量 Pub/Sub、分布式认证限流与飞书 OAuth 一次性 `state`（生产必选） |
 | **统一对象存储** | MinIO / S3 (`ATHENA_STORAGE_*`, 单桶前缀隔离) | 单私有桶按 `knowledge/`、`session-files/`、`skills/` 等前缀隔离原件与附件 |
 | **模型与工具生态** | OpenAI SDK + MCP SDK + 无状态远程 OpenAI 兼容 Embedding + `tiktoken` | 外部模型调用、HTTP/stdio MCP 工具、无状态远程向量化与 Token 计数 |
@@ -150,7 +150,7 @@ Athena_v2/
 ├── .github/workflows/          # GitHub Actions CI 工作流 (ci.yml)
 ├── backend/
 │   ├── alembic.ini             # Alembic 迁移配置
-│   ├── migrations/             # PostgreSQL 数据库迁移脚本（当前唯一 head: 20261204_0037）
+│   ├── migrations/             # PostgreSQL 数据库迁移脚本（当前唯一 head: 20261209_0042）
 │   ├── src/                    # 后端源码（模块化单体）
 │   │   ├── api/                # HTTP/SSE 路由、DTO、转换器与前置鉴权/上传中间件
 │   │   ├── app/                # 应用服务（auth/org/access/preference/run/llm/tool/skill/knowledge/subagent）
@@ -167,7 +167,7 @@ Athena_v2/
 ├── frontend/
 │   ├── src/                    # React SPA 源码
 │   └── e2e/                    # Playwright 浏览器 E2E 测试
-├── mcp_servers/                # 随镜像构建部署的本地 stdio MCP Server 源码
+├── mcp_servers/                # 本地测试/演示用 stdio MCP Server 源码（通过 docker/compose.test-mcp.override.yml 在测试栈只读挂载）
 ├── docker/                     # Dockerfile、Nginx 网关配置、依赖镜像与测试模板
 ├── scripts/                    # Docker 测试栈启停、凭据初始化与环境加载脚本
 ├── docs/                       # 架构、第一期企业后端 API 契约与运维文档
@@ -261,7 +261,7 @@ cd frontend && npm run dev
 
 | 分类 | 核心变量 | 说明 |
 | --- | --- | --- |
-| **数据库与加密** | `ATHENA_DATABASE_URL`, `ATHENA_MCP_SECRET_KEY` | PostgreSQL 16+（含 `pgvector` 与 `zhparser`）与 32 字节 Base64 主密钥 |
+| **数据库与加密** | `ATHENA_DATABASE_URL`, `ATHENA_MCP_SECRET_KEY` | PostgreSQL 16+（含 `pgvector`）与 32 字节 Base64 主密钥 |
 | **环境与安全护栏** | `ATHENA_ENV`, `ATHENA_COOKIE_SECURE`, `ATHENA_PUBLIC_ORIGIN`, `ATHENA_REDIS_URL` | `ATHENA_ENV=production` 时**强制要求**配置 `ATHENA_REDIS_URL` 且**严禁**开启 `ATHENA_AUTH_MOCK_ENABLED=true` |
 | **飞书原生 SSO** | `ATHENA_FEISHU_ENABLED`, `ATHENA_FEISHU_APP_ID`, `ATHENA_FEISHU_APP_SECRET`, `ATHENA_FEISHU_REDIRECT_URI`, `ATHENA_FEISHU_BASE_URL` | 生产开启时强制依赖 Redis（一次性 `state` 防重放）且接口与回调地址须为 HTTPS |
 | **非生产 Mock** | `ATHENA_AUTH_MOCK_ENABLED` | 仅限开发/测试联调；开启后启动自动幂等预置多部门组织树与 6 个典型角色测试账号 |
@@ -310,7 +310,7 @@ printf '%s\n' '<至少12位强密码>' | .venv/bin/python -m cli.bootstrap_super
 # 2. Mypy 严格类型检查
 .venv/bin/python -m mypy --strict backend/src
 
-# 3. 核验 Alembic 单一迁移 head（20261204_0037）
+# 3. 核验 Alembic 单一迁移 head（20261209_0042）
 .venv/bin/alembic -c backend/alembic.ini heads
 
 # 4. 运行第一期端到端验收测试剧本
@@ -372,7 +372,7 @@ npm run build
 | [`.env.example`](.env.example) | 全量环境变量说明与生产上线前安全自检清单 |
 | [`docs/architecture.md`](docs/architecture.md) | 架构起点与模块边界 |
 | [`frontend/README.md`](frontend/README.md) | 前端架构、路由、认证边界与开发说明 |
-| [`mcp_servers/README.md`](mcp_servers/README.md) | 本地 stdio MCP Server 约定与镜像构建 |
+| [`mcp_servers/README.md`](mcp_servers/README.md) | 本地 stdio MCP Server 约定与测试栈只读挂载说明 |
 | [`docs/knowledge-base-operations.md`](docs/knowledge-base-operations.md) | 知识库运行环境、对象存储与 OCR 运维手册 |
 | [`docs/skills-files-operations.md`](docs/skills-files-operations.md) | Skills 与会话文件运行手册及离线维护 |
 | [`docs/run-design.md`](docs/run-design.md) | Run 执行模型与状态机设计 |

@@ -566,11 +566,9 @@ def test_shared_wrappers_ownership_closed_iteration_guard_config_conflict_and_st
 def test_api_bootstrap_shares_single_minio_client_and_closes_in_reverse_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """API 同时开启文件与知识库时共享单个底层客户端，并由 ApiDependencies.aclose() 逆序释放。"""
+    """API 默认全装配时共享单个底层客户端，并由 ApiDependencies.aclose() 逆序释放。"""
     _install_common_bootstrap_fakes(monkeypatch)
     pools, clients = _patch_minio_sdk(monkeypatch, bucket_exists=True)
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
 
     async def scenario() -> None:
         deps = bootstrap_api.build_api_dependencies()
@@ -623,11 +621,9 @@ def test_api_bootstrap_shares_single_minio_client_and_closes_in_reverse_order(
 def test_run_worker_process_shares_single_minio_client_and_closes_in_finally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run Worker 进程同时开启文件与知识库时共享单个底层客户端，并在 finally 逆序统一释放。"""
+    """Run Worker 进程默认无条件共享单个底层客户端，并在 finally 逆序统一释放。"""
     _install_common_bootstrap_fakes(monkeypatch)
     pools, clients = _patch_minio_sdk(monkeypatch, bucket_exists=True)
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
 
     class _ImmediateWorker:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -681,89 +677,24 @@ def test_run_worker_process_shares_single_minio_client_and_closes_in_finally(
     assert pools[0].clear_calls == 1
 
 
-def test_api_and_run_worker_single_domain_disabled_and_injected_stub_modes(
+def test_api_injected_stub_modes_avoid_orphan_shared_client_and_fail_fast_storage_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """覆盖 API 与 Run Worker 单域模式、双关模式及 API 注入替身（绝不创建孤儿共享客户端）。"""
+    """API 注入单侧替身时不创建孤儿共享客户端，且仅文件侧自建时前置校验对象存储配置。"""
     _install_common_bootstrap_fakes(monkeypatch)
-    monkeypatch.setattr(
-        bootstrap_run_worker,
-        "build_mcp_executor",
-        lambda **_kw: SimpleNamespace(aclose=_async_noop),
-    )
 
     async def scenario() -> None:
-        # 1. API & Run Worker 仅知识库模式（无共享客户端，独立 4 并发）。
-        monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
-        monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
-        deps_k = bootstrap_api.build_api_dependencies()
-        assert deps_k.storage_client is None
-        assert deps_k.file_object_store is None
-        assert isinstance(deps_k.knowledge_originals, MinioOriginalStore)
-        assert deps_k.knowledge_originals.object_client._executor.max_workers == 4
-        await deps_k.aclose()
-
-        rw_k = RunWorkerBundle()
-        build_run_worker_dependencies(rw_k)
-        assert rw_k.storage_client is None
-        assert rw_k.file_object_store is None
-        assert rw_k.query_services is not None
-        assert isinstance(rw_k.query_services.knowledge_original_store, MinioOriginalStore)
-        assert rw_k.query_services.knowledge_original_store.object_client._executor.max_workers == 4
-        await rw_k.query_services.aclose()
-        assert rw_k.provider is not None
-        await rw_k.provider.aclose()
-
-        # 2. API & Run Worker 仅文件/技能模式（无共享客户端，独立 8 并发）。
-        monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
-        monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
-        deps_f = bootstrap_api.build_api_dependencies()
-        assert deps_f.storage_client is None
-        assert deps_f.knowledge_originals is None
-        assert isinstance(deps_f.file_object_store, MinioFileObjectStore)
-        assert deps_f.file_object_store.object_client._executor.max_workers == 8
-        await deps_f.aclose()
-
-        rw_f = RunWorkerBundle()
-        build_run_worker_dependencies(rw_f)
-        assert rw_f.storage_client is None
-        assert rw_f.query_services is not None
-        assert rw_f.query_services.knowledge_original_store is None
-        assert isinstance(rw_f.file_object_store, MinioFileObjectStore)
-        assert rw_f.file_object_store.object_client._executor.max_workers == 8
-        await rw_f.file_object_store.aclose()
-        assert rw_f.provider is not None
-        await rw_f.provider.aclose()
-
-        # 3. API & Run Worker 双关模式。
-        monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
-        monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
-        deps_off = bootstrap_api.build_api_dependencies()
-        assert deps_off.storage_client is None
-        assert deps_off.file_object_store is None
-        assert deps_off.knowledge_originals is None
-        await deps_off.aclose()
-
-        rw_off = RunWorkerBundle()
-        build_run_worker_dependencies(rw_off)
-        assert rw_off.storage_client is None
-        assert rw_off.file_object_store is None
-        assert rw_off.query_services is not None
-        assert rw_off.query_services.knowledge_original_store is None
-        assert rw_off.provider is not None
-        await rw_off.provider.aclose()
-
-        # 4. API 注入服务替身：不创建孤儿共享客户端。
-        monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
-        monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
+        # 1. API 注入 knowledge_service：不创建孤儿共享客户端，文件侧独占 8 并发底层引擎。
         deps_inj_k = bootstrap_api.build_api_dependencies(
             knowledge_service=cast(Any, object()),
         )
         assert deps_inj_k.storage_client is None
         assert isinstance(deps_inj_k.file_object_store, MinioFileObjectStore)
         assert deps_inj_k.file_object_store._owns_client is True
+        assert deps_inj_k.file_object_store.object_client._executor.max_workers == 8
         await deps_inj_k.aclose()
 
+        # 2. API 注入 skill_service 与 session_file_service：不建孤儿共享客户端，知识库独占 4 并发。
         deps_inj_f = bootstrap_api.build_api_dependencies(
             skill_service=cast(Any, object()),
             session_file_service=cast(Any, object()),
@@ -772,41 +703,100 @@ def test_api_and_run_worker_single_domain_disabled_and_injected_stub_modes(
         assert deps_inj_f.file_object_store is None
         assert isinstance(deps_inj_f.knowledge_originals, MinioOriginalStore)
         assert deps_inj_f.knowledge_originals._owns_client is True
+        assert deps_inj_f.knowledge_originals.object_client._executor.max_workers == 4
         await deps_inj_f.aclose()
+
+        # 3. 注入 knowledge_service 且缺失 ATHENA_STORAGE_* 时，在建库前直接抛 FileStorageError。
+        db_built = False
+
+        def spy_database(*_args: Any, **_kwargs: Any) -> Any:
+            nonlocal db_built
+            db_built = True
+            raise AssertionError("database must not be created when file storage config is invalid")
+
+        monkeypatch.setattr(bootstrap_database, "Database", spy_database)
+        monkeypatch.delenv("ATHENA_STORAGE_ENDPOINT", raising=False)
+        with pytest.raises(FileStorageError, match="file_storage_configuration_invalid"):
+            bootstrap_api.build_api_dependencies(
+                knowledge_service=cast(Any, object()),
+            )
+        assert db_built is False
 
     asyncio.run(scenario())
 
 
-def test_mid_construction_failure_leaks_zero_thread_pools(
+def test_mid_construction_failure_leaks_zero_pools_and_thread_pools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """构造中途发生配置异常时：bundle 已登记共享客户端且延迟线程池零创建、不构造原件存储。"""
+    """配置前置失败时零连接池/线程池创建；构造中途异常时已登记共享客户端零线程池泄漏。"""
+    from domain.knowledge.model import OriginalStorageConfigurationError
+
     _install_common_bootstrap_fakes(monkeypatch)
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
-    monkeypatch.delenv("ATHENA_EMBEDDING_BASE_URL", raising=False)
     monkeypatch.setattr(
         bootstrap_run_worker,
         "build_mcp_executor",
         lambda **_kw: SimpleNamespace(aclose=_async_noop),
     )
 
+    db_built = False
+
+    def spy_database(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal db_built
+        db_built = True
+        raise AssertionError("database must not be constructed on invalid preflight config")
+
     store_built = False
 
     def spy_original_store(*_args: Any, **_kwargs: Any) -> Any:
         nonlocal store_built
         store_built = True
-        raise AssertionError("original store must not be constructed when embedding config fails")
+        raise AssertionError("original store must not be constructed on invalid preflight config")
 
+    monkeypatch.setattr(bootstrap_database, "Database", spy_database)
     monkeypatch.setattr(bootstrap_tool, "build_knowledge_original_store", spy_original_store)
 
-    bundle = RunWorkerBundle()
+    # 1. 远程 Embedding 缺失时在建库和建共享客户端前 Fail-Fast，零连接池与零线程池创建。
+    monkeypatch.delenv("ATHENA_EMBEDDING_BASE_URL", raising=False)
+    bundle_missing_embed = RunWorkerBundle()
     with pytest.raises(EmbeddingConfigurationError, match="embedding_base_url_missing"):
-        build_run_worker_dependencies(bundle)
-
+        build_run_worker_dependencies(bundle_missing_embed)
+    assert db_built is False
     assert store_built is False
-    assert bundle.storage_client is not None
-    assert bundle.storage_client._executor._pool is None
-    asyncio.run(bundle.storage_client.aclose())
-    assert bundle.storage_client._closed is True
-    assert bundle.storage_client._executor._pool is None
+    assert bundle_missing_embed.database is None
+    assert bundle_missing_embed.storage_client is None
+
+    # 2. 统一对象存储缺失时同样在建库和建共享客户端前 Fail-Fast。
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
+    monkeypatch.delenv("ATHENA_STORAGE_BUCKET", raising=False)
+    bundle_missing_storage = RunWorkerBundle()
+    with pytest.raises(OriginalStorageConfigurationError):
+        build_run_worker_dependencies(bundle_missing_storage)
+    assert db_built is False
+    assert store_built is False
+    assert bundle_missing_storage.database is None
+    assert bundle_missing_storage.storage_client is None
+
+    # 3. 共享客户端已创建但后续 build_query_services 构造中途异常：
+    # bundle 已登记共享客户端且延迟线程池零创建，可干净关闭无泄漏。
+    _install_common_bootstrap_fakes(monkeypatch)
+    monkeypatch.setattr(
+        bootstrap_run_worker,
+        "build_mcp_executor",
+        lambda **_kw: SimpleNamespace(aclose=_async_noop),
+    )
+
+    def fail_query_services(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("query_services_boom")
+
+    monkeypatch.setattr(bootstrap_run_worker, "build_query_services", fail_query_services)
+    bundle_mid_fail = RunWorkerBundle()
+    with pytest.raises(RuntimeError, match="query_services_boom"):
+        build_run_worker_dependencies(bundle_mid_fail)
+
+    assert bundle_mid_fail.database is not None
+    assert bundle_mid_fail.storage_client is not None
+    assert bundle_mid_fail.storage_client._executor._pool is None
+    asyncio.run(bundle_mid_fail.storage_client.aclose())
+    asyncio.run(bundle_mid_fail.database.dispose())
+    assert bundle_mid_fail.storage_client._closed is True
+    assert bundle_mid_fail.storage_client._executor._pool is None

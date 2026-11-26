@@ -5,7 +5,7 @@
 # 业务意图：
 # 1. 默认或传入 "api" 时，启动 FastAPI Web API 服务（Uvicorn 多协程应用服务器）。
 # 2. 传入 "worker" 时，启动独立 Run Worker 消费后台大模型与工具执行任务。
-# 3. 传入 "knowledge-worker" 时，启动可选的本地知识库异步解析 Worker。
+# 3. 传入 "knowledge-worker" 时，启动知识库异步解析 Worker。
 # 4. 传入 "migrate" 时，执行 Alembic 数据库架构自动迁移至最新 head 版本。
 # 5. 传入其他任意命令时，透传执行（支持自定义命令、python 脚本或交互式 shell）。
 # ==============================================================================
@@ -26,7 +26,7 @@ case "$1" in
     exec python -m run_worker "$@"
     ;;
   knowledge-worker)
-    # 启动可选的知识库解析 Worker 进程
+    # 启动知识库解析 Worker 进程
     shift
     exec python -m knowledge_worker "$@"
     ;;

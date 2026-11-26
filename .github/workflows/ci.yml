@@ -41,30 +41,10 @@ jobs:
 
       - name: Install backend dependencies
         run: |
+          # 轻量化文档解析与中文分词依赖已并入核心 [project].dependencies，
+          # optional-dependencies.knowledge 仅保留重型本地 OCR，安装 .[dev] 即可覆盖全部非 real_ocr 测试。
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          python - <<'PY'
-          import re
-          import subprocess
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          knowledge_deps = data["project"]["optional-dependencies"]["knowledge"]
-          # 从 pyproject.toml 单一事实源读取轻量解析依赖，仅排除重型 PaddleOCR 运行时，
-          # 确保非 real_ocr 单元测试在全新 Runner 上完整运行且版本零漂移。
-          lightweight_deps = [
-              dep
-              for dep in knowledge_deps
-              if re.split(r"[<>=!~;\s\[]", dep, maxsplit=1)[0].strip().lower()
-              not in {"paddlepaddle", "paddleocr"}
-          ]
-          if not lightweight_deps:
-              raise SystemExit("No lightweight knowledge dependencies found in pyproject.toml")
-          print("Installing lightweight knowledge dependencies:", lightweight_deps)
-          subprocess.check_call([sys.executable, "-m", "pip", "install", *lightweight_deps])
-          PY
 
       - name: Lint with Ruff
         run: ruff check backend/src backend/tests

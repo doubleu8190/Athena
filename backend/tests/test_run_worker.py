@@ -534,8 +534,27 @@ def test_worker_settles_cancel_committed_before_executor_returns() -> None:
     asyncio.run(scenario())
 
 
-def test_worker_entry_propagates_fatal_task_error_and_closes_resources() -> None:
-    """Worker 启动后立即失败时入口报错，并释放 Provider 与数据库。"""
+def test_worker_entry_propagates_fatal_task_error_and_closes_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker 启动后立即失败时入口报错，并释放 Provider、存储、查询服务与数据库。"""
+    import minio
+
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.internal:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "ak")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "sk")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-test")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
+
+    class _FakeMinio:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def bucket_exists(self, _bucket: str) -> bool:
+            return True
+
+    monkeypatch.setattr(minio, "Minio", _FakeMinio)
 
     async def scenario() -> None:
         state = SimpleNamespace(provider_closed=False, database_closed=False, stopped=False)

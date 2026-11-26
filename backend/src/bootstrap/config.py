@@ -21,13 +21,6 @@ DEFAULT_KNOWLEDGE_OWNER_CONCURRENCY = 2
 DEFAULT_KNOWLEDGE_WORKER_CONCURRENCY = 2
 MAX_KNOWLEDGE_WORKER_CONCURRENCY = 16
 
-_STORAGE_REQUIRED_ENV_NAMES = (
-    "ATHENA_STORAGE_ENDPOINT",
-    "ATHENA_STORAGE_ACCESS_KEY",
-    "ATHENA_STORAGE_SECRET_KEY",
-    "ATHENA_STORAGE_BUCKET",
-)
-
 
 def _source(environ: Mapping[str, str] | None) -> Mapping[str, str]:
     return os.environ if environ is None else environ
@@ -255,7 +248,6 @@ class KnowledgeSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    enabled: bool = False
     semantic_min_score: float = DEFAULT_KNOWLEDGE_SEMANTIC_MIN_SCORE
     ocr_cache_root: str | None = None
     owner_concurrency: int = DEFAULT_KNOWLEDGE_OWNER_CONCURRENCY
@@ -276,7 +268,6 @@ class KnowledgeSettings(BaseModel):
         source = _source(environ)
         ocr_cache_root = (source.get("ATHENA_KNOWLEDGE_OCR_CACHE_ROOT") or "").strip() or None
         return cls(
-            enabled=env_flag("ATHENA_KNOWLEDGE_ENABLED", default=False, environ=source),
             semantic_min_score=env_float(
                 "ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE",
                 default=DEFAULT_KNOWLEDGE_SEMANTIC_MIN_SCORE,
@@ -303,32 +294,22 @@ class KnowledgeSettings(BaseModel):
 
 
 class FileSkillSettings(BaseModel):
-    """会话文件对象存储开关与技能脚本运行时路径设置。"""
+    """技能脚本运行时路径设置。"""
 
     model_config = ConfigDict(frozen=True)
 
-    files_enabled: bool = False
     python_executable: Path = Path(sys.executable)
     temp_root: Path = Path(sys.prefix) / "tmp" / "athena-skill-executions"
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> FileSkillSettings:
         source = _source(environ)
-        # 优先按显式 ATHENA_FILES_ENABLED 开关判定；未设置时按统一 ATHENA_STORAGE_* 存在性推断，
-        # 让不完整的对象存储配置在启动阶段明确报错，而无存储配置的纯开发/旧测试实例保持关闭。
-        if "ATHENA_FILES_ENABLED" in source:
-            files_enabled = env_flag("ATHENA_FILES_ENABLED", default=False, environ=source)
-        else:
-            files_enabled = any(
-                (source.get(name) or "").strip() for name in _STORAGE_REQUIRED_ENV_NAMES
-            )
         python_executable = Path(source.get("ATHENA_SKILL_PYTHON_EXECUTABLE") or sys.executable)
         temp_root = Path(
             source.get("ATHENA_SKILL_TEMP_ROOT")
             or str(Path(sys.prefix) / "tmp" / "athena-skill-executions")
         )
         return cls(
-            files_enabled=files_enabled,
             python_executable=python_executable,
             temp_root=temp_root,
         )

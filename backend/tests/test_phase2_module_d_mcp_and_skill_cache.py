@@ -407,10 +407,31 @@ def test_run_worker_bootstrap_and_shutdown_closes_mcp_executor_and_shares_skill_
                 return None
 
         skill_root = tmp_path / "skill-exec-root"
-        monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
-        monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
+        monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.internal:9000")
+        monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "ak")
+        monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "sk")
+        monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-test")
+        monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+        monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
         monkeypatch.setenv("ATHENA_SKILL_TEMP_ROOT", str(skill_root))
         monkeypatch.delenv("ATHENA_REDIS_URL", raising=False)
+
+        class FakeSharedStorageClient:
+            async def start(self) -> None:
+                return None
+
+            async def aclose(self) -> None:
+                return None
+
+        class FakeQueryServices:
+            knowledge = None
+            project_knowledge = None
+
+            async def start(self) -> None:
+                return None
+
+            async def aclose(self) -> None:
+                return None
 
         captured_skills: list[SkillService] = []
         original_skill_service = SkillService
@@ -425,7 +446,15 @@ def test_run_worker_bootstrap_and_shutdown_closes_mcp_executor_and_shares_skill_
             patch("bootstrap.database.Database", FakeDatabase),
             patch("bootstrap.run_worker.build_mcp_executor", return_value=FakeMcpExecutor()),
             patch(
-                "bootstrap.run_worker.MinioFileObjectStore.from_environment",
+                "bootstrap.run_worker.build_shared_storage_client",
+                return_value=FakeSharedStorageClient(),
+            ),
+            patch(
+                "bootstrap.run_worker.build_query_services",
+                return_value=FakeQueryServices(),
+            ),
+            patch(
+                "bootstrap.run_worker.MinioFileObjectStore",
                 return_value=FakeObjectStore(),
             ),
             patch("bootstrap.run_worker.SkillService", spy_skill_service),
@@ -436,27 +465,18 @@ def test_run_worker_bootstrap_and_shutdown_closes_mcp_executor_and_shares_skill_
             bundle = RunWorkerBundle()
             build_run_worker_dependencies(bundle, database_url="postgresql://unused")
             assert bundle.mcp_executor is not None
+            assert bundle.storage_client is not None
+            assert bundle.query_services is not None
+            assert bundle.file_object_store is not None
             assert bundle.skill_execution is not None
             assert bundle.skill_package_cache is not None
             assert len(captured_skills) == 1
+            assert captured_skills[0]._object_store is bundle.file_object_store
             assert captured_skills[0]._package_cache is bundle.skill_package_cache
             assert bundle.skill_execution._package_cache is bundle.skill_package_cache
             await bundle.skill_package_cache.aclose()
 
-            # 关闭对象存储开关时，Worker 仍为纯 Markdown 技能装配 SkillService(object_store=None)
-            captured_skills.clear()
-            monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
-            md_only_bundle = RunWorkerBundle()
-            build_run_worker_dependencies(md_only_bundle, database_url="postgresql://unused")
-            assert md_only_bundle.file_object_store is None
-            assert md_only_bundle.skill_package_cache is None
-            assert md_only_bundle.skill_execution is None
-            assert len(captured_skills) == 1
-            assert captured_skills[0]._object_store is None
-            assert captured_skills[0]._package_cache is None
-
         # 验证 run_worker_process 的 finally 调用 mcp_executor 与 skill_package_cache 的 aclose()
-        monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
         mcp_closed = False
         cache_closed = False
         original_cache_aclose = SkillPackageCache.aclose
@@ -472,7 +492,15 @@ def test_run_worker_bootstrap_and_shutdown_closes_mcp_executor_and_shares_skill_
             patch("bootstrap.database.Database", FakeDatabase),
             patch("bootstrap.run_worker.build_mcp_executor", return_value=FakeMcpExecutor()),
             patch(
-                "bootstrap.run_worker.MinioFileObjectStore.from_environment",
+                "bootstrap.run_worker.build_shared_storage_client",
+                return_value=FakeSharedStorageClient(),
+            ),
+            patch(
+                "bootstrap.run_worker.build_query_services",
+                return_value=FakeQueryServices(),
+            ),
+            patch(
+                "bootstrap.run_worker.MinioFileObjectStore",
                 return_value=FakeObjectStore(),
             ),
             patch("bootstrap.run_worker.OpenAIChatCompletionsAdapter", FakeProvider),

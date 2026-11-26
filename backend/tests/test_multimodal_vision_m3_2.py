@@ -1762,12 +1762,12 @@ def test_bootstrap_injects_local_vision_image_normalizer(
         "ATHENA_DATABASE_URL",
         "postgresql+asyncpg://user:password@127.0.0.1:5432/athena_test",
     )
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "true")
     monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.example.test:9000")
     monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "test-ak")
     monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "test-sk")
     monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-test")
     monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setenv(
         "ATHENA_MCP_SECRET_KEY",
         "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
@@ -1798,8 +1798,18 @@ def test_bootstrap_injects_local_vision_image_normalizer(
     finally:
 
         async def _cleanup() -> None:
+            if bundle.mcp_executor is not None:
+                await bundle.mcp_executor.aclose()
+            if bundle.skill_package_cache is not None:
+                await bundle.skill_package_cache.aclose()
             if bundle.file_object_store is not None:
                 await bundle.file_object_store.aclose()
+            if bundle.provider is not None:
+                await bundle.provider.aclose()
+            if bundle.query_services is not None:
+                await bundle.query_services.aclose()
+            if bundle.storage_client is not None:
+                await bundle.storage_client.aclose()
             if bundle.database is not None:
                 await bundle.database.dispose()
 

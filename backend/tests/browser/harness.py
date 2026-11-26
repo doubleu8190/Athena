@@ -967,8 +967,8 @@ def main() -> None:
                 "ATHENA_REDIS_URL": f"redis://127.0.0.1:{redis_port}/0",
                 "ATHENA_PUBLIC_ORIGIN": f"http://127.0.0.1:{frontend_port}",
                 "ATHENA_COOKIE_SECURE": "false",
-                "ATHENA_KNOWLEDGE_ENABLED": "false",
-                "ATHENA_FILES_ENABLED": "true",
+                # 知识库与文件能力已默认无条件装配，指向本机可控 provider 的 Embeddings 端点。
+                "ATHENA_EMBEDDING_BASE_URL": f"http://127.0.0.1:{provider_port}/v1",
                 "ATHENA_STORAGE_BUCKET": bucket,
                 "ATHENA_SKILL_TEMP_ROOT": str(state_directory / "skill-temp"),
                 "ATHENA_SKILL_PYTHON_EXECUTABLE": str(_PYTHON),

@@ -1,13 +1,16 @@
-"""本机 Chat Completions 可控 provider，用于真实 HTTP/SSE 协议测试。"""
+"""本机 Chat Completions 与 Embeddings 可控 provider，用于真实 HTTP/SSE 协议测试。"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
 import select
 import socket
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -24,6 +27,8 @@ _INPUT_FILE_METADATA_START = "<untrusted_input_file_metadata>\n"
 _INPUT_FILE_METADATA_END = "\n</untrusted_input_file_metadata>"
 _SUMMARY_FILENAMES = frozenset({"e2e-summary.txt", "e2e-summary-v2.txt"})
 _ARTIFACT_CONTENT_SUFFIX = "\n交付文件："
+_DEFAULT_EMBEDDING_DIMENSIONS = 1024
+_MAX_EMBEDDING_DIMENSIONS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,8 +369,31 @@ def _is_reuse_text_result(
     )
 
 
+def build_deterministic_embedding(
+    text: str,
+    *,
+    dimensions: int = _DEFAULT_EMBEDDING_DIMENSIONS,
+) -> list[float]:
+    """按文本内容确定性生成 L2 归一化的有限浮点向量，供本地 E2E 与协议测试复用。"""
+    raw_values: list[float] = []
+    block = 0
+    encoded_text = text.encode("utf-8")
+    while len(raw_values) < dimensions:
+        digest = hashlib.sha256(encoded_text + b"\x00" + block.to_bytes(4, "big")).digest()
+        block += 1
+        for offset in range(0, len(digest), 4):
+            if len(raw_values) >= dimensions:
+                break
+            unit = struct.unpack(">I", digest[offset : offset + 4])[0] / 0xFFFFFFFF
+            raw_values.append(unit * 2.0 - 1.0)
+    norm = math.sqrt(sum(value * value for value in raw_values))
+    if norm == 0.0 or not math.isfinite(norm):
+        return [1.0, *(0.0 for _ in range(dimensions - 1))]
+    return [value / norm for value in raw_values]
+
+
 class _ProviderHandler(BaseHTTPRequestHandler):
-    """实现 OpenAI Chat Completions 流式响应的最小协议表面。"""
+    """实现 OpenAI Chat Completions 与 Embeddings 响应的最小协议表面。"""
 
     server_version = "AthenaE2EProvider/1"
 
@@ -376,7 +404,7 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/chat/completions":
+        if self.path not in {"/v1/chat/completions", "/v1/embeddings"}:
             self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
             return
         try:
@@ -388,6 +416,9 @@ class _ProviderHandler(BaseHTTPRequestHandler):
                 raise ValueError("body_invalid")
         except (ValueError, json.JSONDecodeError, UnicodeError):
             self._json(HTTPStatus.BAD_REQUEST, {"error": {"code": "request_invalid"}})
+            return
+        if self.path == "/v1/embeddings":
+            self._handle_embeddings(payload)
             return
         action = select_provider_action(payload)
         self._log_action(payload, action)
@@ -412,6 +443,56 @@ class _ProviderHandler(BaseHTTPRequestHandler):
                     }
                 ],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+            },
+        )
+
+    def _handle_embeddings(self, payload: dict[str, Any]) -> None:
+        """响应 OpenAI 兼容 POST /v1/embeddings 请求，返回确定性有限浮点向量。"""
+        raw_input = payload.get("input")
+        texts: list[str]
+        if isinstance(raw_input, str):
+            texts = [raw_input]
+        elif (
+            isinstance(raw_input, list)
+            and raw_input
+            and all(isinstance(item, str) for item in raw_input)
+        ):
+            texts = list(raw_input)
+        else:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": {"code": "request_invalid"}})
+            return
+
+        raw_dimensions = payload.get("dimensions", _DEFAULT_EMBEDDING_DIMENSIONS)
+        if (
+            not isinstance(raw_dimensions, int)
+            or isinstance(raw_dimensions, bool)
+            or not 1 <= raw_dimensions <= _MAX_EMBEDDING_DIMENSIONS
+        ):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": {"code": "request_invalid"}})
+            return
+
+        raw_model = payload.get("model", "e2e-embedding")
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            self._json(HTTPStatus.BAD_REQUEST, {"error": {"code": "request_invalid"}})
+            return
+
+        self._json(
+            HTTPStatus.OK,
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "embedding",
+                        "index": index,
+                        "embedding": build_deterministic_embedding(
+                            text,
+                            dimensions=raw_dimensions,
+                        ),
+                    }
+                    for index, text in enumerate(texts)
+                ],
+                "model": raw_model,
+                "usage": {"prompt_tokens": len(texts), "total_tokens": len(texts)},
             },
         )
 
@@ -599,4 +680,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["select_provider_action"]
+__all__ = ["build_deterministic_embedding", "select_provider_action"]

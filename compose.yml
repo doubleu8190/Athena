@@ -1,8 +1,8 @@
 # ==============================================================================
 # Athena v2 生产环境容器编排配置 (Docker Compose)
 # ------------------------------------------------------------------------------
-# 业务范围：编排 Athena 自身的前端、API、Run Worker 与可选知识库 Worker。
-# 外部依赖（PostgreSQL、Redis、MinIO）均由外部基础设施提供，并通过环境变量或 .env 注入连接
+# 业务范围：编排 Athena 自身的前端、API、Run Worker 与知识库解析 Worker。
+# 外部依赖（PostgreSQL、Redis、MinIO、远程 Embedding）均由外部基础设施提供，并通过环境变量或 .env 注入连接
 # ==============================================================================
 
 name: athena
@@ -46,18 +46,14 @@ x-backend-environment: &backend-environment
   # 技能脚本运行时可写目录
   ATHENA_SKILL_TEMP_ROOT: ${ATHENA_SKILL_TEMP_ROOT:-/app/var/skill-executions}
 
-  # 统一对象存储（私有 MinIO / S3，单桶按业务前缀隔离 knowledge/、session-files/、skills/ 等）
+  # 统一对象存储（必填：私有 MinIO / S3，单桶按业务前缀隔离 knowledge/、session-files/、skills/ 等）
   ATHENA_STORAGE_ENDPOINT: ${ATHENA_STORAGE_ENDPOINT:-}
   ATHENA_STORAGE_ACCESS_KEY: ${ATHENA_STORAGE_ACCESS_KEY:-}
   ATHENA_STORAGE_SECRET_KEY: ${ATHENA_STORAGE_SECRET_KEY:-}
   ATHENA_STORAGE_BUCKET: ${ATHENA_STORAGE_BUCKET:-}
   ATHENA_STORAGE_SECURE: ${ATHENA_STORAGE_SECURE:-false}
 
-  # 会话附件与技能文件功能开关（复用统一 ATHENA_STORAGE_*）
-  ATHENA_FILES_ENABLED: ${ATHENA_FILES_ENABLED:-false}
-
-  # 知识库功能开关与远程 OpenAI 兼容 Embedding 服务（无状态化，不加载本地权重）
-  ATHENA_KNOWLEDGE_ENABLED: ${ATHENA_KNOWLEDGE_ENABLED:-false}
+  # 知识库检索与远程 OpenAI 兼容 Embedding 服务（必填，无状态化，不加载本地权重）
   ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE: ${ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE:-0.35}
   ATHENA_EMBEDDING_BASE_URL: ${ATHENA_EMBEDDING_BASE_URL:-}
   ATHENA_EMBEDDING_API_KEY: ${ATHENA_EMBEDDING_API_KEY:-}
@@ -163,10 +159,9 @@ services:
       - athena-network
 
   # ============================================================================
-  # 4. 可选知识库异步解析 Worker (Knowledge Worker Profile)
+  # 4. 知识库异步解析 Worker (Backend Knowledge Worker)
   # ============================================================================
-  # 默认不随普通 docker compose up 启动；需开启知识库文档异步解析与向量化时使用：
-  # docker compose --profile knowledge up -d backend-knowledge-worker
+  # 随 docker compose up 默认启动，持续消费知识库文档异步解析、远程向量索引与孤儿清理任务
   backend-knowledge-worker:
     build:
       context: .
@@ -186,8 +181,6 @@ services:
     depends_on:
       backend-api:
         condition: service_healthy
-    profiles:
-      - knowledge
     restart: unless-stopped
     networks:
       - athena-network

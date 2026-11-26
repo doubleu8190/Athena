@@ -443,7 +443,6 @@ def test_jieba_tokenizer_warmup_is_idempotent_and_handles_missing_dependency(
             project_knowledge=None,
             knowledge_repository=None,
             knowledge_original_store=None,
-            knowledge_enabled=True,
             _startables=(_RecordingTokenizer(),),
             _closables=(),
         )

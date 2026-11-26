@@ -214,8 +214,12 @@ def test_api_dependencies_wire_shared_redis_auth_rate_limiters_and_close_once(
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://db.invalid/athena")
     monkeypatch.setenv("ATHENA_REDIS_URL", "redis://cache.invalid:6379/0")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.internal:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "ak")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "sk")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-prod")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_api, "build_database", lambda _url: FakeDatabase())
     monkeypatch.setattr("bootstrap.redis.Redis.from_url", lambda *_args, **_kwargs: shared_redis)
 
@@ -230,11 +234,13 @@ def test_api_dependencies_wire_shared_redis_auth_rate_limiters_and_close_once(
     assert deps.auth_service._login_account_limiter._client is shared_redis
     assert deps.run_transport is not None
     assert deps.run_transport._client is shared_redis
-    # ATHENA_FILES_ENABLED=false 时仍装配 SkillService 供纯 Markdown 使用，不初始化 MinIO。
-    assert deps.file_object_store is None
-    assert deps.session_file_service is None
+    # 移除功能开关后，数据库模式下默认无条件装配共享对象存储、文件/技能服务与知识库服务。
+    assert deps.storage_client is not None
+    assert deps.file_object_store is not None
+    assert deps.session_file_service is not None
     assert deps.skill_service is not None
-    assert deps.skill_service._object_store is None
+    assert deps.skill_service._object_store is deps.file_object_store
+    assert deps.knowledge_service is not None
 
     asyncio.run(deps.aclose())
     assert close_calls == 1
@@ -296,12 +302,10 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
         "ATHENA_PUBLIC_ORIGIN": "https://athena.example.com",
         "ATHENA_MCP_ALLOWED_PRIVATE_HOSTS": "mcp.internal,10.0.0.5",
         "ATHENA_MCP_STDIO_BASE_ENV_NAMES": "HOME,PATH",
-        "ATHENA_KNOWLEDGE_ENABLED": "true",
         "ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE": "0.42",
         "ATHENA_KNOWLEDGE_OCR_CACHE_ROOT": "/var/cache/ocr",
         "ATHENA_KNOWLEDGE_OWNER_CONCURRENCY": "3",
         "ATHENA_KNOWLEDGE_WORKER_CONCURRENCY": "6",
-        "ATHENA_FILES_ENABLED": "true",
         "ATHENA_SKILL_PYTHON_EXECUTABLE": "/usr/bin/python3",
         "ATHENA_SKILL_TEMP_ROOT": "/tmp/athena-skills",
         "ATHENA_RUN_WORKER_CONCURRENCY": "8",
@@ -327,14 +331,14 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
     assert auth.cookie_secure is True
     assert auth.public_origin == "https://athena.example.com"
     assert mcp.allowed_private_hosts == frozenset({"mcp.internal", "10.0.0.5"})
-    assert knowledge.enabled is True
+    assert not hasattr(knowledge, "enabled")
     assert knowledge.semantic_min_score == pytest.approx(0.42)
     assert knowledge.ocr_cache_root == "/var/cache/ocr"
     assert not hasattr(knowledge, "upload_min_free_bytes")
     assert not hasattr(knowledge, "parse_memory_mb")
     assert knowledge.owner_concurrency == 3
     assert knowledge.worker_concurrency == 6
-    assert files.files_enabled is True
+    assert not hasattr(files, "files_enabled")
     assert files.python_executable == Path("/usr/bin/python3")
     assert files.temp_root == Path("/tmp/athena-skills")
     assert run_worker.to_config().llm_request_limit == 25
@@ -460,8 +464,12 @@ def test_api_bootstrap_fixes_auth_repo_dedup_transport_probe_and_skill_gate(
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://db.invalid/athena")
     monkeypatch.delenv("ATHENA_REDIS_URL", raising=False)
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.internal:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "ak")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "sk")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-dev")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_api, "build_database", lambda _url: FakeDatabase())
     monkeypatch.setattr(bootstrap_api, "SqlAlchemyAuthRepository", SpyAuthRepository)
     monkeypatch.setattr(bootstrap_api, "build_run_transport", spy_build_run_transport)
@@ -475,7 +483,7 @@ def test_api_bootstrap_fixes_auth_repo_dedup_transport_probe_and_skill_gate(
     assert deps.model_profile_service._auth_reader is deps.auth_service._repository
     asyncio.run(deps.aclose())
 
-    # 2. 注入除 skill_service 外的全部服务时，数据库门禁仍触发并正常装配 Markdown SkillService。
+    # 2. 注入除 skill_service 外的全部服务时，仍触发数据库门禁并装配 SkillService 与独立对象存储。
     stub: Any = object()
     deps_skill_only = bootstrap_api.build_api_dependencies(
         project_service=stub,
@@ -487,12 +495,15 @@ def test_api_bootstrap_fixes_auth_repo_dedup_transport_probe_and_skill_gate(
         model_profile_service=stub,
         system_prompt_service=stub,
         preference_service=stub,
+        knowledge_service=stub,
         subagent_service=stub,
         org_service=stub,
         session_file_service=stub,
     )
     assert deps_skill_only.database is not None
     assert deps_skill_only.skill_service is not None
+    assert deps_skill_only.storage_client is None
+    assert deps_skill_only.file_object_store is not None
     asyncio.run(deps_skill_only.aclose())
 
     # 3. create_app 仅保留 5 个实际被读取的 app.state 属性，移除 9 个死属性。

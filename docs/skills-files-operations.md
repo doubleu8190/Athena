@@ -2,27 +2,32 @@
 
 ## 部署前提
 
-Skills 与会话文件使用独立的对象存储配置，不依赖 `ATHENA_KNOWLEDGE_ENABLED`，
-也不需要安装知识库可选依赖。`minio`、`packaging`、`PyYAML` 和
-`python-multipart` 已属于核心依赖。
+Skills、会话文件与知识库均已收敛为后端默认无条件装配的核心能力，统一共用单桶对象存储
+配置（`ATHENA_STORAGE_*`），在同一个私有桶内按业务前缀严格隔离：文件与技能域仅操作
+`session-files/`、`session-files-extracted/`、`session-artifacts/`、`skill-logs/`、
+`skills/`，知识库原件位于 `knowledge/`。`minio`、`packaging`、`PyYAML`、
+`python-multipart` 以及轻量化文档提取/图像处理依赖（`pypdfium2`、`python-docx`、
+`openpyxl`、`python-pptx`、`Pillow`、`jieba`）均已属于核心依赖；可选分组 `knowledge`
+仅用于重量级本地 OCR（PaddlePaddle + PaddleOCR）。
 
 API 与 Run Worker 必须：
 
-- 使用同一 `ATHENA_DATABASE_URL`、文件 MinIO endpoint、桶和访问凭据；
+- 使用同一 `ATHENA_DATABASE_URL`、统一对象存储 `ATHENA_STORAGE_*` 与远程
+  `ATHENA_EMBEDDING_BASE_URL` 配置；
 - 使用兼容的 Python 3.12+ 运行环境与同一套平台预装依赖；
-- 能访问同一个专用、私有、已预建的 MinIO 桶；
+- 能访问同一个私有、已预建的 MinIO/S3 桶；
 - 对 `ATHENA_SKILL_TEMP_ROOT` 具有创建、写入和删除目录的权限。
 
-不要把知识库桶、不同环境的文件桶或可匿名读取的桶混用。MinIO 服务账号至少需要
-桶检查、对象列举、读取、上传和删除权限；应用不会创建桶或修改桶策略。
+不同环境（开发、测试、生产）必须使用各自独立的私有桶，严禁混用或开启匿名读取；
+同环境内知识库与文件/技能通过统一单桶前缀隔离。MinIO 服务账号至少需要桶检查、对象
+列举、读取、上传和删除权限；应用不会创建桶或修改桶策略。
 
 ```text
-ATHENA_FILES_ENABLED=true
-ATHENA_FILE_MINIO_ENDPOINT=host[:port]
-ATHENA_FILE_MINIO_ACCESS_KEY=<secret manager 注入>
-ATHENA_FILE_MINIO_SECRET_KEY=<secret manager 注入>
-ATHENA_FILE_MINIO_BUCKET=<预建私有桶>
-ATHENA_FILE_MINIO_SECURE=true
+ATHENA_STORAGE_ENDPOINT=host[:port]
+ATHENA_STORAGE_ACCESS_KEY=<secret manager 注入>
+ATHENA_STORAGE_SECRET_KEY=<secret manager 注入>
+ATHENA_STORAGE_BUCKET=<预建私有桶>
+ATHENA_STORAGE_SECURE=true
 ATHENA_SKILL_TEMP_ROOT=/srv/athena/skill-executions
 ATHENA_SKILL_PYTHON_EXECUTABLE=/srv/athena/.venv/bin/python
 ```
@@ -50,8 +55,9 @@ Skill 版本不可下载。API、Run Worker 和管理写路径都不执行在线
 发布预留、owner 存活判断或持久扫描游标。对象写入仍遵循“先写对象、后提交数据库
 引用”；事务失败或提交结果不确定的已知对象保守保留，等待下一次停写维护。
 
-离线维护入口只处理合法的 `session-files/`、`session-artifacts/`、`skill-logs/`
-和 `skills/` 对象。默认命令是 dry-run：
+离线维护入口只处理合法的 `session-files/`、`session-files-extracted/`、
+`session-artifacts/`、`skill-logs/` 和 `skills/` 对象，不会触碰同桶内的 `knowledge/`
+前缀。默认命令是 dry-run：
 
 ```sh
 PYTHONPATH=backend/src .venv/bin/python -m cli.file_maintenance

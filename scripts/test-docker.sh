@@ -3,7 +3,7 @@
 # Athena v2 Docker 容器化测试环境启动与运维脚本
 # ==============================================================================
 # 业务功能：
-#   一键管理基于 Docker 容器化的 Athena 全栈测试环境（frontend、API、Run Worker）。
+#   一键管理基于 Docker 容器化的 Athena 全栈测试环境（frontend、API、Run Worker、Knowledge Worker）。
 #   自动检测并拉起底层外部中间件依赖（PostgreSQL, Redis, MinIO），执行数据库迁移并健康探活。
 #   采用 Base Image 架构：自动检查/构建 athena-backend-base:latest 固化第三方依赖，
 #   使后续每次业务代码变更重构均可达到秒级构建。
@@ -95,6 +95,8 @@ ensure_env_file() {
 
 load_test_environment() {
   ensure_env_file
+  # 防止宿主 shell 残留的 ATHENA_EMBEDDING_BASE_URL 隐式绕过校验或造成与 docker/test.env 不一致。
+  unset ATHENA_EMBEDDING_BASE_URL
   # helper 只从 secrets/ 构造凭据；container 模式改用测试库、测试桶和 Docker
   # 宿主机网关，连接字符串中的用户名、密码和库名均逐段百分号编码。
   ATHENA_TEST_ENV_TARGET=container
@@ -168,8 +170,8 @@ dependency_compose() {
 build_base_image() {
   info "正在构建后端基础依赖镜像 athena-backend-base:latest..."
   local install_knowledge="false"
-  if grep -E '^ATHENA_KNOWLEDGE_ENABLED=true' "$TEST_ENV_FILE" >/dev/null 2>&1 || \
-     grep -E '^ATHENA_INSTALL_KNOWLEDGE=true' "$TEST_ENV_FILE" >/dev/null 2>&1; then
+  # 仅根据 ATHENA_INSTALL_KNOWLEDGE=true 决定是否安装重量级本地 OCR 依赖（PaddlePaddle + PaddleOCR）。
+  if grep -E '^ATHENA_INSTALL_KNOWLEDGE=true' "$TEST_ENV_FILE" >/dev/null 2>&1; then
     install_knowledge="true"
   fi
   info "Base 镜像构建参数: INSTALL_KNOWLEDGE=${install_knowledge}"
@@ -255,6 +257,12 @@ cmd_up() {
     shift
   done
 
+  # 知识库与文件能力已默认无条件装配，拉起镜像与容器前必须确认远程 Embedding 地址已填写。
+  local embedding_base_url="${ATHENA_EMBEDDING_BASE_URL:-}"
+  if [[ -z "${embedding_base_url//[[:space:]]/}" ]]; then
+    fail "缺少必填配置 ATHENA_EMBEDDING_BASE_URL：请在 docker/test.env 中填写可从容器访问的远程 OpenAI 兼容 Embedding 地址（例如 http://host.docker.internal:11434/v1 或外部兼容服务地址）。"
+  fi
+
   ensure_base_image "$force_build_base"
   ensure_dependencies
 
@@ -268,7 +276,7 @@ cmd_up() {
   info "执行测试数据库结构自动迁移 (Alembic migration)..."
   business_compose --profile migration run --rm backend-migration
 
-  info "构建并启动 Athena 业务测试容器 (frontend、API、Run Worker)..."
+  info "构建并启动 Athena 业务测试容器 (frontend、API、Run Worker、Knowledge Worker)..."
   business_compose up -d --build
 
   local port

@@ -173,7 +173,10 @@ def build_skill_service(
     package_cache: SkillPackageCache | None = None,
     skill_service_factory: Callable[..., SkillService] = SkillService,
 ) -> SkillService:
-    """统一构造技能服务；未启用对象存储时纯 Markdown 技能仍可正常使用。"""
+    """统一构造技能服务。
+
+    生产环境默认装配统一对象存储；仅测试或纯 Markdown 场景允许注入 object_store=None。
+    """
     return skill_service_factory(
         skill_repository,
         object_store,
@@ -208,7 +211,6 @@ class QueryServiceBundle:
     # 对外只暴露领域端口，应用层不需要知道具体仓储实现。
     knowledge_repository: KnowledgeRepositoryPort | None
     knowledge_original_store: OriginalStore | None
-    knowledge_enabled: bool
     _startables: tuple[Any, ...]
     _closables: tuple[Any, ...]
 
@@ -257,18 +259,16 @@ def build_query_services(
     knowledge_service: KnowledgeService | None = None,
     access_policy: AccessPolicyService | None = None,
     object_client: MinioObjectClient | None = None,
-    knowledge_enabled: bool | None = None,
     semantic_min_score: float | None = None,
     embedding_config: OpenAICompatibleEmbeddingConfig | None = None,
     storage_config: MinioStorageConfig | None = None,
 ) -> QueryServiceBundle:
-    """按统一强类型配置为 API 与 Run Worker 装配知识库查询服务与实时权限引擎。"""
-    knowledge_settings: KnowledgeSettings | None = None
-    if knowledge_enabled is None:
-        knowledge_settings = KnowledgeSettings.from_environment()
-        resolved_enabled = knowledge_service is not None or knowledge_settings.enabled
-    else:
-        resolved_enabled = knowledge_service is not None or knowledge_enabled
+    """无条件为 API 与 Run Worker 装配知识库查询服务与项目知识关联服务。
+
+    当调用方未注入 knowledge_service 时，按统一强类型配置自建模型、原件存储与仓储并
+    纳入 bundle 生命周期；当调用方显式注入 knowledge_service 时不抢占所有权，仅补充
+    装配同库 ProjectKnowledgeService。
+    """
     startables: list[Any] = []
     closables: list[Any] = []
     knowledge = knowledge_service
@@ -278,27 +278,23 @@ def build_query_services(
         else AccessPolicyService(SqlAlchemyAccessControlRepository(sessions))
     )
     # 组合根是唯一允许构造具体适配器的地方；bundle 只暴露领域端口。
-    knowledge_repository: KnowledgeRepositoryPort | None = None
-    # 项目知识关联需要额外的仓储能力，构造期单独持有具体实现，不进入公开契约。
-    project_knowledge_repository: ProjectKnowledgeRepository | None = None
+    concrete_repository = KnowledgeRepository(sessions)
+    knowledge_repository: KnowledgeRepositoryPort = concrete_repository
+    project_knowledge_repository: ProjectKnowledgeRepository = concrete_repository
     knowledge_originals: OriginalStore | None = None
-    if resolved_enabled and knowledge is None:
+    if knowledge is None:
         # 先校验并构造无状态模型与检索阈值，再构造原件存储包装层，避免配置错误中途遗留资源。
         models = build_knowledge_models(embedding_config=embedding_config)
-        if semantic_min_score is not None:
-            resolved_min_score = semantic_min_score
-        else:
-            if knowledge_settings is None:
-                knowledge_settings = KnowledgeSettings.from_environment()
-            resolved_min_score = knowledge_settings.semantic_min_score
+        resolved_min_score = (
+            semantic_min_score
+            if semantic_min_score is not None
+            else KnowledgeSettings.from_environment().semantic_min_score
+        )
         minio_originals = build_knowledge_original_store(
             object_client=object_client,
             storage_config=storage_config,
         )
         knowledge_originals = minio_originals
-        concrete_repository = KnowledgeRepository(sessions)
-        knowledge_repository = concrete_repository
-        project_knowledge_repository = concrete_repository
         knowledge = KnowledgeService(
             concrete_repository,
             models.tokenizer,
@@ -312,25 +308,16 @@ def build_query_services(
         # 启动顺序沿用存储 → 计数 → 远程向量客户端 → 中文分词词典预热，关闭时按相反依赖顺序释放。
         startables.extend((minio_originals, models.counter, models.embedding, models.tokenizer))
         closables.extend((minio_originals, models.embedding, models.counter))
-    elif knowledge is not None and knowledge_repository is None:
-        concrete_repository = KnowledgeRepository(sessions)
-        knowledge_repository = concrete_repository
-        project_knowledge_repository = concrete_repository
-    project_knowledge = (
-        None
-        if not resolved_enabled or knowledge is None or project_knowledge_repository is None
-        else ProjectKnowledgeService(
-            projects,
-            project_knowledge_repository,
-            access_policy=resolved_access_policy,
-        )
+    project_knowledge = ProjectKnowledgeService(
+        projects,
+        project_knowledge_repository,
+        access_policy=resolved_access_policy,
     )
     return QueryServiceBundle(
         knowledge=knowledge,
         project_knowledge=project_knowledge,
         knowledge_repository=knowledge_repository,
         knowledge_original_store=knowledge_originals,
-        knowledge_enabled=resolved_enabled,
         _startables=tuple(startables),
         _closables=tuple(closables),
     )

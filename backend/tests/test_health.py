@@ -72,30 +72,50 @@ def test_preference_service_is_none_without_database_and_can_be_injected(
     assert "/api/v1/me/memories" in injected_app.openapi()["paths"]
 
 
-def test_disabled_knowledge_does_not_parse_minio_configuration(
+def test_lightweight_mode_without_database_skips_storage_and_embedding_checks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
+    """无 ATHENA_DATABASE_URL 时保持轻量模式，支持纯 /health 探活，不要求对象存储或 Embedding。"""
+    monkeypatch.delenv("ATHENA_DATABASE_URL", raising=False)
     monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "https://invalid")
     monkeypatch.delenv("ATHENA_STORAGE_ACCESS_KEY", raising=False)
     monkeypatch.delenv("ATHENA_STORAGE_SECRET_KEY", raising=False)
     monkeypatch.delenv("ATHENA_STORAGE_BUCKET", raising=False)
-    bundle = build_query_services(
-        cast(Any, object()),
-        projects=cast(ProjectService, object()),
-    )
-    assert bundle.knowledge is None
-    assert bundle.knowledge_original_store is None
+    monkeypatch.delenv("ATHENA_EMBEDDING_BASE_URL", raising=False)
+
+    with TestClient(create_app()) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
-def test_enabled_knowledge_requires_database_configuration(
+def test_file_storage_configuration_fails_before_creating_database_when_knowledge_injected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ATHENA_DATABASE_URL", raising=False)
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
+    """注入 knowledge_service 但自建文件/技能服务时，非法存储配置须在建库前 Fail-Fast 拒绝。"""
+    from domain.file import FileStorageError
 
-    with pytest.raises(RuntimeError, match="knowledge_database_required"):
-        create_app()
+    created: list[str] = []
+
+    class FakeDatabase:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            created.append("database")
+
+    monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
+    monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    monkeypatch.delenv("ATHENA_STORAGE_ENDPOINT", raising=False)
+    monkeypatch.delenv("ATHENA_STORAGE_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("ATHENA_STORAGE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ATHENA_STORAGE_BUCKET", raising=False)
+    monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
+
+    with pytest.raises(FileStorageError, match="file_storage_configuration_invalid"):
+        create_app(
+            project_service=cast(ProjectService, object()),
+            tool_manager=cast(ToolManager, object()),
+            knowledge_service=cast(KnowledgeService, object()),
+        )
+    assert created == []
 
 
 @pytest.mark.parametrize(
@@ -139,7 +159,6 @@ def test_knowledge_minio_configuration_fails_before_creating_query_resources(
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
     monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     for name in (
         "ATHENA_STORAGE_ENDPOINT",
@@ -172,7 +191,6 @@ def test_knowledge_embedding_configuration_fails_before_creating_database(
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "true")
     monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "localhost:9000")
     monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "access")
     monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "secret")
@@ -214,18 +232,25 @@ def test_query_service_start_failure_closes_started_resources_and_database(
         project_knowledge=None,
         knowledge_repository=None,
         knowledge_original_store=None,
-        knowledge_enabled=False,
         _startables=(resource,),
         _closables=(resource,),
     )
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "localhost:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "access")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "secret")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "test-bucket")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr(bootstrap_api, "build_query_services", lambda *_args, **_kwargs: bundle)
 
     app = create_app(
         project_service=cast(ProjectService, object()),
         tool_manager=cast(ToolManager, object()),
+        skill_service=cast(Any, object()),
+        session_file_service=cast(Any, object()),
     )
     with pytest.raises(RuntimeError, match="storage unavailable"):
         with TestClient(app):
@@ -266,17 +291,20 @@ def test_injected_knowledge_service_mounts_project_routes_without_stealing_owner
     knowledge = InjectedKnowledge()
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    # 知识库与文件/技能均由外部注入时，组合根不得解析对象存储或 Embedding 环境变量。
     monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "localhost:not-a-port")
     monkeypatch.delenv("ATHENA_STORAGE_ACCESS_KEY", raising=False)
     monkeypatch.delenv("ATHENA_STORAGE_SECRET_KEY", raising=False)
     monkeypatch.delenv("ATHENA_STORAGE_BUCKET", raising=False)
+    monkeypatch.delenv("ATHENA_EMBEDDING_BASE_URL", raising=False)
     monkeypatch.setattr(bootstrap_database, "Database", FakeDatabase)
     monkeypatch.setattr("bootstrap.api.build_query_services", capture_query_services)
     app = create_app(
         project_service=cast(ProjectService, object()),
         tool_manager=cast(ToolManager, object()),
         knowledge_service=cast(KnowledgeService, knowledge),
+        skill_service=cast(Any, object()),
+        session_file_service=cast(Any, object()),
     )
 
     assert captured
@@ -375,8 +403,12 @@ def test_injected_tool_manager_keeps_mcp_tools_in_default_subagent_catalog(
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://invalid/test")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
-    monkeypatch.setenv("ATHENA_KNOWLEDGE_ENABLED", "false")
-    monkeypatch.setenv("ATHENA_FILES_ENABLED", "false")
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "localhost:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "access")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "secret")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "test-bucket")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.setattr(bootstrap_api, "build_database", lambda _url: FakeDatabase())
     monkeypatch.setattr(bootstrap_api, "SqlAlchemyMcpRepository", FakeMcpRepository)
     monkeypatch.setattr(bootstrap_api, "SqlAlchemyAuthRepository", FakeAuthRepository)

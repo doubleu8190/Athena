@@ -898,3 +898,108 @@ def test_redis_readiness_checks_signal_after_ping_before_return(
         )
 
     assert events == ["docker-run", "registered", "check", "ping", "check", "close"]
+
+
+def test_provider_embeddings_endpoint_is_deterministic_and_openai_compatible() -> None:
+    """可控 provider 的 POST /v1/embeddings 兼容 OpenAI 协议与后端远程 Embedding 客户端。"""
+    import asyncio
+    import io
+    import math
+    from http.client import HTTPMessage
+
+    import httpx2
+
+    from infrastructure.embedding import (
+        OpenAICompatibleEmbeddingClient,
+        OpenAICompatibleEmbeddingConfig,
+    )
+
+    def _invoke_post(path: str, raw_body: bytes) -> tuple[int, dict[str, object]]:
+        """纯内存驱动 _ProviderHandler.do_POST，避免单测绑定 loopback 端口。"""
+        handler = object.__new__(_ProviderHandler)
+        handler.path = path
+        headers = HTTPMessage()
+        headers["content-length"] = str(len(raw_body))
+        headers["content-type"] = "application/json"
+        handler.headers = headers
+        handler.rfile = cast(BufferedIOBase, io.BytesIO(raw_body))
+        captured: dict[str, object] = {}
+
+        def _capture_json(status: object, value: dict[str, object]) -> None:
+            captured["status"] = int(cast(int, status))
+            captured["body"] = value
+
+        handler._json = _capture_json  # type: ignore[method-assign]
+        handler.do_POST()
+        return cast(int, captured["status"]), cast(dict[str, object], captured["body"])
+
+    # 1. 支持单字符串输入与默认 1024 维输出。
+    status, single_body = _invoke_post(
+        "/v1/embeddings",
+        json.dumps({"model": "BAAI/bge-m3", "input": "企业知识库测试"}).encode("utf-8"),
+    )
+    assert status == 200
+    assert single_body["object"] == "list"
+    assert single_body["model"] == "BAAI/bge-m3"
+    single_data = cast(list[dict[str, object]], single_body["data"])
+    assert len(single_data) == 1
+    assert single_data[0]["object"] == "embedding"
+    assert single_data[0]["index"] == 0
+    single_vec = cast(list[float], single_data[0]["embedding"])
+    assert len(single_vec) == 1024
+    assert all(isinstance(val, float) and math.isfinite(val) for val in single_vec)
+
+    # 2. 支持字符串数组、自定义维度，且对同一文本完全确定性一致。
+    status, batch_body = _invoke_post(
+        "/v1/embeddings",
+        json.dumps(
+            {"model": "custom", "input": ["alpha", "beta", "alpha"], "dimensions": 16}
+        ).encode("utf-8"),
+    )
+    assert status == 200
+    batch_data = cast(list[dict[str, object]], batch_body["data"])
+    assert [item["index"] for item in batch_data] == [0, 1, 2]
+    assert len(cast(list[float], batch_data[0]["embedding"])) == 16
+    assert batch_data[0]["embedding"] == batch_data[2]["embedding"]
+    assert batch_data[0]["embedding"] != batch_data[1]["embedding"]
+
+    # 3. 非法输入（空数组、非字符串元素、非法 dimensions、空 model、非法 JSON）返回 400。
+    bad_payloads: tuple[dict[str, object], ...] = (
+        {"input": []},
+        {"input": [123]},
+        {"input": "ok", "dimensions": 0},
+        {"input": "ok", "dimensions": True},
+        {"input": "ok", "model": ""},
+    )
+    for bad_payload in bad_payloads:
+        bad_status, _ = _invoke_post(
+            "/v1/embeddings",
+            json.dumps(bad_payload).encode("utf-8"),
+        )
+        assert bad_status == 400
+    bad_json_status, _ = _invoke_post("/v1/embeddings", b"{not-json")
+    assert bad_json_status == 400
+
+    # 4. 通过真实 OpenAICompatibleEmbeddingClient（AsyncOpenAI）端到端解析该端点响应。
+    async def _verify_client() -> None:
+        def _handler(request: httpx2.Request) -> httpx2.Response:
+            code, body = _invoke_post(request.url.path, request.content)
+            return httpx2.Response(code, json=body)
+
+        client = OpenAICompatibleEmbeddingClient(
+            OpenAICompatibleEmbeddingConfig(
+                base_url="http://127.0.0.1:8012/v1",
+                dimensions=1024,
+            ),
+            transport=httpx2.MockTransport(_handler),
+        )
+        try:
+            vectors = await client.embed(["企业知识库测试", "另一段文本"])
+        finally:
+            await client.aclose()
+        assert len(vectors) == 2
+        assert len(vectors[0]) == 1024
+        assert vectors[0] == single_vec
+        assert vectors[0] != vectors[1]
+
+    asyncio.run(_verify_client())

@@ -11,7 +11,7 @@ from typing import Any
 from redis.asyncio import Redis
 
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.file import MinioFileObjectStore
+from adapter.file import MinioFileObjectStore, MinioFileStorageConfig
 from adapter.knowledge.storage import MinioStorageConfig
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.org import SqlAlchemyOrgRepository
@@ -216,22 +216,26 @@ def build_api_dependencies(
     skill_use_case = skill_service
     session_file_use_case = session_file_service
 
-    knowledge_enabled = knowledge_use_case is not None or knowledge_settings.enabled
-    knowledge_owned = knowledge_use_case is None and knowledge_enabled
-    files_enabled = file_settings.files_enabled
+    has_database = bool(database_url)
+    # 知识库与文件存储作为后端核心能力默认装配；无 ATHENA_DATABASE_URL 时保持轻量模式，
+    # 供纯 /health 探活及全服务注入单测使用，不要求数据库、对象存储或 Embedding。
+    knowledge_owned = has_database and knowledge_use_case is None
+    needs_file_storage = has_database and (skill_use_case is None or session_file_use_case is None)
 
     if auth_use_case is None:
         # 生产环境必须在启动初期拒绝缺失 Redis 限流的配置，避免分配数据库连接池后再失败。
         validate_auth_rate_limit_configuration()
-    if knowledge_owned and not database_url:
-        raise RuntimeError("knowledge_database_required")
 
-    # 知识库环境配置仅在启动前置阶段解析一次，后续复用到共享客户端与 build_query_services。
+    # 在创建数据库连接池之前执行前置 Fail-Fast 校验，防止对象存储或 Embedding 配置非法时
+    # 已建库导致连接池等资源遗留；同时仅解析一次并在后续装配中复用。
     knowledge_storage_config: MinioStorageConfig | None = None
     knowledge_embedding_config: OpenAICompatibleEmbeddingConfig | None = None
+    file_storage_config: MinioFileStorageConfig | None = None
     if knowledge_owned:
         knowledge_storage_config = validate_knowledge_storage_configuration()
         knowledge_embedding_config = validate_knowledge_embedding_configuration()
+    elif needs_file_storage:
+        file_storage_config = MinioFileStorageConfig.from_environment()
 
     # LLM 配置由管理员持久化；部署环境只提供加密主密钥，不提供模型凭据。
     secret_cipher: McpSecretCipher | None = None
@@ -266,8 +270,7 @@ def build_api_dependencies(
     run_transport: RedisRunTransport | None = None
     redis_client: Redis | None = None
 
-    needs_file_storage = files_enabled and (skill_use_case is None or session_file_use_case is None)
-    # 完整覆盖所有依赖数据库装配的用例（含 Markdown Skill 与启用对象存储时的 SessionFile）。
+    # 完整覆盖所有依赖数据库装配的核心用例（含知识库、Skill 与 SessionFile）。
     needs_database = bool(
         database_url
         and (
@@ -278,12 +281,12 @@ def build_api_dependencies(
             or session_use_case is None
             or run_use_case is None
             or mcp_use_case is None
-            or knowledge_enabled
+            or knowledge_use_case is None
             or system_prompt_use_case is None
             or preference_use_case is None
             or subagent_use_case is None
             or skill_use_case is None
-            or (files_enabled and session_file_use_case is None)
+            or session_file_use_case is None
         )
     )
     if needs_database:
@@ -346,7 +349,8 @@ def build_api_dependencies(
                 model_checker=SqlAlchemySubagentModelChecker(database.session_factory),
                 tool_catalog=DefaultSubagentToolCatalog(core.mcp_repository),
             )
-        # 同进程同时装配知识库与文件/技能对象存储时，共享单个底层 MinIO 客户端、连接池与线程池。
+        # 同进程同时自建知识库与文件/技能对象存储时，共享单个底层 MinIO 客户端、连接池与线程池；
+        # 仅单侧自建时各自独占底层客户端，不创建孤儿共享客户端。
         if knowledge_owned and needs_file_storage:
             shared_storage_client = build_shared_storage_client(
                 storage_config=knowledge_storage_config,
@@ -357,7 +361,6 @@ def build_api_dependencies(
             knowledge_service=knowledge_use_case,
             access_policy=core.access_policy,
             object_client=shared_storage_client,
-            knowledge_enabled=knowledge_enabled,
             semantic_min_score=knowledge_settings.semantic_min_score,
             embedding_config=knowledge_embedding_config,
             storage_config=knowledge_storage_config,
@@ -405,17 +408,18 @@ def build_api_dependencies(
                 run_transport,
             )
         if needs_file_storage:
-            file_object_store = MinioFileObjectStore.from_environment(
-                deferred=True,
-                object_client=shared_storage_client,
-            )
+            if shared_storage_client is not None:
+                file_object_store = MinioFileObjectStore(object_client=shared_storage_client)
+            else:
+                # 仅文件/技能侧自建时复用前置已校验配置，独占底层客户端。
+                assert file_storage_config is not None
+                file_object_store = MinioFileObjectStore(file_storage_config)
             if session_file_use_case is None:
                 session_file_use_case = build_session_file_service(
                     database.session_factory,
                     file_object_store,
                 )
-        # 纯 Markdown 技能仅依赖数据库；database 就绪时始终装配 SkillService。
-        # 未启用对象存储（file_object_store is None）时 Markdown 可用，ZIP/脚本日志返回 503。
+        # 技能服务默认绑定统一对象存储；数据库就绪且未注入替身时始终装配。
         if skill_use_case is None:
             skill_use_case = build_skill_service(
                 skill_repository=core.skill_repository,

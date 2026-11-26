@@ -77,7 +77,7 @@ flowchart TB
 
     subgraph Workers["异步执行层 (Async Workers)"]
         RunWorker["run_worker (对话、工具、子智能体与自动标题)"]
-        KbWorker["knowledge_worker (文档解析与远程向量索引, 可选)"]
+        KbWorker["knowledge_worker (文档解析与远程向量索引)"]
     end
 
     subgraph Ext["外部能力与企业集成层"]
@@ -104,17 +104,17 @@ flowchart TB
     RestApi -.->|"限流 / OAuth State"| Redis
     SseStream -.->|"事件订阅"| Redis
     RestApi -.->|"飞书 SSO / 组织同步"| Feishu
-    RestApi -.->|"统一单桶对象存储"| MinIO
+    RestApi -->|"统一单桶对象存储"| MinIO
     RestApi -.->|"工具发现"| MCP
-    RestApi -.->|"查询向量"| RemoteEmbedding
+    RestApi -->|"查询向量"| RemoteEmbedding
 
     RunWorker --> PG
     RunWorker -.->|"增量推送"| Redis
-    RunWorker -.->|"统一单桶对象存储"| MinIO
+    RunWorker -->|"统一单桶对象存储"| MinIO
     RunWorker --> LLM
     RunWorker -.->|"工具调用"| MCP
     RunWorker -.-> SkillSubagent
-    RunWorker -.-> RemoteEmbedding
+    RunWorker --> RemoteEmbedding
 
     KbWorker --> PG
     KbWorker --> MinIO
@@ -138,7 +138,7 @@ flowchart TB
 | **缓存与事件通道** | Redis (`redis-py`) | Run SSE 增量 Pub/Sub、分布式认证限流与飞书 OAuth 一次性 `state`（生产必选） |
 | **统一对象存储** | MinIO / S3 (`ATHENA_STORAGE_*`, 单桶前缀隔离) | 单私有桶按 `knowledge/`、`session-files/`、`skills/` 等前缀隔离原件与附件 |
 | **模型与工具生态** | OpenAI SDK + MCP SDK + 无状态远程 OpenAI 兼容 Embedding + `tiktoken` | 外部模型调用、HTTP/stdio MCP 工具、无状态远程向量化与 Token 计数 |
-| **文档解析 (可选)** | PaddleOCR + `pypdfium2` + `python-docx` / `openpyxl` / `python-pptx` + `jieba` | PDF / Office / 图片多格式文本与 OCR 提取 |
+| **文档解析与可选 OCR** | `pypdfium2` + `python-docx` / `openpyxl` / `python-pptx` + `Pillow` + `jieba`（核心内置）；PaddleOCR（可选 `knowledge` 依赖） | PDF / Office / 图片多格式文本提取与可选扫描件本地 OCR |
 | **容器与 CI** | Docker Compose + GitHub Actions (`pytest` / `ruff` / `mypy` / `eslint` / `vitest` / `playwright`) | 本地测试栈、生产容器编排与自动化质量门禁 |
 
 ---
@@ -189,7 +189,7 @@ Athena_v2/
 
 ### 方式一：Docker 一键启动本地测试栈
 
-`docker/test.env` 与 `secrets/` 专用于 Docker 测试栈，与宿主机 `.env` 职责分离，不要互相复制。`docker/test.env.example` 默认开启非生产 `ATHENA_AUTH_MOCK_ENABLED=true`，启动后访问 `http://localhost:8080` 即可使用预置的 6 个企业多角色 Mock 账号一键登录体验。
+`docker/test.env` 与 `secrets/` 专用于 Docker 测试栈，与宿主机 `.env` 职责分离，不要互相复制。知识库与文件能力已默认无条件装配，启动前请在 `docker/test.env` 中填写容器可访问的 `ATHENA_EMBEDDING_BASE_URL`（如宿主机 Ollama/vLLM `http://host.docker.internal:11434/v1` 或外部 OpenAI 兼容服务地址）。`docker/test.env.example` 默认开启非生产 `ATHENA_AUTH_MOCK_ENABLED=true`，启动后默认拉起 `frontend`、`backend-api`、`backend-worker` 与 `backend-knowledge-worker`，访问 `http://localhost:8080` 即可使用预置的 6 个企业多角色 Mock 账号一键登录体验。
 
 ```bash
 # 1. 初始化本地测试配置与凭据
@@ -212,11 +212,12 @@ scripts/test-docker.sh down --all          # 停止业务与基础设施容器�
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'       # 启用知识库解析需改为 '.[dev,knowledge]'
+.venv/bin/python -m pip install -e '.[dev]'       # 如需启用重量级本地 OCR 改为 '.[dev,knowledge]'
 npm --prefix frontend install
 cp .env.example .env && chmod 600 .env
 
-# 生成 32 字节 Base64 主密钥填入 .env 的 ATHENA_MCP_SECRET_KEY，并配置 ATHENA_DATABASE_URL
+# 生成 32 字节 Base64 主密钥填入 .env 的 ATHENA_MCP_SECRET_KEY，
+# 并填写 ATHENA_DATABASE_URL、统一对象存储 ATHENA_STORAGE_* 与远程 ATHENA_EMBEDDING_BASE_URL
 python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
 ```
 
@@ -243,9 +244,9 @@ printf '%s\n' '<至少12位强密码>' | .venv/bin/python -m cli.bootstrap_super
 # 前端开发服务器（终端 2）
 cd frontend && npm run dev
 
-# 后台 Worker（按需另开终端启动）
-.venv/bin/python -m run_worker         # 必选：对话 Run、工具执行、子智能体与自动标题
-.venv/bin/python -m knowledge_worker   # 可选：知识库文档解析与远程向量索引
+# 后台 Worker（另开终端启动）
+.venv/bin/python -m run_worker         # 对话 Run、工具执行、子智能体与自动标题
+.venv/bin/python -m knowledge_worker   # 知识库文档解析与远程向量索引
 ```
 
 - **前端界面**：`http://localhost:5173`（Vite 开发服务器自动代理 `/api` 到 `127.0.0.1:8000`，保持同源 Cookie 校验）
@@ -265,11 +266,11 @@ cd frontend && npm run dev
 | **环境与安全护栏** | `ATHENA_ENV`, `ATHENA_COOKIE_SECURE`, `ATHENA_PUBLIC_ORIGIN`, `ATHENA_REDIS_URL` | `ATHENA_ENV=production` 时**强制要求**配置 `ATHENA_REDIS_URL` 且**严禁**开启 `ATHENA_AUTH_MOCK_ENABLED=true` |
 | **飞书原生 SSO** | `ATHENA_FEISHU_ENABLED`, `ATHENA_FEISHU_APP_ID`, `ATHENA_FEISHU_APP_SECRET`, `ATHENA_FEISHU_REDIRECT_URI`, `ATHENA_FEISHU_BASE_URL` | 生产开启时强制依赖 Redis（一次性 `state` 防重放）且接口与回调地址须为 HTTPS |
 | **非生产 Mock** | `ATHENA_AUTH_MOCK_ENABLED` | 仅限开发/测试联调；开启后启动自动幂等预置多部门组织树与 6 个典型角色测试账号 |
-| **统一对象存储** | `ATHENA_STORAGE_ENDPOINT`, `ATHENA_STORAGE_ACCESS_KEY`, `ATHENA_STORAGE_SECRET_KEY`, `ATHENA_STORAGE_BUCKET`, `ATHENA_STORAGE_SECURE` | 单私有桶统一承载知识库原件（`knowledge/`）与 Skills/会话文件（`skills/`、`session-files/`） |
-| **知识库与远程 Embedding** | `ATHENA_KNOWLEDGE_ENABLED`, `ATHENA_EMBEDDING_BASE_URL`, `ATHENA_EMBEDDING_API_KEY`, `ATHENA_EMBEDDING_MODEL`, `ATHENA_EMBEDDING_DIMENSIONS`, `ATHENA_EMBEDDING_SEND_DIMENSIONS` | 无状态远程 OpenAI 兼容向量服务（默认 1024 维 `BAAI/bge-m3`），不加载本地模型权重 |
-| **文件与技能** | `ATHENA_FILES_ENABLED`, `ATHENA_SKILL_TEMP_ROOT`, `ATHENA_SKILL_PYTHON_EXECUTABLE` | 复用统一 `ATHENA_STORAGE_*` 单桶，配置技能脚本运行环境与临时目录 |
+| **统一对象存储（必填）** | `ATHENA_STORAGE_ENDPOINT`, `ATHENA_STORAGE_ACCESS_KEY`, `ATHENA_STORAGE_SECRET_KEY`, `ATHENA_STORAGE_BUCKET`, `ATHENA_STORAGE_SECURE` | 单私有桶统一承载知识库原件（`knowledge/`）与 Skills/会话文件（`skills/`、`session-files/`），启动期前置校验 |
+| **知识库与远程 Embedding（必填）** | `ATHENA_EMBEDDING_BASE_URL`, `ATHENA_EMBEDDING_API_KEY`, `ATHENA_EMBEDDING_MODEL`, `ATHENA_EMBEDDING_DIMENSIONS`, `ATHENA_EMBEDDING_SEND_DIMENSIONS`, `ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE` | 无状态远程 OpenAI 兼容向量服务（默认 1024 维 `BAAI/bge-m3`），不加载本地模型权重 |
+| **技能运行时** | `ATHENA_SKILL_TEMP_ROOT`, `ATHENA_SKILL_PYTHON_EXECUTABLE` | 复用统一 `ATHENA_STORAGE_*` 单桶，配置技能脚本运行解释器与临时目录 |
 
-> 完整环境变量清单、Worker 并发/租约调优参数及生产上线前 9 项安全自检清单见 [`.env.example`](.env.example)。
+> 完整环境变量清单、Worker 并发/租约调优参数及生产上线前 10 项安全自检清单见 [`.env.example`](.env.example)。
 
 ### 运维 CLI 速查
 
@@ -382,16 +383,16 @@ npm run build
 
 ## 📦 生产部署
 
-参考 [`compose.yml`](compose.yml) 与 [`.env.example`](.env.example)，复制 `.env.example` 为 `.env.prod`（`chmod 600 .env.prod`）并填写外部 PostgreSQL、Redis、统一单桶对象存储（`ATHENA_STORAGE_*`）及强随机主密钥。生产环境务必设置 `ATHENA_ENV=production`、`ATHENA_COOKIE_SECURE=true`、`ATHENA_AUTH_MOCK_ENABLED=false` 并配置规范公网 `ATHENA_PUBLIC_ORIGIN`。
+参考 [`compose.yml`](compose.yml) 与 [`.env.example`](.env.example)，复制 `.env.example` 为 `.env.prod`（`chmod 600 .env.prod`）并填写外部 PostgreSQL、Redis、统一单桶对象存储（`ATHENA_STORAGE_*`）、远程 OpenAI 兼容 Embedding 服务（`ATHENA_EMBEDDING_BASE_URL`）及强随机主密钥。生产环境务必设置 `ATHENA_ENV=production`、`ATHENA_COOKIE_SECURE=true`、`ATHENA_AUTH_MOCK_ENABLED=false` 并配置规范公网 `ATHENA_PUBLIC_ORIGIN`。
 
 ```bash
-# 1. 预构建后端基础依赖镜像（如需启用知识库 OCR，加 --build-arg INSTALL_KNOWLEDGE=true）
+# 1. 预构建后端基础依赖镜像（如需启用重量级本地扫描件/图片 OCR，加 --build-arg INSTALL_KNOWLEDGE=true）
 docker build -f docker/Dockerfile.backend-base -t athena-backend-base:latest .
 
 # 2. 执行数据库迁移
 docker compose --env-file .env.prod run --rm backend-migration
 
-# 3. 启动生产服务（如需启动知识库解析 Worker，在 up 前加 --profile knowledge）
+# 3. 启动生产全栈服务（默认一并启动 frontend、backend-api、backend-worker 与 backend-knowledge-worker）
 docker compose --env-file .env.prod up -d
 
 # 4. 初始化本地应急 super_admin 账号（开放自助注册已下线）

@@ -21,6 +21,10 @@ from bootstrap.config import (
     RunWorkerSettings,
 )
 from bootstrap.database import build_database
+from bootstrap.knowledge import (
+    validate_knowledge_embedding_configuration,
+    validate_knowledge_storage_configuration,
+)
 from bootstrap.redis import build_run_transport
 from bootstrap.tool import (
     QueryServiceBundle,
@@ -70,10 +74,16 @@ def build_run_worker_dependencies(
     configured_url = database_url or DatabaseSettings.url_from_environment()
     if not configured_url:
         raise RuntimeError("run_worker_database_required")
-    # 加载有界并发、租约与轮询参数，非法配置会在构造配置对象时抛出。
+    # 在创建数据库连接池与共享对象存储客户端之前，前置校验全部必填配置（Fail-Fast），
+    # 防止配置缺失或非法时遗留连接池或线程池资源。
     config = RunWorkerSettings.from_environment().to_config()
     # MCP 凭据解封与 API 使用同一密钥；缺失或损坏时拒绝启动，不能静默禁用工具。
     secret_cipher = McpSecretCipher.from_environment()
+    file_settings = FileSkillSettings.from_environment()
+    knowledge_settings = KnowledgeSettings.from_environment()
+    storage_config = validate_knowledge_storage_configuration()
+    embedding_config = validate_knowledge_embedding_configuration()
+
     database = build_database(configured_url)
     bundle.database = database
 
@@ -91,41 +101,27 @@ def build_run_worker_dependencies(
     # 持有 MCP 执行器以在 Worker 退出时释放池化 HTTP transport 与清空工具清单缓存。
     bundle.mcp_executor = mcp_executor
 
-    file_settings = FileSkillSettings.from_environment()
-    knowledge_settings = KnowledgeSettings.from_environment()
-    files_enabled = file_settings.files_enabled
-    knowledge_enabled = knowledge_settings.enabled
-
-    # Run Worker 同时启用知识库与文件/技能时共享单套底层客户端，创建后立即登记由入口统一释放。
-    shared_storage_client = (
-        build_shared_storage_client() if knowledge_enabled and files_enabled else None
-    )
+    # Run Worker 无条件装配知识库与文件/技能能力，全程共享单套底层 MinIO 客户端，
+    # 创建后立即登记到 bundle，确保中途失败或退出时由入口统一逆序释放。
+    shared_storage_client = build_shared_storage_client(storage_config=storage_config)
     bundle.storage_client = shared_storage_client
     query_services = build_query_services(
         database.session_factory,
         projects=core.project_service,
         access_policy=core.access_policy,
         object_client=shared_storage_client,
-        knowledge_enabled=knowledge_enabled,
         semantic_min_score=knowledge_settings.semantic_min_score,
+        embedding_config=embedding_config,
+        storage_config=storage_config,
     )
     bundle.query_services = query_services
 
-    object_store: FileObjectStore | None = None
-    package_cache: SkillPackageCache | None = None
-    session_files = None
-    skill_execution = None
-    if files_enabled:
-        object_store = MinioFileObjectStore.from_environment(
-            deferred=True,
-            object_client=shared_storage_client,
-        )
-        bundle.file_object_store = object_store
-        # 共享单个有界内存 ZIP 字节 LRU 缓存，由 Worker 退出流程统一 aclose() 释放。
-        package_cache = SkillPackageCache()
-        bundle.skill_package_cache = package_cache
+    object_store: FileObjectStore = MinioFileObjectStore(object_client=shared_storage_client)
+    bundle.file_object_store = object_store
+    # 共享单个有界内存 ZIP 字节 LRU 缓存，由 Worker 退出流程统一 aclose() 释放。
+    package_cache = SkillPackageCache()
+    bundle.skill_package_cache = package_cache
 
-    # 纯 Markdown 技能零 MinIO 依赖，无论是否启用对象存储均装配 SkillService。
     skills = build_skill_service(
         skill_repository=core.skill_repository,
         object_store=object_store,
@@ -135,19 +131,17 @@ def build_run_worker_dependencies(
         package_cache=package_cache,
         skill_service_factory=SkillService,
     )
-    if files_enabled:
-        assert object_store is not None
-        session_files = build_session_file_service(database.session_factory, object_store)
-        skill_execution = SkillExecutionService(
-            skills=skills,
-            files=session_files,
-            repository=core.skill_repository,
-            object_store=object_store,
-            runner=PythonScriptExecutor(file_settings.python_executable),
-            temp_root=file_settings.temp_root,
-            package_cache=package_cache,
-        )
-        bundle.skill_execution = skill_execution
+    session_files = build_session_file_service(database.session_factory, object_store)
+    skill_execution = SkillExecutionService(
+        skills=skills,
+        files=session_files,
+        repository=core.skill_repository,
+        object_store=object_store,
+        runner=PythonScriptExecutor(file_settings.python_executable),
+        temp_root=file_settings.temp_root,
+        package_cache=package_cache,
+    )
+    bundle.skill_execution = skill_execution
 
     tool_runtime = build_run_tool_runtime(
         auth=core.auth_repository,

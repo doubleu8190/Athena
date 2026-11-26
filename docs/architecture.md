@@ -8,15 +8,15 @@ Athena v2 是面向企业内部使用的多用户 AI 智能工作台，采用 **
 - **后端 API（`backend/src/main.py`）**：Python 3.12+ + FastAPI + Uvicorn，提供 REST API、SSE 实时事件流、同源 HttpOnly Cookie 鉴权、前置鉴权与上传准入中间件。
 - **独立异步 Worker**：
   - `run_worker.py`：领取排队 Run，执行模型多轮推理、并行工具批次、MCP/Skill/Subagent 编排、上下文压缩与会话自动标题生成。
-  - `knowledge_worker.py`（可选）：消费知识库解析与清理任务，使用常驻隔离解析子进程提取文本，经远程 Embedding 写入向量与全文索引，并执行孤儿对象回收。
+  - `knowledge_worker.py`：默认随栈运行的知识库异步解析 Worker，消费知识库解析与清理任务，使用常驻隔离解析子进程提取文本（可选本地 OCR），经无状态远程 Embedding 写入向量与全文索引，并执行孤儿对象回收。
 - **运维 CLI（`backend/src/cli/`）**：提供应急超管初始化（`bootstrap_super_admin.py`）、账号提权（`promote_admin.py`）、飞书组织树全量同步（`sync_feishu_org.py`）及文件孤儿维护（`file_maintenance.py`）。
 
 ### 核心基础设施底座
 
 - **PostgreSQL 16+（配合 `pgvector` HNSW）**：作为业务状态、组织树物化路径、行锁并发控制、任务队列、向量检索与 `TSVECTOR` 全文检索的唯一权威持久层。数据库仅依赖 `pgvector` 扩展，**不再依赖 `zhparser` C 扩展**（中文分词在应用侧由 `jieba` 预处理后写入 `TSVECTOR`，历史遗留对象已由迁移 `20261208_0041` 清理）。
 - **Redis 7+**：承载 Run SSE 实时事件 Pub/Sub 推送、分布式认证限流与飞书 OAuth 一次性 `state` 原子防重放。`ATHENA_ENV=production` 模式下强制要求配置 `ATHENA_REDIS_URL`。
-- **统一单桶对象存储（MinIO / S3，`ATHENA_STORAGE_*`）**：在单一私有桶内通过前缀严格隔离 `knowledge/`、`session-files/`、`session-files-extracted/`、`session-artifacts/`、`skill-logs/`、`skills/` 等业务对象。
-- **无状态远程 Embedding 服务**：通过 OpenAI 兼容 HTTP 接口完成向量化（默认 1024 维 `BAAI/bge-m3`），应用与 Worker 进程不加载本地重型向量模型权重。
+- **统一单桶对象存储（MinIO / S3，`ATHENA_STORAGE_*`，核心必填）**：知识库与文件/技能作为默认核心能力无条件装配，在单一私有桶内通过前缀严格隔离 `knowledge/`、`session-files/`、`session-files-extracted/`、`session-artifacts/`、`skill-logs/`、`skills/` 等业务对象。
+- **无状态远程 Embedding 服务（`ATHENA_EMBEDDING_*`，核心必填）**：通过 OpenAI 兼容 HTTP 接口完成向量化（默认 1024 维 `BAAI/bge-m3`），应用与 Worker 进程不加载本地重型向量模型权重。
 
 ## 2. 企业身份、组织架构与三层权限
 

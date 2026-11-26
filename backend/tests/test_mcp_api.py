@@ -517,16 +517,38 @@ def test_database_default_mcp_assembly_fails_closed_without_key(
     from domain.mcp import McpSecretError
 
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://db.invalid/athena")
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.internal:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "ak")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "sk")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-test")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.delenv("ATHENA_MCP_SECRET_KEY", raising=False)
     with pytest.raises(McpSecretError, match="mcp_secret_key_missing"):
         create_app()
 
 
 def test_database_default_assembly_reuses_auth_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    import minio
+
+    class _FakeMinio:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def bucket_exists(self, _bucket: str) -> bool:
+            return True
+
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://db.invalid/athena")
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", base64.b64encode(b"k" * 32).decode())
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.internal:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "ak")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "sk")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-test")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
     monkeypatch.delenv("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS", raising=False)
     monkeypatch.delenv("ATHENA_MCP_STDIO_BASE_ENV_NAMES", raising=False)
+    monkeypatch.setattr(minio, "Minio", _FakeMinio)
     app = create_app()
     manager = app.state.tool_manager
     authenticator = app.state.authenticator

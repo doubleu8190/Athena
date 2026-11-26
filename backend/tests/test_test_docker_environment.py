@@ -39,10 +39,10 @@ def _write_test_project(root: Path) -> None:
                 "MINIO_DEV_BUCKET=tenant-storage-dev",
                 "MINIO_TEST_BUCKET=tenant-storage-test",
                 "ATHENA_COOKIE_SECURE=false",
-                "ATHENA_KNOWLEDGE_ENABLED=false",
                 "ATHENA_STORAGE_SECURE=false",
                 "ATHENA_TEST_MINIO_SECURE=false",
-                "ATHENA_FILES_ENABLED=true",
+                "ATHENA_INSTALL_KNOWLEDGE=false",
+                "ATHENA_EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1",
             )
         )
         + "\n",
@@ -191,7 +191,7 @@ fi
 printf 'ARGV=%s\\n' "$*" >> {str(command_log)!r}
 for key in \
   PORT POSTGRES_TEST_DB MINIO_TEST_BUCKET ATHENA_DATABASE_URL \
-  ATHENA_STORAGE_BUCKET ATHENA_STORAGE_SECURE ROOT_ONLY; do
+  ATHENA_STORAGE_BUCKET ATHENA_STORAGE_SECURE ATHENA_EMBEDDING_BASE_URL ROOT_ONLY; do
   printf 'ENV_%s=%s\\n' "$key" "${{!key-}}" >> {str(command_log)!r}
 done
 case "$*" in
@@ -239,6 +239,7 @@ printf '%s\\n' "$*" >> {str(curl_log)!r}
     assert "ENV_MINIO_TEST_BUCKET=tenant-storage-test" in command_text
     assert "ENV_ATHENA_STORAGE_BUCKET=tenant-storage-test" in command_text
     assert "ENV_ATHENA_STORAGE_SECURE=false" in command_text
+    assert "ENV_ATHENA_EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1" in command_text
     encoded_database = quote("athena test@primary", safe="")
     encoded_user = quote("db-user@example.test", safe="")
     encoded_password = quote('p@ss:word/with?#&="quotes"', safe="")
@@ -268,3 +269,126 @@ def test_production_dockerfile_excludes_mock_mcp_servers_and_mounts_readonly() -
     assert "backend-api:" in override_text
     assert "backend-worker:" in override_text
     assert "./mcp_servers:/app/mcp_servers:ro" in override_text
+
+
+@pytest.mark.parametrize(
+    "embedding_line",
+    (
+        "ATHENA_EMBEDDING_BASE_URL=",
+        "ATHENA_EMBEDDING_BASE_URL='   '",
+        None,
+    ),
+)
+def test_docker_entrypoint_fails_fast_when_embedding_base_url_missing(
+    tmp_path: Path,
+    embedding_line: str | None,
+) -> None:
+    """ATHENA_EMBEDDING_BASE_URL 缺失或仅含空白时，test-docker.sh up 必须在拉起容器前快速报错。"""
+    _write_test_project(tmp_path)
+    config_path = tmp_path / "docker/test.env"
+    lines = [
+        line
+        for line in config_path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("ATHENA_EMBEDDING_BASE_URL=")
+    ]
+    if embedding_line is not None:
+        lines.append(embedding_line)
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    command_log = tmp_path / "docker-command.log"
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    docker_stub = bin_directory / "docker"
+    docker_stub.write_text(
+        f"""#!/usr/bin/env bash
+set -eu
+if [[ "$1" == "info" ]]; then
+  exit 0
+fi
+printf 'ARGV=%s\\n' "$*" >> {str(command_log)!r}
+exit 0
+""",
+        encoding="utf-8",
+    )
+    docker_stub.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{bin_directory}:{environment['PATH']}",
+            "HOME": str(tmp_path),
+            # 即使宿主 shell 残留 ATHENA_EMBEDDING_BASE_URL，也必须以 docker/test.env 为准拒绝启动。
+            "ATHENA_EMBEDDING_BASE_URL": "http://host-leak.invalid/v1",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(tmp_path / "scripts/test-docker.sh"), "up"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "ATHENA_EMBEDDING_BASE_URL" in result.stderr
+    assert "docker/test.env" in result.stderr
+    assert not command_log.exists()
+
+
+@pytest.mark.parametrize(
+    ("install_flag", "expected_build_arg"),
+    (
+        ("false", "INSTALL_KNOWLEDGE=false"),
+        ("true", "INSTALL_KNOWLEDGE=true"),
+    ),
+)
+def test_build_base_image_only_follows_athena_install_knowledge(
+    tmp_path: Path,
+    install_flag: str,
+    expected_build_arg: str,
+) -> None:
+    """build-base 仅根据 ATHENA_INSTALL_KNOWLEDGE=true 决定是否安装重量级本地 OCR 依赖。"""
+    _write_test_project(tmp_path)
+    config_path = tmp_path / "docker/test.env"
+    lines = [
+        line
+        for line in config_path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("ATHENA_INSTALL_KNOWLEDGE=")
+    ]
+    lines.append(f"ATHENA_INSTALL_KNOWLEDGE={install_flag}")
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    build_log = tmp_path / "docker-build.log"
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    docker_stub = bin_directory / "docker"
+    docker_stub.write_text(
+        f"""#!/usr/bin/env bash
+set -eu
+if [[ "$1" == "info" ]]; then
+  exit 0
+fi
+printf '%s\\n' "$*" >> {str(build_log)!r}
+exit 0
+""",
+        encoding="utf-8",
+    )
+    docker_stub.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{bin_directory}:{environment['PATH']}",
+            "HOME": str(tmp_path),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(tmp_path / "scripts/test-docker.sh"), "build-base"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"--build-arg {expected_build_arg}" in build_log.read_text(encoding="utf-8")

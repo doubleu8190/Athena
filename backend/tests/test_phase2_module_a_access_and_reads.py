@@ -84,8 +84,8 @@ from domain.org import DepartmentStatus
 from domain.run.model import (
     InputRequestStatus,
     Run,
+    RunDetails,
     RunEvent,
-    RunInputRequest,
     RunQueuedPayload,
     RunStatus,
     RunUsage,
@@ -1302,9 +1302,23 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
                     vector: list[float],
                     limit: int,
                     profile_id: str | None = None,
+                    *,
+                    min_score: float = 0.0,
                 ) -> tuple[SearchHit, ...]:
-                    del owner_id, base_ids, vector, limit, profile_id
+                    del owner_id, base_ids, vector, limit, profile_id, min_score
                     return ()
+
+                async def has_incompatible_profile(
+                    self, owner_id: str, base_ids: list[str], profile_id: str
+                ) -> bool:
+                    del owner_id, base_ids, profile_id
+                    return False
+
+                async def filter_active_hits(
+                    self, owner_id: str, hits: tuple[SearchHit, ...]
+                ) -> tuple[SearchHit, ...]:
+                    del owner_id
+                    return hits
 
             counting_factory = _CountingSessionFactory(raw_factory)
             access_policy = AccessPolicyService(
@@ -1343,23 +1357,9 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
             await legacy_kb.search("u_fin", ["kb_dept_fin_sub"], "报销")
             assert spy_repo.validate_calls == 1
 
-            # 4) Agent knowledge_search 强制安全契约：
-            #    before_scope 通过后、检索中途将 u_fin 调岗至 dept_rd，
-            #    after_scope 必须独立实时重读数据库并丢弃越权结果！
-            async def _transfer_mid_search() -> None:
-                async with raw_factory() as s, s.begin():
-                    await s.execute(
-                        delete(UserDepartmentModel).where(UserDepartmentModel.user_id == "u_fin")
-                    )
-                    s.add(
-                        UserDepartmentModel(
-                            user_id="u_fin",
-                            department_id="dept_rd",
-                            is_primary=True,
-                        )
-                    )
-
-            spy_repo.on_search = _transfer_mid_search
+            # 4) Agent knowledge_search 实时前置鉴权契约：
+            #    调岗前仅执行 1 次 before_scope 权限查询（无 after_scope 二次重查），
+            #    调岗至 dept_rd 后下一次调用在执行前即被实时拦截并拒绝检索。
             runtime = RunToolRuntimeService(
                 auth=_StubAuthReader(users),
                 sessions=SqlAlchemySessionRepository(raw_factory),
@@ -1379,6 +1379,32 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
                 deadline_at=NOW + timedelta(seconds=30),
                 knowledge_base_ids=("kb_dept_fin_sub",),
             )
+            counting_factory.reset()
+            before_outcome = await runtime.execute(
+                KNOWLEDGE_SEARCH_DEFINITION,
+                "knowledge_search",
+                {"query": "报销", "limit": 5},
+                exec_ctx,
+                deadline_seconds=5.0,
+                run_remaining_seconds=30.0,
+            )
+            assert before_outcome.outcome.status is ToolOutcomeStatus.OK
+            assert len(before_outcome.outcome.data["items"]) == 1
+            # 仅执行 1 次调用前 before_scope 权限校验，不再重复执行 after_scope。
+            assert counting_factory.count == 1
+
+            async with raw_factory() as s, s.begin():
+                await s.execute(
+                    delete(UserDepartmentModel).where(UserDepartmentModel.user_id == "u_fin")
+                )
+                s.add(
+                    UserDepartmentModel(
+                        user_id="u_fin",
+                        department_id="dept_rd",
+                        is_primary=True,
+                    )
+                )
+            counting_factory.reset()
             outcome = await runtime.execute(
                 KNOWLEDGE_SEARCH_DEFINITION,
                 "knowledge_search",
@@ -1390,6 +1416,7 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
             assert outcome.outcome.status is ToolOutcomeStatus.ERROR
             assert outcome.outcome.code == "knowledge_scope_unavailable"
             assert "items" not in outcome.outcome.data
+            assert counting_factory.count == 1
         finally:
             await engine.dispose()
 
@@ -2107,12 +2134,13 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                 )
             assert counting_factory.count == 1
 
-            # B. 内存旧替身回退验证：events() 只调轻量 get()，绝不调重型 pending/subagent 接口
-            class _LegacyRunRepo:
+            # B. 服务直接委托单会话端口契约验证：
+            # get() 直调 get_details()，events() 直调 list_visible_events()。
+            class _DirectPortRunRepo:
                 def __init__(self) -> None:
                     self.calls: list[str] = []
                     self.run = Run(
-                        id="r_legacy",
+                        id="r_direct",
                         session_id="s_1",
                         owner_id="u_1",
                         status=RunStatus.QUEUED,
@@ -2139,41 +2167,21 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                         usage=RunUsage(),
                     )
 
-                async def get(self, session_id: str, owner_id: str, run_id: str) -> Run | None:
-                    self.calls.append("get")
-                    return self.run if run_id == "r_legacy" else None
+                async def get_details(self, session_id: str, owner_id: str, run_id: str) -> Any:
+                    del session_id, owner_id
+                    self.calls.append("get_details")
+                    if run_id != "r_direct":
+                        return None
+                    return RunDetails(
+                        run=self.run,
+                        pending_input=None,
+                        pending_approvals=(),
+                        subagent_tasks=(),
+                        pending_subagent_inputs=(),
+                        pending_subagent_approvals=(),
+                    )
 
-                async def get_pending_input(
-                    self, session_id: str, owner_id: str, run_id: str
-                ) -> RunInputRequest | None:
-                    self.calls.append("get_pending_input")
-                    return None
-
-                async def list_pending_approvals(
-                    self, session_id: str, owner_id: str, run_id: str
-                ) -> tuple[Any, ...] | None:
-                    self.calls.append("list_pending_approvals")
-                    return ()
-
-                async def list_subagent_tasks(
-                    self, session_id: str, owner_id: str, parent_run_id: str
-                ) -> tuple[Any, ...]:
-                    self.calls.append("list_subagent_tasks")
-                    return ()
-
-                async def list_pending_subagent_inputs(
-                    self, session_id: str, owner_id: str, parent_run_id: str
-                ) -> tuple[Any, ...]:
-                    self.calls.append("list_pending_subagent_inputs")
-                    return ()
-
-                async def list_pending_subagent_approvals(
-                    self, session_id: str, owner_id: str, parent_run_id: str
-                ) -> tuple[Any, ...]:
-                    self.calls.append("list_pending_subagent_approvals")
-                    return ()
-
-                async def list_events(
+                async def list_visible_events(
                     self,
                     session_id: str,
                     owner_id: str,
@@ -2182,13 +2190,15 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                     after_sequence: int,
                     limit: int,
                     through_sequence: int | None = None,
-                ) -> tuple[RunEvent, ...]:
-                    del session_id, owner_id, run_id, after_sequence, limit, through_sequence
-                    self.calls.append("list_events")
+                ) -> tuple[RunEvent, ...] | None:
+                    del session_id, owner_id, after_sequence, limit, through_sequence
+                    self.calls.append("list_visible_events")
+                    if run_id != "r_direct":
+                        return None
                     return (
                         RunEvent(
                             id="e_1",
-                            run_id="r_legacy",
+                            run_id="r_direct",
                             sequence=1,
                             type="queued",
                             created_at=NOW,
@@ -2196,25 +2206,18 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                         ),
                     )
 
-            legacy_repo = _LegacyRunRepo()
-            legacy_service = RunService(cast(RunRepository, legacy_repo))
-            legacy_events = await legacy_service.events(
-                "s_1", "u_1", "r_legacy", after_sequence=0, limit=10
+            direct_repo = _DirectPortRunRepo()
+            direct_service = RunService(cast(RunRepository, direct_repo))
+            direct_events = await direct_service.events(
+                "s_1", "u_1", "r_direct", after_sequence=0, limit=10
             )
-            assert len(legacy_events) == 1
-            assert legacy_repo.calls == ["get", "list_events"]
+            assert len(direct_events) == 1
+            assert direct_repo.calls == ["list_visible_events"]
 
-            legacy_repo.calls.clear()
-            legacy_details = await legacy_service.get("s_1", "u_1", "r_legacy")
-            assert legacy_details.run.id == "r_legacy"
-            assert legacy_repo.calls == [
-                "get",
-                "get_pending_input",
-                "list_pending_approvals",
-                "list_subagent_tasks",
-                "list_pending_subagent_inputs",
-                "list_pending_subagent_approvals",
-            ]
+            direct_repo.calls.clear()
+            direct_details = await direct_service.get("s_1", "u_1", "r_direct")
+            assert direct_details.run.id == "r_direct"
+            assert direct_repo.calls == ["get_details"]
         finally:
             await engine.dispose()
 
@@ -2222,12 +2225,12 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
 
 
 # ---------------------------------------------------------------------------
-# 5. 模块 A.2.3：ModelProfileRepository 只读接口去 FOR SHARE 与鉴权边界
+# 5. 模块 A.2.3：ModelProfileRepository 只读与写事务无锁鉴权复核边界
 # ---------------------------------------------------------------------------
 
 
 def test_model_profile_readonly_methods_drop_row_locks_and_enforce_auth() -> None:
-    """验证 list/list_with_default/get_default_id 无 FOR SHARE/FOR UPDATE，写接口保锁且鉴权严格。"""
+    """验证只读与写接口均通过无锁 JOIN 复核管理员（不对认证表加行锁）且鉴权严格。"""
 
     async def _scenario() -> None:
         engine, factory = await _create_sqlite_db()
@@ -2383,7 +2386,7 @@ def test_model_profile_readonly_methods_drop_row_locks_and_enforce_auth() -> Non
             )
             valid_actor = _actor("u_admin", "ses_valid")
 
-            # 先通过写方法创建一条模型并置默认，验证写方法仍持 FOR SHARE + 显式事务
+            # 先通过写方法创建一条模型并置默认，验证写方法开启显式事务且无 FOR SHARE 行锁
             pg_sqls.clear()
             begin_calls = 0
             created = await repo.create(
@@ -2398,7 +2401,10 @@ def test_model_profile_readonly_methods_drop_row_locks_and_enforce_auth() -> Non
                 ),
             )
             assert begin_calls == 1
-            assert any("FOR SHARE" in sql for sql in pg_sqls)
+            assert pg_sqls, "create 应执行无锁管理员复核 SQL"
+            assert all("FOR SHARE" not in sql and "FOR UPDATE" not in sql for sql in pg_sqls), (
+                f"create 不应对认证表申请行锁: {pg_sqls}"
+            )
             async with factory() as session, session.begin():
                 session.add(DefaultModelProfileModel(singleton_id=1, profile_id=created.id))
 
@@ -2421,7 +2427,7 @@ def test_model_profile_readonly_methods_drop_row_locks_and_enforce_auth() -> Non
                     f"{method_name} 不应申请行锁: {pg_sqls}"
                 )
 
-            # 验证全部异常鉴权场景在三大只读接口均抛出 ModelProfileAuthorizationError
+            # 验证全部异常鉴权场景在只读与写接口均抛出 ModelProfileAuthorizationError
             invalid_actors = (
                 _actor("u_admin", "ses_revoked"),
                 _actor("u_admin", "ses_expired"),
@@ -2437,14 +2443,358 @@ def test_model_profile_readonly_methods_drop_row_locks_and_enforce_auth() -> Non
                     await repo.list_with_default(bad_actor)
                 with pytest.raises(ModelProfileAuthorizationError):
                     await repo.get_default_id(bad_actor)
+                with pytest.raises(ModelProfileAuthorizationError):
+                    await repo.set_enabled(bad_actor, created.id, False)
 
-            # 再次确认写方法（set_enabled）仍保留 FOR SHARE 锁守卫
+            # 再次确认写方法（set_enabled）使用无锁单条 JOIN 复核身份（不申请 FOR SHARE）
             pg_sqls.clear()
             begin_calls = 0
             toggled = await repo.set_enabled(valid_actor, created.id, False)
             assert toggled.enabled is False
             assert begin_calls == 1
-            assert any("FOR SHARE" in sql for sql in pg_sqls)
+            assert all("FOR SHARE" not in sql for sql in pg_sqls), (
+                f"set_enabled 不应对认证表申请 FOR SHARE 行锁: {pg_sqls}"
+            )
+        finally:
+            await engine.dispose()
+
+    _run(_scenario())
+
+
+def test_skill_repository_write_transactions_verify_auth_once_without_row_locks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 Skill 管理写事务仅执行 1 次无锁身份复核，消除同事务重复鉴权与 FOR SHARE 锁。"""
+    from unittest.mock import patch
+
+    from domain.skill.model import SkillFormat
+
+    async def _scenario() -> None:
+        engine, factory = await _create_sqlite_db(monkeypatch)
+        try:
+            await _seed_org_and_users(factory)
+            async with factory() as session, session.begin():
+                session.add_all(
+                    [
+                        AuthSessionModel(
+                            id="ses_super",
+                            user_id="u_super",
+                            token_hash="h_super_skill",
+                            expires_at=NOW + timedelta(hours=1),
+                            revoked_time=None,
+                            created_at=NOW,
+                        ),
+                        AuthSessionModel(
+                            id="ses_dept_admin",
+                            user_id="u_admin_sub",
+                            token_hash="h_dept_admin_skill",
+                            expires_at=NOW + timedelta(hours=1),
+                            revoked_time=None,
+                            created_at=NOW,
+                        ),
+                    ]
+                )
+
+            pg_sqls: list[str] = []
+
+            class _InspectingSession:
+                def __init__(self, inner: AsyncSession) -> None:
+                    self._inner = inner
+
+                async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if hasattr(statement, "compile"):
+                        pg_sqls.append(str(statement.compile(dialect=_PG_DIALECT)))
+                    return await self._inner.scalar(statement, *args, **kwargs)
+
+                async def scalars(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if hasattr(statement, "compile"):
+                        pg_sqls.append(str(statement.compile(dialect=_PG_DIALECT)))
+                    return await self._inner.scalars(statement, *args, **kwargs)
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+            @asynccontextmanager
+            async def _inspecting_factory() -> Any:
+                async with factory() as s:
+                    yield _InspectingSession(s)
+
+            repo = SqlAlchemySkillRepository(cast(Any, _inspecting_factory))
+            super_actor = AuthContext(
+                user=User(
+                    id="u_super",
+                    email="super@example.com",
+                    password_hash="h",
+                    display_name="Super",
+                    status=UserStatus.ACTIVE,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    role=UserRole.SUPER_ADMIN,
+                ),
+                session_id="ses_super",
+            )
+            dept_actor = AuthContext(
+                user=User(
+                    id="u_admin_sub",
+                    email="admin.sub@acme.test",
+                    password_hash="h",
+                    display_name="DeptAdmin",
+                    status=UserStatus.ACTIVE,
+                    created_at=NOW,
+                    updated_at=NOW,
+                    role=UserRole.DEPT_ADMIN,
+                ),
+                session_id="ses_dept_admin",
+            )
+            dep_ok = DependencyCheck(
+                status=DependencyCheckStatus.SATISFIED,
+                python_version="3.12.0",
+                python_implementation="CPython",
+                checked_at=NOW,
+            )
+            pkg_manifest = SkillPackageManifest(
+                slug="pkg-skill",
+                name="Pkg Skill",
+                description="desc",
+                guide="# guide",
+                files=(
+                    PackageResource(
+                        path="SKILL.md",
+                        size_bytes=7,
+                        sha256="a" * 64,
+                        text=True,
+                    ),
+                ),
+            )
+            md_manifest = SkillPackageManifest(
+                slug="md-skill",
+                name="MD Skill",
+                description="desc",
+                guide="# md guide",
+                files=(
+                    PackageResource(
+                        path="SKILL.md",
+                        size_bytes=10,
+                        sha256="c" * 64,
+                        text=True,
+                    ),
+                ),
+            )
+
+            def _assert_single_lock_free_auth(op_name: str) -> None:
+                auth_join_sqls = [sql for sql in pg_sqls if "JOIN auth_sessions" in sql]
+                assert len(auth_join_sqls) == 1, f"{op_name} 应仅执行 1 次身份复核: {pg_sqls}"
+                assert all(
+                    "FOR SHARE" not in sql and "FOR UPDATE" not in sql for sql in auth_join_sqls
+                ), f"{op_name} 身份复核不得申请行锁: {auth_join_sqls}"
+
+            with patch("adapter.auth.repository.transaction_guard.now_utc", return_value=NOW):
+                # 1) 创建包技能 + add_version
+                await repo.create_skill(
+                    skill_id="sk_pkg",
+                    version_id="skv_pkg_1",
+                    label="v1",
+                    manifest=pkg_manifest,
+                    object_key="skills/sk_pkg/v1.zip",
+                    package_sha256="a" * 64,
+                    dependency_check=dep_ok,
+                    actor=super_actor,
+                    idempotency_key="imp_pkg_1",
+                    request_fingerprint="fp_pkg_1",
+                    created_at=NOW,
+                    scope=SkillScope.COMPANY,
+                    format=SkillFormat.PACKAGE,
+                )
+                pg_sqls.clear()
+                added = await repo.add_version(
+                    "sk_pkg",
+                    version_id="skv_pkg_2",
+                    label="v2",
+                    manifest=pkg_manifest,
+                    object_key="skills/sk_pkg/v2.zip",
+                    package_sha256="b" * 64,
+                    dependency_check=dep_ok,
+                    actor=super_actor,
+                    idempotency_key="imp_pkg_2",
+                    request_fingerprint="fp_pkg_2",
+                    created_at=NOW,
+                )
+                assert added is not None
+                _assert_single_lock_free_auth("add_version")
+
+                # 2) 创建部门 Markdown 技能并验证发布、配置更新与软删均仅单次无锁鉴权
+                await repo.create_skill(
+                    skill_id="sk_md",
+                    version_id="skv_md_1",
+                    label="v1",
+                    manifest=md_manifest,
+                    object_key=None,
+                    package_sha256="c" * 64,
+                    dependency_check=dep_ok,
+                    actor=dept_actor,
+                    idempotency_key="imp_md_1",
+                    request_fingerprint="fp_md_1",
+                    created_at=NOW,
+                    scope=SkillScope.DEPARTMENT,
+                    owner_department_id="dept_fin",
+                    format=SkillFormat.MARKDOWN,
+                )
+                pg_sqls.clear()
+                published = await repo.publish_admin_markdown_version(
+                    "sk_md",
+                    version_id="skv_md_2",
+                    expected_revision=1,
+                    label="v2",
+                    activate=True,
+                    manifest=md_manifest,
+                    object_key=None,
+                    package_sha256="d" * 64,
+                    dependency_check=dep_ok,
+                    actor=dept_actor,
+                    idempotency_key="imp_md_2",
+                    request_fingerprint="fp_md_2",
+                    created_at=NOW,
+                )
+                assert published is not None
+                _assert_single_lock_free_auth("publish_admin_markdown_version")
+
+                pg_sqls.clear()
+                updated = await repo.update_configuration(
+                    "sk_md",
+                    expected_revision=2,
+                    enabled=True,
+                    current_version_id="skv_md_2",
+                    script_requires_approval=False,
+                    dependency_check=dep_ok,
+                    actor=dept_actor,
+                    updated_at=NOW,
+                )
+                assert updated is not None
+                _assert_single_lock_free_auth("update_configuration")
+
+                pg_sqls.clear()
+                deleted = await repo.delete_admin_skill(
+                    "sk_md",
+                    expected_revision=3,
+                    actor=dept_actor,
+                    deleted_at=NOW,
+                )
+                assert deleted is True
+                _assert_single_lock_free_auth("delete_admin_skill")
+        finally:
+            await engine.dispose()
+
+    _run(_scenario())
+
+
+def test_knowledge_repository_drops_users_row_locks_in_quota_and_claim_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 KnowledgeRepository 配额核验与 claim_job 均不对 users 表加 FOR UPDATE/FOR SHARE。"""
+
+    async def _scenario() -> None:
+        engine, factory = await _create_sqlite_db(monkeypatch)
+        try:
+            await _seed_org_and_users(factory)
+            async with factory() as session, session.begin():
+                session.add(
+                    KnowledgeBaseModel(
+                        id="kb_personal_fin",
+                        owner_id="u_fin",
+                        name="个人知识库",
+                        description="",
+                        visibility_scope=VisibilityScope.PERSONAL.value,
+                        owner_department_id=None,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+            pg_sqls: list[str] = []
+
+            class _InspectingSession:
+                def __init__(self, inner: AsyncSession) -> None:
+                    self._inner = inner
+
+                async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if hasattr(statement, "compile"):
+                        pg_sqls.append(str(statement.compile(dialect=_PG_DIALECT)))
+                    return await self._inner.scalar(statement, *args, **kwargs)
+
+                async def scalars(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if hasattr(statement, "compile"):
+                        pg_sqls.append(str(statement.compile(dialect=_PG_DIALECT)))
+                    return await self._inner.scalars(statement, *args, **kwargs)
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+            @asynccontextmanager
+            async def _inspecting_factory() -> Any:
+                async with factory() as s:
+                    yield _InspectingSession(s)
+
+            repo = KnowledgeRepository(cast(Any, _inspecting_factory))
+            pg_sqls.clear()
+            doc, _ = await repo.create_text_document(
+                owner_id="u_fin",
+                base_id="kb_personal_fin",
+                title="无锁验证文档",
+                text="正文内容",
+                request_key="req_lock_free_1",
+                request_hash="h" * 64,
+                content_hash="c" * 64,
+                document_id="doc_lock_free_1",
+                version_id="ver_lock_free_1",
+                job_id="job_lock_free_1",
+                profile_id="prof_1",
+                at=NOW,
+            )
+            assert doc.id == "doc_lock_free_1"
+            users_sqls = [sql for sql in pg_sqls if "FROM users" in sql]
+            assert len(users_sqls) == 1, f"同事务应仅核验 1 次用户存在性: {users_sqls}"
+            assert all("FOR UPDATE" not in sql and "FOR SHARE" not in sql for sql in users_sqls), (
+                f"知识库写入不得锁定 users 行: {users_sqls}"
+            )
+
+            # 校验 claim_job 的 PG SQL：对 users 无行锁，仅对 knowledge_jobs 用 SKIP LOCKED
+            claim_sqls: list[str] = []
+
+            class _ClaimInspectSession:
+                def __init__(self) -> None:
+                    self._scalar_step = 0
+
+                @asynccontextmanager
+                async def begin(self) -> Any:
+                    yield
+
+                async def scalars(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    del args, kwargs
+                    claim_sqls.append(str(statement.compile(dialect=_PG_DIALECT)))
+                    return ["u_fin"]
+
+                async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    del args, kwargs
+                    claim_sqls.append(str(statement.compile(dialect=_PG_DIALECT)))
+                    self._scalar_step += 1
+                    if self._scalar_step == 1:
+                        return "u_fin"  # users 存在性查询
+                    if self._scalar_step == 2:
+                        return 0  # active processing 计数
+                    return None  # 无可认领任务
+
+            @asynccontextmanager
+            async def _claim_factory() -> Any:
+                yield _ClaimInspectSession()
+
+            claim_repo = KnowledgeRepository(cast(Any, _claim_factory))
+            claimed = await claim_repo.claim_job(lease_seconds=60)
+            assert claimed is None
+            claim_users_sqls = [sql for sql in claim_sqls if "FROM users" in sql]
+            assert len(claim_users_sqls) == 1
+            assert all(
+                "FOR UPDATE" not in sql and "FOR SHARE" not in sql for sql in claim_users_sqls
+            ), f"claim_job 不得锁定 users 行: {claim_users_sqls}"
+            assert any("FOR UPDATE SKIP LOCKED" in sql for sql in claim_sqls)
         finally:
             await engine.dispose()
 

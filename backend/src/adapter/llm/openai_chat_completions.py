@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,13 +15,7 @@ from typing import Any, cast
 import httpx2
 import openai
 from openai import AsyncOpenAI
-from pydantic import BaseModel
 
-from adapter.llm.bounded_http import (
-    BoundedResponseTransport,
-    ResponseLimitError,
-    caused_by_response_limit,
-)
 from domain.llm.model import (
     LlmCapabilityError,
     LlmError,
@@ -53,18 +46,11 @@ from domain.llm.ports import LlmRuntimeTextProvider, LlmStreamProvider
 from infrastructure.http.retry import parse_retry_after_seconds
 
 logger = logging.getLogger(__name__)
-MAX_STREAM_CHUNKS = 8192
-MAX_RAW_EVENT_BYTES = 1024 * 1024
-MAX_TOTAL_RAW_BYTES = 4 * 1024 * 1024
+MAX_STREAM_CHUNKS = 65536
+MAX_INPUT_BYTES = 4 * 1024 * 1024
 MAX_TEXT_BYTES = 1024 * 1024
 MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
 MAX_TOOL_CALLS = 8
-MAX_DIAGNOSTIC_FRAGMENTS = 16
-_DIAGNOSTIC_DIGEST_LENGTH = 12
-_MAX_STREAM_VALUE_DEPTH = 64
-_SAFE_FINISH_REASONS = frozenset(
-    {"stop", "tool_calls", "length", "content_filter", "function_call"}
-)
 _ALLOWED_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
 _ALLOWED_IMAGE_DETAILS = frozenset({"auto", "low", "high"})
 
@@ -77,293 +63,33 @@ class _ToolCallAccumulator:
     argument_bytes: int = 0
 
 
-def _diagnostic_digest(value: str | None) -> str | None:
-    """返回不暴露原值的短 SHA-256 摘要；空值保持为空。"""
-    if not value:
-        return None
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:_DIAGNOSTIC_DIGEST_LENGTH]
-
-
-class _ToolCallDiagnostics:
-    """收集单次请求内有界、脱敏的工具 index/id 分片摘要。"""
-
-    def __init__(self) -> None:
-        """初始化请求级计数、最多八个 index 的 id 摘要和少量位置样本。"""
-        # 仅在 DEBUG 开启时采集分片 SHA-256 与位置样本，避免生产流式热路径额外开销。
-        self._enabled = logger.isEnabledFor(logging.DEBUG)
-        self.chunk_count = 0
-        self.fragment_count = 0
-        self.dropped_positions = 0
-        self._index_to_id: dict[int, str | None] = {}
-        self.duplicate_id_count = 0
-        self.id_change_count = 0
-        self.positions: list[dict[str, object]] = []
-        self.finish_reasons: set[str] = set()
-        self.outcome = "incomplete"
-        self.error_code: str | None = None
-        self._emitted = False
-
-    def observe_chunk(self) -> None:
-        """在任何解析前记录本次请求已尝试读取的分片序号。"""
-        if not self._enabled:
-            return
-        self.chunk_count += 1
-
-    def observe_finish_reason(self, value: Any) -> None:
-        """记录归一化的 choice 完成原因。"""
-        if not self._enabled:
-            return
-        self.finish_reasons.add(
-            value if isinstance(value, str) and value in _SAFE_FINISH_REASONS else "other"
-        )
-
-    def observe_fragment(
-        self,
-        *,
-        choice_index: Any,
-        fragment_position: int,
-        fragment: Any,
-    ) -> None:
-        """旁路记录工具 index/id 关系，不复用 parser 的调用内容状态。"""
-        if not self._enabled:
-            return
-        self.fragment_count += 1
-        raw_index = getattr(fragment, "index", None)
-        index = (
-            raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else None
-        )
-        raw_choice_index = choice_index if isinstance(choice_index, int) else None
-        function = getattr(fragment, "function", None)
-        call_id = getattr(fragment, "id", None)
-        name = getattr(function, "name", None)
-        arguments = getattr(function, "arguments", None)
-        id_digest = _diagnostic_digest(call_id if isinstance(call_id, str) else None)
-        name_digest = _diagnostic_digest(name if isinstance(name, str) else None)
-        argument_bytes = len(arguments.encode("utf-8")) if isinstance(arguments, str) else 0
-
-        relation = "index_invalid"
-        if index is not None:
-            existing = index in self._index_to_id
-            if existing or len(self._index_to_id) < MAX_TOOL_CALLS:
-                relation = (
-                    "same_index_continuation"
-                    if existing
-                    else "independent_call"
-                    if self._index_to_id
-                    else "new_index"
-                )
-                previous_id_digest = self._index_to_id.get(index)
-                if id_digest is not None:
-                    duplicate_id = any(
-                        other_index != index and other_id_digest == id_digest
-                        for other_index, other_id_digest in self._index_to_id.items()
-                    )
-                    if duplicate_id:
-                        relation = "duplicate_id_across_index"
-                        self.duplicate_id_count += 1
-                    elif previous_id_digest is not None and previous_id_digest != id_digest:
-                        relation = "same_index_id_changed"
-                        self.id_change_count += 1
-                    self._index_to_id[index] = id_digest
-                elif not existing:
-                    self._index_to_id[index] = None
-            else:
-                relation = "index_limit"
-
-        if len(self.positions) < MAX_DIAGNOSTIC_FRAGMENTS:
-            self.positions.append(
-                {
-                    "chunk_sequence": self.chunk_count,
-                    "choice_index": raw_choice_index,
-                    "fragment_position": fragment_position,
-                    "call_index": index,
-                    "relation": relation,
-                    "has_id": id_digest is not None,
-                    "id_sha256": id_digest,
-                    "has_name": name_digest is not None,
-                    "name_sha256": name_digest,
-                    "argument_bytes": argument_bytes,
-                }
-            )
-        else:
-            self.dropped_positions += 1
-
-    def emit(self) -> None:
-        """在请求结束时最多写一条不含正文、身份原值或连接配置的日志。"""
-        if not self._enabled or self._emitted or self.fragment_count == 0:
-            return
-        self._emitted = True
-        payload = {
-            "event": "llm_chat_stream_diagnostic",
-            "protocol": "chat_completions",
-            "outcome": self.outcome,
-            "error_code": self.error_code,
-            "chunks_observed": self.chunk_count,
-            "finish_reasons": sorted(self.finish_reasons),
-            "index_count": len(self._index_to_id),
-            "totals": {
-                "fragment_count": self.fragment_count,
-                "duplicate_id_count": self.duplicate_id_count,
-                "id_change_count": self.id_change_count,
-            },
-            "calls": [
-                {"call_index": index, "id_sha256": id_digest}
-                for index, id_digest in sorted(self._index_to_id.items())
-            ],
-            "positions": self.positions,
-            "truncated": self.dropped_positions > 0,
-            "dropped_positions": self.dropped_positions,
-        }
-        logger.info(
-            "llm_chat_stream_diagnostic %s",
-            json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
-        )
-
-    def record_completed(self) -> None:
-        """标记本次流式调用已完整成功结束。"""
-        self.outcome = "completed"
-
-    def record_cancelled(self) -> None:
-        """标记本次流式调用被取消或超时中断。"""
-        self.outcome = "cancelled"
-
-    def record_rejected(self, error: Exception) -> None:
-        """记录流式调用被拒绝的结果，并将错误码清洗为固定安全格式。"""
-        self.outcome = "rejected"
-        if isinstance(error, LlmError):
-            code = error.code
-            self.error_code = (
-                code
-                if code.isascii()
-                and 1 <= len(code) <= 80
-                and all(
-                    character.islower() or character.isdigit() or character == "_"
-                    for character in code
-                )
-                else "llm_error"
-            )
-        else:
-            self.error_code = "llm_provider_error"
-
-
 def _retry_after_seconds(value: str | None, now: datetime | None = None) -> float | None:
     """解析 Retry-After 秒数或 HTTP 日期；无效值不提供重试建议。"""
     return parse_retry_after_seconds(value, now=now)
 
 
 def _json_value(value: Any) -> Any:
-    """将 SDK 分片及轻量映射转换为可计量的 JSON 值。"""
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", exclude_none=True)
+    """将工具调用参数中的只读映射或嵌套序列转为标准 JSON 可序列化对象。"""
     if isinstance(value, Mapping):
         return {str(key): _json_value(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_json_value(item) for item in value]
-    if hasattr(value, "__dict__"):
-        return {key: _json_value(item) for key, item in vars(value).items()}
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise LlmProtocolError("llm_stream_event_invalid")
 
 
-def _estimate_json_string_bytes(value: str) -> int:
-    """估算 JSON 字符串含首尾引号的 UTF-8 字节数；纯 ASCII 走零拷贝 len()。"""
-    return (len(value) if value.isascii() else len(value.encode("utf-8"))) + 2
-
-
-def _estimate_stream_value_bytes(value: Any, *, depth: int = 0) -> int:
-    """零中间字典/JSON 分配地递归估算流式分片近似 JSON UTF-8 字节数。"""
-    if depth > _MAX_STREAM_VALUE_DEPTH:
-        raise LlmProtocolError("llm_stream_event_invalid")
-    if value is None:
-        return 4
-    if isinstance(value, str):
-        return _estimate_json_string_bytes(value)
-    if isinstance(value, bool):
-        return 4 if value else 5
-    if isinstance(value, int):
-        return len(str(value))
-    if isinstance(value, float):
-        # 严格沿用 allow_nan=False 协议校验，拒绝 NaN / Inf。
-        if not math.isfinite(value):
-            raise LlmProtocolError("llm_stream_event_invalid")
-        return len(repr(value))
-    if isinstance(value, BaseModel):
-        # OpenAI SDK Pydantic 模型直接遍历 __dict__ 与 model_extra（跳过 None），
-        # 消除每分片 model_dump(mode="json") + json.dumps 的中间对象分配。
-        total = 2
-        first = True
-        next_depth = depth + 1
-        for key, item in value.__dict__.items():
-            if item is None:
-                continue
-            if not first:
-                total += 1
-            first = False
-            total += (
-                _estimate_json_string_bytes(key)
-                + 1
-                + _estimate_stream_value_bytes(item, depth=next_depth)
-            )
-        extra = value.model_extra
-        if extra:
-            for key, item in extra.items():
-                if item is None:
-                    continue
-                if not first:
-                    total += 1
-                first = False
-                key_str = key if isinstance(key, str) else str(key)
-                total += (
-                    _estimate_json_string_bytes(key_str)
-                    + 1
-                    + _estimate_stream_value_bytes(item, depth=next_depth)
-                )
-        return total
-    if isinstance(value, Mapping):
-        total = 2
-        first = True
-        next_depth = depth + 1
-        for key, item in value.items():
-            if not first:
-                total += 1
-            first = False
-            key_str = key if isinstance(key, str) else str(key)
-            total += (
-                _estimate_json_string_bytes(key_str)
-                + 1
-                + _estimate_stream_value_bytes(item, depth=next_depth)
-            )
-        return total
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        total = 2
-        next_depth = depth + 1
-        for index, item in enumerate(value):
-            if index:
-                total += 1
-            total += _estimate_stream_value_bytes(item, depth=next_depth)
-        return total
-    if hasattr(value, "model_dump"):
-        return _estimate_stream_value_bytes(
-            value.model_dump(mode="json", exclude_none=True),
-            depth=depth + 1,
-        )
-    if hasattr(value, "__dict__"):
-        # 兼容单测使用的 SimpleNamespace 等轻量属性容器。
-        total = 2
-        first = True
-        next_depth = depth + 1
-        for key, item in vars(value).items():
-            if not first:
-                total += 1
-            first = False
-            total += (
-                _estimate_json_string_bytes(key)
-                + 1
-                + _estimate_stream_value_bytes(item, depth=next_depth)
-            )
-        return total
-    raise LlmProtocolError("llm_stream_event_invalid")
+def _plain_text_content(message: LlmMessage) -> str:
+    """提取 assistant（含工具调用）或 tool 消息的纯文本内容并校验不包含非文本部件。"""
+    text = message.content
+    if not message.content_parts:
+        return text
+    extra_parts: list[str] = []
+    for part in message.content_parts:
+        if not isinstance(part, LlmTextPart) or not isinstance(part.text, str):
+            raise LlmProtocolError("llm_chat_image_invalid")
+        extra_parts.append(part.text)
+    return text + "".join(extra_parts)
 
 
 class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
@@ -404,15 +130,12 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
             )
         except (TypeError, ValueError, UnicodeError):
             raise LlmRequestError() from None
-        if request_bytes > MAX_TOTAL_RAW_BYTES:
+        if request_bytes > MAX_INPUT_BYTES:
             raise LlmRequestError("llm_input_too_large")
         semaphore = self._semaphore_for(config)
         timeout = self._request_timeout(config, request)
         request_parameters = self._complete_request_parameters(
-            config,
-            messages,
-            request,
-            timeout=timeout,
+            config, messages, request, timeout=timeout
         )
         acquired = False
         timeout_scope = asyncio.timeout(timeout)
@@ -460,9 +183,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                     try:
                         # 只发起一次流式请求（SDK 重试已禁用），重试策略由执行器负责。
                         request_parameters = self._stream_request_parameters(
-                            config,
-                            request,
-                            timeout=timeout,
+                            config, request, timeout=timeout
                         )
                         stream = await async_client.chat.completions.create(**request_parameters)
                     except asyncio.CancelledError:
@@ -471,7 +192,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                         raise
                     except Exception as error:
                         self._raise_provider_error(error)
-                    # 事件转换器负责分片重组、体积上限与协议校验。
+                    # 事件转换器负责分片重组、文本/工具体积上限与协议校验。
                     yield self._events(stream, runtime)
             except asyncio.CancelledError:
                 raise
@@ -526,12 +247,15 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         identity = (runtime.version.base_url, hashlib.sha256(runtime.api_key.encode()).hexdigest())
         client = self._clients.get(identity)
         if client is None:
+            # 使用标准 httpx2 异步客户端（禁重定向、有界连接池、允许常规 gzip 协商）；
+            # 流式文本、工具参数、分片数上限均在应用层强制校验。
             http_client = httpx2.AsyncClient(
-                headers={"accept-encoding": "identity"},
-                transport=BoundedResponseTransport(
-                    httpx2.AsyncHTTPTransport(),
-                    MAX_TOTAL_RAW_BYTES,
-                    event_limit=MAX_RAW_EVENT_BYTES,
+                follow_redirects=False,
+                timeout=httpx2.Timeout(30.0, connect=10.0),
+                limits=httpx2.Limits(
+                    max_connections=32,
+                    max_keepalive_connections=16,
+                    keepalive_expiry=30.0,
                 ),
             )
             client = AsyncOpenAI(
@@ -556,8 +280,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
             "model": config.model,
             "messages": messages,
             "max_tokens": request.max_output_tokens or config.max_output_tokens,
-            # 显式覆盖 SDK 默认 600 秒，使 HTTP 超时与本次 Run/Profile
-            # deadline 一致；客户端仍可按 base_url 和密钥安全复用。
+            # 显式覆盖 SDK 默认 600 秒，使 HTTP 超时与本次 Run/Profile deadline 一致。
             "timeout": timeout,
         }
         if config.temperature is not None:
@@ -573,15 +296,9 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         *,
         timeout: float,
     ) -> dict[str, Any]:
-        """构造无工具、非流式的完整响应请求参数。"""
-        # 严格遵循 OpenAI Chat Completions 规范：无工具请求不发送空 tools 与孤立 tool_choice。
+        """构造无工具、非流式的完整响应请求参数（无工具时不发送空 tools/tool_choice）。"""
         return {
-            **cls._common_request_parameters(
-                config,
-                messages,
-                request,
-                timeout=timeout,
-            ),
+            **cls._common_request_parameters(config, messages, request, timeout=timeout),
             "stream": False,
         }
 
@@ -595,18 +312,14 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         """构造携带工具配置与 usage 尾分片的流式请求参数。"""
         parameters: dict[str, Any] = {
             **self._common_request_parameters(
-                config,
-                self._messages(request.messages),
-                request,
-                timeout=timeout,
+                config, self._messages(request.messages), request, timeout=timeout
             ),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
         tool_choice = self._tool_choice(request)
         tools = self._tools(request)
-        # 仅在提供至少一个工具定义时才发送 tools、tool_choice 与 parallel_tool_calls，
-        # 避免严格 OpenAI 兼容网关拒绝空 tools 数组或无工具时的 tool_choice 字段。
+        # 仅在提供至少一个工具定义时才发送 tools、tool_choice 与 parallel_tool_calls。
         if tools:
             parameters["tools"] = tools
             parameters["tool_choice"] = tool_choice
@@ -625,17 +338,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         )
 
     def _complete_response(self, response: Any, config: ModelProfileVersion) -> LlmResponse:
-        """校验非流式响应并转换为唯一文本结果。"""
-        try:
-            response_bytes = len(
-                json.dumps(_json_value(response), ensure_ascii=False, allow_nan=False).encode(
-                    "utf-8"
-                )
-            )
-        except (TypeError, ValueError, UnicodeError):
-            raise LlmProtocolError("llm_response_invalid") from None
-        if response_bytes > MAX_TOTAL_RAW_BYTES:
-            raise LlmProtocolError("llm_response_too_large")
+        """校验非流式响应并转换为唯一文本结果（强制 1 MiB 文本上限）。"""
         choices = getattr(response, "choices", ())
         if not isinstance(choices, Sequence) or len(choices) != 1:
             raise LlmProtocolError("llm_response_invalid")
@@ -678,9 +381,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 if part.text:
                     parts.append({"type": "text", "text": part.text})
             elif isinstance(part, LlmImagePart):
-                # 严格校验 MIME 白名单、非空 ASCII base64 与 detail 枚举；
-                # 使用 C 层 strip/split 快速检测全部 ASCII 空白符，避免逐字符遍历阻塞事件循环。
-                # 校验失败只返回固定安全错误码，绝不打印或回显 data_base64。
+                # 严格校验 MIME 白名单、无空白 ASCII base64 与 detail 枚举，绝不回显 data_base64。
                 data_base64 = part.data_base64
                 if (
                     part.mime_type not in _ALLOWED_IMAGE_MIME_TYPES
@@ -703,42 +404,22 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 )
             else:
                 raise LlmProtocolError("llm_chat_image_invalid")
-        if not parts:
-            return ""
-        return parts
+        return parts if parts else ""
 
     @classmethod
     def _messages(cls, messages: tuple[LlmMessage, ...]) -> list[dict[str, Any]]:
         """将领域消息转换为 Chat Completions 消息序列。"""
         result: list[dict[str, Any]] = []
-        pending_call_ids: set[str] = set()
         for message in messages:
             role = message.role.value
             # 视觉图片只能通过 USER 角色发送，严禁出现在 SYSTEM / ASSISTANT / TOOL 消息中。
             if message.has_image_parts() and role != LlmRole.USER.value:
                 raise LlmProtocolError("llm_chat_image_role_invalid")
-            if message.tool_calls and role != LlmRole.ASSISTANT.value:
-                raise LlmProtocolError("llm_chat_tool_calls_role_invalid")
             if message.tool_calls:
-                call_ids = [call.call_id for call in message.tool_calls]
-                if (
-                    any(not call.call_id or not call.name for call in message.tool_calls)
-                    or len(set(call_ids)) != len(call_ids)
-                    or pending_call_ids.intersection(call_ids)
-                ):
-                    raise LlmProtocolError("llm_chat_tool_calls_invalid")
-                assistant_text = message.content
-                if message.content_parts:
-                    extra_parts: list[str] = []
-                    for part in message.content_parts:
-                        if not isinstance(part, LlmTextPart) or not isinstance(part.text, str):
-                            raise LlmProtocolError("llm_chat_image_invalid")
-                        extra_parts.append(part.text)
-                    assistant_text = assistant_text + "".join(extra_parts)
                 result.append(
                     {
                         "role": "assistant",
-                        "content": assistant_text or None,
+                        "content": _plain_text_content(message) or None,
                         "tool_calls": [
                             {
                                 "id": call.call_id,
@@ -756,33 +437,18 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                         ],
                     }
                 )
-                pending_call_ids.update(call_ids)
-                continue
-            if role == LlmRole.TOOL.value:
-                if not message.tool_call_id or message.tool_call_id not in pending_call_ids:
-                    raise LlmProtocolError("llm_chat_tool_result_orphaned")
-                pending_call_ids.remove(message.tool_call_id)
-                tool_text = message.content
-                if message.content_parts:
-                    extra_parts = []
-                    for part in message.content_parts:
-                        if not isinstance(part, LlmTextPart) or not isinstance(part.text, str):
-                            raise LlmProtocolError("llm_chat_image_invalid")
-                        extra_parts.append(part.text)
-                    tool_text = tool_text + "".join(extra_parts)
+            elif role == LlmRole.TOOL.value:
                 result.append(
                     {
                         "role": "tool",
                         "tool_call_id": message.tool_call_id,
-                        "content": tool_text,
+                        "content": _plain_text_content(message),
                     }
                 )
             elif message.content_parts:
                 result.append({"role": role, "content": cls._serialize_content_parts(message)})
             else:
                 result.append({"role": role, "content": message.content})
-        if pending_call_ids:
-            raise LlmProtocolError("llm_chat_tool_result_missing")
         return result
 
     @staticmethod
@@ -802,7 +468,7 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
 
     @staticmethod
     def _tool_choice(request: LlmRequest) -> str | dict[str, Any]:
-        """Map the domain choice to the actual Chat Completions wire value."""
+        """将领域 tool_choice 映射为 Chat Completions 协议值。"""
         if request.tool_choice in {"auto", "none", "required"}:
             return request.tool_choice
         if request.tool_choice.startswith("tool:"):
@@ -811,27 +477,6 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
                 raise LlmRequestError("llm_tool_choice_invalid")
             return {"type": "function", "function": {"name": name}}
         raise LlmRequestError("llm_tool_choice_invalid")
-
-    @staticmethod
-    def _measure_stream_chunk(
-        chunk: Any,
-        chunk_count: int,
-        total_raw_bytes: int,
-    ) -> tuple[int, int]:
-        """执行分片数量、单分片和累计原始字节检查；动态读取模块级上限兼容单测 monkeypatch。"""
-        chunk_count += 1
-        if chunk_count > MAX_STREAM_CHUNKS:
-            raise LlmProtocolError("llm_stream_too_large")
-        try:
-            chunk_bytes = _estimate_stream_value_bytes(chunk)
-        except (TypeError, ValueError, UnicodeError):
-            raise LlmProtocolError("llm_stream_event_invalid") from None
-        if chunk_bytes > MAX_RAW_EVENT_BYTES:
-            raise LlmProtocolError("llm_stream_event_too_large")
-        total_raw_bytes += chunk_bytes
-        if total_raw_bytes > MAX_TOTAL_RAW_BYTES:
-            raise LlmProtocolError("llm_stream_too_large")
-        return chunk_count, total_raw_bytes
 
     async def _iter_chunks(self, stream: Any) -> AsyncIterator[Any]:
         """安全迭代上游异步流，并将供应商异常映射为固定安全错误码。"""
@@ -936,111 +581,75 @@ class OpenAIChatCompletionsAdapter(LlmStreamProvider, LlmRuntimeTextProvider):
         self, stream: Any, runtime: RuntimeModelProfile
     ) -> AsyncIterator[LlmStreamEvent]:
         """重组分片调用，等待结束 chunk 后才发出完整结果。"""
-        # 分片文本与工具调用参数先累积，只有完整结束后才产出最终 LlmResponse。
+        # 应用层聚焦分片计数、文本输出体积与工具调用数量/参数体积上限。
         text_parts: list[str] = []
         calls: dict[int, _ToolCallAccumulator] = {}
         finish_reason: str | None = None
         usage: LlmUsage | None = None
         response_id: str | None = None
-        total_raw_bytes = 0
         text_bytes = 0
         chunk_count = 0
-        diagnostics = _ToolCallDiagnostics()
-        try:
-            async for chunk in self._iter_chunks(stream):
-                diagnostics.observe_chunk()
-                # 对分片数量、单片体积与累计体积设上限，防止异常流耗尽资源。
-                chunk_count, total_raw_bytes = self._measure_stream_chunk(
-                    chunk, chunk_count, total_raw_bytes
-                )
-                response_id = getattr(chunk, "id", None) or response_id
-                # 用量通常在最后一个 chunk 返回，允许覆盖为空的前值。
-                raw_usage = getattr(chunk, "usage", None)
-                if raw_usage is not None:
-                    usage = self._usage(raw_usage)
-                choices = getattr(chunk, "choices", ())
-                if not isinstance(choices, Sequence) or isinstance(
-                    choices, (str, bytes, bytearray)
-                ):
-                    raise LlmProtocolError("llm_stream_choice_invalid")
-                # 本适配器只请求单候选回答；多 choice 或非零 index 会破坏
-                # 文本/工具累积位置和最终响应语义，必须整体拒绝。
-                if len(choices) > 1:
-                    raise LlmProtocolError("llm_stream_choice_invalid")
-                if not choices:
-                    continue
-                choice = choices[0]
-                choice_index = getattr(choice, "index", None)
-                if (
-                    not isinstance(choice_index, int)
-                    or isinstance(choice_index, bool)
-                    or choice_index != 0
-                ):
-                    raise LlmProtocolError("llm_stream_choice_invalid")
-                if choice.finish_reason is not None:
-                    diagnostics.observe_finish_reason(choice.finish_reason)
-                    if finish_reason is not None and finish_reason != choice.finish_reason:
-                        raise LlmProtocolError()
-                    finish_reason = choice.finish_reason
-                delta = choice.delta
-                refusal = getattr(delta, "refusal", None)
-                if refusal:
-                    raise LlmRefusalError("llm_refusal")
-                content = getattr(delta, "content", None)
-                if content:
-                    if not isinstance(content, str):
-                        raise LlmProtocolError()
-                    # 文本累计体积受上限约束，防止超长响应进入持久化。
-                    text_bytes += len(content.encode("utf-8"))
-                    if text_bytes > MAX_TEXT_BYTES:
-                        raise LlmProtocolError("llm_response_too_large")
-                    text_parts.append(content)
-                    yield TextDelta(output_index=0, content_index=0, text=content)
-                # 工具诊断只旁路观察原始分片，不参与重组合法性判定。
-                tool_fragments = getattr(delta, "tool_calls", None) or ()
-                for position, fragment in enumerate(tool_fragments):
-                    diagnostics.observe_fragment(
-                        choice_index=choice_index,
-                        fragment_position=position,
-                        fragment=fragment,
-                    )
-                    # 工具调用按 index 累积：id/name 只出现一次，arguments 分片拼接。
-                    for tool_event in self._tool_fragment_events(calls, fragment):
-                        yield tool_event
-            for final_event in self._finalize_stream_events(
-                finish_reason=finish_reason,
-                text_parts=text_parts,
-                calls=calls,
-                model=runtime.version.model,
-                response_id=response_id,
-                usage=usage,
+
+        async for chunk in self._iter_chunks(stream):
+            chunk_count += 1
+            if chunk_count > MAX_STREAM_CHUNKS:
+                raise LlmProtocolError("llm_stream_too_large")
+            response_id = getattr(chunk, "id", None) or response_id
+            # 用量通常在最后一个 chunk 返回，允许覆盖为空的前值。
+            raw_usage = getattr(chunk, "usage", None)
+            if raw_usage is not None:
+                usage = self._usage(raw_usage)
+            choices = getattr(chunk, "choices", ())
+            if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes, bytearray)):
+                raise LlmProtocolError("llm_stream_choice_invalid")
+            # 本适配器只请求单候选回答；多 choice 或非零 index 会破坏累积语义，必须整体拒绝。
+            if len(choices) > 1:
+                raise LlmProtocolError("llm_stream_choice_invalid")
+            if not choices:
+                continue
+            choice = choices[0]
+            choice_index = getattr(choice, "index", None)
+            if (
+                not isinstance(choice_index, int)
+                or isinstance(choice_index, bool)
+                or choice_index != 0
             ):
-                if isinstance(final_event, ResponseCompleted):
-                    diagnostics.record_completed()
-                yield final_event
-        except asyncio.CancelledError:
-            diagnostics.record_cancelled()
-            raise
-        except Exception as error:
-            diagnostics.record_rejected(error)
-            raise
-        finally:
-            diagnostics.emit()
+                raise LlmProtocolError("llm_stream_choice_invalid")
+            if choice.finish_reason is not None:
+                if finish_reason is not None and finish_reason != choice.finish_reason:
+                    raise LlmProtocolError()
+                finish_reason = choice.finish_reason
+            delta = choice.delta
+            if getattr(delta, "refusal", None):
+                raise LlmRefusalError("llm_refusal")
+            content = getattr(delta, "content", None)
+            if content:
+                if not isinstance(content, str):
+                    raise LlmProtocolError()
+                # 文本累计体积受上限约束，防止超长响应进入持久化。
+                text_bytes += len(content.encode("utf-8"))
+                if text_bytes > MAX_TEXT_BYTES:
+                    raise LlmProtocolError("llm_response_too_large")
+                text_parts.append(content)
+                yield TextDelta(output_index=0, content_index=0, text=content)
+            # 工具调用按 index 累积：id/name 只出现一次，arguments 分片拼接。
+            for fragment in getattr(delta, "tool_calls", None) or ():
+                for tool_event in self._tool_fragment_events(calls, fragment):
+                    yield tool_event
+
+        for final_event in self._finalize_stream_events(
+            finish_reason=finish_reason,
+            text_parts=text_parts,
+            calls=calls,
+            model=runtime.version.model,
+            response_id=response_id,
+            usage=usage,
+        ):
+            yield final_event
 
     @staticmethod
     def _raise_provider_error(error: Exception) -> None:
         """映射供应商异常为固定安全错误码。"""
-        if isinstance(error, ResponseLimitError):
-            raise LlmProtocolError(str(error)) from None
-        if isinstance(error, openai.APIConnectionError) and caused_by_response_limit(error):
-            current: BaseException | None = error
-            visited: set[int] = set()
-            while current is not None and id(current) not in visited:
-                if isinstance(current, ResponseLimitError):
-                    raise LlmProtocolError(str(current)) from None
-                visited.add(id(current))
-                current = current.__cause__ or current.__context__
-            raise LlmProtocolError("llm_provider_error") from None
         if isinstance(error, openai.RateLimitError):
             retry_after = _retry_after_seconds(error.response.headers.get("retry-after"))
             raise LlmProviderError(

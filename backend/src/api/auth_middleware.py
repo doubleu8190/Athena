@@ -23,7 +23,6 @@ from api.security import (
     normalize_origin,
     require_admin,
     require_skill_manager,
-    verify_request_origin,
 )
 from domain.auth import Authenticator, UserRole
 
@@ -186,8 +185,8 @@ class AuthPrecheckMiddleware:
 
         overrides = self._fastapi_app.dependency_overrides if self._fastapi_app is not None else {}
 
-        # 第一道防线：写请求先做同源 Origin 校验，阻断跨站请求触达数据库或公开认证路由。
-        if method not in _SAFE_METHODS and verify_request_origin not in overrides:
+        # 第一道防线（唯一 Origin 校验源）：写请求先做同源校验，阻断跨站请求触达数据库或路由。
+        if method not in _SAFE_METHODS:
             origin_headers = _extract_origin_headers(scope)
             if origin_headers:
                 request_origin = _resolve_scope_request_origin(scope)

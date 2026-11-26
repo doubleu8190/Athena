@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
 from app.project.converter.result import project_page_to_result, project_to_result
 from app.project.model.result import ProjectPageResult, ProjectResult
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.project import (
     InvalidProjectInputError,
@@ -100,13 +101,6 @@ def _normalize_default_skill_ids(values: Sequence[str] | None) -> tuple[str, ...
     return tuple(normalized)
 
 
-def _utc_value(value: datetime) -> datetime:
-    """把时钟输出规范化为 UTC。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
 def _normalized_owner_id(owner_id: str) -> str:
     """校验服务端提供的项目所有者。"""
     normalized = owner_id.strip()
@@ -145,7 +139,7 @@ class ProjectService:
         normalized_description = _normalize_description(description)
         normalized_instructions = _normalize_instructions(instructions)
         normalized_skills = _normalize_default_skill_ids(default_skill_ids)
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         project = await self._repository.create(
             Project(
                 id=self._id_factory(),
@@ -201,7 +195,7 @@ class ProjectService:
             owner,
             project_id,
             normalized,
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
         )
         if project is None:
             raise ProjectNotFoundError("project_not_found")
@@ -250,7 +244,7 @@ class ProjectService:
             instructions=normalized_instructions,
             update_default_skills=update_default_skills,
             default_skill_ids=normalized_skills,
-            updated_at=_utc_value(self._clock()),
+            updated_at=as_utc(self._clock()),
         )
         if project is None:
             raise ProjectNotFoundError("project_not_found")
@@ -268,7 +262,7 @@ class ProjectService:
         deleted = await self._repository.soft_delete(
             owner,
             project_id,
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
             detach_sessions=detach_sessions,
         )
         if not deleted:

@@ -106,5 +106,8 @@ class RunToolRuntime(Protocol):
     ) -> None:
         """在工具结果落库失败时主动清理已上传但未发布的临时产物对象。"""
 
+    async def can_read_subagent(self, user_id: str, subagent_id: str) -> bool:
+        """调度子智能体前复核当前用户对目标 Subagent 的实时读权限。"""
+
 
 __all__ = ["RunToolRuntime"]

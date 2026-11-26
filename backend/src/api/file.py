@@ -8,7 +8,6 @@ from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
-    Depends,
     File,
     Header,
     HTTPException,
@@ -30,7 +29,7 @@ from api.dto.file import (
     SessionFileListResponse,
     SessionFileResponse,
 )
-from api.security import CurrentAuth, verify_request_origin
+from api.security import CurrentAuth
 from api.upload import UploadTooLargeError, staged_upload
 from app.file import FileInputError, SessionFileService
 from domain.file import MAX_SESSION_FILE_BYTES, SessionFile, TextFileReadError
@@ -77,19 +76,14 @@ async def _build_file_streaming_response(
             # 客户端提前断开时也必须关闭 MinIO HTTP 响应。
             await stream.aclose()
 
-    fallback = (
-        "".join(
-            character
-            if character.isascii() and (character.isalnum() or character in "._- ")
-            else "_"
-            for character in file.filename
-        ).strip()
-        or ("preview" if disposition == "inline" else "download")
-    )
+    fallback = "".join(
+        character if character.isascii() and (character.isalnum() or character in "._- ") else "_"
+        for character in file.filename
+    ).strip() or ("preview" if disposition == "inline" else "download")
     encoded = quote(file.filename, safe="")
     headers = {
         "Content-Disposition": (
-            f'{disposition}; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
+            f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
         ),
         "Content-Length": str(file.size_bytes),
         "X-Content-Type-Options": "nosniff",
@@ -109,7 +103,6 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/sessions/{session_id}/files",
         tags=["session-files"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.post("", response_model=SessionFileResponse, status_code=status.HTTP_201_CREATED)

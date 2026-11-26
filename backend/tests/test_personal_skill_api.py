@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from adapter.file.storage import FileStorageError
+from api.auth_middleware import AuthPrecheckMiddleware
 from api.security import get_current_auth
 from api.skill import build_skill_personal_router, build_skill_user_router
 from app.skill.model import SkillAdminDetails
@@ -235,6 +236,7 @@ def _client(
     actor = AuthContext(user=user, session_id="auth_demo")
     service = service or _PersonalService()
     app = FastAPI()
+    app.add_middleware(AuthPrecheckMiddleware, fastapi_app=app)
     app.dependency_overrides[get_current_auth] = lambda: actor
     app.add_exception_handler(OSError, _handle_os_error)
     app.include_router(build_skill_user_router(cast(Any, service)))
@@ -433,9 +435,7 @@ def test_personal_database_transport_failures_return_database_unavailable(
     idempotency_key: str | None,
 ) -> None:
     """个人目录和写接口的原始数据库 OSError 统一投影为 database_unavailable。"""
-    service = _FailingPersonalService(
-        ConnectionRefusedError("database password must not leak")
-    )
+    service = _FailingPersonalService(ConnectionRefusedError("database password must not leak"))
     client, _ = _client(service)
     request_options: dict[str, Any] = {}
     if payload is not None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
 from datetime import datetime
 
@@ -142,13 +141,11 @@ class SubagentService:
             visibility_scope=resolved_scope,
             owner_department_id=resolved_dept,
         )
-        if _accepts_kwarg(self._repository.create, "visibility_grants"):
-            return await self._repository.create(
-                actor,
-                profile,
-                visibility_grants=resolved_grants or (),
-            )
-        return await self._repository.create(actor, profile)
+        return await self._repository.create(
+            actor,
+            profile,
+            visibility_grants=resolved_grants or (),
+        )
 
     async def update_subagent(
         self,
@@ -251,9 +248,7 @@ class SubagentService:
                 visibility_grants=explicit_grants,
                 for_create=False,
                 existing=current,
-                preserve_existing_grants_when_none=isinstance(
-                    command.visibility_grants, UnsetType
-                ),
+                preserve_existing_grants_when_none=isinstance(command.visibility_grants, UnsetType),
             )
 
         patch = SubagentUpdatePatch(
@@ -346,7 +341,6 @@ class SubagentService:
             if unknown_tools:
                 raise SubagentValidationError("subagent_tool_not_found")
 
-
     async def _resolve_visibility(
         self,
         actor: AuthContext,
@@ -391,19 +385,6 @@ class SubagentService:
             raise SubagentAdminRequiredError() from error
         except InvalidVisibilityConfigError as error:
             raise SubagentValidationError(error.code) from error
-
-
-def _accepts_kwarg(func: object, name: str) -> bool:
-    """检查仓储回调是否支持指定关键字参数，兼容旧测试替身签名。"""
-    if not callable(func):
-        return False
-    try:
-        params = inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return False
-    return name in params or any(
-        param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()
-    )
 
 
 def _validate_page(offset: int, limit: int) -> None:

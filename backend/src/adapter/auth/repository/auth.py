@@ -476,14 +476,16 @@ class SqlAlchemyAuthRepository(AuthRepository, CurrentSessionReader):
         display_name: str | None,
         updated_at: datetime,
     ) -> User | None:
-        """复核会话有效性后仅写显示名，避免覆盖并发更新的凭据或角色。"""
+        """复核会话有效性后直接复用已锁定的用户实体更新显示名，省去冗余二次查询。"""
         async with self._session_factory() as session:
             async with session.begin():
                 guard = SqlAlchemyAuthTransactionGuard(session)
-                current_user = await guard.lock_current_session_user(user_id, session_id)
-                if current_user is None:
-                    return None
-                row = await session.get(UserModel, user_id, populate_existing=True)
+                # 直接以 FOR UPDATE 锁定用户行并复核会话，无需再次 session.get(UserModel, ...)。
+                row = await guard.lock_current_session_user_row(
+                    user_id,
+                    session_id,
+                    lock_user_for_update=True,
+                )
                 if row is None:
                     return None
                 row.display_name = display_name

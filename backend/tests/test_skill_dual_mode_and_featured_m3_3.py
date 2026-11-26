@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import sqlite3
 import zipfile
@@ -49,12 +50,17 @@ from app.skill.personal import (
 )
 from app.skill.service import SkillService
 from domain.auth import AuthProvider, UserRole, UserStatus
+from domain.file import FileStorageError
 from domain.skill import (
     DependencyCheck,
     DependencyCheckStatus,
+    PackageResource,
+    RunSkillEntry,
+    RunSkillSnapshot,
     SkillConflictError,
     SkillFormat,
     SkillPackageError,
+    SkillPackageManifest,
     SkillScope,
 )
 
@@ -192,7 +198,7 @@ def _build_zip_package(
 class _M33Harness:
     """端到端 SQLite + FastAPI 测试环境，覆盖超管、部门管理员与普通员工三层权限。"""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, *, with_object_store: bool = True) -> None:
         self._now = NOW
         self.db_path = tmp_path / "m3_3_skills.sqlite"
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.db_path}")
@@ -218,7 +224,7 @@ class _M33Harness:
         self.skill_repo = SqlAlchemySkillRepository(self.session_factory)
         self.skill_service = SkillService(
             self.skill_repo,
-            cast(Any, self.object_store),
+            cast(Any, self.object_store) if with_object_store else None,
             self.auth_repo,
             access_policy=self.access_policy,
             dependency_checker=_InstantSatisfiedChecker(self.clock),
@@ -598,9 +604,16 @@ def test_super_admin_online_markdown_create_idempotency_and_slug_conflict(
         assert co_body["current_version_label"] == "v1"
         assert co_body["current_version_id"] == co_body["versions"][0]["id"]
         assert co_body["dependency_check"]["status"] == "satisfied"
-        assert len(harness.object_store.objects) == 1
+        # 纯 Markdown 走纯数据库持久化，0 次触达 MinIO，且版本 object_key 为 None。
+        assert len(harness.object_store.objects) == 0
+        co_version = asyncio.run(harness.skill_repo.get_version(co_body["current_version_id"]))
+        assert co_version is not None
+        assert co_version.object_key is None
+        assert co_version.package_sha256 == hashlib.sha256(
+            str(company_payload["guide"]).encode("utf-8")
+        ).hexdigest()
 
-        # 2) 相同 Idempotency-Key + 相同请求体（含未传 slug）精准幂等重放，不产生重复对象
+        # 2) 相同 Idempotency-Key + 相同请求体（含未传 slug）精准幂等重放，仍 0 次触达 MinIO
         replayed_co = super_client.post(
             "/api/v1/admin/skills/markdown",
             headers={"Idempotency-Key": "md-co-1"},
@@ -609,7 +622,7 @@ def test_super_admin_online_markdown_create_idempotency_and_slug_conflict(
         assert replayed_co.status_code == 201
         assert replayed_co.json()["id"] == co_body["id"]
         assert replayed_co.json()["slug"] == co_body["slug"]
-        assert len(harness.object_store.objects) == 1
+        assert len(harness.object_store.objects) == 0
 
         # 3) 相同 Idempotency-Key 但修改任意字段（如 featured / starter_prompt）返回 409 幂等冲突
         conflict_idem = super_client.post(
@@ -661,8 +674,7 @@ def test_super_admin_online_markdown_create_idempotency_and_slug_conflict(
         assert dept_body["current_version_label"] == "v1"
         assert {g["target_id"] for g in dept_body["visibility_grants"]} == {"dept_fin", "dept_rd"}
 
-        # 5) 同部门重复显式 slug（新幂等键）返回 409 skill_slug_conflict 且清理孤儿对象
-        obj_count_before = len(harness.object_store.objects)
+        # 5) 同部门重复显式 slug（新幂等键）返回 409 skill_slug_conflict 且全程 0 次触达对象存储
         slug_conflict = super_client.post(
             "/api/v1/admin/skills/markdown",
             headers={"Idempotency-Key": "md-dept-slug-dup"},
@@ -670,8 +682,8 @@ def test_super_admin_online_markdown_create_idempotency_and_slug_conflict(
         )
         assert slug_conflict.status_code == 409
         assert slug_conflict.json() == {"detail": "skill_slug_conflict"}
-        assert len(harness.object_store.objects) == obj_count_before
-        assert len(harness.object_store.deleted_keys) >= 1
+        assert len(harness.object_store.objects) == 0
+        assert harness.object_store.deleted_keys == []
 
         # 6) 非法 slug / 非法 starter_prompt / extra 字段校验
         bad_slug_resp = super_client.post(
@@ -1778,3 +1790,232 @@ def test_upload_admission_middleware_guards_admin_markdown_endpoints() -> None:
             assert sent_stream[1]["body"] == f'{{"detail":"{expected_code}"}}'.encode()
 
     asyncio.run(_run_streaming_limit_checks())
+
+
+def test_markdown_skills_work_without_minio_while_zip_and_log_return_503(
+    tmp_path: Path,
+) -> None:
+    """无 MinIO（object_store=None）时纯 Markdown 全流程可用，ZIP 导入/资源读取均返回 503。"""
+    harness = _M33Harness(tmp_path, with_object_store=False)
+    try:
+        super_client = harness.login_client("super@acme.com")
+        fin_member = harness.login_client("fin_member@acme.com")
+
+        # 1) 管理端纯 Markdown 创建 + 发布新版本 + 用户目录读取全部成功。
+        created_admin = super_client.post(
+            "/api/v1/admin/skills/markdown",
+            headers={"Idempotency-Key": "no-minio-admin-1"},
+            json={
+                "name": "无 MinIO 公司指南",
+                "description": "脱离对象存储独立可用",
+                "guide": "# 指南 v1\n纯数据库持久化。",
+                "scope": "company",
+                "enabled": True,
+            },
+        )
+        assert created_admin.status_code == 201, created_admin.text
+        admin_skill_id = created_admin.json()["id"]
+
+        published_admin = super_client.post(
+            f"/api/v1/admin/skills/{admin_skill_id}/versions/markdown",
+            headers={"Idempotency-Key": "no-minio-admin-v2"},
+            json={
+                "name": "无 MinIO 公司指南",
+                "description": "脱离对象存储独立可用",
+                "guide": "# 指南 v2\n编辑发版零对象存储。",
+                "expected_revision": 1,
+                "activate": True,
+            },
+        )
+        assert published_admin.status_code == 201, published_admin.text
+
+        # 2) 普通员工个人 Markdown 创建 + 编辑 + 目录读取全部成功。
+        created_personal = fin_member.post(
+            "/api/v1/me/skills",
+            headers={"Idempotency-Key": "no-minio-personal-1"},
+            json={
+                "name": "无 MinIO 个人周报",
+                "description": "个人纯 Markdown 技能",
+                "guide": "# 个人周报\n只写事实。",
+            },
+        )
+        assert created_personal.status_code == 201, created_personal.text
+        personal_id = created_personal.json()["id"]
+
+        directory = fin_member.get("/api/v1/skills")
+        assert directory.status_code == 200
+        dir_ids = {item["id"] for item in directory.json()["items"]}
+        assert {admin_skill_id, personal_id} <= dir_ids
+
+        # 3) 通过 Run 快照读取纯 Markdown 的 SKILL.md 零对象存储直出。
+        async def _verify_read_without_minio() -> None:
+            snapshot = await harness.skill_service.build_run_snapshot(
+                "usr_fin_member",
+                (admin_skill_id, personal_id),
+            )
+            sliced = await harness.skill_service.read_resource(
+                snapshot,
+                skill_id=admin_skill_id,
+                path="SKILL.md",
+                offset=0,
+                limit_bytes=1024,
+            )
+            assert sliced.content == "# 指南 v2\n编辑发版零对象存储。"
+            assert sliced.eof is True
+
+        asyncio.run(_verify_read_without_minio())
+
+        # 4) ZIP 包导入在无对象存储时返回 503 file_storage_unavailable。
+        zip_bytes = _build_zip_package(
+            slug="no-minio-zip-blocked",
+            name="需要 MinIO 的脚本包",
+            description="应返回 503",
+            with_script=True,
+        )
+        zip_resp = super_client.post(
+            "/api/v1/admin/skills/import",
+            headers={"Idempotency-Key": "no-minio-zip-1"},
+            files={"package": ("blocked.zip", zip_bytes, "application/zip")},
+        )
+        assert zip_resp.status_code == 503
+        assert zip_resp.json() == {"detail": "file_storage_unavailable"}
+
+        # 5) 存量 ZIP 技能追加版本、读取 ZIP 资源与下载脚本日志在无 MinIO 时均返回 503。
+        async def _seed_zip_and_log_and_verify_503() -> tuple[str, str]:
+            actor = await _auth_context(
+                harness.session_factory,
+                harness.auth_repo,
+                "usr_super",
+            )
+            pkg_manifest = SkillPackageManifest(
+                slug="legacy-zip-skill",
+                name="存量脚本包",
+                description="用于校验无 MinIO 时 ZIP 路径返回 503",
+                guide="# 指南",
+                files=(
+                    PackageResource(
+                        path="SKILL.md",
+                        size_bytes=8,
+                        sha256="a" * 64,
+                        text=True,
+                    ),
+                ),
+            )
+            dep = DependencyCheck(
+                status=DependencyCheckStatus.SATISFIED,
+                python_version="3.12",
+                python_implementation="cpython",
+                items=(),
+                checked_at=NOW,
+            )
+            zip_skill, zip_version = await harness.skill_repo.create_skill(
+                skill_id="skill_legacy_zip",
+                version_id="skillver_legacy_zip",
+                label="v1",
+                manifest=pkg_manifest,
+                object_key="skills/aa/legacy.zip",
+                package_sha256="b" * 64,
+                dependency_check=dep,
+                actor=actor,
+                idempotency_key="seed-legacy-zip",
+                request_fingerprint="f" * 64,
+                created_at=NOW,
+                format=SkillFormat.PACKAGE,
+                enabled=True,
+            )
+            zip_snapshot = RunSkillSnapshot(
+                skills=(
+                    RunSkillEntry(
+                        skill_id=zip_skill.id,
+                        slug=zip_skill.slug,
+                        name=zip_skill.name,
+                        description=zip_skill.description,
+                        version_id=zip_version.id,
+                        version_label=zip_version.label,
+                        requires_approval=False,
+                    ),
+                ),
+                selected_skill_ids=(zip_skill.id,),
+            )
+            with pytest.raises(FileStorageError, match="file_storage_unavailable"):
+                await harness.skill_service.read_resource(
+                    zip_snapshot,
+                    skill_id=zip_skill.id,
+                    path="SKILL.md",
+                    offset=0,
+                    limit_bytes=64,
+                )
+            return zip_skill.id, zip_version.id
+
+        legacy_zip_id, _ = asyncio.run(_seed_zip_and_log_and_verify_503())
+        add_zip_resp = super_client.post(
+            f"/api/v1/admin/skills/{legacy_zip_id}/versions",
+            headers={"Idempotency-Key": "no-minio-add-ver-1"},
+            files={
+                "package": (
+                    "v2.zip",
+                    _build_zip_package(
+                        slug="legacy-zip-skill",
+                        name="存量脚本包 v2",
+                        description="应返回 503",
+                        with_script=False,
+                    ),
+                    "application/zip",
+                )
+            },
+        )
+        assert add_zip_resp.status_code == 503
+        assert add_zip_resp.json() == {"detail": "file_storage_unavailable"}
+
+        # 模拟存在脚本执行日志记录时下载日志也明确返回 503 file_storage_unavailable。
+        async def _verify_admin_log_503() -> None:
+            from domain.skill import SkillExecutionRecord, SkillExecutionStatus
+
+            original_get_exec = harness.skill_repo.get_admin_execution
+
+            async def fake_exec(call_id: str) -> SkillExecutionRecord | None:
+                del call_id
+                return SkillExecutionRecord(
+                    id="skexec_1",
+                    run_id="run_1",
+                    session_id="ses_1",
+                    tool_call_record_id="call_log_503",
+                    skill_id=legacy_zip_id,
+                    skill_version_id="skillver_legacy_zip",
+                    script_path="scripts/run.py",
+                    input_file_ids=(),
+                    parameters_sha256="a" * 64,
+                    python_version="3.12",
+                    dependency_check=DependencyCheck(
+                        status=DependencyCheckStatus.SATISFIED,
+                        python_version="3.12",
+                        python_implementation="cpython",
+                        items=(),
+                        checked_at=NOW,
+                    ),
+                    status=SkillExecutionStatus.SUCCEEDED,
+                    log_object_key="skill-logs/aa/test.log",
+                    log_truncated=False,
+                    log_error_code=None,
+                    error_code=None,
+                    cleanup_error_code=None,
+                    result_artifacts=(),
+                    created_at=NOW,
+                    finished_at=NOW,
+                )
+
+            harness.skill_repo.get_admin_execution = fake_exec  # type: ignore[method-assign]
+            try:
+                actor = await _auth_context(
+                    harness.session_factory,
+                    harness.auth_repo,
+                    "usr_super",
+                )
+                with pytest.raises(FileStorageError, match="file_storage_unavailable"):
+                    await harness.skill_service.admin_log(actor, "call_log_503")
+            finally:
+                harness.skill_repo.get_admin_execution = original_get_exec  # type: ignore[method-assign]
+
+        asyncio.run(_verify_admin_log_503())
+    finally:
+        harness.close()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from api.converter.auth import mock_users_to_response, user_result_to_response
@@ -21,7 +21,6 @@ from api.dto.auth import (
 from api.security import (
     NOT_AUTHENTICATED,
     CurrentAuth,
-    verify_request_origin,
 )
 from app.auth import (
     AuthProviderDisabledError,
@@ -206,7 +205,6 @@ def build_auth_router(
     router = APIRouter(
         prefix="/api/v1/auth",
         tags=["auth"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("/providers", response_model=AuthProvidersResponse)

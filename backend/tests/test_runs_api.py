@@ -22,6 +22,7 @@ from domain.run.model import (
     RunApprovalResumedPayload,
     RunCancelledPayload,
     RunCancelRequestedPayload,
+    RunDetails,
     RunEvent,
     RunInputCall,
     RunInputRequest,
@@ -251,6 +252,21 @@ class InMemoryRunRepository:
             return None
         return self.runs.get((owner_id, session_id, run_id))
 
+    async def get_details(self, session_id: str, owner_id: str, run_id: str) -> RunDetails | None:
+        run = await self.get(session_id, owner_id, run_id)
+        if run is None:
+            return None
+        pending_input = await self.get_pending_input(session_id, owner_id, run_id)
+        pending_approvals = await self.list_pending_approvals(session_id, owner_id, run_id) or ()
+        return RunDetails(
+            run=run,
+            pending_input=pending_input,
+            pending_approvals=pending_approvals,
+            subagent_tasks=(),
+            pending_subagent_inputs=(),
+            pending_subagent_approvals=(),
+        )
+
     async def get_pending_input(
         self, session_id: str, owner_id: str, run_id: str
     ) -> RunInputRequest | None:
@@ -346,12 +362,42 @@ class InMemoryRunRepository:
         return tuple(runs[:limit])
 
     async def list_events(
-        self, session_id: str, owner_id: str, run_id: str, *, after_sequence: int, limit: int
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+        through_sequence: int | None = None,
     ) -> tuple[RunEvent, ...]:
+        visible = await self.list_visible_events(
+            session_id,
+            owner_id,
+            run_id,
+            after_sequence=after_sequence,
+            limit=limit,
+            through_sequence=through_sequence,
+        )
+        return () if visible is None else visible
+
+    async def list_visible_events(
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+        through_sequence: int | None = None,
+    ) -> tuple[RunEvent, ...] | None:
         if await self.get(session_id, owner_id, run_id) is None:
-            return ()
+            return None
         return tuple(
-            event for event in self.events_by_run.get(run_id, []) if event.sequence > after_sequence
+            event
+            for event in self.events_by_run.get(run_id, [])
+            if event.sequence > after_sequence
+            and (through_sequence is None or event.sequence <= through_sequence)
         )[:limit]
 
     async def cancel(
@@ -982,3 +1028,48 @@ def test_session_delete_active_run_conflict_and_terminal_visibility() -> None:
         assert client.get(f"/api/v1/sessions/{session_id}/runs").status_code == 404
         assert client.get(f"/api/v1/sessions/{session_id}/runs/{run_id}").status_code == 404
         assert client.post(f"/api/v1/sessions/{session_id}/runs/{run_id}/cancel").status_code == 404
+
+
+def test_run_details_projects_completed_assistant_message_id_in_single_session() -> None:
+    """completed 终态 Run 详情返回 assistant_message_id，与 report_message_id 对称。"""
+    from domain.run.model import RunDetails
+
+    repository = InMemoryRunRepository()
+    from app.run.service import RunService
+
+    async def get_details(session_id: str, owner_id: str, run_id: str) -> RunDetails | None:
+        run = await repository.get(session_id, owner_id, run_id)
+        if run is None:
+            return None
+        return RunDetails(
+            run=run,
+            pending_input=None,
+            assistant_message_id=(
+                "msg_completed_reply" if run.status is RunStatus.COMPLETED else None
+            ),
+        )
+
+    repository.get_details = get_details  # type: ignore[method-assign]
+    app = create_app(
+        auth_service=make_auth_service(),
+        run_service=RunService(cast(RunRepository, repository)),
+    )
+    auth_client = AuthTestClient(app, email="completed-assistant-id@example.com")
+    with auth_client as client:
+        session_id = "session-completed-assistant-id"
+        owner_id = auth_client.user_id or ""
+        repository.sessions.add((owner_id, session_id))
+        submitted = client.post(
+            f"/api/v1/sessions/{session_id}/runs",
+            json={"request_id": "req-completed-id", "text": "hello"},
+        )
+        assert submitted.status_code == 201
+        assert submitted.json()["assistant_message_id"] is None
+        run_id = submitted.json()["id"]
+        key = (owner_id, session_id, run_id)
+        repository.runs[key] = replace(repository.runs[key], status=RunStatus.COMPLETED)
+
+        details = client.get(f"/api/v1/sessions/{session_id}/runs/{run_id}")
+
+    assert details.status_code == 200
+    assert details.json()["assistant_message_id"] == "msg_completed_reply"

@@ -15,7 +15,7 @@ from adapter.access.repository import (
     load_grants_map_in_session,
     sync_resource_grants_in_session,
 )
-from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
+from adapter.auth.repository.transaction_guard import verify_active_session_user
 from adapter.llm.model import ModelProfileVersionModel
 from adapter.subagent.converter import subagent_to_domain
 from adapter.subagent.model import SubagentModel
@@ -327,9 +327,8 @@ class SqlAlchemySubagentRepository(SubagentRepository):
 
     @staticmethod
     async def _require_admin(session: AsyncSession, actor: AuthContext) -> None:
-        """在资源写事务内以共享锁复核会话有效性及管理员角色。"""
-        guard = SqlAlchemyAuthTransactionGuard(session)
-        user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
+        """在资源写事务内以无锁单条 JOIN 复核会话有效性及管理员角色。"""
+        user = await verify_active_session_user(session, actor.user.id, actor.session_id)
         if user is None:
             raise SubagentInvalidSessionError()
         if user.role is not UserRole.SUPER_ADMIN:

@@ -8,7 +8,7 @@ from sqlalchemy import and_, func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
-from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
+from adapter.auth.repository.transaction_guard import verify_active_session_user
 from adapter.system_prompt.converter import system_prompt_version_to_domain
 from adapter.system_prompt.model import (
     SystemPromptSettingModel,
@@ -247,9 +247,8 @@ class SqlAlchemySystemPromptRepository(SystemPromptRepository):
 
     @staticmethod
     async def _require_admin(session: AsyncSession, actor: AuthContext) -> None:
-        """在版本写入事务内锁定并复核当前管理员身份。"""
-        guard = SqlAlchemyAuthTransactionGuard(session)
-        user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
+        """在版本写入事务内以无锁单条 JOIN 复核当前管理员身份。"""
+        user = await verify_active_session_user(session, actor.user.id, actor.session_id)
         if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise SystemPromptAuthorizationError()
 

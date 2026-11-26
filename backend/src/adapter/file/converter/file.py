@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC
-
 from adapter.file.model import SessionFileModel
+from common.date import as_utc
 from domain.file import SessionFile, SessionFileExtractionStatus, SessionFileSource
 
 
 def session_file_to_domain(row: SessionFileModel) -> SessionFile:
     """把文件行转换为领域对象并补齐测试数据库丢失的 UTC 时区。"""
-    created_at = (
-        row.created_at.replace(tzinfo=UTC)
-        if row.created_at.tzinfo is None
-        else row.created_at.astimezone(UTC)
-    )
+    created_at = as_utc(row.created_at)
     return SessionFile(
         id=row.id,
         session_id=row.session_id,

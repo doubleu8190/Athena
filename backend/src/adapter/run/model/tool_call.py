@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -15,15 +14,9 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base
-
-
-def _json_type() -> JSON:
-    """Use JSONB on PostgreSQL and plain JSON in SQLite tests."""
-    return JSON().with_variant(JSONB(), "postgresql")
+from adapter.base import Base, json_column_type
 
 
 class RunToolCallModel(Base):
@@ -94,9 +87,9 @@ class RunToolCallModel(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    outcome: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
+    outcome: Mapped[dict[str, object] | None] = mapped_column(json_column_type(), nullable=True)
     safe_skill_projection: Mapped[dict[str, object] | None] = mapped_column(
-        _json_type(), nullable=True
+        json_column_type(), nullable=True
     )
     round: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 

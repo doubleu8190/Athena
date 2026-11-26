@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -43,7 +42,6 @@ from api.runs import build_run_router
 from api.sessions import build_session_router
 from app.auth import AuthService
 from app.run.config import RunWorkerConfig
-from app.run.context import PROTOCOL_TOKEN_RESERVE, count_plain_text_tokens_async
 from app.run.executor import RunExecutor
 from app.run.service import RunService
 from app.run.stream import RunStreamService
@@ -248,7 +246,7 @@ def _assert_authoritative_report_snapshot(
 
 
 class _SafetyStoppingProvider:
-    """记录报告调用并故意失败，确保系统兜底报告仍可原子落库。"""
+    """断言上下文安全停机既不调用主模型流，也不再发起报告复述 LLM 调用。"""
 
     def __init__(self) -> None:
         """初始化报告请求与主模型流调用计数。"""
@@ -260,9 +258,9 @@ class _SafetyStoppingProvider:
         runtime: RuntimeModelProfile,
         request: LlmRequest,
     ) -> LlmResponse:
-        """记录唯一一次无工具报告请求后模拟供应商失败。"""
+        """一旦被调用即记录证据并抛错，正常安全停机路径不得触发此方法。"""
         self.report_requests.append((runtime, request))
-        raise LlmProviderError("report_provider_failed")
+        raise LlmProviderError("report_provider_unexpected_call")
 
     @asynccontextmanager
     async def stream(
@@ -575,7 +573,7 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
                     await asyncio.wait_for(worker_task, timeout=5)
                     worker_task = None
 
-                assert len(provider.report_requests) == 1
+                assert len(provider.report_requests) == 0
                 assert provider.main_stream_calls == 0
                 expected_fail_calls = 2 if inject_transaction_failure else 1
                 assert len(run_repository.fail_commands) == expected_fail_calls
@@ -586,41 +584,15 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
                 )
                 assert first_fail_command.report_message is not None
                 assert first_fail_command.report_message.id == report_message_id
+                assert first_fail_command.report_message.metadata.provider == (
+                    "system_context_safety"
+                )
+                assert first_fail_command.report_message.metadata.model is None
                 assert first_fail_command.safe_error_code == "run_context_safety_stop"
                 assert first_fail_command.context_stop_reason is (
                     ContextStopReason.HARD_WINDOW_EXCEEDED
                 )
-                assert len(first_fail_command.usage.attempts) == 1
-                report_runtime, report_request = provider.report_requests[0]
-                assert report_request.tools == ()
-                assert report_request.tool_choice == "none"
-                assert report_request.max_output_tokens is not None
-                report_text = "\n".join(message.content for message in report_request.messages)
-                assert trigger_text in report_text
-                assert history_marker not in report_text
-                encoded_report = json.dumps(
-                    [
-                        {
-                            "role": message.role.value,
-                            "content": message.content,
-                        }
-                        for message in report_request.messages
-                    ],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                report_input_tokens = (
-                    await count_plain_text_tokens_async(
-                        encoded_report,
-                        report_runtime.version,
-                        timeout_seconds=5,
-                    )
-                    + PROTOCOL_TOKEN_RESERVE
-                )
-                assert (
-                    report_input_tokens + report_request.max_output_tokens
-                    <= report_runtime.version.context_window_tokens
-                )
+                assert first_fail_command.usage.attempts == ()
 
                 async with session_factory() as session:
                     run_row = await session.get(RunModel, run_id)
@@ -629,11 +601,11 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
                     assert run_row.safe_error_code == "run_context_safety_stop"
                     assert run_row.report_message_id == report_message_id
                     assert run_row.owner_id == user_id
-                    assert run_row.llm_request_count == 1
+                    assert run_row.llm_request_count == 0
                     usage = run_row.usage
                     usage_attempts = usage["attempts"]
                     assert isinstance(usage_attempts, list)
-                    assert len(usage_attempts) == 1
+                    assert usage_attempts == []
 
                     trigger_row = await session.get(
                         ConversationMessageModel,
@@ -661,6 +633,8 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
                     assert len(report_row.parts) == 1
                     assert report_row.parts[0]["type"] == "text"
                     assert "任务未标记为完成" in str(report_row.parts[0]["text"])
+                    assert history_marker not in str(report_row.parts[0]["text"])
+                    assert trigger_text not in str(report_row.parts[0]["text"])
                     report_message_count = await session.scalar(
                         select(func.count())
                         .select_from(ConversationMessageModel)

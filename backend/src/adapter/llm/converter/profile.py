@@ -1,10 +1,10 @@
 """LLM 配置 ORM 到领域投影的转换。"""
 
 from dataclasses import fields
-from datetime import UTC, datetime
 from typing import Literal, cast
 
 from adapter.llm.model.profile import ModelProfileVersionModel
+from common.date import as_utc
 from domain.llm.model.profile import ModelProfileVersion
 
 _PASSTHROUGH_FIELDS = tuple(
@@ -24,16 +24,11 @@ _PASSTHROUGH_FIELDS = tuple(
 )
 
 
-def _as_utc(value: datetime) -> datetime:
-    """补齐 SQLite 驱动省略的 UTC 时区信息。"""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
 def profile_to_domain(row: ModelProfileVersionModel) -> ModelProfileVersion:
     """构造不含凭据明文的模型版本投影。"""
     values = {name: getattr(row, name) for name in _PASSTHROUGH_FIELDS}
-    created_at = _as_utc(row.created_at)
-    updated_at = created_at if row.updated_at is None else _as_utc(row.updated_at)
+    created_at = as_utc(row.created_at)
+    updated_at = created_at if row.updated_at is None else as_utc(row.updated_at)
     return ModelProfileVersion(
         protocol="chat_completions",
         has_api_key=bool(row.api_key_ciphertext),

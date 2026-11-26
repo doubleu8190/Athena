@@ -7,14 +7,6 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ProjectNameRequest(BaseModel):
-    """兼容既有仅含名称的请求模型。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-
-
 class ProjectCreateRequest(BaseModel):
     """创建项目请求；兼容仅传 name，可选携带简介、背景指令与默认技能列表。"""
 
@@ -61,7 +53,6 @@ class ProjectListResponse(BaseModel):
 __all__ = [
     "ProjectCreateRequest",
     "ProjectListResponse",
-    "ProjectNameRequest",
     "ProjectResponse",
     "ProjectUpdateRequest",
 ]

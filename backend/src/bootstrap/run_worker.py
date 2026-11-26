@@ -2,52 +2,41 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 
-from adapter.access import SqlAlchemyAccessControlRepository
-from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.file import MinioFileObjectStore, SqlAlchemySessionFileRepository
+from adapter.file import MinioFileObjectStore
 from adapter.llm import OpenAIChatCompletionsAdapter
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
-from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository import SqlAlchemyMessageRepository
-from adapter.preference import SqlAlchemyPreferenceRepository
-from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
-from adapter.session import SqlAlchemySessionRepository
-from adapter.skill import SqlAlchemySkillRepository
 from adapter.skill.execution import PythonScriptExecutor
-from adapter.subagent import SqlAlchemySubagentRepository
-from adapter.system_prompt import SqlAlchemySystemPromptRepository
-from app.access import AccessPolicyService
-from app.file import SessionFileService
-from app.preference import PreferenceService
-from app.project.service import ProjectService
-from app.run import (
-    RunExecutor,
-    RunWorker,
-    worker_config_from_environment,
-)
-from app.skill import DependencyChecker, SkillService
+from app.run import RunExecutor, RunWorker
+from app.skill import SkillPackageCache, SkillService
 from app.skill.execution_service import SkillExecutionService
-from bootstrap.config import env_flag
+from bootstrap.config import (
+    DatabaseSettings,
+    FileSkillSettings,
+    KnowledgeSettings,
+    RunWorkerSettings,
+)
 from bootstrap.database import build_database
 from bootstrap.redis import build_run_transport
 from bootstrap.tool import (
     QueryServiceBundle,
+    build_core_persistence,
     build_mcp_executor,
     build_query_services,
     build_run_tool_runtime,
+    build_session_file_service,
+    build_shared_storage_client,
+    build_skill_service,
 )
 from domain.file import FileObjectStore
 from infrastructure.database import Database
-from infrastructure.file import LocalSessionDocumentExtractor, LocalVisionImageNormalizer
+from infrastructure.mcp.execution import McpToolCallClient
 from infrastructure.security.mcp_secrets import McpSecretCipher
-from infrastructure.storage.config import has_object_storage_env
+from infrastructure.storage.minio_client import MinioObjectClient
 
 
 @dataclass(slots=True)
@@ -57,17 +46,13 @@ class RunWorkerBundle:
     database: Database | None = None
     provider: OpenAIChatCompletionsAdapter | None = None
     run_transport: RedisRunTransport | None = None
+    mcp_executor: McpToolCallClient | None = None
+    storage_client: MinioObjectClient | None = None
     query_services: QueryServiceBundle | None = None
     file_object_store: FileObjectStore | None = None
+    skill_package_cache: SkillPackageCache | None = None
     skill_execution: SkillExecutionService | None = None
     worker: RunWorker | None = None
-
-
-def _files_enabled() -> bool:
-    """优先尊重显式 ATHENA_FILES_ENABLED 开关；未显式声明时按统一 ATHENA_STORAGE_* 判定。"""
-    if "ATHENA_FILES_ENABLED" in os.environ:
-        return env_flag("ATHENA_FILES_ENABLED", default=False)
-    return has_object_storage_env()
 
 
 def build_run_worker_dependencies(
@@ -81,84 +66,101 @@ def build_run_worker_dependencies(
     失败时，入口 finally 只清理 bundle 中已填充的字段，因此这里每完成一个
     资源就立即写回 bundle。
     """
-    # 数据库地址优先使用入参，其次读取环境变量；缺失时先于其他配置解析直接拒绝。
-    configured_url = database_url or os.getenv("ATHENA_DATABASE_URL", "").strip()
+    # 数据库地址优先使用入参，其次读取强类型环境变量；缺失时先于其他配置解析直接拒绝。
+    configured_url = database_url or DatabaseSettings.url_from_environment()
     if not configured_url:
         raise RuntimeError("run_worker_database_required")
     # 加载有界并发、租约与轮询参数，非法配置会在构造配置对象时抛出。
-    config = worker_config_from_environment()
+    config = RunWorkerSettings.from_environment().to_config()
     # MCP 凭据解封与 API 使用同一密钥；缺失或损坏时拒绝启动，不能静默禁用工具。
     secret_cipher = McpSecretCipher.from_environment()
     database = build_database(configured_url)
     bundle.database = database
-    access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(database.session_factory))
-    profiles = SqlAlchemyModelProfileRepository(database.session_factory, secret_cipher)
-    projects_repository = SqlAlchemyProjectRepository(database.session_factory)
-    messages = SqlAlchemyMessageRepository(database.session_factory)
-    system_prompts = SqlAlchemySystemPromptRepository(database.session_factory)
-    auth_repository = SqlAlchemyAuthRepository(database.session_factory)
-    session_repository = SqlAlchemySessionRepository(database.session_factory)
-    mcp_catalog = SqlAlchemyMcpRepository(database.session_factory, secret_cipher)
-    preferences = PreferenceService(SqlAlchemyPreferenceRepository(database.session_factory))
-    projects = ProjectService(projects_repository)
+
+    core = build_core_persistence(
+        database.session_factory,
+        secret_cipher=secret_cipher,
+        include_mcp=True,
+        # 显式传入模块级仓储类，保持测试对 bootstrap.run_worker 符号的 patch 兼容。
+        model_profile_repository_factory=SqlAlchemyModelProfileRepository,
+        message_repository_factory=SqlAlchemyMessageRepository,
+        run_repository_factory=SqlAlchemyRunRepository,
+    )
+    assert core.mcp_repository is not None
     mcp_executor = build_mcp_executor(cleanup_timeout_seconds=config.tool_cleanup_seconds)
+    # 持有 MCP 执行器以在 Worker 退出时释放池化 HTTP transport 与清空工具清单缓存。
+    bundle.mcp_executor = mcp_executor
+
+    file_settings = FileSkillSettings.from_environment()
+    knowledge_settings = KnowledgeSettings.from_environment()
+    files_enabled = file_settings.files_enabled
+    knowledge_enabled = knowledge_settings.enabled
+
+    # Run Worker 同时启用知识库与文件/技能时共享单套底层客户端，创建后立即登记由入口统一释放。
+    shared_storage_client = (
+        build_shared_storage_client() if knowledge_enabled and files_enabled else None
+    )
+    bundle.storage_client = shared_storage_client
     query_services = build_query_services(
         database.session_factory,
-        projects=projects,
-        access_policy=access_policy,
+        projects=core.project_service,
+        access_policy=core.access_policy,
+        object_client=shared_storage_client,
+        knowledge_enabled=knowledge_enabled,
+        semantic_min_score=knowledge_settings.semantic_min_score,
     )
     bundle.query_services = query_services
-    repository = SqlAlchemyRunRepository(database.session_factory, messages)
-    skills = None
+
+    object_store: FileObjectStore | None = None
+    package_cache: SkillPackageCache | None = None
     session_files = None
     skill_execution = None
-    if _files_enabled():
-        object_store = MinioFileObjectStore.from_environment(deferred=True)
+    if files_enabled:
+        object_store = MinioFileObjectStore.from_environment(
+            deferred=True,
+            object_client=shared_storage_client,
+        )
         bundle.file_object_store = object_store
-        skill_repository = SqlAlchemySkillRepository(database.session_factory)
-        python_executable = Path(os.getenv("ATHENA_SKILL_PYTHON_EXECUTABLE", sys.executable))
-        skills = SkillService(
-            skill_repository,
-            object_store,
-            auth_repository,
-            access_policy=access_policy,
-            dependency_checker=DependencyChecker(python_executable=python_executable),
-        )
-        file_repository = SqlAlchemySessionFileRepository(database.session_factory)
-        session_files = SessionFileService(
-            file_repository,
-            object_store,
-            document_extractor=LocalSessionDocumentExtractor(),
-            image_normalizer=LocalVisionImageNormalizer(),
-        )
-        temp_root = Path(
-            os.getenv(
-                "ATHENA_SKILL_TEMP_ROOT",
-                str(Path(sys.prefix) / "tmp" / "athena-skill-executions"),
-            )
-        )
+        # 共享单个有界内存 ZIP 字节 LRU 缓存，由 Worker 退出流程统一 aclose() 释放。
+        package_cache = SkillPackageCache()
+        bundle.skill_package_cache = package_cache
+
+    # 纯 Markdown 技能零 MinIO 依赖，无论是否启用对象存储均装配 SkillService。
+    skills = build_skill_service(
+        skill_repository=core.skill_repository,
+        object_store=object_store,
+        auth_repository=core.auth_repository,
+        access_policy=core.access_policy,
+        python_executable=file_settings.python_executable,
+        package_cache=package_cache,
+        skill_service_factory=SkillService,
+    )
+    if files_enabled:
+        assert object_store is not None
+        session_files = build_session_file_service(database.session_factory, object_store)
         skill_execution = SkillExecutionService(
             skills=skills,
             files=session_files,
-            repository=skill_repository,
+            repository=core.skill_repository,
             object_store=object_store,
-            runner=PythonScriptExecutor(python_executable),
-            temp_root=temp_root,
+            runner=PythonScriptExecutor(file_settings.python_executable),
+            temp_root=file_settings.temp_root,
+            package_cache=package_cache,
         )
         bundle.skill_execution = skill_execution
-    subagents_repository = SqlAlchemySubagentRepository(database.session_factory)
+
     tool_runtime = build_run_tool_runtime(
-        auth=auth_repository,
-        sessions=session_repository,
-        mcp_catalog=mcp_catalog,
+        auth=core.auth_repository,
+        sessions=core.session_repository,
+        mcp_catalog=core.mcp_repository,
         mcp_executor=mcp_executor,
         query_services=query_services,
-        preferences=preferences,
+        preferences=core.preference_service,
         skills=skills,
         session_files=session_files,
         skill_execution=skill_execution,
-        subagents=subagents_repository,
-        access_policy=access_policy,
+        subagents=core.subagent_repository,
+        access_policy=core.access_policy,
     )
     provider = OpenAIChatCompletionsAdapter()
     bundle.provider = provider
@@ -168,20 +170,20 @@ def build_run_worker_dependencies(
     bundle.run_transport = run_transport
     # Executor 负责执行单个 Run；Worker 负责领取、续约并驱动执行。
     executor = RunExecutor(
-        repository,
-        profiles,
+        core.run_repository,
+        core.model_profile_repository,
         provider,
-        system_prompts=system_prompts,
+        system_prompts=core.system_prompt_repository,
         publisher=run_transport,
         config=config,
         tool_runtime=tool_runtime,
-        preferences=preferences,
-        projects=projects_repository,
-        sessions=session_repository,
-        subagents=subagents_repository,
-        access_policy=access_policy,
+        preferences=core.preference_service,
+        projects=core.project_repository,
+        sessions=core.session_repository,
+        subagents=core.subagent_repository,
+        access_policy=core.access_policy,
     )
-    bundle.worker = RunWorker(repository, executor, config, publisher=run_transport)
+    bundle.worker = RunWorker(core.run_repository, executor, config, publisher=run_transport)
 
 
 __all__ = ["RunWorkerBundle", "build_run_worker_dependencies"]

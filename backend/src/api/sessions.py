@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Response, status
 
 from api.converter.session import session_list_to_response, session_to_response
 from api.dto.session import (
@@ -13,7 +13,7 @@ from api.dto.session import (
     SessionResponse,
     SessionUpdateRequest,
 )
-from api.security import CurrentAuth, verify_request_origin
+from api.security import CurrentAuth
 from app.session import (
     InvalidSessionFilterError,
     InvalidSessionTitleError,
@@ -46,7 +46,6 @@ def build_session_router(service: SessionService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/sessions",
         tags=["sessions"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.post(

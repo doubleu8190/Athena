@@ -29,7 +29,6 @@ from domain.auth.model import (
 from domain.auth.ports import (
     Authenticator,
     AuthRepository,
-    AuthTransactionGuard,
     CurrentSessionReader,
     PasswordHasher,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "AuthProviderDisabledError",
     "AuthRepository",
     "AuthSession",
-    "AuthTransactionGuard",
     "Authenticator",
     "CurrentSessionReader",
     "EmailAlreadyRegisteredError",

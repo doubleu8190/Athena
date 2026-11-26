@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -16,15 +15,9 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base
-
-
-def _json_type() -> JSON:
-    """在 PostgreSQL 使用 JSONB，在 SQLite 测试中使用 JSON。"""
-    return JSON().with_variant(JSONB(), "postgresql")
+from adapter.base import Base, json_column_type
 
 
 class SubagentModel(Base):
@@ -73,7 +66,7 @@ class SubagentModel(Base):
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     model_profile_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     allowed_tool_ids: Mapped[list[str]] = mapped_column(
-        _json_type(),
+        json_column_type(),
         nullable=False,
         default=list,
         server_default=text("'[]'"),

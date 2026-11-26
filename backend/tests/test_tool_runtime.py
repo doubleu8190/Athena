@@ -5,18 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import pytest
 
 from app.knowledge.service import KnowledgeService
 from app.preference import PreferenceService
 from app.project.knowledge import ProjectKnowledgeService
+from app.skill.service import SkillService
 from app.tool.runtime import (
     KNOWLEDGE_SEARCH_DEFINITION,
-    MCP_DELIVERY_AUTH_ERROR,
     REQUEST_USER_INPUT_DEFINITION,
     SAVE_USER_MEMORY_DEFINITION,
+    SKILL_READ_RESOURCE_DEFINITION,
     RunToolRuntimeService,
 )
 from domain.auth.model import User, UserRole, UserStatus
@@ -27,6 +28,16 @@ from domain.mcp import (
     McpRuntimeToolTarget,
 )
 from domain.session.model import Session
+from domain.skill import (
+    DependencyCheck,
+    DependencyCheckStatus,
+    PackageResource,
+    RunSkillEntry,
+    RunSkillSnapshot,
+    SkillPackageManifest,
+    SkillRepository,
+    SkillVersion,
+)
 from domain.tool import (
     AuthorizedRunContext,
     BuiltinToolSource,
@@ -97,6 +108,15 @@ class _McpCatalog:
         assert limit == 201
         return self.definitions[:201]
 
+    async def list_readable_runtime_tools(
+        self,
+        snapshot: Any,
+        *,
+        limit: int = 200,
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        del snapshot
+        return await self.list_runtime_tools(limit=limit)
+
     async def get_call_target(
         self,
         tool_id: str,
@@ -148,7 +168,9 @@ class _Knowledge:
         *,
         limit: int,
         context_budget: int,
+        skip_access_check: bool = False,
     ) -> SearchResult:
+        del skip_access_check
         self.calls.append((owner_id, list(base_ids), query, limit, context_budget))
         return self.result
 
@@ -158,7 +180,14 @@ class _ProjectKnowledge:
         self.bases = bases
         self.list_calls: list[tuple[str, str]] = []
 
-    async def list(self, owner_id: str, project_id: str) -> list[KnowledgeBase]:
+    async def list(
+        self,
+        owner_id: str,
+        project_id: str,
+        *,
+        snapshot: Any = None,
+    ) -> list[KnowledgeBase]:
+        del snapshot
         self.list_calls.append((owner_id, project_id))
         return list(self.bases)
 
@@ -435,40 +464,24 @@ def test_knowledge_search_refuses_silent_subset_when_scope_exceeds_limit() -> No
     asyncio.run(scenario())
 
 
-def test_knowledge_search_drops_body_when_scope_shrinks_during_search() -> None:
+def test_knowledge_search_checks_scope_once_and_drops_out_of_scope_hits() -> None:
+    """知识检索仅在调用前执行 1 次范围解析，并丢弃 knowledge_base_id 越界的命中。"""
+
     async def scenario() -> None:
-        search_started = asyncio.Event()
-        release_search = asyncio.Event()
-
-        class _BlockingKnowledge(_Knowledge):
-            async def search(
-                self,
-                owner_id: str,
-                base_ids: list[str],
-                query: str,
-                *,
-                limit: int,
-                context_budget: int,
-            ) -> SearchResult:
-                self.calls.append((owner_id, list(base_ids), query, limit, context_budget))
-                search_started.set()
-                await release_search.wait()
-                return self.result
-
         projects = _ProjectKnowledge([_base(1)])
-        knowledge = _BlockingKnowledge(
+        knowledge = _Knowledge(
             SearchResult(
                 (
                     SearchHit(
-                        chunk_id="chunk_secret",
+                        chunk_id="chunk_leaked",
                         document_id="doc_1",
                         version_id="version_1",
-                        title="Formerly visible",
+                        title="Out of scope",
                         text="TOP SECRET BODY",
                         locators=(),
                         channels=("keyword",),
                         rank=1.0,
-                        knowledge_base_id="kb_1",
+                        knowledge_base_id="kb_other_tenant",
                     ),
                 ),
                 ("keyword",),
@@ -479,37 +492,39 @@ def test_knowledge_search_drops_body_when_scope_shrinks_during_search() -> None:
             project_knowledge=projects,
         )
 
-        execution = asyncio.create_task(
-            runtime.execute(
-                KNOWLEDGE_SEARCH_DEFINITION,
-                "knowledge_search",
-                {"query": "secret"},
-                _context(),
-                deadline_seconds=1,
-                run_remaining_seconds=10,
-            )
+        result = await runtime.execute(
+            KNOWLEDGE_SEARCH_DEFINITION,
+            "knowledge_search",
+            {"query": "secret"},
+            _context(),
+            deadline_seconds=1,
+            run_remaining_seconds=10,
         )
-        await search_started.wait()
-        projects.bases = []
-        release_search.set()
-        result = await execution
 
         assert result.outcome.status is ToolOutcomeStatus.ERROR
         assert result.outcome.code == "knowledge_scope_unavailable"
         assert result.outcome.data == {}
         assert "TOP SECRET BODY" not in result.outcome.canonical_output()
-        assert len(projects.list_calls) == 2
+        # 仅在执行前解析 1 次项目知识库范围，不再重复执行交付前 after_scope 重查。
+        assert len(projects.list_calls) == 1
 
     asyncio.run(scenario())
 
 
-def test_knowledge_search_drops_body_when_scope_recheck_fails() -> None:
+def test_knowledge_search_fails_closed_when_before_scope_resolution_errors() -> None:
+    """调用前知识库范围解析异常时 fail-closed 拒绝检索，不发起底层查询。"""
+
     class _PermissionFailingProjects(_ProjectKnowledge):
-        async def list(self, owner_id: str, project_id: str) -> list[KnowledgeBase]:
+        async def list(
+            self,
+            owner_id: str,
+            project_id: str,
+            *,
+            snapshot: Any = None,
+        ) -> list[KnowledgeBase]:
+            del snapshot
             self.list_calls.append((owner_id, project_id))
-            if len(self.list_calls) > 1:
-                raise PermissionError("scope revoked")
-            return list(self.bases)
+            raise PermissionError("scope revoked")
 
     async def scenario() -> None:
         projects = _PermissionFailingProjects([_base(1)])
@@ -546,19 +561,21 @@ def test_knowledge_search_drops_body_when_scope_recheck_fails() -> None:
         )
 
         assert result.outcome.status is ToolOutcomeStatus.ERROR
-        assert result.outcome.code == "knowledge_scope_unavailable"
+        assert result.outcome.code == "knowledge_unavailable"
         assert result.outcome.data == {}
         assert "TOP SECRET BODY" not in result.outcome.canonical_output()
+        assert knowledge.calls == []
 
     asyncio.run(scenario())
 
 
-def test_mcp_and_builtin_drop_content_when_delivery_auth_revoked() -> None:
-    """MCP 与内置工具在交付前权限撤销时均必须丢弃原始载荷并终止 Run。"""
+def test_mcp_and_builtin_authorize_once_before_execution_and_reject_invalid_session() -> None:
+    """MCP 与内置工具在执行前实时鉴权（失效即拒且不执行），有效调用仅查 1 次认证不重复重查。"""
 
     async def scenario() -> None:
-        auth = _Auth()
-        auth.allow_next_calls(1)
+        # 1) 认证会话失效时：MCP 与内置工具在执行前即阻断并标记终止 Run，绝不触发实际执行。
+        revoked_auth = _Auth()
+        revoked_auth.allow_next_calls(0)
         executor = _McpExecutor(
             McpCallResult(
                 McpCallStatus.OK,
@@ -568,7 +585,7 @@ def test_mcp_and_builtin_drop_content_when_delivery_auth_revoked() -> None:
         )
         catalog = _McpCatalog((_mcp_snapshot_definition(),))
         runtime, _ = _runtime(
-            auth=auth,
+            auth=revoked_auth,
             mcp_catalog=catalog,
             mcp_executor=executor,
         )
@@ -581,11 +598,11 @@ def test_mcp_and_builtin_drop_content_when_delivery_auth_revoked() -> None:
             run_remaining_seconds=10,
         )
         assert mcp.outcome.status is ToolOutcomeStatus.ERROR
-        assert mcp.outcome.code == "tool_permission_revoked"
+        assert mcp.outcome.code == "tool_permission_denied"
         assert mcp.outcome.data == {}
         assert "sensitive mcp payload" not in mcp.outcome.canonical_output()
-        assert mcp.terminate_run_error_code == MCP_DELIVERY_AUTH_ERROR
-        assert catalog.target_requests == [("tool_lookup", "mcp_1", "remote_lookup", 2)]
+        assert mcp.terminate_run_error_code == "run_auth_session_invalid"
+        assert catalog.target_requests == []
 
         knowledge = _Knowledge(
             SearchResult(
@@ -605,10 +622,10 @@ def test_mcp_and_builtin_drop_content_when_delivery_auth_revoked() -> None:
                 ("keyword",),
             )
         )
-        auth = _Auth()
-        auth.allow_next_calls(1)
+        revoked_builtin_auth = _Auth()
+        revoked_builtin_auth.allow_next_calls(0)
         builtin_runtime, _ = _runtime(
-            auth=auth,
+            auth=revoked_builtin_auth,
             knowledge=knowledge,
             project_knowledge=_ProjectKnowledge([_base(1)]),
         )
@@ -621,77 +638,22 @@ def test_mcp_and_builtin_drop_content_when_delivery_auth_revoked() -> None:
             run_remaining_seconds=10,
         )
         assert builtin.outcome.status is ToolOutcomeStatus.ERROR
-        assert builtin.outcome.code == "tool_permission_revoked"
+        assert builtin.outcome.code == "tool_permission_denied"
         assert builtin.outcome.data == {}
         assert "private body" not in builtin.outcome.canonical_output()
+        assert builtin.terminate_run_error_code == "run_auth_session_invalid"
+        assert knowledge.calls == []
 
-    asyncio.run(scenario())
-
-
-def test_mcp_delivery_auth_timeout_exhausted_and_error_discard_payload() -> None:
-    """MCP 交付前鉴权超时、剩余时间耗尽或抛异常时，均不得回传原始载荷。"""
-
-    class _SlowOrFailingAuth(_Auth):
-        def __init__(self, *, mode: Literal["timeout", "error"]) -> None:
-            super().__init__()
-            self._mode = mode
-
-        async def get_current_session_user(
-            self, user_id: str, session_id: str, now: datetime
-        ) -> User | None:
-            if self.requests >= 1:
-                self.requests += 1
-                if self._mode == "timeout":
-                    await asyncio.sleep(5)
-                raise RuntimeError("auth_backend_down")
-            return await super().get_current_session_user(user_id, session_id, now)
-
-    async def scenario() -> None:
-        executor = _McpExecutor(
-            McpCallResult(
-                McpCallStatus.OK,
-                "mcp_tool_completed",
-                text="TOP_SECRET_MCP_DATA",
-                structured={"secret": "TOP_SECRET_MCP_DATA"},
-            )
-        )
-        catalog = _McpCatalog((_mcp_snapshot_definition(),))
-
-        # 1. 交付前鉴权超时
-        timeout_runtime, _ = _runtime(
-            auth=_SlowOrFailingAuth(mode="timeout"),
+        # 2) 有效会话下：MCP 与内置工具单次执行均仅触发 1 次前置鉴权（无交付前二次鉴权）。
+        ok_auth = _Auth()
+        ok_runtime, _ = _runtime(
+            auth=ok_auth,
             mcp_catalog=catalog,
             mcp_executor=executor,
+            knowledge=knowledge,
+            project_knowledge=_ProjectKnowledge([_base(1)]),
         )
-        timeout_res = await timeout_runtime.execute(
-            _mcp_definition(),
-            "lookup",
-            {"query": "value"},
-            _context(),
-            deadline_seconds=1,
-            run_remaining_seconds=0.05,
-        )
-        # 2. 交付前 Run 剩余时间已耗尽
-        exhausted_runtime, _ = _runtime(
-            auth=_Auth(),
-            mcp_catalog=catalog,
-            mcp_executor=executor,
-        )
-        exhausted_res = await exhausted_runtime.execute(
-            _mcp_definition(),
-            "lookup",
-            {"query": "value"},
-            _context(),
-            deadline_seconds=1,
-            run_remaining_seconds=0.0,
-        )
-        # 3. 交付前鉴权抛出异常
-        error_runtime, _ = _runtime(
-            auth=_SlowOrFailingAuth(mode="error"),
-            mcp_catalog=catalog,
-            mcp_executor=executor,
-        )
-        error_res = await error_runtime.execute(
+        mcp_ok = await ok_runtime.execute(
             _mcp_definition(),
             "lookup",
             {"query": "value"},
@@ -699,13 +661,20 @@ def test_mcp_delivery_auth_timeout_exhausted_and_error_discard_payload() -> None
             deadline_seconds=1,
             run_remaining_seconds=10,
         )
+        assert mcp_ok.outcome.status is ToolOutcomeStatus.OK
+        assert ok_auth.requests == 1
+        assert catalog.target_requests == [("tool_lookup", "mcp_1", "remote_lookup", 2)]
 
-        for result in (timeout_res, exhausted_res, error_res):
-            assert result.outcome.status is ToolOutcomeStatus.ERROR
-            assert result.outcome.code == "tool_permission_revoked"
-            assert result.outcome.data == {}
-            assert "TOP_SECRET_MCP_DATA" not in result.outcome.canonical_output()
-            assert result.terminate_run_error_code == MCP_DELIVERY_AUTH_ERROR
+        kb_ok = await ok_runtime.execute(
+            KNOWLEDGE_SEARCH_DEFINITION,
+            "knowledge_search",
+            {"query": "private"},
+            _context(),
+            deadline_seconds=1,
+            run_remaining_seconds=10,
+        )
+        assert kb_ok.outcome.status is ToolOutcomeStatus.OK
+        assert ok_auth.requests == 2
 
     asyncio.run(scenario())
 
@@ -769,3 +738,152 @@ def test_snapshot_rejects_duplicate_model_names_and_oversized_catalogs() -> None
         pass
     else:
         raise AssertionError("oversized tool accepted")
+
+
+def test_skill_read_resource_without_minio_reads_markdown_and_returns_error_for_zip() -> None:
+    """无 MinIO（object_store=None）时 Markdown 读取返回 OK，存量 ZIP 读取收敛为确定性 ERROR。"""
+    md_guide = "# Markdown 指南\n零对象存储直接读取。"
+    md_bytes = md_guide.encode("utf-8")
+    dep = DependencyCheck(
+        status=DependencyCheckStatus.SATISFIED,
+        python_version="not-checked",
+        python_implementation="markdown-only",
+        items=(),
+        checked_at=NOW,
+    )
+    md_manifest = SkillPackageManifest(
+        slug="md-only-skill",
+        name="纯 Markdown 技能",
+        description="纯库存储",
+        guide=md_guide,
+        files=(
+            PackageResource(
+                path="SKILL.md",
+                size_bytes=len(md_bytes),
+                sha256="a" * 64,
+                text=True,
+            ),
+        ),
+    )
+    zip_manifest = SkillPackageManifest(
+        slug="legacy-zip-skill",
+        name="存量 ZIP 技能",
+        description="依赖 MinIO 对象存储",
+        guide="# ZIP 指南",
+        files=(
+            PackageResource(
+                path="SKILL.md",
+                size_bytes=10,
+                sha256="b" * 64,
+                text=True,
+            ),
+        ),
+    )
+    versions = {
+        "skillver_md": SkillVersion(
+            id="skillver_md",
+            skill_id="skill_md",
+            ordinal=1,
+            label="v1",
+            manifest=md_manifest,
+            object_key=None,
+            package_sha256="a" * 64,
+            dependency_requirements=(),
+            dependency_check=dep,
+            created_by=None,
+            created_at=NOW,
+        ),
+        "skillver_zip": SkillVersion(
+            id="skillver_zip",
+            skill_id="skill_zip",
+            ordinal=1,
+            label="v1",
+            manifest=zip_manifest,
+            object_key="skills/aa/legacy.zip",
+            package_sha256="b" * 64,
+            dependency_requirements=(),
+            dependency_check=dep,
+            created_by=None,
+            created_at=NOW,
+        ),
+    }
+
+    class _SkillRepo:
+        async def get_version(self, version_id: str) -> SkillVersion | None:
+            return versions.get(version_id)
+
+    auth = _Auth()
+    skills = SkillService(
+        cast(SkillRepository, _SkillRepo()),
+        None,
+        auth,
+        clock=lambda: NOW,
+    )
+    runtime = RunToolRuntimeService(
+        auth=auth,
+        sessions=cast(Any, _Sessions("project_1")),
+        mcp_catalog=_McpCatalog(),
+        mcp_executor=_McpExecutor(McpCallResult(McpCallStatus.OK, "ok")),
+        knowledge=None,
+        project_knowledge=None,
+        skills=skills,
+    )
+    snapshot = RunSkillSnapshot(
+        skills=(
+            RunSkillEntry(
+                skill_id="skill_md",
+                slug=md_manifest.slug,
+                name=md_manifest.name,
+                description=md_manifest.description,
+                version_id="skillver_md",
+                version_label="v1",
+                requires_approval=False,
+            ),
+            RunSkillEntry(
+                skill_id="skill_zip",
+                slug=zip_manifest.slug,
+                name=zip_manifest.name,
+                description=zip_manifest.description,
+                version_id="skillver_zip",
+                version_label="v1",
+                requires_approval=False,
+            ),
+        ),
+        selected_skill_ids=("skill_md", "skill_zip"),
+    )
+    context = ToolExecutionContext(
+        owner_id="owner_1",
+        chat_session_id="session_1",
+        project_id="project_1",
+        run_id="run_1",
+        execution_epoch=1,
+        auth_session_id="auth_1",
+        deadline_at=NOW,
+        skill_snapshot=snapshot,
+    )
+
+    async def scenario() -> None:
+        md_res = await runtime.execute(
+            SKILL_READ_RESOURCE_DEFINITION,
+            "skill_read_resource",
+            {"skill_id": "skill_md", "path": "SKILL.md", "offset": 0, "limit_bytes": 1024},
+            context,
+            deadline_seconds=2,
+            run_remaining_seconds=10,
+        )
+        assert md_res.outcome.status is ToolOutcomeStatus.OK
+        assert md_res.outcome.code == "skill_resource_read"
+        assert md_res.outcome.data["content"] == md_guide
+
+        zip_res = await runtime.execute(
+            SKILL_READ_RESOURCE_DEFINITION,
+            "skill_read_resource",
+            {"skill_id": "skill_zip", "path": "SKILL.md", "offset": 0, "limit_bytes": 1024},
+            context,
+            deadline_seconds=2,
+            run_remaining_seconds=10,
+        )
+        assert zip_res.outcome.status is ToolOutcomeStatus.ERROR
+        assert zip_res.outcome.code == "skill_resource_unavailable"
+
+    asyncio.run(scenario())

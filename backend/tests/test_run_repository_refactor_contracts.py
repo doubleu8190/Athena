@@ -2,21 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock
 
-from adapter.run.repository import _shared, context_events, tool_calls
+import pytest
+from sqlalchemy import DateTime, event, func, literal
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+from adapter.auth.model import UserModel
+from adapter.message.repository.message import SqlAlchemyMessageRepository
+from adapter.models import Base
+from adapter.run.model import RunModel
+from adapter.run.repository import _shared, context_events, lifecycle, tool_calls
 from adapter.run.repository.lifecycle import RunLifecycleMixin
 from adapter.run.repository.run import SqlAlchemyRunRepository
 from adapter.run.repository.tool_calls import RunToolCallsMixin
+from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
+from domain.auth import UserRole, UserStatus
 from domain.file import PendingSessionFile
+from domain.run.model import RunStatus, RunUsage
 from domain.run.ports import RunRepository
 from domain.skill import (
     SkillExecutionArtifact,
     SkillExecutionCompletion,
     SkillExecutionStatus,
+)
+from domain.tool import (
+    InitializeRunToolsCommand,
+    ReserveLlmRequestCommand,
+    RuntimeToolSnapshot,
 )
 
 
@@ -219,3 +238,128 @@ def test_skill_execution_row_matches_logic() -> None:
 
     # 产物不匹配
     assert not RunToolCallsMixin._skill_execution_row_matches(matching_row, completion, ())
+
+
+def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """heartbeat / initialize_tools / reserve_llm_request 仅锁 runs 行，绝不触碰 sessions。"""
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        func,
+        "clock_timestamp",
+        lambda: literal(now, type_=DateTime(timezone=True)),
+    )
+    # 同步确认 lifecycle 重复辅助与死常量均已收口。
+    assert not hasattr(lifecycle, "_STREAM_SNAPSHOT_MESSAGES")
+    assert not hasattr(lifecycle, "_MAX_TOOL_BATCH_SIZE")
+    assert "_refresh_safe_skill_projection_in_session" not in RunLifecycleMixin.__dict__
+    assert "_extract_subagent_task_summary" not in RunLifecycleMixin.__dict__
+    assert "_load_subagent_details_in_session" not in RunLifecycleMixin.__dict__
+    assert "list_visible_events" not in RunLifecycleMixin.__dict__
+
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+        executed_sql: list[str] = []
+
+        def _capture_sql(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            executed_sql.append(statement.lower())
+
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            repo = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            async with factory() as session, session.begin():
+                session.add_all(
+                    [
+                        UserModel(
+                            id="usr_lock",
+                            email="lock@example.com",
+                            password_hash="hash",
+                            display_name="Lock",
+                            role=UserRole.MEMBER.value,
+                            status=UserStatus.ACTIVE.value,
+                            created_at=now,
+                            updated_at=now,
+                        ),
+                        SessionModel(
+                            id="sess_lock",
+                            owner_id="usr_lock",
+                            title="Lock",
+                            project_id=None,
+                            last_message_sequence=1,
+                            created_at=now,
+                            updated_at=now,
+                            deleted_time=None,
+                        ),
+                        RunModel(
+                            id="run_lock",
+                            session_id="sess_lock",
+                            owner_id="usr_lock",
+                            status=RunStatus.RUNNING.value,
+                            trigger_message_id="msg_1",
+                            context_cutoff_sequence=1,
+                            retry_of_run_id=None,
+                            model_config_version_id="prof_1",
+                            main_prompt_version_id="main_1",
+                            compression_prompt_version_id="comp_1",
+                            prompt_template_version="v1",
+                            event_sequence=1,
+                            execution_epoch=1,
+                            worker_id="worker-1",
+                            lease_expires_at=now + timedelta(seconds=60),
+                            execution_started_at=now,
+                            execution_deadline_at=now + timedelta(seconds=300),
+                            llm_request_count=0,
+                            queued_at=now,
+                            created_at=now,
+                            updated_at=now,
+                            usage=RunUsage().model_dump(mode="json"),
+                        ),
+                    ]
+                )
+
+            event.listen(engine.sync_engine, "before_cursor_execute", _capture_sql)
+            try:
+                executed_sql.clear()
+                hb = await repo.heartbeat("run_lock", "worker-1", 1, lease_seconds=90)
+                assert hb is not None
+                assert not any("sessions" in sql for sql in executed_sql)
+
+                executed_sql.clear()
+                snap = await repo.initialize_tools(
+                    InitializeRunToolsCommand(
+                        run_id="run_lock",
+                        worker_id="worker-1",
+                        execution_epoch=1,
+                        snapshot=RuntimeToolSnapshot(tools=()),
+                    )
+                )
+                assert snap == RuntimeToolSnapshot(tools=())
+                assert not any("sessions" in sql for sql in executed_sql)
+
+                executed_sql.clear()
+                seq = await repo.reserve_llm_request(
+                    ReserveLlmRequestCommand(
+                        run_id="run_lock",
+                        worker_id="worker-1",
+                        execution_epoch=1,
+                        maximum_count=10,
+                    )
+                )
+                assert seq == 1
+                assert not any("sessions" in sql for sql in executed_sql)
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", _capture_sql)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -15,15 +14,9 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base
-
-
-def _json_type() -> JSON:
-    """在 PostgreSQL 使用 JSONB，在 SQLite 测试中使用普通 JSON。"""
-    return JSON().with_variant(JSONB(), "postgresql")
+from adapter.base import Base, json_column_type
 
 
 class ConversationMessageModel(Base):
@@ -91,7 +84,7 @@ class ConversationMessageModel(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    parts: Mapped[list[dict[str, object]]] = mapped_column(_json_type(), nullable=False)
+    parts: Mapped[list[dict[str, object]]] = mapped_column(json_column_type(), nullable=False)
     reply_to_message_id: Mapped[str | None] = mapped_column(
         ForeignKey("conversation_messages.id", ondelete="SET NULL"),
         nullable=True,
@@ -107,7 +100,7 @@ class ConversationMessageModel(Base):
     )
     metadata_json: Mapped[dict[str, object]] = mapped_column(
         "metadata",
-        _json_type(),
+        json_column_type(),
         nullable=False,
         default=dict,
     )

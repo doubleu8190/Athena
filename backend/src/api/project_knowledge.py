@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 
 from api.converter.knowledge import knowledge_base_to_response
 from api.dto.knowledge import KnowledgeBaseResponse
-from api.security import CurrentAuth, verify_request_origin
+from api.security import CurrentAuth
 from app.project.knowledge import KnowledgeNotFoundError, ProjectKnowledgeService
 from app.project.service import ProjectService
 from domain.knowledge.model import ProjectKnowledgeLimitReachedError
@@ -20,7 +20,6 @@ def build_project_knowledge_router(
     router = APIRouter(
         prefix="/api/v1/projects/{project_id}/knowledge-bases",
         tags=["project-knowledge"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("", response_model=list[KnowledgeBaseResponse])

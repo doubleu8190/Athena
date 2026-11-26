@@ -16,13 +16,11 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.types import JSON
 
-from adapter.base import Base
+from adapter.base import Base, json_column_type
 
-_JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
+_JSON_DOCUMENT = json_column_type()
 
 
 class McpServerModel(Base):

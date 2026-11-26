@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import gzip
 import json
 import logging
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -16,15 +15,12 @@ import pytest
 from cli.bootstrap_super_admin import bootstrap_super_admin
 from cli.sync_feishu_org import run_feishu_org_sync
 from fastapi.testclient import TestClient
-from lark_oapi.core.http import Transport as LarkTransport
-from lark_oapi.core.model import BaseRequest, Config, RawResponse, RequestOption
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-import infrastructure.feishu.client as feishu_client_module
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.models import Base
@@ -164,7 +160,7 @@ def test_feishu_config_enforces_https_in_production_and_hides_secret() -> None:
     assert dev_cfg.base_url == "http://127.0.0.1:18080"
     assert dev_cfg.redirect_uri == "http://dev.local:8000/api/v1/auth/feishu/callback?next=1"
 
-    # base_url 与 lark_oapi._validate_domain 校验提前对齐：禁止路径段与非回环明文 HTTP。
+    # base_url 要求纯 origin：禁止路径段与非回环明文 HTTP。
     for bad_base_url in (
         "https://open.feishu.cn/proxy",
         "https://open.feishu.cn/v1/",
@@ -381,8 +377,8 @@ def test_feishu_client_caches_token_retries_429_5xx_and_never_leaks_secrets(
         assert sensitive not in joined_logs
 
 
-def test_feishu_client_rejects_redirects_oversized_body_and_masks_errors() -> None:
-    """禁用重定向、限制响应体字节上限，且传输异常/上游错误绝不回显凭据。"""
+def test_feishu_client_rejects_redirects_and_masks_errors() -> None:
+    """禁用重定向，且传输异常/上游错误绝不回显凭据。"""
     secret = "cli_secret_must_not_leak"
 
     async def scenario() -> None:
@@ -407,20 +403,7 @@ def test_feishu_client_rejects_redirects_oversized_body_and_masks_errors() -> No
         finally:
             await redirect_client.aclose()
 
-        # 2. 超限响应体拦截。
-        huge_client = FeishuClient(
-            config,
-            transport=httpx2.MockTransport(lambda _req: httpx2.Response(200, content=b"x" * 2048)),
-            max_retries=0,
-            max_response_bytes=512,
-        )
-        try:
-            with pytest.raises(FeishuProtocolError, match="feishu_response_too_large"):
-                await huge_client.get_tenant_access_token()
-        finally:
-            await huge_client.aclose()
-
-        # 3. 底层异常包含敏感头时必须截断异常链。
+        # 2. 底层异常包含敏感头时必须截断异常链。
         def timeout_handler(req: httpx2.Request) -> httpx2.Response:
             raise httpx2.ReadTimeout(f"timeout leaking {secret} {req.headers}")
 
@@ -440,11 +423,10 @@ def test_feishu_client_rejects_redirects_oversized_body_and_masks_errors() -> No
     _run(scenario())
 
 
-def test_feishu_client_never_invokes_sync_lark_transport_and_refreshes_expired_token(
-    monkeypatch: pytest.MonkeyPatch,
+def test_feishu_client_exercises_all_five_endpoints_and_refreshes_expired_token(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """5 个端点全程禁走同步 Transport.execute；SDK Config 不存 app_secret；99991663 自动刷新。"""
+    """5 个 REST 端点全程直连有界 httpx2 客户端；99991663 触发单次强制刷新且零凭据泄露。"""
     secret = "cli_sync_guard_secret_xyz"
     oauth_code = "oauth-code-all-five-endpoints"
     tok_1 = "t-expired-secret-1"
@@ -453,11 +435,6 @@ def test_feishu_client_never_invokes_sync_lark_transport_and_refreshes_expired_t
     token_calls = 0
     dept_calls = 0
     seen_paths: list[str] = []
-
-    def forbid_sync_execute(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("lark_oapi 同步 Transport.execute 绝不可在异步路径中被调用")
-
-    monkeypatch.setattr(LarkTransport, "execute", staticmethod(forbid_sync_execute))
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal token_calls, dept_calls
@@ -549,10 +526,6 @@ def test_feishu_client_never_invokes_sync_lark_transport_and_refreshes_expired_t
             assert [d.external_id for d in departments] == ["od_refreshed"]
             assert token_calls == 2
             assert dept_calls == 2
-            # 确认 SDK Config 未持久化明文 app_secret，结构性阻断同步 TokenManager 回退。
-            assert client._sdk_client is not None
-            assert client._sdk_client.config is not None
-            assert client._sdk_client.config.app_secret is None
 
             identity = await client.exchange_code_for_user(oauth_code)
             assert identity.open_id == "ou_sync_1"
@@ -608,23 +581,8 @@ def test_feishu_client_never_invokes_sync_lark_transport_and_refreshes_expired_t
         assert sensitive not in joined
 
 
-def test_feishu_client_pagination_loop_stream_limits_close_before_retry_and_lifecycle() -> None:
-    """验证分页环路拦截、重试前 0 字节关流、协议校验、并发隔离、取消透传与关闭后拒绝。"""
-
-    class _TrackedStream(httpx2.AsyncByteStream):
-        def __init__(self, chunks: list[bytes]) -> None:
-            self._chunks = chunks
-            self.iterated = False
-            self.closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            self.iterated = True
-            for chunk in self._chunks:
-                yield chunk
-
-        async def aclose(self) -> None:
-            self.closed = True
-
+def test_feishu_client_pagination_loop_protocol_guards_and_lifecycle() -> None:
+    """验证分页环路拦截、429 Retry-After 重试、协议校验、并发隔离、取消透传与关闭后拒绝。"""
     config = FeishuConfig(
         app_id="cli_guard",
         app_secret="cli_guard_secret",
@@ -656,91 +614,61 @@ def test_feishu_client_pagination_loop_stream_limits_close_before_retry_and_life
         finally:
             await loop_client.aclose()
 
-        # 2. 429 压缩错误流在进入 sleep 前以 0 字节读取关闭并遵守 Retry-After。
-        error_stream = _TrackedStream([gzip.compress(b"E" * 65_536)])
-        ok_stream = _TrackedStream(
-            [json.dumps({"code": 0, "tenant_access_token": "t-ok", "expire": 7200}).encode()]
-        )
+        # 2. 429 遵守 Retry-After 后重试成功。
         attempts = 0
         sleeps: list[float] = []
-        closed_before_sleep: list[tuple[bool, bool]] = []
 
-        class _RetryStreamTransport(httpx2.AsyncBaseTransport):
-            async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-                nonlocal attempts
-                attempts += 1
-                if attempts == 1:
-                    return httpx2.Response(
-                        429,
-                        headers={"content-encoding": "gzip", "retry-after": "1.5"},
-                        stream=error_stream,
-                        request=request,
-                    )
-                return httpx2.Response(200, stream=ok_stream, request=request)
+        def retry_handler(_request: httpx2.Request) -> httpx2.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx2.Response(429, headers={"retry-after": "1.5"}, text="slow down")
+            return httpx2.Response(
+                200,
+                json={"code": 0, "tenant_access_token": "t-ok", "expire": 7200},
+            )
 
-            async def aclose(self) -> None:
-                return None
-
-        async def verify_sleep(seconds: float) -> None:
+        async def record_sleep(seconds: float) -> None:
             sleeps.append(seconds)
-            closed_before_sleep.append((error_stream.iterated, error_stream.closed))
 
         retry_client = FeishuClient(
             config,
-            transport=_RetryStreamTransport(),
-            sleep=verify_sleep,
+            transport=httpx2.MockTransport(retry_handler),
+            sleep=record_sleep,
         )
         try:
             assert await retry_client.get_tenant_access_token() == "t-ok"
             assert sleeps == [1.5]
-            assert closed_before_sleep == [(False, True)]
-            assert ok_stream.closed is True
         finally:
             await retry_client.aclose()
 
-        # 3. 200 响应协议边界：非 identity 编码、非法/负值长度、流式超限、非法 JSON、bool code。
-        protocol_cases: list[tuple[dict[str, str], list[bytes], str]] = [
-            ({"content-encoding": "gzip"}, [gzip.compress(b"{}")], "feishu_response_decode_failed"),
-            ({"content-length": "bad-len"}, [b"{}"], "feishu_response_length_invalid"),
-            ({"content-length": "-5"}, [b"{}"], "feishu_response_length_invalid"),
-            ({}, [b"x" * 100, b"y" * 100], "feishu_response_too_large"),
-            ({}, [b"not-valid-json"], "feishu_response_invalid_json"),
+        # 3. 200 响应协议边界：非法 JSON、损坏 gzip 解码与 bool code 均映射稳定协议异常。
+        protocol_cases: list[tuple[dict[str, str], bytes, str]] = [
+            ({"content-encoding": "gzip"}, b"corrupt-gzip", "feishu_response_decode_failed"),
+            ({}, b"not-valid-json", "feishu_response_invalid_json"),
             (
                 {},
-                [b'{"code": false, "tenant_access_token": "t", "expire": 10}'],
+                b'{"code": false, "tenant_access_token": "t", "expire": 10}',
                 "feishu_response_code_invalid",
             ),
         ]
-        for headers, chunks, expected_code in protocol_cases:
-            stream = _TrackedStream(chunks)
-
-            class _OneShotTransport(httpx2.AsyncBaseTransport):
-                def __init__(self, hdrs: dict[str, str], st: _TrackedStream) -> None:
-                    self._hdrs = hdrs
-                    self._st = st
-
-                async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-                    return httpx2.Response(
-                        200, headers=self._hdrs, stream=self._st, request=request
-                    )
-
-                async def aclose(self) -> None:
-                    return None
-
+        for headers, body, expected_code in protocol_cases:
             p_client = FeishuClient(
                 config,
-                transport=_OneShotTransport(headers, stream),
+                transport=httpx2.MockTransport(
+                    lambda _req, hdrs=headers, payload=body: httpx2.Response(
+                        200, headers=hdrs, content=payload
+                    )
+                ),
                 max_retries=0,
-                max_response_bytes=128,
             )
             try:
                 with pytest.raises(FeishuProtocolError, match=expected_code):
                     await p_client.get_tenant_access_token()
-                assert stream.closed is True
             finally:
                 await p_client.aclose()
 
-        # 4. 并发 FeishuClient 实例通过 ContextVar 严格隔离，互不串流。
+        # 4. 并发 FeishuClient 实例各自持有独立连接池，互不串流。
         def make_token_transport(token_value: str) -> httpx2.MockTransport:
             async def slow_handler(_request: httpx2.Request) -> httpx2.Response:
                 await asyncio.sleep(0.01)
@@ -781,17 +709,14 @@ def test_feishu_client_pagination_loop_stream_limits_close_before_retry_and_life
             with pytest.raises(asyncio.CancelledError):
                 await cancel_client.get_tenant_access_token()
             assert cancel_attempts == 1
-            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
         finally:
             await cancel_client.aclose()
 
     _run(scenario())
 
 
-def test_feishu_client_rejects_null_items_and_resets_lark_context_with_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """验证 data.items=[null] 映射为协议错、异常/正常退出均重置 ContextVar 及上下文外回退。"""
+def test_feishu_client_rejects_null_items_and_non_retryable_status() -> None:
+    """验证 data.items=[null] 映射为协议错，且非重试 HTTP 状态码映射为稳定上游错误。"""
     config = FeishuConfig(
         app_id="cli_null_items",
         app_secret="cli_null_secret",
@@ -815,15 +740,13 @@ def test_feishu_client_rejects_null_items_and_resets_lark_context_with_fallback(
         try:
             with pytest.raises(FeishuProtocolError, match="feishu_department_item_invalid"):
                 await client.list_departments()
-            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
 
             with pytest.raises(FeishuProtocolError, match="feishu_user_item_invalid"):
                 await client.list_department_users("od_1")
-            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
         finally:
             await client.aclose()
 
-        # 2. 正常返回与 FeishuUpstreamError 退出后，_ACTIVE_LARK_CONTEXT 均已重置为 None。
+        # 2. 非重试 400 状态码立即拒绝并映射为稳定上游错误。
         err_client = FeishuClient(
             config,
             transport=httpx2.MockTransport(lambda _req: httpx2.Response(400, text="bad")),
@@ -832,33 +755,8 @@ def test_feishu_client_rejects_null_items_and_resets_lark_context_with_fallback(
         try:
             with pytest.raises(FeishuUpstreamError, match="feishu_upstream_rejected"):
                 await err_client.get_tenant_access_token()
-            assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
         finally:
             await err_client.aclose()
-
-        # 3. FeishuClient 上下文外调用 LarkTransport.aexecute 透明回退至 _ORIGINAL_LARK_AEXECUTE。
-        fallback_calls: list[tuple[Config, BaseRequest, RequestOption | None]] = []
-
-        async def fake_original(
-            conf: Config,
-            req: BaseRequest,
-            option: RequestOption | None = None,
-        ) -> RawResponse:
-            fallback_calls.append((conf, req, option))
-            raw = RawResponse()
-            raw.status_code = 200
-            raw.content = b'{"code": 0}'
-            return raw
-
-        monkeypatch.setattr(feishu_client_module, "_ORIGINAL_LARK_AEXECUTE", fake_original)
-        feishu_client_module._ensure_lark_transport_bridge()
-        assert feishu_client_module._ACTIVE_LARK_CONTEXT.get() is None
-        dummy_conf = Config()
-        dummy_req = BaseRequest()
-        raw_resp = await LarkTransport.aexecute(dummy_conf, dummy_req, None)
-        assert raw_resp.status_code == 200
-        assert len(fallback_calls) == 1
-        assert fallback_calls[0] == (dummy_conf, dummy_req, None)
 
     _run(scenario())
 

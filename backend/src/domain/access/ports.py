@@ -69,5 +69,43 @@ class AccessControlRepository(Protocol):
     ) -> None:
         """删除指定资源关联的全部可见性授权记录。"""
 
+    async def filter_readable_targets(
+        self,
+        user_id: str,
+        resource_type: ResourceType,
+        resource_ids: Sequence[str] | None = None,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> tuple[ResourceAccessTarget, ...]:
+        """单会话内加载或复用权限快照，下推过滤指定类型下的可读资源元数据。"""
+
+    async def can_read_resource(
+        self,
+        user_id: str,
+        resource_type: ResourceType,
+        resource_id: str,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> bool:
+        """单会话内实时判定用户对单个未删除资源是否拥有读权限。"""
+
+    async def can_read_target(
+        self,
+        user_id: str,
+        target: ResourceAccessTarget,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> bool:
+        """已知资源归属元数据时实时判定读权限（命中快速路径时零查库）。"""
+
+    async def evaluate_target_access(
+        self,
+        user_id: str,
+        target: ResourceAccessTarget,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> tuple[bool, bool]:
+        """单次快照内联合返回目标资源的 (可读, 可管) 双判定结果。"""
+
 
 __all__ = ["AccessControlRepository"]

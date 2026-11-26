@@ -844,43 +844,21 @@ def test_redis_subscription_overflow_surfaces_for_reconnect(
 
 
 def test_publisher_failure_before_sequence_is_reported_before_next_delta() -> None:
-    """序号分配失败后，恢复发布先发送中断标记，避免静默缺片。"""
+    """发布失败后，恢复发布先发送中断标记，避免静默缺片。"""
     from redis.exceptions import RedisError
 
     class FailingRedis:
         def __init__(self) -> None:
-            self.sequence = 0
-            self.fail_next_sequence = True
+            self.fail_next_publish = True
             self.published: list[bytes] = []
 
-        async def _exec_publish_script(
-            self,
-            numkeys: int,
-            key: str,
-            ttl: int,
-            prefix: bytes,
-            suffix: bytes,
-            channel: str,
-            max_bytes: int,
-        ) -> int:
-            del numkeys, key, ttl, channel
-            if self.fail_next_sequence:
-                self.fail_next_sequence = False
-                raise RedisError("sequence unavailable")
-            self.sequence += 1
-            raw = prefix + str(self.sequence).encode("utf-8") + suffix
-            if len(raw) > int(max_bytes):
-                return -1
+        async def publish(self, channel: str, raw: bytes) -> int:
+            del channel
+            if self.fail_next_publish:
+                self.fail_next_publish = False
+                raise RedisError("publish unavailable")
             self.published.append(raw)
-            return self.sequence
-
-        async def evalsha(self, sha: str, *args: object) -> int:
-            del sha
-            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
-
-        async def eval(self, script: str, *args: object) -> int:
-            del script
-            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
+            return 1
 
     async def scenario() -> list[RunStreamEvent]:
         client = FailingRedis()
@@ -933,33 +911,17 @@ def test_publisher_to_public_sse_suppresses_failed_epoch_suffixes() -> None:
 
     class FakeRedis:
         def __init__(self) -> None:
-            self.counters: dict[str, int] = {}
             self.history: dict[str, list[bytes]] = {}
             self.subscribers: set[FakePubSub] = set()
-            self.fail_next_sequence = False
+            self.fail_next_publish = False
 
         def pubsub(self) -> FakePubSub:
             return FakePubSub(self)
 
-        async def _exec_publish_script(
-            self,
-            numkeys: int,
-            key: str,
-            ttl: int,
-            prefix: bytes,
-            suffix: bytes,
-            channel: str,
-            max_bytes: int,
-        ) -> int:
-            del numkeys, ttl
-            if self.fail_next_sequence:
-                self.fail_next_sequence = False
-                raise RedisError("sequence temporarily unavailable")
-            self.counters[key] = self.counters.get(key, 0) + 1
-            sequence = self.counters[key]
-            raw = prefix + str(sequence).encode("utf-8") + suffix
-            if len(raw) > int(max_bytes):
-                return -1
+        async def publish(self, channel: str, raw: bytes) -> int:
+            if self.fail_next_publish:
+                self.fail_next_publish = False
+                raise RedisError("publish temporarily unavailable")
             self.history.setdefault(channel, []).append(raw)
             channel_bytes = channel.encode("utf-8")
             for subscriber in tuple(self.subscribers):
@@ -967,15 +929,7 @@ def test_publisher_to_public_sse_suppresses_failed_epoch_suffixes() -> None:
                     subscriber.messages.put_nowait(
                         {"type": "message", "channel": channel_bytes, "data": raw}
                     )
-            return sequence
-
-        async def evalsha(self, sha: str, *args: object) -> int:
-            del sha
-            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
-
-        async def eval(self, script: str, *args: object) -> int:
-            del script
-            return await self._exec_publish_script(*args)  # type: ignore[arg-type]
+            return len(self.subscribers)
 
         async def aclose(self) -> None:
             return None
@@ -1004,11 +958,11 @@ def test_publisher_to_public_sse_suppresses_failed_epoch_suffixes() -> None:
 
     async def publish_scenario() -> None:
         await transport.publish_text(run_id, 1, "visible prefix")
-        redis.fail_next_sequence = True
+        redis.fail_next_publish = True
         with pytest.raises(RunEventTransportError):
             await transport.publish_text(run_id, 1, "lost same epoch part")
         await transport.publish_text(run_id, 1, "hidden same epoch suffix")
-        redis.fail_next_sequence = True
+        redis.fail_next_publish = True
         with pytest.raises(RunEventTransportError):
             await transport.publish_text(run_id, 2, "lost first new epoch part")
         await transport.publish_text(run_id, 2, "hidden new epoch suffix")
@@ -1136,22 +1090,13 @@ def test_redis_subscribe_translates_client_errors_to_transport_error() -> None:
     asyncio.run(scenario())
 
 
-def test_stream_caches_live_execution_within_ttl_and_invalidates_on_interrupt_or_epoch() -> None:
-    """短 TTL 内同代次增量复用存活校验；中断或代次切换立即重新查库。"""
+def test_stream_validates_deltas_by_authoritative_epoch_without_per_delta_db_polling() -> None:
+    """权威 epoch 内的连续增量与中断零 DB 轮询；旧代次直接拦截，新代次跃升仅复核 1 次。"""
     from domain.run.model import RunInterruptedPayload
-
-    for invalid_ttl in (-0.1, float("nan"), float("inf"), float("-inf")):
-        with pytest.raises(ValueError, match="run_stream_live_check_ttl_invalid"):
-            RunStreamService(
-                cast(RunRepository, _FakeRepository()),
-                cast(Authenticator, _FakeAuthenticator()),
-                None,
-                live_check_ttl_seconds=invalid_ttl,
-            )
 
     class CountingRepository(_FakeRepository):
         def __init__(self) -> None:
-            super().__init__(status=RunStatus.RUNNING, epoch=1, valid_epochs={1, 2})
+            super().__init__(status=RunStatus.RUNNING, epoch=2, valid_epochs={3})
             self.live_checks: list[int] = []
 
         async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
@@ -1160,41 +1105,51 @@ def test_stream_caches_live_execution_within_ttl_and_invalidates_on_interrupt_or
             return execution_epoch in (self.valid_epochs or set())
 
     incoming: list[RunStreamEvent] = [
+        # 旧代次僵尸 delta：直接丢弃，零 DB 查询。
         RunTextDeltaEvent(
             run_id="run_stream_test",
             execution_epoch=1,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="stale-epoch-1"),
+        ),
+        # 当前权威 epoch=2 连续增量与中断：全部零 DB 查询。
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=2,
             stream_sequence=1,
             payload=RunTextDeltaPayload(text="a"),
         ),
         RunTextDeltaEvent(
             run_id="run_stream_test",
-            execution_epoch=1,
+            execution_epoch=2,
             stream_sequence=2,
             payload=RunTextDeltaPayload(text="b"),
         ),
-        RunTextDeltaEvent(
-            run_id="run_stream_test",
-            execution_epoch=1,
-            stream_sequence=3,
-            payload=RunTextDeltaPayload(text="c"),
-        ),
         RunInterruptedEvent(
             run_id="run_stream_test",
-            execution_epoch=1,
-            stream_sequence=4,
+            execution_epoch=2,
+            stream_sequence=3,
             payload=RunInterruptedPayload(reason="publisher_error"),
         ),
+        # 新代次跃升至 epoch=4（DB 判定已失效）：复核 1 次并拦截，不推进当前 epoch。
         RunTextDeltaEvent(
             run_id="run_stream_test",
-            execution_epoch=2,
+            execution_epoch=4,
             stream_sequence=1,
-            payload=RunTextDeltaPayload(text="d"),
+            payload=RunTextDeltaPayload(text="stale-future-epoch-4"),
+        ),
+        # 新代次跃升至 epoch=3（DB 判定存活）：复核 1 次并推进 epoch，后续同代次增量零查库。
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=3,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="c"),
         ),
         RunTextDeltaEvent(
             run_id="run_stream_test",
-            execution_epoch=2,
+            execution_epoch=3,
             stream_sequence=2,
-            payload=RunTextDeltaPayload(text="e"),
+            payload=RunTextDeltaPayload(text="d"),
         ),
     ]
     repository = CountingRepository()
@@ -1202,15 +1157,14 @@ def test_stream_caches_live_execution_within_ttl_and_invalidates_on_interrupt_or
         cast(RunRepository, repository),
         cast(Authenticator, _FakeAuthenticator()),
         cast(RunEventTransport, _FakeTransport(repository, incoming)),
-        live_check_ttl_seconds=1.0,
     )
 
     async def collect() -> list[RunStreamEvent]:
         iterator = service.events(
             "session_stream_test", "user_stream_test", "run_stream_test", "token"
         )
-        # 1 snapshot + 3 deltas(epoch=1) + 1 interrupted(epoch=1) + 2 deltas(epoch=2) = 7
-        items = [await anext(iterator) for _ in range(7)]
+        # 1 snapshot + 2 deltas(epoch=2) + 1 interrupted(epoch=2) + 2 deltas(epoch=3) = 6
+        items = [await anext(iterator) for _ in range(6)]
         await iterator.aclose()
         return items
 
@@ -1220,30 +1174,68 @@ def test_stream_caches_live_execution_within_ttl_and_invalidates_on_interrupt_or
         "b",
         "c",
         "d",
-        "e",
     ]
-    # epoch=1 连续 3 条增量只查库 1 次；收到中断强制复核 1 次；切到 epoch=2 后 2 条增量只查库 1 次。
-    assert repository.live_checks == [1, 1, 2]
+    # epoch=1/2 零查库；仅在观察到更高代次 4、3 时各向 DB 复核 1 次。
+    assert repository.live_checks == [4, 3]
 
-    # TTL=0 时禁用缓存，每条增量都实时查库。
-    no_cache_repo = CountingRepository()
-    no_cache_service = RunStreamService(
-        cast(RunRepository, no_cache_repo),
+
+def test_stream_suppresses_deltas_after_reconcile_observes_cancelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """周期对账观察到 cancelling 状态后拦截同代次僵尸 delta。"""
+    import app.run.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "DATABASE_RECONCILE_SECONDS", 0.0)
+
+    class CancellingRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.RUNNING, epoch=1)
+            self.snapshots = 0
+
+        async def get_stream_snapshot(
+            self, session_id: str, owner_id: str, run_id: str
+        ) -> RunStreamSnapshot:
+            self.snapshots += 1
+            if self.snapshots == 1:
+                return RunStreamSnapshot(_run(RunStatus.RUNNING, 1), (), ())
+            if self.snapshots == 2:
+                return RunStreamSnapshot(_run(RunStatus.CANCELLING, 1), (), ())
+            return RunStreamSnapshot(_run(RunStatus.CANCELLED, 1), (), ())
+
+    incoming: list[RunStreamEvent] = [
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="before-cancel"),
+        ),
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=2,
+            payload=RunTextDeltaPayload(text="zombie-after-cancel"),
+        ),
+    ]
+    repository = CancellingRepository()
+    service = RunStreamService(
+        cast(RunRepository, repository),
         cast(Authenticator, _FakeAuthenticator()),
-        cast(RunEventTransport, _FakeTransport(no_cache_repo, incoming[:3])),
-        live_check_ttl_seconds=0.0,
+        cast(RunEventTransport, _FakeTransport(repository, incoming)),
     )
 
-    async def collect_no_cache() -> None:
-        iterator = no_cache_service.events(
-            "session_stream_test", "user_stream_test", "run_stream_test", "token"
-        )
-        for _ in range(4):
-            await anext(iterator)
-        await iterator.aclose()
+    async def collect() -> list[RunStreamEvent]:
+        return [
+            item
+            async for item in service.events(
+                "session_stream_test", "user_stream_test", "run_stream_test", "token"
+            )
+        ]
 
-    asyncio.run(collect_no_cache())
-    assert no_cache_repo.live_checks == [1, 1, 1]
+    events = asyncio.run(collect())
+    texts = [event.payload.text for event in events if isinstance(event, RunTextDeltaEvent)]
+    assert texts == ["before-cancel"]
+    assert isinstance(events[-1], RunSnapshotEvent)
+    assert events[-1].payload.status is RunStatus.CANCELLED
 
 
 def test_stream_deduplicates_batch_persisted_events_already_covered_by_snapshot(
@@ -1441,78 +1433,34 @@ def test_stream_still_reconciles_child_forwarded_persisted_event(
     assert emitted[-1].payload.status is RunStatus.COMPLETED
 
 
-def test_redis_publish_falls_back_from_noscript_evalsha_to_eval() -> None:
-    """EVALSHA 遇到 NoScriptError 时自动回退 EVAL，不误报传输故障且正确替换顶层序号。"""
-    from redis.exceptions import NoScriptError
+def test_redis_local_sequence_monotonic_eviction_and_size_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进程内序号按 (run_id, execution_epoch) 独立递增、终态淘汰、LRU 限容且校验 64KB 帧上限。"""
+    from domain.run.model import RunCompletedPayload
 
-    class NoScriptFallbackRedis:
+    class RecordingRedis:
         def __init__(self) -> None:
-            self.loaded_sha: str | None = None
-            self.evalsha_calls = 0
-            self.eval_calls = 0
-            self.sequence = 0
             self.published: list[tuple[str, bytes]] = []
-            self.force_limit_error = False
 
-        async def evalsha(
-            self,
-            sha: str,
-            numkeys: int,
-            key: str,
-            ttl: int,
-            prefix: bytes,
-            suffix: bytes,
-            channel: str,
-            max_bytes: int,
-        ) -> int:
-            del numkeys, key, ttl
-            self.evalsha_calls += 1
-            if self.loaded_sha != sha:
-                raise NoScriptError("NOSCRIPT No matching script.")
-            return self._finish(prefix, suffix, channel, max_bytes)
-
-        async def eval(
-            self,
-            script: str,
-            numkeys: int,
-            key: str,
-            ttl: int,
-            prefix: bytes,
-            suffix: bytes,
-            channel: str,
-            max_bytes: int,
-        ) -> int:
-            del numkeys, key, ttl
-            self.eval_calls += 1
-            assert script == redis_module._PUBLISH_LUA_SCRIPT
-            self.loaded_sha = redis_module._PUBLISH_SCRIPT_SHA
-            return self._finish(prefix, suffix, channel, max_bytes)
-
-        def _finish(self, prefix: bytes, suffix: bytes, channel: str, max_bytes: int) -> int:
-            if self.force_limit_error:
-                return -1
-            self.sequence += 1
-            raw = prefix + str(self.sequence).encode("utf-8") + suffix
-            if len(raw) > int(max_bytes):
-                return -1
+        async def publish(self, channel: str, raw: bytes) -> int:
             self.published.append((channel, raw))
-            return self.sequence
+            return 1
 
     async def scenario() -> None:
-        client = NoScriptFallbackRedis()
+        client = RecordingRedis()
         transport = RedisRunTransport(cast(Redis, client))
-        # run_id 与 text 内故意包含与顶层占位符相似的文本，验证只替换真正的顶层 stream_sequence。
+        # run_id 与 text 内故意包含类似 JSON 序号片段，验证完全基于模型序列化无任何字节切片污染。
         tricky_run_id = 'run_"stream_sequence":0'
         tricky_text = ',"stream_sequence":0,"payload":{"fake":1}'
         await transport.publish_text(tricky_run_id, 7, tricky_text, round=2)
         await transport.publish_text(tricky_run_id, 7, "second chunk", round=2)
+        await transport.publish_text(tricky_run_id, 8, "new epoch chunk", round=0)
 
-        assert client.evalsha_calls == 2
-        assert client.eval_calls == 1
-        assert len(client.published) == 2
-
+        assert len(client.published) == 3
         first = redis_module._EVENT_ADAPTER.validate_json(client.published[0][1])
         second = redis_module._EVENT_ADAPTER.validate_json(client.published[1][1])
+        third = redis_module._EVENT_ADAPTER.validate_json(client.published[2][1])
         assert isinstance(first, RunTextDeltaEvent)
         assert first.run_id == tricky_run_id
         assert first.stream_sequence == 1
@@ -1520,58 +1468,101 @@ def test_redis_publish_falls_back_from_noscript_evalsha_to_eval() -> None:
         assert first.payload.round == 2
         assert isinstance(second, RunTextDeltaEvent)
         assert second.stream_sequence == 2
-        assert second.payload.text == "second chunk"
+        assert isinstance(third, RunTextDeltaEvent)
+        assert third.execution_epoch == 8 and third.stream_sequence == 1
 
-        # Lua 返回 -1 时按超限错误处理，不吞掉错误。
-        client.force_limit_error = True
+        # 子 Run 终态事件转发到父频道时不淘汰父 Run 的序号状态。
+        now = datetime.now(UTC)
+        child_completed = RunEvent(
+            id="evt_child_done",
+            run_id="sub_run_1",
+            sequence=2,
+            type="completed",
+            created_at=now,
+            payload=RunCompletedPayload(assistant_message_id="exec_sub_1"),
+        )
+        await transport.publish_persisted(tricky_run_id, 7, child_completed)
+        assert (tricky_run_id, 7) in transport._sequences
+
+        # 本 Run 终态事件发布完成后立即清理该代次序号与失败记录。
+        parent_completed = RunEvent(
+            id="evt_parent_done",
+            run_id=tricky_run_id,
+            sequence=3,
+            type="completed",
+            created_at=now,
+            payload=RunCompletedPayload(assistant_message_id="msg_final_1"),
+        )
+        await transport.publish_persisted(tricky_run_id, 7, parent_completed)
+        assert (tricky_run_id, 7) not in transport._sequences
+
+        # LRU 容量上限淘汰最旧键，防止常驻 Worker 内存泄漏。
+        monkeypatch.setattr(redis_module, "MAX_TRACKED_EPOCHS", 2)
+        await transport.publish_text("run_lru_1", 1, "x")
+        await transport.publish_text("run_lru_2", 1, "y")
+        await transport.publish_text("run_lru_3", 1, "z")
+        assert len(transport._sequences) == 2
+        assert ("run_lru_1", 1) not in transport._sequences
+        assert ("run_lru_2", 1) in transport._sequences
+        assert ("run_lru_3", 1) in transport._sequences
+
+        # 超过单帧 64KB 预算时明确报错，不发送到 Redis。
+        monkeypatch.setattr(redis_module, "MAX_REDIS_EVENT_BYTES", 32)
         with pytest.raises(ValueError, match="run_stream_event_exceeds_redis_limit"):
-            await transport.publish_text(tricky_run_id, 7, "overflow")
+            await transport.publish_persisted("run_oversize", 1, parent_completed)
 
     asyncio.run(scenario())
 
 
-def test_redis_max_text_chunk_length_fast_paths_and_binary_search(
+def test_redis_split_text_chunks_utf8_and_json_escape_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_max_text_chunk_length 覆盖 O(1) 小包快路径、中包整串快路径与超长包二分回退。"""
-    # 小包命中 O(1) 上界快路径：ASCII、多字节 UTF-8、控制字符与转义引号均可完整放行。
+    """_split_text_chunks 按 UTF-8 安全字节边界与 JSON 转义预算切分，严格遵守 64KB 帧上限。"""
+    # 小包与空串快路径。
+    assert RedisRunTransport._split_text_chunks("run_empty", 1, "", round=0) == [""]
     small = 'hello 世界🙂\x00"\\' * 50
-    assert RedisRunTransport._max_text_chunk_length("run_fast", 1, small, round=3) == len(small)
+    assert RedisRunTransport._split_text_chunks("run_fast", 1, small, round=3) == [small]
 
-    # 中包超出 len*6 上界但实际 UTF-8 JSON 仍在预算内，命中二级整串快路径。
+    # 中包整串一次放行。
     medium = "a" * 20_000
-    assert RedisRunTransport._max_text_chunk_length("run_med", 1, medium, round=0) == len(medium)
+    assert RedisRunTransport._split_text_chunks("run_med", 1, medium, round=0) == [medium]
 
-    # 超长多字节文本触发二分切分，且每片满足 Redis 与 SSE 双重字节预算。
+    # 超长多字节文本按合法 UTF-8 边界切分，无损拼接且每片满足 Redis 与 SSE 双重字节预算。
     large = "界🙂" * 20_000
-    chunk_len = RedisRunTransport._max_text_chunk_length("run_big", 9, large, round=4)
-    assert 0 < chunk_len < len(large)
-    fitted = RunTextDeltaEvent(
-        run_id="run_big",
-        execution_epoch=9,
-        stream_sequence=9_999_999_999_999_999_999,
-        payload=RunTextDeltaPayload(text=large[:chunk_len], round=4),
-    )
-    fitted_len = len(fitted.model_dump_json(exclude_none=True).encode("utf-8"))
-    assert fitted_len <= redis_module.MAX_REDIS_EVENT_BYTES
-    assert fitted_len + redis_module.SSE_PREFIX_RESERVE <= redis_module.MAX_SSE_EVENT_BYTES
+    chunks = RedisRunTransport._split_text_chunks("run_big", 9, large, round=4)
+    assert len(chunks) > 1
+    assert "".join(chunks) == large
+    for chunk in chunks:
+        fitted = RunTextDeltaEvent(
+            run_id="run_big",
+            execution_epoch=9,
+            stream_sequence=9_999_999_999_999_999_999,
+            payload=RunTextDeltaPayload(text=chunk, round=4),
+        )
+        fitted_len = len(fitted.model_dump_json(exclude_none=True).encode("utf-8"))
+        assert fitted_len <= redis_module.MAX_REDIS_EVENT_BYTES
+        assert fitted_len + redis_module.SSE_PREFIX_RESERVE <= redis_module.MAX_SSE_EVENT_BYTES
 
-    next_one = RunTextDeltaEvent(
-        run_id="run_big",
-        execution_epoch=9,
-        stream_sequence=9_999_999_999_999_999_999,
-        payload=RunTextDeltaPayload(text=large[: chunk_len + 1], round=4),
-    )
-    next_len = len(next_one.model_dump_json(exclude_none=True).encode("utf-8"))
-    assert (
-        next_len > redis_module.MAX_REDIS_EVENT_BYTES
-        or next_len + redis_module.SSE_PREFIX_RESERVE > redis_module.MAX_SSE_EVENT_BYTES
-    )
+    # 高密度 JSON 转义字符（控制字符、引号、反斜杠）同样精确收缩至预算内。
+    heavy_escape = '"\x00\\\n' * 12_000
+    escaped_chunks = RedisRunTransport._split_text_chunks("run_esc", 2, heavy_escape, round=1)
+    assert len(escaped_chunks) > 1
+    assert "".join(escaped_chunks) == heavy_escape
+    for chunk in escaped_chunks:
+        fitted = RunTextDeltaEvent(
+            run_id="run_esc",
+            execution_epoch=2,
+            stream_sequence=9_999_999_999_999_999_999,
+            payload=RunTextDeltaPayload(text=chunk, round=1),
+        )
+        fitted_len = len(fitted.model_dump_json(exclude_none=True).encode("utf-8"))
+        assert fitted_len <= redis_module.MAX_REDIS_EVENT_BYTES
+        assert fitted_len + redis_module.SSE_PREFIX_RESERVE <= redis_module.MAX_SSE_EVENT_BYTES
 
     # 动态读取 monkeypatch 后的极小上限，单字符即超限时明确报错。
     monkeypatch.setattr(redis_module, "MAX_REDIS_EVENT_BYTES", 32)
     with pytest.raises(ValueError, match="run_stream_text_chunk_exceeds_redis_limit"):
-        RedisRunTransport._max_text_chunk_length("run_tiny", 1, "a", round=0)
+        RedisRunTransport._split_text_chunks("run_tiny", 1, "a", round=0)
 
 
 def test_redis_multiplexer_shares_single_pubsub_and_fans_out_with_single_deserialization(
@@ -2003,7 +1994,8 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
         return original_snapshot_dump(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(RunSnapshotEvent, "model_dump_json", spy_snapshot_dump)
-    monkeypatch.setattr(ctx_module, "_STREAM_SNAPSHOT_BYTES", 2048)
+    # RunStreamMessage 同时携带 text 与自包含 parts，2560B 预算可保留 msg_3 并裁掉旧 msg_2。
+    monkeypatch.setattr(ctx_module, "_STREAM_SNAPSHOT_BYTES", 2560)
 
     run_row = RunModel(
         id="run_snap_1",
@@ -2164,8 +2156,12 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
     assert tx_active_during_snapshot_dump
     assert all(not active for active in tx_active_during_snapshot_dump)
     assert all(not active for active in session_active_during_snapshot_dump)
-    # 较旧的超长消息 msg_2 被裁掉，保留 msg_3 且游标推进至 2 + 1 = 3。
+    # 较旧的超长消息 msg_2 被裁掉，保留 msg_3 且游标推进至 2 + 1 = 3，同时携带自包含扩展字段。
     assert [message.id for message in snapshot.messages] == ["msg_3"]
+    assert snapshot.messages[0].session_id == "ses_snap_1"
+    assert snapshot.messages[0].run_id == "run_snap_1"
+    assert snapshot.messages[0].parts == ({"type": "text", "text": "B" * 600},)
+    assert snapshot.messages[0].completed_at == now
     assert snapshot.messages_complete is False
     assert snapshot.messages_before_sequence == 3
     assert [event.sequence for event in snapshot.events] == [1, 2]
@@ -2208,3 +2204,815 @@ def test_public_sse_stream_yields_bytes_and_rejects_oversize_frame() -> None:
                 f"/api/v1/sessions/{session_id}/runs/{run_id}/stream",
                 cookies={"athena_session": "valid-token"},
             )
+
+
+def test_stream_direct_forwards_contiguous_progress_events_and_reconciles_on_gap_or_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """序号连续的纯进展型事件直接转发零查库；缺口与终态仍回查权威快照并即时关闭流。"""
+    import app.run.stream as stream_module
+    from domain.run.model import (
+        RunCompletedPayload,
+        RunCompressionStartedPayload,
+        RunStartedPayload,
+        RunToolCallFinishedPayload,
+        RunToolCallStartedPayload,
+    )
+    from domain.tool import ToolCallStatus
+
+    monkeypatch.setattr(stream_module, "DATABASE_RECONCILE_SECONDS", 60.0)
+    now = datetime.now(UTC)
+    final_msg = RunStreamMessage(
+        id="msg_assistant_final",
+        role="assistant",
+        status="completed",
+        text="已完成分析",
+        sequence=2,
+        created_at=now,
+        session_id="session_stream_test",
+        run_id="run_stream_test",
+        reply_to_message_id="message_stream_test",
+        parts=(
+            {"type": "text", "text": "已完成分析"},
+            {
+                "type": "file_ref",
+                "file_id": "file_report_1",
+                "filename": "report.pdf",
+                "mime_type": "application/pdf",
+                "size_bytes": 1024,
+            },
+        ),
+        completed_at=now,
+    )
+    all_events: list[RunEvent] = [
+        RunEvent(
+            id="evt_1",
+            run_id="run_stream_test",
+            sequence=1,
+            type="queued",
+            created_at=now,
+            payload=RunQueuedPayload(trigger_message_id="message_stream_test"),
+        ),
+        RunEvent(
+            id="evt_2",
+            run_id="run_stream_test",
+            sequence=2,
+            type="started",
+            created_at=now,
+            payload=RunStartedPayload(execution_epoch=1, worker_id="worker-1"),
+        ),
+        RunEvent(
+            id="evt_3",
+            run_id="run_stream_test",
+            sequence=3,
+            type="tool_call_started",
+            created_at=now,
+            payload=RunToolCallStartedPayload(call_id="tc_1", ordinal=1, round=0),
+        ),
+        RunEvent(
+            id="evt_4",
+            run_id="run_stream_test",
+            sequence=4,
+            type="tool_call_finished",
+            created_at=now,
+            payload=RunToolCallFinishedPayload(
+                call_id="tc_1", ordinal=1, status=ToolCallStatus.COMPLETED, round=0
+            ),
+        ),
+        RunEvent(
+            id="evt_5",
+            run_id="run_stream_test",
+            sequence=5,
+            type="compression_started",
+            created_at=now,
+            payload=RunCompressionStartedPayload(operation_id="cmp_1"),
+        ),
+        RunEvent(
+            id="evt_6",
+            run_id="run_stream_test",
+            sequence=6,
+            type="compression_completed",
+            created_at=now,
+            payload=RunCompressionCompletedPayload(
+                operation_id="cmp_1", summary_id="sum_1", covered_through_sequence=1, batch_count=1
+            ),
+        ),
+        RunEvent(
+            id="evt_7",
+            run_id="run_stream_test",
+            sequence=7,
+            type="tool_call_started",
+            created_at=now,
+            payload=RunToolCallStartedPayload(call_id="tc_2", ordinal=2, round=1),
+        ),
+        RunEvent(
+            id="evt_8",
+            run_id="run_stream_test",
+            sequence=8,
+            type="tool_call_finished",
+            created_at=now,
+            payload=RunToolCallFinishedPayload(
+                call_id="tc_2", ordinal=2, status=ToolCallStatus.COMPLETED, round=1
+            ),
+        ),
+        RunEvent(
+            id="evt_9",
+            run_id="run_stream_test",
+            sequence=9,
+            type="completed",
+            created_at=now,
+            payload=RunCompletedPayload(assistant_message_id="msg_assistant_final"),
+        ),
+    ]
+
+    class ProgressRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.RUNNING, epoch=1)
+            self.snapshot_calls = 0
+            self.list_events_calls = 0
+
+        async def get_stream_snapshot(
+            self, session_id: str, owner_id: str, run_id: str
+        ) -> RunStreamSnapshot:
+            assert self.subscribed
+            self.snapshot_calls += 1
+            if self.snapshot_calls == 1:
+                return RunStreamSnapshot(
+                    replace(_run(RunStatus.RUNNING, 1), event_sequence=2),
+                    (),
+                    tuple(all_events[:2]),
+                )
+            if self.snapshot_calls == 2:
+                return RunStreamSnapshot(
+                    replace(_run(RunStatus.RUNNING, 1), event_sequence=8),
+                    (),
+                    tuple(all_events[:8]),
+                )
+            return RunStreamSnapshot(
+                replace(_run(RunStatus.COMPLETED, 1), event_sequence=9),
+                (final_msg,),
+                tuple(all_events),
+                assistant_message_id="msg_assistant_final",
+            )
+
+        async def list_events(
+            self,
+            session_id: str,
+            owner_id: str,
+            run_id: str,
+            *,
+            after_sequence: int,
+            limit: int,
+            through_sequence: int | None = None,
+        ) -> tuple[RunEvent, ...]:
+            self.list_events_calls += 1
+            upper = through_sequence or len(all_events)
+            return tuple(evt for evt in all_events if after_sequence < evt.sequence <= upper)[
+                :limit
+            ]
+
+    incoming: list[RunStreamEvent] = [
+        # 序号 3..6 连续纯进展型事件：全部直接转发，不触发 DB 快照。
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunPersistedEventPayload(event=all_events[2]),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=2,
+            payload=RunPersistedEventPayload(event=all_events[3]),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=3,
+            payload=RunPersistedEventPayload(event=all_events[4]),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=4,
+            payload=RunPersistedEventPayload(event=all_events[5]),
+        ),
+        # 跳过 seq=7 直接到达 seq=8：触发第 2 次快照对账并补齐 7、8。
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=5,
+            payload=RunPersistedEventPayload(event=all_events[7]),
+        ),
+        # 终态 completed（seq=9）：触发第 3 次快照对账、推送自包含终态快照并立即关闭 SSE 流。
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=6,
+            payload=RunPersistedEventPayload(event=all_events[8]),
+        ),
+    ]
+    repository = ProgressRepository()
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository, incoming)),
+    )
+
+    async def collect() -> list[RunStreamEvent]:
+        return [
+            item
+            async for item in service.events(
+                "session_stream_test", "user_stream_test", "run_stream_test", "token"
+            )
+        ]
+
+    emitted = asyncio.run(collect())
+    # 仅首屏 1 次 + 缺口对账 1 次 + 终态对账 1 次 = 3 次（4 条连续纯进展型事件零快照查库）。
+    assert repository.snapshot_calls == 3
+    # 缺口对账与终态对账各分页补齐 1 次。
+    assert repository.list_events_calls == 2
+    persisted_seqs = [
+        item.payload.event.sequence for item in emitted if isinstance(item, RunPersistedEvent)
+    ]
+    assert persisted_seqs == [3, 4, 5, 6, 7, 8, 9]
+    terminal = emitted[-1]
+    assert isinstance(terminal, RunSnapshotEvent)
+    assert terminal.payload.status is RunStatus.COMPLETED
+    assert terminal.payload.assistant_message_id == "msg_assistant_final"
+    assert terminal.payload.messages[0].parts is not None
+    assert terminal.payload.messages[0].parts[1]["type"] == "file_ref"
+
+
+def test_stream_reconciles_on_subagent_and_waiting_approval_even_when_contiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """子智能体状态变更与等待审批事件即使序号连续也不直传，必须回查 DB 更新卡片投影并关闭流。"""
+    import app.run.stream as stream_module
+    from domain.run.model import (
+        RunSubagentStatusChangedPayload,
+        RunWaitingForApprovalPayload,
+        SubagentTaskSummary,
+    )
+
+    monkeypatch.setattr(stream_module, "DATABASE_RECONCILE_SECONDS", 60.0)
+    now = datetime.now(UTC)
+    evt_1 = RunEvent(
+        id="evt_1",
+        run_id="run_stream_test",
+        sequence=1,
+        type="queued",
+        created_at=now,
+        payload=RunQueuedPayload(trigger_message_id="message_stream_test"),
+    )
+    evt_2 = RunEvent(
+        id="evt_2",
+        run_id="run_stream_test",
+        sequence=2,
+        type="subagent_status_changed",
+        created_at=now,
+        payload=RunSubagentStatusChangedPayload(
+            sub_run_id="sub_1",
+            subagent_slug="research",
+            subagent_name="Research",
+            status=RunStatus.RUNNING,
+        ),
+    )
+    evt_3 = RunEvent(
+        id="evt_3",
+        run_id="run_stream_test",
+        sequence=3,
+        type="waiting_for_approval",
+        created_at=now,
+        payload=RunWaitingForApprovalPayload(
+            batch_message_id="exec_batch_1", pending_call_ids=("tc_approval_1",)
+        ),
+    )
+    sub_summary = SubagentTaskSummary(
+        sub_run_id="sub_1",
+        parent_tool_call_id="ptc_1",
+        subagent_slug="research",
+        subagent_name="Research",
+        status=RunStatus.RUNNING,
+        created_at=now,
+    )
+
+    class ProjectionRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.RUNNING, epoch=1)
+            self.snapshot_calls = 0
+
+        async def get_stream_snapshot(
+            self, session_id: str, owner_id: str, run_id: str
+        ) -> RunStreamSnapshot:
+            self.snapshot_calls += 1
+            if self.snapshot_calls == 1:
+                return RunStreamSnapshot(
+                    replace(_run(RunStatus.RUNNING, 1), event_sequence=1), (), (evt_1,)
+                )
+            if self.snapshot_calls == 2:
+                return RunStreamSnapshot(
+                    replace(_run(RunStatus.RUNNING, 1), event_sequence=2),
+                    (),
+                    (evt_1, evt_2),
+                    subagent_tasks=(sub_summary,),
+                )
+            return RunStreamSnapshot(
+                replace(_run(RunStatus.WAITING_FOR_APPROVAL, 1), event_sequence=3),
+                (),
+                (evt_1, evt_2, evt_3),
+                subagent_tasks=(sub_summary,),
+            )
+
+        async def list_events(
+            self,
+            session_id: str,
+            owner_id: str,
+            run_id: str,
+            *,
+            after_sequence: int,
+            limit: int,
+            through_sequence: int | None = None,
+        ) -> tuple[RunEvent, ...]:
+            upper = through_sequence or 3
+            return tuple(e for e in (evt_1, evt_2, evt_3) if after_sequence < e.sequence <= upper)[
+                :limit
+            ]
+
+    incoming: list[RunStreamEvent] = [
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=1,
+            payload=RunPersistedEventPayload(event=evt_2),
+        ),
+        RunPersistedEvent(
+            run_id="run_stream_test",
+            execution_epoch=1,
+            stream_sequence=2,
+            payload=RunPersistedEventPayload(event=evt_3),
+        ),
+    ]
+    repository = ProjectionRepository()
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository, incoming)),
+    )
+
+    async def collect() -> list[RunStreamEvent]:
+        return [
+            item
+            async for item in service.events(
+                "session_stream_test", "user_stream_test", "run_stream_test", "token"
+            )
+        ]
+
+    emitted = asyncio.run(collect())
+    # 首屏 + subagent_status_changed 对账 + waiting_for_approval 对账 = 3 次快照。
+    assert repository.snapshot_calls == 3
+    snapshots = [item for item in emitted if isinstance(item, RunSnapshotEvent)]
+    assert len(snapshots) == 3
+    assert len(snapshots[1].payload.subagent_tasks) == 1
+    assert snapshots[2].payload.status is RunStatus.WAITING_FOR_APPROVAL
+
+
+def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """终态快照填充自包含消息与 assistant_message_id，兼容旧格式并优先裁事件保护终态消息。"""
+    from collections.abc import Sequence
+    from types import SimpleNamespace
+
+    from adapter.run.model import RunModel
+    from adapter.run.repository import context_events as ctx_module
+    from adapter.run.repository.context_events import RunContextEventsMixin
+
+    now = datetime.now(UTC)
+    # 1. 验证旧格式 RunStreamMessage / RunSnapshotPayload JSON 100% 向后兼容反序列化。
+    legacy_snapshot_json = (
+        '{"type":"snapshot","run_id":"r1","execution_epoch":1,"stream_sequence":0,'
+        '"payload":{"status":"completed","event_sequence":2,"messages":[{"id":"m1",'
+        '"role":"assistant","status":"completed","text":"legacy","sequence":2,'
+        '"created_at":"2026-01-01T00:00:00Z"}],"events":[]}}'
+    )
+    parsed_legacy = redis_module._EVENT_ADAPTER.validate_json(legacy_snapshot_json)
+    assert isinstance(parsed_legacy, RunSnapshotEvent)
+    assert parsed_legacy.payload.assistant_message_id is None
+    assert parsed_legacy.payload.messages[0].parts is None
+    assert parsed_legacy.payload.messages[0].session_id is None
+
+    # 2. 验证 completed 终态填充完整 parts（含 file_ref）、assistant_message_id 与裁剪保护。
+    run_row = RunModel(
+        id="run_term_1",
+        session_id="ses_term_1",
+        owner_id="usr_term_1",
+        status="completed",
+        trigger_message_id="msg_user_1",
+        context_cutoff_sequence=1,
+        retry_of_run_id=None,
+        model_config_version_id="profile_1",
+        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
+        prompt_template_version="run-v2",
+        event_sequence=4,
+        execution_epoch=1,
+        worker_id=None,
+        lease_expires_at=None,
+        execution_started_at=now,
+        execution_deadline_at=now + timedelta(seconds=60),
+        queued_at=now,
+        first_started_at=now,
+        finished_at=now,
+        created_at=now,
+        updated_at=now,
+        cancel_requested_at=None,
+        safe_error_code=None,
+        report_message_id=None,
+        usage={},
+        compression_policy_version_id=None,
+        model_snapshot_json=None,
+        tool_snapshot=None,
+        auth_session_id=None,
+        llm_request_count=1,
+        skill_snapshot=None,
+        input_file_ids=[],
+        knowledge_base_ids=None,
+        parent_run_id=None,
+        root_run_id="run_term_1",
+        parent_tool_call_id=None,
+        subagent_profile_id=None,
+        subagent_slug=None,
+        subagent_name=None,
+        subagent_system_prompt=None,
+        max_llm_requests=None,
+        timeout_seconds=None,
+        depth=1,
+    )
+    msg_rows = [
+        SimpleNamespace(
+            id="msg_final_assistant",
+            session_id="ses_term_1",
+            role="assistant",
+            status="completed",
+            sequence=2,
+            parts=[
+                {"type": "text", "text": "R" * 450},
+                {
+                    "type": "file_ref",
+                    "file_id": "file_1",
+                    "filename": "summary.csv",
+                    "mime_type": "text/csv",
+                    "size_bytes": 512,
+                },
+            ],
+            reply_to_message_id="msg_user_1",
+            run_id="run_term_1",
+            managed_run_id="run_term_1",
+            client_message_id=None,
+            created_at=now,
+            completed_at=now,
+            metadata_json={},
+            context_turn_id=None,
+        ),
+        SimpleNamespace(
+            id="msg_user_1",
+            session_id="ses_term_1",
+            role="user",
+            status="completed",
+            sequence=1,
+            parts=[{"type": "text", "text": "U" * 500}],
+            reply_to_message_id=None,
+            run_id="run_term_1",
+            managed_run_id="run_term_1",
+            client_message_id=None,
+            created_at=now,
+            completed_at=now,
+            metadata_json={},
+            context_turn_id=None,
+        ),
+    ]
+    evt_rows = [
+        SimpleNamespace(
+            id=f"evt_{seq}",
+            run_id="run_term_1",
+            session_id="ses_term_1",
+            sequence=seq,
+            type="queued" if seq < 4 else "completed",
+            created_at=now,
+            payload=(
+                {"trigger_message_id": "msg_user_1"}
+                if seq < 4
+                else {"assistant_message_id": "msg_final_assistant"}
+            ),
+        )
+        for seq in range(1, 5)
+    ]
+
+    class _FakeScalarResult:
+        def __init__(self, items: Sequence[object]) -> None:
+            self._items = list(items)
+
+        def all(self) -> list[object]:
+            return self._items
+
+    class _FakeBegin:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    class _FakeSession:
+        bind = None
+
+        def __init__(self) -> None:
+            self._scalars_call = 0
+
+        def begin(self) -> _FakeBegin:
+            return _FakeBegin()
+
+        async def scalar(self, stmt: object) -> object:
+            del stmt
+            return run_row
+
+        async def scalars(self, stmt: object) -> _FakeScalarResult:
+            del stmt
+            self._scalars_call += 1
+            if self._scalars_call == 1:
+                return _FakeScalarResult(msg_rows)
+            return _FakeScalarResult(evt_rows)
+
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            del args
+
+    class _Repo(RunContextEventsMixin):
+        def __init__(self) -> None:
+            self._session_factory = lambda: _FakeSession()  # type: ignore[assignment]
+
+    # 紧凑预算：全量消息+事件超限，裁掉旧用户消息与尾部事件后可完整保留最终助手消息。
+    monkeypatch.setattr(ctx_module, "_STREAM_SNAPSHOT_BYTES", 2000)
+    snapshot = asyncio.run(_Repo().get_stream_snapshot("ses_term_1", "usr_term_1", "run_term_1"))
+    assert snapshot is not None
+    assert snapshot.assistant_message_id == "msg_final_assistant"
+    assert [m.id for m in snapshot.messages] == ["msg_final_assistant"]
+    final_projected = snapshot.messages[0]
+    assert final_projected.session_id == "ses_term_1"
+    assert final_projected.run_id == "run_term_1"
+    assert final_projected.reply_to_message_id == "msg_user_1"
+    assert final_projected.completed_at == now
+    assert final_projected.parts == (
+        {"type": "text", "text": "R" * 450},
+        {
+            "type": "file_ref",
+            "file_id": "file_1",
+            "filename": "summary.csv",
+            "mime_type": "text/csv",
+            "size_bytes": 512,
+        },
+    )
+    assert snapshot.messages_complete is False
+    assert snapshot.messages_before_sequence == 2
+    assert snapshot.events_complete is False
+    assert len(snapshot.events) < 4
+
+
+def test_sqlalchemy_completed_run_snapshot_beyond_100_events_and_get_details_assistant_id() -> None:
+    """超过 100 条事件的 completed 快照与 get_details 均准确填充 assistant_message_id。"""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    from adapter.auth.model import UserModel
+    from adapter.base import Base
+    from adapter.message.model import ConversationMessageModel
+    from adapter.message.repository import SqlAlchemyMessageRepository
+    from adapter.run.model import RunEventModel, RunModel
+    from adapter.run.repository import SqlAlchemyRunRepository
+    from adapter.session.model import SessionModel
+
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            engine, expire_on_commit=False
+        )
+        now = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
+        try:
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="usr_sq_1",
+                        email="sq@example.test",
+                        password_hash="h",
+                        status=UserStatus.ACTIVE.value,
+                        role=UserRole.MEMBER.value,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                session.add(
+                    SessionModel(
+                        id="ses_sq_1",
+                        owner_id="usr_sq_1",
+                        title="SQLite 终态快照回归",
+                        project_id=None,
+                        last_message_sequence=2,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                session.add_all(
+                    [
+                        ConversationMessageModel(
+                            id="msg_sq_user",
+                            session_id="ses_sq_1",
+                            role="user",
+                            status="completed",
+                            sequence=1,
+                            parts=[{"type": "text", "text": "请生成报告"}],
+                            reply_to_message_id=None,
+                            run_id="run_sq_1",
+                            managed_run_id="run_sq_1",
+                            created_at=now,
+                            completed_at=now,
+                            metadata_json={},
+                        ),
+                        ConversationMessageModel(
+                            id="msg_sq_final",
+                            session_id="ses_sq_1",
+                            role="assistant",
+                            status="completed",
+                            sequence=2,
+                            parts=[
+                                {"type": "text", "text": "报告已生成"},
+                                {
+                                    "type": "file_ref",
+                                    "file_id": "file_sq_1",
+                                    "filename": "out.csv",
+                                    "mime_type": "text/csv",
+                                    "size_bytes": 2048,
+                                },
+                            ],
+                            reply_to_message_id="msg_sq_user",
+                            run_id="run_sq_1",
+                            managed_run_id="run_sq_1",
+                            created_at=now,
+                            completed_at=now,
+                            metadata_json={},
+                        ),
+                    ]
+                )
+                session.add(
+                    RunModel(
+                        id="run_sq_1",
+                        session_id="ses_sq_1",
+                        owner_id="usr_sq_1",
+                        status="completed",
+                        trigger_message_id="msg_sq_user",
+                        context_cutoff_sequence=1,
+                        retry_of_run_id=None,
+                        model_config_version_id="prof_1",
+                        main_prompt_version_id=TEST_MAIN_PROMPT_ID,
+                        compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
+                        prompt_template_version="run-v2",
+                        event_sequence=105,
+                        execution_epoch=1,
+                        queued_at=now,
+                        first_started_at=now,
+                        finished_at=now,
+                        created_at=now,
+                        updated_at=now,
+                        usage={},
+                        input_file_ids=[],
+                        depth=0,
+                    )
+                )
+                # 插入 105 条事件，其中 completed 位于首屏 100 条之外（sequence=105）。
+                for seq in range(1, 105):
+                    session.add(
+                        RunEventModel(
+                            id=f"evt_sq_{seq}",
+                            run_id="run_sq_1",
+                            session_id="ses_sq_1",
+                            sequence=seq,
+                            type="queued",
+                            created_at=now,
+                            payload={"type": "queued", "trigger_message_id": "msg_sq_user"},
+                        )
+                    )
+                session.add(
+                    RunEventModel(
+                        id="evt_sq_105",
+                        run_id="run_sq_1",
+                        session_id="ses_sq_1",
+                        sequence=105,
+                        type="completed",
+                        created_at=now,
+                        payload={"type": "completed", "assistant_message_id": "msg_sq_final"},
+                    )
+                )
+
+            repo = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            snapshot = await repo.get_stream_snapshot("ses_sq_1", "usr_sq_1", "run_sq_1")
+            assert snapshot is not None
+            assert len(snapshot.events) == 100
+            assert snapshot.events_complete is False
+            assert snapshot.events_after_sequence == 100
+            assert snapshot.assistant_message_id == "msg_sq_final"
+            assert [m.id for m in snapshot.messages] == ["msg_sq_user", "msg_sq_final"]
+            final_msg = snapshot.messages[-1]
+            assert final_msg.session_id == "ses_sq_1"
+            assert final_msg.run_id == "run_sq_1"
+            assert final_msg.reply_to_message_id == "msg_sq_user"
+            assert final_msg.completed_at == now
+            assert final_msg.parts == (
+                {"type": "text", "text": "报告已生成"},
+                {
+                    "type": "file_ref",
+                    "file_id": "file_sq_1",
+                    "filename": "out.csv",
+                    "mime_type": "text/csv",
+                    "size_bytes": 2048,
+                },
+            )
+
+            details = await repo.get_details("ses_sq_1", "usr_sq_1", "run_sq_1")
+            assert details is not None
+            assert details.assistant_message_id == "msg_sq_final"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_stream_emits_new_epoch_snapshot_after_higher_epoch_delta_advances_current_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """高代次 text_delta 提前推进 current_epoch 后，对账拿到同状态新代次快照时仍必须补发。"""
+    import app.run.stream as stream_module
+
+    monkeypatch.setattr(stream_module, "DATABASE_RECONCILE_SECONDS", 0.0)
+
+    class EpochAdvanceRepository(_FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(status=RunStatus.RUNNING, epoch=1, valid_epochs={2})
+            self.snapshot_calls = 0
+
+        async def get_stream_snapshot(
+            self, session_id: str, owner_id: str, run_id: str
+        ) -> RunStreamSnapshot:
+            assert self.subscribed
+            self.snapshot_calls += 1
+            # 首次快照为 RUNNING(epoch=1)；后续对账返回同状态但代次升至 epoch=2 的快照。
+            epoch = 1 if self.snapshot_calls == 1 else 2
+            return RunStreamSnapshot(_run(RunStatus.RUNNING, epoch), (), ())
+
+    incoming: list[RunStreamEvent] = [
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=2,
+            stream_sequence=1,
+            payload=RunTextDeltaPayload(text="epoch-2-first"),
+        ),
+        RunTextDeltaEvent(
+            run_id="run_stream_test",
+            execution_epoch=2,
+            stream_sequence=2,
+            payload=RunTextDeltaPayload(text="epoch-2-second"),
+        ),
+    ]
+    repository = EpochAdvanceRepository()
+    service = RunStreamService(
+        cast(RunRepository, repository),
+        cast(Authenticator, _FakeAuthenticator()),
+        cast(RunEventTransport, _FakeTransport(repository, incoming)),
+    )
+
+    async def collect() -> list[RunStreamEvent]:
+        iterator = service.events(
+            "session_stream_test", "user_stream_test", "run_stream_test", "token"
+        )
+        # 1: 初始 snapshot(epoch=1)
+        # 2: text_delta(epoch=2, "epoch-2-first")
+        # 3: 对账补发的权威 snapshot(epoch=2)
+        # 4: text_delta(epoch=2, "epoch-2-second")（验证未重复发 snapshot 且未误报 stream_gap）
+        items = [await anext(iterator) for _ in range(4)]
+        await iterator.aclose()
+        return items
+
+    events = asyncio.run(collect())
+    assert isinstance(events[0], RunSnapshotEvent)
+    assert events[0].execution_epoch == 1
+    assert isinstance(events[1], RunTextDeltaEvent)
+    assert events[1].execution_epoch == 2
+    assert events[1].payload.text == "epoch-2-first"
+    assert isinstance(events[2], RunSnapshotEvent)
+    assert events[2].execution_epoch == 2
+    assert events[2].payload.status is RunStatus.RUNNING
+    assert isinstance(events[3], RunTextDeltaEvent)
+    assert events[3].execution_epoch == 2
+    assert events[3].payload.text == "epoch-2-second"

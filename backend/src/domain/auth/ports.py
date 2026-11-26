@@ -134,20 +134,8 @@ class Authenticator(Protocol):
         """验证原始 token 并返回登录上下文。"""
 
 
-class AuthTransactionGuard(Protocol):
-    """绑定到调用方事务、为最终管理操作复核身份的窄能力。"""
-
-    async def lock_current_session_user(
-        self,
-        user_id: str,
-        session_id: str,
-    ) -> User | None:
-        """在调用方事务中按 user 后 session 的顺序锁行并检查当前有效身份。"""
-
-
 __all__ = [
     "AuthRepository",
-    "AuthTransactionGuard",
     "Authenticator",
     "CurrentSessionReader",
     "PasswordHasher",

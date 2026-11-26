@@ -116,10 +116,11 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
             )
         actor_a, actor_b = await _seed_users(factory)
         repository = SqlAlchemySkillRepository(factory)
+        objects = _MemoryObjects()
         sequence = count(1)
         service = SkillService(
             repository,
-            cast(Any, _MemoryObjects()),
+            cast(Any, objects),
             _AuthReader(),
             id_factory=lambda prefix: f"{prefix}_{next(sequence)}",
             clock=lambda: NOW,
@@ -142,6 +143,11 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
         assert created_a.skill.scope is SkillScope.PERSONAL
         assert created_a.skill.owner_id == actor_a.user.id
         assert created_b.skill.owner_id == actor_b.user.id
+        # 纯 Markdown 个人技能多条并存时 object_key 均为 None，且 0 次触达对象存储。
+        assert created_a.versions[0].object_key is None
+        assert created_b.versions[0].object_key is None
+        assert objects.values == {}
+        assert objects.deleted == []
         assert created_a.versions[0].package_sha256 == created_b.versions[0].package_sha256
 
         await _insert_public_skill(factory)
@@ -279,6 +285,19 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
         )
         assert resolved.version_id == published.versions[0].id
         assert old_version.id == published.versions[0].id
+        assert old_version.object_key is None
+        # 通过历史快照读取纯 Markdown 正文同样不触达 MinIO。
+        resource_slice = await service.read_resource(
+            historical_snapshot,
+            skill_id=created_a.skill.id,
+            path="SKILL.md",
+            offset=0,
+            limit_bytes=1024,
+        )
+        assert resource_slice.content == "先校验事实，再整理周报。"
+        assert resource_slice.eof is True
+        assert objects.values == {}
+        assert objects.deleted == []
     finally:
         await engine.dispose()
 
@@ -390,7 +409,8 @@ async def _run_personal_replay_current_scenario(tmp_path: Path) -> None:
                 )
             )
         assert version_count == 3
-        assert len(objects.values) == 3
+        assert len(objects.values) == 0
+        assert objects.deleted == []
     finally:
         await engine.dispose()
 

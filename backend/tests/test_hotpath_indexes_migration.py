@@ -97,7 +97,8 @@ def test_hotpath_index_migration_emits_expected_postgresql_upgrade_and_downgrade
     """PostgreSQL 离线升级与降级 SQL 须对称创建/删除全部 9 个新索引与 4 个冗余索引。"""
     pg_cfg = _pg_config()
     script = ScriptDirectory.from_config(pg_cfg)
-    assert script.get_heads() == ["20261207_0040"]
+    # 校验主干始终保持单一 head，且 20261207_0040 位于迁移链中（后续由 20261208_0041 承接）。
+    assert len(script.get_heads()) == 1
     rev = script.get_revision("20261207_0040")
     assert rev is not None
     assert rev.down_revision == "20261206_0039"

@@ -1522,6 +1522,7 @@ def test_run_executor_vision_enabled_caches_caps_five_and_isolates_failures() ->
         system_prompts=cast(Any, _FakePromptRepo()),
         tool_runtime=cast(RunToolRuntime, tool_runtime),
         config=RunWorkerConfig(),
+        clock=lambda: NOW,
     )
     lease = RunLease(
         run=run,
@@ -1624,6 +1625,7 @@ def test_run_executor_non_vision_model_gracefully_degrades_without_reading_objec
         system_prompts=cast(Any, _FakePromptRepo()),
         tool_runtime=cast(RunToolRuntime, tool_runtime),
         config=RunWorkerConfig(),
+        clock=lambda: NOW,
     )
     lease = RunLease(
         run=run,
@@ -1729,6 +1731,7 @@ def test_safe_stop_report_records_vision_status_and_never_persists_base64() -> N
         system_prompts=cast(Any, _FakePromptRepo()),
         tool_runtime=cast(RunToolRuntime, tool_runtime),
         config=RunWorkerConfig(),
+        clock=lambda: NOW,
     )
     lease = RunLease(
         run=run,

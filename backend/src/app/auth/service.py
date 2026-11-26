@@ -6,7 +6,7 @@ import asyncio
 import logging
 import unicodedata
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Protocol, TypeVar
@@ -21,6 +21,7 @@ from app.auth.oauth_state import (
     validate_safe_return_to,
 )
 from app.auth.rate_limit import FixedWindowRateLimiter, RateLimiter
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.auth import (
     AdminPromotionError,
@@ -86,13 +87,6 @@ def _default_auth_session_id() -> str:
 def _default_token() -> str:
     """生成 256 位随机 URL 安全 token。"""
     return token_urlsafe(32)
-
-
-def _utc_value(value: datetime) -> datetime:
-    """把时钟输出规范化为 UTC。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def _normalize_email(email: str) -> str:
@@ -241,7 +235,7 @@ class AuthService:
         normalized_email = _normalize_email(email)
         normalized_password = _validate_password(password)
         normalized_display_name = _normalize_display_name(display_name)
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         user = User(
             id=self._user_id_factory(),
             email=normalized_email,
@@ -274,7 +268,7 @@ class AuthService:
             self._password_hasher.hash_password,
             normalized_password,
         )
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         return await self._repository.upsert_local_super_admin(
             user_id=self._user_id_factory(),
             email=normalized_email,
@@ -340,7 +334,7 @@ class AuthService:
             raise InvalidCredentialsError("invalid_credentials")
 
         await self._login_account_limiter.reset(account_key)
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         ttl_seconds = REMEMBER_SESSION_SECONDS if remember_me else DEFAULT_SESSION_SECONDS
         auth_session, token, max_age_seconds = self._new_session(
             user.id,
@@ -388,7 +382,7 @@ class AuthService:
             # 截断底层异常链，防止任何 code/app_secret/access_token 逸出到上层。
             raise SsoAuthenticationError("feishu_auth_failed") from None
 
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         token = self._token_factory()
         auth_session_id = self._auth_session_id_factory()
         expires_at = current + timedelta(seconds=DEFAULT_SESSION_SECONDS)
@@ -436,7 +430,7 @@ class AuthService:
             raise MockUserNotFoundError("mock_user_not_found")
         if user.status is not UserStatus.ACTIVE:
             raise InvalidCredentialsError("invalid_credentials")
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         auth_session, token, max_age_seconds = self._new_session(
             user.id,
             current,
@@ -460,17 +454,8 @@ class AuthService:
             return None
         return await self._repository.get_active_session(
             _hash_token(token),
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
         )
-
-    async def revalidate_admin(self, context: AuthContext) -> User | None:
-        """按会话 ID 从数据库复核当前有效用户及超级管理员角色。"""
-        user = await self._repository.get_current_session_user(
-            context.user.id,
-            context.session_id,
-            _utc_value(self._clock()),
-        )
-        return user if user is not None and user.role is UserRole.SUPER_ADMIN else None
 
     async def promote_admin_by_email(self, email: str) -> User:
         """将已有 active 且未删除账号提升为超级管理员。"""
@@ -480,7 +465,7 @@ class AuthService:
             raise AdminPromotionError("admin_promotion_unavailable") from error
         user = await self._repository.promote_active_user_by_email(
             normalized_email,
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
         )
         if user is None:
             raise AdminPromotionError("admin_promotion_unavailable")
@@ -492,7 +477,7 @@ class AuthService:
             return
         await self._repository.revoke_session(
             _hash_token(token),
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
         )
 
     async def change_password(
@@ -524,7 +509,7 @@ class AuthService:
             self._password_hasher.hash_password,
             validated_password,
         )
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         changed = await self._repository.change_password_and_revoke_sessions(
             context.user.id,
             password_hash,
@@ -552,7 +537,7 @@ class AuthService:
             context.user.id,
             context.session_id,
             normalized_display_name,
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
         )
         if updated is None:
             raise InvalidSessionError("invalid_session")

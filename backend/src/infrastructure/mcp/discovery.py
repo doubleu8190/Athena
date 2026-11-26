@@ -13,7 +13,7 @@ import anyio
 from jsonschema import validators  # type: ignore[import-untyped]
 from jsonschema.validators import Draft202012Validator  # type: ignore[import-untyped]
 from mcp import Client, types
-from mcp.client._transport import Transport
+from mcp.client import Transport
 from mcp.shared.inbound import find_invalid_x_mcp_header
 from mcp.types import Tool
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS

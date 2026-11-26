@@ -635,10 +635,22 @@ async def _create_harness(
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool)
 
     def _enable_sqlite_fk(dbapi_connection: Any, _record: Any) -> None:
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
-        dbapi_connection.execute("PRAGMA busy_timeout=5000")
+        # 关闭 pysqlite 隐式事务管理，由下方 begin 钩子显式发送 BEGIN IMMEDIATE，
+        # 在 SQLite 上正确串行化并行工具批次的写事务（等价于 PostgreSQL 的 FOR UPDATE 行锁）。
+        dbapi_connection.isolation_level = None
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
+
+    def _begin_sqlite_immediate(connection: Any) -> None:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
 
     event.listen(engine.sync_engine, "connect", _enable_sqlite_fk)
+    event.listen(engine.sync_engine, "begin", _begin_sqlite_immediate)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

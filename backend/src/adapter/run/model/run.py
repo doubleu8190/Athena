@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -17,15 +16,9 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base
-
-
-def _json_type() -> JSON:
-    """在 PostgreSQL 使用 JSONB，在 SQLite 测试中使用 JSON。"""
-    return JSON().with_variant(JSONB(), "postgresql")
+from adapter.base import Base, json_column_type
 
 
 class RunModel(Base):
@@ -136,21 +129,25 @@ class RunModel(Base):
     model_config_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
     # 固化创建 Run 时的非密钥模型元数据快照，严禁存放任何明文或密文 api_key。
     model_snapshot_json: Mapped[dict[str, object] | None] = mapped_column(
-        _json_type(), nullable=True
+        json_column_type(), nullable=True
     )
     main_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    skill_snapshot: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
+    skill_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        json_column_type(), nullable=True
+    )
     input_file_ids: Mapped[list[str]] = mapped_column(
-        _json_type(),
+        json_column_type(),
         nullable=False,
         default=list,
         server_default=text("'[]'"),
     )
     # NULL 表示默认企业工作台范围；[] 表示显式关闭知识库检索；非空表示显式限定知识库 ID 列表。
-    knowledge_base_ids: Mapped[list[str] | None] = mapped_column(_json_type(), nullable=True)
-    tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(_json_type(), nullable=True)
+    knowledge_base_ids: Mapped[list[str] | None] = mapped_column(json_column_type(), nullable=True)
+    tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        json_column_type(), nullable=True
+    )
     auth_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     llm_request_count: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default=text("0")
@@ -170,7 +167,9 @@ class RunModel(Base):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     report_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    usage: Mapped[dict[str, object]] = mapped_column(_json_type(), nullable=False, default=dict)
+    usage: Mapped[dict[str, object]] = mapped_column(
+        json_column_type(), nullable=False, default=dict
+    )
     # Phase 2 Subagent 编排预留字段，默认兼容主 Run（depth=0）。
     parent_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     root_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 import threading
@@ -22,6 +23,7 @@ from domain.knowledge.ports import (
 DEFAULT_OCR_LANGUAGES = "en"
 _MAX_CONTENT_TYPES_BYTES = 10 * 1024 * 1024
 _MIN_PDF_OCR_IMAGE_DIMENSION = 32
+_MAX_PDF_SEEN_IMAGE_HASHES = 2048
 # PDFium 底层 C++ 库非线程安全；同进程内并发解析/校验多个 PDF 时必须串行化访问，
 # 避免多线程同时调用 pypdfium2 导致死锁或未定义行为。
 _PDFIUM_LOCK = threading.Lock()
@@ -210,21 +212,31 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
             )
         return self._ocr
 
-    def _ocr_image(
-        self, image: bytes, *, page: int | None = None, media_id: str | None = None
+    def _ocr_pil_image(
+        self,
+        pil_image: Any,
+        *,
+        page: int | None = None,
+        media_id: str | None = None,
+        _pixels: Any | None = None,
     ) -> tuple[TextBlock, ...]:
+        """直接将 PIL Image 转为 RGB 数组送入 OCR 推理，跳过无意义的 PNG 编解码往返。"""
         # 关闭 OCR 时直接短路返回空元组，避免误加载重量级 PaddleOCR 引擎。
         if not self._enable_ocr:
             return ()
-        from PIL import Image
-
-        with Image.open(io.BytesIO(image)) as decoded:
-            if decoded.width * decoded.height > 40_000_000:
-                raise ValueError("knowledge_image_too_large")
+        if pil_image.width * pil_image.height > 40_000_000:
+            raise ValueError("knowledge_image_too_large")
+        pixels = _pixels
+        if pixels is None:
             import numpy as np
 
-            pixels = np.asarray(decoded.convert("RGB"))
-            result = self._ocr_engine().predict(input=pixels)
+            rgb_image = pil_image if pil_image.mode == "RGB" else pil_image.convert("RGB")
+            try:
+                pixels = np.ascontiguousarray(np.asarray(rgb_image))
+            finally:
+                if rgb_image is not pil_image:
+                    rgb_image.close()
+        result = self._ocr_engine().predict(input=pixels)
         texts: list[str] = []
         for item in result:
             payload = item.json.get("res", {}) if hasattr(item, "json") else {}
@@ -237,10 +249,23 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
             return ()
         return (TextBlock(text, ChunkLocator(kind="ocr", page=page, media_id=media_id)),)
 
+    def _ocr_image(
+        self, image: bytes, *, page: int | None = None, media_id: str | None = None
+    ) -> tuple[TextBlock, ...]:
+        # 关闭 OCR 时直接短路返回空元组，避免误加载重量级 PaddleOCR 引擎。
+        if not self._enable_ocr:
+            return ()
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image)) as decoded:
+            return self._ocr_pil_image(decoded, page=page, media_id=media_id)
+
     def _pdf(self, content: bytes) -> ParsedDocument:
         import pypdfium2 as pdfium
 
         blocks: list[TextBlock] = []
+        # 跨页图元去重缓存：键为 (宽, 高, blake2b-128)，值记录该图元 OCR 是否识别出文本。
+        seen_image_hashes: dict[tuple[int, int, bytes], bool] = {}
         with _PDFIUM_LOCK:
             pdf = pdfium.PdfDocument(content)
             try:
@@ -262,43 +287,102 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
                             for image_object in page.get_objects():
                                 if not hasattr(image_object, "get_bitmap"):
                                     continue
-                                bitmap = image_object.get_bitmap()
-                                pil_image = bitmap.to_pil()
-                                # 跳过极小装饰图或 1px 细线，避免对无效图元空跑 OCR 引擎。
-                                if (
-                                    pil_image.width < _MIN_PDF_OCR_IMAGE_DIMENSION
-                                    or pil_image.height < _MIN_PDF_OCR_IMAGE_DIMENSION
-                                ):
-                                    continue
-                                image_no += 1
-                                image_buffer = io.BytesIO()
-                                pil_image.save(image_buffer, format="PNG")
-                                ocr_blocks = self._ocr_image(
-                                    image_buffer.getvalue(),
-                                    page=number + 1,
-                                    media_id=f"pdf-page-{number + 1}-image-{image_no}",
-                                )
-                                image_ocr_succeeded = image_ocr_succeeded or bool(ocr_blocks)
-                                for block in ocr_blocks:
-                                    normalized = " ".join(block.text.casefold().split())
+                                # 优先读图元像素元数据预过滤 < 32px 装饰图，避免触发位图光栅化。
+                                get_px_size = getattr(image_object, "get_px_size", None)
+                                if callable(get_px_size):
+                                    try:
+                                        px_width, px_height = get_px_size()
+                                    except Exception:
+                                        px_width, px_height = None, None
                                     if (
-                                        normalized
-                                        and normalized not in seen_ocr
-                                        and normalized not in text.casefold()
+                                        isinstance(px_width, int)
+                                        and isinstance(px_height, int)
+                                        and (
+                                            px_width < _MIN_PDF_OCR_IMAGE_DIMENSION
+                                            or px_height < _MIN_PDF_OCR_IMAGE_DIMENSION
+                                        )
                                     ):
-                                        blocks.append(block)
-                                        seen_ocr.add(normalized)
-                            if len(text) < self._min_pdf_chars and not image_ocr_succeeded:
-                                bitmap = page.render(scale=2).to_pil()
-                                buffer = io.BytesIO()
-                                bitmap.save(buffer, format="PNG")
-                                blocks.extend(
-                                    self._ocr_image(
-                                        buffer.getvalue(),
-                                        page=number + 1,
-                                        media_id=f"pdf-page-{number + 1}",
+                                        continue
+                                bitmap = image_object.get_bitmap()
+                                pil_image: Any = None
+                                try:
+                                    pil_image = bitmap.to_pil()
+                                    # 兜底尺寸校验：过滤无 px_size 或位图小于阈值的装饰图元。
+                                    if (
+                                        pil_image.width < _MIN_PDF_OCR_IMAGE_DIMENSION
+                                        or pil_image.height < _MIN_PDF_OCR_IMAGE_DIMENSION
+                                    ):
+                                        continue
+                                    if pil_image.width * pil_image.height > 40_000_000:
+                                        raise ValueError("knowledge_image_too_large")
+                                    image_no += 1
+                                    import numpy as np
+
+                                    rgb_image = (
+                                        pil_image
+                                        if pil_image.mode == "RGB"
+                                        else pil_image.convert("RGB")
                                     )
-                                )
+                                    try:
+                                        pixels = np.ascontiguousarray(np.asarray(rgb_image))
+                                    finally:
+                                        if rgb_image is not pil_image:
+                                            rgb_image.close()
+                                    image_key = (
+                                        pil_image.width,
+                                        pil_image.height,
+                                        hashlib.blake2b(
+                                            memoryview(pixels), digest_size=16
+                                        ).digest(),
+                                    )
+                                    cached_had_text = seen_image_hashes.get(image_key)
+                                    if cached_had_text is not None:
+                                        # 命中跨页去重缓存直接跳过 OCR，并同步回传有文本状态，
+                                        # 防止稀疏正文页因跳过重复图元而误触发整页回退 OCR。
+                                        image_ocr_succeeded = image_ocr_succeeded or cached_had_text
+                                        continue
+                                    ocr_blocks = self._ocr_pil_image(
+                                        pil_image,
+                                        page=number + 1,
+                                        media_id=f"pdf-page-{number + 1}-image-{image_no}",
+                                        _pixels=pixels,
+                                    )
+                                    had_text = bool(ocr_blocks)
+                                    if len(seen_image_hashes) < _MAX_PDF_SEEN_IMAGE_HASHES:
+                                        seen_image_hashes[image_key] = had_text
+                                    image_ocr_succeeded = image_ocr_succeeded or had_text
+                                    for block in ocr_blocks:
+                                        normalized = " ".join(block.text.casefold().split())
+                                        if (
+                                            normalized
+                                            and normalized not in seen_ocr
+                                            and normalized not in text.casefold()
+                                        ):
+                                            blocks.append(block)
+                                            seen_ocr.add(normalized)
+                                finally:
+                                    # 先关 PIL 视图再释放 PDFium 位图，防释放共享缓冲区后悬垂访问。
+                                    if pil_image is not None and hasattr(pil_image, "close"):
+                                        pil_image.close()
+                                    if hasattr(bitmap, "close"):
+                                        bitmap.close()
+                            if len(text) < self._min_pdf_chars and not image_ocr_succeeded:
+                                page_bitmap = page.render(scale=2)
+                                page_pil: Any = None
+                                try:
+                                    page_pil = page_bitmap.to_pil()
+                                    blocks.extend(
+                                        self._ocr_pil_image(
+                                            page_pil,
+                                            page=number + 1,
+                                            media_id=f"pdf-page-{number + 1}",
+                                        )
+                                    )
+                                finally:
+                                    if page_pil is not None and hasattr(page_pil, "close"):
+                                        page_pil.close()
+                                    if hasattr(page_bitmap, "close"):
+                                        page_bitmap.close()
                     finally:
                         page.close()
             finally:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import cast
 
@@ -11,6 +12,7 @@ import pytest
 from knowledge_fakes import MemoryOriginalStore
 
 from app.knowledge.service import KnowledgeInputError, KnowledgeNotFoundError, KnowledgeService
+from domain.access import VisibilityGrantInput
 from domain.knowledge.model import (
     Document,
     KnowledgeBase,
@@ -32,13 +34,23 @@ class MemoryKnowledgeRepository:
         self.deleted_documents: list[str] = []
         self.source_reference: SourceReference | None = None
 
-    async def create_base(self, item: KnowledgeBase) -> KnowledgeBase:
+    async def create_base(
+        self,
+        item: KnowledgeBase,
+        *,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
+    ) -> KnowledgeBase:
+        del visibility_grants
         self.bases[item.id] = item
         return item
 
     async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None:
         item = self.bases.get(base_id)
         return item if item and item.owner_id == owner_id and item.deleted_time is None else None
+
+    async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None:
+        item = self.bases.get(base_id)
+        return item if item and item.deleted_time is None else None
 
     async def list_bases(self, owner_id: str, *, offset: int, limit: int) -> list[KnowledgeBase]:
         items = [item for item in self.bases.values() if item.owner_id == owner_id]
@@ -147,9 +159,24 @@ class MemoryKnowledgeRepository:
         vector: list[float],
         limit: int,
         profile_id: str | None = None,
+        *,
+        min_score: float = 0.0,
     ) -> tuple[SearchHit, ...]:
+        del min_score
         self.semantic_calls.append((owner_id, list(base_ids), vector, limit, profile_id))
         return ()
+
+    async def has_incompatible_profile(
+        self, owner_id: str, base_ids: list[str], profile_id: str
+    ) -> bool:
+        del owner_id, base_ids, profile_id
+        return False
+
+    async def filter_active_hits(
+        self, owner_id: str, hits: tuple[SearchHit, ...]
+    ) -> tuple[SearchHit, ...]:
+        del owner_id
+        return hits
 
     async def delete_document(
         self, owner_id: str, base_id: str, document_id: str

@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.mcp.model import McpServerModel, McpToolModel
+from common.date import as_utc
 from domain.access import VisibilityGrant, VisibilityScope
 from domain.mcp import McpSecretMetadata, McpServer, parse_server_config
 from domain.tool import AdminToolDefinition, PublicToolDefinition, ToolDefinition
-
-
-def _as_utc(value: datetime) -> datetime:
-    """补齐 SQLite 测试驱动省略的 UTC 时区。"""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def server_to_domain(
@@ -31,10 +25,10 @@ def server_to_domain(
         key_version=row.key_version,
         config_version=row.config_version,
         created_by=row.created_by,
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
         tools_discovered_at=(
-            _as_utc(row.tools_discovered_at) if row.tools_discovered_at is not None else None
+            as_utc(row.tools_discovered_at) if row.tools_discovered_at is not None else None
         ),
         visibility_scope=VisibilityScope(row.visibility_scope),
         owner_department_id=row.owner_department_id,

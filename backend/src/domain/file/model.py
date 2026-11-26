@@ -151,6 +151,15 @@ class NormalizedVisionImage:
     size_bytes: int
 
 
+class FileStorageError(RuntimeError):
+    """对象存储不可用或操作失败时携带稳定的基础设施错误码。"""
+
+    def __init__(self, code: str = "file_storage_unavailable") -> None:
+        """保存可供上层稳定映射为 503 的错误码。"""
+        super().__init__(code)
+        self.code = code
+
+
 class VisionImageError(ValueError):
     """视觉图片加载或归一化失败时携带稳定、可安全公开的错误码。"""
 
@@ -183,6 +192,7 @@ __all__ = [
     "MAX_VISION_RAW_IMAGE_BYTES",
     "VISION_IMAGE_MIME_TYPES",
     "FileObjectScanEntry",
+    "FileStorageError",
     "NormalizedVisionImage",
     "PendingSessionFile",
     "SessionDocumentExtractionResult",

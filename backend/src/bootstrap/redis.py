@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import cast
 
@@ -15,6 +14,7 @@ from app.auth.oauth_state import (
     RedisOAuthStateStore,
 )
 from app.auth.rate_limit import RateLimiter, RedisFixedWindowRateLimiter
+from bootstrap.config import RedisSettings, is_production_env
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,29 +28,29 @@ class AuthRateLimiters:
 
 def is_production_environment() -> bool:
     """判断当前是否处于 ATHENA_ENV=production 生产运行环境。"""
-    return os.getenv("ATHENA_ENV", "").strip().lower() == "production"
+    return is_production_env()
 
 
-def build_redis_client() -> Redis | None:
-    """按 ATHENA_REDIS_URL 创建共享异步 Redis 客户端；未配置时返回 None。"""
-    redis_url = os.getenv("ATHENA_REDIS_URL", "").strip()
-    if not redis_url:
+def build_redis_client(*, redis_url: str | None = None) -> Redis | None:
+    """按统一 RedisSettings 创建共享异步 Redis 客户端；未配置时返回 None。"""
+    configured_url = redis_url if redis_url is not None else RedisSettings.from_environment().url
+    if not configured_url:
         return None
     return cast(
         Redis,
-        Redis.from_url(redis_url, decode_responses=False, socket_connect_timeout=1),
+        Redis.from_url(configured_url, decode_responses=False, socket_connect_timeout=1),
     )
 
 
 def validate_auth_rate_limit_configuration() -> None:
     """生产环境禁止回退到单进程内存限流，缺失 ATHENA_REDIS_URL 时立即阻断启动。"""
-    if is_production_environment() and not os.getenv("ATHENA_REDIS_URL", "").strip():
+    if is_production_env() and not RedisSettings.from_environment().url:
         raise RuntimeError("auth_redis_rate_limit_required")
 
 
 def validate_feishu_state_store_configuration() -> None:
     """生产环境开启飞书 SSO 时必须使用 Redis 一次性 state 存储，防止多实例 CSRF 校验失效。"""
-    if is_production_environment() and not os.getenv("ATHENA_REDIS_URL", "").strip():
+    if is_production_env() and not RedisSettings.from_environment().url:
         raise RuntimeError("feishu_redis_state_store_required")
 
 

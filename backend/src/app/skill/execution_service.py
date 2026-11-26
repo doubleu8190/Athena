@@ -8,26 +8,35 @@ import json
 import logging
 import os
 import shutil
+import stat
+import sys
 import tempfile
+import threading
 import zipfile
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 from uuid import uuid4
 
 from app.file.service import SessionFileService
 from app.skill.errors import public_skill_error_code
+from app.skill.package_cache import SkillPackageCache, resolve_safe_child_path
 from app.skill.service import SkillService
+from common.async_utils import await_task_shielded, run_thread_shielded
 from common.ids import new_id, now_utc
 from domain.file import FileObjectStore, PendingSessionFile, SessionFile
 from domain.skill import (
+    MAX_PACKAGE_FILE_BYTES,
+    MAX_PACKAGE_FILES,
+    MAX_PACKAGE_UNCOMPRESSED_BYTES,
     MAX_PACKAGE_ZIP_BYTES,
     DependencyCheck,
     SkillExecutionCompletion,
     SkillExecutionRecord,
     SkillExecutionStatus,
+    SkillNotFoundError,
     SkillPackageManifest,
     SkillRepository,
     SkillVersion,
@@ -48,6 +57,10 @@ from domain.tool import (
 logger = logging.getLogger(__name__)
 
 
+class _DirectoryPreparationCancelled(Exception):
+    """后台工作目录准备线程收到协同取消信号。"""
+
+
 class SkillExecutionService:
     """在平台临时目录中准备可信脚本输入并上传显式交付文件。"""
 
@@ -60,11 +73,12 @@ class SkillExecutionService:
         object_store: FileObjectStore,
         runner: ScriptExecutionPort,
         temp_root: Path | None = None,
+        package_cache: SkillPackageCache | None = None,
         worker_instance_id: str | None = None,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
-        """保存固定版本、文件存储、审计和执行端口。"""
+        """保存固定版本、文件存储、可选本地包缓存、审计和执行端口。"""
         self._skills = skills
         self._files = files
         self._repository = repository
@@ -73,6 +87,7 @@ class SkillExecutionService:
         self._temp_root = temp_root or (
             Path(tempfile.gettempdir()) / "athena-skill-executions"
         )
+        self._package_cache = package_cache
         self._worker_instance_id = worker_instance_id or str(uuid4())
         self._active_working_directories: set[Path] = set()
         self._id_factory = id_factory
@@ -103,6 +118,10 @@ class SkillExecutionService:
                     parameters=parameters,
                 )
             )
+            if version.object_key is None:
+                # 纯 Markdown 版本不含对象存储 ZIP 包，显式拒绝进入脚本解包执行链路。
+                raise SkillNotFoundError("skill_version_unavailable")
+            object_key = version.object_key
             files = await self._files.get_many(
                 context.chat_session_id,
                 context.owner_id,
@@ -193,17 +212,31 @@ class SkillExecutionService:
         record = start.record
 
         working_directory: Path | None = None
+        created_directory_holder: list[Path] = []
         runner_owns_working_directory = False
         uploaded_artifacts: tuple[PendingSessionFile, ...] = ()
         uploaded_log_key: str | None = None
         uploaded_log_truncated = False
         log_error_code: str | None = None
         try:
-            package = await self._object_store.get_bytes(
-                version.object_key,
-                maximum_bytes=MAX_PACKAGE_ZIP_BYTES,
+            # 统一经有界内存 ZIP 字节缓存或对象存储获取包体，再单路径解包至 0o600 独占工作目录。
+            if self._package_cache is not None:
+                package = await self._package_cache.get_zip_bytes(
+                    version,
+                    fetch_bytes=lambda: self._object_store.get_bytes(
+                        object_key,
+                        maximum_bytes=MAX_PACKAGE_ZIP_BYTES,
+                    ),
+                )
+            else:
+                package = await self._object_store.get_bytes(
+                    object_key,
+                    maximum_bytes=MAX_PACKAGE_ZIP_BYTES,
+                )
+            working_directory = await self._create_working_directory_async(
+                call_id,
+                created_directory_holder,
             )
-            working_directory = self._create_working_directory(call_id)
             self._active_working_directories.add(working_directory)
             await self._prepare_directory(
                 working_directory,
@@ -243,12 +276,16 @@ class SkillExecutionService:
         except asyncio.CancelledError as error:
             # 取消语义不能被审计落库覆盖；runner 会把进程、管道和目录清理结论
             # 放在该异常上，取消路径也必须原样持久化，供恢复扫描和排查使用。
-            runner_cleanup_error = _runner_cleanup_error_code(error)
-            local_cleanup_error = (
-                None
-                if runner_owns_working_directory
-                else self._remove_unentered_directory(working_directory)
+            target_directory = working_directory or (
+                created_directory_holder[0] if created_directory_holder else None
             )
+            runner_cleanup_error = _runner_cleanup_error_code(error)
+            if runner_owns_working_directory:
+                local_cleanup_error = None
+            else:
+                local_cleanup_error, _ = await self._remove_unentered_directory_async(
+                    target_directory
+                )
             await self._finish_cancelled_execution(
                 record,
                 log_object_key=uploaded_log_key,
@@ -269,12 +306,26 @@ class SkillExecutionService:
                     fallback="skill_execution_internal_failed",
                 ),
             )
-            runner_cleanup_error = _runner_cleanup_error_code(error)
-            local_cleanup_error = (
-                None
-                if runner_owns_working_directory
-                else self._remove_unentered_directory(working_directory)
+            target_directory = working_directory or (
+                created_directory_holder[0] if created_directory_holder else None
             )
+            runner_cleanup_error = _runner_cleanup_error_code(error)
+            if runner_owns_working_directory:
+                local_cleanup_error = None
+            else:
+                local_cleanup_error, cleanup_cancelled = (
+                    await self._remove_unentered_directory_async(target_directory)
+                )
+                if cleanup_cancelled is not None:
+                    await self._finish_cancelled_execution(
+                        record,
+                        log_object_key=uploaded_log_key,
+                        log_truncated=uploaded_log_truncated,
+                        log_error_code=log_error_code,
+                        error_code="skill_execution_cancelled",
+                        cleanup_error_code=runner_cleanup_error or local_cleanup_error,
+                    )
+                    raise cleanup_cancelled from None
             cleanup_error_code = runner_cleanup_error or local_cleanup_error
             completion_error_code = (
                 "skill_artifact_invalid"
@@ -301,6 +352,8 @@ class SkillExecutionService:
         finally:
             if working_directory is not None:
                 self._active_working_directories.discard(working_directory)
+            elif created_directory_holder:
+                self._active_working_directories.discard(created_directory_holder[0])
 
         cleanup_error_code = script_result.cleanup_error_code
         status = (
@@ -368,6 +421,25 @@ class SkillExecutionService:
             skill_execution_completion=completion,
         )
 
+    async def _create_working_directory_async(
+        self,
+        call_id: str,
+        created_directory_holder: list[Path],
+    ) -> Path:
+        """在工作线程创建独占目录；若中途取消则等待创建线程退出并登记目录供统一清理。"""
+        task = asyncio.create_task(
+            asyncio.to_thread(self._create_working_directory, call_id),
+            name=f"athena-skill-mkdir-{call_id[:16]}",
+        )
+        cancelled = await await_task_shielded(task)
+        if cancelled is not None:
+            if not task.cancelled() and task.exception() is None:
+                created_directory_holder.append(task.result())
+            raise cancelled
+        directory = task.result()
+        created_directory_holder.append(directory)
+        return directory
+
     def _create_working_directory(self, call_id: str) -> Path:
         """在部署指定根目录下创建权限收紧的唯一工作目录。"""
         self._temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -390,45 +462,61 @@ class SkillExecutionService:
         version: SkillVersion,
         input_files: tuple[SessionFile, ...],
     ) -> None:
-        """只复制清单声明的 Skill 文件与当前会话授权输入。"""
-        manifest = SkillPackageManifest.model_validate(version.manifest)
-        try:
-            with zipfile.ZipFile(BytesIO(package)) as archive:
-                for resource in manifest.files:
-                    member = archive.getinfo(resource.path)
-                    destination = working_directory.joinpath(
-                        *PurePosixPath(resource.path).parts
-                    )
-                    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    digest = hashlib.sha256()
-                    written = 0
-                    with archive.open(member, "r") as source, destination.open(
-                        "xb"
-                    ) as target:
-                        while chunk := source.read(128 * 1024):
-                            written += len(chunk)
-                            digest.update(chunk)
-                            target.write(chunk)
-                    if (
-                        written != resource.size_bytes
-                        or digest.hexdigest() != resource.sha256
-                    ):
-                        raise ValueError("skill_package_integrity_invalid")
-        except (KeyError, OSError, zipfile.BadZipFile, ValueError) as error:
-            raise ValueError("skill_package_integrity_invalid") from error
+        """只解压清单声明的 Skill 文件与当前会话授权输入（全部磁盘 I/O 下放工作线程）。"""
+        cancel_event = threading.Event()
+        # 通知后台线程尽快中止并在 shield 中等待其退出，杜绝并发写删工作目录竞态。
+        await run_thread_shielded(
+            _extract_package_files_sync,
+            working_directory,
+            package=package,
+            version=version,
+            cancel_event=cancel_event,
+            name="athena-skill-prepare-zip",
+            on_cancel=cancel_event.set,
+        )
+        await self._prepare_input_files(working_directory, input_files)
+
+    async def _prepare_input_files(
+        self,
+        working_directory: Path,
+        input_files: tuple[SessionFile, ...],
+    ) -> None:
+        """在工作线程打开、写入并关闭会话授权输入文件，取消时先收敛当前写线程再关闭句柄。"""
         inputs = working_directory / "inputs"
-        outputs = working_directory / "outputs"
-        inputs.mkdir(mode=0o700)
-        outputs.mkdir(mode=0o700)
         for index, file in enumerate(input_files):
             destination = inputs / f"{index:02d}-{file.filename}"
             digest = hashlib.sha256()
             size = 0
-            with destination.open("xb") as target:
+            target = await run_thread_shielded(
+                _open_exclusive_binary_0600,
+                destination,
+                name="athena-skill-input-open",
+            )
+            try:
                 async for chunk in self._object_store.iter_range(file.object_key):
                     size += len(chunk)
-                    digest.update(chunk)
-                    await asyncio.to_thread(target.write, chunk)
+                    await run_thread_shielded(
+                        _write_and_hash_chunk,
+                        target,
+                        chunk,
+                        digest,
+                        name="athena-skill-input-write",
+                    )
+            finally:
+                # 无论正常完成还是取消，均在工作线程安全关闭句柄后再释放目录；
+                # 无活跃异常时保留关闭期间收到的取消信号或关闭失败，避免静默吞噬。
+                active_error = sys.exc_info()[1]
+                close_task = asyncio.create_task(
+                    asyncio.to_thread(target.close),
+                    name="athena-skill-input-close",
+                )
+                close_cancelled = await await_task_shielded(close_task)
+                if active_error is None:
+                    if close_cancelled is not None:
+                        raise close_cancelled
+                    close_task.result()
+                elif not close_task.cancelled():
+                    close_task.exception()
             if size != file.size_bytes or digest.hexdigest() != file.sha256:
                 raise ValueError("session_file_integrity_invalid")
 
@@ -539,12 +627,28 @@ class SkillExecutionService:
             name=f"athena-skill-cancel-finish-{record.id}",
         )
         # 上层可能再次投递取消；shield 保持审计任务完成，原始取消仍由调用方抛出。
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-        task.result()
+        await await_task_shielded(task)
+        if not task.cancelled() and task.exception() is None:
+            task.result()
+
+    async def _remove_unentered_directory_async(
+        self,
+        path: Path | None,
+    ) -> tuple[str | None, asyncio.CancelledError | None]:
+        """在工作线程异步清理未移交 runner 的工作目录，套用抗二次取消盾护循环。"""
+        if path is None:
+            return None, None
+        task = asyncio.create_task(
+            asyncio.to_thread(self._remove_unentered_directory, path),
+            name="athena-skill-remove-unentered",
+        )
+        cancelled = await await_task_shielded(task)
+        try:
+            return task.result(), cancelled
+        except asyncio.CancelledError as error:
+            return "script_working_directory_cleanup_failed", cancelled or error
+        except Exception:
+            return "script_working_directory_cleanup_failed", cancelled
 
     @staticmethod
     def _remove_unentered_directory(path: Path | None) -> str | None:
@@ -558,6 +662,87 @@ class SkillExecutionService:
         except OSError:
             return "script_working_directory_cleanup_failed"
         return None
+
+
+def _open_exclusive_binary_0600(destination: Path) -> BinaryIO:
+    """原子独占创建 0o600 常规文件并返回二进制写入句柄。"""
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.chmod(destination, 0o600)
+        return os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _write_and_hash_chunk(
+    target: BinaryIO,
+    chunk: bytes,
+    digest: Any,
+) -> None:
+    """在工作线程合并写盘与 SHA-256 增量摘要，避免大块数据阻塞事件循环。"""
+    digest.update(chunk)
+    target.write(chunk)
+
+
+def _extract_package_files_sync(
+    working_directory: Path,
+    *,
+    package: bytes,
+    version: SkillVersion,
+    cancel_event: threading.Event,
+) -> None:
+    """在工作线程流式解压至 0o600 独占目录，执行路径穿越、有界大小与逐成员 SHA-256 校验。"""
+    manifest = SkillPackageManifest.model_validate(version.manifest)
+    if len(manifest.files) > MAX_PACKAGE_FILES:
+        raise ValueError("skill_package_integrity_invalid")
+    resolved_work = working_directory.resolve(strict=True)
+    total_written = 0
+    try:
+        with zipfile.ZipFile(BytesIO(package)) as archive:
+            for resource in manifest.files:
+                if cancel_event.is_set():
+                    raise _DirectoryPreparationCancelled()
+                member = archive.getinfo(resource.path)
+                if member.flag_bits & 0x1:
+                    raise ValueError("skill_package_integrity_invalid")
+                mode = (member.external_attr >> 16) & 0xFFFF
+                file_type = stat.S_IFMT(mode)
+                if file_type and not stat.S_ISREG(file_type):
+                    raise ValueError("skill_package_integrity_invalid")
+                destination = resolve_safe_child_path(resolved_work, resource.path)
+                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if not destination.parent.resolve(strict=True).is_relative_to(resolved_work):
+                    raise ValueError("skill_package_integrity_invalid")
+                digest = hashlib.sha256()
+                written = 0
+                with (
+                    archive.open(member, "r") as source,
+                    _open_exclusive_binary_0600(destination) as target,
+                ):
+                    while chunk := source.read(128 * 1024):
+                        if cancel_event.is_set():
+                            raise _DirectoryPreparationCancelled()
+                        written += len(chunk)
+                        total_written += len(chunk)
+                        if (
+                            written > resource.size_bytes
+                            or written > MAX_PACKAGE_FILE_BYTES
+                            or total_written > MAX_PACKAGE_UNCOMPRESSED_BYTES
+                        ):
+                            raise ValueError("skill_package_integrity_invalid")
+                        digest.update(chunk)
+                        target.write(chunk)
+                if written != resource.size_bytes or digest.hexdigest() != resource.sha256:
+                    raise ValueError("skill_package_integrity_invalid")
+        if cancel_event.is_set():
+            raise _DirectoryPreparationCancelled()
+        (resolved_work / "inputs").mkdir(mode=0o700)
+        (resolved_work / "outputs").mkdir(mode=0o700)
+    except _DirectoryPreparationCancelled:
+        raise
+    except (KeyError, OSError, zipfile.BadZipFile, ValueError) as error:
+        raise ValueError("skill_package_integrity_invalid") from error
 
 
 def _parse_execution_arguments(

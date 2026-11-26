@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
 from app.session.converter.result import session_page_to_result, session_to_result
 from app.session.model.result import SessionPageResult, SessionResult
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.project import ProjectNotFoundError
 from domain.session import (
@@ -28,13 +29,6 @@ MAX_PAGE_SIZE = 100
 def _default_id_factory() -> str:
     """生成带会话前缀的随机主键。"""
     return new_id("sess")
-
-
-def _utc_value(value: datetime) -> datetime:
-    """把时钟输出规范化为 UTC。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def _normalized_owner_id(owner_id: str) -> str:
@@ -118,7 +112,7 @@ class SessionService:
         normalized_title = _normalized_title(title)
         normalized_project_id = None if project_id is None else _normalized_project_id(project_id)
 
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         session = await self._repository.create(
             Session(
                 id=self._id_factory(),
@@ -210,7 +204,7 @@ class SessionService:
             title=normalized_title,
             update_project=update_project,
             project_id=normalized_project_id,
-            updated_at=_utc_value(self._clock()),
+            updated_at=as_utc(self._clock()),
         )
         if session is None:
             raise SessionNotFoundError("session_not_found")
@@ -225,7 +219,7 @@ class SessionService:
         deleted = await self._repository.soft_delete(
             scope.owner_id,
             scope.session_id,
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
         )
         if not deleted:
             raise SessionNotFoundError("session_not_found")

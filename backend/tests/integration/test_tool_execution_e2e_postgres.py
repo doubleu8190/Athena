@@ -90,7 +90,14 @@ class _ProjectKnowledge:
         self.project_id = project_id
         self.now = datetime.now(UTC)
 
-    async def list(self, owner_id: str, project_id: str) -> list[KnowledgeBase]:
+    async def list(
+        self,
+        owner_id: str,
+        project_id: str,
+        *,
+        snapshot: Any = None,
+    ) -> list[KnowledgeBase]:
+        del snapshot
         assert (owner_id, project_id) == (self.owner_id, self.project_id)
         return [
             KnowledgeBase(
@@ -116,7 +123,9 @@ class _KnowledgeSearch:
         *,
         limit: int,
         context_budget: int,
+        skip_access_check: bool = False,
     ) -> SearchResult:
+        del skip_access_check
         assert limit == 5
         assert context_budget == 2000
         self.requests.append((owner_id, tuple(base_ids), query))
@@ -174,6 +183,15 @@ class _McpCatalog:
     async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         assert limit == 201
         return (self.definition,)
+
+    async def list_readable_runtime_tools(
+        self,
+        snapshot: Any,
+        *,
+        limit: int = 200,
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        del snapshot
+        return await self.list_runtime_tools(limit=limit)
 
     async def get_call_target(
         self,

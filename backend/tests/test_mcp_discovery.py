@@ -11,7 +11,7 @@ from typing import Any, cast
 import anyio
 import pytest
 from mcp import Client, types
-from mcp.client._transport import Transport
+from mcp.client import Transport
 from mcp.server import Server
 from mcp.types import Tool
 
@@ -412,7 +412,7 @@ def test_stdio_ignores_header_annotation_and_enforces_environment_allowlist() ->
     assert "PATH" not in transport._environment  # noqa: SLF001
 
 
-def test_stdio_discovery_applies_small_output_limit_and_rejects_oversized_server() -> None:
+def test_stdio_discovery_rejects_malformed_server_output() -> None:
     connection = McpConnectionInput(
         StdioConfig(
             "stdio",
@@ -424,8 +424,6 @@ def test_stdio_discovery_applies_small_output_limit_and_rejects_oversized_server
     discovery = McpDiscoveryClient(maximum_response_bytes=64, deadline_seconds=5)
     transport = discovery._make_transport(connection)  # noqa: SLF001
     assert isinstance(transport, McpStdioTransport)
-    assert transport._maximum_line_bytes == 64  # noqa: SLF001
-    assert transport._maximum_total_bytes == 64  # noqa: SLF001
     with pytest.raises(McpDiscoveryProtocolError, match="mcp_discovery_protocol_failed"):
         _run(discovery.discover(connection))
 
@@ -435,14 +433,14 @@ def test_http_transport_receives_only_current_operation_headers(
 ) -> None:
     captured: list[dict[str, str]] = []
 
-    def pinned_transport(endpoint: str, **kwargs: Any) -> FakeTransport:
+    def http_transport(endpoint: str, **kwargs: Any) -> FakeTransport:
         assert endpoint == "https://mcp.example.test/rpc"
         captured.append(kwargs["headers"])
         return FakeTransport()
 
     from infrastructure.mcp import transport as transport_module
 
-    monkeypatch.setattr(transport_module, "pinned_streamable_http_transport", pinned_transport)
+    monkeypatch.setattr(transport_module, "mcp_streamable_http_transport", http_transport)
     discovery = McpDiscoveryClient(
         client_factory=lambda _transport: FakeClient([_page([])]),
         allowed_private_hosts=frozenset({"mcp.example.test"}),

@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Final, Literal, Protocol
 
-from domain.access import VisibilityGrantInput
+from domain.access import UserAccessSnapshot, VisibilityGrantInput
 from domain.auth import AuthContext
 from domain.file import PendingSessionFile
 from domain.skill.model import (
@@ -59,6 +59,14 @@ class SkillRepository(Protocol):
     ) -> tuple[tuple[Skill, SkillVersion], ...]:
         """单次 JOIN 返回公共及本人已启用候选及其当前版本，消除目录 N+1 查询。"""
 
+    async def get_readable_user_directory_entries(
+        self,
+        owner_id: str,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> tuple[tuple[Skill, SkillVersion], ...]:
+        """单会话加载或复用权限快照，下推过滤用户可读的已启用 Skill 与当前版本。"""
+
     async def list_personal_skills(self, owner_id: str) -> tuple[Skill, ...]:
         """按稳定顺序读取指定用户未删除的个人 Skill。"""
 
@@ -80,7 +88,7 @@ class SkillRepository(Protocol):
         version_id: str,
         label: str,
         manifest: SkillPackageManifest,
-        object_key: str,
+        object_key: str | None,
         package_sha256: str,
         dependency_check: DependencyCheck,
         actor: AuthContext,
@@ -103,7 +111,7 @@ class SkillRepository(Protocol):
         skill_id: str,
         version_id: str,
         manifest: SkillPackageManifest,
-        object_key: str,
+        object_key: str | None,
         package_sha256: str,
         dependency_check: DependencyCheck,
         actor: AuthContext,
@@ -139,7 +147,7 @@ class SkillRepository(Protocol):
         label: str | None,
         activate: bool,
         manifest: SkillPackageManifest,
-        object_key: str,
+        object_key: str | None,
         package_sha256: str,
         dependency_check: DependencyCheck,
         actor: AuthContext,
@@ -156,7 +164,7 @@ class SkillRepository(Protocol):
         version_id: str,
         expected_revision: int,
         manifest: SkillPackageManifest,
-        object_key: str,
+        object_key: str | None,
         package_sha256: str,
         dependency_check: DependencyCheck,
         actor: AuthContext,
@@ -276,19 +284,11 @@ class SkillRepository(Protocol):
     ) -> SkillExecutionRecord | None:
         """保存脚本终态和待发布产物元数据。"""
 
-    async def get_script_execution(
-        self, tool_call_record_id: str
-    ) -> SkillExecutionRecord | None:
+    async def get_script_execution(self, tool_call_record_id: str) -> SkillExecutionRecord | None:
         """按现有工具调用记录读取一对一附加信息。"""
 
     async def get_admin_execution(self, call_id: str) -> SkillExecutionRecord | None:
         """管理员按工具调用记录读取排查信息。"""
-
-class SkillPackageObjectStore(Protocol):
-    """供 Skill 包和日志复用的最小对象存储接口。"""
-
-    async def get_bytes(self, key: str, *, maximum_bytes: int) -> bytes:
-        """读取有界技能包或日志对象。"""
 
 
 def snapshot_from_skill(skill: Skill, version: SkillVersion) -> RunSkillSnapshot:
@@ -314,7 +314,6 @@ def snapshot_from_skill(skill: Skill, version: SkillVersion) -> RunSkillSnapshot
 
 __all__ = [
     "UNSET",
-    "SkillPackageObjectStore",
     "SkillRepository",
     "UnsetType",
     "snapshot_from_skill",

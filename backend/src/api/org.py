@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, NoReturn
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Response, status
 
 from api.converter.org import (
     department_list_to_response,
@@ -20,7 +20,7 @@ from api.dto.org import (
     UpdateUserRoleRequest,
     UpdateUserStatusRequest,
 )
-from api.security import AdminAuth, verify_request_origin
+from api.security import AdminAuth
 from app.org import OrgService
 from domain.auth import UserRole, UserStatus
 from domain.org import (
@@ -78,7 +78,6 @@ def build_org_admin_router(service: OrgService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/admin/org",
         tags=["admin-org"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("/departments", response_model=DepartmentListResponse)

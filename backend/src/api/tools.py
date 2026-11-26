@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 
 from api.converter.tool import (
     admin_tool_page_to_response,
@@ -22,7 +22,7 @@ from api.dto.tool import (
     ToolBatchApprovalRequest,
 )
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
-from api.security import AdminAuth, CurrentAuth, verify_request_origin
+from api.security import AdminAuth, CurrentAuth
 from app.tool import ToolManager
 from domain.mcp import McpServerNotFoundError
 from domain.tool import TOOL_FIELD_UNSET, ToolMetadataPatch
@@ -113,7 +113,6 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
     @router.patch(
         "/api/v1/admin/tools/batch-approval",
         response_model=AdminToolBatchApprovalResponse,
-        dependencies=[Depends(verify_request_origin)],
     )
     async def batch_update_admin_tool_approval(
         actor: AdminAuth,
@@ -138,7 +137,6 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
     @router.patch(
         "/api/v1/admin/tools/{tool_id}",
         response_model=AdminToolResponse,
-        dependencies=[Depends(verify_request_origin)],
     )
     async def update_admin_tool_policy(
         actor: AdminAuth,

@@ -75,8 +75,9 @@ def upgrade() -> None:
         ")) "
         "UPDATE memories AS memory SET "
         "content = preserved.preserved_content, "
+        # 历史重型记忆表已下线并移除 zhparser 依赖，此处改用 PostgreSQL 内置 simple 分词配置。
         "search_document = to_tsvector("
-        "'athena_memory_chinese', preserved.preserved_content"
+        "'simple', preserved.preserved_content"
         "), "
         "content_hash = encode(sha256(convert_to("
         "regexp_replace(BTRIM(preserved.preserved_content), "

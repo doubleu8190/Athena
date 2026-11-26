@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC
-
 from adapter.system_prompt.model import SystemPromptVersionModel
+from common.date import as_utc
 from domain.system_prompt import SystemPromptKind, SystemPromptVersion
 
 
 def system_prompt_version_to_domain(row: SystemPromptVersionModel) -> SystemPromptVersion:
     """把数据库行投影为带时区时间的不可变提示词版本。"""
-    created_at = row.created_at
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=UTC)
-    else:
-        created_at = created_at.astimezone(UTC)
+    created_at = as_utc(row.created_at)
     return SystemPromptVersion(
         id=row.id,
         kind=SystemPromptKind(row.kind),

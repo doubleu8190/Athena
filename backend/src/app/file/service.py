@@ -17,10 +17,10 @@ from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, NoReturn
 
+from common.async_utils import run_thread_shielded
 from common.ids import new_id, now_utc
-from common.json_stream import JsonStreamValidationError, validate_json_stream
 from domain.file import (
     EXTRACTABLE_DOCUMENT_EXTENSIONS,
     MAX_SESSION_DOCUMENT_EXTRACT_BYTES,
@@ -987,16 +987,27 @@ def _strict_utf8(
     return ""
 
 
+def _reject_json_constant(_value: str) -> NoReturn:
+    """拒绝 Python json 扩展默认接受的非 RFC 8259 常量（NaN / Infinity）。"""
+    raise ValueError("file_content_mismatch")
+
+
 def _validate_json_document(
     path: Path,
     *,
     cancellation: threading.Event | None = None,
 ) -> None:
-    """使用可取消状态机验证 JSON，不构造标量或递归容器。"""
+    """前置已受 50 MiB 文件大小上限保护，直接严格 UTF-8 解码并用标准 json.loads 校验。"""
+    _raise_if_cancelled(cancellation)
     try:
         with path.open("rb") as stream:
-            validate_json_stream(stream, cancellation=cancellation)
-    except JsonStreamValidationError as error:
+            raw = stream.read()
+        _raise_if_cancelled(cancellation)
+        text = raw.decode("utf-8", errors="strict")
+        json.loads(text, parse_constant=_reject_json_constant)
+    except _FileInspectionCancelled:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
         raise FileInputError("file_content_mismatch") from error
 
 
@@ -1026,38 +1037,17 @@ async def _inspect_file_cancellable(
     filename: str,
     declared_mime: str | None,
 ) -> _FileInspection:
-    """在线程检查被取消时设置停止事件，并等待线程实际退出。"""
+    """在线程检查被取消时设置停止事件，并复用抗二次取消护盾等待线程退出。"""
     stop_event = threading.Event()
-    inspection_task = asyncio.create_task(
-        asyncio.to_thread(
-            _inspect_file,
-            path,
-            filename,
-            declared_mime,
-            stop_event,
-        ),
+    return await run_thread_shielded(
+        _inspect_file,
+        path,
+        filename,
+        declared_mime,
+        stop_event,
         name="athena-session-file-inspection",
+        on_cancel=stop_event.set,
     )
-    try:
-        return await asyncio.shield(inspection_task)
-    except asyncio.CancelledError:
-        stop_event.set()
-        # to_thread 的协程取消不会终止底层线程；等待 helper 在读取块边界
-        # 观察到停止事件后退出，避免取消返回后继续读取大 JSON。
-        while not inspection_task.done():
-            try:
-                await asyncio.shield(inspection_task)
-            except asyncio.CancelledError:
-                continue
-            except BaseException:
-                # helper 可能因停止事件主动抛出取消错误；线程已经完成后，
-                # 外层仍必须传播最初的 asyncio 取消，而不是替换为检查错误。
-                break
-        try:
-            inspection_task.result()
-        except BaseException:
-            pass
-        raise
 
 
 def _validate_idempotency_key(value: str) -> str:

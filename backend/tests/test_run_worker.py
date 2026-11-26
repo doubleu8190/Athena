@@ -122,6 +122,21 @@ class _CleanupRepository:
     async def get(self, *args: object, **kwargs: object) -> Run:
         return replace(self.lease.run, status=RunStatus.CANCELLING)
 
+    async def get_lease_state(
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+    ) -> RunLeaseState | None:
+        run = await self.get(session_id, owner_id, run_id)
+        if run is None:
+            return None
+        return RunLeaseState(
+            status=run.status,
+            worker_id=run.worker_id,
+            execution_epoch=run.execution_epoch,
+        )
+
     async def settle_cancelled(self, *args: object, **kwargs: object) -> Run:
         self.settled = True
         self.settled_event.set()
@@ -144,9 +159,15 @@ class _SlowCleanupExecutor:
             await self.cleanup_release.wait()
             raise
 
+    async def wait_background_tasks(self) -> None:
+        return None
+
 
 class _FinishedExecutor:
     async def execute(self, lease: RunLease) -> None:
+        return None
+
+    async def wait_background_tasks(self) -> None:
         return None
 
 
@@ -1084,12 +1105,8 @@ def test_worker_drive_lease_cleanup_exception_does_not_crash_sibling_consumer(
                 await asyncio.wait_for(task, timeout=2)
 
         assert repository.states[sibling_lease.run.id] is RunStatus.COMPLETED
-        assert any(
-            "run_execution_cleanup_failed" in record.message for record in caplog.records
-        )
-        assert any(
-            "run_worker_drive_database_retry" in record.message for record in caplog.records
-        )
+        assert any("run_execution_cleanup_failed" in record.message for record in caplog.records)
+        assert any("run_worker_drive_database_retry" in record.message for record in caplog.records)
 
     asyncio.run(scenario())
 

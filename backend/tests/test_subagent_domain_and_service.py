@@ -135,6 +135,17 @@ class _StubMcpRepo:
     async def list_public(self, *, offset: int, limit: int) -> ToolPage[object]:
         raise NotImplementedError
 
+    async def list_readable_public(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        snapshot: object = None,
+    ) -> ToolPage[object]:
+        del user_id, snapshot
+        return await self.list_public(offset=offset, limit=limit)
+
     async def list_server_admin(
         self, server_id: str, *, offset: int, limit: int
     ) -> ToolPage[AdminToolDefinition]:
@@ -151,8 +162,14 @@ class _InMemorySubagentRepo:
     def __init__(self) -> None:
         self.items: dict[str, SubagentProfile] = {}
 
-    async def create(self, actor: AuthContext, profile: SubagentProfile) -> SubagentProfile:
-        del actor
+    async def create(
+        self,
+        actor: AuthContext,
+        profile: SubagentProfile,
+        *,
+        visibility_grants: object = None,
+    ) -> SubagentProfile:
+        del actor, visibility_grants
         self.items[profile.id] = profile
         return profile
 
@@ -187,6 +204,13 @@ class _InMemorySubagentRepo:
         return tuple(
             item for item in self.items.values() if item.deleted_at is None and item.enabled
         )
+
+    async def list_readable_enabled(
+        self,
+        snapshot: object,
+    ) -> tuple[SubagentProfile, ...]:
+        del snapshot
+        return await self.list_enabled()
 
     async def update(
         self,

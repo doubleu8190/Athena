@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.converter.auth import user_to_domain
 from adapter.auth.model.auth import AuthSessionModel, UserModel
-from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
+from adapter.auth.repository.transaction_guard import verify_active_session_user
 from adapter.org.converter import department_to_domain
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from domain.auth import AuthContext, AuthProvider, User, UserRole, UserStatus
@@ -728,9 +728,13 @@ class SqlAlchemyOrgRepository(OrgRepository):
         actor: AuthContext,
         now: datetime,
     ) -> User:
-        """在当前写事务中按标准锁顺序复核操作者仍为有效 super_admin。"""
-        guard = SqlAlchemyAuthTransactionGuard(session, clock=lambda: now)
-        current_user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
+        """在当前写事务中以无锁单条 JOIN 复核操作者仍为有效 super_admin。"""
+        current_user = await verify_active_session_user(
+            session,
+            actor.user.id,
+            actor.session_id,
+            clock=lambda: now,
+        )
         if current_user is None or current_user.role is not UserRole.SUPER_ADMIN:
             raise OrgAuthorizationError("admin_required")
         return current_user

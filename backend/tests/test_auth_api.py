@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.auth import AuthCookieConfig, build_auth_router
+from api.auth_middleware import AuthPrecheckMiddleware
 from api.security import AdminAuth
 from app.auth.rate_limit import FixedWindowRateLimiter
 from app.auth.service import (
@@ -80,6 +81,7 @@ def _app(
     app.state.authenticator = service
     app.state.auth_cookie_name = "athena_session"
     app.state.public_origin = public_origin
+    app.add_middleware(AuthPrecheckMiddleware, fastapi_app=app)
     app.include_router(
         build_auth_router(
             service,
@@ -111,10 +113,10 @@ def _provision_and_login(
 
 
 def test_public_register_route_is_removed_and_providers_endpoint_works() -> None:
-    """公开自助注册接口必须彻底下线返回 404，且 /providers 准确声明认证方式。"""
+    """公开自助注册接口必须彻底下线（未登录拦 401、已登录 404），且 /providers 准确声明认证方式。"""
     service, _ = _service()
     with TestClient(_app(service)) as client:
-        register_resp = client.post(
+        unauth_register_resp = client.post(
             "/api/v1/auth/register",
             json={
                 "email": "user@example.com",
@@ -127,8 +129,18 @@ def test_public_register_route_is_removed_and_providers_endpoint_works() -> None
         mock_login_resp = client.post(
             "/api/v1/auth/mock/login", json={"user_id": "mock_super_admin"}
         )
+        _provision_and_login(service, client)
+        authed_register_resp = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "user2@example.com",
+                "password": "long-enough-password",
+                "display_name": "Athena 2",
+            },
+        )
 
-    assert register_resp.status_code == 404
+    assert unauth_register_resp.status_code == 401
+    assert authed_register_resp.status_code == 404
     assert providers_resp.status_code == 200
     assert providers_resp.headers["cache-control"] == "no-store"
     assert providers_resp.json() == {

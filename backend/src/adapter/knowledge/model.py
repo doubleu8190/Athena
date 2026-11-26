@@ -235,44 +235,6 @@ class KnowledgeRequestModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class KnowledgeUploadReservationModel(Base):
-    __tablename__ = "knowledge_upload_reservations"
-    __table_args__ = (
-        CheckConstraint(
-            "operation IN ('create','replace')", name="ck_knowledge_upload_reservation_operation"
-        ),
-        CheckConstraint(
-            "state IN ('reserved','cleaning')", name="ck_knowledge_upload_reservation_state"
-        ),
-    )
-    owner_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
-    )
-    operation: Mapped[str] = mapped_column(String(16), primary_key=True)
-    request_key: Mapped[str] = mapped_column(String(128), primary_key=True)
-    reservation_token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    base_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    document_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    version_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    job_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    storage_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
-    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
-    state: Mapped[str] = mapped_column(String(16), nullable=False, default="reserved")
-    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class KnowledgeUploadSlotModel(Base):
-    __tablename__ = "knowledge_upload_slots"
-    slot_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    token: Mapped[str | None] = mapped_column(String(64))
-    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class ProjectKnowledgeBaseModel(Base):
     __tablename__ = "project_knowledge_bases"
     __table_args__ = (

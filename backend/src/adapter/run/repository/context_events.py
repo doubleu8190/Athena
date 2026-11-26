@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Literal, cast
 
 from sqlalchemy import func, or_, select
 from sqlalchemy import text as sql_text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapter.message.converter.message import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
@@ -19,18 +17,18 @@ from adapter.run.converter import (
 )
 from adapter.run.model import (
     RunEventModel,
-    RunInputRequestModel,
     RunModel,
     RunToolCallModel,
     SessionContextSummaryModel,
 )
 from adapter.run.repository._shared import RunRepositorySupportMixin
-from adapter.session.model import SessionModel
 from common.ids import now_utc
 from domain.message import (
     ConversationMessage,
     ExecutionMessage,
     ExecutionRole,
+    FileRefPart,
+    MessagePart,
     TextPart,
     ToolCallPart,
     ToolResultPart,
@@ -38,12 +36,12 @@ from domain.message import (
 from domain.run.model import (
     MAX_RUN_SSE_SNAPSHOT_BYTES,
     ContextSummary,
-    InputRequestStatus,
     PendingSubagentApproval,
     PendingSubagentInput,
     RecordRunUsageCommand,
     Run,
     RunAttemptUsage,
+    RunCompletedPayload,
     RunCompressionCompletedPayload,
     RunEvent,
     RunEventPayload,
@@ -61,7 +59,6 @@ from domain.run.model.errors import (
 )
 from domain.skill import (
     SKILL_LOAD_TOOL_ID,
-    SafeSkillApprovalProjection,
 )
 from domain.tool import (
     ToolCallStatus,
@@ -74,6 +71,54 @@ _STREAM_SNAPSHOT_EVENTS = 100
 _STREAM_SNAPSHOT_BYTES = MAX_RUN_SSE_SNAPSHOT_BYTES
 _STREAM_SNAPSHOT_PREFIX_RESERVE = 128
 logger = logging.getLogger(__name__)
+
+
+def _stream_message_parts(parts: tuple[MessagePart, ...]) -> tuple[dict[str, object], ...]:
+    """将消息内容块投影为与 GET /api/v1/sessions/{id}/messages 一致的 JSON 结构。"""
+    projected: list[dict[str, object]] = []
+    for part in parts:
+        if isinstance(part, TextPart):
+            projected.append({"type": "text", "text": part.text})
+        elif isinstance(part, FileRefPart):
+            projected.append(
+                {
+                    "type": "file_ref",
+                    "file_id": part.file_id,
+                    "filename": part.filename,
+                    "mime_type": part.mime_type,
+                    "size_bytes": part.size_bytes,
+                }
+            )
+        elif isinstance(part, ToolCallPart):
+            projected.append(
+                {
+                    "type": "tool_call",
+                    "tool_call_id": part.tool_call_id,
+                    "name": part.name,
+                    "arguments": part.arguments,
+                }
+            )
+        else:
+            projected.append(
+                {
+                    "type": "tool_result",
+                    "tool_call_id": part.tool_call_id,
+                    "status": part.status.value,
+                    "output": part.output,
+                    "artifact_id": part.artifact_id,
+                    "artifacts": [
+                        {
+                            "file_id": artifact.file_id,
+                            "filename": artifact.filename,
+                            "label": artifact.label,
+                            "mime_type": artifact.mime_type,
+                            "size_bytes": artifact.size_bytes,
+                        }
+                        for artifact in part.artifacts
+                    ],
+                }
+            )
+    return tuple(projected)
 
 
 class RunContextEventsMixin(RunRepositorySupportMixin):
@@ -138,17 +183,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[ConversationMessage | ExecutionMessage, ...] | None:
         """读取 Run 固定 cutoff 前的正式消息及本 Run 执行交互。"""
         async with self._session_factory() as session:
-            run = await session.scalar(
-                select(RunModel)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
+            run = await self._get_visible_run(session, session_id, owner_id, run_id)
             if run is None:
                 return None
             # 子 Run 严格上下文隔离：不拉取主会话正式对话历史，仅加载本子 Run 执行消息。
@@ -318,17 +353,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[ContextSummary, ...] | None:
         """读取 cutoff 兼容的摘要版本；不可见 Run 返回 None。"""
         async with self._session_factory() as session:
-            run = await session.scalar(
-                select(RunModel)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
+            run = await self._get_visible_run(session, session_id, owner_id, run_id)
             if run is None:
                 return None
             if run.depth >= 1:
@@ -511,17 +536,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     )
 
                 # 步骤 2：校验租户所有权与会话软删除状态，拒绝未授权或失效数据访问。
-                row = await session.scalar(
-                    select(RunModel)
-                    .join(SessionModel, SessionModel.id == RunModel.session_id)
-                    .where(
-                        RunModel.id == run_id,
-                        RunModel.session_id == session_id,
-                        RunModel.owner_id == owner_id,
-                        SessionModel.owner_id == owner_id,
-                        SessionModel.deleted_time.is_(None),
-                    )
-                )
+                row = await self._get_visible_run(session, session_id, owner_id, run_id)
                 if row is None:
                     return None
 
@@ -548,63 +563,91 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                 ).all()
 
                 # 步骤 4（事务内只读查询）：仅根任务（row.depth == 0）聚合并发 Subagent 任务树及
-                # 人工协同（HITL）待审批/待澄清状态。
+                # 人工协同（HITL）待审批/待澄清状态，复用共享聚合方法消除重复查库。
                 subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
                 pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
                 pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
                 if row.depth == 0:
-                    # 同一快照事务内仅预查一次子任务序号与摘要并透传，消除三项聚合重复查库；
-                    # 无任何子任务的主 Run 直接跳过后续三组子任务查询。
-                    subagent_metadata = await self._load_subagent_task_metadata_in_session(
-                        session, session_id, row.id
-                    )
-                    if subagent_metadata[0]:
-                        subagent_tasks = await self._load_subagent_tasks_in_session(
-                            session, session_id, row.id, metadata=subagent_metadata
-                        )
-                        pending_subagent_inputs = (
-                            await self._load_pending_subagent_inputs_in_session(
-                                session, session_id, row.id, metadata=subagent_metadata
-                            )
-                        )
-                        pending_subagent_approvals = (
-                            await self._load_pending_subagent_approvals_in_session(
-                                session, session_id, row.id, metadata=subagent_metadata
-                            )
-                        )
+                    (
+                        subagent_tasks,
+                        pending_subagent_inputs,
+                        pending_subagent_approvals,
+                    ) = await self._load_subagent_details_in_session(session, session_id, row.id)
 
                 # 在退出事务与归还连接前完成全部轻量领域对象转换，避免事务外访问 ORM 实体。
                 run = run_to_domain(row)
                 has_more_messages = len(conversation_rows) > _STREAM_SNAPSHOT_MESSAGES
-                messages = [
-                    RunStreamMessage(
-                        id=message.id,
-                        role=cast(Literal["user", "assistant"], message.role),
-                        status=message.status,
-                        text="".join(
-                            part.text
-                            for part in conversation_to_domain(message).parts
-                            if isinstance(part, TextPart)
-                        ),
-                        sequence=message.sequence,
-                        created_at=message.created_at,
+                messages: list[RunStreamMessage] = []
+                for message in reversed(conversation_rows[:_STREAM_SNAPSHOT_MESSAGES]):
+                    domain_message = conversation_to_domain(message)
+                    messages.append(
+                        RunStreamMessage(
+                            id=domain_message.id,
+                            role=domain_message.role.value,
+                            status=domain_message.status.value,
+                            text="".join(
+                                part.text
+                                for part in domain_message.parts
+                                if isinstance(part, TextPart)
+                            ),
+                            sequence=domain_message.sequence,
+                            created_at=domain_message.created_at,
+                            session_id=domain_message.session_id,
+                            run_id=domain_message.run_id,
+                            reply_to_message_id=domain_message.reply_to_message_id,
+                            parts=_stream_message_parts(domain_message.parts),
+                            completed_at=domain_message.completed_at,
+                        )
                     )
-                    for message in reversed(conversation_rows[:_STREAM_SNAPSHOT_MESSAGES])
-                ]
                 has_more_events = len(event_rows) > _STREAM_SNAPSHOT_EVENTS
                 events = [event_to_domain(event) for event in event_rows[:_STREAM_SNAPSHOT_EVENTS]]
+
+                # 终态 completed 时在同一一致快照事务内填充 assistant_message_id；
+                # 首屏事件已覆盖时直接内存提取，仅超过首屏上限时回查持久化 completed 事件。
+                assistant_message_id: str | None = None
+                if run.status is RunStatus.COMPLETED:
+                    for event in reversed(events):
+                        if isinstance(event.payload, RunCompletedPayload):
+                            assistant_message_id = event.payload.assistant_message_id
+                            break
+                    if assistant_message_id is None and has_more_events:
+                        completed_event_row = await session.scalar(
+                            select(RunEventModel)
+                            .where(
+                                RunEventModel.run_id == run_id,
+                                RunEventModel.type == "completed",
+                            )
+                            .order_by(RunEventModel.sequence.desc())
+                            .limit(1)
+                        )
+                        if completed_event_row is not None:
+                            completed_event = event_to_domain(completed_event_row)
+                            if isinstance(completed_event.payload, RunCompletedPayload):
+                                assistant_message_id = completed_event.payload.assistant_message_id
+                    if assistant_message_id is None and row.depth == 0:
+                        assistant_message_id = next(
+                            (msg.id for msg in reversed(messages) if msg.role == "assistant"),
+                            None,
+                        )
         # 事务边界结束：数据库只读快照已完整取出，连接立即归还连接池，
         # 后续 CPU 密集的消息字节预裁剪与 512KB 快照序列化裁剪全部在事务外执行。
 
         # 步骤 5：还原历史消息排他游标，并以 O(1) 保守上界预判 + 单次运行和消除 O(M²) 重算。
         messages_before_sequence = messages[0].sequence if has_more_messages and messages else None
-        # 单码点 JSON 转义至多占 6 UTF-8 字节，叠加每条固定字段裕量 256 字节作为保守上界。
+        # text 与 parts 双份承载文本，按单码点 12 字节 + parts/固定字段裕量估算保守上界。
         upper_bound_bytes = sum(
-            len(message.text) * 6 + len(message.id) * 6 + len(message.status) * 6 + 256
+            len(message.text) * 12
+            + len(message.id) * 6
+            + len(message.status) * 6
+            + (len(message.parts) * 512 if message.parts else 0)
+            + 512
             for message in messages
         )
         if messages and upper_bound_bytes > _STREAM_SNAPSHOT_BYTES:
-            message_sizes = [len(message.model_dump_json().encode("utf-8")) for message in messages]
+            message_sizes = [
+                len(message.model_dump_json(exclude_none=True).encode("utf-8"))
+                for message in messages
+            ]
             total_message_bytes = sum(message_sizes)
             trim_index = 0
             while trim_index < len(messages) and total_message_bytes > _STREAM_SNAPSHOT_BYTES:
@@ -619,15 +662,15 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         events_after_sequence = events[-1].sequence if has_more_events and events else None
         events_complete = events_after_sequence is None
 
-        # 步骤 7：在事务外模拟完整 SSE 序列化，在 512KB 硬预算内执行两级优雅降级裁剪
-        # （先裁旧消息，后裁事件），同步推进排他游标。
-        # 预算覆盖完整 JSON envelope 与 SSE event/id/data 前缀；超出时只裁掉
-        # 可由既有消息/事件分页接口恢复的首屏内容，并同步推进排他游标。
+        # 步骤 7：在事务外模拟完整 SSE 序列化，在 512KB 硬预算内执行优雅降级裁剪：
+        # 先裁旧消息；仅剩终态关联消息时优先裁事件以尽量保留终态回复；仍超限时再裁消息。
+        protected_message_id = assistant_message_id or run.report_message_id
         while True:
             payload = RunSnapshotPayload(
                 status=run.status,
                 event_sequence=run.event_sequence,
                 report_message_id=run.report_message_id,
+                assistant_message_id=assistant_message_id,
                 messages=tuple(messages),
                 events=tuple(events),
                 messages_complete=messages_before_sequence is None,
@@ -650,7 +693,9 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             )
             if len(encoded) + _STREAM_SNAPSHOT_PREFIX_RESERVE <= _STREAM_SNAPSHOT_BYTES:
                 break
-            if messages:
+            if messages and (
+                len(messages) > 1 or messages[0].id != protected_message_id or not events
+            ):
                 removed = messages.pop(0)
                 messages_before_sequence = removed.sequence + 1
             elif events:
@@ -672,9 +717,10 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             subagent_tasks=subagent_tasks,
             pending_subagent_inputs=pending_subagent_inputs,
             pending_subagent_approvals=pending_subagent_approvals,
+            assistant_message_id=assistant_message_id,
         )
 
-    async def list_events(
+    async def list_visible_events(
         self,
         session_id: str,
         owner_id: str,
@@ -683,22 +729,12 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         after_sequence: int,
         limit: int,
         through_sequence: int | None = None,
-    ) -> tuple[RunEvent, ...]:
-        """先校验 owner/Session 可见性，再按 Run 内序号分页读取。"""
+    ) -> tuple[RunEvent, ...] | None:
+        """在单数据库会话内合并 Run 可见性校验与事件分页读取，不可见时返回 None。"""
         async with self._session_factory() as session:
-            visible = await session.scalar(
-                select(RunModel.id)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
+            visible = await self._get_visible_run(session, session_id, owner_id, run_id)
             if visible is None:
-                return ()
+                return None
             rows = (
                 await session.scalars(
                     select(RunEventModel)
@@ -718,295 +754,71 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             ).all()
         return tuple(event_to_domain(row) for row in rows)
 
+    async def list_events(
+        self,
+        session_id: str,
+        owner_id: str,
+        run_id: str,
+        *,
+        after_sequence: int,
+        limit: int,
+        through_sequence: int | None = None,
+    ) -> tuple[RunEvent, ...]:
+        """复用 list_visible_events 校验可见性并分页读取，不可见时返回空元组。"""
+        events = await self.list_visible_events(
+            session_id,
+            owner_id,
+            run_id,
+            after_sequence=after_sequence,
+            limit=limit,
+            through_sequence=through_sequence,
+        )
+        return () if events is None else events
+
     async def list_subagent_tasks(
         self, session_id: str, owner_id: str, parent_run_id: str
     ) -> tuple[SubagentTaskSummary, ...]:
         """读取主 Run 下属全部子任务的聚合状态投影。"""
         async with self._session_factory() as session:
-            visible = await session.scalar(
-                select(RunModel.id)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == parent_run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
-            if visible is None:
+            if await self._get_visible_run(session, session_id, owner_id, parent_run_id) is None:
                 return ()
-            return await self._load_subagent_tasks_in_session(session, session_id, parent_run_id)
+            tasks, _, _ = await self._load_subagent_details_in_session(
+                session,
+                session_id,
+                parent_run_id,
+                include_inputs=False,
+                include_approvals=False,
+            )
+            return tasks
 
     async def list_pending_subagent_inputs(
         self, session_id: str, owner_id: str, parent_run_id: str
     ) -> tuple[PendingSubagentInput, ...]:
         """读取主 Run 下属子 Run 当前待回答的澄清请求。"""
         async with self._session_factory() as session:
-            visible = await session.scalar(
-                select(RunModel.id)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == parent_run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
-            if visible is None:
+            if await self._get_visible_run(session, session_id, owner_id, parent_run_id) is None:
                 return ()
-            return await self._load_pending_subagent_inputs_in_session(
-                session, session_id, parent_run_id
+            _, inputs, _ = await self._load_subagent_details_in_session(
+                session,
+                session_id,
+                parent_run_id,
+                include_tasks=False,
+                include_approvals=False,
             )
+            return inputs
 
     async def list_pending_subagent_approvals(
         self, session_id: str, owner_id: str, parent_run_id: str
     ) -> tuple[PendingSubagentApproval, ...]:
         """读取主 Run 下属子 Run 当前待人工审批的工具调用。"""
         async with self._session_factory() as session:
-            visible = await session.scalar(
-                select(RunModel.id)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == parent_run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
-            if visible is None:
+            if await self._get_visible_run(session, session_id, owner_id, parent_run_id) is None:
                 return ()
-            return await self._load_pending_subagent_approvals_in_session(
-                session, session_id, parent_run_id
+            _, _, approvals = await self._load_subagent_details_in_session(
+                session,
+                session_id,
+                parent_run_id,
+                include_tasks=False,
+                include_inputs=False,
             )
-
-    @staticmethod
-    def _extract_task_summary(raw_text: str) -> str:
-        """从子 Run 初始任务文本提取精简摘要，去除模板前缀并截断至 120 字符内。"""
-        text = raw_text.strip()
-        if not text:
-            return ""
-        if text.startswith("任务：\n"):
-            text = text[len("任务：\n") :]
-        elif text.startswith("任务："):
-            text = text[len("任务：") :]
-        marker = "\n\n补充上下文："
-        if marker in text:
-            head, _ = text.split(marker, 1)
-            if head.strip():
-                text = head
-        normalized = " ".join(text.split())
-        if len(normalized) <= 120:
-            return normalized
-        return normalized[:119] + "…"
-
-    @classmethod
-    async def _load_subagent_task_metadata_in_session(
-        cls,
-        session: AsyncSession,
-        session_id: str,
-        parent_run_id: str,
-    ) -> tuple[dict[str, int], dict[str, str]]:
-        """批量加载同主 Run 下所有子任务的 1-based 序号与首条任务摘要。"""
-        sub_run_ids = (
-            await session.scalars(
-                select(RunModel.id)
-                .where(
-                    RunModel.session_id == session_id,
-                    RunModel.parent_run_id == parent_run_id,
-                )
-                .order_by(RunModel.created_at, RunModel.id)
-            )
-        ).all()
-        if not sub_run_ids:
-            return {}, {}
-        task_index_by_id = {sub_id: idx for idx, sub_id in enumerate(sub_run_ids, start=1)}
-        # 仅取每个子 Run 的首条 user 执行消息作为任务摘要来源，避免后续交互覆盖初始任务。
-        exec_rows = (
-            await session.scalars(
-                select(ExecutionMessageModel)
-                .where(
-                    ExecutionMessageModel.session_id == session_id,
-                    ExecutionMessageModel.run_id.in_(sub_run_ids),
-                    ExecutionMessageModel.role == ExecutionRole.USER.value,
-                )
-                .order_by(ExecutionMessageModel.sequence, ExecutionMessageModel.id)
-            )
-        ).all()
-        task_summary_by_id: dict[str, str] = {}
-        for exec_row in exec_rows:
-            if exec_row.run_id in task_summary_by_id:
-                continue
-            domain_exec = execution_to_domain(exec_row)
-            raw_text = "".join(
-                part.text for part in domain_exec.parts if isinstance(part, TextPart)
-            )
-            task_summary_by_id[exec_row.run_id] = cls._extract_task_summary(raw_text)
-        return task_index_by_id, task_summary_by_id
-
-    @classmethod
-    async def _load_subagent_tasks_in_session(
-        cls,
-        session: AsyncSession,
-        session_id: str,
-        parent_run_id: str,
-        *,
-        metadata: tuple[dict[str, int], dict[str, str]] | None = None,
-    ) -> tuple[SubagentTaskSummary, ...]:
-        rows = (
-            await session.scalars(
-                select(RunModel)
-                .where(
-                    RunModel.session_id == session_id,
-                    RunModel.parent_run_id == parent_run_id,
-                )
-                .order_by(RunModel.created_at, RunModel.id)
-            )
-        ).all()
-        if not rows:
-            return ()
-        task_index_by_id, task_summary_by_id = (
-            await cls._load_subagent_task_metadata_in_session(session, session_id, parent_run_id)
-            if metadata is None
-            else metadata
-        )
-        return tuple(
-            SubagentTaskSummary(
-                sub_run_id=row.id,
-                parent_tool_call_id=row.parent_tool_call_id or "",
-                subagent_profile_id=row.subagent_profile_id,
-                subagent_slug=row.subagent_slug or "",
-                subagent_name=row.subagent_name or "",
-                task_index=task_index_by_id.get(row.id, idx),
-                task_summary=task_summary_by_id.get(row.id, ""),
-                status=RunStatus(row.status),
-                safe_error_code=row.safe_error_code,
-                created_at=row.created_at,
-                first_started_at=row.first_started_at,
-                finished_at=row.finished_at,
-            )
-            for idx, row in enumerate(rows, start=1)
-        )
-
-    @classmethod
-    async def _load_pending_subagent_inputs_in_session(
-        cls,
-        session: AsyncSession,
-        session_id: str,
-        parent_run_id: str,
-        *,
-        metadata: tuple[dict[str, int], dict[str, str]] | None = None,
-    ) -> tuple[PendingSubagentInput, ...]:
-        rows = (
-            await session.execute(
-                select(RunInputRequestModel, RunModel, ConversationMessageModel)
-                .join(RunModel, RunModel.id == RunInputRequestModel.run_id)
-                .join(
-                    ConversationMessageModel,
-                    ConversationMessageModel.id == RunInputRequestModel.question_message_id,
-                )
-                .where(
-                    RunModel.session_id == session_id,
-                    RunModel.parent_run_id == parent_run_id,
-                    RunModel.status == RunStatus.WAITING_FOR_INPUT.value,
-                    RunInputRequestModel.status == InputRequestStatus.PENDING.value,
-                )
-                .order_by(RunInputRequestModel.created_at, RunInputRequestModel.id)
-            )
-        ).all()
-        if not rows:
-            return ()
-        task_index_by_id, task_summary_by_id = (
-            await cls._load_subagent_task_metadata_in_session(session, session_id, parent_run_id)
-            if metadata is None
-            else metadata
-        )
-        items: list[PendingSubagentInput] = []
-        for req, sub_run, msg_row in rows:
-            domain_msg = conversation_to_domain(msg_row)
-            question_text = "".join(
-                part.text for part in domain_msg.parts if isinstance(part, TextPart)
-            )
-            items.append(
-                PendingSubagentInput(
-                    sub_run_id=sub_run.id,
-                    subagent_slug=sub_run.subagent_slug or "",
-                    subagent_name=sub_run.subagent_name or "",
-                    task_index=task_index_by_id.get(sub_run.id, 1),
-                    task_summary=task_summary_by_id.get(sub_run.id, ""),
-                    input_request_id=req.id,
-                    question_message_id=req.question_message_id,
-                    question_text=question_text,
-                    created_at=req.created_at,
-                )
-            )
-        return tuple(items)
-
-    @classmethod
-    async def _load_pending_subagent_approvals_in_session(
-        cls,
-        session: AsyncSession,
-        session_id: str,
-        parent_run_id: str,
-        *,
-        metadata: tuple[dict[str, int], dict[str, str]] | None = None,
-    ) -> tuple[PendingSubagentApproval, ...]:
-        rows = (
-            await session.execute(
-                select(RunToolCallModel, RunModel)
-                .join(RunModel, RunModel.id == RunToolCallModel.run_id)
-                .where(
-                    RunModel.session_id == session_id,
-                    RunModel.parent_run_id == parent_run_id,
-                    RunModel.status == RunStatus.WAITING_FOR_APPROVAL.value,
-                    RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
-                )
-                .order_by(RunModel.created_at, RunToolCallModel.ordinal, RunToolCallModel.id)
-            )
-        ).all()
-        if not rows:
-            return ()
-        task_index_by_id, task_summary_by_id = (
-            await cls._load_subagent_task_metadata_in_session(session, session_id, parent_run_id)
-            if metadata is None
-            else metadata
-        )
-        skill_projections = [
-            None
-            if call_row.safe_skill_projection is None
-            else SafeSkillApprovalProjection.model_validate(call_row.safe_skill_projection)
-            for call_row, _ in rows
-        ]
-        enriched = await cls._enrich_pending_approvals_in_session(
-            session,
-            [
-                (call_row, sub_run, skill_proj)
-                for (call_row, sub_run), skill_proj in zip(rows, skill_projections, strict=True)
-            ],
-        )
-        return tuple(
-            PendingSubagentApproval(
-                sub_run_id=sub_run.id,
-                subagent_slug=sub_run.subagent_slug or "",
-                subagent_name=sub_run.subagent_name or "",
-                task_index=task_index_by_id.get(sub_run.id, 1),
-                task_summary=task_summary_by_id.get(sub_run.id, ""),
-                call_id=call_row.id,
-                batch_message_id=call_row.call_message_id,
-                ordinal=call_row.ordinal,
-                model_name=call_row.model_name,
-                tool_kind=call_row.tool_kind,
-                requested_at=call_row.requested_at or sub_run.updated_at,
-                safe_skill_projection=skill_proj,
-                display_name=display_name,
-                approval_summary=approval_summary,
-                formatted_arguments=formatted_arguments,
-            )
-            for (call_row, sub_run), skill_proj, (
-                display_name,
-                approval_summary,
-                formatted_arguments,
-            ) in zip(rows, skill_projections, enriched, strict=True)
-        )
+            return approvals

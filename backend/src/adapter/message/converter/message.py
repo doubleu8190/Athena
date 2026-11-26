@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.message.model.conversation import ConversationMessageModel
 from adapter.message.model.execution import ExecutionMessageModel
+from common.date import as_utc
 from domain.message import (
     ArtifactFileRef,
     ConversationMessage,
@@ -22,13 +21,6 @@ from domain.message import (
     ToolResultPart,
     ToolResultStatus,
 )
-
-
-def _as_utc(value: datetime) -> datetime:
-    """补齐 SQLite 等测试驱动丢失的 UTC 时区信息。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def serialize_metadata(metadata: MessageMetadata) -> dict[str, object]:
@@ -218,8 +210,8 @@ def conversation_to_domain(row: ConversationMessageModel) -> ConversationMessage
         run_id=row.run_id,
         context_turn_id=row.context_turn_id,
         client_message_id=row.client_message_id,
-        created_at=_as_utc(row.created_at),
-        completed_at=_as_utc(row.completed_at) if row.completed_at is not None else None,
+        created_at=as_utc(row.created_at),
+        completed_at=as_utc(row.completed_at) if row.completed_at is not None else None,
         metadata=deserialize_metadata(row.metadata_json),
     )
 
@@ -236,7 +228,7 @@ def execution_to_domain(row: ExecutionMessageModel) -> ExecutionMessage:
         parts=deserialize_parts(row.parts),
         tool_call_id=row.tool_call_id,
         source_message_id=row.source_message_id,
-        created_at=_as_utc(row.created_at),
+        created_at=as_utc(row.created_at),
         metadata=deserialize_metadata(row.metadata_json),
     )
 

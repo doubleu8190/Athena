@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -15,15 +14,9 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base
-
-
-def _json_type() -> JSON:
-    """在 PostgreSQL 使用 JSONB，在 SQLite 测试中使用 JSON。"""
-    return JSON().with_variant(JSONB(), "postgresql")
+from adapter.base import Base, json_column_type
 
 
 class SkillExecutionModel(Base):
@@ -76,10 +69,10 @@ class SkillExecutionModel(Base):
     skill_id: Mapped[str] = mapped_column(String(128), nullable=False)
     skill_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     script_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    input_file_ids: Mapped[list[str]] = mapped_column(_json_type(), nullable=False)
+    input_file_ids: Mapped[list[str]] = mapped_column(json_column_type(), nullable=False)
     parameters_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     python_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    dependency_check: Mapped[dict[str, object]] = mapped_column(_json_type(), nullable=False)
+    dependency_check: Mapped[dict[str, object]] = mapped_column(json_column_type(), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     log_object_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     log_truncated: Mapped[bool] = mapped_column(
@@ -89,7 +82,7 @@ class SkillExecutionModel(Base):
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     cleanup_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     result_artifacts: Mapped[list[dict[str, object]]] = mapped_column(
-        _json_type(), nullable=False, default=list
+        json_column_type(), nullable=False, default=list
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

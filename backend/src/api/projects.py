@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Response, status
 
 from api.converter.project import project_list_to_response, project_to_response
 from api.dto.project import (
@@ -13,7 +13,7 @@ from api.dto.project import (
     ProjectResponse,
     ProjectUpdateRequest,
 )
-from api.security import CurrentAuth, verify_request_origin
+from api.security import CurrentAuth
 from app.project import (
     InvalidProjectInputError,
     InvalidProjectNameError,
@@ -34,7 +34,6 @@ def build_project_router(service: ProjectService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/projects",
         tags=["projects"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.post(

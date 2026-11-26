@@ -60,7 +60,7 @@ def test_openapi_export_valid_schema_no_warnings_or_dup_ops() -> None:
         warnings.simplefilter("always")
         app = build_openapi_app()
 
-    # 过滤第三方依赖首次导入期的 DeprecationWarning（如 lark_oapi 内嵌 protobuf），
+    # 过滤第三方依赖首次导入期的 DeprecationWarning，
     # 其余任何路由注册期或项目代码告警均视为失败。
     unexpected_build_warnings = [
         f"{w.category.__name__} ({w.filename}:{w.lineno}): {w.message}"

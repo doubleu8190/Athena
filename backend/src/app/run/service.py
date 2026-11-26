@@ -7,9 +7,10 @@ import hashlib
 import json
 import unicodedata
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
 from app.run.model.result import RunDetailsResult, RunListResult
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.message import (
     ConversationMessageDraft,
@@ -58,10 +59,6 @@ CURRENT_PROMPT_TEMPLATE_VERSION = "run-v2"
 
 class InvalidRunInputError(ValueError):
     """Run HTTP 用例输入不符合业务约束。"""
-
-
-def _utc_value(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def _fingerprint(*, operation: str, fields: dict[str, str]) -> str:
@@ -170,7 +167,7 @@ def _decode_cursor(cursor: str | None) -> tuple[datetime | None, str | None]:
         parsed = datetime.fromisoformat(timestamp)
         if not run_id or len(run_id) > 128:
             raise ValueError
-        return _utc_value(parsed), run_id
+        return as_utc(parsed), run_id
     except (ValueError, UnicodeError) as error:
         raise InvalidRunInputError("run_cursor_invalid") from error
 
@@ -215,7 +212,7 @@ class RunService:
         # 与 skill_ids / input_file_ids / model_profile_id 保持一致，避免阻断幂等重放与重复查库。
         run_id = self._id_factory("run")
         message_id = self._id_factory("msg")
-        now = _utc_value(self._clock())
+        now = as_utc(self._clock())
         draft = ConversationMessageDraft(
             id=message_id,
             session_id=session_id,
@@ -306,7 +303,7 @@ class RunService:
         )
         if input_call is None:
             raise RunStateError("run_input_call_reference_invalid")
-        now = _utc_value(self._clock())
+        now = as_utc(self._clock())
         answer = ConversationMessageDraft(
             id=self._id_factory("msg"),
             session_id=session_id,
@@ -371,9 +368,7 @@ class RunService:
         )
 
     async def cancel(self, session_id: str, owner_id: str, run_id: str) -> Run:
-        result = await self._repository.cancel(
-            session_id, owner_id, run_id, _utc_value(self._clock())
-        )
+        result = await self._repository.cancel(session_id, owner_id, run_id, as_utc(self._clock()))
         if result is None:
             raise RunNotFoundError("run_not_found")
         return result
@@ -390,7 +385,7 @@ class RunService:
     ) -> Run:
         request_id = _validate_request_id(request_id)
         new_run_id = self._id_factory("run")
-        now = _utc_value(self._clock())
+        now = as_utc(self._clock())
         try:
             result = await self._repository.retry(
                 session_id=session_id,
@@ -413,49 +408,18 @@ class RunService:
         return result
 
     async def get(self, session_id: str, owner_id: str, run_id: str) -> RunDetailsResult:
-        """读取 Run 详情及待交互/待审批/子任务视图；优先走单会话聚合读取，兼容内存替身。"""
-        if callable(getattr(self._repository, "get_details", None)):
-            details = await self._repository.get_details(session_id, owner_id, run_id)
-            if details is None:
-                raise RunNotFoundError("run_not_found")
-            return RunDetailsResult(
-                details.run,
-                details.pending_input,
-                details.pending_approvals,
-                subagent_tasks=details.subagent_tasks,
-                pending_subagent_inputs=details.pending_subagent_inputs,
-                pending_subagent_approvals=details.pending_subagent_approvals,
-            )
-        run = await self._repository.get(session_id, owner_id, run_id)
-        if run is None:
+        """单会话聚合读取 Run 详情及待交互/待审批/子任务视图。"""
+        details = await self._repository.get_details(session_id, owner_id, run_id)
+        if details is None:
             raise RunNotFoundError("run_not_found")
-        pending = await self._repository.get_pending_input(session_id, owner_id, run_id)
-        pending_approvals = await self._repository.list_pending_approvals(
-            session_id, owner_id, run_id
-        )
-        if pending_approvals is None:
-            raise RunNotFoundError("run_not_found")
-        if run.depth == 0:
-            subagent_tasks = await self._repository.list_subagent_tasks(
-                session_id, owner_id, run_id
-            )
-            pending_subagent_inputs = await self._repository.list_pending_subagent_inputs(
-                session_id, owner_id, run_id
-            )
-            pending_subagent_approvals = await self._repository.list_pending_subagent_approvals(
-                session_id, owner_id, run_id
-            )
-        else:
-            subagent_tasks = ()
-            pending_subagent_inputs = ()
-            pending_subagent_approvals = ()
         return RunDetailsResult(
-            run,
-            pending,
-            pending_approvals,
-            subagent_tasks=subagent_tasks,
-            pending_subagent_inputs=pending_subagent_inputs,
-            pending_subagent_approvals=pending_subagent_approvals,
+            details.run,
+            details.pending_input,
+            details.pending_approvals,
+            subagent_tasks=details.subagent_tasks,
+            pending_subagent_inputs=details.pending_subagent_inputs,
+            pending_subagent_approvals=details.pending_subagent_approvals,
+            assistant_message_id=details.assistant_message_id,
         )
 
     async def decide_tool_approval(
@@ -492,7 +456,7 @@ class RunService:
                     },
                 ),
                 decision=decision,
-                decided_at=_utc_value(self._clock()),
+                decided_at=as_utc(self._clock()),
                 auth_session_id=auth_session_id,
             )
         )
@@ -540,28 +504,16 @@ class RunService:
         """按序号游标读取 Run 状态事件；优先走单会话可见性合并查询。"""
         if after_sequence < 0 or not 1 <= limit <= MAX_EVENT_PAGE_SIZE:
             raise InvalidRunInputError("run_event_page_invalid")
-        if callable(getattr(self._repository, "list_visible_events", None)):
-            events = await self._repository.list_visible_events(
-                session_id,
-                owner_id,
-                run_id,
-                after_sequence=after_sequence,
-                limit=limit,
-            )
-            if events is None:
-                raise RunNotFoundError("run_not_found")
-            return events
-        # 回退路径：仅做轻量的 Run 存在性校验，不再调用重型 self.get() 触发 6 次冗余查询。
-        run = await self._repository.get(session_id, owner_id, run_id)
-        if run is None:
-            raise RunNotFoundError("run_not_found")
-        return await self._repository.list_events(
+        events = await self._repository.list_visible_events(
             session_id,
             owner_id,
             run_id,
             after_sequence=after_sequence,
             limit=limit,
         )
+        if events is None:
+            raise RunNotFoundError("run_not_found")
+        return events
 
     async def list_tool_calls(
         self,

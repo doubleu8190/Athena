@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.auth_middleware import AuthPrecheckMiddleware
 from api.system_prompt import build_system_prompt_admin_router
 from app.system_prompt import SystemPromptService
 from domain.auth import AuthContext, User, UserRole, UserStatus
@@ -100,10 +101,7 @@ class _Repository:
             SystemPromptKind.MAIN: _version(SystemPromptKind.MAIN),
             SystemPromptKind.COMPRESSION: _version(SystemPromptKind.COMPRESSION),
         }
-        self.versions = {
-            kind: {value.id: value}
-            for kind, value in self.current.items()
-        }
+        self.versions = {kind: {value.id: value} for kind, value in self.current.items()}
         self.save_calls: list[tuple[SystemPromptKind, str, str, datetime]] = []
         self.restore_calls: list[tuple[SystemPromptKind, str, str, datetime]] = []
         self.save_error: Exception | None = None
@@ -331,6 +329,7 @@ def test_admin_api_contract_permission_validation_and_error_mapping() -> None:
     app.state.authenticator = _Authenticator()
     app.state.auth_cookie_name = "athena_session"
     app.state.public_origin = None
+    app.add_middleware(AuthPrecheckMiddleware, fastapi_app=app)
     app.include_router(build_system_prompt_admin_router(service))
 
     with TestClient(app) as client:

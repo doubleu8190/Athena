@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.project.model.project import ProjectModel
+from common.date import as_utc
 from domain.project import Project
-
-
-def _as_utc(value: datetime) -> datetime:
-    """补齐 SQLite 等测试驱动丢失的 UTC 时区信息。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def project_to_domain(row: ProjectModel) -> Project:
@@ -21,9 +13,9 @@ def project_to_domain(row: ProjectModel) -> Project:
         id=row.id,
         owner_id=row.owner_id,
         name=row.name,
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
-        deleted_time=_as_utc(row.deleted_time) if row.deleted_time is not None else None,
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+        deleted_time=as_utc(row.deleted_time) if row.deleted_time is not None else None,
         description=row.description,
         instructions=row.instructions,
         default_skill_ids=tuple(row.default_skill_ids or ()),

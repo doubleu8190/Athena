@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -12,7 +11,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
-from adapter.file.storage import FileStorageError
 from api.auth import AuthCookieConfig, build_auth_router
 from api.auth_middleware import AuthPrecheckMiddleware
 from api.file import build_session_file_router
@@ -53,7 +51,8 @@ from app.subagent import SubagentService
 from app.system_prompt import SystemPromptService
 from app.tool import ToolManager
 from bootstrap.api import ApiDependencies, build_api_dependencies
-from bootstrap.config import env_flag
+from bootstrap.config import AuthSettings
+from domain.file import FileStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -160,12 +159,11 @@ def create_app(
         subagent_service=subagent_service,
         org_service=org_service,
     )
+    auth_settings = AuthSettings.from_environment()
     if auth_cookie_secure is None:
-        auth_cookie_secure = env_flag("ATHENA_COOKIE_SECURE", default=False)
+        auth_cookie_secure = auth_settings.cookie_secure
     configured_public_origin = (
-        public_origin.strip()
-        if public_origin is not None
-        else os.getenv("ATHENA_PUBLIC_ORIGIN", "").strip()
+        public_origin.strip() if public_origin is not None else (auth_settings.public_origin or "")
     )
 
     @asynccontextmanager
@@ -183,10 +181,7 @@ def create_app(
     # Starlette add_middleware 采用 LIFO 栈顺序：后注册的位于外层先执行。
     # 先挂载内层 UploadAdmissionMiddleware，再挂载外层 AuthPrecheckMiddleware，
     # 确保请求按 AuthPrecheckMiddleware -> UploadAdmissionMiddleware -> FastAPI 路由 依次处理。
-    app.add_middleware(
-        UploadAdmissionMiddleware,
-        repository=deps.knowledge_upload_slots,
-    )
+    app.add_middleware(UploadAdmissionMiddleware)
     app.add_middleware(
         AuthPrecheckMiddleware,
         fastapi_app=app,
@@ -195,19 +190,12 @@ def create_app(
     app.add_exception_handler(OSError, _handle_os_error)
     app.add_exception_handler(FileStorageError, _handle_file_storage_unavailable)
     app.add_exception_handler(RequestValidationError, _handle_request_validation_error)
+    # 仅保留中间件与运行期/测试真正读取的 5 个应用级状态属性，避免挂接无人消费的冗余引用。
     app.state.authenticator = deps.auth_service
     app.state.auth_cookie_name = DEFAULT_COOKIE_NAME
     app.state.public_origin = configured_public_origin or None
     app.state.tool_manager = deps.tool_manager
-    app.state.model_profile_service = deps.model_profile_service
-    app.state.system_prompt_service = deps.system_prompt_service
-    app.state.subagent_service = deps.subagent_service
-    app.state.skill_service = deps.skill_service
-    app.state.session_file_service = deps.session_file_service
-    app.state.run_service = deps.run_service
     app.state.preference_service = deps.preference_service
-    app.state.knowledge_service = deps.knowledge_service
-    app.state.org_service = deps.org_service
     app.include_router(health_router)
     if deps.org_service is not None:
         app.include_router(build_org_admin_router(deps.org_service))
@@ -248,7 +236,6 @@ def create_app(
         app.include_router(build_mcp_router(deps.tool_manager))
         app.include_router(build_tools_router(deps.tool_manager))
     if deps.knowledge_service is not None:
-        app.state.knowledge_original_store = deps.knowledge_originals
         assert deps.document_validator is not None
         app.include_router(build_knowledge_router(deps.knowledge_service, deps.document_validator))
         if (

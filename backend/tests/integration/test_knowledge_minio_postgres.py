@@ -282,16 +282,6 @@ def test_joint_pg_minio_ambiguous_commit_keeps_object_and_replays_idempotently()
                 async with sessions() as session:
                     assert (
                         await session.scalar(
-                            text(
-                                "SELECT count(*) FROM knowledge_upload_reservations "
-                                "WHERE owner_id = :owner"
-                            ),
-                            {"owner": owner},
-                        )
-                        == 0
-                    )
-                    assert (
-                        await session.scalar(
                             text("SELECT count(*) FROM knowledge_sources WHERE owner_id = :owner"),
                             {"owner": owner},
                         )
@@ -421,7 +411,7 @@ def test_joint_pg_minio_cleanup_survives_transient_delete_failure() -> None:
     asyncio.run(scenario())
 
 
-def test_joint_pg_minio_orphan_scan_preserves_source_and_reservation_references() -> None:
+def test_joint_pg_minio_orphan_scan_preserves_source_references() -> None:
     database_url = DATABASE_URL
     if database_url is None or not _MINIO_CONFIGURED:
         pytest.skip("joint PostgreSQL and MinIO environment is not configured")
@@ -459,37 +449,13 @@ def test_joint_pg_minio_orphan_scan_preserves_source_and_reservation_references(
                 created.add(source_key)
                 await _publish_ingestion(repository)
 
-                reservation_content = f"referenced reservation {token_hex(8)}".encode()
-                reservation_key = _key(
-                    reservation_content,
-                    owner=owner,
-                    source_id="ksrc_reserved",
-                )
-                await store.put(reservation_key, reservation_content)
-                created.add(reservation_key)
-                await repository.reserve_file_upload(
-                    owner_id=owner,
-                    operation="create",
-                    request_key="reserved-request",
-                    request_hash="reserved-request-hash",
-                    base_id=base_id,
-                    document_id="kdoc_reserved",
-                    size_bytes=len(reservation_content),
-                    reservation_token="kres_reserved",
-                    storage_key=reservation_key,
-                    source_id="ksrc_reserved",
-                    version_id="kver_reserved",
-                    job_id="kjob_reserved",
-                    at=datetime(2026, 1, 1, tzinfo=UTC),
-                )
-
                 orphan_content = f"orphan {token_hex(8)}".encode()
                 orphan_key = _key(orphan_content, owner=owner, source_id="ksrc_orphan")
                 await store.put(orphan_key, orphan_content)
                 created.add(orphan_key)
                 injected = _InjectedCandidateStore(
                     store,
-                    (source_key, reservation_key, orphan_key),
+                    (source_key, orphan_key),
                 )
                 worker = KnowledgeWorker(
                     repository,
@@ -504,7 +470,6 @@ def test_joint_pg_minio_orphan_scan_preserves_source_and_reservation_references(
                 assert not await worker.run_once()
                 assert injected.delete_keys == [orphan_key]
                 assert await store.get(source_key) == source_content
-                assert await store.get(reservation_key) == reservation_content
                 with pytest.raises(OriginalStorageNotFoundError):
                     await store.get(orphan_key)
         finally:

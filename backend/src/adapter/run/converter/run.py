@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any, cast
 
 from pydantic import BaseModel
 
 from adapter.run.model import RunEventModel, RunInputRequestModel, RunModel, RunToolCallModel
+from common.date import as_utc
 from domain.run.model import (
     InputRequestStatus,
     Run,
@@ -71,11 +71,6 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[BaseModel]] = {
 }
 
 
-def _as_utc(value: datetime) -> datetime:
-    """兼容 SQLite 驱动返回无时区时间。"""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-
-
 def run_to_domain(row: RunModel) -> Run:
     """将 ORM 行投影为不可变 Run 实体。"""
     usage = RunUsage.model_validate(row.usage)
@@ -105,18 +100,18 @@ def run_to_domain(row: RunModel) -> Run:
         event_sequence=row.event_sequence,
         execution_epoch=row.execution_epoch,
         worker_id=row.worker_id,
-        lease_expires_at=None if row.lease_expires_at is None else _as_utc(row.lease_expires_at),
+        lease_expires_at=None if row.lease_expires_at is None else as_utc(row.lease_expires_at),
         execution_started_at=(
-            None if row.execution_started_at is None else _as_utc(row.execution_started_at)
+            None if row.execution_started_at is None else as_utc(row.execution_started_at)
         ),
         execution_deadline_at=(
-            None if row.execution_deadline_at is None else _as_utc(row.execution_deadline_at)
+            None if row.execution_deadline_at is None else as_utc(row.execution_deadline_at)
         ),
-        queued_at=_as_utc(row.queued_at),
+        queued_at=as_utc(row.queued_at),
         first_started_at=row.first_started_at,
         finished_at=row.finished_at,
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
         cancel_requested_at=row.cancel_requested_at,
         safe_error_code=row.safe_error_code,
         usage=usage,
@@ -153,9 +148,9 @@ def input_request_to_domain(row: RunInputRequestModel) -> RunInputRequest:
         question_message_id=row.question_message_id,
         status=InputRequestStatus(row.status),
         answer_message_id=row.answer_message_id,
-        created_at=_as_utc(row.created_at),
-        answered_at=None if row.answered_at is None else _as_utc(row.answered_at),
-        closed_at=None if row.closed_at is None else _as_utc(row.closed_at),
+        created_at=as_utc(row.created_at),
+        answered_at=None if row.answered_at is None else as_utc(row.answered_at),
+        closed_at=None if row.closed_at is None else as_utc(row.closed_at),
     )
 
 
@@ -172,7 +167,7 @@ def event_to_domain(row: RunEventModel) -> RunEvent:
         run_id=row.run_id,
         sequence=row.sequence,
         type=row.type,
-        created_at=_as_utc(row.created_at),
+        created_at=as_utc(row.created_at),
         payload=payload,
     )
 
@@ -197,14 +192,14 @@ def tool_call_to_domain(row: RunToolCallModel) -> RunToolCallRecord:
         status=ToolCallStatus(row.status),
         call_message_id=row.call_message_id,
         result_message_id=row.result_message_id,
-        started_at=None if row.started_at is None else _as_utc(row.started_at),
-        finished_at=None if row.finished_at is None else _as_utc(row.finished_at),
+        started_at=None if row.started_at is None else as_utc(row.started_at),
+        finished_at=None if row.finished_at is None else as_utc(row.finished_at),
         safe_error_code=row.safe_error_code,
         outcome=None if row.outcome is None else ToolOutcome.model_validate(row.outcome),
         requires_approval=row.requires_approval,
-        requested_at=None if row.requested_at is None else _as_utc(row.requested_at),
+        requested_at=None if row.requested_at is None else as_utc(row.requested_at),
         approval_decided_at=(
-            None if row.approval_decided_at is None else _as_utc(row.approval_decided_at)
+            None if row.approval_decided_at is None else as_utc(row.approval_decided_at)
         ),
         approval_decision=(
             None if row.approval_decision is None else ToolApprovalDecision(row.approval_decision)

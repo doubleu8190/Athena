@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC
-
 from adapter.run.model import SessionContextSummaryModel
+from common.date import as_utc
 from domain.run.model import ContextSummary
 
 
 def context_summary_to_domain(row: SessionContextSummaryModel) -> ContextSummary:
     """把内部摘要映射为不可变领域对象。"""
-    created_at = row.created_at
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=UTC)
+    created_at = as_utc(row.created_at)
     return ContextSummary(
         id=row.id,
         session_id=row.session_id,

@@ -9,7 +9,7 @@ from typing import Protocol
 from app.access import AccessPolicyService
 from app.project.service import ProjectService
 from common.ids import now_utc
-from domain.access import ResourceType
+from domain.access import ResourceType, UserAccessSnapshot
 from domain.knowledge.model import KnowledgeBase
 from domain.project import ProjectNotFoundError
 
@@ -43,7 +43,13 @@ class ProjectKnowledgeService:
         self._access_policy = access_policy
         self._clock = clock
 
-    async def list(self, owner_id: str, project_id: str) -> list[KnowledgeBase]:
+    async def list(
+        self,
+        owner_id: str,
+        project_id: str,
+        *,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> list[KnowledgeBase]:
         """读取当前用户项目关联且当前仍有读权限的知识库（员工调岗后旧部门库立即失效）。"""
         await self._projects.get(owner_id, project_id)
         bases = await self._repository.list_project_bases(owner_id, project_id)
@@ -53,6 +59,7 @@ class ProjectKnowledgeService:
             owner_id,
             ResourceType.KNOWLEDGE_BASE,
             [base.id for base in bases],
+            snapshot=snapshot,
         )
         return [base for base in bases if base.id in readable_ids]
 

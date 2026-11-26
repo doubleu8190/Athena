@@ -11,9 +11,7 @@ from typing import Any, cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adapter.access.repository import filter_readable_targets_in_session
 from adapter.file.model import SessionFileModel
-from adapter.knowledge.model import KnowledgeBaseModel
 from adapter.llm.model.profile import (
     CurrentCompressionPolicyModel,
     DefaultModelProfileModel,
@@ -37,7 +35,6 @@ from adapter.run.model import (
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
 from common.ids import new_id
-from domain.access import ResourceAccessTarget, ResourceType, VisibilityScope
 from domain.message import (
     ConversationMessage,
     ExecutionMessageDraft,
@@ -51,6 +48,8 @@ from domain.message import (
 )
 from domain.run.model import (
     InputRequestStatus,
+    PendingSubagentApproval,
+    PendingSubagentInput,
     Run,
     RunAttemptUsage,
     RunEventPayload,
@@ -62,11 +61,11 @@ from domain.run.model import (
     RunSubagentStatusChangedPayload,
     RunToolCallFinishedPayload,
     RunUsage,
+    SubagentTaskSummary,
 )
 from domain.run.model.errors import (
     RunConflictError,
     RunInputResourceError,
-    RunKnowledgeBaseNotFoundError,
     RunNotFoundError,
     RunStateError,
 )
@@ -79,6 +78,7 @@ from domain.skill import (
 )
 from domain.tool import (
     FormattedToolArgument,
+    PendingToolApproval,
     RuntimeToolSnapshot,
     ToolCallStatus,
     ToolKind,
@@ -906,50 +906,6 @@ class RunRepositorySupportMixin:
     async def _lock_retry_profile_id(self, session: AsyncSession, profile_id: str) -> str:
         return (await self._lock_retry_profile_row(session, profile_id)).id
 
-    async def _validate_explicit_knowledge_base_ids(
-        self,
-        session: AsyncSession,
-        owner_id: str,
-        knowledge_base_ids: tuple[str, ...] | None,
-    ) -> list[str] | None:
-        """在同一提交事务内实时校验显式知识库存在、未删除且当前用户可读，防止跨部门 ID 探测。"""
-        if knowledge_base_ids is None:
-            return None
-        ordered_ids = tuple(dict.fromkeys(knowledge_base_ids))
-        if len(ordered_ids) > 20:
-            raise RunInputResourceError("run_knowledge_base_ids_invalid")
-        if not ordered_ids:
-            return []
-        kb_rows = (
-            await session.execute(
-                select(
-                    KnowledgeBaseModel.id,
-                    KnowledgeBaseModel.visibility_scope,
-                    KnowledgeBaseModel.owner_id,
-                    KnowledgeBaseModel.owner_department_id,
-                ).where(
-                    KnowledgeBaseModel.id.in_(ordered_ids),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-            )
-        ).all()
-        if len(kb_rows) != len(ordered_ids):
-            raise RunKnowledgeBaseNotFoundError("knowledge_base_not_found")
-        targets = tuple(
-            ResourceAccessTarget(
-                resource_type=ResourceType.KNOWLEDGE_BASE,
-                resource_id=row[0],
-                visibility_scope=VisibilityScope(row[1]),
-                owner_id=row[2],
-                owner_department_id=row[3],
-            )
-            for row in kb_rows
-        )
-        readable_ids = await filter_readable_targets_in_session(session, owner_id, targets)
-        if readable_ids != set(ordered_ids):
-            raise RunKnowledgeBaseNotFoundError("knowledge_base_not_found")
-        return list(ordered_ids)
-
     @staticmethod
     async def _current_compression_policy_id(session: AsyncSession) -> str | None:
         """读取当前策略版本，供新 Run 固定配置快照。"""
@@ -1048,6 +1004,319 @@ class RunRepositorySupportMixin:
             raise RunNotFoundError("run_not_found")
         return row
 
+    @staticmethod
+    async def _get_visible_run(
+        session: AsyncSession, session_id: str, owner_id: str, run_id: str
+    ) -> RunModel | None:
+        """在未软删会话与所有者归属约束下读取可见 Run，供只读查询复用。"""
+        return await session.scalar(
+            select(RunModel)
+            .join(SessionModel, SessionModel.id == RunModel.session_id)
+            .where(
+                RunModel.id == run_id,
+                RunModel.session_id == session_id,
+                RunModel.owner_id == owner_id,
+                SessionModel.owner_id == owner_id,
+                SessionModel.deleted_time.is_(None),
+            )
+        )
+
+    @staticmethod
+    async def _refresh_safe_skill_projection(
+        session: AsyncSession,
+        row: RunToolCallModel,
+    ) -> SafeSkillApprovalProjection | None:
+        """按冻结摘要复核 Skill 审批输入文件存在性，不读取当前 Skill 管理配置。"""
+        if row.safe_skill_projection is None:
+            return None
+        projection = SafeSkillApprovalProjection.model_validate(row.safe_skill_projection)
+        if not projection.input_files:
+            return projection
+        file_ids = tuple(item.file_id for item in projection.input_files)
+        visible_ids = set(
+            (
+                await session.scalars(
+                    select(SessionFileModel.id).where(
+                        SessionFileModel.session_id == row.session_id,
+                        SessionFileModel.id.in_(file_ids),
+                    )
+                )
+            ).all()
+        )
+        files = tuple(
+            item.model_copy(update={"available": item.file_id in visible_ids})
+            for item in projection.input_files
+        )
+        all_available = all(item.available for item in files)
+        return projection.model_copy(
+            update={
+                "input_files": files,
+                "can_approve": projection.can_approve and all_available,
+                "unavailable_reason": (
+                    projection.unavailable_reason
+                    if all_available
+                    else "skill_approval_input_unavailable"
+                ),
+            }
+        )
+
+    async def _load_pending_approvals_in_session(
+        self,
+        session: AsyncSession,
+        run_row: RunModel,
+        session_id: str,
+    ) -> tuple[PendingToolApproval, ...]:
+        """在当前只读会话内加载主/子 Run 的待人工审批工具调用及安全展示摘要。"""
+        rows = (
+            await session.scalars(
+                select(RunToolCallModel)
+                .where(
+                    RunToolCallModel.run_id == run_row.id,
+                    RunToolCallModel.session_id == session_id,
+                    RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
+                )
+                .order_by(RunToolCallModel.ordinal)
+            )
+        ).all()
+        if not rows:
+            return ()
+        skill_projections: list[SafeSkillApprovalProjection | None] = []
+        for row in rows:
+            if row.requested_at is None:
+                raise RuntimeError("run_tool_call_requested_at_missing")
+            skill_projections.append(await self._refresh_safe_skill_projection(session, row))
+        enriched = await self._enrich_pending_approvals_in_session(
+            session,
+            [
+                (row, run_row, skill_proj)
+                for row, skill_proj in zip(rows, skill_projections, strict=True)
+            ],
+        )
+        pending: list[PendingToolApproval] = []
+        for row, skill_proj, (display_name, approval_summary, formatted_arguments) in zip(
+            rows, skill_projections, enriched, strict=True
+        ):
+            assert row.requested_at is not None
+            pending.append(
+                PendingToolApproval(
+                    call_id=row.id,
+                    batch_message_id=row.call_message_id,
+                    ordinal=row.ordinal,
+                    model_name=row.model_name,
+                    tool_kind=(None if row.tool_kind is None else ToolKind(row.tool_kind)),
+                    requested_at=row.requested_at,
+                    safe_skill_projection=skill_proj,
+                    display_name=display_name,
+                    approval_summary=approval_summary,
+                    formatted_arguments=formatted_arguments,
+                )
+            )
+        return tuple(pending)
+
+    @staticmethod
+    def _extract_subagent_task_summary(raw_text: str) -> str:
+        """从子 Run 初始任务文本提取精简摘要，去除模板前缀并截断至 120 字符内。"""
+        text = raw_text.strip()
+        if not text:
+            return ""
+        if text.startswith("任务：\n"):
+            text = text[len("任务：\n") :]
+        elif text.startswith("任务："):
+            text = text[len("任务：") :]
+        marker = "\n\n补充上下文："
+        if marker in text:
+            head, _ = text.split(marker, 1)
+            if head.strip():
+                text = head
+        normalized = " ".join(text.split())
+        if len(normalized) <= 120:
+            return normalized
+        return normalized[:119] + "…"
+
+    async def _load_subagent_details_in_session(
+        self,
+        session: AsyncSession,
+        session_id: str,
+        parent_run_id: str,
+        *,
+        include_tasks: bool = True,
+        include_inputs: bool = True,
+        include_approvals: bool = True,
+    ) -> tuple[
+        tuple[SubagentTaskSummary, ...],
+        tuple[PendingSubagentInput, ...],
+        tuple[PendingSubagentApproval, ...],
+    ]:
+        """在当前只读会话内统一加载主 Run 的子任务摘要、待回答澄清与待审批调用。
+
+        无子任务或无需进一步查询时直接短路，所有需要的视图仅加载一次初始任务摘要元数据。
+        """
+        sub_rows = (
+            await session.scalars(
+                select(RunModel)
+                .where(
+                    RunModel.session_id == session_id,
+                    RunModel.parent_run_id == parent_run_id,
+                )
+                .order_by(RunModel.created_at, RunModel.id)
+            )
+        ).all()
+        if not sub_rows:
+            return (), (), ()
+
+        sub_by_id = {sub.id: sub for sub in sub_rows}
+        task_index_by_id = {sub.id: idx for idx, sub in enumerate(sub_rows, start=1)}
+        waiting_input_ids = (
+            tuple(sub.id for sub in sub_rows if sub.status == RunStatus.WAITING_FOR_INPUT.value)
+            if include_inputs
+            else ()
+        )
+        waiting_approval_ids = (
+            tuple(sub.id for sub in sub_rows if sub.status == RunStatus.WAITING_FOR_APPROVAL.value)
+            if include_approvals
+            else ()
+        )
+        # 仅当至少一个目标视图非空时才拉取子 Run 首条 user 执行消息，避免多余查库。
+        summary_target_ids = (
+            tuple(sub.id for sub in sub_rows)
+            if include_tasks
+            else tuple(dict.fromkeys((*waiting_input_ids, *waiting_approval_ids)))
+        )
+        task_summary_by_id: dict[str, str] = {}
+        if summary_target_ids:
+            exec_rows = (
+                await session.scalars(
+                    select(ExecutionMessageModel)
+                    .where(
+                        ExecutionMessageModel.session_id == session_id,
+                        ExecutionMessageModel.run_id.in_(summary_target_ids),
+                        ExecutionMessageModel.role == ExecutionRole.USER.value,
+                    )
+                    .order_by(ExecutionMessageModel.sequence, ExecutionMessageModel.id)
+                )
+            ).all()
+            for exec_row in exec_rows:
+                if exec_row.run_id in task_summary_by_id:
+                    continue
+                domain_exec = execution_to_domain(exec_row)
+                raw_text = "".join(
+                    part.text for part in domain_exec.parts if isinstance(part, TextPart)
+                )
+                task_summary_by_id[exec_row.run_id] = self._extract_subagent_task_summary(raw_text)
+
+        subagent_tasks = (
+            tuple(
+                SubagentTaskSummary(
+                    sub_run_id=sub.id,
+                    parent_tool_call_id=sub.parent_tool_call_id or "",
+                    subagent_profile_id=sub.subagent_profile_id,
+                    subagent_slug=sub.subagent_slug or "",
+                    subagent_name=sub.subagent_name or "",
+                    task_index=task_index_by_id[sub.id],
+                    task_summary=task_summary_by_id.get(sub.id, ""),
+                    status=RunStatus(sub.status),
+                    safe_error_code=sub.safe_error_code,
+                    created_at=sub.created_at,
+                    first_started_at=sub.first_started_at,
+                    finished_at=sub.finished_at,
+                )
+                for sub in sub_rows
+            )
+            if include_tasks
+            else ()
+        )
+
+        pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
+        if waiting_input_ids:
+            input_rows = (
+                await session.execute(
+                    select(RunInputRequestModel, ConversationMessageModel)
+                    .join(
+                        ConversationMessageModel,
+                        ConversationMessageModel.id == RunInputRequestModel.question_message_id,
+                    )
+                    .where(
+                        RunInputRequestModel.run_id.in_(waiting_input_ids),
+                        RunInputRequestModel.status == InputRequestStatus.PENDING.value,
+                    )
+                    .order_by(RunInputRequestModel.created_at, RunInputRequestModel.id)
+                )
+            ).all()
+            pending_subagent_inputs = tuple(
+                PendingSubagentInput(
+                    sub_run_id=sub_by_id[req.run_id].id,
+                    subagent_slug=sub_by_id[req.run_id].subagent_slug or "",
+                    subagent_name=sub_by_id[req.run_id].subagent_name or "",
+                    task_index=task_index_by_id.get(req.run_id, 1),
+                    task_summary=task_summary_by_id.get(req.run_id, ""),
+                    input_request_id=req.id,
+                    question_message_id=req.question_message_id,
+                    question_text="".join(
+                        part.text
+                        for part in conversation_to_domain(msg_row).parts
+                        if isinstance(part, TextPart)
+                    ),
+                    created_at=req.created_at,
+                )
+                for req, msg_row in input_rows
+            )
+
+        pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
+        if waiting_approval_ids:
+            approval_rows = (
+                await session.execute(
+                    select(RunToolCallModel, RunModel)
+                    .join(RunModel, RunModel.id == RunToolCallModel.run_id)
+                    .where(
+                        RunToolCallModel.run_id.in_(waiting_approval_ids),
+                        RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
+                    )
+                    .order_by(RunModel.created_at, RunToolCallModel.ordinal, RunToolCallModel.id)
+                )
+            ).all()
+            if approval_rows:
+                skill_projections = [
+                    None
+                    if call_row.safe_skill_projection is None
+                    else SafeSkillApprovalProjection.model_validate(call_row.safe_skill_projection)
+                    for call_row, _ in approval_rows
+                ]
+                enriched = await self._enrich_pending_approvals_in_session(
+                    session,
+                    [
+                        (call_row, sub_run, skill_proj)
+                        for (call_row, sub_run), skill_proj in zip(
+                            approval_rows, skill_projections, strict=True
+                        )
+                    ],
+                )
+                pending_subagent_approvals = tuple(
+                    PendingSubagentApproval(
+                        sub_run_id=sub_run.id,
+                        subagent_slug=sub_run.subagent_slug or "",
+                        subagent_name=sub_run.subagent_name or "",
+                        task_index=task_index_by_id.get(sub_run.id, 1),
+                        task_summary=task_summary_by_id.get(sub_run.id, ""),
+                        call_id=call_row.id,
+                        batch_message_id=call_row.call_message_id,
+                        ordinal=call_row.ordinal,
+                        model_name=call_row.model_name,
+                        tool_kind=call_row.tool_kind,
+                        requested_at=call_row.requested_at or sub_run.updated_at,
+                        safe_skill_projection=skill_proj,
+                        display_name=display_name,
+                        approval_summary=approval_summary,
+                        formatted_arguments=formatted_arguments,
+                    )
+                    for (call_row, sub_run), skill_proj, (
+                        display_name,
+                        approval_summary,
+                        formatted_arguments,
+                    ) in zip(approval_rows, skill_projections, enriched, strict=True)
+                )
+
+        return subagent_tasks, pending_subagent_inputs, pending_subagent_approvals
+
     async def _lock_worker_run(
         self, session: AsyncSession, run_id: str, worker_id: str, execution_epoch: int
     ) -> RunModel:
@@ -1056,6 +1325,18 @@ class RunRepositorySupportMixin:
             raise RunNotFoundError("run_not_found")
         await self._lock_session_by_id(session, session_id)
         row = await self._lock_run(session, session_id, run_id)
+        if row.worker_id != worker_id or row.execution_epoch != execution_epoch:
+            raise RunStateError("run_execution_lease_lost")
+        return row
+
+    @staticmethod
+    async def _lock_worker_run_only(
+        session: AsyncSession, run_id: str, worker_id: str, execution_epoch: int
+    ) -> RunModel:
+        """仅锁 runs 单行并校验租约归属（不锁父表 sessions），消除心跳/微操作与同会话操作锁争用。"""
+        row = await session.scalar(select(RunModel).where(RunModel.id == run_id).with_for_update())
+        if row is None:
+            raise RunNotFoundError("run_not_found")
         if row.worker_id != worker_id or row.execution_epoch != execution_epoch:
             raise RunStateError("run_execution_lease_lost")
         return row

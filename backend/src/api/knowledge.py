@@ -10,7 +10,6 @@ from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
-    Depends,
     File,
     Form,
     Header,
@@ -42,7 +41,7 @@ from api.dto.knowledge import (
     KnowledgeTextRequest,
     KnowledgeVersionResponse,
 )
-from api.security import CurrentAuth, verify_request_origin
+from api.security import CurrentAuth
 from app.knowledge.service import (
     KNOWLEDGE_UNSET,
     KnowledgeInputError,
@@ -66,7 +65,6 @@ def build_knowledge_router(
     router = APIRouter(
         prefix="/api/v1/knowledge-bases",
         tags=["knowledge"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.post("", response_model=KnowledgeBaseResponse, status_code=status.HTTP_201_CREATED)
@@ -93,9 +91,7 @@ def build_knowledge_router(
                     ),
                 )
             else:
-                created = await service.create_base(
-                    auth.user.id, request.name, request.description
-                )
+                created = await service.create_base(auth.user.id, request.name, request.description)
             return _base_response(created)
         except KnowledgePermissionDeniedError as error:
             raise _forbidden(error) from error

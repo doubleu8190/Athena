@@ -16,7 +16,6 @@ dependencies = [
     "fastapi>=0.115,<1",
     "httpx2==2.16.0",
     "jsonschema>=4.26,<5",
-    "lark-oapi==1.9.0",
     "mcp==2.3.0",
     "minio==7.2.20",
     "packaging>=25,<27",
@@ -44,7 +43,6 @@ dev = [
 ]
 knowledge = [
     "jieba==0.42.1",
-    "psutil>=6,<8",
     "paddlepaddle==3.2.2; python_version < '3.14'",
     "paddleocr==3.7.0; python_version < '3.14'",
     "pypdfium2==5.15.0",
@@ -63,7 +61,7 @@ sources = ["backend/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
-pythonpath = [".", "backend/src", "backend/tests", "backend/scripts"]
+pythonpath = [".", "backend/src", "backend/tests"]
 markers = [
     "integration: requires ATHENA_TEST_DATABASE_URL and PostgreSQL",
     "llm_live: uses a configured real LLM service and is skipped by default",
@@ -94,13 +92,9 @@ known-first-party = [
 python_version = "3.12"
 strict = true
 explicit_package_bases = true
-mypy_path = ".:backend/src:backend/tests:backend/scripts"
-files = ["backend/src", "backend/scripts", "backend/tests", "mcp_servers"]
+mypy_path = ".:backend/src:backend/tests"
+files = ["backend/src", "backend/tests", "mcp_servers"]
 
 [[tool.mypy.overrides]]
 module = ["minio", "minio.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["lark_oapi", "lark_oapi.*"]
 ignore_missing_imports = true

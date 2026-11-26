@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.preference.model import UserMemoryModel, UserWorkProfileModel
+from common.date import as_utc
 from domain.preference import UserMemory, UserMemorySource, UserWorkProfile
-
-
-def _as_utc(value: datetime) -> datetime:
-    """兼容 SQLite 测试驱动返回的无时区时间，统一转换为 UTC。"""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def profile_to_domain(row: UserWorkProfileModel) -> UserWorkProfile:
@@ -19,7 +13,7 @@ def profile_to_domain(row: UserWorkProfileModel) -> UserWorkProfile:
         user_id=row.user_id,
         custom_instructions=row.custom_instructions,
         memory_enabled=row.memory_enabled,
-        updated_at=_as_utc(row.updated_at),
+        updated_at=as_utc(row.updated_at),
     )
 
 
@@ -30,8 +24,8 @@ def memory_to_domain(row: UserMemoryModel) -> UserMemory:
         user_id=row.user_id,
         content=row.content,
         source=UserMemorySource(row.source),
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
     )
 
 

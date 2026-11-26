@@ -6,32 +6,12 @@ import asyncio
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol
-
-from pydantic import BaseModel, ConfigDict, Field
-
-SCRIPT_PROCESS_DIAGNOSTIC_FILENAME = ".athena-process-diagnostic.json"
+from typing import Protocol
 
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
-
-
-class ScriptProcessDiagnostic(BaseModel):
-    """只供人工排查、不能证明进程存活的本地启动记录。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    schema_version: Literal[1] = 1
-    run_id: str = Field(min_length=1, max_length=128)
-    tool_call_id: str = Field(min_length=1, max_length=128)
-    worker_instance_id: str = Field(min_length=1, max_length=128)
-    process_id: int = Field(gt=0)
-    process_group_id: int = Field(gt=0)
-    recorded_at: datetime
-    working_directory: str = Field(min_length=1, max_length=4096)
 
 
 class ScriptExecutionErrorCode(StrEnum):
@@ -252,7 +232,6 @@ class ScriptExecutionPort(Protocol):
 __all__ = [
     "JsonScalar",
     "JsonValue",
-    "SCRIPT_PROCESS_DIAGNOSTIC_FILENAME",
     "ScriptCleanupErrorCode",
     "ScriptExecutionConfigurationError",
     "ScriptExecutionCancelled",
@@ -261,5 +240,4 @@ __all__ = [
     "ScriptExecutionRequest",
     "ScriptExecutionResult",
     "ScriptManifestOutput",
-    "ScriptProcessDiagnostic",
 ]

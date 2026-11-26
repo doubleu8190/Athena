@@ -1,4 +1,4 @@
-"""会话文件元数据与配额锁的 SQLAlchemy 适配器。"""
+"""会话文件元数据与配额校验的 SQLAlchemy 适配器。"""
 
 from __future__ import annotations
 
@@ -21,18 +21,6 @@ from domain.file import (
     SessionFileRepository,
 )
 from domain.session import SessionNotFoundError
-
-
-async def lock_session_file_quota(session: AsyncSession, session_id: str) -> None:
-    """用会话派生的事务 advisory lock 串行化上传和产物发布。"""
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        await session.execute(
-            select(
-                func.pg_advisory_xact_lock(
-                    func.hashtextextended(f"athena:session-files:{session_id}", 0)
-                )
-            )
-        )
 
 
 async def count_published_session_files(session: AsyncSession, session_id: str) -> int:
@@ -116,19 +104,19 @@ class SqlAlchemySessionFileRepository(
         )
         async with self._session_factory() as session:
             async with session.begin():
-                # 上传和 Run 完成都按 Session → 配额锁的顺序加锁。这里先显式
-                # 取 FOR KEY SHARE，避免在持有 advisory lock 时由新增文件的
-                # 外键检查反向等待 Session 行，与完成事务形成死锁。
+                # 与 finish_tool_call 统一锁定 SessionModel 行（FOR UPDATE）串行化配额与幂等检查；
+                # 事务内无对象存储 I/O 且极短，锁序完全一致，无需额外 pg_advisory_xact_lock。
                 visible = await session.scalar(
-                    select(SessionModel.id).where(
+                    select(SessionModel.id)
+                    .where(
                         SessionModel.id == session_id,
                         SessionModel.owner_id == owner_id,
                         SessionModel.deleted_time.is_(None),
-                    ).with_for_update(key_share=True)
+                    )
+                    .with_for_update()
                 )
                 if visible is None:
                     raise SessionNotFoundError("session_not_found")
-                await lock_session_file_quota(session, session_id)
                 existing = await self._upload_request(
                     session,
                     session_id,
@@ -424,6 +412,5 @@ async def _is_object_key_referenced_in_session(
 __all__ = [
     "SqlAlchemySessionFileRepository",
     "count_published_session_files",
-    "lock_session_file_quota",
     "pending_file_to_model",
 ]

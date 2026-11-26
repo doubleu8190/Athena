@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -17,7 +16,6 @@ import openai
 import pytest
 from openai import AsyncOpenAI
 
-from adapter.llm.bounded_http import ResponseLimitError
 from adapter.llm.openai_chat_completions import OpenAIChatCompletionsAdapter, _retry_after_seconds
 from domain.llm.model import (
     LlmCapabilityError,
@@ -30,7 +28,6 @@ from domain.llm.model import (
     LlmRequest,
     LlmRequestError,
     LlmRole,
-    LlmStreamEvent,
     LlmText,
     LlmTool,
     LlmToolCall,
@@ -86,19 +83,6 @@ def chunk(
     delta = SimpleNamespace(content=content, tool_calls=tool_calls)
     choice = SimpleNamespace(index=index, delta=delta, finish_reason=finish_reason)
     return SimpleNamespace(id="chatcmpl_test", choices=[choice], usage=usage)
-
-
-def diagnostic_payload(caplog: pytest.LogCaptureFixture) -> dict[str, Any]:
-    """提取当前测试唯一的结构诊断日志并解析为 JSON。"""
-    messages = [
-        record.getMessage()
-        for record in caplog.records
-        if record.getMessage().startswith("llm_chat_stream_diagnostic ")
-    ]
-    assert len(messages) == 1
-    prefix, payload = messages[0].split(" ", 1)
-    assert prefix == "llm_chat_stream_diagnostic"
-    return cast(dict[str, Any], json.loads(payload))
 
 
 def test_stream_keeps_reading_usage_chunk_after_finish() -> None:
@@ -163,148 +147,8 @@ def test_stream_reassembles_and_validates_tool_call() -> None:
     assert isinstance(events[-1], ResponseCompleted)
 
 
-def test_tool_call_diagnostic_summarizes_same_index_continuation_without_sensitive_values(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """同 index 多片只形成一个调用，日志仅含哈希化身份和有界结构字段。"""
-    adapter = OpenAIChatCompletionsAdapter()
-    call_id = "call_secret_identifier_123"
-    tool_name = "secret_tool_name"
-    argument_suffix = 'secret_argument_value"}'
-    runtime = replace(
-        runtime_profile(),
-        version=replace(
-            runtime_profile().version,
-            base_url="https://base-url-secret.example/v1",
-        ),
-        api_key="api-key-secret-value",
-    )
-    stream = [
-        chunk(
-            content="response-body-secret",
-            tool_calls=[
-                SimpleNamespace(
-                    index=0,
-                    id=call_id,
-                    function=SimpleNamespace(
-                        name=tool_name,
-                        arguments='{"secret":"',
-                    ),
-                )
-            ],
-        ),
-        chunk(
-            tool_calls=[
-                SimpleNamespace(
-                    index=0,
-                    id=call_id,
-                    function=SimpleNamespace(
-                        name=tool_name,
-                        arguments=argument_suffix,
-                    ),
-                )
-            ]
-        ),
-        chunk(finish_reason="tool_calls"),
-    ]
-
-    async def collect() -> list[LlmStreamEvent]:
-        return [
-            event
-            async for event in adapter._events(
-                async_chunks(stream),
-                runtime,
-            )
-        ]
-
-    with caplog.at_level(logging.DEBUG):
-        events = asyncio.run(collect())
-
-    payload = diagnostic_payload(caplog)
-    assert payload["outcome"] == "completed"
-    assert payload["index_count"] == 1
-    assert payload["chunks_observed"] == 3
-    assert payload["finish_reasons"] == ["tool_calls"]
-    assert cast(dict[str, Any], payload["totals"])["fragment_count"] == 2
-    fragments = cast(list[dict[str, Any]], payload["positions"])
-    assert [fragment["relation"] for fragment in fragments] == [
-        "new_index",
-        "same_index_continuation",
-    ]
-    assert all(fragment["choice_index"] == 0 for fragment in fragments)
-    assert all(fragment["fragment_position"] == 0 for fragment in fragments)
-    assert all(len(cast(str, fragment["id_sha256"])) == 12 for fragment in fragments)
-    assert all(len(cast(str, fragment["name_sha256"])) == 12 for fragment in fragments)
-    assert isinstance(events[-1], ResponseCompleted)
-
-    log_text = caplog.text
-    for sensitive in (
-        call_id,
-        tool_name,
-        "secret_argument_value",
-        "response-body-secret",
-        "https://base-url-secret.example/v1",
-        "api-key-secret-value",
-    ):
-        assert sensitive not in log_text
-
-
-def test_tool_call_diagnostic_distinguishes_independent_calls(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """不同 index 与不同 id 的两个分片被标记为独立调用。"""
-    adapter = OpenAIChatCompletionsAdapter()
-
-    async def collect() -> list[LlmStreamEvent]:
-        return [
-            event
-            async for event in adapter._events(
-                async_chunks(
-                    [
-                        chunk(
-                            tool_calls=[
-                                SimpleNamespace(
-                                    index=0,
-                                    id="call_first",
-                                    function=SimpleNamespace(
-                                        name="tool",
-                                        arguments='{"a":1}',
-                                    ),
-                                ),
-                                SimpleNamespace(
-                                    index=1,
-                                    id="call_second",
-                                    function=SimpleNamespace(
-                                        name="tool",
-                                        arguments='{"b":2}',
-                                    ),
-                                ),
-                            ]
-                        ),
-                        chunk(finish_reason="tool_calls"),
-                    ]
-                ),
-                runtime_profile(),
-            )
-        ]
-
-    with caplog.at_level(logging.DEBUG):
-        asyncio.run(collect())
-
-    payload = diagnostic_payload(caplog)
-    fragments = cast(list[dict[str, Any]], payload["positions"])
-    assert payload["index_count"] == 2
-    assert [fragment["call_index"] for fragment in fragments] == [0, 1]
-    assert [fragment["relation"] for fragment in fragments] == [
-        "new_index",
-        "independent_call",
-    ]
-
-
-def test_tool_call_diagnostic_records_duplicate_id_rejection(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """不同 index 重复使用同一 id 时保留原错误语义并记录拒绝摘要。"""
+def test_stream_rejects_duplicate_tool_call_id_across_indices() -> None:
+    """不同 index 重复使用同一 call_id 时按协议错误拒绝。"""
     adapter = OpenAIChatCompletionsAdapter()
 
     async def collect() -> None:
@@ -316,18 +160,12 @@ def test_tool_call_diagnostic_records_duplicate_id_rejection(
                             SimpleNamespace(
                                 index=0,
                                 id="call_duplicate",
-                                function=SimpleNamespace(
-                                    name="tool",
-                                    arguments='{"a":1}',
-                                ),
+                                function=SimpleNamespace(name="tool", arguments='{"a":1}'),
                             ),
                             SimpleNamespace(
                                 index=1,
                                 id="call_duplicate",
-                                function=SimpleNamespace(
-                                    name="tool",
-                                    arguments='{"b":2}',
-                                ),
+                                function=SimpleNamespace(name="tool", arguments='{"b":2}'),
                             ),
                         ]
                     ),
@@ -338,154 +176,8 @@ def test_tool_call_diagnostic_records_duplicate_id_rejection(
         ):
             pass
 
-    with caplog.at_level(logging.DEBUG):
-        with pytest.raises(LlmProtocolError, match="llm_tool_call_identity_invalid"):
-            asyncio.run(collect())
-
-    payload = diagnostic_payload(caplog)
-    assert payload["outcome"] == "rejected"
-    assert payload["error_code"] == "llm_tool_call_identity_invalid"
-    assert cast(dict[str, Any], payload["totals"])["duplicate_id_count"] == 1
-    fragments = cast(list[dict[str, Any]], payload["positions"])
-    assert fragments[1]["relation"] == "duplicate_id_across_index"
-
-
-def test_tool_call_diagnostic_caps_fragments_without_changing_stream(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """诊断分片达到上限后早停记录，业务分片仍继续重组并正常完成。"""
-    import adapter.llm.openai_chat_completions as chat_adapter
-
-    monkeypatch.setattr(chat_adapter, "MAX_DIAGNOSTIC_FRAGMENTS", 2)
-    adapter = OpenAIChatCompletionsAdapter()
-
-    async def collect() -> list[LlmStreamEvent]:
-        return [
-            event
-            async for event in adapter._events(
-                async_chunks(
-                    [
-                        chunk(
-                            tool_calls=[
-                                SimpleNamespace(
-                                    index=0,
-                                    id="call_limited",
-                                    function=SimpleNamespace(
-                                        name="tool",
-                                        arguments='{"value":"',
-                                    ),
-                                )
-                            ]
-                        ),
-                        chunk(
-                            tool_calls=[
-                                SimpleNamespace(
-                                    index=0,
-                                    id=None,
-                                    function=SimpleNamespace(
-                                        name=None,
-                                        arguments="still-",
-                                    ),
-                                )
-                            ]
-                        ),
-                        chunk(
-                            tool_calls=[
-                                SimpleNamespace(
-                                    index=0,
-                                    id=None,
-                                    function=SimpleNamespace(
-                                        name=None,
-                                        arguments='complete"}',
-                                    ),
-                                )
-                            ]
-                        ),
-                        chunk(finish_reason="tool_calls"),
-                    ]
-                ),
-                runtime_profile(),
-            )
-        ]
-
-    with caplog.at_level(logging.DEBUG):
-        events = asyncio.run(collect())
-
-    payload = diagnostic_payload(caplog)
-    assert payload["outcome"] == "completed"
-    assert payload["truncated"] is True
-    assert payload["dropped_positions"] == 1
-    assert len(cast(list[object], payload["positions"])) == 2
-    assert cast(dict[str, Any], payload["totals"])["fragment_count"] == 3
-    completed = next(event for event in events if isinstance(event, ToolCallCompleted))
-    assert completed.tool_call.arguments == {"value": "still-complete"}
-
-
-def test_tool_call_diagnostic_records_cancelled_outcome(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """流式消费被取消时记录 outcome=cancelled，且不把取消误报为错误。"""
-
-    # 首个分片声明工具身份后永久阻塞，让测试能在消费端停在上游读取时取消。
-    class _BlockedToolCallStream(_ClosableStream):
-        def __init__(self) -> None:
-            super().__init__(
-                (
-                    chunk(
-                        tool_calls=[
-                            SimpleNamespace(
-                                index=0,
-                                id="call_cancel",
-                                function=SimpleNamespace(name="tool", arguments=None),
-                            )
-                        ]
-                    ),
-                )
-            )
-            self.blocked = asyncio.Event()
-            self._next_index = 0
-
-        def __aiter__(self) -> AsyncIterator[object]:
-            return self
-
-        async def __anext__(self) -> object:
-            # values 是 Sequence，按游标逐个投递，避免修改共享切片序列。
-            if self._next_index < len(self.values):
-                value = self.values[self._next_index]
-                self._next_index += 1
-                return value
-            # 告知测试消费任务已阻塞在上游读取，随后保持挂起等待取消。
-            self.blocked.set()
-            await asyncio.Event().wait()
-            raise StopAsyncIteration
-
-    stream = _BlockedToolCallStream()
-    adapter = _public_adapter(stream)
-    request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "hi"),))
-
-    async def cancel() -> None:
-        async with adapter.stream(runtime_profile(), request) as events:
-            first = await anext(events)
-            assert isinstance(first, ToolCallStarted)
-            task = asyncio.ensure_future(anext(events))
-            await stream.blocked.wait()
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-    # DEBUG 必须在诊断对象构造前开启，否则取消结果不会输出诊断日志。
-    with caplog.at_level(logging.DEBUG):
-        asyncio.run(cancel())
-
-    payload = diagnostic_payload(caplog)
-    assert payload["outcome"] == "cancelled"
-    assert payload["error_code"] is None
-    assert payload["chunks_observed"] == 1
-    assert cast(dict[str, Any], payload["totals"])["fragment_count"] == 1
-    # 取消路径同样必须关闭上游流并归还并发名额。
-    assert stream.closed
-    assert adapter._semaphores["llmprof_test"]._value == 1
+    with pytest.raises(LlmProtocolError, match="llm_tool_call_identity_invalid"):
+        asyncio.run(collect())
 
 
 def test_stream_preserves_repeated_tool_identity_without_concatenation() -> None:
@@ -610,92 +302,6 @@ def test_provider_context_limit_error_uses_structured_code_only() -> None:
     )
     with pytest.raises(LlmRequestError, match="llm_context_window_exceeded"):
         OpenAIChatCompletionsAdapter._raise_provider_error(error)
-
-
-def test_provider_connection_error_preserves_nested_response_limit_code() -> None:
-    """连接错误经过多层因果链时仍映射为原限流协议错误码。"""
-    request = httpx2.Request("POST", "https://llm.example.test/v1/chat/completions")
-    limit_error = ResponseLimitError("llm_response_too_large")
-    middle = RuntimeError("transport wrapper")
-    middle.__cause__ = limit_error
-    error = openai.APIConnectionError(message="connection dropped", request=request)
-    error.__cause__ = middle
-
-    with pytest.raises(LlmProtocolError, match="llm_response_too_large"):
-        OpenAIChatCompletionsAdapter._raise_provider_error(error)
-
-
-@pytest.mark.parametrize("entry", ("complete", "stream"))
-def test_sdk_gzip_rejection_precedes_body_read_and_releases_semaphore(
-    monkeypatch: pytest.MonkeyPatch,
-    entry: str,
-) -> None:
-    """真实 SDK 的非流式与流式入口都在迭代 gzip body 前拒绝并释放名额。"""
-
-    class TrackedBody(httpx2.AsyncByteStream):
-        """记录限流 transport 是否读取或关闭底层响应体。"""
-
-        def __init__(self) -> None:
-            self.iterated = False
-            self.closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            self.iterated = True
-            yield b"compressed body must not be read"
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    async def run() -> None:
-        tracked = TrackedBody()
-        request_headers: list[str | None] = []
-
-        async def handle(request: httpx2.Request) -> httpx2.Response:
-            request_headers.append(request.headers.get("accept-encoding"))
-            return httpx2.Response(
-                200,
-                headers={
-                    "content-encoding": "gzip",
-                    "content-type": (
-                        "text/event-stream" if entry == "stream" else "application/json"
-                    ),
-                },
-                stream=tracked,
-                request=request,
-            )
-
-        monkeypatch.setattr(
-            httpx2,
-            "AsyncHTTPTransport",
-            lambda: httpx2.MockTransport(handle),
-        )
-        runtime = runtime_profile()
-        adapter = OpenAIChatCompletionsAdapter()
-        try:
-            request = LlmRequest(
-                "unused",
-                (LlmMessage(LlmRole.USER, "gzip response"),),
-                tool_choice="none" if entry == "complete" else "auto",
-            )
-            with pytest.raises(LlmProtocolError) as error:
-                if entry == "complete":
-                    await adapter.complete(runtime, request)
-                else:
-                    async with adapter.stream(runtime, request) as events:
-                        _ = [event async for event in events]
-
-            assert error.value.code == "llm_response_encoding_unsupported"
-            assert request_headers == ["identity"]
-            assert tracked.closed is True
-            assert tracked.iterated is False
-
-            semaphore = adapter._semaphore_for(runtime.version)
-            await asyncio.wait_for(semaphore.acquire(), timeout=0.1)
-            semaphore.release()
-        finally:
-            await adapter.aclose()
-
-    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -919,44 +525,6 @@ def test_request_timeout_while_waiting_for_profile_capacity(entrypoint: str) -> 
     asyncio.run(run())
 
 
-def test_real_sdk_transport_limits_unterminated_sse_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """真实 OpenAI SDK 在解析前限制多个未终止 SSE 分片的原始字节。"""
-    import adapter.llm.openai_chat_completions as chat_adapter
-
-    class _FragmentedSse(httpx2.AsyncByteStream):
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            for _ in range(8):
-                yield b"data: xxxxxxxxxx"
-
-    async def run() -> None:
-        async def handle(request: httpx2.Request) -> httpx2.Response:
-            return httpx2.Response(
-                200,
-                headers={"content-type": "text/event-stream"},
-                stream=_FragmentedSse(),
-                request=request,
-            )
-
-        monkeypatch.setattr(chat_adapter, "MAX_RAW_EVENT_BYTES", 48)
-        monkeypatch.setattr(chat_adapter, "MAX_TOTAL_RAW_BYTES", 1024)
-        monkeypatch.setattr(
-            httpx2,
-            "AsyncHTTPTransport",
-            lambda: httpx2.MockTransport(handle),
-        )
-        adapter = OpenAIChatCompletionsAdapter()
-        request = LlmRequest("unused", (LlmMessage(LlmRole.USER, "hi"),))
-        with pytest.raises(LlmProtocolError, match="llm_stream_event_too_large"):
-            async with adapter.stream(runtime_profile(), request) as events:
-                async for _ in events:
-                    pass
-        await adapter.aclose()
-
-    asyncio.run(run())
-
-
 def test_refusal_after_text_never_completes_response() -> None:
     """先输出文本后收到 refusal 仍明确失败，不产生成功结束事件。"""
     stream = [chunk(content="I can"), chunk(content=None)]
@@ -1017,15 +585,14 @@ def test_retry_after_parses_seconds_http_date_and_rejects_invalid() -> None:
 @pytest.mark.parametrize(
     "field,value,code",
     [
-        ("MAX_RAW_EVENT_BYTES", 8, "llm_stream_event_too_large"),
-        ("MAX_TOTAL_RAW_BYTES", 8, "llm_stream_too_large"),
+        ("MAX_STREAM_CHUNKS", 1, "llm_stream_too_large"),
         ("MAX_TEXT_BYTES", 2, "llm_response_too_large"),
     ],
 )
 def test_stream_limits_reject_oversized_events_and_close_upstream(
     monkeypatch: pytest.MonkeyPatch, field: str, value: int, code: str
 ) -> None:
-    """原始事件与累计文本超限时返回安全错误并关闭上游。"""
+    """分片数与累计文本超限时返回安全错误并关闭上游。"""
     import adapter.llm.openai_chat_completions as chat_adapter
 
     monkeypatch.setattr(chat_adapter, field, value)
@@ -1616,60 +1183,20 @@ def test_serialize_content_parts_accepts_valid_large_ascii_base64() -> None:
     ]
 
 
-def test_measure_stream_chunk_covers_pydantic_extra_utf8_and_invalid_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """轻量流式字节计量器覆盖 SDK Pydantic 字段、model_extra、多字节 UTF-8 与非法值校验。"""
-    from openai.types.chat import ChatCompletionChunk
-
+def test_client_disables_redirects_allows_compression_and_keeps_chunk_cap() -> None:
+    """验证 _client 使用标准 httpx2 客户端（禁重定向、允许压缩协商）且保留 65536 分片上限。"""
     import adapter.llm.openai_chat_completions as chat_adapter
 
-    # 1. 正常 OpenAI SDK chunk（含中文内容与 model_extra）可正确累计字节。
-    sdk_chunk = ChatCompletionChunk.model_validate(
-        {
-            "id": "chatcmpl-measure",
-            "choices": [{"index": 0, "delta": {"content": "你好世界"}, "finish_reason": None}],
-            "created": 1700000000,
-            "model": "gpt-4o",
-            "object": "chat.completion.chunk",
-            "vendor_blob": "ok",
-        }
-    )
-    count, total = OpenAIChatCompletionsAdapter._measure_stream_chunk(sdk_chunk, 0, 0)
-    assert count == 1
-    assert total > len("你好世界".encode())
+    assert chat_adapter.MAX_STREAM_CHUNKS == 65536
 
-    # 2. model_extra 超出动态 MAX_RAW_EVENT_BYTES 时拒绝。
-    monkeypatch.setattr(chat_adapter, "MAX_RAW_EVENT_BYTES", 256)
-    oversize_extra = ChatCompletionChunk.model_validate(
-        {
-            "id": "chatcmpl-extra",
-            "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": None}],
-            "created": 1700000000,
-            "model": "gpt-4o",
-            "object": "chat.completion.chunk",
-            "vendor_blob": "x" * 300,
-        }
-    )
-    with pytest.raises(LlmProtocolError, match="llm_stream_event_too_large"):
-        OpenAIChatCompletionsAdapter._measure_stream_chunk(oversize_extra, 0, 0)
+    async def run() -> None:
+        adapter = OpenAIChatCompletionsAdapter()
+        sdk = adapter._client(runtime_profile())
+        try:
+            http_client = sdk._client
+            assert http_client.follow_redirects is False
+            assert http_client.headers.get("accept-encoding", "").lower() != "identity"
+        finally:
+            await adapter.aclose()
 
-    # 3. 非有限浮点（NaN / Inf / -Inf）与不可序列化对象均按 llm_stream_event_invalid 拒绝。
-    monkeypatch.setattr(chat_adapter, "MAX_RAW_EVENT_BYTES", 1024 * 1024)
-    for bad_float in (float("nan"), float("inf"), float("-inf")):
-        bad_chunk = SimpleNamespace(id="c1", choices=[], score=bad_float)
-        with pytest.raises(LlmProtocolError, match="llm_stream_event_invalid"):
-            OpenAIChatCompletionsAdapter._measure_stream_chunk(bad_chunk, 0, 0)
-
-    with pytest.raises(LlmProtocolError, match="llm_stream_event_invalid"):
-        OpenAIChatCompletionsAdapter._measure_stream_chunk(
-            SimpleNamespace(id="c2", raw=object()),
-            0,
-            0,
-        )
-
-    # 4. 循环引用触发深度上限保护，拒绝而非栈溢出。
-    cyclic: dict[str, object] = {}
-    cyclic["self"] = cyclic
-    with pytest.raises(LlmProtocolError, match="llm_stream_event_invalid"):
-        OpenAIChatCompletionsAdapter._measure_stream_chunk(cyclic, 0, 0)
+    asyncio.run(run())

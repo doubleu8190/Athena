@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
-from common.date import utc_now
+from common.date import as_utc, utc_now
 from common.ids import new_id
 from domain.preference import (
     MAX_USER_MEMORIES_PER_USER,
@@ -146,8 +146,7 @@ class PreferenceService:
 
     def _now(self) -> datetime:
         """统一输出 UTC 时区时间。"""
-        value = self._clock()
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return as_utc(self._clock())
 
 
 __all__ = ["PreferenceService"]

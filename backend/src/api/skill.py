@@ -7,7 +7,6 @@ from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
-    Depends,
     File,
     Form,
     Header,
@@ -20,7 +19,6 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import TypeAdapter, ValidationError
 
-from adapter.file.storage import FileStorageError
 from api.converter.skill import (
     admin_details_to_response,
     admin_list_to_response,
@@ -48,12 +46,13 @@ from api.dto.skill import (
     SkillVersionListResponse,
     SkillVersionResponse,
 )
-from api.security import AdminAuth, CurrentAuth, SkillManagerAuth, verify_request_origin
+from api.security import AdminAuth, CurrentAuth, SkillManagerAuth
 from api.upload import UploadTooLargeError, staged_upload
 from app.skill import SkillService
 from app.skill.personal import PersonalSkillError
 from app.skill.service import SkillAuthorizationError, SkillUserAuthorizationError
 from domain.access import VisibilityGrantInput
+from domain.file import FileStorageError
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
     MAX_PERSONAL_MARKDOWN_BYTES,
@@ -105,7 +104,6 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/me",
         tags=["personal-skills"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("/skills", response_model=SkillPersonalListResponse)
@@ -140,8 +138,10 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
         except PersonalSkillError as error:
             raise _personal_validation_error(error) from error
         except ValueError as error:
-            code = "skill_markdown_empty" if str(error) == "upload_empty" else (
-                "personal_skill_file_invalid"
+            code = (
+                "skill_markdown_empty"
+                if str(error) == "upload_empty"
+                else ("personal_skill_file_invalid")
             )
             raise HTTPException(422, code) from error
         except OSError as error:
@@ -290,7 +290,6 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/admin",
         tags=["skill-admin"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("/skills", response_model=SkillAdminListResponse)
@@ -324,25 +323,14 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                 package,
                 maximum_bytes=MAX_PACKAGE_ZIP_BYTES,
             ) as path:
-                if (
-                    scope == "company"
-                    and owner_department_id is None
-                    and parsed_grants is None
-                ):
-                    details = await service.import_package(
-                        actor,
-                        path,
-                        idempotency_key=idempotency_key,
-                    )
-                else:
-                    details = await service.import_package(
-                        actor,
-                        path,
-                        idempotency_key=idempotency_key,
-                        scope=SkillScope(scope),
-                        owner_department_id=owner_department_id,
-                        visibility_grants=parsed_grants,
-                    )
+                details = await service.import_package(
+                    actor,
+                    path,
+                    idempotency_key=idempotency_key,
+                    scope=SkillScope(scope),
+                    owner_department_id=owner_department_id,
+                    visibility_grants=parsed_grants,
+                )
                 return admin_details_to_response(details)
         except UploadTooLargeError as error:
             raise HTTPException(413, "skill_zip_too_large") from error
@@ -352,7 +340,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             raise HTTPException(409, error.code) from error
         except (SkillPackageError, ValueError) as error:
             raise HTTPException(422, _package_error_detail(error)) from error
-        except OSError as error:
+        except (FileStorageError, OSError) as error:
             raise HTTPException(503, "file_storage_unavailable") from error
 
     @router.post(
@@ -495,7 +483,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             raise HTTPException(409, error.code) from error
         except (SkillPackageError, ValueError) as error:
             raise HTTPException(422, _package_error_detail(error)) from error
-        except OSError as error:
+        except (FileStorageError, OSError) as error:
             raise HTTPException(503, "file_storage_unavailable") from error
 
     @router.post(
@@ -579,9 +567,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
     ) -> SkillVersionResponse:
         """读取指定历史版本完整正文。"""
         try:
-            return version_to_response(
-                await service.get_version(actor, skill_id, version_id)
-            )
+            return version_to_response(await service.get_version(actor, skill_id, version_id))
         except SkillAuthorizationError as error:
             raise _authorization_error(error) from error
         except SkillNotFoundError as error:
@@ -601,54 +587,25 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                 raise HTTPException(422, "skill_featured_invalid")
             featured_value = request.featured
         starter_prompt_value: str | None | UnsetType = (
-            request.starter_prompt
-            if "starter_prompt" in request.model_fields_set
-            else UNSET
+            request.starter_prompt if "starter_prompt" in request.model_fields_set else UNSET
         )
         try:
-            if (
-                request.visibility_grants is None
-                and featured_value is UNSET
-                and starter_prompt_value is UNSET
-            ):
-                await service.configure(
-                    actor,
-                    skill_id,
-                    expected_revision=request.expected_revision,
-                    enabled=request.enabled,
-                    current_version_id=request.current_version_id,
-                    script_requires_approval=request.script_requires_approval,
-                )
-            elif featured_value is UNSET and starter_prompt_value is UNSET:
-                assert request.visibility_grants is not None
-                await service.configure(
-                    actor,
-                    skill_id,
-                    expected_revision=request.expected_revision,
-                    enabled=request.enabled,
-                    current_version_id=request.current_version_id,
-                    script_requires_approval=request.script_requires_approval,
-                    visibility_grants=tuple(
-                        item.to_domain() for item in request.visibility_grants
-                    ),
-                )
-            else:
-                grants = (
-                    None
-                    if request.visibility_grants is None
-                    else tuple(item.to_domain() for item in request.visibility_grants)
-                )
-                await service.configure(
-                    actor,
-                    skill_id,
-                    expected_revision=request.expected_revision,
-                    enabled=request.enabled,
-                    current_version_id=request.current_version_id,
-                    script_requires_approval=request.script_requires_approval,
-                    visibility_grants=grants,
-                    featured=featured_value,
-                    starter_prompt=starter_prompt_value,
-                )
+            grants = (
+                None
+                if request.visibility_grants is None
+                else tuple(item.to_domain() for item in request.visibility_grants)
+            )
+            await service.configure(
+                actor,
+                skill_id,
+                expected_revision=request.expected_revision,
+                enabled=request.enabled,
+                current_version_id=request.current_version_id,
+                script_requires_approval=request.script_requires_approval,
+                visibility_grants=grants,
+                featured=featured_value,
+                starter_prompt=starter_prompt_value,
+            )
             return admin_details_to_response(await service.get_admin(actor, skill_id))
         except SkillAuthorizationError as error:
             raise _authorization_error(error) from error
@@ -698,9 +655,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
     ) -> SkillExecutionResponse:
         """读取脚本解释器、错误和日志可用性等排查摘要。"""
         try:
-            return execution_to_response(
-                await service.admin_execution(actor, call_id)
-            )
+            return execution_to_response(await service.admin_execution(actor, call_id))
         except SkillAuthorizationError as error:
             raise _authorization_error(error) from error
         except SkillNotFoundError as error:
@@ -729,15 +684,13 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             raise _authorization_error(error) from error
         except SkillNotFoundError as error:
             raise HTTPException(404, error.code) from error
-        except OSError as error:
+        except (FileStorageError, OSError) as error:
             raise HTTPException(503, "file_storage_unavailable") from error
         return Response(
             content=content,
             media_type="text/plain; charset=utf-8",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="skill-execution-{call_id}.log"'
-                ),
+                "Content-Disposition": (f'attachment; filename="skill-execution-{call_id}.log"'),
                 "X-Content-Type-Options": "nosniff",
             },
         )
@@ -765,8 +718,10 @@ def _personal_validation_error(error: Exception) -> HTTPException:
         code = explicit
     else:
         value = str(error)
-        code = value if value.replace("_", "").isalnum() and value.isascii() else (
-            "skill_personal_content_invalid"
+        code = (
+            value
+            if value.replace("_", "").isalnum() and value.isascii()
+            else ("skill_personal_content_invalid")
         )
     field = getattr(error, "field", None)
     if (

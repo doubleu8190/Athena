@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.subagent.model import SubagentModel
+from common.date import as_utc
 from domain.access import VisibilityGrant, VisibilityScope
 from domain.subagent import SubagentProfile
-
-
-def _utc(value: datetime) -> datetime:
-    """将 SQLite 无时区时间规范化为 UTC 时区时间。"""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def subagent_to_domain(
@@ -33,9 +27,9 @@ def subagent_to_domain(
         timeout_seconds=row.timeout_seconds,
         version=int(row.version),
         created_by=row.created_by,
-        deleted_at=None if row.deleted_at is None else _utc(row.deleted_at),
-        created_at=_utc(row.created_at),
-        updated_at=_utc(row.updated_at),
+        deleted_at=None if row.deleted_at is None else as_utc(row.deleted_at),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
         visibility_scope=VisibilityScope(row.visibility_scope),
         owner_department_id=row.owner_department_id,
         visibility_grants=grants,

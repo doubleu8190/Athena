@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -33,19 +32,4 @@ def truncate_utf8(text: str, maximum_bytes: int) -> str:
     return encoded[:maximum_bytes].decode("utf-8", errors="ignore")
 
 
-def json_object(value: Any) -> dict[str, Any]:
-    """Validate and copy a JSON object at a persistence boundary."""
-    if not isinstance(value, Mapping):
-        raise ValueError("json_object_required")
-    result: dict[str, Any] = {}
-    for key, item in value.items():
-        if not isinstance(key, str):
-            raise ValueError("json_object_key_invalid")
-        if isinstance(item, (Mapping, Sequence)) and not isinstance(item, (str, bytes, bytearray)):
-            dumps(item)
-        result[key] = item
-    dumps(result)
-    return result
-
-
-__all__ = ["dumps", "json_object", "truncate_utf8", "utf8_size"]
+__all__ = ["dumps", "truncate_utf8", "utf8_size"]

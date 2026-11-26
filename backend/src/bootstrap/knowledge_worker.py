@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from adapter.knowledge.repository import KnowledgeRepository
 from adapter.knowledge.storage import MinioOriginalStore
 from app.knowledge.worker import KnowledgeWorker
+from bootstrap.config import DatabaseSettings, KnowledgeSettings
 from bootstrap.database import build_database
 from bootstrap.knowledge import (
     KnowledgeModelResources,
@@ -29,19 +30,22 @@ class KnowledgeWorkerBundle:
     originals: MinioOriginalStore | None = None
     models: KnowledgeModelResources | None = None
     worker: KnowledgeWorker | None = None
+    settings: KnowledgeSettings | None = None
 
 
 def build_knowledge_worker_resources(bundle: KnowledgeWorkerBundle) -> None:
-    """第一阶段：装配数据库、原件存储与模型资源。
+    """第一阶段：校验统一配置并装配数据库、原件存储与模型资源。
 
     存储配置与模型资源都在 Worker 构造前完成，失败时入口只清理 bundle 中
     已填充的字段，保持与原先入口一致的失败清理语义。
     """
-    database_url = os.getenv("ATHENA_DATABASE_URL")
+    database_url = DatabaseSettings.url_from_environment()
     if not database_url:
         raise RuntimeError("knowledge_database_required")
-    if os.getenv("ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"):
-        os.environ["PADDLE_PDX_CACHE_HOME"] = os.environ["ATHENA_KNOWLEDGE_OCR_CACHE_ROOT"]
+    settings = KnowledgeSettings.from_environment()
+    bundle.settings = settings
+    if settings.ocr_cache_root:
+        os.environ["PADDLE_PDX_CACHE_HOME"] = settings.ocr_cache_root
     bundle.database = build_database(database_url)
     # 知识库原件与远程 Embedding/Tiktoken 已无状态化，
     # 统一复用 ATHENA_STORAGE_* 与 ATHENA_EMBEDDING_* 配置。
@@ -55,6 +59,7 @@ def build_knowledge_worker(bundle: KnowledgeWorkerBundle) -> int:
     originals = bundle.originals
     models = bundle.models
     assert database is not None and originals is not None and models is not None
+    settings = bundle.settings or KnowledgeSettings.from_environment()
     bundle.worker = KnowledgeWorker(
         KnowledgeRepository(database.session_factory),
         LocalDocumentParserFactory(ocr_languages=OCR_LANGUAGES),
@@ -62,14 +67,10 @@ def build_knowledge_worker(bundle: KnowledgeWorkerBundle) -> int:
         models.embedding,
         models.tokenizer,
         models.counter,
-        parse_memory_mb=int(os.getenv("ATHENA_KNOWLEDGE_PARSE_MEMORY_MB", "4096")),
         profile_id=models.profile_id,
-        owner_concurrency=int(os.getenv("ATHENA_KNOWLEDGE_OWNER_CONCURRENCY", "2")),
+        owner_concurrency=settings.owner_concurrency,
     )
-    concurrency = int(os.getenv("ATHENA_KNOWLEDGE_WORKER_CONCURRENCY", "2"))
-    if concurrency < 1 or concurrency > 16:
-        raise ValueError("knowledge_worker_concurrency_invalid")
-    return concurrency
+    return settings.worker_concurrency
 
 
 __all__ = [

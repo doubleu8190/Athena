@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, HTTPException, Path, Response, status
 
 from api.converter.llm import (
     compression_policy_to_response,
@@ -22,7 +22,7 @@ from api.dto.llm import (
     ModelProfileUpdateRequest,
     UserModelCatalogResponse,
 )
-from api.security import AdminAuth, CurrentAuth, verify_request_origin
+from api.security import AdminAuth, CurrentAuth
 from app.llm.profile_service import ModelProfileService
 from domain.llm.model.compression_policy import CompressionPolicyInput
 from domain.llm.model.profile import (
@@ -43,7 +43,6 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
     profile_router = APIRouter(
         prefix="/api/v1/admin/llm/model-profiles",
         tags=["llm-admin"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @profile_router.get("", response_model=ModelProfileListResponse)
@@ -255,7 +254,6 @@ def build_llm_admin_router(service: ModelProfileService) -> APIRouter:
     policy_router = APIRouter(
         prefix="/api/v1/admin/llm/compression-policy",
         tags=["llm-admin"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @policy_router.get("")
@@ -303,7 +301,6 @@ def build_llm_user_router(service: ModelProfileService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/models",
         tags=["models"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("", response_model=UserModelCatalogResponse)

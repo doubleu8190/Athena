@@ -4,16 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKeyConstraint, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, DateTime, ForeignKeyConstraint, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base
-
-
-def _json_type() -> JSON:
-    """在 PostgreSQL 使用 JSONB，在 SQLite 测试中使用 JSON。"""
-    return JSON().with_variant(JSONB(), "postgresql")
+from adapter.base import Base, json_column_type
 
 
 class RunEventModel(Base):
@@ -36,7 +30,7 @@ class RunEventModel(Base):
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     type: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    payload: Mapped[dict[str, object]] = mapped_column(_json_type(), nullable=False)
+    payload: Mapped[dict[str, object]] = mapped_column(json_column_type(), nullable=False)
 
 
 __all__ = ["RunEventModel"]

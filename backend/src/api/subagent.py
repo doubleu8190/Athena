@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Response, status
 
 from api.converter.subagent import (
     available_tools_to_response,
@@ -21,7 +21,7 @@ from api.dto.subagent import (
     SubagentResponse,
     SubagentUpdateRequest,
 )
-from api.security import AdminAuth, verify_request_origin
+from api.security import AdminAuth
 from app.subagent import SubagentService
 from domain.subagent import (
     SubagentAdminRequiredError,
@@ -43,7 +43,6 @@ def build_subagent_admin_router(service: SubagentService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/admin/subagents",
         tags=["subagent-admin"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("", response_model=SubagentListResponse)

@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 from app.access import AccessPolicyService
 from common.ids import new_id, now_utc
@@ -543,27 +543,10 @@ class ToolManager:
         await self._authorize(actor, admin=False)
         self._validate_page(offset, limit)
         if self._access_policy is not None:
-            # 优先走仓储单 Session SQL EXISTS 下推，兼容仅实现基础端口的内存测试替身。
-            list_readable_public = getattr(self._tools, "list_readable_public", None)
-            if callable(list_readable_public):
-                return cast(
-                    ToolPage[PublicToolDefinition],
-                    await list_readable_public(
-                        actor.user.id,
-                        offset=offset,
-                        limit=limit,
-                    ),
-                )
-            readable_server_ids = await self._access_policy.filter_readable_ids(
+            return await self._tools.list_readable_public(
                 actor.user.id,
-                ResourceType.MCP_SERVER,
-            )
-            if not readable_server_ids:
-                return ToolPage(items=(), total=0)
-            return await self._tools.list_public(
                 offset=offset,
                 limit=limit,
-                allowed_server_ids=tuple(readable_server_ids),
             )
         return await self._tools.list_public(offset=offset, limit=limit)
 

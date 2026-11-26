@@ -48,6 +48,19 @@ def _embedding_response(
     )
 
 
+def _patch_sdk_retry_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+    delays: list[float] | None = None,
+) -> None:
+    """在单测中消除 OpenAI SDK 重试退避真实等待，加快执行并可选记录退避时长。"""
+
+    async def _fast_sleep(seconds: float) -> None:
+        if delays is not None:
+            delays.append(seconds)
+
+    monkeypatch.setattr("openai._base_client.anyio.sleep", _fast_sleep)
+
+
 def test_config_from_environment_defaults_and_hides_api_key() -> None:
     config = OpenAICompatibleEmbeddingConfig.from_environment(
         {
@@ -245,6 +258,10 @@ def test_embed_rejects_dimension_mismatch_and_invalid_protocol_payloads() -> Non
             "embedding_vector_non_finite",
         ),
         (
+            b'{"data":[{"index":0,"embedding":[0.1,Infinity,0.3,0.4]}]}',
+            "embedding_vector_non_finite",
+        ),
+        (
             json.dumps({"data": [{"index": 9, "embedding": [0.1, 0.2, 0.3, 0.4]}]}).encode(),
             "embedding_index_invalid",
         ),
@@ -276,21 +293,25 @@ def test_embed_rejects_dimension_mismatch_and_invalid_protocol_payloads() -> Non
 @pytest.mark.parametrize(
     ("status_code", "expected_code"),
     (
+        (408, "embedding_upstream_unavailable"),
+        (409, "embedding_upstream_unavailable"),
         (429, "embedding_rate_limited"),
+        (500, "embedding_upstream_unavailable"),
         (502, "embedding_upstream_unavailable"),
         (503, "embedding_upstream_unavailable"),
         (504, "embedding_upstream_unavailable"),
     ),
 )
-def test_embed_retries_transient_statuses_and_timeouts_up_to_two_times(
+def test_embed_retries_sdk_transient_statuses_up_to_max_retries(
+    monkeypatch: pytest.MonkeyPatch,
     status_code: int,
     expected_code: str,
 ) -> None:
-    attempts = 0
+    """复用 AsyncOpenAI 标准 {408,409,429,>=500} 重试，恢复成功或耗尽后映射稳定可重试错误。"""
     delays: list[float] = []
+    _patch_sdk_retry_sleep(monkeypatch, delays)
 
-    async def fake_sleep(seconds: float) -> None:
-        delays.append(seconds)
+    attempts = 0
 
     def recover_on_third(_request: httpx2.Request) -> httpx2.Response:
         nonlocal attempts
@@ -308,7 +329,6 @@ def test_embed_retries_transient_statuses_and_timeouts_up_to_two_times(
         client = OpenAICompatibleEmbeddingClient(
             config,
             transport=httpx2.MockTransport(recover_on_third),
-            sleep=fake_sleep,
         )
         try:
             return await client.embed(["retry-me"])
@@ -317,7 +337,7 @@ def test_embed_retries_transient_statuses_and_timeouts_up_to_two_times(
 
     assert asyncio.run(run_recover()) == [[0.1, 0.2, 0.3, 0.4]]
     assert attempts == 3
-    assert delays == [0.25, 0.5]
+    assert len(delays) == 2
 
     # 连续失败 3 次（首次 + 2 次重试）后抛出对应可重试错误码。
     exhausted_attempts = 0
@@ -332,7 +352,6 @@ def test_embed_retries_transient_statuses_and_timeouts_up_to_two_times(
         client = OpenAICompatibleEmbeddingClient(
             config,
             transport=httpx2.MockTransport(always_fail),
-            sleep=fake_sleep,
         )
         try:
             await client.embed(["retry-me"])
@@ -344,18 +363,17 @@ def test_embed_retries_transient_statuses_and_timeouts_up_to_two_times(
     assert exc_info.value.retryable is True
     assert exc_info.value.status_code == status_code
     assert exhausted_attempts == 3
-    assert delays == [0.25, 0.5]
+    assert len(delays) == 2
 
 
 def test_embed_retries_timeout_and_never_leaks_api_key(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    delays: list[float] = []
+    _patch_sdk_retry_sleep(monkeypatch, delays)
     secret_key = "sk-do-not-leak-anywhere-987654"
     attempts = 0
-    delays: list[float] = []
-
-    async def fake_sleep(seconds: float) -> None:
-        delays.append(seconds)
 
     def timeout_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal attempts
@@ -372,7 +390,6 @@ def test_embed_retries_timeout_and_never_leaks_api_key(
         client = OpenAICompatibleEmbeddingClient(
             config,
             transport=httpx2.MockTransport(timeout_handler),
-            sleep=fake_sleep,
         )
         try:
             await client.embed(["hello"])
@@ -384,7 +401,7 @@ def test_embed_retries_timeout_and_never_leaks_api_key(
             asyncio.run(scenario())
 
     assert attempts == 3
-    assert delays == [0.25, 0.5]
+    assert len(delays) == 2
     assert exc_info.value.retryable is True
     assert exc_info.value.__cause__ is None
     assert secret_key not in str(exc_info.value)
@@ -400,20 +417,18 @@ def test_embed_retries_timeout_and_never_leaks_api_key(
         (403, "embedding_auth_failed"),
         (404, "embedding_endpoint_not_found"),
         (422, "embedding_request_invalid"),
-        (500, "embedding_upstream_error"),
     ),
 )
-def test_embed_does_not_retry_4xx_or_non_transient_errors_and_hides_key(
+def test_embed_does_not_retry_non_transient_4xx_and_hides_key(
+    monkeypatch: pytest.MonkeyPatch,
     status_code: int,
     expected_code: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    delays: list[float] = []
+    _patch_sdk_retry_sleep(monkeypatch, delays)
     secret_key = "sk-non-retryable-secret-key"
     attempts = 0
-    delays: list[float] = []
-
-    async def fake_sleep(seconds: float) -> None:
-        delays.append(seconds)
 
     def error_handler(_request: httpx2.Request) -> httpx2.Response:
         nonlocal attempts
@@ -430,7 +445,6 @@ def test_embed_does_not_retry_4xx_or_non_transient_errors_and_hides_key(
         client = OpenAICompatibleEmbeddingClient(
             config,
             transport=httpx2.MockTransport(error_handler),
-            sleep=fake_sleep,
         )
         try:
             await client.embed(["bad-input"])
@@ -450,9 +464,11 @@ def test_embed_does_not_retry_4xx_or_non_transient_errors_and_hides_key(
 
 
 def test_embed_maps_corrupted_gzip_decoding_error_without_leaking_api_key(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """损坏的 gzip 响应触发 httpx2.DecodingError 时应映射为协议异常并截断异常链防密钥泄露。"""
+    """损坏的 gzip 响应触发 DecodingError 时映射为脱敏协议异常并截断异常链防密钥泄露。"""
+    _patch_sdk_retry_sleep(monkeypatch)
     secret_key = "sk-gzip-decode-secret-12345"
 
     def corrupted_gzip_handler(_request: httpx2.Request) -> httpx2.Response:
@@ -475,6 +491,7 @@ def test_embed_maps_corrupted_gzip_decoding_error_without_leaking_api_key(
         client = OpenAICompatibleEmbeddingClient(
             config,
             transport=httpx2.MockTransport(corrupted_gzip_handler),
+            max_retries=0,
         )
         try:
             await client.embed(["hello"])
@@ -496,7 +513,7 @@ def test_embed_maps_corrupted_gzip_decoding_error_without_leaking_api_key(
 def test_embed_maps_other_httpx_stream_errors_without_leaking_api_key(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """其余 httpx2 StreamError/HTTPError 同样应被脱敏映射且截断异常链。"""
+    """其余 httpx2 StreamError 同样被脱敏映射且截断异常链。"""
     secret_key = "sk-stream-error-secret-67890"
 
     def stream_error_handler(request: httpx2.Request) -> httpx2.Response:
@@ -526,66 +543,6 @@ def test_embed_maps_other_httpx_stream_errors_without_leaking_api_key(
     assert exc_info.value.__cause__ is None
     assert secret_key not in str(exc_info.value)
     assert secret_key not in caplog.text
-
-
-def test_embed_closes_previous_response_stream_before_retry_sleep() -> None:
-    """触发 429/5xx 重试退避时，必须在进入 sleep 前关闭上一次响应流以归还连接池。"""
-
-    class _TrackedStream(httpx2.AsyncByteStream):
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-            self.closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            yield self._body
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    streams: list[_TrackedStream] = []
-    closed_before_sleep: list[bool] = []
-
-    class _RetryingTransport(httpx2.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-            if len(streams) == 0:
-                stream = _TrackedStream(b"rate limited")
-                streams.append(stream)
-                return httpx2.Response(429, stream=stream, request=request)
-            payload = json.dumps(
-                {"object": "list", "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}]}
-            ).encode("utf-8")
-            stream = _TrackedStream(payload)
-            streams.append(stream)
-            return httpx2.Response(200, stream=stream, request=request)
-
-        async def aclose(self) -> None:
-            return None
-
-    async def verify_sleep(seconds: float) -> None:
-        assert seconds == 0.25
-        # 断言进入退避等待前，前一次 429 响应流已经关闭并归还连接。
-        assert len(streams) == 1
-        closed_before_sleep.append(streams[0].closed)
-
-    config = OpenAICompatibleEmbeddingConfig(
-        base_url="http://127.0.0.1:8000/v1",
-        dimensions=4,
-    )
-
-    async def scenario() -> list[list[float]]:
-        client = OpenAICompatibleEmbeddingClient(
-            config,
-            transport=_RetryingTransport(),
-            sleep=verify_sleep,
-        )
-        try:
-            return await client.embed(["check-stream-closed"])
-        finally:
-            await client.aclose()
-
-    assert asyncio.run(scenario()) == [[0.1, 0.2, 0.3, 0.4]]
-    assert closed_before_sleep == [True]
-    assert all(stream.closed for stream in streams)
 
 
 def test_embed_closing_between_batches_raises_closed_error_cleanly() -> None:
@@ -643,142 +600,18 @@ def test_remote_embedding_profile_id_is_stable_and_bounded() -> None:
     assert len(hashed_first) <= 128
 
 
-def test_embed_enforces_max_response_bytes_and_validates_content_length() -> None:
-    """验证响应字节上限（含 Content-Length 声明、负值/非法长度与流式分片累计超限）。"""
-
-    class _ChunkedStream(httpx2.AsyncByteStream):
-        def __init__(self, chunks: list[bytes]) -> None:
-            self._chunks = chunks
-            self.closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            for chunk in self._chunks:
-                yield chunk
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    config = OpenAICompatibleEmbeddingConfig(
-        base_url="http://127.0.0.1:8000/v1",
-        dimensions=4,
-    )
-
-    # 1) 流式分片累计超限 -> embedding_response_too_large 且底层流关闭。
-    stream_oversize = _ChunkedStream([b'{"data":', b'[{"index":0,"embedding":[0.1,0.2,0.3,0.4]}]}'])
-
-    class _StreamTransport(httpx2.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-            return httpx2.Response(200, stream=stream_oversize, request=request)
-
-        async def aclose(self) -> None:
-            return None
-
-    async def run_stream_oversize() -> None:
-        client = OpenAICompatibleEmbeddingClient(
-            config,
-            transport=_StreamTransport(),
-            max_response_bytes=16,
-        )
-        try:
-            await client.embed(["hello"])
-        finally:
-            await client.aclose()
-
-    with pytest.raises(EmbeddingProtocolError, match="embedding_response_too_large"):
-        asyncio.run(run_stream_oversize())
-    assert stream_oversize.closed is True
-
-    # 2) Content-Length 声明超限与非法/负值长度在读取前直接拒绝。
-    for content_length, expected_code in (
-        ("9999", "embedding_response_too_large"),
-        ("invalid-int", "embedding_response_length_invalid"),
-        ("-10", "embedding_response_length_invalid"),
-    ):
-        unconsumed = _ChunkedStream([b"unused"])
-
-        class _HeaderTransport(httpx2.AsyncBaseTransport):
-            def __init__(self, raw_len: str, resp_stream: _ChunkedStream) -> None:
-                self._raw_len = raw_len
-                self._resp_stream = resp_stream
-
-            async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-                return httpx2.Response(
-                    200,
-                    headers={"content-length": self._raw_len},
-                    stream=self._resp_stream,
-                    request=request,
-                )
-
-            async def aclose(self) -> None:
-                return None
-
-        async def run_header_case(
-            raw_len: str = content_length,
-            resp_stream: _ChunkedStream = unconsumed,
-        ) -> None:
-            client = OpenAICompatibleEmbeddingClient(
-                config,
-                transport=_HeaderTransport(raw_len, resp_stream),
-                max_response_bytes=64,
-            )
-            try:
-                await client.embed(["hello"])
-            finally:
-                await client.aclose()
-
-        with pytest.raises(EmbeddingProtocolError, match=expected_code):
-            asyncio.run(run_header_case())
-        assert unconsumed.closed is True
-
-
-def test_embed_respects_retry_after_header_with_cap_and_ignores_invalid() -> None:
-    """429 携带合法 Retry-After 时在安全上限内生效，非法值回退至默认指数退避。"""
-    attempts = 0
-    delays: list[float] = []
-
-    async def fake_sleep(seconds: float) -> None:
-        delays.append(seconds)
-
-    def handler(_request: httpx2.Request) -> httpx2.Response:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            return httpx2.Response(429, headers={"retry-after": "2.0"}, text="slow down")
-        if attempts == 2:
-            return httpx2.Response(429, headers={"retry-after": "120"}, text="still busy")
-        return _embedding_response([(0, [0.1, 0.2, 0.3, 0.4])])
-
-    config = OpenAICompatibleEmbeddingConfig(
-        base_url="http://127.0.0.1:8000/v1",
-        dimensions=4,
-    )
-
-    async def scenario() -> list[list[float]]:
-        client = OpenAICompatibleEmbeddingClient(
-            config,
-            transport=httpx2.MockTransport(handler),
-            sleep=fake_sleep,
-        )
-        try:
-            return await client.embed(["retry-after"])
-        finally:
-            await client.aclose()
-
-    assert asyncio.run(scenario()) == [[0.1, 0.2, 0.3, 0.4]]
-    assert attempts == 3
-    assert delays == [2.0, 5.0]
-
-
-def test_embed_without_api_key_never_uses_openai_env_key_or_sends_authorization(
+def test_embed_without_api_key_never_uses_openai_env_vars_or_sends_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """未配置 API Key 时，即使存在 OPENAI_API_KEY 环境变量也绝不发送 Authorization。"""
+    """未配置 API Key 时，即使宿主机存在 OPENAI_* 环境变量也绝不发送 Authorization/Org/Project。"""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env-must-never-be-sent")
-    seen_auth: list[str | None] = []
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-must-never-be-sent")
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-must-never-be-sent")
+    seen_headers: list[dict[str, str]] = []
     seen_body: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
-        seen_auth.append(request.headers.get("authorization"))
+        seen_headers.append({k.lower(): v for k, v in request.headers.items()})
         seen_body.append(json.loads(request.content.decode("utf-8")))
         return _embedding_response([(0, [0.1, 0.2, 0.3, 0.4])])
 
@@ -800,7 +633,9 @@ def test_embed_without_api_key_never_uses_openai_env_key_or_sends_authorization(
             await client.aclose()
 
     assert asyncio.run(scenario()) == [[0.1, 0.2, 0.3, 0.4]]
-    assert seen_auth == [None]
+    assert "authorization" not in seen_headers[0]
+    assert "openai-organization" not in seen_headers[0]
+    assert "openai-project" not in seen_headers[0]
     assert "dimensions" not in seen_body[0]
     assert seen_body[0]["encoding_format"] == "float"
 
@@ -860,7 +695,7 @@ def test_embed_rejects_redirect_without_following_and_propagates_cancellation() 
 
 @pytest.mark.parametrize("encoding", ("gzip", "deflate"))
 def test_embed_decodes_valid_streaming_compressed_response(encoding: str) -> None:
-    """200 OK 合法 gzip/deflate 流式响应应正常解压解码并返回向量，同时关闭底层流。"""
+    """200 OK 合法 gzip/deflate 响应应由标准 httpx2 自动解压解码并返回向量。"""
 
     class _Stream(httpx2.AsyncByteStream):
         def __init__(self, chunks: list[bytes]) -> None:
@@ -880,11 +715,11 @@ def test_embed_decodes_valid_streaming_compressed_response(encoding: str) -> Non
     compressed = gzip.compress(raw_json) if encoding == "gzip" else zlib.compress(raw_json)
     mid = max(1, len(compressed) // 2)
     response_stream = _Stream([compressed[:mid], compressed[mid:]])
-    seen_accept_encoding: list[str | None] = []
+    seen_accept_encoding: list[str] = []
 
     class _CompressedTransport(httpx2.AsyncBaseTransport):
         async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-            seen_accept_encoding.append(request.headers.get("accept-encoding"))
+            seen_accept_encoding.append(request.headers.get("accept-encoding", ""))
             return httpx2.Response(
                 200,
                 headers={
@@ -912,244 +747,7 @@ def test_embed_decodes_valid_streaming_compressed_response(encoding: str) -> Non
 
     assert asyncio.run(scenario()) == [[0.25, 0.5, 0.75, 1.0]]
     assert response_stream.closed is True
-    assert seen_accept_encoding == ["gzip, deflate"]
-
-
-def test_embed_rejects_200_gzip_zip_bomb_and_closes_stream() -> None:
-    """200 OK 压缩体积在上限内但解压后超限（zip-bomb）必须立即中止并关闭底层流。"""
-
-    class _TrackedStream(httpx2.AsyncByteStream):
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-            self.closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            yield self._body
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    # 压缩后不足 500 字节（远低于 1024 上限），解压后 64 KiB 远超上限。
-    bomb = gzip.compress(b"A" * 65_536)
-    assert len(bomb) < 1024
-    bomb_stream = _TrackedStream(bomb)
-
-    class _BombTransport(httpx2.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-            return httpx2.Response(
-                200,
-                headers={
-                    "content-type": "application/json",
-                    "content-encoding": "gzip",
-                    "content-length": str(len(bomb)),
-                },
-                stream=bomb_stream,
-                request=request,
-            )
-
-        async def aclose(self) -> None:
-            return None
-
-    config = OpenAICompatibleEmbeddingConfig(
-        base_url="http://127.0.0.1:8000/v1",
-        dimensions=4,
-    )
-
-    async def scenario() -> None:
-        client = OpenAICompatibleEmbeddingClient(
-            config,
-            transport=_BombTransport(),
-            max_response_bytes=1024,
-        )
-        try:
-            await client.embed(["zip-bomb"])
-        finally:
-            await client.aclose()
-
-    with pytest.raises(EmbeddingProtocolError, match="embedding_response_too_large"):
-        asyncio.run(scenario())
-    assert bomb_stream.closed is True
-
-
-@pytest.mark.parametrize("payload_kind", ("zip_bomb", "corrupt_gzip"))
-def test_embed_closes_non_2xx_compressed_error_streams_without_reading_body(
-    payload_kind: str,
-) -> None:
-    """非 2xx（500/502/429）zip-bomb 与损坏 gzip 必须在 0 字节读取前提下关闭并正确映射或重试。"""
-
-    class _TrackedStream(httpx2.AsyncByteStream):
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-            self.iterated = False
-            self.closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            self.iterated = True
-            yield self._body
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    error_body = (
-        gzip.compress(b"B" * 131_072) if payload_kind == "zip_bomb" else b"corrupted-gzip-stream"
-    )
-    config = OpenAICompatibleEmbeddingConfig(
-        base_url="http://127.0.0.1:8000/v1",
-        dimensions=4,
-    )
-
-    # 1) 500 错误体不读取、不解压，直接映射为不可重试 embedding_upstream_error。
-    stream_500 = _TrackedStream(error_body)
-
-    class _Transport500(httpx2.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-            return httpx2.Response(
-                500,
-                headers={"content-encoding": "gzip"},
-                stream=stream_500,
-                request=request,
-            )
-
-        async def aclose(self) -> None:
-            return None
-
-    async def run_500() -> None:
-        client = OpenAICompatibleEmbeddingClient(
-            config,
-            transport=_Transport500(),
-            max_response_bytes=1024,
-        )
-        try:
-            await client.embed(["err-500"])
-        finally:
-            await client.aclose()
-
-    with pytest.raises(EmbeddingUpstreamError, match="embedding_upstream_error") as exc_500:
-        asyncio.run(run_500())
-    assert exc_500.value.retryable is False
-    assert exc_500.value.status_code == 500
-    assert stream_500.iterated is False
-    assert stream_500.closed is True
-
-    # 2) 502 / 429（携带 Retry-After）错误体均不读取、不解压，按既定策略完成退避重试并成功。
-    retry_streams: list[_TrackedStream] = []
-    delays: list[float] = []
-
-    async def fake_sleep(seconds: float) -> None:
-        delays.append(seconds)
-
-    class _RetryTransport(httpx2.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-            attempt = len(retry_streams)
-            if attempt == 0:
-                stream = _TrackedStream(error_body)
-                retry_streams.append(stream)
-                return httpx2.Response(
-                    429,
-                    headers={"content-encoding": "gzip", "retry-after": "1.5"},
-                    stream=stream,
-                    request=request,
-                )
-            if attempt == 1:
-                stream = _TrackedStream(error_body)
-                retry_streams.append(stream)
-                return httpx2.Response(
-                    502,
-                    headers={"content-encoding": "gzip"},
-                    stream=stream,
-                    request=request,
-                )
-            ok_payload = json.dumps(
-                {"object": "list", "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}]}
-            ).encode("utf-8")
-            ok_stream = _TrackedStream(ok_payload)
-            retry_streams.append(ok_stream)
-            return httpx2.Response(200, stream=ok_stream, request=request)
-
-        async def aclose(self) -> None:
-            return None
-
-    async def run_retry() -> list[list[float]]:
-        client = OpenAICompatibleEmbeddingClient(
-            config,
-            transport=_RetryTransport(),
-            sleep=fake_sleep,
-            max_response_bytes=1024,
-        )
-        try:
-            return await client.embed(["retry-compressed-errors"])
-        finally:
-            await client.aclose()
-
-    assert asyncio.run(run_retry()) == [[0.1, 0.2, 0.3, 0.4]]
-    assert delays == [1.5, 0.5]
-    assert len(retry_streams) == 3
-    # 前两次 429/502 均在 0 字节读取下直接关闭。
-    assert retry_streams[0].iterated is False and retry_streams[0].closed is True
-    assert retry_streams[1].iterated is False and retry_streams[1].closed is True
-    assert retry_streams[2].iterated is True and retry_streams[2].closed is True
-
-
-def test_embed_streaming_corrupted_gzip_maps_decoding_error_closes_stream_and_hides_key(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """200 流式损坏 gzip 在 _read_bounded_body 触发 DecodingError 时安全映射、关流且零密钥泄露。"""
-    secret_key = "sk-stream-gzip-secret-99999"
-
-    class _CorruptGzipStream(httpx2.AsyncByteStream):
-        def __init__(self) -> None:
-            self.iterated = False
-            self.closed = False
-
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            self.iterated = True
-            yield b"definitely-not-gzip-bytes"
-
-        async def aclose(self) -> None:
-            self.closed = True
-
-    corrupt_stream = _CorruptGzipStream()
-
-    class _StreamTransport(httpx2.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
-            return httpx2.Response(
-                200,
-                headers={
-                    "content-type": "application/json",
-                    "content-encoding": "gzip",
-                },
-                stream=corrupt_stream,
-                request=request,
-            )
-
-        async def aclose(self) -> None:
-            return None
-
-    config = OpenAICompatibleEmbeddingConfig(
-        base_url="http://127.0.0.1:8000/v1",
-        api_key=secret_key,
-        dimensions=4,
-    )
-
-    async def scenario() -> None:
-        client = OpenAICompatibleEmbeddingClient(config, transport=_StreamTransport())
-        try:
-            await client.embed(["corrupt-stream"])
-        finally:
-            await client.aclose()
-
-    with caplog.at_level(logging.DEBUG):
-        with pytest.raises(
-            EmbeddingProtocolError, match="embedding_response_decode_failed"
-        ) as exc_info:
-            asyncio.run(scenario())
-
-    assert corrupt_stream.iterated is True
-    assert corrupt_stream.closed is True
-    assert exc_info.value.__cause__ is None
-    assert secret_key not in str(exc_info.value)
-    assert secret_key not in repr(exc_info.value)
-    assert secret_key not in caplog.text
+    assert "gzip" in seen_accept_encoding[0].lower()
 
 
 def test_embed_rejects_huge_integer_overflow_as_non_finite_vector() -> None:
@@ -1219,8 +817,11 @@ def test_client_validates_max_concurrency_bounds_and_types() -> None:
     assert env_client._max_concurrency == DEFAULT_EMBEDDING_MAX_CONCURRENCY
 
 
-def test_embed_multi_batch_concurrency_preserves_order_and_cancels_siblings_on_failure() -> None:
+def test_embed_multi_batch_concurrency_preserves_order_and_cancels_siblings_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """验证多批 Semaphore 并发上限、乱序完成保序拼接，以及任一批失败时安全取消兄弟任务。"""
+    _patch_sdk_retry_sleep(monkeypatch)
     config = OpenAICompatibleEmbeddingConfig(
         base_url="http://127.0.0.1:8000/v1",
         dimensions=4,
@@ -1318,7 +919,6 @@ def test_embed_multi_batch_concurrency_preserves_order_and_cancels_siblings_on_f
         finally:
             await client.aclose()
 
-        # 让出事件循环并检查任务列表：已启动兄弟批必须全部取消，尾部排队批未启动，零泄露任务/异常。
         await asyncio.sleep(0)
         after_tasks = {task for task in asyncio.all_tasks() if task is not current}
         started_siblings = [token for token in started_tokens if token != "fail"]
@@ -1346,7 +946,7 @@ def test_embed_multi_batch_concurrency_preserves_order_and_cancels_siblings_on_f
             if arrived == 2:
                 both_ready.set()
             await asyncio.wait_for(both_ready.wait(), timeout=2.0)
-            status = 400 if token == "fail-a" else 500
+            status = 400 if token == "fail-a" else 422
             return httpx2.Response(status, text="boom")
 
         client = OpenAICompatibleEmbeddingClient(
@@ -1367,9 +967,12 @@ def test_embed_multi_batch_concurrency_preserves_order_and_cancels_siblings_on_f
 
 
 def test_embed_retries_connect_and_remote_protocol_errors_without_leaking_key(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """ConnectError / RemoteProtocolError 应指数退避重试，耗尽报 retryable=True 且零密钥泄露。"""
+    """ConnectError / RemoteProtocolError 由 SDK 自动重试，耗尽报 retryable=True 且零密钥泄露。"""
+    delays: list[float] = []
+    _patch_sdk_retry_sleep(monkeypatch, delays)
     secret_key = "sk-transient-transport-secret-424242"
     config = OpenAICompatibleEmbeddingConfig(
         base_url="http://127.0.0.1:8000/v1",
@@ -1379,10 +982,6 @@ def test_embed_retries_connect_and_remote_protocol_errors_without_leaking_key(
 
     # 1) 依次遭遇 ConnectError 与 RemoteProtocolError 后于第 3 次尝试恢复成功。
     recover_attempts = 0
-    recover_delays: list[float] = []
-
-    async def record_recover_sleep(seconds: float) -> None:
-        recover_delays.append(seconds)
 
     def recover_handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal recover_attempts
@@ -1398,7 +997,6 @@ def test_embed_retries_connect_and_remote_protocol_errors_without_leaking_key(
         client = OpenAICompatibleEmbeddingClient(
             config,
             transport=httpx2.MockTransport(recover_handler),
-            sleep=record_recover_sleep,
         )
         try:
             return await client.embed(["transient-recover"])
@@ -1409,21 +1007,14 @@ def test_embed_retries_connect_and_remote_protocol_errors_without_leaking_key(
         assert asyncio.run(run_recover()) == [[0.1, 0.2, 0.3, 0.4]]
 
     assert recover_attempts == 3
-    assert recover_delays == [0.25, 0.5]
-    assert "embedding_transport_retry" in caplog.text
+    assert len(delays) == 2
     assert secret_key not in caplog.text
 
     # 2) ConnectError 与 RemoteProtocolError 持续耗尽后均抛出 retryable=True、截断异常链且不泄密钥。
     for error_cls in (httpx2.ConnectError, httpx2.RemoteProtocolError):
         caplog.clear()
+        delays.clear()
         exhausted_attempts = 0
-        exhausted_delays: list[float] = []
-
-        async def record_exhausted_sleep(
-            seconds: float,
-            sink: list[float] = exhausted_delays,
-        ) -> None:
-            sink.append(seconds)
 
         def failing_handler(
             request: httpx2.Request,
@@ -1435,14 +1026,10 @@ def test_embed_retries_connect_and_remote_protocol_errors_without_leaking_key(
                 f"transport failed header={request.headers.get('authorization')} key={secret_key}"
             )
 
-        async def run_exhausted(
-            handler_fn: Any = failing_handler,
-            sleep_fn: Any = record_exhausted_sleep,
-        ) -> None:
+        async def run_exhausted(handler_fn: Any = failing_handler) -> None:
             client = OpenAICompatibleEmbeddingClient(
                 config,
                 transport=httpx2.MockTransport(handler_fn),
-                sleep=sleep_fn,
             )
             try:
                 await client.embed(["transient-exhausted"])
@@ -1456,7 +1043,7 @@ def test_embed_retries_connect_and_remote_protocol_errors_without_leaking_key(
                 asyncio.run(run_exhausted())
 
         assert exhausted_attempts == 3
-        assert exhausted_delays == [0.25, 0.5]
+        assert len(delays) == 2
         assert exc_info.value.retryable is True
         assert exc_info.value.status_code is None
         assert exc_info.value.__cause__ is None

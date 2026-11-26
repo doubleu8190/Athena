@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
+from domain.access import UserAccessSnapshot
 from domain.auth import AuthContext
 from domain.mcp.model import (
     DiscoveredMcpTool,
@@ -118,6 +119,16 @@ class McpServerRepository(Protocol):
     ) -> ToolPage[PublicToolDefinition]:
         """读取供普通调用方使用的工具定义，支持按有权限的 MCP Server ID 集合过滤。"""
 
+    async def list_readable_public(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> ToolPage[PublicToolDefinition]:
+        """单会话按用户权限快照下推读取可读且已启用的公共工具分页。"""
+
     async def list_admin(self, *, offset: int, limit: int) -> ToolPage[AdminToolDefinition]:
         """读取包含 Server 来源映射的管理员工具定义。"""
 
@@ -145,6 +156,14 @@ class McpToolRuntimeReader(Protocol):
 
     async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
         """Read at most ``limit`` catalog rows with one config version per Server."""
+
+    async def list_readable_runtime_tools(
+        self,
+        snapshot: UserAccessSnapshot | None,
+        *,
+        limit: int = 201,
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        """按用户权限快照下推读取当前用户可读的已启用运行时 MCP 工具。"""
 
     async def get_call_target(
         self,

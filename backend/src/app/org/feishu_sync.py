@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.auth import AuthContext
 from domain.org import (
@@ -18,12 +19,6 @@ from domain.org import (
 )
 
 MAX_DEPARTMENT_DEPTH = 64
-
-
-def _utc_value(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def validate_and_order_departments(
@@ -184,7 +179,7 @@ class FeishuOrgSyncService:
             collected_employees.extend(dept_users)
 
         active_employees, inactive_employees = _merge_remote_employees(collected_employees)
-        now = _utc_value(self._clock())
+        now = as_utc(self._clock())
         return await self._org_repository.apply_feishu_sync(
             ordered_departments=ordered_departments,
             active_employees=active_employees,

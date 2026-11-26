@@ -564,3 +564,111 @@ def test_password_change_rejects_revoked_expired_foreign_disabled_and_deleted_se
             await engine.dispose()
 
     _run(scenario())
+
+
+def test_verify_active_session_user_uses_lock_free_single_join() -> None:
+    """无锁复核函数以单条 JOIN 校验活跃账号与有效会话，严禁生成 FOR SHARE / FOR UPDATE。"""
+    from sqlalchemy.dialects import postgresql
+
+    from adapter.auth.repository import verify_active_session_user
+
+    pg_dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
+
+    async def scenario() -> None:
+        engine, session_factory, repository = await _make_repository()
+        try:
+            now = datetime(2026, 1, 2, tzinfo=UTC)
+            active = _user("usr_vf_active", "vf-active@example.com")
+            disabled = _user(
+                "usr_vf_disabled", "vf-disabled@example.com", status=UserStatus.DISABLED
+            )
+            deleted = _user("usr_vf_deleted", "vf-deleted@example.com", deleted=True)
+            await repository.create_user(active)
+            await repository.create_user(disabled)
+            await repository.create_user(deleted)
+
+            valid_sess = _session(
+                "ses_vf_valid", active.id, "1" * 64, expires_at=now + timedelta(hours=1)
+            )
+            revoked_sess = AuthSession(
+                id="ses_vf_revoked",
+                user_id=active.id,
+                token_hash="2" * 64,
+                expires_at=now + timedelta(hours=1),
+                revoked_time=now,
+                created_at=now,
+            )
+            expired_sess = _session("ses_vf_expired", active.id, "3" * 64, expires_at=now)
+            disabled_sess = _session(
+                "ses_vf_disabled", disabled.id, "4" * 64, expires_at=now + timedelta(hours=1)
+            )
+            deleted_sess = _session(
+                "ses_vf_deleted", deleted.id, "5" * 64, expires_at=now + timedelta(hours=1)
+            )
+            for item in (valid_sess, revoked_sess, expired_sess, disabled_sess, deleted_sess):
+                await repository.create_session(item)
+
+            pg_sqls: list[str] = []
+
+            class _InspectingSession:
+                def __init__(self, inner: Any) -> None:
+                    self._inner = inner
+
+                async def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if hasattr(statement, "compile"):
+                        pg_sqls.append(str(statement.compile(dialect=pg_dialect)))
+                    return await self._inner.scalar(statement, *args, **kwargs)
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+            async with session_factory() as db_session:
+                wrapped = _InspectingSession(db_session)
+                verified = await verify_active_session_user(
+                    wrapped,  # type: ignore[arg-type]
+                    active.id,
+                    valid_sess.id,
+                    clock=lambda: now,
+                )
+                assert verified is not None
+                assert verified.id == active.id
+                assert len(pg_sqls) == 1
+                assert "JOIN auth_sessions" in pg_sqls[0]
+                assert "FOR SHARE" not in pg_sqls[0]
+                assert "FOR UPDATE" not in pg_sqls[0]
+
+                # 撤销、过期、停用、删除与错配会话均拒绝
+                assert (
+                    await verify_active_session_user(
+                        db_session, active.id, revoked_sess.id, clock=lambda: now
+                    )
+                    is None
+                )
+                assert (
+                    await verify_active_session_user(
+                        db_session, active.id, expired_sess.id, clock=lambda: now
+                    )
+                    is None
+                )
+                assert (
+                    await verify_active_session_user(
+                        db_session, disabled.id, disabled_sess.id, clock=lambda: now
+                    )
+                    is None
+                )
+                assert (
+                    await verify_active_session_user(
+                        db_session, deleted.id, deleted_sess.id, clock=lambda: now
+                    )
+                    is None
+                )
+                assert (
+                    await verify_active_session_user(
+                        db_session, disabled.id, valid_sess.id, clock=lambda: now
+                    )
+                    is None
+                )
+        finally:
+            await engine.dispose()
+
+    _run(scenario())

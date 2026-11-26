@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, HTTPException, Path, Response, status
 
 from api.converter.preference import (
     memory_list_to_response,
@@ -19,7 +19,7 @@ from api.dto.preference import (
     UserMemoryResponse,
     UserWorkProfileResponse,
 )
-from api.security import CurrentAuth, verify_request_origin
+from api.security import CurrentAuth
 from app.preference import PreferenceService
 from domain.preference import (
     InvalidCustomInstructionsError,
@@ -36,7 +36,6 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/me",
         tags=["preferences"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("/preferences", response_model=UserWorkProfileResponse)

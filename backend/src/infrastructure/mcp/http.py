@@ -1,44 +1,28 @@
-"""受控 Streamable HTTP transport。"""
+"""面向超管受控内网场景的 Streamable HTTP MCP 传输层（基于标准 httpx2 与官方 MCP SDK）。"""
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
-import socket
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import cast
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx2
-from httpx2 import AsyncByteStream, AsyncHTTPTransport, Request, Response
-from mcp.client._transport import TransportStreams
 from mcp.client.streamable_http import streamable_http_client
 
-from infrastructure.http.bounded import BoundedResponseStream
+from infrastructure.http import has_control_characters
 
 DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-_METADATA_IPS = {
-    ipaddress.ip_address("169.254.169.254"),
-    ipaddress.ip_address("169.254.170.2"),
-    ipaddress.ip_address("100.100.100.200"),
-    ipaddress.ip_address("fd00:ec2::254"),
-}
-_IPV6_NAT64_PREFIXES = (
-    ipaddress.ip_network("64:ff9b::/96"),
-    ipaddress.ip_network("64:ff9b:1::/48"),
-)
-_IPV6_SPECIAL_PREFIXES = (
-    ipaddress.ip_network("2001::/23"),
-    ipaddress.ip_network("2001:db8::/32"),
-    ipaddress.ip_network("3fff::/20"),
-)
-_ALLOWLISTABLE_PRIVATE_PREFIXES = (
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("fc00::/7"),
+DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
+_CLOUD_METADATA_IPS = frozenset(
+    {
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("169.254.170.2"),
+        ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("fd00:ec2::254"),
+    }
 )
 
 
@@ -54,13 +38,6 @@ class McpRedirectRejectedError(ConnectionError):
     """MCP endpoint 返回了被禁止的重定向。"""
 
 
-class McpResponseTooLargeError(ConnectionError):
-    """MCP HTTP 响应超过字节上限。"""
-
-
-Resolver = Callable[[str, int], Awaitable[Iterable[str]]]
-
-
 @dataclass(frozen=True, slots=True)
 class McpEndpoint:
     """已验证的 MCP HTTPS endpoint。"""
@@ -70,8 +47,21 @@ class McpEndpoint:
     port: int
 
 
+def _is_cloud_metadata_literal(hostname: str) -> bool:
+    """检查字面主机名是否为云平台元数据 IP（含 IPv4-mapped IPv6 形式）。"""
+    try:
+        address = ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        return False
+    if address in _CLOUD_METADATA_IPS:
+        return True
+    return isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped in _CLOUD_METADATA_IPS
+
+
 def validate_mcp_endpoint(url: str) -> McpEndpoint:
-    """校验 HTTPS endpoint 并拒绝可携带凭据或额外目标信息的 URL。"""
+    """校验 HTTPS endpoint，拒绝 URL 凭据、查询串、片段、控制字符与字面云元数据 IP。"""
+    if not url or has_control_characters(url):
+        raise McpEndpointError("mcp_endpoint_invalid")
     try:
         parsed = urlsplit(url)
         if (
@@ -79,231 +69,71 @@ def validate_mcp_endpoint(url: str) -> McpEndpoint:
             or not parsed.hostname
             or parsed.username is not None
             or parsed.password is not None
+            or "@" in parsed.netloc
             or parsed.query
+            or "?" in url
             or parsed.fragment
+            or "#" in url
+            or _is_cloud_metadata_literal(parsed.hostname)
         ):
             raise McpEndpointError("mcp_endpoint_invalid")
-        port = parsed.port or 443
-        endpoint = httpx2.URL(url)
-        return McpEndpoint(endpoint, parsed.hostname.encode("idna").decode("ascii"), port)
+        return McpEndpoint(
+            httpx2.URL(url),
+            parsed.hostname.encode("idna").decode("ascii"),
+            parsed.port or 443,
+        )
     except (UnicodeError, ValueError) as error:
         if isinstance(error, McpEndpointError):
             raise
         raise McpEndpointError("mcp_endpoint_invalid") from error
 
 
-def _is_allowed_address(value: str, *, allow_private: bool) -> bool:
-    if "%" in value:
-        return False
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    if address in _METADATA_IPS:
-        return False
-    if isinstance(address, ipaddress.IPv6Address):
-        if (
-            address.ipv4_mapped is not None
-            or address.sixtofour is not None
-            or address.teredo is not None
-            or any(address in prefix for prefix in _IPV6_NAT64_PREFIXES)
-            or any(address in prefix for prefix in _IPV6_SPECIAL_PREFIXES)
-        ):
-            return False
-    if (
-        address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-    ):
-        return False
-    if address.is_global:
-        return True
-    if allow_private and address.is_loopback:
-        return True
-    return allow_private and any(
-        address.version == prefix.version and address in prefix
-        for prefix in _ALLOWLISTABLE_PRIVATE_PREFIXES
-    )
+async def _check_mcp_response(response: httpx2.Response) -> None:
+    """在 SDK 跟随同源重定向或协议回退前，统一拦截 3xx 与 401/403 响应。"""
+    if 300 <= response.status_code < 400:
+        await response.aclose()
+        raise McpRedirectRejectedError("mcp_redirect_rejected")
+    if response.status_code in {401, 403}:
+        await response.aclose()
+        raise McpAccessDeniedError("mcp_access_denied")
 
 
-async def _resolve(hostname: str, port: int) -> tuple[str, ...]:
-    loop = asyncio.get_running_loop()
-    records = await loop.getaddrinfo(
-        hostname,
-        port,
-        type=socket.SOCK_STREAM,
-        proto=socket.IPPROTO_TCP,
-    )
-    return tuple(dict.fromkeys(record[4][0] for record in records))
-
-
-class PinnedHttpTransport(httpx2.AsyncBaseTransport):
-    """拒绝私网目标和重定向，并将请求固定到已检查的 DNS 地址。"""
-
-    def __init__(
-        self,
-        endpoint: str,
-        *,
-        allowed_private_hosts: frozenset[str] = frozenset(),
-        maximum_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-        resolver: Resolver | None = None,
-        inner_transport: httpx2.AsyncBaseTransport | None = None,
-    ) -> None:
-        """保存 endpoint 策略与可替换的 DNS/HTTP 依赖。"""
-        if maximum_response_bytes < 1:
-            raise ValueError("maximum_response_bytes_invalid")
-        self._endpoint = validate_mcp_endpoint(endpoint)
-        self._allowed_private_hosts = frozenset(
-            host.encode("idna").decode("ascii").lower() for host in allowed_private_hosts
-        )
-        self._maximum_response_bytes = maximum_response_bytes
-        self._resolver = resolver or _resolve
-        self._transport = inner_transport or AsyncHTTPTransport(trust_env=False, retries=0)
-        self._addresses: tuple[str, ...] | None = None
-        self._resolve_lock = asyncio.Lock()
-
-    async def handle_async_request(self, request: Request) -> Response:
-        """用 endpoint 的固定解析地址发送一次 HTTP 请求。"""
-        self._validate_request_url(request.url)
-        addresses = await self._checked_addresses()
-        address = addresses[0]
-        original_url = request.url
-        rewritten_url = original_url.copy_with(host=address)
-        headers = httpx2.Headers(request.headers)
-        headers["accept-encoding"] = "identity"
-        host_value = self._endpoint.hostname
-        if ":" in host_value:
-            host_value = f"[{host_value}]"
-        if self._endpoint.port != 443:
-            host_value = f"{host_value}:{self._endpoint.port}"
-        headers["host"] = host_value
-        extensions = dict(request.extensions)
-        extensions["sni_hostname"] = self._endpoint.hostname
-        pinned_request = Request(
-            request.method,
-            rewritten_url,
-            headers=headers,
-            stream=request.stream,
-            extensions=extensions,
-        )
-        response = await self._transport.handle_async_request(pinned_request)
-        if 300 <= response.status_code < 400:
-            await response.aclose()
-            raise McpRedirectRejectedError("mcp_redirect_rejected")
-        if response.status_code in {401, 403}:
-            await response.aclose()
-            raise McpAccessDeniedError("mcp_access_denied")
-        # 只接受缺省编码或 identity；空值和压缩编码一律拒绝。
-        if "content-encoding" in response.headers:
-            content_encoding = response.headers["content-encoding"].strip().lower()
-            if content_encoding != "identity":
-                await response.aclose()
-                raise McpEndpointError("mcp_content_encoding_rejected")
-        declared_length = response.headers.get("content-length")
-        if declared_length is not None:
-            try:
-                if int(declared_length) > self._maximum_response_bytes:
-                    await response.aclose()
-                    raise McpResponseTooLargeError("mcp_response_too_large")
-            except ValueError:
-                await response.aclose()
-                raise McpEndpointError("mcp_response_invalid") from None
-        # 复用共享有界流包装器在读取阶段计数字节，超限时抛出 MCP 专用异常。
-        response.stream = BoundedResponseStream(
-            cast(AsyncByteStream, response.stream),
-            self._maximum_response_bytes,
-            is_sse=False,
-            too_large_code="mcp_response_too_large",
-            error_factory=McpResponseTooLargeError,
-        )
-        response.request = request
-        return response
-
-    async def aclose(self) -> None:
-        """释放底层 HTTP 连接池。"""
-        await self._transport.aclose()
-
-    def _validate_request_url(self, url: httpx2.URL) -> None:
-        if (
-            url.scheme != "https"
-            or url.host.lower() != self._endpoint.hostname.lower()
-            or (url.port or 443) != self._endpoint.port
-            or url.path != self._endpoint.url.path
-            or url.query
-            or url.fragment
-            or url.userinfo
-        ):
-            raise McpEndpointError("mcp_endpoint_changed")
-
-    async def _checked_addresses(self) -> tuple[str, ...]:
-        if self._addresses is not None:
-            return self._addresses
-        async with self._resolve_lock:
-            if self._addresses is not None:
-                return self._addresses
-            resolved = await self._resolver(self._endpoint.hostname, self._endpoint.port)
-            if isinstance(resolved, (str, bytes)):
-                raise McpEndpointError("mcp_dns_invalid")
-            if not isinstance(resolved, Iterable):
-                raise McpEndpointError("mcp_dns_invalid")
-            addresses = tuple(dict.fromkeys(resolved))
-            if not addresses:
-                raise McpEndpointError("mcp_dns_empty")
-            allow_private = self._endpoint.hostname.lower() in self._allowed_private_hosts
-            if any(
-                not _is_allowed_address(address, allow_private=allow_private)
-                for address in addresses
-            ):
-                raise McpEndpointError("mcp_dns_address_rejected")
-            self._addresses = addresses
-            return addresses
-
-
-def build_pinned_http_client(
+def build_mcp_http_client(
     endpoint: str,
     *,
-    headers: dict[str, str] | None = None,
-    allowed_private_hosts: frozenset[str] = frozenset(),
-    maximum_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-    resolver: Resolver | None = None,
-    inner_transport: httpx2.AsyncBaseTransport | None = None,
+    headers: Mapping[str, str] | None = None,
+    transport: httpx2.AsyncBaseTransport | None = None,
+    timeout: httpx2.Timeout | None = None,
 ) -> httpx2.AsyncClient:
-    """创建供 SDK Streamable HTTP transport 使用的单次请求客户端。"""
-    transport = PinnedHttpTransport(
-        endpoint,
-        allowed_private_hosts=allowed_private_hosts,
-        maximum_response_bytes=maximum_response_bytes,
-        resolver=resolver,
-        inner_transport=inner_transport,
-    )
+    """构造单次调用独立的无 Cookie、禁重定向且校验响应状态的 MCP HTTP 客户端。"""
+    validate_mcp_endpoint(endpoint)
     return httpx2.AsyncClient(
-        headers=headers,
+        headers=dict(headers) if headers is not None else None,
         follow_redirects=False,
         trust_env=False,
         transport=transport,
-        timeout=httpx2.Timeout(30.0, read=30.0),
+        timeout=timeout or httpx2.Timeout(DEFAULT_HTTP_TIMEOUT_SECONDS, read=30.0),
+        event_hooks={"response": [_check_mcp_response]},
     )
 
 
 @asynccontextmanager
-async def pinned_streamable_http_transport(
+async def mcp_streamable_http_transport(
     endpoint: str,
     *,
-    headers: dict[str, str] | None = None,
-    allowed_private_hosts: frozenset[str] = frozenset(),
+    headers: Mapping[str, str] | None = None,
     maximum_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-    resolver: Resolver | None = None,
-    inner_transport: httpx2.AsyncBaseTransport | None = None,
-) -> AsyncGenerator[TransportStreams, None]:
-    """创建自动关闭资源且设置响应、SSE 上限的 SDK Streamable HTTP transport。"""
-    async with build_pinned_http_client(
+    transport: httpx2.AsyncBaseTransport | None = None,
+    timeout: httpx2.Timeout | None = None,
+) -> AsyncGenerator[Any, None]:
+    """创建自动释放客户端且设置 SSE 单事件上限的官方 Streamable HTTP transport。"""
+    if maximum_response_bytes < 1:
+        raise ValueError("maximum_response_bytes_invalid")
+    async with build_mcp_http_client(
         endpoint,
         headers=headers,
-        allowed_private_hosts=allowed_private_hosts,
-        maximum_response_bytes=maximum_response_bytes,
-        resolver=resolver,
-        inner_transport=inner_transport,
+        transport=transport,
+        timeout=timeout,
     ) as client:
         async with streamable_http_client(
             endpoint,
@@ -314,14 +144,13 @@ async def pinned_streamable_http_transport(
 
 
 __all__ = [
+    "DEFAULT_HTTP_TIMEOUT_SECONDS",
     "DEFAULT_MAX_RESPONSE_BYTES",
     "McpAccessDeniedError",
     "McpEndpoint",
     "McpEndpointError",
     "McpRedirectRejectedError",
-    "McpResponseTooLargeError",
-    "PinnedHttpTransport",
-    "build_pinned_http_client",
-    "pinned_streamable_http_transport",
+    "build_mcp_http_client",
+    "mcp_streamable_http_transport",
     "validate_mcp_endpoint",
 ]

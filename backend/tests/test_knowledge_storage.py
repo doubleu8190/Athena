@@ -293,10 +293,30 @@ def test_config_accepts_strict_host_port_forms(endpoint: str) -> None:
 
 
 def test_direct_config_construction_is_validated() -> None:
+    # 防止 __post_init__ 重新捕获 __class__ 闭包导致 Python 3.12 @dataclass(slots=True) 实例化崩溃。
+    assert "__class__" not in MinioStorageConfig.__post_init__.__code__.co_freevars
+
+    config = MinioStorageConfig(
+        "localhost:9000",
+        "direct-access",
+        "direct-secret",
+        "test-bucket",
+        secure=False,
+    )
+    assert config.endpoint == "localhost:9000"
+    assert config.access_key == "direct-access"
+    assert config.secret_key == "direct-secret"
+    assert config.bucket == "test-bucket"
+    assert config.secure is False
+    assert "direct-access" not in repr(config)
+    assert "direct-secret" not in repr(config)
+
     with pytest.raises(OriginalStorageConfigurationError):
         MinioStorageConfig("localhost:abc", "access", "secret", "test-bucket")
     with pytest.raises(OriginalStorageConfigurationError):
         MinioStorageConfig("localhost:9000", "", "secret", "test-bucket")
+    with pytest.raises(OriginalStorageConfigurationError):
+        MinioStorageConfig("localhost:9000", "access", "   ", "test-bucket")
     with pytest.raises(OriginalStorageConfigurationError):
         MinioStorageConfig("localhost:9000", "access", "secret", "Invalid_Bucket")
     with pytest.raises(OriginalStorageConfigurationError):

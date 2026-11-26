@@ -1,16 +1,15 @@
-"""个人 Skill 的单文件 Markdown 协议与规范化包测试。"""
+"""个人 Skill 的单文件 Markdown 协议与纯库不可变清单测试。"""
 
 from __future__ import annotations
 
-import zipfile
-from io import BytesIO
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from app.skill.personal import (
     PersonalSkillError,
-    build_personal_package,
+    build_markdown_manifest,
     parse_personal_markdown,
     validate_personal_content,
 )
@@ -118,16 +117,18 @@ def test_parse_rejects_wrong_extension_encoding_and_size(tmp_path: Path) -> None
 
 
 def test_structured_content_limits_and_package_manifest() -> None:
-    """在线字段执行正文上限，内部包只含一个 SKILL.md。"""
+    """在线字段执行正文上限，纯 Markdown 清单只含 SKILL.md 且直接计算正文 UTF-8 SHA-256。"""
     draft = validate_personal_content("名称", "描述", "业务正文")
-    package = build_personal_package("personal-demo", draft)
+    manifest, package_sha256 = build_markdown_manifest("personal-demo", draft)
 
-    assert package.manifest.dependencies == ()
-    assert package.manifest.scripts == ()
-    assert [item.path for item in package.manifest.files] == ["SKILL.md"]
-    with zipfile.ZipFile(BytesIO(package.content)) as archive:
-        assert archive.namelist() == ["SKILL.md"]
-        assert archive.read("SKILL.md").decode("utf-8") == "业务正文"
+    expected_sha256 = hashlib.sha256("业务正文".encode()).hexdigest()
+    assert manifest.dependencies == ()
+    assert manifest.scripts == ()
+    assert manifest.guide == "业务正文"
+    assert [item.path for item in manifest.files] == ["SKILL.md"]
+    assert manifest.files[0].sha256 == expected_sha256
+    assert manifest.files[0].size_bytes == len("业务正文".encode())
+    assert package_sha256 == expected_sha256
 
     with pytest.raises(PersonalSkillError, match="skill_guide_invalid"):
         validate_personal_content("名称", "描述", "x" * (MAX_GUIDE_CHARACTERS + 1))

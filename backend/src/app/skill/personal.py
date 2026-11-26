@@ -1,11 +1,9 @@
-"""个人 Skill 的单文件 Markdown 协议与内存包构造。"""
+"""纯 Markdown Skill 的单文件协议校验与不可变清单构造。"""
 
 from __future__ import annotations
 
 import hashlib
-import io
 import re
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -51,15 +49,6 @@ class PersonalSkillDraft:
     name: str
     description: str
     guide: str
-
-
-@dataclass(frozen=True, slots=True)
-class PersonalSkillPackage:
-    """只含根 ``SKILL.md`` 的规范化不可变包。"""
-
-    manifest: SkillPackageManifest
-    content: bytes
-    package_sha256: str
 
 
 def parse_personal_markdown(filename: str, path: Path) -> PersonalSkillDraft:
@@ -134,9 +123,13 @@ def validate_personal_content(name: str, description: str, guide: str) -> Person
     )
 
 
-def build_personal_package(slug: str, draft: PersonalSkillDraft) -> PersonalSkillPackage:
-    """把已校验正文规范化为只含 ``SKILL.md`` 的确定性 ZIP。"""
+def build_markdown_manifest(
+    slug: str,
+    draft: PersonalSkillDraft,
+) -> tuple[SkillPackageManifest, str]:
+    """将已校验 Markdown 正文构造为纯数据库持久化的清单与 UTF-8 SHA-256 摘要（零 ZIP/MinIO）。"""
     guide_bytes = draft.guide.encode("utf-8")
+    guide_sha256 = hashlib.sha256(guide_bytes).hexdigest()
     manifest = SkillPackageManifest(
         slug=slug,
         name=draft.name,
@@ -148,23 +141,12 @@ def build_personal_package(slug: str, draft: PersonalSkillDraft) -> PersonalSkil
             PackageResource(
                 path="SKILL.md",
                 size_bytes=len(guide_bytes),
-                sha256=hashlib.sha256(guide_bytes).hexdigest(),
+                sha256=guide_sha256,
                 text=True,
             ),
         ),
     )
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        info = zipfile.ZipInfo("SKILL.md", date_time=(1980, 1, 1, 0, 0, 0))
-        info.compress_type = zipfile.ZIP_DEFLATED
-        info.external_attr = 0o100644 << 16
-        archive.writestr(info, guide_bytes)
-    content = output.getvalue()
-    return PersonalSkillPackage(
-        manifest=manifest,
-        content=content,
-        package_sha256=hashlib.sha256(content).hexdigest(),
-    )
+    return manifest, guide_sha256
 
 
 def validate_starter_prompt(value: str | None) -> str | None:
@@ -278,9 +260,8 @@ __all__ = [
     "MAX_PERSONAL_MARKDOWN_BYTES",
     "PersonalSkillDraft",
     "PersonalSkillError",
-    "PersonalSkillPackage",
     "build_admin_markdown_slug",
-    "build_personal_package",
+    "build_markdown_manifest",
     "parse_personal_markdown",
     "validate_optional_admin_slug",
     "validate_personal_content",

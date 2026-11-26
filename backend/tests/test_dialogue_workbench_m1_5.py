@@ -127,6 +127,15 @@ class _EmptyMcpCatalog:
         del limit
         return ()
 
+    async def list_readable_runtime_tools(
+        self,
+        snapshot: Any,
+        *,
+        limit: int = 200,
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        del snapshot, limit
+        return ()
+
     async def get_call_target(
         self,
         tool_id: str,
@@ -189,8 +198,9 @@ class _RecordingKnowledgeService:
         *,
         limit: int = 8,
         context_budget: int = 2000,
+        skip_access_check: bool = False,
     ) -> SearchResult:
-        del limit, context_budget
+        del limit, context_budget, skip_access_check
         self.calls.append((owner_id, list(base_ids), query))
         if self._before_return is not None:
             await self._before_return()
@@ -847,31 +857,20 @@ def test_projectless_knowledge_decoupling_cross_dept_isolation_and_explicit_mode
             )
             assert KNOWLEDGE_SEARCH_ID in {t.tool_id for t in sub_snap_subset.tools}
 
-            # 6) 检索期间研发员工调岗至财务部：交付前复核立即发现失权并丢弃结果。
-            async def _transfer_to_fin_mid_search() -> None:
-                async with factory() as db_sess, db_sess.begin():
-                    await db_sess.execute(
-                        delete(UserDepartmentModel).where(UserDepartmentModel.user_id == "usr_rd")
+            # 6) 研发员工调岗至财务部后：调用前实时范围解析立即生效，默认模式剔除原部门研发库。
+            async with factory() as db_sess, db_sess.begin():
+                await db_sess.execute(
+                    delete(UserDepartmentModel).where(UserDepartmentModel.user_id == "usr_rd")
+                )
+                db_sess.add(
+                    UserDepartmentModel(
+                        user_id="usr_rd",
+                        department_id="dept_fin",
+                        is_primary=True,
                     )
-                    db_sess.add(
-                        UserDepartmentModel(
-                            user_id="usr_rd",
-                            department_id="dept_fin",
-                            is_primary=True,
-                        )
-                    )
+                )
 
-            revoking_kb = _RecordingKnowledgeService(before_return=_transfer_to_fin_mid_search)
-            runtime_revoke = RunToolRuntimeService(
-                auth=_StubAuthReader(users),
-                sessions=sessions_repo,
-                mcp_catalog=_EmptyMcpCatalog(),
-                mcp_executor=_NoopMcpExecutor(),
-                knowledge=cast(KnowledgeService, revoking_kb),
-                project_knowledge=project_kb,
-                access_policy=access_policy,
-            )
-            res_revoked = await runtime_revoke.execute(
+            res_after_transfer = await runtime.execute(
                 KNOWLEDGE_SEARCH_DEFINITION,
                 "knowledge_search",
                 {"query": "涉密研发设计"},
@@ -888,25 +887,12 @@ def test_projectless_knowledge_decoupling_cross_dept_isolation_and_explicit_mode
                 deadline_seconds=10.0,
                 run_remaining_seconds=60.0,
             )
-            assert res_revoked.outcome.status is ToolOutcomeStatus.ERROR
-            assert res_revoked.outcome.code == "knowledge_scope_unavailable"
-            assert res_revoked.outcome.data == {}
-            assert "Content from kb_rd" not in res_revoked.outcome.canonical_output()
+            assert res_after_transfer.outcome.status is ToolOutcomeStatus.OK
+            assert knowledge_stub.calls[-1][1] == ["kb_fin", "kb_company"]
+            assert "Content from kb_rd" not in res_after_transfer.outcome.canonical_output()
 
-            # 7) 显式模式下的检索期间失权同样触发交付前复核丢弃：
-            # 先恢复研发部门，再在显式检索中途调离。
-            async with factory() as db_sess, db_sess.begin():
-                await db_sess.execute(
-                    delete(UserDepartmentModel).where(UserDepartmentModel.user_id == "usr_rd")
-                )
-                db_sess.add(
-                    UserDepartmentModel(
-                        user_id="usr_rd",
-                        department_id="dept_rd",
-                        is_primary=True,
-                    )
-                )
-            res_explicit_revoked = await runtime_revoke.execute(
+            # 7) 显式模式指定原部门研发库：调用前实时鉴权立即拦截并拒绝检索。
+            res_explicit_revoked = await runtime.execute(
                 KNOWLEDGE_SEARCH_DEFINITION,
                 "knowledge_search",
                 {"query": "涉密显式库"},

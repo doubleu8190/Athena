@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from adapter.file.model import SessionFileModel
 from adapter.file.repository import (
     count_published_session_files,
-    lock_session_file_quota,
     pending_file_to_model,
 )
 from adapter.message.converter.message import conversation_to_domain, execution_to_domain
@@ -81,7 +80,6 @@ from domain.tool import (
     RunToolCallRecord,
     ToolApprovalDecision,
     ToolCallStatus,
-    ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
     ToolRetryContext,
@@ -168,29 +166,28 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                             )
                         ).all()
                     )
-                    # 调用 id、模型名或参数列表不一致说明不是同一批次，按冲突处理。
-                    if (
-                        [record.tool_call_id for record in existing_records] != protocol_ids
-                        or [record.model_name for record in existing_records]
-                        != [item.model_name for item in command.calls]
-                        or [
-                            part
-                            for part in execution_to_domain(existing_message).parts
-                            if isinstance(part, ToolCallPart)
-                        ]
-                        != call_parts
-                    ):
-                        raise RunConflictError("run_tool_batch_conflict")
-                    if [
+                    # 调用身份、模型名、原始参数与脱敏 Skill 投影均一致才允许重放，否则按冲突拒绝。
+                    existing_call_parts = [
+                        part
+                        for part in execution_to_domain(existing_message).parts
+                        if isinstance(part, ToolCallPart)
+                    ]
+                    existing_projections = [
                         None
                         if record.safe_skill_projection is None
                         else SafeSkillApprovalProjection.model_validate(
                             record.safe_skill_projection
                         )
                         for record in existing_records
-                    ] != [item.safe_skill_projection for item in command.calls]:
+                    ]
+                    if (
+                        [(r.tool_call_id, r.model_name) for r in existing_records]
+                        != [(item.tool_call_id, item.model_name) for item in command.calls]
+                        or existing_call_parts != call_parts
+                        or existing_projections
+                        != [item.safe_skill_projection for item in command.calls]
+                    ):
                         raise RunConflictError("run_tool_batch_conflict")
-                    # replayed 标志为 True；是否仍在审批等待取决于 Run 当前状态。
                     return BeginToolCallBatchResult(
                         await self._batch_from_records(session, row.id, existing_records),
                         row.status == RunStatus.WAITING_FOR_APPROVAL.value,
@@ -652,66 +649,12 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
     async def list_pending_approvals(
         self, session_id: str, owner_id: str, run_id: str
     ) -> tuple[PendingToolApproval, ...] | None:
-        """Read the safe pending-call projection for an owner-visible Run."""
+        """读取可见 Run 的安全待审批工具投影，复用共享加载实现。"""
         async with self._session_factory() as session:
-            run_row = await session.scalar(
-                select(RunModel)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
+            run_row = await self._get_visible_run(session, session_id, owner_id, run_id)
             if run_row is None:
                 return None
-            rows = (
-                await session.scalars(
-                    select(RunToolCallModel)
-                    .where(
-                        RunToolCallModel.run_id == run_id,
-                        RunToolCallModel.session_id == session_id,
-                        RunToolCallModel.status == ToolCallStatus.PENDING_APPROVAL.value,
-                    )
-                    .order_by(RunToolCallModel.ordinal)
-                )
-            ).all()
-            if not rows:
-                return ()
-            skill_projections: list[SafeSkillApprovalProjection | None] = []
-            for row in rows:
-                if row.requested_at is None:
-                    raise RuntimeError("run_tool_call_requested_at_missing")
-                skill_projections.append(await self._refresh_safe_skill_projection(session, row))
-            enriched = await self._enrich_pending_approvals_in_session(
-                session,
-                [
-                    (row, run_row, skill_proj)
-                    for row, skill_proj in zip(rows, skill_projections, strict=True)
-                ],
-            )
-            pending: list[PendingToolApproval] = []
-            for row, skill_proj, (display_name, approval_summary, formatted_arguments) in zip(
-                rows, skill_projections, enriched, strict=True
-            ):
-                assert row.requested_at is not None
-                pending.append(
-                    PendingToolApproval(
-                        call_id=row.id,
-                        batch_message_id=row.call_message_id,
-                        ordinal=row.ordinal,
-                        model_name=row.model_name,
-                        tool_kind=(None if row.tool_kind is None else ToolKind(row.tool_kind)),
-                        requested_at=row.requested_at,
-                        safe_skill_projection=skill_proj,
-                        display_name=display_name,
-                        approval_summary=approval_summary,
-                        formatted_arguments=formatted_arguments,
-                    )
-                )
-        return tuple(pending)
+            return await self._load_pending_approvals_in_session(session, run_row, session_id)
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
         """对外入口：原子持久化工具调用结果与产物发布。"""
@@ -790,7 +733,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 ):
                     return None
                 if pending_artifacts:
-                    await lock_session_file_quota(session, row.session_id)
+                    # _lock_worker_run 已锁 SessionModel FOR UPDATE，直接校验配额即可串行。
                     count = await count_published_session_files(session, row.session_id)
                     if count + len(pending_artifacts) > 100:
                         raise ValueError("session_file_quota_exceeded")
@@ -882,17 +825,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         if after_ordinal < 0 or not 1 <= limit <= 100:
             raise ValueError("run_tool_call_page_invalid")
         async with self._session_factory() as session:
-            visible = await session.scalar(
-                select(RunModel.id)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
+            visible = await self._get_visible_run(session, session_id, owner_id, run_id)
             if visible is None:
                 return None
             rows = (
@@ -944,8 +877,9 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 if row.result_message_id is None
                 else await session.get(ExecutionMessageModel, row.result_message_id)
             )
-        if call_message is None:
-            raise ValueError("run_tool_call_message_missing")
+            if call_message is None:
+                raise ValueError("run_tool_call_message_missing")
+            safe_skill_projection = await self._refresh_safe_skill_projection(session, row)
         call_domain = execution_to_domain(call_message)
         call_part = next(
             (
@@ -969,8 +903,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             )
             output = None if result_part is None else result_part.output
             artifacts = () if result_part is None else result_part.artifacts
-        async with self._session_factory() as session:
-            safe_skill_projection = await self._refresh_safe_skill_projection(session, row)
         return RunToolCallDetails(
             tool_call_to_domain(row),
             {} if call_part is None else dict(call_part.arguments),
@@ -987,17 +919,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
     ) -> tuple[ToolRetryContext, ...] | None:
         """Read only safe unknown summaries from the direct source Run."""
         async with self._session_factory() as session:
-            run = await session.scalar(
-                select(RunModel)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunModel.id == run_id,
-                    RunModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
-                )
-            )
+            run = await self._get_visible_run(session, session_id, owner_id, run_id)
             if run is None:
                 return None
             if run.retry_of_run_id is None:
@@ -1114,6 +1036,25 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         return artifacts
 
     @staticmethod
+    def _serialize_skill_artifacts(
+        artifacts: tuple[PendingSessionFile, ...],
+    ) -> list[dict[str, object]]:
+        """将待发布产物列表序列化为 SkillExecutionModel.result_artifacts 持久化格式。"""
+        return [
+            SkillExecutionArtifact(
+                file_id=artifact.id,
+                filename=artifact.filename,
+                label=artifact.label,
+                mime_type=artifact.mime_type,
+                size_bytes=artifact.size_bytes,
+                sha256=artifact.sha256,
+                object_key=artifact.object_key,
+                output_index=artifact.output_index,
+            ).model_dump(mode="json")
+            for artifact in artifacts
+        ]
+
+    @staticmethod
     def _validate_delivery_message(
         record: RunToolCallModel,
         message: ConversationMessageDraft | None,
@@ -1124,35 +1065,21 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         del record
         # 子 Run（depth >= 1）的产物仅随 TOOL 执行消息落库并在唤醒父 Run 时汇总，
         # 不得附带公开交付消息。
-        if run.depth >= 1:
-            if message is not None:
-                raise RunStateError("run_tool_delivery_message_invalid")
-            return
-        if not artifacts:
+        if run.depth >= 1 or not artifacts:
             if message is not None:
                 raise RunStateError("run_tool_delivery_message_invalid")
             return
         if message is None:
             raise RunStateError("run_tool_delivery_message_invalid")
-        references = tuple(
-            ArtifactFileRef(
+        file_parts = tuple(part for part in message.parts if isinstance(part, FileRefPart))
+        expected_parts = tuple(
+            FileRefPart(
                 file_id=file.id,
                 filename=file.filename,
-                label=file.label,
                 mime_type=file.mime_type,
                 size_bytes=file.size_bytes,
             )
             for file in artifacts
-        )
-        file_parts = tuple(part for part in message.parts if isinstance(part, FileRefPart))
-        expected_parts = tuple(
-            FileRefPart(
-                file_id=item.file_id,
-                filename=item.filename,
-                mime_type=item.mime_type,
-                size_bytes=item.size_bytes,
-            )
-            for item in references
         )
         if (
             message.session_id != run.session_id
@@ -1176,11 +1103,17 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             return False
         domain = conversation_to_domain(existing)
         return (
-            domain.session_id == message.session_id
-            and domain.role is message.role
-            and domain.status is message.status
-            and domain.parts == message.parts
-            and domain.run_id == message.run_id
+            domain.session_id,
+            domain.role,
+            domain.status,
+            domain.parts,
+            domain.run_id,
+        ) == (
+            message.session_id,
+            message.role,
+            message.status,
+            message.parts,
+            message.run_id,
         )
 
     @staticmethod
@@ -1218,19 +1151,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         skill_execution.log_error_code = completion.log_error_code
         skill_execution.error_code = completion.error_code
         skill_execution.cleanup_error_code = completion.cleanup_error_code
-        skill_execution.result_artifacts = [
-            SkillExecutionArtifact(
-                file_id=artifact.id,
-                filename=artifact.filename,
-                label=artifact.label,
-                mime_type=artifact.mime_type,
-                size_bytes=artifact.size_bytes,
-                sha256=artifact.sha256,
-                object_key=artifact.object_key,
-                output_index=artifact.output_index,
-            ).model_dump(mode="json")
-            for artifact in artifacts
-        ]
+        skill_execution.result_artifacts = RunToolCallsMixin._serialize_skill_artifacts(artifacts)
         skill_execution.finished_at = completion.finished_at
         await session.flush()
 
@@ -1241,28 +1162,24 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         artifacts: tuple[PendingSessionFile, ...],
     ) -> bool:
         """比较脚本审计终态，重放不能替换日志、错误或产物集合。"""
-        expected_artifacts = [
-            SkillExecutionArtifact(
-                file_id=artifact.id,
-                filename=artifact.filename,
-                label=artifact.label,
-                mime_type=artifact.mime_type,
-                size_bytes=artifact.size_bytes,
-                sha256=artifact.sha256,
-                object_key=artifact.object_key,
-                output_index=artifact.output_index,
-            ).model_dump(mode="json")
-            for artifact in artifacts
-        ]
         return (
-            row.status == completion.status.value
-            and row.log_object_key == completion.log_object_key
-            and row.log_truncated == completion.log_truncated
-            and row.log_error_code == completion.log_error_code
-            and row.error_code == completion.error_code
-            and row.cleanup_error_code == completion.cleanup_error_code
-            and row.result_artifacts == expected_artifacts
-            and row.finished_at == completion.finished_at
+            row.status,
+            row.log_object_key,
+            row.log_truncated,
+            row.log_error_code,
+            row.error_code,
+            row.cleanup_error_code,
+            row.result_artifacts,
+            row.finished_at,
+        ) == (
+            completion.status.value,
+            completion.log_object_key,
+            completion.log_truncated,
+            completion.log_error_code,
+            completion.error_code,
+            completion.cleanup_error_code,
+            RunToolCallsMixin._serialize_skill_artifacts(artifacts),
+            completion.finished_at,
         )
 
     @staticmethod
@@ -1302,70 +1219,41 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         )
 
     @staticmethod
-    async def _refresh_safe_skill_projection(
-        session: AsyncSession,
-        row: RunToolCallModel,
-    ) -> SafeSkillApprovalProjection | None:
-        """按冻结摘要重新核对输入文件，不读取当前 Skill 管理配置。"""
-        if row.safe_skill_projection is None:
-            return None
-        projection = SafeSkillApprovalProjection.model_validate(row.safe_skill_projection)
-        if not projection.input_files:
-            return projection
-        file_ids = tuple(item.file_id for item in projection.input_files)
-        visible_ids = set(
-            (
-                await session.scalars(
-                    select(SessionFileModel.id).where(
-                        SessionFileModel.session_id == row.session_id,
-                        SessionFileModel.id.in_(file_ids),
-                    )
-                )
-            ).all()
-        )
-        files = tuple(
-            item.model_copy(update={"available": item.file_id in visible_ids})
-            for item in projection.input_files
-        )
-        all_available = all(item.available for item in files)
-        return projection.model_copy(
-            update={
-                "input_files": files,
-                "can_approve": projection.can_approve and all_available,
-                "unavailable_reason": (
-                    projection.unavailable_reason
-                    if all_available
-                    else "skill_approval_input_unavailable"
-                ),
-            }
-        )
-
-    @staticmethod
     async def _artifact_rows_match(
         session: AsyncSession,
         record: RunToolCallModel,
         artifacts: tuple[PendingSessionFile, ...],
     ) -> bool:
         """确认已完成调用已发布的文件 ID 和顺序与本次重放命令一致。"""
-        rows = list(
+        rows = (
+            await session.scalars(
+                select(SessionFileModel)
+                .where(SessionFileModel.source_call_id == record.id)
+                .order_by(SessionFileModel.output_index)
+            )
+        ).all()
+        return [
             (
-                await session.scalars(
-                    select(SessionFileModel)
-                    .where(SessionFileModel.source_call_id == record.id)
-                    .order_by(SessionFileModel.output_index)
-                )
-            ).all()
-        )
-        if len(rows) != len(artifacts):
-            return False
-        return all(
-            row.id == artifact.id
-            and row.filename == artifact.filename
-            and row.label == artifact.label
-            and row.mime_type == artifact.mime_type
-            and row.size_bytes == artifact.size_bytes
-            and row.sha256 == artifact.sha256
-            and row.object_key == artifact.object_key
-            and row.output_index == artifact.output_index
-            for row, artifact in zip(rows, artifacts, strict=True)
-        )
+                row.id,
+                row.filename,
+                row.label,
+                row.mime_type,
+                row.size_bytes,
+                row.sha256,
+                row.object_key,
+                row.output_index,
+            )
+            for row in rows
+        ] == [
+            (
+                artifact.id,
+                artifact.filename,
+                artifact.label,
+                artifact.mime_type,
+                artifact.size_bytes,
+                artifact.sha256,
+                artifact.object_key,
+                artifact.output_index,
+            )
+            for artifact in artifacts
+        ]

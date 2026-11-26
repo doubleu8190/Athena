@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.auth_middleware import AuthPrecheckMiddleware
 from api.knowledge import build_knowledge_router
 from api.security import get_current_auth
 from app.knowledge.service import KnowledgeInputError, KnowledgeNotFoundError, KnowledgeService
@@ -225,6 +226,7 @@ def _context(owner_id: str) -> AuthContext:
 
 def _app(authenticated: bool = True) -> FastAPI:
     app = FastAPI()
+    app.add_middleware(AuthPrecheckMiddleware, fastapi_app=app)
     # 上传校验继续使用真实解析器，锁定端口注入后的校验行为。
     app.include_router(
         build_knowledge_router(cast(KnowledgeService, ApiService()), LocalDocumentParser())
@@ -433,8 +435,8 @@ def test_missing_source_maps_to_not_found_not_storage_unavailable() -> None:
 @pytest.mark.parametrize(
     ("stage", "conflict_code"),
     [
-        ("reserve", "document_update_in_progress"),
-        ("reserve", "idempotency_conflict"),
+        ("preflight", "document_update_in_progress"),
+        ("preflight", "idempotency_conflict"),
         ("replace", "document_update_in_progress"),
         ("replace", "idempotency_conflict"),
     ],
@@ -443,10 +445,10 @@ def test_replace_file_document_conflicts_return_http_409(
     stage: str,
     conflict_code: str,
 ) -> None:
-    """文件替换在预留或提交阶段触发并发更新/幂等冲突时，API 必须返回 409 而非 422。"""
+    """文件替换在预检或提交阶段触发并发更新/幂等冲突时，API 必须返回 409 而非 422。"""
     from knowledge_fakes import MemoryOriginalStore
 
-    from domain.knowledge.ports import FileUploadReservation, KnowledgeRepositoryPort
+    from domain.knowledge.ports import KnowledgeRepositoryPort
 
     now = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -463,17 +465,11 @@ def test_replace_file_document_conflicts_return_http_409(
         ) -> Document | None:
             return Document(document_id, owner_id, base_id, "Doc", None, None, now, now)
 
-        async def reserve_file_upload(self, **kwargs: object) -> FileUploadReservation:
-            if stage == "reserve":
+        async def preflight_file_upload(self, **kwargs: object) -> tuple[Document, str] | None:
+            del kwargs
+            if stage == "preflight":
                 raise ValueError(conflict_code)
-            return FileUploadReservation(
-                document_id=str(kwargs["document_id"]),
-                version_id=str(kwargs["version_id"]),
-                reservation_token=str(kwargs["reservation_token"]),
-                storage_key=str(kwargs["storage_key"]),
-                source_id=str(kwargs["source_id"]),
-                job_id=str(kwargs["job_id"]),
-            )
+            return None
 
         async def replace_file_document(self, **kwargs: object) -> tuple[Document, str]:
             del kwargs

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
 from app.org.feishu_sync import FeishuOrgSyncService
+from common.date import as_utc
 from common.ids import now_utc
 from domain.auth import AuthContext, CurrentSessionReader, UserRole, UserStatus
 from domain.org import (
@@ -18,12 +19,6 @@ from domain.org import (
     OrgUserDetail,
     OrgUserPage,
 )
-
-
-def _utc_value(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 class OrgService:
@@ -93,7 +88,7 @@ class OrgService:
             user_id,
             role=role,
             managed_departments=managed_departments,
-            now=_utc_value(self._clock()),
+            now=as_utc(self._clock()),
         )
 
     async def update_user_status(
@@ -109,7 +104,7 @@ class OrgService:
             actor,
             user_id,
             status=status,
-            now=_utc_value(self._clock()),
+            now=as_utc(self._clock()),
         )
 
     async def sync_feishu_org(self, actor: AuthContext) -> FeishuSyncSummary:
@@ -124,7 +119,7 @@ class OrgService:
         current = await self._auth_reader.get_current_session_user(
             actor.user.id,
             actor.session_id,
-            _utc_value(self._clock()),
+            as_utc(self._clock()),
         )
         if current is None or current.role is not UserRole.SUPER_ADMIN:
             raise OrgAuthorizationError("admin_required")

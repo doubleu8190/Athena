@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
+from common.date import as_utc
 from common.ids import now_utc
 from domain.auth import AuthProvider, User, UserRole, UserStatus
 from domain.org import (
@@ -143,7 +144,7 @@ def build_mock_seed_data(
     tuple[MockDeptAdminScopeSeed, ...],
 ]:
     """构造非生产 Mock 组织树、6 个标准角色测试账号及其部门归属与分权范围。"""
-    current = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+    current = as_utc(now)
     users: list[User] = []
     bindings: list[MockUserDepartmentSeed] = []
     for user_id, display_name, email, role, employee_no, job_title, dept_id in MOCK_USER_SPECS:

@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.types import Message, Send
 
@@ -29,7 +29,7 @@ from api.dto.run import (
     RunToolCallDetailResponse,
     RunToolCallListResponse,
 )
-from api.security import DEFAULT_COOKIE_NAME, CurrentAuth, verify_request_origin
+from api.security import DEFAULT_COOKIE_NAME, CurrentAuth
 from app.run.service import InvalidRunInputError, RunService
 from app.run.stream import RunStreamService
 from domain.run.model import MAX_RUN_SSE_EVENT_BYTES, MAX_RUN_SSE_SNAPSHOT_BYTES
@@ -81,7 +81,6 @@ def build_run_router(
     router = APIRouter(
         prefix="/api/v1/sessions/{session_id}/runs",
         tags=["runs"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.post("", response_model=RunResponse, status_code=status.HTTP_201_CREATED)

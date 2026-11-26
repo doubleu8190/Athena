@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import uuid4
 
 from app.message.converter.result import (
@@ -15,6 +15,7 @@ from app.message.model.result import (
     ConversationMessagePageResult,
     ConversationMessageResult,
 )
+from common.date import as_utc
 from common.ids import now_utc
 from domain.message import (
     ArtifactFileRef,
@@ -48,13 +49,6 @@ _FINAL_STATUSES = {
 def _default_message_id() -> str:
     """生成消息主键。"""
     return f"msg_{uuid4().hex}"
-
-
-def _utc_value(value: datetime) -> datetime:
-    """把时钟输出规范化为 UTC。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def _require_identifier(
@@ -233,7 +227,7 @@ class MessageService:
         _require_identifier(run_id, "invalid_run_id")
         _require_identifier(client_message_id, "invalid_client_message_id")
         _validate_conversation_parts(parts)
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         message = await self._repository.append_conversation(
             ConversationMessageDraft(
                 id=self._id_factory(),
@@ -279,7 +273,7 @@ class MessageService:
         if status not in _FINAL_STATUSES:
             raise InvalidMessageError("message_status_not_supported")
         _validate_conversation_parts(parts)
-        current = _utc_value(self._clock())
+        current = as_utc(self._clock())
         message = await self._repository.append_conversation(
             ConversationMessageDraft(
                 id=self._id_factory(),
@@ -338,7 +332,7 @@ class MessageService:
                 parts=parts,
                 tool_call_id=tool_call_id,
                 source_message_id=source_message_id,
-                created_at=_utc_value(self._clock()),
+                created_at=as_utc(self._clock()),
                 metadata=metadata or MessageMetadata(),
             )
         )

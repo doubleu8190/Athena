@@ -24,6 +24,7 @@ class RunDetailsResult:
     subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
     pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
     pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
+    assistant_message_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

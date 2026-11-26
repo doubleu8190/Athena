@@ -328,3 +328,76 @@ def test_corrupt_secret_ciphertext_fails_get_list_and_update_closed() -> None:
             await engine.dispose()
 
     _run(scenario())
+
+
+def test_repository_writes_avoid_redundant_secret_decryption() -> None:
+    """验证 5 个写路径不执行刚加密又解密或单事务双重解密，且返回准确的 secret_names。"""
+
+    async def scenario() -> None:
+        engine, _session_factory, repository, actor = await _setup()
+        open_calls = 0
+        original_open = repository._secret_cipher.open
+
+        def counted_open(*args: Any, **kwargs: Any) -> Any:
+            nonlocal open_calls
+            open_calls += 1
+            return original_open(*args, **kwargs)
+
+        repository._secret_cipher.open = counted_open  # type: ignore[method-assign]
+        try:
+            initial = McpServerWrite(
+                "mcp_once",
+                "Once",
+                StdioConfig("stdio", "/opt/mcp/server"),
+                {"B_TOKEN": "b", "A_TOKEN": "a"},
+            )
+            created = await repository.create_with_tools(actor, initial, ())
+            assert tuple(item.name for item in created.secret_metadata) == ("A_TOKEN", "B_TOKEN")
+            assert open_calls == 0
+
+            open_calls = 0
+            toggled = await repository.set_enabled(actor, initial.id, False)
+            assert tuple(item.name for item in toggled.secret_metadata) == ("A_TOKEN", "B_TOKEN")
+            assert open_calls == 1
+
+            open_calls = 0
+            synced = await repository.sync_discovered_tools(actor, initial.id, 2, ())
+            assert tuple(item.name for item in synced.secret_metadata) == ("A_TOKEN", "B_TOKEN")
+            assert open_calls == 1
+
+            open_calls = 0
+            replaced = await repository.replace_with_tools(
+                actor,
+                initial.id,
+                3,
+                McpServerWrite(
+                    initial.id,
+                    "Once Updated",
+                    StdioConfig("stdio", "/opt/mcp/server"),
+                    {"C_TOKEN": "c"},
+                ),
+                (),
+            )
+            assert tuple(item.name for item in replaced.secret_metadata) == ("C_TOKEN",)
+            assert open_calls == 1
+
+            open_calls = 0
+            patched = await repository.patch_server(
+                actor,
+                initial.id,
+                4,
+                McpServerWrite(
+                    initial.id,
+                    "Once Patched",
+                    StdioConfig("stdio", "/opt/mcp/server"),
+                    {"D_TOKEN": "d", "C_TOKEN": "c"},
+                ),
+                enabled=True,
+                sync_grants=False,
+            )
+            assert tuple(item.name for item in patched.secret_metadata) == ("C_TOKEN", "D_TOKEN")
+            assert open_calls == 1
+        finally:
+            await engine.dispose()
+
+    _run(scenario())

@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.auth.model.auth import AuthSessionModel, UserModel
+from common.date import as_utc
 from domain.auth import AuthProvider, AuthSession, User, UserRole, UserStatus
-
-
-def _as_utc(value: datetime) -> datetime:
-    """补齐 SQLite 等测试驱动丢失的 UTC 时区信息。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def user_to_domain(row: UserModel) -> User:
@@ -30,10 +22,10 @@ def user_to_domain(row: UserModel) -> User:
         employee_no=row.employee_no,
         avatar_url=row.avatar_url,
         job_title=row.job_title,
-        last_synced_at=(_as_utc(row.last_synced_at) if row.last_synced_at is not None else None),
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
-        deleted_time=(_as_utc(row.deleted_time) if row.deleted_time is not None else None),
+        last_synced_at=(as_utc(row.last_synced_at) if row.last_synced_at is not None else None),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+        deleted_time=(as_utc(row.deleted_time) if row.deleted_time is not None else None),
     )
 
 
@@ -43,9 +35,9 @@ def auth_session_to_domain(row: AuthSessionModel) -> AuthSession:
         id=row.id,
         user_id=row.user_id,
         token_hash=row.token_hash,
-        expires_at=_as_utc(row.expires_at),
-        revoked_time=(_as_utc(row.revoked_time) if row.revoked_time is not None else None),
-        created_at=_as_utc(row.created_at),
+        expires_at=as_utc(row.expires_at),
+        revoked_time=(as_utc(row.revoked_time) if row.revoked_time is not None else None),
+        created_at=as_utc(row.created_at),
     )
 
 

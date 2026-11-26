@@ -11,8 +11,6 @@ from adapter.knowledge.model import (
     KnowledgeJobModel,
     KnowledgeRequestModel,
     KnowledgeSourceModel,
-    KnowledgeUploadReservationModel,
-    KnowledgeUploadSlotModel,
     KnowledgeVersionModel,
     ProjectKnowledgeBaseModel,
 )
@@ -62,8 +60,6 @@ __all__ = [
     "KnowledgeJobModel",
     "KnowledgeRequestModel",
     "KnowledgeSourceModel",
-    "KnowledgeUploadReservationModel",
-    "KnowledgeUploadSlotModel",
     "KnowledgeVersionModel",
     "ProjectKnowledgeBaseModel",
     "ProjectModel",

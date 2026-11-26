@@ -16,7 +16,6 @@ from api.auth_middleware import AuthPrecheckMiddleware
 from api.security import AdminAuth, CurrentAuth, get_current_auth, require_admin
 from api.upload_middleware import UploadAdmissionMiddleware
 from domain.auth import AuthContext, Authenticator, User, UserRole, UserStatus
-from domain.knowledge.ports import KnowledgeUploadSlotRepository
 from main import create_app
 
 NOW = datetime(2026, 11, 23, tzinfo=UTC)
@@ -123,23 +122,8 @@ def test_public_whitelist_and_health_and_options_pass_through() -> None:
     asyncio.run(scenario())
 
 
-def test_protected_routes_reject_unauthenticated_before_downstream_disk_and_slot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """未登录或无效 Cookie 在触碰下游路由、磁盘检查、上传槽位和读体之前返回 401。"""
-    monkeypatch.setattr(
-        "api.upload_middleware.shutil.disk_usage",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("disk_usage must not be checked before auth")
-        ),
-    )
-
-    class _Slots:
-        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
-            raise AssertionError("slot must not be acquired before auth")
-
-        async def release_upload_slot(self, token: str) -> None:
-            raise AssertionError("unacquired slot must not be released")
+def test_protected_routes_reject_unauthenticated_before_downstream_and_slot() -> None:
+    """未登录或无效 Cookie 在触碰下游路由、上传槽位和读体之前返回 401。"""
 
     async def scenario() -> None:
         auth = _CountingAuthenticator()
@@ -150,10 +134,7 @@ def test_protected_routes_reject_unauthenticated_before_downstream_disk_and_slot
             del scope, receive, send
             app_calls += 1
 
-        upload_layer = UploadAdmissionMiddleware(
-            downstream,
-            cast(KnowledgeUploadSlotRepository, _Slots()),
-        )
+        upload_layer = UploadAdmissionMiddleware(downstream)
         auth_layer = AuthPrecheckMiddleware(upload_layer, authenticator=auth)
 
         async def fail_receive() -> dict[str, object]:
@@ -185,6 +166,7 @@ def test_protected_routes_reject_unauthenticated_before_downstream_disk_and_slot
             assert responses[-1]["body"] == b'{"detail":"not_authenticated"}'
 
         assert app_calls == 0
+        assert upload_layer._local_active["knowledge"] == 0
         assert auth.seen_tokens == ["expired_or_invalid"]
 
     asyncio.run(scenario())
@@ -496,17 +478,8 @@ def test_dependency_overrides_bypass_precheck_while_keeping_origin_check() -> No
         assert auth.seen_tokens == []
 
 
-def test_create_app_runs_auth_precheck_before_upload_admission(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_create_app_runs_auth_precheck_before_upload_admission() -> None:
     """create_app 中外层 AuthPrecheckMiddleware 先于内层 UploadAdmissionMiddleware 执行。"""
-    monkeypatch.setattr(
-        "api.upload_middleware.shutil.disk_usage",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("disk_usage must not be called for unauthenticated upload")
-        ),
-    )
-
     auth_service = make_auth_service()
     provision_local_user_sync(auth_service, email="member@example.com", password=TEST_PASSWORD)
     app = create_app(auth_service=auth_service)

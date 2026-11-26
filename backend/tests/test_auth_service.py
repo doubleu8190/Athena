@@ -474,29 +474,6 @@ def test_admin_promotion_is_idempotent_and_requires_active_existing_account() ->
     _run(scenario())
 
 
-def test_admin_revalidation_reads_current_role_and_rejects_revoked_session() -> None:
-    async def scenario() -> None:
-        service, repository, _, _ = _service()
-        await service.provision_local_user("user@example.com", "long-enough-password")
-        issued = await service.login("user@example.com", "long-enough-password")
-        context = await service.authenticate(issued.token)
-        assert context is not None
-        assert await service.revalidate_admin(context) is None
-
-        # dept_admin 不得通过 super_admin 复核。
-        repository.users[context.user.id] = replace(context.user, role=UserRole.DEPT_ADMIN)
-        assert await service.revalidate_admin(context) is None
-
-        repository.users[context.user.id] = replace(context.user, role=UserRole.SUPER_ADMIN)
-        current = await service.revalidate_admin(context)
-        assert current is not None and current.role is UserRole.SUPER_ADMIN
-
-        await service.logout(issued.token)
-        assert await service.revalidate_admin(context) is None
-
-    _run(scenario())
-
-
 def test_change_password_rate_limits_failures_and_resets_on_success() -> None:
     """改密按 user_id 限制连续失败次数（默认 5 次触发限流），改密成功后重置计数。"""
 

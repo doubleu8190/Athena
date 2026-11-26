@@ -1,114 +1,87 @@
-"""Upload/service integration against the real local original store."""
+"""文件上传、只读 preflight 预检、幂等与仓储事务测试。"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
 from knowledge_fakes import MemoryOriginalStore
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from adapter.access.model import ResourceVisibilityGrantModel
+from adapter.auth.model import UserModel
+from adapter.base import Base
+from adapter.knowledge.model import (
+    KnowledgeBaseModel,
+    KnowledgeDocumentModel,
+    KnowledgeJobModel,
+    KnowledgeRequestModel,
+    KnowledgeSourceModel,
+    KnowledgeVersionModel,
+)
+from adapter.knowledge.repository import KnowledgeRepository
+from adapter.org.model import DepartmentModel
 from app.knowledge.service import KnowledgeService
-from domain.knowledge.model import Document, KnowledgeBase
-from domain.knowledge.ports import FileUploadReservation, KnowledgeRepositoryPort
+from domain.access import VisibilityGrantInput
+from domain.knowledge.model import Document, KnowledgeBase, OriginalStorageUnavailableError
+from domain.knowledge.ports import KnowledgeRepositoryPort
 
 
 class _UploadRepository:
     def __init__(self) -> None:
         self.bases: dict[str, KnowledgeBase] = {}
-        self.requests: dict[tuple[str, str], tuple[str, Document, str]] = {}
+        self.requests: dict[tuple[str, str, str], tuple[str, Document, str]] = {}
+        self.documents: dict[str, Document] = {}
         self.content_hashes: list[str] = []
         self.referenced: set[str] = set()
         self.storage_keys: list[str] = []
-        self.reservations: dict[tuple[str, str, str], FileUploadReservation] = {}
-        self.reservation_hashes: dict[tuple[str, str, str], str] = {}
-        self._reserved_sizes: dict[str, int] = {}
-        self._reservation_fences: dict[str, int] = {}
-        self._expired_reservations: set[str] = set()
-        self.reserve_calls = 0
+        self.preflight_calls = 0
         self.quota_limit_bytes = 1024 * 1024
         self.committed_sizes: dict[str, int] = {}
         self.fail_next = False
         self.fail_after_commit = False
 
-    async def reserve_file_upload(self, **values: Any) -> FileUploadReservation:
-        self.reserve_calls += 1
-        request = (values["owner_id"], values["operation"], values["request_key"])
-        existing = self.requests.get((values["owner_id"], values["request_key"]))
+    async def preflight_file_upload(
+        self,
+        *,
+        owner_id: str,
+        operation: str,
+        request_key: str,
+        request_hash: str,
+        base_id: str,
+        document_id: str | None,
+        size_bytes: int,
+    ) -> tuple[Document, str] | None:
+        self.preflight_calls += 1
+        existing = self.requests.get((owner_id, operation, request_key))
         if existing is not None:
-            request_hash, document, version_id = existing
-            if request_hash != values["request_hash"]:
+            saved_hash, document, version_id = existing
+            if saved_hash != request_hash:
                 raise ValueError("idempotency_conflict")
-            return FileUploadReservation(
-                None, None, None, document.id, version_id, None, replay_document=document
-            )
-        previous = self.reservations.get(request)
-        if previous is not None:
-            if self.reservation_hashes[request] != values["request_hash"]:
-                raise ValueError("upload_reservation_fenced")
-            if previous.reservation_token in self._expired_reservations:
-                raise ValueError("knowledge_upload_reservation_stale")
-            return previous
-        used_bytes = sum(self.committed_sizes.values()) + sum(self._reserved_sizes.values())
-        if used_bytes + values["size_bytes"] > self.quota_limit_bytes:
-            raise ValueError("knowledge_quota_exceeded")
-        reservation = FileUploadReservation(
-            values["reservation_token"],
-            values["storage_key"],
-            values["source_id"],
-            values["document_id"],
-            values["version_id"],
-            values["job_id"],
-        )
-        self.reservations[request] = reservation
-        self.reservation_hashes[request] = values["request_hash"]
-        self._reserved_sizes[values["reservation_token"]] = values["size_bytes"]
-        return reservation
+            return document, version_id
+        if base_id not in self.bases:
+            raise LookupError("knowledge_base_not_found")
+        if operation == "replace":
+            if document_id is None or document_id not in self.documents:
+                raise LookupError("document_not_found")
+            if self.documents[document_id].pending_version_id is not None:
+                raise ValueError("document_update_in_progress")
+        if sum(self.committed_sizes.values()) + size_bytes > self.quota_limit_bytes:
+            raise ValueError("knowledge_storage_quota_exceeded")
+        return None
 
-    async def release_file_upload_reservation(self, token: str) -> None:
-        self._reserved_sizes.pop(token, None)
-        self.reservations = {
-            request: reservation
-            for request, reservation in self.reservations.items()
-            if reservation.reservation_token != token
-        }
-        self.reservation_hashes = {
-            request: request_hash
-            for request, request_hash in self.reservation_hashes.items()
-            if request in self.reservations
-        }
-
-    async def list_expired_upload_reservations(
-        self, *, limit: int = 20
-    ) -> tuple[FileUploadReservation, ...]:
-        expired: list[FileUploadReservation] = []
-        for reservation in self.reservations.values():
-            token = reservation.reservation_token
-            if token is None or token not in self._expired_reservations:
-                continue
-            expired.append(reservation)
-            if len(expired) >= limit:
-                break
-        return tuple(expired)
-
-    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool:
-        if reservation_token not in self._expired_reservations:
-            return False
-        await self.release_file_upload_reservation(reservation_token)
-        self._expired_reservations.discard(reservation_token)
-        return True
-
-    def retained_storage_keys(self) -> set[str]:
-        return self.referenced.union(
-            reservation.storage_key
-            for reservation in self.reservations.values()
-            if reservation.storage_key is not None
-        )
-
-    async def create_base(self, item: KnowledgeBase) -> KnowledgeBase:
+    async def create_base(
+        self,
+        item: KnowledgeBase,
+        *,
+        visibility_grants: Sequence[VisibilityGrantInput] = (),
+    ) -> KnowledgeBase:
+        del visibility_grants
         self.bases[item.id] = item
         return item
 
@@ -116,8 +89,20 @@ class _UploadRepository:
         base = self.bases.get(base_id)
         return base if base and base.owner_id == owner_id else None
 
+    async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None:
+        return self.bases.get(base_id)
+
+    async def find_referenced_storage_keys(self, storage_keys: Sequence[str]) -> set[str]:
+        return {key for key in storage_keys if key in self.referenced}
+
     async def create_file_document(self, **values: Any) -> tuple[Document, str]:
-        req = (values["owner_id"], values["request_key"])
+        return await self._save_file("create", **values)
+
+    async def replace_file_document(self, **values: Any) -> tuple[Document, str]:
+        return await self._save_file("replace", **values)
+
+    async def _save_file(self, operation: str, **values: Any) -> tuple[Document, str]:
+        req = (values["owner_id"], operation, values["request_key"])
         previous = self.requests.get(req)
         if previous:
             request_hash, document, version_id = previous
@@ -127,69 +112,61 @@ class _UploadRepository:
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("simulated_database_failure")
-        if values["reservation_token"] in self._expired_reservations:
-            raise ValueError("knowledge_upload_reservation_stale")
-        document = Document(
-            values["document_id"],
-            values["owner_id"],
-            values["base_id"],
-            values["title"],
-            None,
-            values["version_id"],
-            values["at"],
-            values["at"],
-        )
+        if operation == "replace":
+            current = self.documents[values["document_id"]]
+            document = replace(
+                current,
+                pending_version_id=values["version_id"],
+                updated_at=values["at"],
+            )
+        else:
+            document = Document(
+                values["document_id"],
+                values["owner_id"],
+                values["base_id"],
+                values["title"],
+                None,
+                values["version_id"],
+                values["at"],
+                values["at"],
+            )
+        self.documents[document.id] = document
         self.requests[req] = (values["request_hash"], document, values["version_id"])
         self.content_hashes.append(values["sha256"])
         self.referenced.add(values["storage_key"])
         self.storage_keys.append(values["storage_key"])
         self.committed_sizes[values["storage_key"]] = values["size_bytes"]
-        self.reservations = {
-            request: reservation
-            for request, reservation in self.reservations.items()
-            if reservation.reservation_token != values["reservation_token"]
-        }
-        self.reservation_hashes = {
-            request: request_hash
-            for request, request_hash in self.reservation_hashes.items()
-            if request in self.reservations
-        }
-        self._reserved_sizes.pop(values["reservation_token"], None)
         if self.fail_after_commit:
             self.fail_after_commit = False
             raise RuntimeError("simulated_commit_result_unknown")
         return document, values["version_id"]
 
-    async def replace_file_document(self, **values: Any) -> tuple[Document, str]:
-        return await self.create_file_document(**values)
-
     async def is_storage_key_referenced(self, key: str) -> bool:
         return key in self.referenced
 
     async def get_document(self, owner_id: str, base_id: str, document_id: str) -> Document | None:
-        for _, document, _ in self.requests.values():
-            if (
-                document.owner_id == owner_id
-                and document.knowledge_base_id == base_id
-                and document.id == document_id
-            ):
-                return document
+        document = self.documents.get(document_id)
+        if (
+            document is not None
+            and document.owner_id == owner_id
+            and document.knowledge_base_id == base_id
+        ):
+            return document
         return None
 
     async def rename_document(
         self, owner_id: str, base_id: str, document_id: str, title: str, at: datetime
     ) -> Document | None:
         del at
-        for request, (request_hash, document, version_id) in self.requests.items():
-            if (
-                document.owner_id == owner_id
-                and document.knowledge_base_id == base_id
-                and document.id == document_id
-            ):
-                renamed = replace(document, title=title)
+        current = await self.get_document(owner_id, base_id, document_id)
+        if current is None:
+            return None
+        renamed = replace(current, title=title)
+        self.documents[document_id] = renamed
+        for request, (request_hash, document, version_id) in list(self.requests.items()):
+            if document.id == document_id:
                 self.requests[request] = (request_hash, renamed, version_id)
-                return renamed
-        return None
+        return renamed
 
 
 class _Tokenizer:
@@ -200,26 +177,7 @@ class _Tokenizer:
 class _FailAfterStoreOriginalStore(MemoryOriginalStore):
     async def put(self, key: str, content: bytes) -> None:
         await super().put(key, content)
-        from domain.knowledge.model import OriginalStorageUnavailableError
-
         raise OriginalStorageUnavailableError()
-
-
-class _RacingOriginalStore(MemoryOriginalStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self._both_writing = asyncio.Event()
-        self._write_count = 0
-
-    async def put(self, key: str, content: bytes) -> None:
-        self._write_count += 1
-        write_number = self._write_count
-        if self._write_count == 2:
-            self._both_writing.set()
-        await self._both_writing.wait()
-        await super().put(key, content)
-        if write_number == 1:
-            raise OSError("simulated_concurrent_write_error")
 
 
 def _make(
@@ -256,7 +214,6 @@ def test_owner_scoped_uploads_same_bytes_to_distinct_storage_keys() -> None:
             hashlib.sha256(b"alice").hexdigest(),
             hashlib.sha256(b"bob").hexdigest(),
         }
-        assert len({key for key in repository.referenced}) == 2
         originals = cast(MemoryOriginalStore, service._originals)
         assert originals is not None
         assert originals.keys() == set(repository.storage_keys)
@@ -264,7 +221,9 @@ def test_owner_scoped_uploads_same_bytes_to_distinct_storage_keys() -> None:
     asyncio.run(scenario())
 
 
-def test_upload_idempotency_replay_keeps_one_source_key() -> None:
+def test_upload_idempotency_replay_and_conflict_skip_original_write() -> None:
+    """幂等重放与哈希冲突均在只读 preflight 拦截，不向对象存储写入多余孤儿。"""
+
     async def scenario() -> None:
         service, repository = _make()
         base = await service.create_base("alice", "private", None)
@@ -275,13 +234,14 @@ def test_upload_idempotency_replay_keeps_one_source_key() -> None:
             "alice", base.id, "notes", "notes.txt", b"same bytes", "request-1"
         )
         assert (first.id, version_a) == (replay.id, version_b)
-        request_hash = repository.requests[("alice", "request-1")][0]
+        request_hash = repository.requests[("alice", "create", "request-1")][0]
         assert request_hash != hashlib.sha256(b"same bytes").hexdigest()
         assert repository.content_hashes == [hashlib.sha256(b"same bytes").hexdigest()]
         assert len(repository.referenced) == 1
         assert len(repository.storage_keys) == 1
         originals = cast(MemoryOriginalStore, service._originals)
-        assert originals.keys() == set(repository.storage_keys)
+        assert len(originals.put_calls) == 1
+
         with pytest.raises(ValueError, match="idempotency_conflict"):
             await service.create_file_document(
                 "alice", base.id, "notes", "notes.txt", b"different", "request-1"
@@ -291,22 +251,24 @@ def test_upload_idempotency_replay_keeps_one_source_key() -> None:
                 "alice", base.id, "renamed", "renamed.txt", b"same bytes", "request-1"
             )
         assert len(repository.referenced) == 1
+        assert len(originals.put_calls) == 1
 
     asyncio.run(scenario())
 
 
 def test_quota_rejection_happens_before_original_write() -> None:
+    """超配额请求在无锁只读 preflight 阶段拦截，不向对象存储写入字节。"""
+
     async def scenario() -> None:
         service, repository = _make()
         base = await service.create_base("alice", "private", None)
         repository.quota_limit_bytes = 2
 
-        with pytest.raises(ValueError, match="knowledge_quota_exceeded"):
+        with pytest.raises(ValueError, match="knowledge_storage_quota_exceeded"):
             await service.create_file_document(
                 "alice", base.id, "notes", "notes.txt", b"too large", "request-1"
             )
 
-        assert repository.reservations == {}
         originals = cast(MemoryOriginalStore, service._originals)
         assert originals.keys() == set()
         assert originals.put_calls == []
@@ -314,7 +276,9 @@ def test_quota_rejection_happens_before_original_write() -> None:
     asyncio.run(scenario())
 
 
-def test_finalize_failure_keeps_reservation_original_and_quota() -> None:
+def test_finalize_failure_leaves_unreferenced_orphan_for_worker_sweep() -> None:
+    """数据库提交失败时不会登记来源引用，残留对象由 24h 宽限期孤儿扫描安全回收。"""
+
     async def scenario() -> None:
         service, repository = _make()
         base = await service.create_base("alice", "private", None)
@@ -327,90 +291,26 @@ def test_finalize_failure_keeps_reservation_original_and_quota() -> None:
         originals = cast(MemoryOriginalStore, service._originals)
         orphan = next(key for key in originals.keys() if key.endswith(digest))
         assert originals.content(orphan) == b"orphan"
-        assert len(repository.reservations) == 1
-        assert sum(repository._reserved_sizes.values()) == len(b"orphan")
-        assert orphan in originals.keys()
-
-        token = next(iter(repository._reserved_sizes))
-        repository._expired_reservations.add(token)
-        expired = await repository.list_expired_upload_reservations()
-        assert len(expired) == 1
-        reservation = expired[0]
-        assert reservation.storage_key is not None
-        assert not await repository.is_storage_key_referenced(reservation.storage_key)
-        await originals.delete(reservation.storage_key)
-        assert await repository.delete_expired_upload_reservation(token) is True
-        assert not originals.contains(orphan)
-        assert token not in repository._reserved_sizes
+        assert not await repository.is_storage_key_referenced(orphan)
 
     asyncio.run(scenario())
 
 
-def test_expired_reservation_cannot_be_committed_or_renewed() -> None:
-    async def scenario() -> None:
-        service, repository = _make()
-        base = await service.create_base("alice", "private", None)
-        repository.fail_next = True
-        with pytest.raises(RuntimeError, match="simulated_database_failure"):
-            await service.create_file_document(
-                "alice", base.id, "notes", "notes.txt", b"orphan", "request-expired"
-            )
-        token = next(iter(repository._reserved_sizes))
-        repository._expired_reservations.add(token)
-        with pytest.raises(ValueError, match="knowledge_upload_reservation_stale"):
-            await service.create_file_document(
-                "alice", base.id, "notes", "notes.txt", b"orphan", "request-expired"
-            )
+def test_store_error_does_not_register_document_or_source() -> None:
+    """对象存储返回故障时立即失败，不写入数据库来源与文档记录。"""
 
-    asyncio.run(scenario())
-
-
-def test_store_error_keeps_reservation_and_bytes_until_fenced_cleanup() -> None:
     async def scenario() -> None:
         storage = _FailAfterStoreOriginalStore()
         service, repository = _make(storage)
         base = await service.create_base("alice", "private", None)
-
-        from domain.knowledge.model import OriginalStorageUnavailableError
 
         with pytest.raises(OriginalStorageUnavailableError):
             await service.create_file_document(
                 "alice", base.id, "notes", "notes.txt", b"expected", "request-1"
             )
 
-        assert len(repository.reservations) == 1
-        assert sum(repository._reserved_sizes.values()) == len(b"expected")
-        reservation = next(iter(repository.reservations.values()))
-        assert reservation.storage_key is not None
-        assert storage.content(reservation.storage_key) == b"expected"
-        assert reservation.storage_key in repository.retained_storage_keys()
-
-    asyncio.run(scenario())
-
-
-def test_same_reservation_concurrent_put_failure_does_not_delete_successful_write() -> None:
-    async def scenario() -> None:
-        storage = _RacingOriginalStore()
-        service, repository = _make(storage)
-        base = await service.create_base("alice", "private", None)
-
-        results = await asyncio.gather(
-            *(
-                service.create_file_document(
-                    "alice", base.id, "notes", "notes.txt", b"same bytes", "request-1"
-                )
-                for _ in range(2)
-            ),
-            return_exceptions=True,
-        )
-
-        assert sum(isinstance(result, Exception) for result in results) == 1
-        assert sum(not isinstance(result, Exception) for result in results) == 1
-        assert len(repository.storage_keys) == 1
-        key = repository.storage_keys[0]
-        assert storage.content(key) == b"same bytes"
-        assert repository.reservations == {}
-        assert repository.committed_sizes[key] == len(b"same bytes")
+        assert repository.documents == {}
+        assert repository.referenced == set()
 
     asyncio.run(scenario())
 
@@ -431,7 +331,6 @@ def test_uncertain_commit_keeps_referenced_original() -> None:
         assert originals is not None
         assert originals.content(key) == b"committed"
         assert key in repository.referenced
-        assert repository.reservations == {}
         assert sum(repository.committed_sizes.values()) == len(b"committed")
         assert key in originals.keys()
 
@@ -442,14 +341,19 @@ def test_file_replacement_uses_same_owner_scope_and_persists_bytes() -> None:
     async def scenario() -> None:
         service, repository = _make()
         base = await service.create_base("alice", "private", None)
-        await service.create_file_document(
+        original, _ = await service.create_file_document(
             "alice", base.id, "notes", "notes.txt", b"old", "request-1"
         )
-        # The fake returns the newly registered version; this checks replacement's storage path.
+        # 模拟原版本已完成处理（清空 pending_version_id），允许后续替换。
+        repository.documents[original.id] = replace(
+            repository.documents[original.id],
+            active_version_id=original.pending_version_id,
+            pending_version_id=None,
+        )
         result, version = await service.replace_file_document(
             "alice",
             base.id,
-            repository.requests[("alice", "request-1")][1].id,
+            original.id,
             "new.txt",
             b"replacement",
             "request-2",
@@ -471,6 +375,11 @@ def test_replace_request_replays_after_document_rename() -> None:
         original, _ = await service.create_file_document(
             "alice", base.id, "notes", "notes.txt", b"original", "create-request"
         )
+        repository.documents[original.id] = replace(
+            repository.documents[original.id],
+            active_version_id=original.pending_version_id,
+            pending_version_id=None,
+        )
         replacement, version = await service.replace_file_document(
             "alice", base.id, original.id, "next.txt", b"replacement", "replace-request"
         )
@@ -483,5 +392,216 @@ def test_replace_request_replays_after_document_rename() -> None:
         assert replay.id == replacement.id == original.id
         assert (replay.id, replay_version) == (replacement.id, version)
         assert len(repository.storage_keys) == 2
+
+    asyncio.run(scenario())
+
+
+def test_repository_preflight_and_unified_save_document_version_sqlite_contracts() -> None:
+    """用真实 SQLite 验证无锁 preflight 与合并后的 4 个创建/替换文档事务方法契约。"""
+
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(
+                    lambda sync: Base.metadata.create_all(
+                        sync,
+                        tables=cast(
+                            Any,
+                            [
+                                UserModel.__table__,
+                                DepartmentModel.__table__,
+                                ResourceVisibilityGrantModel.__table__,
+                                KnowledgeBaseModel.__table__,
+                                KnowledgeSourceModel.__table__,
+                                KnowledgeDocumentModel.__table__,
+                                KnowledgeVersionModel.__table__,
+                                KnowledgeJobModel.__table__,
+                                KnowledgeRequestModel.__table__,
+                            ],
+                        ),
+                    )
+                )
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            now = datetime(2026, 11, 20, tzinfo=UTC)
+            async with sessions() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="owner_1",
+                        email="owner1@example.test",
+                        password_hash="unused",
+                        display_name=None,
+                        status="active",
+                        role="member",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            repo = KnowledgeRepository(sessions)
+            await repo.create_base(KnowledgeBase("kb_1", "owner_1", "Base", None, now, now))
+
+            # 1. preflight 新文件通过并返回 None
+            assert (
+                await repo.preflight_file_upload(
+                    owner_id="owner_1",
+                    operation="create",
+                    request_key="req-file-1",
+                    request_hash="hash-file-1",
+                    base_id="kb_1",
+                    document_id=None,
+                    size_bytes=16,
+                )
+                is None
+            )
+
+            # 2. 创建文件文档后，同 key preflight 返回重放元组，不同 hash 抛冲突
+            doc, ver = await repo.create_file_document(
+                owner_id="owner_1",
+                base_id="kb_1",
+                title="File Doc",
+                filename="a.txt",
+                media_type="text/plain",
+                storage_key="owner/ksrc_1/aa/aaa",
+                size_bytes=16,
+                sha256="a" * 64,
+                request_key="req-file-1",
+                request_hash="hash-file-1",
+                document_id="kdoc_1",
+                version_id="kver_1",
+                source_id="ksrc_1",
+                job_id="kjob_1",
+                profile_id="prof_1",
+                at=now,
+            )
+            assert (doc.id, ver) == ("kdoc_1", "kver_1")
+            preflight_replay = await repo.preflight_file_upload(
+                owner_id="owner_1",
+                operation="create",
+                request_key="req-file-1",
+                request_hash="hash-file-1",
+                base_id="kb_1",
+                document_id=None,
+                size_bytes=16,
+            )
+            assert preflight_replay is not None
+            assert (
+                preflight_replay[0].id,
+                preflight_replay[0].pending_version_id,
+                preflight_replay[1],
+            ) == (doc.id, ver, ver)
+            with pytest.raises(ValueError, match="idempotency_conflict"):
+                await repo.preflight_file_upload(
+                    owner_id="owner_1",
+                    operation="create",
+                    request_key="req-file-1",
+                    request_hash="different-hash",
+                    base_id="kb_1",
+                    document_id=None,
+                    size_bytes=16,
+                )
+
+            # 3. 存在 pending_version_id 时，replace preflight 拦截返回 document_update_in_progress
+            with pytest.raises(ValueError, match="document_update_in_progress"):
+                await repo.preflight_file_upload(
+                    owner_id="owner_1",
+                    operation="replace",
+                    request_key="req-rep-1",
+                    request_hash="hash-rep-1",
+                    base_id="kb_1",
+                    document_id="kdoc_1",
+                    size_bytes=12,
+                )
+
+            # 清空 pending_version_id 后允许替换文件与文本版本，并校验幂等重放
+            async with sessions() as session, session.begin():
+                row = await session.get(KnowledgeDocumentModel, "kdoc_1")
+                assert row is not None
+                row.active_version_id = "kver_1"
+                row.pending_version_id = None
+
+            replaced, rep_ver = await repo.replace_file_document(
+                owner_id="owner_1",
+                base_id="kb_1",
+                document_id="kdoc_1",
+                filename="b.txt",
+                media_type="text/plain",
+                storage_key="owner/ksrc_2/bb/bbb",
+                size_bytes=12,
+                sha256="b" * 64,
+                request_key="req-rep-1",
+                request_hash="hash-rep-1",
+                version_id="kver_2",
+                source_id="ksrc_2",
+                job_id="kjob_2",
+                profile_id="prof_1",
+                at=now,
+            )
+            assert replaced.pending_version_id == "kver_2"
+            assert rep_ver == "kver_2"
+            replace_replay = await repo.replace_file_document(
+                owner_id="owner_1",
+                base_id="kb_1",
+                document_id="kdoc_1",
+                filename="b.txt",
+                media_type="text/plain",
+                storage_key="owner/ksrc_ignored/cc/ccc",
+                size_bytes=12,
+                sha256="b" * 64,
+                request_key="req-rep-1",
+                request_hash="hash-rep-1",
+                version_id="kver_ignored",
+                source_id="ksrc_ignored",
+                job_id="kjob_ignored",
+                profile_id="prof_1",
+                at=now,
+            )
+            assert (
+                replace_replay[0].id,
+                replace_replay[0].pending_version_id,
+                replace_replay[1],
+            ) == (
+                replaced.id,
+                "kver_2",
+                "kver_2",
+            )
+
+            # 4. 文本创建与替换同样支持幂等与冲突校验
+            text_doc, text_ver = await repo.create_text_document(
+                owner_id="owner_1",
+                base_id="kb_1",
+                title="Text Doc",
+                text="hello text",
+                request_key="req-text-1",
+                request_hash="hash-text-1",
+                content_hash="c" * 64,
+                document_id="kdoc_text",
+                version_id="kver_text_1",
+                job_id="kjob_text_1",
+                profile_id="prof_1",
+                at=now,
+            )
+            assert (text_doc.id, text_ver) == ("kdoc_text", "kver_text_1")
+            async with sessions() as session, session.begin():
+                row = await session.get(KnowledgeDocumentModel, "kdoc_text")
+                assert row is not None
+                row.active_version_id = "kver_text_1"
+                row.pending_version_id = None
+            rep_text_doc, rep_text_ver = await repo.replace_text_document(
+                owner_id="owner_1",
+                base_id="kb_1",
+                document_id="kdoc_text",
+                text="updated text",
+                request_key="req-text-rep-1",
+                request_hash="hash-text-rep-1",
+                content_hash="d" * 64,
+                version_id="kver_text_2",
+                job_id="kjob_text_2",
+                profile_id="prof_1",
+                at=now,
+            )
+            assert rep_text_doc.pending_version_id == "kver_text_2"
+            assert rep_text_ver == "kver_text_2"
+        finally:
+            await engine.dispose()
 
     asyncio.run(scenario())

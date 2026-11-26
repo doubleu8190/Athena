@@ -17,7 +17,7 @@ from adapter.access.repository import (
     load_user_access_snapshot_in_session,
     sync_resource_grants_in_session,
 )
-from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
+from adapter.auth.repository.transaction_guard import verify_active_session_user
 from adapter.mcp.converter.mcp import (
     server_to_domain,
     tool_to_admin,
@@ -123,7 +123,12 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         now=now,
                     )
                     await session.flush()
-                    return self._server_projection(row, grants=grants)
+                    # 新写入密文来自当前已校验明文 server.secrets，直接透传键名避免刚加密又解密。
+                    return self._server_projection(
+                        row,
+                        secret_names=tuple(sorted(server.secrets)),
+                        grants=grants,
+                    )
         except IntegrityError as error:
             self._raise_integrity_domain_error(error)
         except SQLAlchemyError:
@@ -185,7 +190,12 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         now=now,
                     )
                     await session.flush()
-                    return self._server_projection(row, grants=grants)
+                    # 既有密文已于替换前认证校验，此处直接透传新写入的 replacement.secrets 键名。
+                    return self._server_projection(
+                        row,
+                        secret_names=tuple(sorted(replacement.secrets)),
+                        grants=grants,
+                    )
         except IntegrityError as error:
             self._raise_integrity_domain_error(error)
         except SQLAlchemyError:
@@ -263,7 +273,12 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         )
                         grants = grants_map.get(server_id, ())
                     await session.flush()
-                    return self._server_projection(row, grants=grants)
+                    # 既有密文已于替换前认证校验，此处直接透传新写入的 replacement.secrets 键名。
+                    return self._server_projection(
+                        row,
+                        secret_names=tuple(sorted(replacement.secrets)),
+                        grants=grants,
+                    )
         except IntegrityError as error:
             self._raise_integrity_domain_error(error)
         except SQLAlchemyError:
@@ -305,7 +320,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         and row.config_version != expected_config_version
                     ):
                         raise McpConfigVersionConflictError("mcp_config_version_conflict")
-                    self._decrypt_secrets(row)
+                    secrets = self._decrypt_secrets(row)
                     row.enabled = enabled
                     row.updated_at = now
                     row.config_version += 1
@@ -313,7 +328,12 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     grants_map = await load_grants_map_in_session(
                         session, ResourceType.MCP_SERVER, (server_id,)
                     )
-                    return self._server_projection(row, grants=grants_map.get(server_id, ()))
+                    # 启停操作未修改密文，复用已认证解密得到的键名避免同一事务内重复解密。
+                    return self._server_projection(
+                        row,
+                        secret_names=tuple(sorted(secrets)),
+                        grants=grants_map.get(server_id, ()),
+                    )
         except SQLAlchemyError:
             raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
 
@@ -346,7 +366,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         raise McpServerNotFoundError("mcp_server_not_found")
                     if row.config_version != expected_config_version:
                         raise McpConfigVersionConflictError("mcp_config_version_conflict")
-                    self._decrypt_secrets(row)
+                    secrets = self._decrypt_secrets(row)
                     await self._align_server_tools_in_session(session, server_id, tools, now)
                     row.tools_discovered_at = now
                     row.updated_at = now
@@ -355,7 +375,12 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                     grants_map = await load_grants_map_in_session(
                         session, ResourceType.MCP_SERVER, (server_id,)
                     )
-                    return self._server_projection(row, grants=grants_map.get(server_id, ()))
+                    # 工具同步未修改密文，复用已认证解密得到的键名避免同一事务内重复解密。
+                    return self._server_projection(
+                        row,
+                        secret_names=tuple(sorted(secrets)),
+                        grants=grants_map.get(server_id, ()),
+                    )
         except IntegrityError as error:
             self._raise_integrity_domain_error(error)
         except SQLAlchemyError:
@@ -898,12 +923,12 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         self._replace_tools(session, server_id, tools, existing_by_remote, now)
 
     async def _require_admin(self, session: AsyncSession, actor: AuthContext) -> None:
-        """在最终写事务中先锁 user/session 并读取当前角色。"""
-        user = await SqlAlchemyAuthTransactionGuard(
-            session, clock=self._clock
-        ).lock_current_session_user(
+        """在写事务中无锁复核当前登录会话与超管角色，避免对认证表加行锁。"""
+        user = await verify_active_session_user(
+            session,
             actor.user.id,
             actor.session_id,
+            clock=self._clock,
         )
         if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise McpAuthorizationChangedError("mcp_authorization_changed")
@@ -919,11 +944,14 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         self,
         row: McpServerModel,
         *,
+        secret_names: tuple[str, ...] | None = None,
         grants: tuple[VisibilityGrant, ...] = (),
     ) -> McpServer:
-        """先认证解密秘密，再把经过验证的名称交给纯转换器。"""
-        secrets = self._decrypt_secrets(row)
-        return server_to_domain(row, tuple(sorted(secrets)), grants=grants)
+        """投影为领域 McpServer；未提供 secret_names 时执行认证解密（损坏密文 fail-closed）。"""
+        resolved_names = (
+            tuple(sorted(self._decrypt_secrets(row))) if secret_names is None else secret_names
+        )
+        return server_to_domain(row, resolved_names, grants=grants)
 
     def _decrypt_secrets(self, row: McpServerModel) -> dict[str, str]:
         """校验密文三元组并认证解密；缺失或损坏时失败关闭。"""

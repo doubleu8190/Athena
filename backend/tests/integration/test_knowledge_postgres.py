@@ -7,15 +7,12 @@ import hashlib
 import os
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
-from threading import Thread
 from typing import Any, cast
 
 import pytest
 from integration.postgres_harness import isolated_postgres_schema
 from knowledge_fakes import MemoryOriginalStore
 from sqlalchemy import event, insert, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import (
@@ -90,8 +87,6 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             server_settings=KNOWLEDGE_SERVER_SETTINGS,
             use_subprocess=True,
         ) as db:
-            schema = db.schema
-            engine = db.engine
             session_factory = db.session_factory
             repository = KnowledgeRepository(session_factory)
             now = datetime(2026, 1, 1, tzinfo=UTC)
@@ -120,120 +115,32 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             await repository.create_base(
                 KnowledgeBase("upload_kb", "upload_owner", "uploads", None, now, now)
             )
-            interleaved_content = b"committed during referenced keys snapshot"
-            interleaved_hash = hashlib.sha256(interleaved_content).hexdigest()
-            interleaved_source_id = "snapshot_source"
-            interleaved_reservation = await repository.reserve_file_upload(
+            snapshot_content = b"committed source reference check"
+            snapshot_hash = hashlib.sha256(snapshot_content).hexdigest()
+            snapshot_key = (
+                hashlib.sha256(b"upload_owner").hexdigest()
+                + f"/snapshot_source/{snapshot_hash[:2]}/{snapshot_hash}"
+            )
+            assert not await repository.is_storage_key_referenced(snapshot_key)
+            await repository.create_file_document(
                 owner_id="upload_owner",
-                operation="create",
+                base_id="upload_kb",
+                title="snapshot source",
+                filename="snapshot.txt",
+                media_type="text/plain",
+                storage_key=snapshot_key,
+                size_bytes=len(snapshot_content),
+                sha256=snapshot_hash,
                 request_key="snapshot-race-key",
                 request_hash="snapshot-race-hash",
-                base_id="upload_kb",
                 document_id="snapshot_doc",
-                size_bytes=len(interleaved_content),
-                reservation_token="snapshot-race-token",
-                storage_key=(
-                    hashlib.sha256(b"upload_owner").hexdigest()
-                    + f"/{interleaved_source_id}/{interleaved_hash[:2]}/{interleaved_hash}"
-                ),
-                source_id=interleaved_source_id,
                 version_id="snapshot_version",
+                source_id="snapshot_source",
                 job_id="snapshot_job",
+                profile_id="profile-v1",
                 at=now,
             )
-            assert interleaved_reservation.storage_key is not None
-            assert interleaved_reservation.reservation_token is not None
-            assert interleaved_reservation.source_id is not None
-            assert interleaved_reservation.job_id is not None
-            assert await repository.is_storage_key_referenced(interleaved_reservation.storage_key)
-            interleaved_done = False
-            interleaved_errors: list[BaseException] = []
-
-            def finalize_before_referenced_query(
-                connection: Any,
-                cursor: Any,
-                statement: str,
-                parameters: Any,
-                context: Any,
-                executemany: bool,
-            ) -> None:
-                del connection, cursor, parameters, context, executemany
-                nonlocal interleaved_done
-                if interleaved_done or (
-                    "from knowledge_upload_reservations" not in statement.lower()
-                ):
-                    return
-                interleaved_done = True
-
-                async def finalize() -> None:
-                    thread_engine = create_async_engine(
-                        database_url,
-                        poolclass=NullPool,
-                        connect_args={
-                            **DB_CONNECT_ARGS,
-                            "server_settings": {
-                                "search_path": f"{schema},public",
-                                "statement_timeout": "15000",
-                                "lock_timeout": "5000",
-                            },
-                        },
-                    )
-                    try:
-                        thread_repository = KnowledgeRepository(
-                            async_sessionmaker(thread_engine, expire_on_commit=False)
-                        )
-                        await thread_repository.create_file_document(
-                            owner_id="upload_owner",
-                            base_id="upload_kb",
-                            title="snapshot race",
-                            filename="snapshot.txt",
-                            media_type="text/plain",
-                            storage_key=interleaved_reservation.storage_key or "",
-                            size_bytes=len(interleaved_content),
-                            sha256=interleaved_hash,
-                            request_key="snapshot-race-key",
-                            request_hash="snapshot-race-hash",
-                            document_id="snapshot_doc",
-                            version_id="snapshot_version",
-                            source_id=interleaved_reservation.source_id or "",
-                            job_id=interleaved_reservation.job_id or "",
-                            reservation_token=interleaved_reservation.reservation_token or "",
-                            profile_id="profile-v1",
-                            at=now,
-                        )
-                    finally:
-                        await thread_engine.dispose()
-
-                def run_finalize() -> None:
-                    try:
-                        asyncio.run(finalize())
-                    except BaseException as error:
-                        interleaved_errors.append(error)
-
-                finalizer_thread = Thread(target=run_finalize, daemon=True)
-                finalizer_thread.start()
-                finalizer_thread.join(timeout=30)
-                if finalizer_thread.is_alive():
-                    interleaved_errors.append(TimeoutError("reservation finalize timed out"))
-
-            event.listen(
-                engine.sync_engine,
-                "before_cursor_execute",
-                finalize_before_referenced_query,
-            )
-            try:
-                still_referenced = await repository.is_storage_key_referenced(
-                    interleaved_reservation.storage_key
-                )
-            finally:
-                event.remove(
-                    engine.sync_engine,
-                    "before_cursor_execute",
-                    finalize_before_referenced_query,
-                )
-            assert interleaved_done
-            assert not interleaved_errors, f"interleaved finalize failed: {interleaved_errors!r}"
-            assert still_referenced
+            assert await repository.is_storage_key_referenced(snapshot_key)
 
             with nullcontext(MemoryOriginalStore()) as originals:
                 upload_service = KnowledgeService(
@@ -261,7 +168,8 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     ),
                 )
                 assert upload_results[0] == upload_results[1]
-                assert len(originals.keys()) == 1
+                # 无预留表时并发同 key 可能各自写对象（最多 2 个，未引用者由 24h 孤儿扫描回收）。
+                assert 1 <= len(originals.keys()) <= 2
                 winning_document, winning_version = upload_results[0]
                 winning_source = await repository.get_source(
                     "upload_owner", "upload_kb", winning_document.id, winning_version
@@ -924,30 +832,13 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             await repository.create_base(
                 KnowledgeBase("quota_bytes_kb", "quota_bytes_owner", "bytes", None, now, now)
             )
-            bytes_reservation = await repository.reserve_file_upload(
-                owner_id="quota_bytes_owner",
-                operation="create",
-                request_key="bytes-create",
-                request_hash="bytes-create-hash",
-                base_id="quota_bytes_kb",
-                document_id="bytes_doc",
-                size_bytes=1024 * 1024 * 1024,
-                reservation_token="bytes-create-reservation",
-                storage_key=("a" * 64) + "/bytes_source/aa/" + ("a" * 64),
-                source_id="bytes_source",
-                version_id="bytes_version",
-                job_id="bytes_job",
-                at=now,
-            )
-            assert bytes_reservation.reservation_token is not None
-            assert bytes_reservation.storage_key is not None
             await repository.create_file_document(
                 owner_id="quota_bytes_owner",
                 base_id="quota_bytes_kb",
                 title="large source",
                 filename="large.txt",
                 media_type="text/plain",
-                storage_key=bytes_reservation.storage_key,
+                storage_key=("a" * 64) + "/bytes_source/aa/" + ("a" * 64),
                 size_bytes=1024 * 1024 * 1024,
                 sha256="a" * 64,
                 request_key="bytes-create",
@@ -956,7 +847,6 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 version_id="bytes_version",
                 source_id="bytes_source",
                 job_id="bytes_job",
-                reservation_token=bytes_reservation.reservation_token,
                 profile_id="profile-v1",
                 at=now,
             )

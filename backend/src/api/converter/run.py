@@ -160,6 +160,7 @@ def run_to_response(
     subagent_tasks: tuple[SubagentTaskSummary, ...] = (),
     pending_subagent_inputs: tuple[PendingSubagentInput, ...] = (),
     pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = (),
+    assistant_message_id: str | None = None,
     replayed: bool = False,
 ) -> RunResponse:
     """只公开 Run 业务状态，不包含供应商地址或凭据引用。"""
@@ -194,6 +195,7 @@ def run_to_response(
         cancel_requested_at=run.cancel_requested_at,
         safe_error_code=run.safe_error_code,
         report_message_id=run.report_message_id,
+        assistant_message_id=assistant_message_id,
         usage=_usage_to_response(run.usage),
         skill_snapshot=(
             None
@@ -344,6 +346,7 @@ def run_details_to_response(details: RunDetailsResult) -> RunResponse:
         subagent_tasks=details.subagent_tasks,
         pending_subagent_inputs=details.pending_subagent_inputs,
         pending_subagent_approvals=details.pending_subagent_approvals,
+        assistant_message_id=details.assistant_message_id,
     )
 
 

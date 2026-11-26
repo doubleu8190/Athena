@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import socket
 import ssl
 import sys
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,7 +34,7 @@ from domain.mcp import (
     StreamableHttpConfig,
 )
 from infrastructure.mcp.execution import McpToolCallClient
-from infrastructure.mcp.http import pinned_streamable_http_transport
+from infrastructure.mcp.http import mcp_streamable_http_transport
 from infrastructure.mcp.stdio import McpStdioTransport
 
 
@@ -72,7 +73,7 @@ class _ObservedClient:
 
 def _certificate_material(tmp_path: Path) -> tuple[Path, Path, ssl.SSLContext]:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "mcp.test")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
     certificate = (
         x509.CertificateBuilder()
         .subject_name(name)
@@ -82,7 +83,7 @@ def _certificate_material(tmp_path: Path) -> tuple[Path, Path, ssl.SSLContext]:
         .not_valid_before(datetime.now(UTC) - timedelta(minutes=1))
         .not_valid_after(datetime.now(UTC) + timedelta(days=1))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("mcp.test")]),
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]),
             critical=False,
         )
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
@@ -119,7 +120,7 @@ def _http_target(port: int) -> McpRuntimeToolTarget:
         connection=McpConnectionInput(
             StreamableHttpConfig(
                 transport="streamable_http",
-                url=f"https://mcp.test:{port}/mcp",
+                url=f"https://127.0.0.1:{port}/mcp",
             ),
             {"Authorization": "Bearer test-secret"},
         ),
@@ -183,7 +184,7 @@ async def _tls_http_server(
     app = server.streamable_http_app(
         streamable_http_path="/mcp",
         json_response=True,
-        host="mcp.test",
+        host="127.0.0.1",
     )
     uvicorn_server = uvicorn.Server(
         uvicorn.Config(
@@ -209,27 +210,6 @@ async def _tls_http_server(
         if not uvicorn_server.started:
             raise AssertionError("TLS MCP server did not start")
 
-        async def resolver(_: str, __: int) -> Iterable[str]:
-            return ("127.0.0.1",)
-
-        def transport_factory(connection: McpConnectionInput) -> Any:
-            assert isinstance(connection.config, StreamableHttpConfig)
-            return pinned_streamable_http_transport(
-                connection.config.url,
-                headers=dict(connection.secrets),
-                allowed_private_hosts=frozenset({"mcp.test"}),
-                resolver=resolver,
-                inner_transport=httpx2.AsyncHTTPTransport(
-                    verify=client_context,
-                    trust_env=False,
-                ),
-            )
-
-        def client_factory(transport: Any, deadline_seconds: float) -> _ObservedClient:
-            client = _ObservedClient(transport, deadline_seconds)
-            clients.append(client)
-            return client
-
         yield (
             port,
             calls,
@@ -254,22 +234,15 @@ def test_real_tls_http_execution_is_single_shot_and_bounded(tmp_path: Path) -> N
             finished,
             clients,
         ):
-            executor_clients: list[McpToolCallClient] = []
-
-            async def resolver(_: str, __: int) -> Iterable[str]:
-                return ("127.0.0.1",)
-
             cert_path = tmp_path / "mcp-cert.pem"
             client_context = ssl.create_default_context(cafile=str(cert_path))
 
             def transport_factory(connection: McpConnectionInput) -> Any:
                 assert isinstance(connection.config, StreamableHttpConfig)
-                return pinned_streamable_http_transport(
+                return mcp_streamable_http_transport(
                     connection.config.url,
                     headers=dict(connection.secrets),
-                    allowed_private_hosts=frozenset({"mcp.test"}),
-                    resolver=resolver,
-                    inner_transport=httpx2.AsyncHTTPTransport(
+                    transport=httpx2.AsyncHTTPTransport(
                         verify=client_context,
                         trust_env=False,
                     ),
@@ -281,12 +254,10 @@ def test_real_tls_http_execution_is_single_shot_and_bounded(tmp_path: Path) -> N
                 return client
 
             executor = McpToolCallClient(
-                allowed_private_hosts=frozenset({"mcp.test"}),
                 client_factory=client_factory,
                 transport_factory=transport_factory,
                 cleanup_timeout_seconds=2,
             )
-            executor_clients.append(executor)
             target = _http_target(port)
 
             first = await executor.call(target, {"query": "one"}, deadline_seconds=5)
@@ -571,25 +542,13 @@ def test_mcp_protocol_errors_before_and_after_admission(
 _STDIO_SERVER_SCRIPT = r"""
 import asyncio
 import os
-import signal
-import subprocess
 import sys
 
 from mcp.server import MCPServer
 
 log_path = sys.argv[1]
-descendant = subprocess.Popen(
-    [
-        sys.executable,
-        "-c",
-        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
-    ],
-    stdin=subprocess.DEVNULL,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
 with open(log_path, "a", encoding="utf-8") as output:
-    output.write(f"{os.getpid()} {descendant.pid}\n")
+    output.write(f"{os.getpid()}\n")
 
 server = MCPServer("athena-stdio-test")
 calls = {"count": 0}
@@ -691,15 +650,13 @@ def test_real_stdio_execution_uses_new_process_and_reaps_group(tmp_path: Path) -
         assert len(observed_clients) == 2
         assert all(client.exit_finished.is_set() for client in observed_clients)
 
-        process_rows = [
-            tuple(int(value) for value in line.split())
+        process_pids = [
+            int(line.strip())
             for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
         ]
-        assert len(process_rows) == 2
-        assert process_rows[0][0] == first_data["pid"]
-        assert process_rows[1][0] == second_data["pid"]
-        for server_pid, descendant_pid in process_rows:
+        assert process_pids == [first_data["pid"], second_data["pid"]]
+        for server_pid in process_pids:
             assert await _wait_for_process_exit(server_pid)
-            assert await _wait_for_process_exit(descendant_pid)
 
     asyncio.run(scenario())

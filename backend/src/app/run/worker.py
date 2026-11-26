@@ -7,8 +7,7 @@ import logging
 import random
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import UTC, datetime
-from typing import cast
+from datetime import datetime
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
@@ -16,10 +15,10 @@ from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 from app.run.config import RunWorkerConfig
 from app.run.events import publish_pending_events
 from app.run.executor import RunExecutor
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.run.model import (
     FailRunCommand,
-    Run,
     RunContextSafetyCommitError,
     RunLease,
     RunLeaseState,
@@ -82,11 +81,9 @@ class RunWorker:
                 tasks.create_task(self._reclaim())
         finally:
             # 优雅停机时等待执行器登记的轻量后台任务（如首轮自动标题）限时收敛，避免未回收 Task。
-            wait_background = getattr(self._executor, "wait_background_tasks", None)
-            if callable(wait_background):
-                with suppress(Exception):
-                    async with asyncio.timeout(10.0):
-                        await wait_background()
+            with suppress(Exception):
+                async with asyncio.timeout(10.0):
+                    await self._executor.wait_background_tasks()
 
     async def stop(self) -> None:
         """停止新领取并等待活跃 Run 完成或按自身控制流程收尾。"""
@@ -497,20 +494,13 @@ class RunWorker:
 
     async def _read_lease_state(
         self, session_id: str, owner_id: str, run_id: str
-    ) -> RunLeaseState | Run | None:
-        """优先调用轻量标量租约查询，兼容测试中仅实现 get() 的最小仓储替身。"""
-        get_lease_state = getattr(self._repository, "get_lease_state", None)
-        if callable(get_lease_state):
-            return cast(
-                RunLeaseState | None,
-                await get_lease_state(session_id, owner_id, run_id),
-            )
-        return await self._repository.get(session_id, owner_id, run_id)
+    ) -> RunLeaseState | None:
+        """读取轻量标量租约状态，用于取消轮询与租约一致性核验。"""
+        return await self._repository.get_lease_state(session_id, owner_id, run_id)
 
     def _now(self) -> datetime:
         """读取并规范化应用时钟，用于比较数据库返回的租约快照。"""
-        value = self._clock()
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return as_utc(self._clock())
 
 
 __all__ = ["RunWorker"]

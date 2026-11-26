@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
-def _positive_int(name: str, default: int, maximum: int) -> int:
-    value = os.getenv(name)
+def _positive_int(
+    source: Mapping[str, str],
+    name: str,
+    default: int,
+    maximum: int,
+) -> int:
+    value = source.get(name)
     if value is None or not value.strip():
         return default
     try:
@@ -31,7 +37,6 @@ class RunWorkerConfig:
     cancel_poll_seconds: float = 1.0
     queue_poll_seconds: float = 1.0
     reclaim_seconds: float = 5.0
-    claim_batch_size: int = 1
     llm_request_limit: int = 40
     tool_timeout_seconds: float = 30.0
     tool_argument_bytes: int = 64 * 1024
@@ -56,7 +61,6 @@ class RunWorkerConfig:
                     self.tool_cleanup_seconds,
                 )
             )
-            or self.claim_batch_size != 1
             or not 1 <= self.llm_request_limit <= 40
             or not 0 < self.tool_timeout_seconds <= 300
             or not 0 < self.tool_cleanup_seconds <= 10
@@ -69,30 +73,44 @@ class RunWorkerConfig:
             raise ValueError("run_worker_config_invalid")
 
 
-def worker_config_from_environment() -> RunWorkerConfig:
+def worker_config_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> RunWorkerConfig:
     """读取受限 Worker 参数，拒绝无效并发或租约配置。"""
-    lease_seconds = _positive_int("ATHENA_RUN_LEASE_SECONDS", 30, 3600)
-    heartbeat_seconds = _positive_int("ATHENA_RUN_HEARTBEAT_SECONDS", 5, 3599)
+    source = os.environ if environ is None else environ
+    lease_seconds = _positive_int(source, "ATHENA_RUN_LEASE_SECONDS", 30, 3600)
+    heartbeat_seconds = _positive_int(source, "ATHENA_RUN_HEARTBEAT_SECONDS", 5, 3599)
     return RunWorkerConfig(
-        concurrency=_positive_int("ATHENA_RUN_WORKER_CONCURRENCY", 4, 64),
+        concurrency=_positive_int(source, "ATHENA_RUN_WORKER_CONCURRENCY", 4, 64),
         lease_seconds=lease_seconds,
         heartbeat_seconds=heartbeat_seconds,
-        execution_seconds=_positive_int("ATHENA_RUN_EXECUTION_SECONDS", 300, 86_400),
-        cancel_poll_seconds=float(os.getenv("ATHENA_RUN_CANCEL_POLL_SECONDS", "1")),
-        queue_poll_seconds=float(os.getenv("ATHENA_RUN_QUEUE_POLL_SECONDS", "1")),
-        reclaim_seconds=float(os.getenv("ATHENA_RUN_RECLAIM_SECONDS", "5")),
-        llm_request_limit=_positive_int("ATHENA_RUN_LLM_REQUEST_LIMIT", 40, 40),
-        tool_timeout_seconds=_positive_float("ATHENA_RUN_TOOL_TIMEOUT_SECONDS", 30.0, 300.0),
-        tool_argument_bytes=_positive_int("ATHENA_RUN_TOOL_ARGUMENT_BYTES", 64 * 1024, 64 * 1024),
-        tool_result_bytes=_positive_int("ATHENA_RUN_TOOL_RESULT_BYTES", 64 * 1024, 64 * 1024),
-        tool_cleanup_seconds=_positive_float("ATHENA_RUN_TOOL_CLEANUP_SECONDS", 10.0, 10.0),
-        tool_batch_limit=_positive_int("ATHENA_RUN_TOOL_BATCH_LIMIT", 8, 8),
-        tool_concurrency=_positive_int("ATHENA_RUN_TOOL_CONCURRENCY", 4, 8),
+        execution_seconds=_positive_int(source, "ATHENA_RUN_EXECUTION_SECONDS", 300, 86_400),
+        cancel_poll_seconds=float(source.get("ATHENA_RUN_CANCEL_POLL_SECONDS", "1")),
+        queue_poll_seconds=float(source.get("ATHENA_RUN_QUEUE_POLL_SECONDS", "1")),
+        reclaim_seconds=float(source.get("ATHENA_RUN_RECLAIM_SECONDS", "5")),
+        llm_request_limit=_positive_int(source, "ATHENA_RUN_LLM_REQUEST_LIMIT", 40, 40),
+        tool_timeout_seconds=_positive_float(
+            source, "ATHENA_RUN_TOOL_TIMEOUT_SECONDS", 30.0, 300.0
+        ),
+        tool_argument_bytes=_positive_int(
+            source, "ATHENA_RUN_TOOL_ARGUMENT_BYTES", 64 * 1024, 64 * 1024
+        ),
+        tool_result_bytes=_positive_int(
+            source, "ATHENA_RUN_TOOL_RESULT_BYTES", 64 * 1024, 64 * 1024
+        ),
+        tool_cleanup_seconds=_positive_float(source, "ATHENA_RUN_TOOL_CLEANUP_SECONDS", 10.0, 10.0),
+        tool_batch_limit=_positive_int(source, "ATHENA_RUN_TOOL_BATCH_LIMIT", 8, 8),
+        tool_concurrency=_positive_int(source, "ATHENA_RUN_TOOL_CONCURRENCY", 4, 8),
     )
 
 
-def _positive_float(name: str, default: float, maximum: float) -> float:
-    value = os.getenv(name)
+def _positive_float(
+    source: Mapping[str, str],
+    name: str,
+    default: float,
+    maximum: float,
+) -> float:
+    value = source.get(name)
     if value is None or not value.strip():
         return default
     try:

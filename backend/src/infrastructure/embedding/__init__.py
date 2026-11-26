@@ -9,13 +9,9 @@ from infrastructure.embedding.openai_compatible import (
     OpenAICompatibleEmbeddingConfig,
 )
 from infrastructure.embedding.profile import remote_embedding_profile_id
-from infrastructure.embedding.token_counter import (
-    ApproximateTokenCounter,
-    TiktokenTokenCounter,
-)
+from infrastructure.embedding.token_counter import TiktokenTokenCounter
 
 __all__ = [
-    "ApproximateTokenCounter",
     "EmbeddingConfigurationError",
     "EmbeddingError",
     "EmbeddingProtocolError",

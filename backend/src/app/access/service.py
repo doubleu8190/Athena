@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import cast
 
 from common.ids import now_utc
 from domain.access import (
@@ -20,7 +19,6 @@ from domain.access import (
     VisibilityGrantInput,
     VisibilityScope,
     evaluate_can_manage,
-    evaluate_can_read,
 )
 from domain.auth import UserRole
 
@@ -61,24 +59,12 @@ class AccessPolicyService:
             return False
         if snapshot is not None and not snapshot.is_active:
             return False
-        # 优先走仓储单 Session SQL EXISTS 下推，兼容仅实现基础端口的测试替身。
-        repo_can_read = getattr(self._repository, "can_read_resource", None)
-        if callable(repo_can_read):
-            return bool(
-                await repo_can_read(
-                    normalized or (snapshot.user_id if snapshot is not None else ""),
-                    resource_type,
-                    resource_id,
-                    snapshot=snapshot,
-                )
-            )
-        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
-        if resolved is None or not resolved.is_active:
-            return False
-        target = await self._repository.get_resource_target(resource_type, resource_id)
-        if target is None:
-            return False
-        return await self._can_read_with_snapshot(resolved, target)
+        return await self._repository.can_read_resource(
+            normalized or (snapshot.user_id if snapshot is not None else ""),
+            resource_type,
+            resource_id,
+            snapshot=snapshot,
+        )
 
     async def can_read_target(
         self,
@@ -93,19 +79,11 @@ class AccessPolicyService:
             return False
         if snapshot is not None and not snapshot.is_active:
             return False
-        repo_can_read_target = getattr(self._repository, "can_read_target", None)
-        if callable(repo_can_read_target):
-            return bool(
-                await repo_can_read_target(
-                    normalized or (snapshot.user_id if snapshot is not None else ""),
-                    target,
-                    snapshot=snapshot,
-                )
-            )
-        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
-        if resolved is None or not resolved.is_active:
-            return False
-        return await self._can_read_with_snapshot(resolved, target)
+        return await self._repository.can_read_target(
+            normalized or (snapshot.user_id if snapshot is not None else ""),
+            target,
+            snapshot=snapshot,
+        )
 
     async def filter_readable_targets(
         self,
@@ -123,60 +101,11 @@ class AccessPolicyService:
             return ()
         if snapshot is not None and not snapshot.is_active:
             return ()
-        # 优先走仓储单 Session SQL EXISTS 下推（4 Session -> 1 Session），未实现时回退。
-        repo_filter = getattr(self._repository, "filter_readable_targets", None)
-        if callable(repo_filter):
-            return cast(
-                tuple[ResourceAccessTarget, ...],
-                await repo_filter(
-                    normalized or (snapshot.user_id if snapshot is not None else ""),
-                    resource_type,
-                    resource_ids,
-                    snapshot=snapshot,
-                ),
-            )
-        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
-        if resolved is None or not resolved.is_active:
-            return ()
-        targets = await self._repository.list_resource_targets(resource_type, resource_ids)
-        if not targets:
-            return ()
-
-        # 仅对 department 级且尚未通过超管/部门管理员快速放行的目标批量加载 grants。
-        dept_resource_ids = [
-            target.resource_id
-            for target in targets
-            if target.visibility_scope is VisibilityScope.DEPARTMENT
-        ]
-        grants_by_id: dict[str, tuple[VisibilityGrant, ...]] = {}
-        active_grant_depts: frozenset[str] = frozenset()
-        if dept_resource_ids and resolved.role is not UserRole.SUPER_ADMIN:
-            grants_by_id = await self._repository.list_grants_for_resources(
-                resource_type,
-                dept_resource_ids,
-            )
-            dept_target_ids = tuple(
-                dict.fromkeys(
-                    grant.target_id
-                    for grants in grants_by_id.values()
-                    for grant in grants
-                    if grant.target_type is GrantTargetType.DEPARTMENT
-                )
-            )
-            if dept_target_ids:
-                active_grant_depts = await self._repository.list_active_department_ids(
-                    dept_target_ids
-                )
-
-        return tuple(
-            target
-            for target in targets
-            if evaluate_can_read(
-                resolved,
-                target,
-                grants_by_id.get(target.resource_id, ()),
-                active_grant_department_ids=active_grant_depts,
-            )
+        return await self._repository.filter_readable_targets(
+            normalized or (snapshot.user_id if snapshot is not None else ""),
+            resource_type,
+            resource_ids,
+            snapshot=snapshot,
         )
 
     async def filter_readable_ids(
@@ -244,28 +173,11 @@ class AccessPolicyService:
             return False, False
         if snapshot is not None and not snapshot.is_active:
             return False, False
-        repo_eval = getattr(self._repository, "evaluate_target_access", None)
-        if callable(repo_eval):
-            return cast(
-                tuple[bool, bool],
-                await repo_eval(
-                    normalized or (snapshot.user_id if snapshot is not None else ""),
-                    target,
-                    snapshot=snapshot,
-                ),
-            )
-        resolved = snapshot if snapshot is not None else await self.get_user_snapshot(user_id)
-        if resolved is None or not resolved.is_active:
-            return False, False
-        can_manage = evaluate_can_manage(
-            resolved,
-            target.resource_type,
-            target.visibility_scope,
-            owner_id=target.owner_id,
-            owner_department_id=target.owner_department_id,
+        return await self._repository.evaluate_target_access(
+            normalized or (snapshot.user_id if snapshot is not None else ""),
+            target,
+            snapshot=snapshot,
         )
-        can_read = await self._can_read_with_snapshot(resolved, target)
-        return can_read, can_manage
 
     async def resolve_and_validate_visibility(
         self,
@@ -348,16 +260,6 @@ class AccessPolicyService:
         if normalized_dept not in active_owner_depts:
             raise InvalidVisibilityConfigError("owner_department_not_found")
 
-        # 再次确认管理权限（确保超管以外仅能在管辖 active 部门下操作）。
-        if not evaluate_can_manage(
-            snapshot,
-            resource_type,
-            visibility_scope,
-            owner_id=target_owner_id,
-            owner_department_id=normalized_dept,
-        ):
-            raise AccessPermissionDeniedError("permission_denied")
-
         # 3. 校验或自动生成 department 级可见性授权列表。
         if visibility_grants is None:
             if (
@@ -422,42 +324,6 @@ class AccessPolicyService:
     ) -> dict[str, tuple[VisibilityGrant, ...]]:
         """批量读取多个资源的可见性授权映射。"""
         return await self._repository.list_grants_for_resources(resource_type, resource_ids)
-
-    async def _can_read_with_snapshot(
-        self,
-        snapshot: UserAccessSnapshot,
-        target: ResourceAccessTarget,
-    ) -> bool:
-        """结合已加载的用户快照和必要的 grants 判定单个资源是否可读。"""
-        if target.visibility_scope is not VisibilityScope.DEPARTMENT:
-            return evaluate_can_read(snapshot, target, (), active_grant_department_ids=frozenset())
-        if snapshot.role is UserRole.SUPER_ADMIN:
-            return True
-        if (
-            snapshot.role is UserRole.DEPT_ADMIN
-            and target.owner_department_id is not None
-            and target.owner_department_id in snapshot.managed_department_ids
-        ):
-            return True
-        grants = await self._repository.list_grants(target.resource_type, target.resource_id)
-        if not grants:
-            return False
-        dept_ids = tuple(
-            dict.fromkeys(
-                grant.target_id
-                for grant in grants
-                if grant.target_type is GrantTargetType.DEPARTMENT
-            )
-        )
-        active_dept_ids = (
-            await self._repository.list_active_department_ids(dept_ids) if dept_ids else frozenset()
-        )
-        return evaluate_can_read(
-            snapshot,
-            target,
-            grants,
-            active_grant_department_ids=active_dept_ids,
-        )
 
     async def _validate_explicit_grants(
         self,

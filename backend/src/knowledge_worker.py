@@ -4,21 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 import signal
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from typing import Any
 
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
 from app.knowledge.worker import KnowledgeWorker
+from bootstrap.config import LoggingSettings
 from bootstrap.knowledge_worker import (
     KnowledgeWorkerBundle,
     build_knowledge_worker,
     build_knowledge_worker_resources,
 )
+from bootstrap.lifecycle import close_resources_lifo
 
 logger = logging.getLogger(__name__)
 
@@ -75,16 +77,12 @@ async def _run_consumers(worker: KnowledgeWorker, concurrency: int) -> None:
 
 def _log_level() -> str:
     """统一日志级别解析：优先 ATHENA_LOG_LEVEL，其次兼容 LOG_LEVEL，默认 INFO。"""
-    return (
-        (os.getenv("ATHENA_LOG_LEVEL") or "").strip()
-        or (os.getenv("LOG_LEVEL") or "").strip()
-        or "INFO"
-    ).upper()
+    return LoggingSettings.from_environment(allow_legacy_log_level=True).level
 
 
 async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
     """装配共享 PostgreSQL、MinIO 和模型资源并运行有界消费协程；支持停机信号优雅退出。"""
-    # 资源由 bundle 持有；两阶段构造保证启动顺序不变，失败时只清理已创建部分。
+    # 资源由 bundle 持有；两阶段构造保证启动顺序不变，失败时按注册逆序清理已创建资源。
     bundle = KnowledgeWorkerBundle()
     failure: BaseException | None = None
     try:
@@ -128,51 +126,44 @@ async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
     except BaseException as error:
         failure = error
     finally:
-        # 逆序释放模型、存储与数据库；单个清理失败不阻断后续步骤，
-        # 只保留首个异常，函数结束前统一抛出。
-        models = bundle.models
-        if models is not None:
-            try:
-                models.counter.close()
-            except BaseException as error:
-                logger.error(
-                    "knowledge_worker_counter_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
-        if models is not None:
-            try:
-                await models.embedding.aclose()
-            except BaseException as error:
-                logger.error(
-                    "knowledge_worker_embedding_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
-        if bundle.originals is not None:
-            try:
-                await bundle.originals.aclose()
-            except BaseException as error:
-                logger.error(
-                    "knowledge_worker_storage_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
+        # 按创建顺序登记，经 AsyncExitStack 严格逆序释放：
+        # worker -> counter -> embedding -> originals -> database。
+        cleanups: list[tuple[str, Callable[[], Any]]] = []
         if bundle.database is not None:
-            try:
-                await bundle.database.dispose()
-            except BaseException as error:
-                logger.error(
-                    "knowledge_worker_database_cleanup_failed exception_type=%s",
-                    type(error).__name__,
+            database = bundle.database
+            cleanups.append(
+                ("knowledge_worker_database_cleanup_failed", lambda: database.dispose())
+            )
+        if bundle.originals is not None:
+            originals_store = bundle.originals
+            cleanups.append(
+                ("knowledge_worker_storage_cleanup_failed", lambda: originals_store.aclose())
+            )
+        if bundle.models is not None:
+            model_resources = bundle.models
+            cleanups.append(
+                (
+                    "knowledge_worker_embedding_cleanup_failed",
+                    lambda: model_resources.embedding.aclose(),
                 )
-                if failure is None:
-                    failure = error
-    if failure is not None:
-        raise failure
+            )
+            cleanups.append(
+                (
+                    "knowledge_worker_counter_cleanup_failed",
+                    lambda: model_resources.counter.close(),
+                )
+            )
+        if bundle.worker is not None:
+            active_worker = bundle.worker
+            cleanups.append(
+                ("knowledge_worker_pool_cleanup_failed", lambda: active_worker.aclose())
+            )
+        await close_resources_lifo(
+            cleanups,
+            log=logger,
+            reraise=True,
+            initial_error=failure,
+        )
 
 
 async def _main() -> None:

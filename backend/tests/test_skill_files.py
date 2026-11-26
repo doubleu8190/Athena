@@ -15,7 +15,6 @@ import pytest
 
 from app.file import FileInputError, SessionFileService
 from app.file import service as file_service_module
-from common.json_stream import JsonStreamValidationCancelled
 from domain.file import (
     MAX_SESSION_FILE_BYTES,
     FileObjectScanEntry,
@@ -615,7 +614,7 @@ def test_generated_json_artifact_validation_uses_streaming_path_within_size_cap(
     tmp_path: Path,
     json_kind: str,
 ) -> None:
-    """50 MiB 限额内的超大标量、大键和深嵌套 JSON 产物仍走流式校验发布。"""
+    """50 MiB 限额内的大标量、大键与合法深度嵌套 JSON 产物可通过校验并发布。"""
 
     class StreamOnlyObjects(_Objects):
         async def put_file(
@@ -631,7 +630,7 @@ def test_generated_json_artifact_validation_uses_streaming_path_within_size_cap(
 
     path = tmp_path / f"{json_kind}.json"
     if json_kind == "nested":
-        path.write_bytes(b"[" * 150_000 + b"0" + b"]" * 150_000)
+        path.write_bytes(b"[" * 128 + b"0" + b"]" * 128)
     else:
         prefix = b'{"' if json_kind == "key" else b'"'
         suffix = b'":0}' if json_kind == "key" else b'"'
@@ -656,6 +655,30 @@ def test_generated_json_artifact_validation_uses_streaming_path_within_size_cap(
 
     assert artifact.size_bytes == path.stat().st_size
     assert objects.puts == 1
+
+
+def test_generated_json_artifact_rejects_excessive_nesting_depth(
+    tmp_path: Path,
+) -> None:
+    """触发 json.loads RecursionError 的超深嵌套 JSON 产物应安全拒绝且不写入对象存储。"""
+    depth = 150_000
+    path = tmp_path / f"too-deep-{depth}.json"
+    path.write_bytes(b"[" * depth + b"0" + b"]" * depth)
+    objects = _Objects()
+    service = _service(objects, _Repository(objects))
+
+    with pytest.raises(FileInputError, match="file_content_mismatch"):
+        asyncio.run(
+            service.prepare_artifact(
+                source_call_id="toolcall_too_deep_000000000000",
+                output_index=0,
+                path=path,
+                filename=path.name,
+                label="too-deep",
+            )
+        )
+
+    assert objects.puts == 0
 
 
 def test_cancelled_artifact_preparation_does_not_publish_partial_object(
@@ -743,7 +766,7 @@ def test_json_path_cancellation_uses_real_validator_and_joins_worker_thread(
     path = tmp_path / "memory.json"
     path.write_text('{"value":1}', encoding="utf-8")
     original_open = Path.open
-    original_validator = file_service_module.validate_json_stream
+    original_validator = file_service_module._validate_json_document
 
     def blocking_open(
         self: Path,
@@ -766,19 +789,19 @@ def test_json_path_cancellation_uses_real_validator_and_joins_worker_thread(
         return stream
 
     def observed_validator(
-        stream: Any,
+        target_path: Path,
         *,
         cancellation: threading.Event | None = None,
     ) -> None:
         try:
-            original_validator(stream, cancellation=cancellation)
+            original_validator(target_path, cancellation=cancellation)
         finally:
             finished.set()
 
     monkeypatch.setattr(Path, "open", blocking_open)
     monkeypatch.setattr(
         file_service_module,
-        "validate_json_stream",
+        "_validate_json_document",
         observed_validator,
     )
     objects = _Objects()
@@ -1024,6 +1047,10 @@ def test_json_validation_accepts_single_streamed_root(
     [
         ("invalid.json", b'{"a":'),
         ("multiple.json", b"{} {}"),
+        ("nan.json", b"NaN"),
+        ("infinity.json", b"Infinity"),
+        ("neg-infinity.json", b"-Infinity"),
+        ("bom.json", b"\xef\xbb\xbf{}"),
         ("bad-utf8.json", b'"\xff"'),
         ("bad-utf8.txt", b"\xf0\x9f"),
     ],
@@ -1054,24 +1081,24 @@ def test_json_upload_cancellation_stops_and_joins_worker_thread(
     service = _service(objects, _Repository(objects))
 
     def blocking_validator(
-        stream: Any,
+        target_path: Path,
         *,
         cancellation: threading.Event | None = None,
     ) -> None:
-        del stream
+        del target_path
         started.set()
         try:
             assert cancellation is not None
             while not cancellation.wait(0.005):
                 pass
             stopped.set()
-            raise JsonStreamValidationCancelled()
+            file_service_module._raise_if_cancelled(cancellation)
         finally:
             finished.set()
 
     monkeypatch.setattr(
         file_service_module,
-        "validate_json_stream",
+        "_validate_json_document",
         blocking_validator,
     )
 

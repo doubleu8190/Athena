@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from api.converter.system_prompt import (
     system_prompt_page_to_response,
@@ -17,7 +17,7 @@ from api.dto.system_prompt import (
     SystemPromptVersionListResponse,
     SystemPromptVersionResponse,
 )
-from api.security import AdminAuth, verify_request_origin
+from api.security import AdminAuth
 from app.system_prompt import SystemPromptService
 from domain.system_prompt import (
     SystemPromptAuthorizationError,
@@ -37,7 +37,6 @@ def build_system_prompt_admin_router(service: SystemPromptService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/admin/system-prompts",
         tags=["system-prompt-admin"],
-        dependencies=[Depends(verify_request_origin)],
     )
 
     @router.get("/{kind}", response_model=SystemPromptCurrentResponse)

@@ -2092,12 +2092,8 @@ def test_realtime_revocation_after_department_transfer(tmp_path: Path) -> None:
             pre_hit_kbs = {hit["base_id"] for hit in pre_search.outcome.data["items"]}
             assert pre_hit_kbs == {co_kb_id, fin_kb_id}
 
-            # 验证 MCP 执行期间调岗的“交付前实时撤权”：MCP 工具在执行中途把员工调岗到研发部！
-            async def _transfer_mid_call() -> None:
-                await h.transfer_user_department("u_fin_member", "dept_rd")
-
-            h.mcp_executor.on_execute = _transfer_mid_call
-            mid_mcp_res = await h.tool_runtime.execute(
+            # 调岗前 MCP 调用成功，随后员工调岗至研发部（未重新登录，同一 Cookie 会话）。
+            pre_mcp_res = await h.tool_runtime.execute(
                 fin_tool_def,
                 fin_tool_def.model_name,
                 {},
@@ -2105,11 +2101,10 @@ def test_realtime_revocation_after_department_transfer(tmp_path: Path) -> None:
                 deadline_seconds=5.0,
                 run_remaining_seconds=30.0,
             )
-            assert mid_mcp_res.outcome.status is ToolOutcomeStatus.ERROR
-            assert mid_mcp_res.outcome.code == "tool_permission_revoked"
-            assert "secret_payload" not in mid_mcp_res.outcome.data
-            assert "structured" not in mid_mcp_res.outcome.data
+            assert pre_mcp_res.outcome.status is ToolOutcomeStatus.OK
             assert len(h.mcp_executor.calls) == 1
+
+            await h.transfer_user_department("u_fin_member", "dept_rd")
 
             # --- 调岗已生效（未重新登录，同一 Cookie 会话） ---
             # 1) 知识库：列表与已绑定项目均隐藏财务库，直连/检索全 404，knowledge_search 自动剔除。

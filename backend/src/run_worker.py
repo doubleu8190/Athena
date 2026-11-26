@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import signal
+from collections.abc import Callable
 from contextlib import suppress
+from typing import Any
 
 from app.run.context import prepare_run_tokenizers
+from bootstrap.config import LoggingSettings
+from bootstrap.lifecycle import close_resources_lifo
 from bootstrap.run_worker import RunWorkerBundle, build_run_worker_dependencies
 
 logger = logging.getLogger(__name__)
@@ -19,7 +22,7 @@ async def run_worker_process(
     database_url: str | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """组装 Worker 并在停止信号后依次清理已创建的资源。"""
+    """组装 Worker 并在停止信号后经 AsyncExitStack 严格逆序清理已创建的资源。"""
     # 外部资源由 bundle 持有，finally 中只清理真正创建成功的部分；
     # failure 暂存首个异常，确保清理流程执行完毕后再原样抛出。
     bundle = RunWorkerBundle()
@@ -58,8 +61,6 @@ async def run_worker_process(
         # 包括 CancelledError 在内的所有异常都先暂存，保证 finally 完整清理后再抛出。
         failure = error
     finally:
-        # 按依赖逆序清理，每步独立捕获异常，单个清理失败不阻断后续步骤；
-        # 只记录首个失败，函数结束前统一抛出。
         if stop_task is not None and not stop_task.done():
             stop_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -67,71 +68,51 @@ async def run_worker_process(
         if bundle.worker is not None:
             # stop 幂等：正常路径已调用过，此处兜底覆盖提前异常退出的情况。
             await bundle.worker.stop()
-        # 等待 Worker 的 TaskGroup 收敛；清理阶段的异常只记录，不覆盖原始 failure。
-        if worker_task is not None:
-            try:
-                await worker_task
-            except BaseException as error:
-                logger.error(
-                    "run_worker_shutdown_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
-        if bundle.file_object_store is not None:
-            try:
-                await bundle.file_object_store.aclose()
-            except BaseException as error:
-                logger.error(
-                    "run_worker_file_storage_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
-        # 依次关闭 LLM 客户端、查询模型、Redis 连接与数据库连接池。
-        if bundle.provider is not None:
-            try:
-                await bundle.provider.aclose()
-            except BaseException as error:
-                logger.error(
-                    "run_worker_llm_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
-        if bundle.query_services is not None:
-            try:
-                await bundle.query_services.aclose()
-            except BaseException as error:
-                logger.error(
-                    "run_worker_query_services_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
-        if bundle.run_transport is not None:
-            try:
-                await bundle.run_transport.aclose()
-            except BaseException as error:
-                logger.error(
-                    "run_worker_redis_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
+        # 按创建顺序登记，经 AsyncExitStack 严格逆序释放：
+        # worker_task -> mcp_executor -> skill_package_cache -> file_store ->
+        # provider -> query_services -> storage_client -> run_transport -> database。
+        cleanups: list[tuple[str, Callable[[], Any]]] = []
         if bundle.database is not None:
-            try:
-                await bundle.database.dispose()
-            except BaseException as error:
-                logger.error(
-                    "run_worker_database_cleanup_failed exception_type=%s",
-                    type(error).__name__,
-                )
-                if failure is None:
-                    failure = error
-    # 清理完成后重新抛出首个异常，保留原始失败原因（含取消语义）。
-    if failure is not None:
-        raise failure
+            database = bundle.database
+            cleanups.append(("run_worker_database_cleanup_failed", lambda: database.dispose()))
+        if bundle.run_transport is not None:
+            run_transport = bundle.run_transport
+            cleanups.append(("run_worker_redis_cleanup_failed", lambda: run_transport.aclose()))
+        if bundle.storage_client is not None:
+            storage_client = bundle.storage_client
+            cleanups.append(
+                ("run_worker_shared_storage_cleanup_failed", lambda: storage_client.aclose())
+            )
+        if bundle.query_services is not None:
+            query_services = bundle.query_services
+            cleanups.append(
+                ("run_worker_query_services_cleanup_failed", lambda: query_services.aclose())
+            )
+        if bundle.provider is not None:
+            provider = bundle.provider
+            cleanups.append(("run_worker_llm_cleanup_failed", lambda: provider.aclose()))
+        if bundle.file_object_store is not None:
+            file_store = bundle.file_object_store
+            cleanups.append(("run_worker_file_storage_cleanup_failed", lambda: file_store.aclose()))
+        if bundle.skill_package_cache is not None:
+            package_cache = bundle.skill_package_cache
+            cleanups.append(
+                ("run_worker_skill_cache_cleanup_failed", lambda: package_cache.aclose())
+            )
+        if bundle.mcp_executor is not None:
+            mcp_executor = bundle.mcp_executor
+            cleanups.append(("run_worker_mcp_cleanup_failed", lambda: mcp_executor.aclose()))
+        # 仅当 worker_task 尚未结束时在收尾阶段等待其收敛；
+        # 若已在 try 块中因内部异常结束并被 await 取出，跳过二次 await 以避免误导性清理错误日志。
+        if worker_task is not None and not worker_task.done():
+            active_task = worker_task
+            cleanups.append(("run_worker_shutdown_failed", lambda: active_task))
+        await close_resources_lifo(
+            cleanups,
+            log=logger,
+            reraise=True,
+            initial_error=failure,
+        )
 
 
 async def _main() -> None:
@@ -144,7 +125,7 @@ async def _main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=os.getenv("ATHENA_LOG_LEVEL", "INFO"))
+    logging.basicConfig(level=LoggingSettings.from_environment().level)
     asyncio.run(_main())
 
 

@@ -133,6 +133,15 @@ class _StubMcpCatalog:
         del limit
         return ()
 
+    async def list_readable_runtime_tools(
+        self,
+        snapshot: Any,
+        *,
+        limit: int = 201,
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        del snapshot, limit
+        return ()
+
     async def get_call_target(
         self,
         tool_id: str,

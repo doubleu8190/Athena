@@ -39,11 +39,6 @@ def normalize_origin(value: str) -> str | None:
         return None
 
 
-def _request_origin(request: Request) -> str | None:
-    """从当前请求 URL 生成同源比较值。"""
-    return normalize_origin(f"{request.url.scheme}://{request.url.netloc}")
-
-
 def is_origin_allowed(
     *,
     method: str,
@@ -51,7 +46,7 @@ def is_origin_allowed(
     request_origin: str | None,
     configured_public_origin: str | None,
 ) -> bool:
-    """判断写请求携带的 Origin 是否与当前请求源或显式公开源同源。"""
+    """判断写请求 Origin 是否与请求源或公开源同源（由 AuthPrecheckMiddleware 统一调用）。"""
     if method.upper() in {"GET", "HEAD", "OPTIONS"}:
         return True
     if supplied_origin is None:
@@ -66,23 +61,6 @@ def is_origin_allowed(
     }
     submitted_origin = normalize_origin(supplied_origin)
     return submitted_origin is not None and submitted_origin in allowed
-
-
-def verify_request_origin(request: Request) -> None:
-    """拒绝带不匹配 Origin 的浏览器写请求。"""
-    if not is_origin_allowed(
-        method=request.method,
-        supplied_origin=request.headers.get("origin"),
-        request_origin=_request_origin(request),
-        configured_public_origin=cast(
-            str | None,
-            getattr(request.app.state, "public_origin", None),
-        ),
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=ORIGIN_NOT_ALLOWED,
-        )
 
 
 async def get_current_auth(request: Request) -> AuthContext:
@@ -126,8 +104,8 @@ CurrentAuth = Annotated[AuthContext, Depends(get_current_auth)]
 async def require_admin(current_auth: CurrentAuth) -> AuthContext:
     """基于本次数据库认证结果预检查超级管理员角色。
 
-    管理操作服务仍须调用 AuthService.revalidate_admin 及事务守卫，避免把依赖层检查当作
-    事务内最终授权。此依赖不读取任何管理资源。
+    管理操作服务仍须通过 CurrentSessionReader 与仓储无锁身份复核（verify_active_session_user）
+    复核当前有效身份及角色，避免把依赖层检查当作事务内最终授权。此依赖不读取任何管理资源。
     """
     if current_auth.user.role is not UserRole.SUPER_ADMIN:
         raise HTTPException(
@@ -143,7 +121,7 @@ AdminAuth = Annotated[AuthContext, Depends(require_admin)]
 async def require_skill_manager(current_auth: CurrentAuth) -> AuthContext:
     """基于本次数据库认证结果预检查超管或部门管理员角色（用于 /api/v1/admin/skills）。
 
-    细粒度部门范围与事务内身份复核仍由 SkillService 与仓储事务守卫完成。
+    细粒度部门范围与事务内无锁身份复核仍由 SkillService 与仓储完成。
     """
     if current_auth.user.role not in {UserRole.SUPER_ADMIN, UserRole.DEPT_ADMIN}:
         raise HTTPException(
@@ -171,5 +149,4 @@ __all__ = [
     "normalize_origin",
     "require_admin",
     "require_skill_manager",
-    "verify_request_origin",
 ]

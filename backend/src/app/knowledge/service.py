@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import inspect
 import json
 import math
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import PurePath
-from typing import Final, cast
+from typing import Final
 
 from app.access import AccessPolicyService
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.access import (
     AccessPermissionDeniedError,
@@ -123,15 +123,6 @@ class KnowledgeService:
         self._access_policy = access_policy
         self._profile_id = profile_id
         self._semantic_min_score = semantic_min_score
-        # 检测仓储是否支持 min_score / visibility_grants 参数，兼容既有测试中的旧版 fake 仓储。
-        self._semantic_supports_min_score = _accepts_keyword_argument(
-            getattr(repository, "search_semantic", None),
-            "min_score",
-        )
-        self._create_supports_grants = _accepts_keyword_argument(
-            getattr(repository, "create_base", None),
-            "visibility_grants",
-        )
         self._id_factory = id_factory
         self._clock = clock
 
@@ -143,12 +134,7 @@ class KnowledgeService:
             if base is None:
                 raise KnowledgeNotFoundError("knowledge_base_not_found")
             return base
-        get_by_id = getattr(self._repository, "get_base_by_id", None)
-        base = (
-            await get_by_id(base_id)
-            if callable(get_by_id)
-            else await self._repository.get_base(owner, base_id)
-        )
+        base = await self._repository.get_base_by_id(base_id)
         if base is None:
             raise KnowledgeNotFoundError("knowledge_base_not_found")
         if not await self._access_policy.can_read_target(owner, _kb_access_target(base)):
@@ -160,12 +146,7 @@ class KnowledgeService:
         owner = _required(actor_user_id, "owner_id_required")
         if self._access_policy is None:
             return await self._require_readable_base(owner, base_id)
-        get_by_id = getattr(self._repository, "get_base_by_id", None)
-        base = (
-            await get_by_id(base_id)
-            if callable(get_by_id)
-            else await self._repository.get_base(owner, base_id)
-        )
+        base = await self._repository.get_base_by_id(base_id)
         if base is None:
             raise KnowledgeNotFoundError("knowledge_base_not_found")
         # 单次权限快照内同时完成可读与可管双判定，避免重复加载组织树。
@@ -177,7 +158,7 @@ class KnowledgeService:
             raise KnowledgeNotFoundError("knowledge_base_not_found")
         if not can_manage:
             raise KnowledgePermissionDeniedError("knowledge_permission_denied")
-        return cast(KnowledgeBase, base)
+        return base
 
     async def create_base(
         self,
@@ -223,7 +204,7 @@ class KnowledgeService:
             if visibility_scope is not VisibilityScope.PERSONAL or owner_department_id is not None:
                 raise KnowledgeInputError("visibility_scope_requires_access_policy")
 
-        at = _utc(self._clock())
+        at = as_utc(self._clock())
         item = KnowledgeBase(
             self._id_factory("kb"),
             owner,
@@ -234,9 +215,7 @@ class KnowledgeService:
             visibility_scope=resolved_scope,
             owner_department_id=resolved_department_id,
         )
-        if self._create_supports_grants:
-            return await self._repository.create_base(item, visibility_grants=resolved_grants)
-        return await self._repository.create_base(item)
+        return await self._repository.create_base(item, visibility_grants=resolved_grants)
 
     async def list_bases(
         self,
@@ -257,27 +236,8 @@ class KnowledgeService:
                 offset=(page - 1) * page_size,
                 limit=page_size,
             )
-        # 优先走仓储单 Session SQL EXISTS 下推过滤/排序/分页，兼容未实现该方法的测试替身。
-        list_readable = getattr(self._repository, "list_readable_bases", None)
-        if callable(list_readable):
-            return cast(
-                list[KnowledgeBase],
-                await list_readable(
-                    owner,
-                    offset=(page - 1) * page_size,
-                    limit=page_size,
-                    visibility_scope=visibility_scope,
-                    owner_department_id=owner_department_id,
-                ),
-            )
-        readable_ids = await self._access_policy.filter_readable_ids(
+        return await self._repository.list_readable_bases(
             owner,
-            ResourceType.KNOWLEDGE_BASE,
-        )
-        if not readable_ids:
-            return []
-        return await self._repository.list_bases_by_ids(
-            tuple(readable_ids),
             offset=(page - 1) * page_size,
             limit=page_size,
             visibility_scope=visibility_scope,
@@ -327,7 +287,7 @@ class KnowledgeService:
                 base_id,
                 next_name,
                 next_description,
-                _utc(self._clock()),
+                as_utc(self._clock()),
             )
             if updated is None:
                 raise KnowledgeNotFoundError("knowledge_base_not_found")
@@ -381,7 +341,7 @@ class KnowledgeService:
             visibility_scope=resolved_scope,
             owner_department_id=resolved_dept,
             visibility_grants=resolved_grants,
-            at=_utc(self._clock()),
+            at=as_utc(self._clock()),
         )
         if updated is None:
             raise KnowledgeNotFoundError("knowledge_base_not_found")
@@ -392,7 +352,7 @@ class KnowledgeService:
         owner = _required(owner_id, "owner_id_required")
         if self._access_policy is not None:
             await self._require_manageable_base(owner, base_id)
-        deleted = await self._repository.soft_delete_base(owner, base_id, _utc(self._clock()))
+        deleted = await self._repository.soft_delete_base(owner, base_id, as_utc(self._clock()))
         if not deleted:
             raise KnowledgeNotFoundError("knowledge_base_not_found")
 
@@ -419,7 +379,7 @@ class KnowledgeService:
             source_kind="text",
             content_hash=digest,
         )
-        at = _utc(self._clock())
+        at = as_utc(self._clock())
         return await self._repository.create_text_document(
             owner_id=owner,
             base_id=base_id,
@@ -473,49 +433,37 @@ class KnowledgeService:
             content_hash=sha256,
         )
         owner_scope = hashlib.sha256(owner.encode()).hexdigest()
-        at = _utc(self._clock())
-        candidate_source_id = self._id_factory("ksrc")
-        reservation = await self._repository.reserve_file_upload(
+        at = as_utc(self._clock())
+        # 写对象存储前先执行无锁只读预检，确保重放、幂等冲突或超配额不会向 MinIO 写入孤儿对象。
+        replay = await self._repository.preflight_file_upload(
             owner_id=owner,
             operation="create",
             request_key=key,
             request_hash=request_hash,
             base_id=base_id,
-            document_id=self._id_factory("kdoc"),
+            document_id=None,
             size_bytes=len(content),
-            reservation_token=self._id_factory("kres"),
-            storage_key=(f"{owner_scope}/{candidate_source_id}/{sha256[:2]}/{sha256}"),
-            source_id=candidate_source_id,
-            version_id=self._id_factory("kver"),
-            job_id=self._id_factory("kjob"),
-            at=at,
         )
-        if reservation.replay_document is not None:
-            return reservation.replay_document, reservation.version_id
-        if (
-            reservation.reservation_token is None
-            or reservation.storage_key is None
-            or reservation.source_id is None
-            or reservation.job_id is None
-        ):
-            raise RuntimeError("knowledge_upload_reservation_invalid")
-        await self._originals.put(reservation.storage_key, content)
+        if replay is not None:
+            return replay
+        source_id = self._id_factory("ksrc")
+        storage_key = f"{owner_scope}/{source_id}/{sha256[:2]}/{sha256}"
+        await self._originals.put(storage_key, content)
         return await self._repository.create_file_document(
             owner_id=owner,
             base_id=base_id,
             title=normalized_title,
             filename=safe_filename,
             media_type=media_type,
-            storage_key=reservation.storage_key,
+            storage_key=storage_key,
             size_bytes=len(content),
             sha256=sha256,
             request_key=key,
             request_hash=request_hash,
-            document_id=reservation.document_id,
-            version_id=reservation.version_id,
-            source_id=reservation.source_id,
-            job_id=reservation.job_id,
-            reservation_token=reservation.reservation_token,
+            document_id=self._id_factory("kdoc"),
+            version_id=self._id_factory("kver"),
+            source_id=source_id,
+            job_id=self._id_factory("kjob"),
             profile_id=self._profile_id,
             at=at,
         )
@@ -543,7 +491,7 @@ class KnowledgeService:
             source_kind="text",
             content_hash=digest,
         )
-        at = _utc(self._clock())
+        at = as_utc(self._clock())
         try:
             return await self._repository.replace_text_document(
                 owner_id=owner,
@@ -575,7 +523,7 @@ class KnowledgeService:
             raise OriginalStorageUnavailableError()
         owner = _required(owner_id, "owner_id_required")
         await self._require_manageable_base(owner, base_id)
-        document = await self.get_document(owner, base_id, document_id)
+        await self.get_document(owner, base_id, document_id)
         safe_filename = unicodedata.normalize(
             "NFC", PurePath(filename.replace("\\", "/")).name.strip()
         )
@@ -599,10 +547,10 @@ class KnowledgeService:
             content_hash=sha256,
         )
         owner_scope = hashlib.sha256(owner.encode()).hexdigest()
-        at = _utc(self._clock())
-        candidate_source_id = self._id_factory("ksrc")
+        at = as_utc(self._clock())
         try:
-            reservation = await self._repository.reserve_file_upload(
+            # 写对象存储前先执行无锁只读预检，确保重放、冲突、进行中替换或超配额不写孤儿。
+            replay = await self._repository.preflight_file_upload(
                 owner_id=owner,
                 operation="replace",
                 request_key=key,
@@ -610,44 +558,31 @@ class KnowledgeService:
                 base_id=base_id,
                 document_id=document_id,
                 size_bytes=len(content),
-                reservation_token=self._id_factory("kres"),
-                storage_key=(f"{owner_scope}/{candidate_source_id}/{sha256[:2]}/{sha256}"),
-                source_id=candidate_source_id,
-                version_id=self._id_factory("kver"),
-                job_id=self._id_factory("kjob"),
-                at=at,
             )
         except ValueError as error:
             # 将仓储冲突/并发更新等业务 ValueError 统一转为 KnowledgeInputError，
             # 与 replace_text_document 对齐，确保 API 层稳定映射为 409。
             raise KnowledgeInputError(str(error)) from error
-        if reservation.replay_document is not None:
-            return reservation.replay_document, reservation.version_id
-        if (
-            reservation.reservation_token is None
-            or reservation.storage_key is None
-            or reservation.source_id is None
-            or reservation.job_id is None
-        ):
-            raise RuntimeError("knowledge_upload_reservation_invalid")
-        await self._originals.put(reservation.storage_key, content)
+        if replay is not None:
+            return replay
+        source_id = self._id_factory("ksrc")
+        storage_key = f"{owner_scope}/{source_id}/{sha256[:2]}/{sha256}"
+        await self._originals.put(storage_key, content)
         try:
             return await self._repository.replace_file_document(
                 owner_id=owner,
                 base_id=base_id,
                 document_id=document_id,
-                title=document.title,
                 filename=safe_filename,
                 media_type=media_type,
-                storage_key=reservation.storage_key,
+                storage_key=storage_key,
                 size_bytes=len(content),
                 sha256=sha256,
                 request_key=key,
                 request_hash=request_hash,
-                version_id=reservation.version_id,
-                source_id=reservation.source_id,
-                job_id=reservation.job_id,
-                reservation_token=reservation.reservation_token,
+                version_id=self._id_factory("kver"),
+                source_id=source_id,
+                job_id=self._id_factory("kjob"),
                 profile_id=self._profile_id,
                 at=at,
             )
@@ -688,7 +623,7 @@ class KnowledgeService:
             base_id,
             document_id,
             normalized,
-            _utc(self._clock()),
+            as_utc(self._clock()),
         )
         if document is None:
             raise KnowledgeNotFoundError("document_not_found")
@@ -725,7 +660,7 @@ class KnowledgeService:
                 document_id,
                 version_id,
                 self._id_factory("kjob"),
-                _utc(self._clock()),
+                as_utc(self._clock()),
             )
         except ValueError as error:
             raise KnowledgeInputError(str(error)) from error
@@ -805,33 +740,36 @@ class KnowledgeService:
         else:
             # 未注入统一权限引擎的测试/旧调用路径仍保留仓储级基础范围校验。
             await self._repository.validate_search_scope(owner_id, base_ids)
-        tokens: tuple[str, ...] = ()
         keyword_reason: str | None = None
-        try:
-            # 将同步分词卸载到工作线程，避免首次加载或长查询分词阻塞事件循环。
-            tokens = await asyncio.to_thread(self._tokenizer.tokenize, normalized)
-        except Exception:
-            keyword_reason = "keyword_tokenizer_unavailable"
-        vector, semantic_reason = await self._query_vector(normalized)
+        semantic_reason: str | None = None
         profile_degraded = False
 
-        async def keyword_search() -> tuple[SearchHit, ...]:
-            if keyword_reason is not None:
-                raise RuntimeError(keyword_reason)
+        async def keyword_branch() -> tuple[SearchHit, ...]:
+            nonlocal keyword_reason
+            try:
+                # 关键词分支独立完成分词与全文检索，不再串行等待远程 Embedding RTT。
+                tokens = await asyncio.to_thread(self._tokenizer.tokenize, normalized)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                keyword_reason = "keyword_tokenizer_unavailable"
+                raise RuntimeError(keyword_reason) from error
             return await self._repository.search_keyword(owner_id, base_ids, tokens, 40)
 
-        async def semantic_search() -> tuple[SearchHit, ...]:
-            nonlocal profile_degraded
+        async def semantic_branch() -> tuple[SearchHit, ...]:
+            nonlocal profile_degraded, semantic_reason
+            vector, semantic_reason = await self._query_vector(normalized)
             if vector is None:
+                # 向量不可用或非法时立即降级，确保零语义查库请求（semantic_calls == 0）。
                 raise RuntimeError(semantic_reason or "semantic_unavailable")
-            incompatible_check = getattr(self._repository, "has_incompatible_profile", None)
-            has_incompatible = (
-                await incompatible_check(owner_id, base_ids, self._profile_id)
-                if callable(incompatible_check)
-                else False
+
+            # 查询向量就绪后并行执行档案兼容性探测与语义近邻检索，消除一次串行 DB RTT；
+            # 任一子任务异常或取消时及时取消并回收另一子任务，避免遗留孤立协程。
+            incompatible_task = asyncio.create_task(
+                self._repository.has_incompatible_profile(owner_id, base_ids, self._profile_id)
             )
-            if self._semantic_supports_min_score:
-                hits = await self._repository.search_semantic(
+            search_task = asyncio.create_task(
+                self._repository.search_semantic(
                     owner_id,
                     base_ids,
                     vector,
@@ -839,15 +777,21 @@ class KnowledgeService:
                     self._profile_id,
                     min_score=self._semantic_min_score,
                 )
-            else:
-                hits = await self._repository.search_semantic(
-                    owner_id, base_ids, vector, 40, self._profile_id
-                )
+            )
+            try:
+                has_incompatible, hits = await asyncio.gather(incompatible_task, search_task)
+            except BaseException:
+                for pending_task in (incompatible_task, search_task):
+                    if not pending_task.done():
+                        pending_task.cancel()
+                await asyncio.gather(incompatible_task, search_task, return_exceptions=True)
+                raise
+
             profile_degraded = has_incompatible
             if has_incompatible and not hits:
                 # 混合 profile 且启用相关性下限时，低频探测是否仍存在兼容切片：
                 # 若仅因相似度低于 min_score 返回空命中，保留 semantic 通道并记录降级提示。
-                if self._semantic_supports_min_score and self._semantic_min_score > 0.0:
+                if self._semantic_min_score > 0.0:
                     compatible_probe = await self._repository.search_semantic(
                         owner_id,
                         base_ids,
@@ -862,8 +806,8 @@ class KnowledgeService:
             return hits
 
         keyword_result, semantic_result = await asyncio.gather(
-            keyword_search(),
-            semantic_search(),
+            keyword_branch(),
+            semantic_branch(),
             return_exceptions=True,
         )
         channels: list[str] = []
@@ -901,9 +845,8 @@ class KnowledgeService:
         )
         merged = _merge_adjacent_hits(ordered, scores)
         bounded = _apply_context_budget(merged, context_budget, self._counter)
-        if hasattr(self._repository, "filter_active_hits"):
-            # 单次过滤已失效/已删除文档命中的片段，避免可见性变化时递归整次重跑。
-            bounded = list(await self._repository.filter_active_hits(owner_id, tuple(bounded)))
+        # 单次过滤已失效/已删除文档命中的片段，避免可见性变化时递归整次重跑。
+        bounded = list(await self._repository.filter_active_hits(owner_id, tuple(bounded)))
         if profile_degraded:
             degraded.append("semantic_profile_incompatible")
         return SearchResult(tuple(bounded[:limit]), tuple(channels), tuple(dict.fromkeys(degraded)))
@@ -1053,23 +996,3 @@ def _clean_text(value: str, *, maximum: int, code: str) -> str:
     ):
         raise KnowledgeInputError(code)
     return normalized
-
-
-def _accepts_keyword_argument(func: object, name: str) -> bool:
-    """判断可调用对象是否接受指定关键字参数，兼容旧测试替身签名。"""
-    if not callable(func):
-        return False
-    try:
-        parameters = inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        return False
-    if name in parameters:
-        return parameters[name].kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        )
-    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-
-
-def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

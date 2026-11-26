@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from common.date import as_utc
 from domain.access import VisibilityGrant
 from domain.skill.model import (
     DependencyCheck,
@@ -17,11 +16,6 @@ from domain.skill.model import (
     SkillScope,
     SkillVersion,
 )
-
-
-def _utc(value: datetime) -> datetime:
-    """补齐 SQLite 丢失的 UTC 时区。"""
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def skill_version_to_domain(row: SkillVersionModel) -> SkillVersion:
@@ -39,7 +33,7 @@ def skill_version_to_domain(row: SkillVersionModel) -> SkillVersion:
         dependency_requirements=tuple(row.dependency_requirements),
         dependency_check=dependency_check,
         created_by=row.created_by,
-        created_at=_utc(row.created_at),
+        created_at=as_utc(row.created_at),
     )
 
 
@@ -59,15 +53,15 @@ def skill_to_domain(
         script_requires_approval=row.script_requires_approval,
         revision=row.revision,
         created_by=row.created_by,
-        created_at=_utc(row.created_at),
-        updated_at=_utc(row.updated_at),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
         name="" if current is None else current.manifest.name,
         description="" if current is None else current.manifest.description,
         current_version_label=None if current is None else current.label,
         dependency_check=None if current is None else current.dependency_check,
         scope=SkillScope(row.scope),
         owner_id=row.owner_id,
-        deleted_at=None if row.deleted_at is None else _utc(row.deleted_at),
+        deleted_at=None if row.deleted_at is None else as_utc(row.deleted_at),
         owner_department_id=row.owner_department_id,
         visibility_grants=grants,
         format=SkillFormat(row.format),
@@ -101,8 +95,8 @@ def skill_execution_to_domain(row: SkillExecutionModel) -> SkillExecutionRecord:
             SkillExecutionArtifact.model_validate(item)
             for item in row.result_artifacts
         ),
-        created_at=_utc(row.created_at),
-        finished_at=None if row.finished_at is None else _utc(row.finished_at),
+        created_at=as_utc(row.created_at),
+        finished_at=None if row.finished_at is None else as_utc(row.finished_at),
     )
 
 

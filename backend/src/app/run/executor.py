@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from pydantic import ValidationError
 
@@ -33,15 +33,14 @@ from app.run.events import publish_pending_events
 from app.run.prompt import render_project_instructions_context
 from app.run.safe_stop import (
     SafeStopReporter,
-    is_context_report_text_valid,
     system_context_report,
 )
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import (
-    MCP_DELIVERY_AUTH_TIMEOUT_SECONDS,
     MCP_TOOL_WATCHDOG_GRACE_SECONDS,
     REQUEST_USER_INPUT_DEFINITION,
 )
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from common.json import utf8_size
 from domain.access import ResourceType
@@ -224,7 +223,6 @@ class RunExecutor:
         )
         self._safe_stop = SafeStopReporter(
             repository,
-            provider,
             id_factory=id_factory,
             now=self._now,
         )
@@ -1514,11 +1512,8 @@ class RunExecutor:
         """尽力清理落库失败的临时产物对象，清理异常不影响调用状态收敛。"""
         if not artifacts or self._tool_runtime is None:
             return
-        abandon = getattr(self._tool_runtime, "abandon_artifacts", None)
-        if not callable(abandon):
-            return
         try:
-            await abandon(artifacts)
+            await self._tool_runtime.abandon_artifacts(artifacts)
         except Exception as error:
             logger.warning(
                 "run_tool_artifact_abandon_failed count=%d exception_type=%s",
@@ -1583,14 +1578,12 @@ class RunExecutor:
             skill_snapshot=state.run.skill_snapshot,
             knowledge_base_ids=state.run.knowledge_base_ids,
         )
-        # MCP 内部按业务、清理、交付认证三段收敛；外层守护必须完整包住该 envelope
-        # 并留调度余量，否则已确定结果会被抢先误报为 unknown。内置工具不加额外预算。
+        # MCP 内部按业务与清理两段超时收敛；外层守护必须完整包住该 envelope 并留调度余量，
+        # 否则已确定结果会被抢先误报为 unknown。内置工具不加额外预算。
         execution_timeout_seconds = deadline_seconds
         if definition.source.kind == "mcp":
             execution_timeout_seconds += (
-                self._config.tool_cleanup_seconds
-                + MCP_DELIVERY_AUTH_TIMEOUT_SECONDS
-                + MCP_TOOL_WATCHDOG_GRACE_SECONDS
+                self._config.tool_cleanup_seconds + MCP_TOOL_WATCHDOG_GRACE_SECONDS
             )
         try:
             async with asyncio.timeout(execution_timeout_seconds):
@@ -1764,8 +1757,7 @@ class RunExecutor:
                 ):
                     raise LlmError("subagent_profile_unavailable")
             elif self._tool_runtime is not None:
-                check_subagent = getattr(self._tool_runtime, "can_read_subagent", None)
-                if callable(check_subagent) and not await check_subagent(
+                if not await self._tool_runtime.can_read_subagent(
                     run.owner_id,
                     profile.id,
                 ):
@@ -2045,25 +2037,6 @@ class RunExecutor:
             compression_stop_reason=compression_stop_reason,
         )
 
-    async def _try_model_context_report(
-        self,
-        state: _ExecutionState,
-        runtime: RuntimeModelProfile,
-        persisted_state: dict[str, object],
-        system_report: str,
-    ) -> tuple[str, bool, RunUsage]:
-        return await self._safe_stop.try_model_context_report(
-            state,
-            runtime,
-            persisted_state,
-            system_report,
-            remaining_seconds=lambda: self._remaining_seconds(state),
-        )
-
-    @staticmethod
-    def _is_context_report_text_valid(text: str, system_report: str) -> bool:
-        return is_context_report_text_valid(text, system_report)
-
     async def _context_report_state(
         self,
         state: _ExecutionState,
@@ -2175,8 +2148,7 @@ class RunExecutor:
 
     def _now(self) -> datetime:
         """读取并规范化执行时钟。"""
-        value = self._clock()
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return as_utc(self._clock())
 
     @staticmethod
     def _is_retryable(error: LlmProviderError) -> bool:

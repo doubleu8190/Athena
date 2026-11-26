@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from domain.access import VisibilityGrantInput, VisibilityScope
+from domain.access import UserAccessSnapshot, VisibilityGrantInput, VisibilityScope
 from domain.knowledge.model import (
     Document,
     DocumentVersion,
@@ -25,20 +25,6 @@ class ParsedDocument:
 
     blocks: tuple[TextBlock, ...]
     warnings: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class FileUploadReservation:
-    """Fenced file-upload quota reservation or a finalized idempotency replay."""
-
-    reservation_token: str | None
-    storage_key: str | None
-    source_id: str | None
-    document_id: str
-    version_id: str
-    job_id: str | None
-    replay_document: Document | None = None
-    fencing_token: int = 0
 
 
 class DocumentParser(Protocol):
@@ -95,7 +81,9 @@ class KnowledgeRepositoryPort(Protocol):
 
     async def is_storage_key_referenced(self, storage_key: str) -> bool: ...
 
-    async def reserve_file_upload(
+    async def find_referenced_storage_keys(self, storage_keys: Sequence[str]) -> set[str]: ...
+
+    async def preflight_file_upload(
         self,
         *,
         owner_id: str,
@@ -103,19 +91,23 @@ class KnowledgeRepositoryPort(Protocol):
         request_key: str,
         request_hash: str,
         base_id: str,
-        document_id: str,
+        document_id: str | None,
         size_bytes: int,
-        reservation_token: str,
-        storage_key: str,
-        source_id: str,
-        version_id: str,
-        job_id: str,
-        at: datetime,
-        expires_after_seconds: int = 86400,
-    ) -> FileUploadReservation: ...
+    ) -> tuple[Document, str] | None: ...
 
     async def list_bases(
         self, owner_id: str, *, offset: int, limit: int
+    ) -> list[KnowledgeBase]: ...
+
+    async def list_readable_bases(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+        snapshot: UserAccessSnapshot | None = None,
     ) -> list[KnowledgeBase]: ...
 
     async def list_bases_by_ids(
@@ -179,7 +171,6 @@ class KnowledgeRepositoryPort(Protocol):
         document_id: str,
         version_id: str,
         source_id: str,
-        reservation_token: str,
         job_id: str,
         profile_id: str,
         at: datetime,
@@ -207,7 +198,6 @@ class KnowledgeRepositoryPort(Protocol):
         owner_id: str,
         base_id: str,
         document_id: str,
-        title: str,
         filename: str,
         media_type: str,
         storage_key: str,
@@ -217,7 +207,6 @@ class KnowledgeRepositoryPort(Protocol):
         request_hash: str,
         version_id: str,
         source_id: str,
-        reservation_token: str,
         job_id: str,
         profile_id: str,
         at: datetime,
@@ -331,20 +320,4 @@ class KnowledgeJobRepository(Protocol):
 
     async def is_storage_key_referenced(self, storage_key: str) -> bool: ...
 
-    async def list_expired_upload_reservations(
-        self, *, limit: int = 20
-    ) -> tuple[FileUploadReservation, ...]: ...
-
-    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool: ...
-
-    async def release_upload_slot(self, token: str) -> None: ...
-
-    async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool: ...
-
-
-class KnowledgeUploadSlotRepository(Protocol):
-    """上传入口中间件使用的轻量并发槽位控制端口。"""
-
-    async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool: ...
-
-    async def release_upload_slot(self, token: str) -> None: ...
+    async def find_referenced_storage_keys(self, storage_keys: Sequence[str]) -> set[str]: ...

@@ -105,6 +105,16 @@ class _DirectoryRepository:
         """返回全部候选，版本可用性由服务逐项读取。"""
         return self.skills
 
+    async def get_public_directory_entries(
+        self,
+    ) -> tuple[tuple[Skill, SimpleNamespace], ...]:
+        """返回候选与对应当前版本二元组，匹配 SkillRepository 正式契约。"""
+        return tuple(
+            (skill, self.versions[skill.current_version_id])
+            for skill in self.skills
+            if skill.current_version_id is not None and skill.current_version_id in self.versions
+        )
+
     async def get_version(self, version_id: str) -> SimpleNamespace | None:
         """返回数据库中的实时版本替身。"""
         return self.versions.get(version_id)
@@ -334,7 +344,7 @@ def test_expired_probe_failure_never_returns_stale_snapshot(
 def test_public_directory_reuses_probe_timestamp_without_repeated_db_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """10 个 Skill 的两次公共目录读取只探测一次，重复 GET 不重复写检查。"""
+    """10 个 Skill 的两次公共目录读取只探测一次，且 GET 路径全程零写库。"""
     probe = _ProbeRecorder("2.1")
     monkeypatch.setattr(dependency_module, "_probe_target_environment", probe)
     old_check = DependencyCheck(
@@ -399,8 +409,7 @@ def test_public_directory_reuses_probe_timestamp_without_repeated_db_writes(
 
     assert len(first) == len(second) == 10
     assert probe.calls == 1
-    assert len(repository.dependency_writes) == 10
-    assert {write.checked_at for write in repository.dependency_writes} == {CHECKED_AT}
+    assert repository.dependency_writes == []
 
 
 def test_public_directory_restores_previously_unsatisfied_skill_after_probe_recovers(
@@ -468,11 +477,8 @@ def test_public_directory_restores_previously_unsatisfied_skill_after_probe_reco
 
     assert first == ()
     assert second == (skill,)
-    # 首次探测结果与旧持久化结论实质语义一致（仅 checked_at 推进），不再重复写库；
-    # 依赖恢复为 SATISFIED 后立即写回一次。
-    assert [write.status for write in repository.dependency_writes] == [
-        DependencyCheckStatus.SATISFIED,
-    ]
+    # GET 目录仅做只读实时过滤，恢复可用后不触发任何数据库写回。
+    assert repository.dependency_writes == []
 
 
 def test_check_uses_target_distributions_markers_and_python_fingerprint(
@@ -543,9 +549,7 @@ def test_probe_implementation_version_matches_packaging_format(
         clock=lambda: CHECKED_AT,
     )
 
-    check = checker.check(
-        (f'target-only-package; implementation_version == "{expected}"',)
-    )
+    check = checker.check((f'target-only-package; implementation_version == "{expected}"',))
 
     assert check.status is DependencyCheckStatus.SATISFIED
 
@@ -725,7 +729,7 @@ def test_directory_uses_joined_entries_and_skips_noop_writes_after_ttl(
         clock.advance(61)
         wall_clock_value[0] = CHECKED_AT + timedelta(minutes=5)
         second = await service.user_directory(cast(Any, actor))
-        # 第三次探测版本降级为 1.0，语义变为 UNSATISFIED，此时应落库一次。
+        # 第三次探测版本降级为 1.0，语义变为 UNSATISFIED；GET 仅实时过滤，不触发写库。
         clock.advance(61)
         wall_clock_value[0] = CHECKED_AT + timedelta(minutes=10)
         third = await service.public_directory()
@@ -737,9 +741,7 @@ def test_directory_uses_joined_entries_and_skips_noop_writes_after_ttl(
     assert second == (skill,)
     assert third == ()
     assert repository.get_version_calls == 0
-    assert [write.status for write in repository.dependency_writes] == [
-        DependencyCheckStatus.UNSATISFIED,
-    ]
+    assert repository.dependency_writes == []
 
 
 def test_recheck_version_dependencies_skips_write_when_unchanged_and_updates_on_change(
@@ -1015,3 +1017,75 @@ def test_prepare_call_uses_cached_dependency_probe_and_avoids_duplicate_probe_be
         assert repository.dependency_writes == []
 
     asyncio.run(scenario())
+
+
+def test_current_interpreter_probe_runs_in_process_without_subprocess(
+    target_venvs: tuple[_TargetVenv, _TargetVenv],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """当前解释器走进程内探测（零 subprocess.run），外部 venv 符号链接仍走子进程。"""
+    import platform
+
+    real_run = subprocess.run
+    subprocess_calls: list[object] = []
+
+    def forbid_subprocess(*args: Any, **kwargs: Any) -> Any:
+        subprocess_calls.append((args, kwargs))
+        raise AssertionError("current interpreter must not spawn subprocess")
+
+    monkeypatch.setattr(subprocess, "run", forbid_subprocess)
+    current_checker = DependencyChecker(
+        python_executable=sys.executable,
+        clock=lambda: CHECKED_AT,
+    )
+    check = current_checker.check(("packaging>=20", "nonexistent-pkg-athena-test==1.0"))
+
+    assert subprocess_calls == []
+    assert check.python_version == platform.python_version()
+    assert check.python_implementation == platform.python_implementation()
+    assert check.status is DependencyCheckStatus.UNSATISFIED
+    assert check.items[0].package == "packaging"
+    assert check.items[0].satisfied is True
+    assert check.items[0].installed_version is not None
+    assert check.items[1].satisfied is False
+    assert check.items[1].detail_code == "dependency_missing"
+
+    # 外部 venv 的 python 入口通常是指向同一基础解释器的 symlink；
+    # 词法路径与 sys.executable 不同，必须仍走子进程探测而非误判为当前进程。
+    target_a, _ = target_venvs
+    recorded_external_calls = 0
+
+    def record_subprocess(*args: Any, **kwargs: Any) -> Any:
+        nonlocal recorded_external_calls
+        recorded_external_calls += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", record_subprocess)
+    external_checker = DependencyChecker(
+        python_executable=target_a.python_executable,
+        clock=lambda: CHECKED_AT,
+    )
+    external_check = external_checker.check(("target-only-package>=2,<3",))
+
+    assert recorded_external_calls == 1
+    assert external_check.status is DependencyCheckStatus.SATISFIED
+    assert external_check.items[0].installed_version == "2.1"
+
+
+def test_current_interpreter_probe_maps_metadata_os_error_to_environment_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进程内元数据读取发生 OSError 时与子进程路径一致映射为环境不可用。"""
+    import importlib.metadata
+
+    def raise_os_error() -> Any:
+        raise OSError("dist-info unreadable")
+
+    monkeypatch.setattr(importlib.metadata, "distributions", raise_os_error)
+    checker = DependencyChecker(
+        python_executable=sys.executable,
+        clock=lambda: CHECKED_AT,
+    )
+
+    with pytest.raises(SkillPackageError, match="skill_dependency_environment_unavailable"):
+        checker.check(("packaging>=20",))

@@ -70,7 +70,10 @@ class _Repository:
         vector: list[float],
         limit: int,
         profile_id: str | None = None,
+        *,
+        min_score: float = 0.0,
     ) -> tuple[SearchHit, ...]:
+        del min_score
         self.semantic_calls += 1
         assert len(vector) == 1024
         if self.semantic_error:
@@ -81,6 +84,12 @@ class _Repository:
         self, owner_id: str, base_ids: list[str], profile_id: str
     ) -> bool:
         return self.incompatible_profile
+
+    async def filter_active_hits(
+        self, owner_id: str, hits: tuple[SearchHit, ...]
+    ) -> tuple[SearchHit, ...]:
+        del owner_id
+        return hits
 
 
 def _hit(chunk: str, ordinal: int, text: str, channel: str, rank: int) -> SearchHit:

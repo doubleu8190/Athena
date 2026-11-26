@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import DateTime, func, literal, select
+from sqlalchemy import DateTime, event, func, literal, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -2644,9 +2644,9 @@ def test_dispatch_subagents_catalog_bounds_description_and_preserves_newlines() 
                 id=f"sub_{index}",
                 slug=f"agent-{index:02d}",
                 name=f"专业子智能体{index:02d}",
-                description=(
-                    f"第一行职责{index}\r\n\t第二行细则：" + "详" * 960 + "\x00\x07"
-                )[:1000],
+                description=(f"第一行职责{index}\r\n\t第二行细则：" + "详" * 960 + "\x00\x07")[
+                    :1000
+                ],
                 system_prompt="你是专业子智能体",
                 model_profile_id=None,
                 allowed_tool_ids=(REQUEST_USER_INPUT_ID,),
@@ -2693,82 +2693,37 @@ def test_dispatch_subagents_catalog_bounds_description_and_preserves_newlines() 
 def test_get_stream_snapshot_deduplicates_subagent_metadata_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """同一主 Run 快照仅加载一次子任务元数据；无子任务时跳过下游 3 个查询。"""
+    """同一主 Run 快照通过统一聚合仅加载一次子任务摘要，无子任务/无待审批时短路跳过下游查询。"""
 
     async def scenario() -> None:
         engine, _factory, repo = await _setup_db(monkeypatch)
+        executed_sql: list[str] = []
+
+        def _capture_sql(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            executed_sql.append(statement.lower())
+
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_sql)
         try:
             root_lease = await _submit_main_run(repo, "run_main_dedup")
-            orig_meta = SqlAlchemyRunRepository._load_subagent_task_metadata_in_session
-            orig_tasks = SqlAlchemyRunRepository._load_subagent_tasks_in_session
-            orig_inputs = SqlAlchemyRunRepository._load_pending_subagent_inputs_in_session
-            orig_approvals = SqlAlchemyRunRepository._load_pending_subagent_approvals_in_session
-            counts = {"meta": 0, "tasks": 0, "inputs": 0, "approvals": 0}
 
-            async def spy_meta(
-                session: AsyncSession, session_id: str, parent_run_id: str
-            ) -> tuple[dict[str, int], dict[str, str]]:
-                counts["meta"] += 1
-                return await orig_meta(session, session_id, parent_run_id)
-
-            async def spy_tasks(
-                session: AsyncSession,
-                session_id: str,
-                parent_run_id: str,
-                *,
-                metadata: tuple[dict[str, int], dict[str, str]] | None = None,
-            ) -> Any:
-                counts["tasks"] += 1
-                return await orig_tasks(session, session_id, parent_run_id, metadata=metadata)
-
-            async def spy_inputs(
-                session: AsyncSession,
-                session_id: str,
-                parent_run_id: str,
-                *,
-                metadata: tuple[dict[str, int], dict[str, str]] | None = None,
-            ) -> Any:
-                counts["inputs"] += 1
-                return await orig_inputs(session, session_id, parent_run_id, metadata=metadata)
-
-            async def spy_approvals(
-                session: AsyncSession,
-                session_id: str,
-                parent_run_id: str,
-                *,
-                metadata: tuple[dict[str, int], dict[str, str]] | None = None,
-            ) -> Any:
-                counts["approvals"] += 1
-                return await orig_approvals(session, session_id, parent_run_id, metadata=metadata)
-
-            monkeypatch.setattr(
-                SqlAlchemyRunRepository,
-                "_load_subagent_task_metadata_in_session",
-                staticmethod(spy_meta),
-            )
-            monkeypatch.setattr(
-                SqlAlchemyRunRepository,
-                "_load_subagent_tasks_in_session",
-                staticmethod(spy_tasks),
-            )
-            monkeypatch.setattr(
-                SqlAlchemyRunRepository,
-                "_load_pending_subagent_inputs_in_session",
-                staticmethod(spy_inputs),
-            )
-            monkeypatch.setattr(
-                SqlAlchemyRunRepository,
-                "_load_pending_subagent_approvals_in_session",
-                staticmethod(spy_approvals),
-            )
-
-            # 无子任务时只查 1 次元数据，后续 3 个子任务查询全部短路跳过。
+            # 无子任务时只查 1 次子 Run，execution_messages / run_input_requests /
+            # run_tool_calls 全部短路跳过。
+            executed_sql.clear()
             empty_snapshot = await repo.get_stream_snapshot("sess_1", "usr_1", root_lease.run.id)
             assert empty_snapshot is not None
             assert empty_snapshot.subagent_tasks == ()
-            assert counts == {"meta": 1, "tasks": 0, "inputs": 0, "approvals": 0}
+            assert not any("execution_messages" in sql for sql in executed_sql)
+            assert not any("run_input_requests" in sql for sql in executed_sql)
+            assert not any("run_tool_calls" in sql for sql in executed_sql)
 
-            # 派发一个子任务并进入待输入状态，验证元数据仍仅查询 1 次且三处摘要一致。
+            # 派发一个子任务并进入待输入状态，验证元数据仅查 1 次、跳过审批查询且摘要一致。
             await repo.begin_subagent_batch(
                 _subagent_batch_command(root_lease, sequence=1, sub_run_id="run_sub_dedup_1")
             )
@@ -2824,10 +2779,12 @@ def test_get_stream_snapshot_deduplicates_subagent_metadata_queries(
                 )
             )
 
-            counts = {"meta": 0, "tasks": 0, "inputs": 0, "approvals": 0}
+            executed_sql.clear()
             populated = await repo.get_stream_snapshot("sess_1", "usr_1", root_lease.run.id)
             assert populated is not None
-            assert counts == {"meta": 1, "tasks": 1, "inputs": 1, "approvals": 1}
+            assert sum("execution_messages" in sql for sql in executed_sql) == 1
+            assert sum("run_input_requests" in sql for sql in executed_sql) == 1
+            assert sum("run_tool_calls" in sql for sql in executed_sql) == 0
             assert len(populated.subagent_tasks) == 1
             assert populated.subagent_tasks[0].task_index == 1
             assert populated.subagent_tasks[0].task_summary == "任务 run_sub_dedup_1"
@@ -2835,6 +2792,7 @@ def test_get_stream_snapshot_deduplicates_subagent_metadata_queries(
             assert populated.pending_subagent_inputs[0].task_index == 1
             assert populated.pending_subagent_inputs[0].task_summary == "任务 run_sub_dedup_1"
         finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture_sql)
             await engine.dispose()
 
     asyncio.run(scenario())

@@ -3,23 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sys
+import threading
 import zipfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 import pytest
 
 from adapter.skill.execution import PythonScriptExecutor
-from app.skill.execution_service import SkillExecutionService
+from app.skill.execution_service import SkillExecutionService, _open_exclusive_binary_0600
 from app.skill.package import SkillPackageValidator
 from app.skill.service import SkillService
-from domain.file import PendingSessionFile
+from domain.file import PendingSessionFile, SessionFile, SessionFileSource
 from domain.skill import (
     DependencyCheck,
     DependencyCheckStatus,
@@ -34,7 +36,6 @@ from domain.skill import (
     SkillVersion,
 )
 from domain.skill.execution import (
-    SCRIPT_PROCESS_DIAGNOSTIC_FILENAME,
     ScriptCleanupErrorCode,
     ScriptExecutionCancelled,
     ScriptExecutionErrorCode,
@@ -47,7 +48,11 @@ _NOW = datetime(2026, 11, 12, tzinfo=UTC)
 _CALL_RECORD_ID = f"toolcall_{'a' * 23}"
 
 
-def _package_and_manifest(tmp_path: Path) -> tuple[bytes, SkillPackageManifest]:
+def _package_and_manifest(
+    tmp_path: Path,
+    *,
+    script_source: str = "import time\ntime.sleep(60)\n",
+) -> tuple[bytes, SkillPackageManifest]:
     """构造包含长运行脚本的最小合法技能包。"""
     package_path = tmp_path / "skill.zip"
     markdown = """
@@ -75,7 +80,7 @@ scripts:
         archive.writestr("SKILL.md", markdown)
         archive.writestr(
             "scripts/run.py",
-            "import time\ntime.sleep(60)\n",
+            script_source,
         )
     validated = SkillPackageValidator().validate(package_path)
     return package_path.read_bytes(), validated.manifest
@@ -394,12 +399,19 @@ class _FailingRunner:
     or not (sys.platform.startswith("linux") or sys.platform == "darwin"),
     reason="真实进程身份核验需要 POSIX",
 )
-def test_service_cancellation_preserves_runner_directory_after_killpg_failure(
+def test_service_cancellation_records_killpg_failure_and_cleans_runner_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """runner 已接管目录后 killpg 失败时，Service 不得抢删仍待恢复的目录。"""
-    package, manifest = _package_and_manifest(tmp_path)
+    """runner 接管目录后 killpg 失败时，回退强杀直接子进程、清理目录并持久化清理错误码。"""
+    script_source = (
+        "import os, time\n"
+        "from pathlib import Path\n"
+        'ready = Path(os.environ["ATHENA_INPUT_PATH"]).parent / "ready.pid"\n'
+        'ready.write_text(str(os.getpid()), encoding="utf-8")\n'
+        "time.sleep(60)\n"
+    )
+    package, manifest = _package_and_manifest(tmp_path, script_source=script_source)
     check = _dependency_check()
     repository = _Repository(_record(check))
     service = SkillExecutionService(
@@ -452,30 +464,264 @@ def test_service_cancellation_preserves_runner_directory_after_killpg_failure(
                 context,
             )
         )
-        diagnostic_path: Path | None = None
+        ready_path: Path | None = None
         deadline = asyncio.get_running_loop().time() + 3
-        while diagnostic_path is None:
+        while ready_path is None:
             directories = tuple((tmp_path / "executions").glob("skill-*"))
             for directory in directories:
-                candidate = directory / SCRIPT_PROCESS_DIAGNOSTIC_FILENAME
-                if candidate.is_file():
-                    diagnostic_path = candidate
+                candidate = directory / "ready.pid"
+                if candidate.is_file() and candidate.read_text(encoding="utf-8").strip():
+                    ready_path = candidate
                     break
             if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError("真实脚本诊断记录未出现")
+                raise TimeoutError("真实脚本启动标记未出现")
             await asyncio.sleep(0.01)
-        working_directory = diagnostic_path.parent
+        working_directory = ready_path.parent
+        child_pid = int(ready_path.read_text(encoding="utf-8").strip())
         execution.cancel()
         with pytest.raises(ScriptExecutionCancelled):
             await execution
 
-        assert working_directory.is_dir()
-        assert diagnostic_path.is_file()
+        assert not working_directory.exists()
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
         assert repository.finish is not None
         assert repository.finish["status"] is SkillExecutionStatus.UNKNOWN
         assert (
             repository.finish["cleanup_error_code"]
             == ScriptCleanupErrorCode.PROCESS_GROUP_CLEANUP_FAILED.value
         )
+
+    asyncio.run(scenario())
+
+
+def test_prepare_input_files_close_cancellation_propagates_without_starting_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """输入文件句柄 target.close() 阻塞期间收到取消时必须传播 CancelledError 且不启动 runner。"""
+    package_bytes, manifest = _package_and_manifest(tmp_path)
+    payload = b"authorized input payload"
+    input_file = SessionFile(
+        id="file_in_1",
+        session_id="ses_cancel",
+        owner_id="usr_cancel",
+        source=SessionFileSource.UPLOAD,
+        filename="notes.txt",
+        label=None,
+        mime_type="text/plain",
+        size_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        object_key="session-files/aa/in1",
+        source_call_id=None,
+        output_index=None,
+        created_at=_NOW,
+    )
+    check = DependencyCheck(
+        status=DependencyCheckStatus.SATISFIED,
+        python_version=f"{sys.version_info.major}.{sys.version_info.minor}",
+        python_implementation=sys.implementation.name,
+        items=(),
+        checked_at=_NOW,
+    )
+    version = SkillVersion(
+        id="skillver_close_cancel",
+        skill_id="skill_close_cancel",
+        ordinal=1,
+        label="v1",
+        manifest=manifest,
+        object_key="skills/cc/pkg.zip",
+        package_sha256=hashlib.sha256(package_bytes).hexdigest(),
+        dependency_requirements=(),
+        dependency_check=check,
+        created_by=None,
+        created_at=_NOW,
+    )
+
+    close_entered = threading.Event()
+    close_release = threading.Event()
+    close_finished = threading.Event()
+
+    class _BlockingCloseWrapper:
+        def __init__(self, inner: BinaryIO) -> None:
+            self._inner = inner
+
+        def write(self, data: bytes) -> int:
+            return self._inner.write(data)
+
+        def close(self) -> None:
+            close_entered.set()
+            try:
+                close_release.wait(timeout=5.0)
+                self._inner.close()
+            finally:
+                close_finished.set()
+
+    def _open_with_blocking_input_close(path: Path) -> BinaryIO:
+        handle = _open_exclusive_binary_0600(path)
+        # 仅包装 inputs/ 下的会话授权输入文件句柄，保持技能包解压走原生 with 上下文。
+        if path.parent.name == "inputs":
+            return cast(BinaryIO, _BlockingCloseWrapper(handle))
+        return handle
+
+    monkeypatch.setattr(
+        "app.skill.execution_service._open_exclusive_binary_0600",
+        _open_with_blocking_input_close,
+    )
+
+    class _SkillsStub:
+        async def prepare_script_target(self, snapshot: RunSkillSnapshot, **kwargs: Any) -> Any:
+            entry = snapshot.by_id(kwargs["skill_id"])
+            assert entry is not None
+            return entry, version, manifest.scripts[0], check
+
+    class _FilesStub:
+        async def get_many(self, *_args: Any) -> tuple[SessionFile, ...]:
+            return (input_file,)
+
+    class _ObjectsStub:
+        async def get_bytes(self, key: str, *, maximum_bytes: int) -> bytes:
+            del key, maximum_bytes
+            return package_bytes
+
+        async def iter_range(self, key: str) -> AsyncIterator[bytes]:
+            assert key == input_file.object_key
+            yield payload
+
+    runner_started = False
+
+    class _ForbiddenRunner:
+        @asynccontextmanager
+        async def execute(
+            self, _request: ScriptExecutionRequest
+        ) -> AsyncIterator[ScriptExecutionResult]:
+            nonlocal runner_started
+            runner_started = True
+            raise AssertionError("runner must not start after cancellation during close()")
+            yield  # pragma: no cover
+
+    class _RepoStub:
+        def __init__(self) -> None:
+            self.finish: dict[str, Any] | None = None
+
+        async def start_script_execution(self, **kwargs: Any) -> SkillExecutionStart:
+            return SkillExecutionStart(
+                record=SkillExecutionRecord(
+                    id=kwargs["execution_id"],
+                    run_id=kwargs["run_id"],
+                    session_id=kwargs["session_id"],
+                    tool_call_record_id=kwargs["tool_call_record_id"],
+                    skill_id=kwargs["skill_id"],
+                    skill_version_id=kwargs["skill_version_id"],
+                    script_path=kwargs["script_path"],
+                    input_file_ids=kwargs["input_file_ids"],
+                    parameters_sha256=kwargs["parameters_sha256"],
+                    python_version=kwargs["python_version"],
+                    dependency_check=kwargs["dependency_check"],
+                    status=SkillExecutionStatus.RUNNING,
+                    log_object_key=None,
+                    log_truncated=False,
+                    log_error_code=None,
+                    error_code=None,
+                    cleanup_error_code=None,
+                    result_artifacts=(),
+                    created_at=kwargs["created_at"],
+                    finished_at=None,
+                ),
+                created=True,
+            )
+
+        async def finish_script_execution(
+            self,
+            execution_id: str,
+            *,
+            status: SkillExecutionStatus,
+            log_object_key: str | None,
+            log_truncated: bool,
+            log_error_code: str | None,
+            error_code: str | None,
+            cleanup_error_code: str | None,
+            artifacts: Sequence[PendingSessionFile],
+            finished_at: datetime,
+        ) -> None:
+            del execution_id, log_object_key, log_truncated, log_error_code, artifacts, finished_at
+            self.finish = {
+                "status": status,
+                "error_code": error_code,
+                "cleanup_error_code": cleanup_error_code,
+            }
+
+    temp_root = tmp_path / "close-cancel-exec"
+    repo = _RepoStub()
+    service = SkillExecutionService(
+        skills=cast(SkillService, _SkillsStub()),
+        files=cast(Any, _FilesStub()),
+        repository=cast(SkillRepository, repo),
+        object_store=cast(Any, _ObjectsStub()),
+        runner=cast(Any, _ForbiddenRunner()),
+        temp_root=temp_root,
+        clock=lambda: _NOW,
+    )
+    entry = RunSkillEntry(
+        skill_id=version.skill_id,
+        slug=manifest.slug,
+        name=manifest.name,
+        description=manifest.description,
+        version_id=version.id,
+        version_label="v1",
+        requires_approval=False,
+    )
+    context = ToolExecutionContext(
+        owner_id="usr_cancel",
+        chat_session_id="ses_cancel",
+        project_id=None,
+        run_id="run_cancel",
+        execution_epoch=1,
+        auth_session_id="auth_cancel",
+        deadline_at=_NOW + timedelta(minutes=2),
+        tool_call_record_id=_CALL_RECORD_ID,
+        skill_snapshot=RunSkillSnapshot(skills=(entry,), selected_skill_ids=(entry.skill_id,)),
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            service.execute(
+                {
+                    "skill_id": entry.skill_id,
+                    "script_path": "scripts/run.py",
+                    "parameters": {},
+                    "input_file_ids": [input_file.id],
+                },
+                context,
+            )
+        )
+        try:
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while not close_entered.is_set():
+                if task.done():
+                    raise AssertionError(
+                        f"任务在进入输入文件 target.close() 前提前结束: {task.result()!r}"
+                    )
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError("等待进入输入文件 target.close() 超时")
+                await asyncio.sleep(0.005)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            # 句柄尚未完成关闭前，任务不得提前退出或抢删目录。
+            assert not task.done()
+            close_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert close_finished.is_set()
+            assert runner_started is False
+            assert list(temp_root.glob("skill-*")) == []
+            assert repo.finish is not None
+            assert repo.finish["status"] is SkillExecutionStatus.UNKNOWN
+            assert repo.finish["error_code"] == "skill_execution_cancelled"
+        finally:
+            close_release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())

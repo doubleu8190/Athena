@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from adapter.session.model.session import SessionModel
+from common.date import as_utc
 from domain.session import Session
-
-
-def _as_utc(value: datetime) -> datetime:
-    """补齐 SQLite 等测试驱动丢失的 UTC 时区信息。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
 
 
 def session_to_domain(row: SessionModel) -> Session:
@@ -23,9 +15,9 @@ def session_to_domain(row: SessionModel) -> Session:
         title=row.title,
         project_id=row.project_id,
         last_message_sequence=row.last_message_sequence,
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
-        deleted_time=_as_utc(row.deleted_time) if row.deleted_time is not None else None,
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+        deleted_time=as_utc(row.deleted_time) if row.deleted_time is not None else None,
     )
 
 

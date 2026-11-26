@@ -4,7 +4,6 @@ from api.dto.message import ConversationMessageListResponse, ConversationMessage
 from api.dto.project import (
     ProjectCreateRequest,
     ProjectListResponse,
-    ProjectNameRequest,
     ProjectResponse,
     ProjectUpdateRequest,
 )
@@ -14,7 +13,6 @@ __all__ = [
     "ConversationMessageResponse",
     "ProjectCreateRequest",
     "ProjectListResponse",
-    "ProjectNameRequest",
     "ProjectResponse",
     "ProjectUpdateRequest",
 ]

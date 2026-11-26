@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from domain.access import VisibilityGrantInput
+from domain.access import UserAccessSnapshot, VisibilityGrantInput
 from domain.auth import AuthContext
 from domain.subagent.model import (
     AvailableToolGroup,
@@ -49,6 +49,13 @@ class SubagentRepository(Protocol):
 
     async def list_enabled(self) -> tuple[SubagentProfile, ...]:
         """读取全部未软删除且已启用的 Subagent 配置。"""
+        ...
+
+    async def list_readable_enabled(
+        self,
+        snapshot: UserAccessSnapshot | None,
+    ) -> tuple[SubagentProfile, ...]:
+        """按用户权限快照下推读取未软删除且已启用的可读 Subagent 列表。"""
         ...
 
     async def update(

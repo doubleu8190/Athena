@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adapter.auth.model.auth import AuthSessionModel, UserModel
-from adapter.auth.repository.transaction_guard import SqlAlchemyAuthTransactionGuard
+from adapter.auth.repository.transaction_guard import verify_active_session_user
 from adapter.llm.converter.profile import profile_to_domain
 from adapter.llm.model.profile import (
     CompressionPolicyVersionModel,
@@ -21,7 +20,7 @@ from adapter.llm.model.profile import (
 )
 from adapter.subagent.model import SubagentModel
 from common.ids import new_id, now_utc
-from domain.auth import AuthContext, UserRole, UserStatus
+from domain.auth import AuthContext, UserRole
 from domain.llm.model.compression_policy import (
     CompressionPolicyInput,
     CompressionPolicyVersion,
@@ -117,7 +116,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
     async def list(self, actor: AuthContext) -> tuple[ModelProfileVersion, ...]:
         """无锁只读会话内复核管理员身份，按创建顺序读取未软删除且不含秘密的配置。"""
         async with self._session_factory() as session:
-            await self._require_admin_readonly(session, actor)
+            await self._require_admin(session, actor)
             rows = (
                 await session.scalars(
                     select(ModelProfileVersionModel)
@@ -135,7 +134,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
     ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
         """同一无锁只读会话内复核管理员并读取未软删除配置列表与当前默认版本标识。"""
         async with self._session_factory() as session:
-            await self._require_admin_readonly(session, actor)
+            await self._require_admin(session, actor)
             rows = (
                 await session.scalars(
                     select(ModelProfileVersionModel)
@@ -589,7 +588,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
     async def get_default_id(self, actor: AuthContext) -> str | None:
         """无锁只读会话内复核管理员身份并返回当前未软删除的默认版本标识。"""
         async with self._session_factory() as session:
-            await self._require_admin_readonly(session, actor)
+            await self._require_admin(session, actor)
             return await session.scalar(
                 select(DefaultModelProfileModel.profile_id)
                 .join(
@@ -639,34 +638,14 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
             return None
         return RuntimeModelProfile(version=profile_to_domain(row), api_key=api_key)
 
-    async def _require_admin_readonly(self, session: AsyncSession, actor: AuthContext) -> None:
-        """在只读会话中以单条无锁 JOIN 复核超管与有效登录会话，避免只读接口申请 FOR SHARE 锁。"""
-        current_time = self._clock()
-        if current_time.tzinfo is None:
-            current_time = current_time.replace(tzinfo=UTC)
-        else:
-            current_time = current_time.astimezone(UTC)
-        admin_id = await session.scalar(
-            select(UserModel.id)
-            .join(AuthSessionModel, AuthSessionModel.user_id == UserModel.id)
-            .where(
-                UserModel.id == actor.user.id,
-                UserModel.status == UserStatus.ACTIVE.value,
-                UserModel.deleted_time.is_(None),
-                UserModel.role == UserRole.SUPER_ADMIN.value,
-                AuthSessionModel.id == actor.session_id,
-                AuthSessionModel.revoked_time.is_(None),
-                AuthSessionModel.expires_at > current_time,
-            )
-            .limit(1)
-        )
-        if admin_id is None:
-            raise ModelProfileAuthorizationError()
-
     async def _require_admin(self, session: AsyncSession, actor: AuthContext) -> None:
-        """在写事务中锁定并复核当前管理员身份。"""
-        guard = SqlAlchemyAuthTransactionGuard(session, clock=self._clock)
-        user = await guard.lock_current_session_user(actor.user.id, actor.session_id)
+        """以单条无锁 JOIN 复核当前超管身份与有效登录会话（只读与写事务统一复用）。"""
+        user = await verify_active_session_user(
+            session,
+            actor.user.id,
+            actor.session_id,
+            clock=self._clock,
+        )
         if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise ModelProfileAuthorizationError()
 

@@ -163,7 +163,8 @@ class SkillVersion:
     ordinal: int
     label: str
     manifest: SkillPackageManifest
-    object_key: str
+    # 纯文本 Markdown 版本直接存库，不写入对象存储，object_key 为 None；ZIP 技能包为非空对象键。
+    object_key: str | None
     package_sha256: str
     dependency_requirements: tuple[str, ...]
     dependency_check: DependencyCheck

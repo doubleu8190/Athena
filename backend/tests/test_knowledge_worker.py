@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import AsyncIterator
 
 import anyio
@@ -14,10 +13,6 @@ from app.knowledge.worker import (
     _error_code,
     _is_retryable_error,
     _make_chunks,
-    _parse_child_entry,
-    _parse_in_child,
-    _process_rss_mb,
-    _terminate_and_reap,
 )
 from domain.knowledge.model import (
     ChunkLocator,
@@ -27,7 +22,7 @@ from domain.knowledge.model import (
     OriginalStorageUnavailableError,
     TextBlock,
 )
-from domain.knowledge.ports import ClaimedKnowledgeJob, FileUploadReservation, ParsedDocument
+from domain.knowledge.ports import ClaimedKnowledgeJob, ParsedDocument
 from infrastructure.knowledge.parsers import LocalDocumentParserFactory
 
 
@@ -97,21 +92,9 @@ class _Repository:
         del storage_key
         return False
 
-    async def list_expired_upload_reservations(
-        self, *, limit: int = 20
-    ) -> tuple[FileUploadReservation, ...]:
-        del limit
-        return ()
-
-    async def delete_expired_upload_reservation(self, reservation_token: str) -> bool:
-        del reservation_token
-        return True
-
-    async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
-        return True
-
-    async def release_upload_slot(self, token: str) -> None:
-        return None
+    async def find_referenced_storage_keys(self, storage_keys: object) -> set[str]:
+        del storage_keys
+        return set()
 
 
 class _UnusedParser:
@@ -225,7 +208,10 @@ async def _run_isolated_file_job() -> _FileRepository:
         _Tokenizer(),
         _Counter(),
     )
-    assert await worker.run_once()
+    try:
+        assert await worker.run_once()
+    finally:
+        await worker.aclose()
     return repository
 
 
@@ -262,62 +248,6 @@ async def _run_no_job() -> bool:
 
 def test_no_job_returns_without_processing() -> None:
     assert not anyio.run(_run_no_job)
-
-
-async def _parse_repeatedly() -> None:
-    for index in range(3):
-        parsed = await _parse_in_child(
-            f"sample-{index}.txt",
-            b"valid text content for parser process lifecycle",
-            LocalDocumentParserFactory(),
-            30,
-        )
-        assert parsed.blocks
-        assert "valid text content" in parsed.blocks[0].text
-
-
-@pytest.mark.skipif(__import__("os").name == "nt", reason="spawn CLI import differs on Windows")
-def test_parser_child_result_is_not_mistaken_for_a_live_child() -> None:
-    anyio.run(_parse_repeatedly)
-
-
-def test_memory_monitor_can_read_process_rss() -> None:
-    rss_mb = _process_rss_mb(os.getpid())
-    assert rss_mb is not None and rss_mb > 0
-
-
-def test_memory_monitor_handles_process_exit_and_access_denied(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import psutil  # type: ignore[import-untyped]
-
-    def inaccessible(_: int) -> object:
-        raise psutil.AccessDenied(pid=1)
-
-    monkeypatch.setattr(psutil, "Process", inaccessible)
-    assert _process_rss_mb(1) is None
-
-
-def test_exception_cleanup_kills_unresponsive_child_and_joins() -> None:
-    class UnresponsiveChild:
-        alive = True
-        joined = False
-
-        def is_alive(self) -> bool:
-            return self.alive
-
-        def terminate(self) -> None:
-            pass
-
-        def kill(self) -> None:
-            self.alive = False
-
-        def join(self, timeout: float | None = None) -> None:
-            self.joined = True
-
-    child = UnresponsiveChild()
-    anyio.run(_terminate_and_reap, child)
-    assert child.joined and not child.alive
 
 
 async def _run_profile_mismatch() -> _Repository:
@@ -446,96 +376,15 @@ def test_worker_does_not_publish_nonfinite_or_zero_embedding() -> None:
     assert not repository.retryable
 
 
-def test_parser_ipc_marks_runtime_engine_errors_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
-    class ResultQueue:
-        value: tuple[bool, ParsedDocument | str] | None = None
-
-        def put(self, value: tuple[bool, ParsedDocument | str]) -> None:
-            self.value = value
-
-    class RuntimeFailureParser:
-        async def parse(self, filename: str, content: bytes) -> ParsedDocument:
-            raise RuntimeError("knowledge_ocr_engine_unavailable")
-
-    class RuntimeFailureFactory:
-        def create(self) -> RuntimeFailureParser:
-            return RuntimeFailureParser()
-
-    monkeypatch.setattr(sys, "platform", "darwin")
-    queue = ResultQueue()
-    _parse_child_entry("scan.png", b"image", RuntimeFailureFactory(), queue, 4096)
-    assert queue.value == (False, "transient:knowledge_ocr_engine_unavailable")
-    assert _error_code(RuntimeError("knowledge_ocr_engine_unavailable")) == (
-        "knowledge_ocr_engine_unavailable"
-    )
-
-
-def test_parse_in_child_closes_queue_when_process_start_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """启动失败不得 join 未启动进程，但结果队列仍须关闭并回收线程。"""
-    import multiprocessing
-
-    class FakeQueue:
-        closed = False
-        joined = False
-
-        def close(self) -> None:
-            self.closed = True
-
-        def join_thread(self) -> None:
-            self.joined = True
-
-    class FailingProcess:
-        def start(self) -> None:
-            raise RuntimeError("factory_pickle_failed")
-
-    class FakeContext:
-        queue = FakeQueue()
-
-        def Queue(self, maxsize: int = 0) -> FakeQueue:
-            del maxsize
-            return self.queue
-
-        def Process(self, target: object, args: tuple[object, ...]) -> FailingProcess:
-            del target, args
-            return FailingProcess()
-
-    context = FakeContext()
-
-    def fake_get_context(method: str) -> FakeContext:
-        del method
-        return context
-
-    monkeypatch.setattr(multiprocessing, "get_context", fake_get_context)
-
-    reap_calls: list[object] = []
-
-    async def spy_terminate_and_reap(process: object) -> None:
-        reap_calls.append(process)
-
-    # 必须替换模块全局：_parse_in_child 在运行时按 app.knowledge.worker 全局名查找。
-    monkeypatch.setattr("app.knowledge.worker._terminate_and_reap", spy_terminate_and_reap)
-
-    with pytest.raises(RuntimeError, match="factory_pickle_failed"):
-        anyio.run(
-            _parse_in_child,
-            "sample.txt",
-            b"content",
-            LocalDocumentParserFactory(),
-            30,
-        )
-    assert reap_calls == []  # 未启动的进程不得被 terminate/join
-    assert context.queue.closed
-    assert context.queue.joined
-
-
 def test_storage_error_codes_and_retry_policies_are_distinct() -> None:
     unavailable = OriginalStorageUnavailableError()
     missing = OriginalStorageNotFoundError()
     denied = OriginalStorageAccessDeniedError()
     integrity = OriginalStorageIntegrityError()
 
+    assert _error_code(RuntimeError("knowledge_ocr_engine_unavailable")) == (
+        "knowledge_ocr_engine_unavailable"
+    )
     assert _error_code(unavailable) == "knowledge_storage_unavailable"
     assert _error_code(missing) == "knowledge_storage_object_not_found"
     assert _is_retryable_error(unavailable, "ingestion")

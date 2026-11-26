@@ -32,6 +32,13 @@ class RunStreamMessage(BaseModel):
     text: str
     sequence: int
     created_at: datetime
+    # 向后兼容的增量自包含字段：与 GET /api/v1/sessions/{id}/messages 响应结构对齐，
+    # 供客户端在终态快照到达时直接合并完整消息与附件 parts，无需额外翻页查库。
+    session_id: str | None = None
+    run_id: str | None = None
+    reply_to_message_id: str | None = None
+    parts: tuple[dict[str, object], ...] | None = None
+    completed_at: datetime | None = None
 
 
 class RunSnapshotPayload(BaseModel):
@@ -42,6 +49,7 @@ class RunSnapshotPayload(BaseModel):
     status: RunStatus
     event_sequence: int
     report_message_id: str | None = None
+    assistant_message_id: str | None = None
     messages: tuple[RunStreamMessage, ...]
     events: tuple[RunEvent, ...]
     messages_complete: bool = True
@@ -160,6 +168,7 @@ class RunStreamSnapshot:
     subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
     pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
     pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
+    assistant_message_id: str | None = None
 
 
 __all__ = [

@@ -7,8 +7,7 @@ import io
 import threading
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 import pytest
 from fastapi import FastAPI, File, UploadFile
@@ -16,7 +15,6 @@ from fastapi.testclient import TestClient
 
 from api.upload import UploadTooLargeError, staged_upload
 from api.upload_middleware import UploadAdmissionMiddleware
-from domain.knowledge.ports import KnowledgeUploadSlotRepository
 from domain.skill import MAX_PERSONAL_MARKDOWN_BYTES
 
 
@@ -37,23 +35,8 @@ async def _drain_request_body(receive: object) -> bytes:
     return b"".join(chunks)
 
 
-def test_content_length_fast_reject_skips_disk_slot_and_body_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """显式 Content-Length 超限时直接返回 413，不查磁盘、不占槽位、不读请求体。"""
-    monkeypatch.setattr(
-        "api.upload_middleware.shutil.disk_usage",
-        lambda _path: (_ for _ in ()).throw(
-            AssertionError("disk_usage must not be checked on Content-Length fast-reject")
-        ),
-    )
-
-    class _Slots:
-        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
-            raise AssertionError("slot must not be acquired on Content-Length fast-reject")
-
-        async def release_upload_slot(self, token: str) -> None:
-            raise AssertionError("unacquired slot must not be released")
+def test_content_length_fast_reject_skips_slot_and_body_read() -> None:
+    """显式 Content-Length 超限时直接返回 413，不占槽位、不读请求体。"""
 
     async def scenario() -> None:
         calls = 0
@@ -63,10 +46,7 @@ def test_content_length_fast_reject_skips_disk_slot_and_body_read(
             del scope, receive, send
             calls += 1
 
-        middleware = UploadAdmissionMiddleware(
-            application,
-            cast(KnowledgeUploadSlotRepository, _Slots()),
-        )
+        middleware = UploadAdmissionMiddleware(application)
         responses: list[dict[str, object]] = []
 
         async def receive() -> dict[str, object]:
@@ -89,6 +69,7 @@ def test_content_length_fast_reject_skips_disk_slot_and_body_read(
             send,
         )
         assert calls == 0
+        assert middleware._local_active["knowledge"] == 0
         assert responses[0]["status"] == 413
         assert responses[-1]["body"] == b'{"detail":"document_file_too_large"}'
 
@@ -287,198 +268,56 @@ def test_forged_small_content_length_is_still_bounded_by_streaming_counter() -> 
     asyncio.run(scenario())
 
 
-def test_upload_slot_is_released_with_its_token_after_downstream() -> None:
-    class Slots:
-        acquired: list[tuple[str, int]]
-        released: list[str]
-
-        def __init__(self) -> None:
-            self.acquired = []
-            self.released = []
-
-        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
-            self.acquired.append((token, lease_seconds))
-            return True
-
-        async def release_upload_slot(self, token: str) -> None:
-            self.released.append(token)
+def test_knowledge_upload_enforces_local_slot_limit_and_releases_after_downstream() -> None:
+    """知识库上传使用进程内 4 槽位上限：满载立即返回 429 不读体，完成后立即归还槽位。"""
 
     async def scenario() -> None:
-        slots = Slots()
-        app_calls = 0
+        release_uploads = asyncio.Event()
+        entered = 0
+        slots_full = asyncio.Event()
 
         async def application(scope: object, receive: object, send: object) -> None:
-            nonlocal app_calls
+            nonlocal entered
             del scope, send
             payload = await _drain_request_body(receive)
             assert payload == b"ok"
-            app_calls += 1
+            entered += 1
+            if entered == 4:
+                slots_full.set()
+            await release_uploads.wait()
 
-        middleware = UploadAdmissionMiddleware(
-            application,
-            cast(KnowledgeUploadSlotRepository, slots),
-        )
-        responses: list[dict[str, object]] = []
+        middleware = UploadAdmissionMiddleware(application)
 
-        async def receive() -> dict[str, object]:
+        async def ok_receive() -> dict[str, object]:
             return {"type": "http.request", "body": b"ok", "more_body": False}
 
-        async def send(message: dict[str, object]) -> None:
-            responses.append(message)
-
-        await middleware(
-            {
-                "type": "http",
-                "method": "POST",
-                "path": "/api/v1/knowledge-bases/kb_1/documents/upload",
-            },
-            receive,
-            send,
-        )
-        assert app_calls == 1
-        assert len(slots.acquired) == 1
-        token, lease_seconds = slots.acquired[0]
-        assert lease_seconds == 900
-        assert slots.released == [token]
-
-    asyncio.run(scenario())
-
-
-def test_upload_admission_checks_only_the_temp_filesystem_in_worker_thread(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """磁盘剩余空间仅检查临时目录，并通过工作线程执行以防阻塞事件循环。"""
-    checked_paths: list[str] = []
-    worker_thread_ids: list[int] = []
-    temp_directory = "/tmp/athena-upload-test"
-
-    def disk_usage(path: str) -> SimpleNamespace:
-        checked_paths.append(path)
-        worker_thread_ids.append(threading.get_ident())
-        return SimpleNamespace(free=1024**3)
-
-    monkeypatch.setattr("api.upload_middleware.shutil.disk_usage", disk_usage)
-    monkeypatch.setattr("api.upload_middleware.tempfile.gettempdir", lambda: temp_directory)
-
-    class Slots:
-        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
-            del token, lease_seconds
-            return True
-
-        async def release_upload_slot(self, token: str) -> None:
-            del token
-
-    main_thread_id = threading.get_ident()
-
-    async def scenario() -> None:
-        async def application(scope: object, receive: object, send: object) -> None:
-            del scope, receive, send
-
-        middleware = UploadAdmissionMiddleware(
-            application,
-            cast(KnowledgeUploadSlotRepository, Slots()),
-        )
-
-        async def receive() -> dict[str, object]:
-            return {"type": "http.request", "body": b"ok", "more_body": False}
-
-        async def send(message: dict[str, object]) -> None:
+        async def noop_send(message: dict[str, object]) -> None:
             del message
 
-        await middleware(
-            {
-                "type": "http",
-                "method": "POST",
-                "path": "/api/v1/knowledge-bases/kb_1/documents/upload",
-            },
-            receive,
-            send,
-        )
+        tasks = [
+            asyncio.create_task(
+                middleware(
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "path": "/api/v1/knowledge-bases/kb_1/documents/upload",
+                    },
+                    ok_receive,
+                    noop_send,
+                )
+            )
+            for _ in range(4)
+        ]
+        await asyncio.wait_for(slots_full.wait(), timeout=2)
+        assert middleware._local_active["knowledge"] == 4
 
-    asyncio.run(scenario())
-    assert checked_paths == [temp_directory]
-    assert worker_thread_ids and worker_thread_ids[0] != main_thread_id
+        rejected_responses: list[dict[str, object]] = []
 
-
-def test_upload_rejects_low_temp_space_before_acquiring_a_slot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "api.upload_middleware.shutil.disk_usage",
-        lambda _path: SimpleNamespace(free=0),
-    )
-
-    class Slots:
-        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
-            raise AssertionError("low temp space must be rejected before slot acquisition")
-
-        async def release_upload_slot(self, token: str) -> None:
-            raise AssertionError("unacquired slot must not be released")
-
-    async def scenario() -> None:
-        app_calls = 0
-
-        async def application(scope: object, receive: object, send: object) -> None:
-            nonlocal app_calls
-            del scope, receive, send
-            app_calls += 1
-
-        middleware = UploadAdmissionMiddleware(
-            application,
-            cast(KnowledgeUploadSlotRepository, Slots()),
-        )
-        responses: list[dict[str, object]] = []
-
-        async def receive() -> dict[str, object]:
-            raise AssertionError("request body must not be read when temp space is low")
-
-        async def send(message: dict[str, object]) -> None:
-            responses.append(message)
-
-        await middleware(
-            {
-                "type": "http",
-                "method": "POST",
-                "path": "/api/v1/knowledge-bases/kb_1/documents/upload",
-            },
-            receive,
-            send,
-        )
-        assert app_calls == 0
-        assert responses[0]["status"] == 503
-        assert responses[-1]["body"] == b'{"detail":"knowledge_upload_storage_low"}'
-
-    asyncio.run(scenario())
-
-
-def test_upload_is_rejected_when_shared_slot_pool_is_full() -> None:
-    class FullSlots:
-        async def acquire_upload_slot(self, token: str, *, lease_seconds: int) -> bool:
-            del token, lease_seconds
-            return False
-
-        async def release_upload_slot(self, token: str) -> None:
-            raise AssertionError("unacquired slot must not be released")
-
-    async def scenario() -> None:
-        app_calls = 0
-
-        async def application(scope: object, receive: object, send: object) -> None:
-            nonlocal app_calls
-            del scope, receive, send
-            app_calls += 1
-
-        middleware = UploadAdmissionMiddleware(
-            application,
-            cast(KnowledgeUploadSlotRepository, FullSlots()),
-        )
-        responses: list[dict[str, object]] = []
-
-        async def receive() -> dict[str, object]:
+        async def fail_receive() -> dict[str, object]:
             raise AssertionError("request body must not be read without an upload slot")
 
-        async def send(message: dict[str, object]) -> None:
-            responses.append(message)
+        async def send_rejected(message: dict[str, object]) -> None:
+            rejected_responses.append(message)
 
         await middleware(
             {
@@ -486,12 +325,15 @@ def test_upload_is_rejected_when_shared_slot_pool_is_full() -> None:
                 "method": "POST",
                 "path": "/api/v1/knowledge-bases/kb_1/versions/upload",
             },
-            receive,
-            send,
+            fail_receive,
+            send_rejected,
         )
-        assert app_calls == 0
-        assert responses[0]["status"] == 429
-        assert responses[-1]["body"] == b'{"detail":"knowledge_upload_capacity_exceeded"}'
+        assert rejected_responses[0]["status"] == 429
+        assert rejected_responses[-1]["body"] == b'{"detail":"knowledge_upload_capacity_exceeded"}'
+
+        release_uploads.set()
+        await asyncio.gather(*tasks)
+        assert middleware._local_active["knowledge"] == 0
 
     asyncio.run(scenario())
 

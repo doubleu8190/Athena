@@ -1,25 +1,56 @@
-"""绑定到现有 SQLAlchemy 事务的管理员身份复核器。"""
+"""绑定到现有 SQLAlchemy 会话的身份复核器与认证写事务行锁守卫。"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapter.auth.converter.auth import user_to_domain
 from adapter.auth.model.auth import AuthSessionModel, UserModel
+from common.date import as_utc
 from common.ids import now_utc
-from domain.auth import AuthTransactionGuard, User, UserStatus
+from domain.auth import User, UserStatus
 
 
-class SqlAlchemyAuthTransactionGuard(AuthTransactionGuard):
-    """复用调用方 AsyncSession，在最终写事务中以共享锁复核授权身份。
+async def verify_active_session_user(
+    session: AsyncSession,
+    user_id: str,
+    session_id: str,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> User | None:
+    """在当前事务或只读会话中以单条无锁 JOIN 复核有效用户与登录会话。
+
+    严禁对 users / auth_sessions 申请 FOR SHARE 或 FOR UPDATE 行锁，
+    避免后台管理写事务与认证核心表产生跨域行锁争用；仍实时拒绝已停用、已删除、
+    已撤销、已过期或角色已变更的身份。
+    """
+    # 延迟求值默认时钟，保持单测对模块级 now_utc 的补丁注入有效。
+    current_time = as_utc(now_utc() if clock is None else clock())
+    user_row = await session.scalar(
+        select(UserModel)
+        .join(AuthSessionModel, AuthSessionModel.user_id == UserModel.id)
+        .where(
+            UserModel.id == user_id,
+            UserModel.status == UserStatus.ACTIVE.value,
+            UserModel.deleted_time.is_(None),
+            AuthSessionModel.id == session_id,
+            AuthSessionModel.revoked_time.is_(None),
+            AuthSessionModel.expires_at > current_time,
+        )
+        .execution_options(populate_existing=True)
+    )
+    return None if user_row is None else user_to_domain(user_row)
+
+
+class SqlAlchemyAuthTransactionGuard:
+    """专供认证仓储修改自身 users 行（改密、改显示名）使用的行锁守卫。
 
     必须在写操作提交之前保持该 session 的事务打开。统一锁顺序为先 users 行、
-    再 auth_sessions 行；角色修改与会话撤销持有写锁（FOR UPDATE），本复核使用共享锁
-    （FOR SHARE），使同一管理员并发请求不再互相串行阻塞，同时仍与写锁互斥且不形成反向锁链。
+    再 auth_sessions 行；其他业务管理仓储应改用无锁的 verify_active_session_user。
     """
 
     def __init__(
@@ -37,19 +68,16 @@ class SqlAlchemyAuthTransactionGuard(AuthTransactionGuard):
         self._session = session
         self._clock = clock
 
-    async def lock_current_session_user(
+    async def lock_current_session_user_row(
         self,
         user_id: str,
         session_id: str,
-    ) -> User | None:
-        """锁定用户和会话并读取本事务可见的当前有效身份。
-
-        参数：user_id、session_id 来自已验证的认证上下文。
-        返回：账号 active、未删除且会话未撤销、未过期时返回锁定后的当前用户；
-        任一条件不满足或标识不匹配时返回 None。
-        异常：数据库错误由 SQLAlchemy 原样传播。
-        """
-        # 管理员角色更新持有写锁，此处使用 FOR SHARE 共享锁：并发请求可并行复核，仍与角色变更互斥。
+        *,
+        lock_user_for_update: bool = False,
+    ) -> UserModel | None:
+        """锁定用户与会话并校验有效身份，返回当前事务内已锁定的 UserModel ORM 行。"""
+        # 默认使用 FOR SHARE 共享锁（并发复核互不阻塞，仍与写锁互斥）；写用户自身字段时支持
+        # 直接持 FOR UPDATE，避免先共享锁再 UPDATE 触发锁升级竞争。
         user_row = await self._session.scalar(
             select(UserModel)
             .where(
@@ -57,13 +85,13 @@ class SqlAlchemyAuthTransactionGuard(AuthTransactionGuard):
                 UserModel.status == UserStatus.ACTIVE.value,
                 UserModel.deleted_time.is_(None),
             )
-            .with_for_update(read=True)
+            .with_for_update(read=not lock_user_for_update)
             .execution_options(populate_existing=True)
         )
         if user_row is None:
             return None
 
-        # 锁 session 前已持有 user 共享锁；会话撤销持有写锁且只访问 session 行，不反向等待 user。
+        # 锁 session 前已持有 user 锁；会话撤销持有写锁且只访问 session 行，不反向等待 user。
         auth_row = await self._session.scalar(
             select(AuthSessionModel)
             .where(
@@ -76,19 +104,26 @@ class SqlAlchemyAuthTransactionGuard(AuthTransactionGuard):
         if auth_row is None:
             return None
         # 两把行锁都已取得，再读当前时刻并一起检查撤销和过期状态。
-        current_time = self._clock()
-        if current_time.tzinfo is None:
-            current_time = current_time.replace(tzinfo=UTC)
-        else:
-            current_time = current_time.astimezone(UTC)
-        expires_at = auth_row.expires_at
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        else:
-            expires_at = expires_at.astimezone(UTC)
+        current_time = as_utc(self._clock())
+        expires_at = as_utc(auth_row.expires_at)
         if auth_row.revoked_time is not None or expires_at <= current_time:
             return None
-        return user_to_domain(user_row)
+        return user_row
+
+    async def lock_current_session_user(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> User | None:
+        """锁定用户和会话并读取本事务可见的当前有效身份。
+
+        参数：user_id、session_id 来自已验证的认证上下文。
+        返回：账号 active、未删除且会话未撤销、未过期时返回锁定后的当前用户；
+        任一条件不满足或标识不匹配时返回 None。
+        异常：数据库错误由 SQLAlchemy 原样传播。
+        """
+        user_row = await self.lock_current_session_user_row(user_id, session_id)
+        return None if user_row is None else user_to_domain(user_row)
 
 
-__all__ = ["SqlAlchemyAuthTransactionGuard"]
+__all__ = ["SqlAlchemyAuthTransactionGuard", "verify_active_session_user"]

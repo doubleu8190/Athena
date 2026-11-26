@@ -4,31 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
-import shutil
-import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from starlette.exceptions import HTTPException
 
-from bootstrap.config import env_int
-from common.ids import new_id
-from domain.knowledge.ports import KnowledgeUploadSlotRepository
 from domain.skill import MAX_PERSONAL_MARKDOWN_BYTES
-
-logger = logging.getLogger(__name__)
 
 _PERSONAL_MARKDOWN_MULTIPART_OVERHEAD = 64 * 1024
 _PERSONAL_JSON_MAXIMUM = 2 * 1024 * 1024
 _DEFAULT_UPLOAD_TIMEOUT_SECONDS = 600.0
-_KNOWLEDGE_SLOT_LEASE_SECONDS = 900
-_DEFAULT_MIN_TEMP_FREE_BYTES = 384 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class UploadPolicy:
-    """单类上传入口的请求体大小、并发槽位、超时与磁盘准入策略。"""
+    """单类上传入口的请求体大小、进程内并发槽位与超时准入策略。"""
 
     kind: str
     maximum_bytes: int
@@ -36,8 +26,6 @@ class UploadPolicy:
     local_slot_limit: int
     capacity_error_code: str
     timeout_error_code: str
-    use_shared_slot: bool = False
-    check_disk_space: bool = False
 
 
 UPLOAD_POLICIES: Mapping[str, UploadPolicy] = {
@@ -48,8 +36,6 @@ UPLOAD_POLICIES: Mapping[str, UploadPolicy] = {
         local_slot_limit=4,
         capacity_error_code="knowledge_upload_capacity_exceeded",
         timeout_error_code="knowledge_upload_timeout",
-        use_shared_slot=True,
-        check_disk_space=True,
     ),
     "skill": UploadPolicy(
         kind="skill",
@@ -105,10 +91,7 @@ def _match_upload_kind(method: str, path: str) -> str | None:
     if (
         path in {"/api/v1/me/skills", "/api/v1/admin/skills/markdown"}
         or (path.startswith("/api/v1/me/skills/") and path.endswith("/versions"))
-        or (
-            path.startswith("/api/v1/admin/skills/")
-            and path.endswith("/versions/markdown")
-        )
+        or (path.startswith("/api/v1/admin/skills/") and path.endswith("/versions/markdown"))
     ):
         return "personal_json"
     return None
@@ -183,23 +166,21 @@ async def _send_json(send: object, status: int, detail: str) -> None:
 
 
 class UploadAdmissionMiddleware:
-    """在 multipart/JSON 解析阶段提供上传准入、并发槽位隔离、超时与流式体积限流。"""
+    """在 multipart/JSON 解析阶段提供上传准入、进程内并发槽位隔离、超时与流式体积限流。"""
 
     def __init__(
         self,
         app: object,
-        repository: KnowledgeUploadSlotRepository | None = None,
         *,
         policies: Mapping[str, UploadPolicy] | None = None,
         timeout_seconds: float = _DEFAULT_UPLOAD_TIMEOUT_SECONDS,
     ) -> None:
         self.app = app
-        self._repository = repository
         self._policies: Mapping[str, UploadPolicy] = (
             policies if policies is not None else UPLOAD_POLICIES
         )
         self._timeout_seconds = timeout_seconds
-        # 按策略 kind 独立维护占用计数；在单线程事件循环中同步增减，实现零排队快速失败。
+        # 按策略 kind 独立维护进程内并发占用计数；单线程事件循环中同步增减，实现零排队快速失败。
         self._local_active: dict[str, int] = dict.fromkeys(self._policies, 0)
 
     async def __call__(self, scope: dict[str, object], receive: object, send: object) -> None:
@@ -217,50 +198,17 @@ class UploadAdmissionMiddleware:
 
         assert callable(receive) and callable(send)
 
-        # 快速拒绝：显式声明的 Content-Length 超限时直接 413，不检查磁盘、不占用槽位、不读请求体。
+        # 快速拒绝：显式声明的 Content-Length 超限时直接 413，不占用槽位、不读请求体。
         content_length = _parse_content_length(scope)
         if content_length is not None and content_length > policy.maximum_bytes:
             await _send_json(send, 413, policy.overflow_code)
             return
 
-        # 知识库上传要求临时目录具备最低剩余空间，磁盘查询放到工作线程避免阻塞事件循环。
-        if policy.check_disk_space:
-            minimum_free_bytes = env_int(
-                "ATHENA_KNOWLEDGE_UPLOAD_MIN_FREE_BYTES",
-                default=_DEFAULT_MIN_TEMP_FREE_BYTES,
-                minimum=1,
-            )
-            try:
-                temp_free = (await asyncio.to_thread(shutil.disk_usage, tempfile.gettempdir())).free
-            except OSError:
-                await _send_json(send, 503, "knowledge_upload_storage_unavailable")
-                return
-            if temp_free < minimum_free_bytes:
-                await _send_json(send, 503, "knowledge_upload_storage_low")
-                return
-
-        # 并发准入：知识库优先使用共享租约槽位，其余上传按策略 kind 使用独立本地槽位。
-        slot_token = new_id("kuslot")
-        use_shared_slot = policy.use_shared_slot and self._repository is not None
-        acquired = False
-        if not use_shared_slot:
-            if self._local_active[policy.kind] < policy.local_slot_limit:
-                self._local_active[policy.kind] += 1
-                acquired = True
-        else:
-            assert self._repository is not None
-            try:
-                acquired = await self._repository.acquire_upload_slot(
-                    slot_token,
-                    lease_seconds=_KNOWLEDGE_SLOT_LEASE_SECONDS,
-                )
-            except Exception:
-                await _send_json(send, 503, "knowledge_upload_admission_unavailable")
-                return
-
-        if not acquired:
+        # 并发准入：所有上传类型统一按策略 kind 使用独立进程内槽位，满载立即返回 429。
+        if self._local_active[policy.kind] >= policy.local_slot_limit:
             await _send_json(send, 429, policy.capacity_error_code)
             return
+        self._local_active[policy.kind] += 1
 
         response_started = False
         received_bytes = 0
@@ -301,15 +249,8 @@ class UploadAdmissionMiddleware:
                 raise
             await _send_json(tracked_send, 504, policy.timeout_error_code)
         finally:
-            # 无论下游成功、超限、超时或取消，均确保立即归还本地或共享上传槽位。
-            if not use_shared_slot:
-                self._local_active[policy.kind] -= 1
-            else:
-                assert self._repository is not None
-                try:
-                    await asyncio.shield(self._repository.release_upload_slot(slot_token))
-                except Exception:
-                    logger.error("knowledge_upload_slot_release_failed")
+            # 无论下游成功、超限、超时或取消，均确保立即归还进程内上传槽位。
+            self._local_active[policy.kind] -= 1
 
 
 __all__ = [

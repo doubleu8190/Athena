@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 from pydantic import TypeAdapter, ValidationError
 
 from api.converter.mcp import mcp_server_page_to_response, mcp_server_to_response
@@ -23,7 +23,7 @@ from api.dto.mcp import (
 )
 from api.dto.tool import AdminToolListResponse
 from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
-from api.security import AdminAuth, verify_request_origin
+from api.security import AdminAuth
 from app.tool import ToolManager
 from domain.access import VisibilityScope
 from domain.mcp import McpConfigVersionConflictError
@@ -77,7 +77,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         http_request: Request,
         response: Response,
         actor: AdminAuth,
-        _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _CREATE_ADAPTER)
         has_visibility = bool(
@@ -148,7 +147,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
         server_id: Annotated[str, Path(min_length=1)],
         response: Response,
-        _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _UPDATE_ADAPTER)
         has_visibility = bool(
@@ -196,7 +194,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
         server_id: Annotated[str, Path(min_length=1)],
         response: Response,
-        _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
         """保留既有加密凭据的局部更新接口，可选触发远端工具重发现。"""
         request = await _read_request_model(http_request, _PATCH_ADAPTER)
@@ -247,7 +244,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
         server_id: Annotated[str, Path(min_length=1)],
         response: Response,
-        _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
         """原子切换 MCP Server 启停状态并递增配置版本号。"""
         request = await _read_request_model(http_request, _ENABLED_ADAPTER)
@@ -273,7 +269,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
         server_id: Annotated[str, Path(min_length=1)],
         response: Response,
-        _: Annotated[None, Depends(verify_request_origin)],
     ) -> McpServerResponse:
         """使用已存加密凭据独立重发现远端工具并按 remote_name 增量对齐。"""
         try:
@@ -293,7 +288,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
     async def delete_server(
         actor: AdminAuth,
         server_id: Annotated[str, Path(min_length=1)],
-        _: Annotated[None, Depends(verify_request_origin)],
     ) -> Response:
         try:
             await manager.unregister_mcp(actor, server_id)

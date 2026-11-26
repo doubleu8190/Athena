@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import math
 import multiprocessing
-import sys
 import time
+import weakref
 from collections.abc import AsyncGenerator, Callable
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import aclosing
 from dataclasses import asdict
-from queue import Empty
-from typing import Protocol, cast
+from typing import cast
 
 from domain.knowledge.model import (
     ChunkLocator,
@@ -28,7 +30,6 @@ from domain.knowledge.ports import (
     ClaimedKnowledgeJob,
     DocumentParser,
     DocumentParserFactory,
-    FileUploadReservation,
     KnowledgeJobRepository,
     OriginalStore,
     ParsedDocument,
@@ -38,6 +39,8 @@ from domain.llm.ports import EmbeddingPort, TokenCounterPort
 CHUNK_TOKEN_LIMIT = 512
 CHUNK_TOKEN_OVERLAP = 64
 EMBED_BATCH_SIZE = 32
+EMBED_CONCURRENCY_FACTOR = 4
+PARSER_CHILD_MAX_TASKS = 50
 ORPHAN_REFERENCE_BATCH_SIZE = 100
 DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS = 3600.0
 LEASE_SECONDS = 120
@@ -45,23 +48,9 @@ HEARTBEAT_SECONDS = 20
 
 logger = logging.getLogger(__name__)
 
-
-class _ChildResultQueue(Protocol):
-    """multiprocessing.Queue 的窄结果边界。"""
-
-    def put(self, value: tuple[bool, ParsedDocument | str]) -> None: ...
-
-
-class _ChildProcess(Protocol):
-    """Narrow lifecycle methods shared by multiprocessing context processes."""
-
-    def is_alive(self) -> bool: ...
-
-    def terminate(self) -> None: ...
-
-    def kill(self) -> None: ...
-
-    def join(self, timeout: float | None = None) -> None: ...
+# spawn 解析子进程内缓存的解析器与事件循环，消除每文档重复初始化 OCR 运行时的冷启动开销。
+_CHILD_PARSER: DocumentParser | None = None
+_CHILD_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 class KnowledgeWorker:
@@ -78,13 +67,13 @@ class KnowledgeWorker:
         *,
         isolate_parsing: bool = True,
         parse_timeout_seconds: int = 600,
-        parse_memory_mb: int = 4096,
+        parse_pool_size: int | None = None,
         profile_id: str | None = None,
         owner_concurrency: int = 2,
         orphan_sweep_interval_seconds: float = DEFAULT_ORPHAN_SWEEP_INTERVAL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        """保存任务仓储及解析工厂、磁盘、模型和文本处理端口。"""
+        """保存任务仓储及解析工厂、存储、模型和文本处理端口。"""
         self._repository = repository
         self._parser_factory = parser_factory
         # 非隔离模式下按需创建并缓存唯一解析器实例，避免重复初始化模型。
@@ -95,30 +84,47 @@ class KnowledgeWorker:
         self._counter = counter
         self._isolate_parsing = isolate_parsing
         self._parse_timeout_seconds = parse_timeout_seconds
-        if parse_memory_mb < 512 or parse_memory_mb > 16384:
-            raise ValueError("knowledge_parse_memory_limit_invalid")
         if orphan_sweep_interval_seconds < 0.0:
             raise ValueError("knowledge_orphan_sweep_interval_invalid")
-        self._parse_memory_mb = parse_memory_mb
+        resolved_pool_size = (
+            max(1, min(owner_concurrency, 4)) if parse_pool_size is None else parse_pool_size
+        )
+        if resolved_pool_size < 1 or resolved_pool_size > 16:
+            raise ValueError("knowledge_parse_pool_size_invalid")
         self._profile_id = profile_id
         self._owner_concurrency = owner_concurrency
         self._orphan_sweep_interval_seconds = orphan_sweep_interval_seconds
         self._monotonic = monotonic
         self._sweep_counter = 0
         self._last_orphan_sweep_at: float | None = None
+        # 隔离模式下基于标准库 ProcessPoolExecutor 复用 spawn 子进程，避免重复 OCR 冷启动。
+        self._parser_pool: _IsolatedParserPool | None = (
+            _IsolatedParserPool(
+                parser_factory,
+                max_workers=resolved_pool_size,
+                timeout_seconds=parse_timeout_seconds,
+            )
+            if isolate_parsing
+            else None
+        )
+
+    async def aclose(self) -> None:
+        """优雅关闭并回收解析子进程池；可安全重复调用。"""
+        if self._parser_pool is not None:
+            await self._parser_pool.aclose()
 
     async def run_once(self) -> bool:
         """消费一条任务；返回是否认领到工作。"""
         self._sweep_counter += 1
         if self._sweep_counter >= 100:
             self._sweep_counter = 0
-            # 解耦过期预留清理与全桶老孤儿扫描：预留仍按固定周期回收，全桶扫描按单调时钟降频。
+            # 按单调时钟降频执行 24 小时宽限期全桶孤儿扫描，避免每次轮询重复枚举对象存储。
             now = self._monotonic()
-            include_orphans = (
+            if (
                 self._last_orphan_sweep_at is None
                 or (now - self._last_orphan_sweep_at) >= self._orphan_sweep_interval_seconds
-            )
-            await self._sweep_expired_uploads(include_orphans=include_orphans)
+            ):
+                await self._sweep_expired_uploads()
         job = await self._repository.claim_job(
             lease_seconds=LEASE_SECONDS,
             owner_concurrency=self._owner_concurrency,
@@ -147,12 +153,14 @@ class KnowledgeWorker:
                 raise ValueError("document_text_empty")
             if lost_lease.is_set():
                 return True
-            # 分批向量化并在批间复核租约状态，控制大文档内存峰值并及时中止失租任务。
+            # 按嵌入客户端配置动态决定单轮向量化窗口大小（如 batch_size * 4），
+            # 既让远程客户端 4 路并发充分生效，又在窗口间定期复核租约状态及时中止失租任务。
+            embed_window_size = _resolve_embed_window_size(self._embedding)
             vectors: list[list[float]] = []
-            for start in range(0, len(chunks), EMBED_BATCH_SIZE):
+            for start in range(0, len(chunks), embed_window_size):
                 if lost_lease.is_set():
                     return True
-                batch_texts = [chunk[0] for chunk in chunks[start : start + EMBED_BATCH_SIZE]]
+                batch_texts = [chunk[0] for chunk in chunks[start : start + embed_window_size]]
                 batch_vectors = await self._embedding.embed(batch_texts)
                 if len(batch_vectors) != len(batch_texts) or any(
                     not _is_valid_embedding_vector(vector) for vector in batch_vectors
@@ -186,30 +194,9 @@ class KnowledgeWorker:
             await asyncio.gather(heartbeat, return_exceptions=True)
         return True
 
-    async def _sweep_expired_uploads(self, include_orphans: bool = True) -> None:
-        """先删过期预留的原件并条件删除预留行，再按需批量清理老孤儿。"""
+    async def _sweep_expired_uploads(self) -> None:
+        """批量扫描超过 24 小时宽限期且未被来源表引用的孤儿对象并回收。"""
         try:
-            expired = await self._repository.list_expired_upload_reservations(limit=20)
-            for reservation in expired:
-                try:
-                    await self._cleanup_expired_reservation(reservation)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    code = (
-                        error.code
-                        if isinstance(error, OriginalStorageError)
-                        else "knowledge_upload_cleanup_failed"
-                    )
-                    logger.warning(
-                        "knowledge_upload_cleanup_failed code=%s exception_type=%s reservation=%s",
-                        code,
-                        type(error).__name__,
-                        reservation.reservation_token,
-                    )
-                    continue
-            if not include_orphans:
-                return
             candidates = self._originals.iter_orphan_candidates(older_than_seconds=86400)
             async with aclosing(cast(AsyncGenerator[str, None], candidates)) as orphan_candidates:
                 batch: list[str] = []
@@ -222,7 +209,7 @@ class KnowledgeWorker:
                     await self._delete_unreferenced_orphans(batch)
             self._last_orphan_sweep_at = self._monotonic()
         except Exception as error:
-            # 回收失败不影响 ingestion；reservation 和 quota 保持可恢复状态。
+            # 孤儿回收失败不影响 ingestion 主循环，等待下个周期重试。
             logger.warning(
                 "knowledge_maintenance_failed exception_type=%s",
                 type(error).__name__,
@@ -230,16 +217,9 @@ class KnowledgeWorker:
             return
 
     async def _delete_unreferenced_orphans(self, keys: list[str]) -> None:
-        """按页批量核验对象引用后再删除未引用孤儿，兼容仅实现单条查询的仓储替身。"""
-        batch_lookup = getattr(self._repository, "find_referenced_storage_keys", None)
-        if callable(batch_lookup):
-            referenced = cast(set[str], await batch_lookup(keys))
-            unreferenced = [key for key in keys if key not in referenced]
-        else:
-            unreferenced = []
-            for key in keys:
-                if not await self._repository.is_storage_key_referenced(key):
-                    unreferenced.append(key)
+        """按页批量核验对象引用后再删除未引用孤儿对象，避免 N+1 查库。"""
+        referenced = await self._repository.find_referenced_storage_keys(keys)
+        unreferenced = [key for key in keys if key not in referenced]
         for key in unreferenced:
             try:
                 await self._originals.delete(key)
@@ -252,27 +232,6 @@ class KnowledgeWorker:
                 )
                 continue
 
-    async def _cleanup_expired_reservation(self, reservation: FileUploadReservation) -> None:
-        """先原子删除过期预留行，确认无来源与有效预留引用后再删除对象（失败由孤儿扫描兜底）。"""
-        if reservation.reservation_token is None or reservation.storage_key is None:
-            return
-        deleted = await self._repository.delete_expired_upload_reservation(
-            reservation.reservation_token
-        )
-        if not deleted:
-            return
-        try:
-            await self._originals.delete(reservation.storage_key)
-        except OriginalStorageNotFoundError:
-            pass
-        except OriginalStorageError as error:
-            logger.warning(
-                "knowledge_upload_cleanup_failed code=%s exception_type=%s reservation=%s",
-                error.code,
-                type(error).__name__,
-                reservation.reservation_token,
-            )
-
     async def _read_blocks(self, job: ClaimedKnowledgeJob) -> tuple[list[TextBlock], list[str]]:
         if job.source_text is not None:
             return [TextBlock(job.source_text, ChunkLocator(kind="text"))], []
@@ -280,13 +239,8 @@ class KnowledgeWorker:
             raise ValueError("document_source_missing")
         content = await self._originals.get(job.source_key)
         if self._isolate_parsing:
-            parsed = await _parse_in_child(
-                job.source_filename,
-                content,
-                self._parser_factory,
-                self._parse_timeout_seconds,
-                self._parse_memory_mb,
-            )
+            assert self._parser_pool is not None
+            parsed = await self._parser_pool.parse(job.source_filename, content)
         else:
             if self._parser is None:
                 self._parser = self._parser_factory.create()
@@ -306,14 +260,25 @@ class KnowledgeWorker:
                 return
 
 
+def _resolve_embed_window_size(embedding: EmbeddingPort) -> int:
+    """根据嵌入客户端配置计算单轮送检窗口大小；无 .config 的测试替身回退默认 EMBED_BATCH_SIZE。"""
+    config = getattr(embedding, "config", None)
+    configured_batch = getattr(config, "batch_size", None)
+    if (
+        isinstance(configured_batch, int)
+        and not isinstance(configured_batch, bool)
+        and configured_batch > 0
+    ):
+        return configured_batch * EMBED_CONCURRENCY_FACTOR
+    return EMBED_BATCH_SIZE
+
+
 def _is_valid_embedding_vector(vector: list[float]) -> bool:
     """校验单条知识库向量满足 1024 维、全有限数值且非全零。"""
     return (
         len(vector) == 1024
         and all(
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
             for value in vector
         )
         and any(value != 0 for value in vector)
@@ -379,6 +344,41 @@ def _merge_locators(first: ChunkLocator, last: ChunkLocator) -> ChunkLocator:
     )
 
 
+def _split_long_text_with_cursor(
+    text: str,
+    locator: ChunkLocator,
+    counter: TokenCounterPort,
+    output: list[tuple[str, dict[str, object], int]],
+) -> None:
+    """按 Python 字符下标执行严格 O(N) 游标分块（倍增探测 + 局部二分），天然不切碎 UTF-8。"""
+    total = len(text)
+    pos = 0
+    while pos < total:
+        split_end = _largest_prefix_from(text, pos, counter, CHUNK_TOKEN_LIMIT)
+        if split_end >= total:
+            piece = text[pos:].rstrip()
+            if piece:
+                output.append((piece, asdict(locator), counter.count(piece)))
+            break
+        piece = text[pos:split_end].rstrip()
+        if not piece:
+            # 窗口内全为空白时直接跳过并单调前移游标，杜绝死循环。
+            pos = split_end
+            while pos < total and text[pos].isspace():
+                pos += 1
+            continue
+        output.append((piece, asdict(locator), counter.count(piece)))
+        overlap_offset = _largest_suffix_start(piece, counter, CHUNK_TOKEN_OVERLAP)
+        next_pos = pos + overlap_offset
+        while next_pos < split_end and text[next_pos].isspace():
+            next_pos += 1
+        if next_pos <= pos:
+            next_pos = split_end
+            while next_pos < total and text[next_pos].isspace():
+                next_pos += 1
+        pos = next_pos
+
+
 def _make_chunks(
     blocks: list[TextBlock],
     counter: TokenCounterPort,
@@ -390,9 +390,9 @@ def _make_chunks(
     buffer_count = 0
     buffer_first_locator: ChunkLocator | None = None
     buffer_last_locator: ChunkLocator | None = None
-    buffer_region: (
-        tuple[str, int | None, str | None, int | None, str | None, str | None] | None
-    ) = None
+    buffer_region: tuple[str, int | None, str | None, int | None, str | None, str | None] | None = (
+        None
+    )
 
     def flush_buffer() -> None:
         nonlocal buffer_text, buffer_tokens, buffer_count
@@ -438,39 +438,44 @@ def _make_chunks(
             buffer_region = region
             continue
 
-        # 单长块或非纯文本块（如表格）先结算已有缓冲，再沿用原有重叠切分逻辑。
+        # 单长块或非纯文本块（如表格）先结算已有缓冲，再执行严格 O(N) 游标切分。
         flush_buffer()
-        while pending:
-            if counter.count(pending) <= CHUNK_TOKEN_LIMIT:
-                piece = pending
-                pending = ""
-            else:
-                previous_length = len(pending)
-                split_at = _largest_prefix(pending, counter, CHUNK_TOKEN_LIMIT)
-                piece = pending[:split_at].rstrip()
-                overlap_at = _largest_suffix_start(piece, counter, CHUNK_TOKEN_OVERLAP)
-                pending = piece[overlap_at:].lstrip() + pending[split_at:]
-                if not piece or len(pending) >= previous_length:
-                    raise ValueError("chunker_no_progress")
-            if piece:
-                output.append((piece, asdict(block.locator), counter.count(piece)))
+        if pending_tokens <= CHUNK_TOKEN_LIMIT:
+            output.append((pending, asdict(block.locator), pending_tokens))
+            continue
+        _split_long_text_with_cursor(pending, block.locator, counter, output)
     flush_buffer()
     return output
 
 
-def _largest_prefix(text: str, counter: TokenCounterPort, limit: int) -> int:
-    low, high = 1, len(text)
+def _largest_prefix_from(text: str, start: int, counter: TokenCounterPort, limit: int) -> int:
+    """从游标 start 起以指数倍增探测上界再局部二分，返回满足 token 上限的最大右端点。"""
+    remaining = len(text) - start
+    if remaining <= 1:
+        return len(text)
+    low = 0
+    probe = min(remaining, 64)
+    while True:
+        if counter.count(text[start : start + probe]) <= limit:
+            low = probe
+            if probe == remaining:
+                return len(text)
+            probe = min(remaining, probe * 2)
+        else:
+            high = probe - 1
+            break
+    low = max(1, low)
     while low < high:
         middle = (low + high + 1) // 2
-        if counter.count(text[:middle]) <= limit:
+        if counter.count(text[start : start + middle]) <= limit:
             low = middle
         else:
             high = middle - 1
-    return low
+    return start + low
 
 
 def _largest_suffix_start(text: str, counter: TokenCounterPort, limit: int) -> int:
-    # 使用二分查找定位满足 token 上限的最长后缀起点（最小 start），将 O(N) 线性探测降为 O(log N)。
+    """二分查找满足 token 上限的最长后缀起点（最小 start），复杂度 O(log N)。"""
     if not text or counter.count(text) <= limit:
         return 0
     low, high = 1, len(text)
@@ -498,7 +503,6 @@ def _error_code(error: Exception) -> str:
         code = str(error)
         if code in {
             "knowledge_ocr_engine_unavailable",
-            "knowledge_parse_memory_monitor_unavailable",
             "knowledge_parser_process_failed",
             "knowledge_parser_transient",
         }:
@@ -509,7 +513,7 @@ def _error_code(error: Exception) -> str:
 
 
 def _is_retryable_error(error: Exception, job_kind: str) -> bool:
-    """Apply distinct ingestion and cleanup retry policies."""
+    """按入库与清理两类任务区分是否允许后台重试。"""
     if isinstance(error, OriginalStorageUnavailableError):
         return True
     if isinstance(
@@ -522,156 +526,247 @@ def _is_retryable_error(error: Exception, job_kind: str) -> bool:
     return not isinstance(error, (ValueError, TypeError))
 
 
-def _process_rss_mb(process_id: int) -> int | None:
-    """Read a child process RSS in MiB for the macOS parser guard."""
-    try:
-        import psutil  # type: ignore[import-untyped]
+def _classify_parser_error(error: BaseException) -> tuple[str, bool]:
+    """将解析子进程中的异常脱敏为安全错误码，并返回是否需要回收重建子进程池。"""
+    if isinstance(error, MemoryError):
+        return "invalid:knowledge_parse_memory_limit", True
+    message = str(error)
+    safe_code = (
+        message if message.startswith("knowledge_") and message.replace("_", "").isalnum() else None
+    )
+    if isinstance(error, ValueError):
+        # 合法文档格式/加密/页数等业务校验错误不破坏解析器运行时，允许复用子进程。
+        return f"invalid:{safe_code or 'knowledge_document_invalid'}", False
+    # 其余运行期异常（OCR 引擎故障、C++ 异常等）可能遗留脏状态，建议回收重建子进程池。
+    return f"transient:{safe_code or 'knowledge_parser_transient'}", True
 
-        return cast(int, psutil.Process(process_id).memory_info().rss // (1024 * 1024))
-    except Exception:
-        return None
+
+def _decode_child_error(category: str) -> Exception:
+    """将脱敏后的子进程错误类别还原为父进程统一的领域异常类型。"""
+    if category.startswith("invalid:"):
+        return ValueError(category.removeprefix("invalid:"))
+    if category.startswith("transient:"):
+        return RuntimeError(category.removeprefix("transient:"))
+    return RuntimeError("knowledge_parser_failed")
 
 
-async def _parse_in_child(
+def _close_child_loop() -> None:
+    """子进程退出时关闭按需创建的事件循环。"""
+    global _CHILD_LOOP
+    loop = _CHILD_LOOP
+    _CHILD_LOOP = None
+    if loop is not None and not loop.is_closed():
+        loop.close()
+
+
+def _init_parser_child(factory: DocumentParserFactory) -> None:
+    """在 spawn 子进程启动时创建并缓存 DocumentParser 实例，消除重复 OCR 冷启动。"""
+    global _CHILD_PARSER, _CHILD_LOOP
+    _CHILD_PARSER = factory.create()
+    _CHILD_LOOP = None
+    atexit.register(_close_child_loop)
+
+
+def _run_parser_child_task(
     filename: str,
     content: bytes,
-    factory: DocumentParserFactory,
-    timeout_seconds: int,
-    memory_limit_mb: int = 4096,
-) -> ParsedDocument:
-    """在独立进程运行 OCR/解析，取消或超时后终止并回收进程。"""
-    context = multiprocessing.get_context("spawn")
-    result_queue = context.Queue(maxsize=1)
-    # 工厂实例随 spawn 参数在父进程序列化；子进程反序列化参数时
-    # （进入目标函数前）即导入解析器模块，create() 时才实例化解析器。
-    process = context.Process(
-        target=_parse_child_entry,
-        args=(filename, content, factory, result_queue, memory_limit_mb),
-    )
-    # 进程可能启动失败（例如工厂无法序列化）：只在真正启动后终止回收，
-    # 但结果队列无论启动成败都要在 finally 中关闭，避免句柄泄漏。
-    started = False
+) -> tuple[bool, ParsedDocument | str, bool]:
+    """在隔离解析子进程内执行单次文档解析，并将异常脱敏映射为安全错误码。"""
+    global _CHILD_LOOP
+    parser = _CHILD_PARSER
+    if parser is None:
+        return False, "transient:knowledge_parser_process_failed", True
     try:
-        process.start()
-        started = True
-        deadline = time.monotonic() + timeout_seconds
-        received: tuple[bool, ParsedDocument | str] | None = None
-        while received is None:
-            remaining = deadline - time.monotonic()
+        # 若解析器实现提供 parse_sync，直接同步执行以省去子进程内额外事件循环开销。
+        parse_sync = getattr(parser, "parse_sync", None)
+        if callable(parse_sync):
+            parsed = cast(ParsedDocument, parse_sync(filename, content))
+        else:
+            if _CHILD_LOOP is None or _CHILD_LOOP.is_closed():
+                _CHILD_LOOP = asyncio.new_event_loop()
+                asyncio.set_event_loop(_CHILD_LOOP)
+            parsed = _CHILD_LOOP.run_until_complete(parser.parse(filename, content))
+    except BaseException as error:
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        category, should_recycle = _classify_parser_error(error)
+        return False, category, should_recycle
+    return True, parsed, False
+
+
+def _shutdown_executor_sync(executor: ProcessPoolExecutor, *, force_kill: bool) -> None:
+    """关闭单个 ProcessPoolExecutor；强杀模式下先快照进程、管理线程与结果队列再彻底回收。"""
+    # 必须在 shutdown 清空内部引用前快照子进程、管理线程与结果队列。
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    manager_thread = getattr(executor, "_executor_manager_thread", None)
+    result_queue = getattr(executor, "_result_queue", None)
+    if not force_kill:
+        try:
+            executor.shutdown(wait=True, cancel_futures=True)
+            return
+        except Exception:
+            pass
+    # 先标记 shutdown 并取消排队任务，防止终止卡死子进程时 manager 线程重复拉起新进程。
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:
+            pass
+    for process in processes:
+        try:
+            process.join(timeout=1.0)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1.0)
+        except Exception:
+            pass
+    # 等待 manager 线程收敛并关闭结果队列，杜绝 FD 泄漏与后台线程遗留。
+    if manager_thread is not None:
+        try:
+            manager_thread.join(timeout=2.0)
+        except Exception:
+            pass
+    if result_queue is not None:
+        try:
+            result_queue.close()
+        except Exception:
+            pass
+
+
+def _cleanup_executors_sync(executors: set[ProcessPoolExecutor]) -> None:
+    """weakref.finalize 回调：无父对象强引用，回收全部残留解析子进程池。"""
+    for executor in list(executors):
+        executors.discard(executor)
+        _shutdown_executor_sync(executor, force_kill=True)
+
+
+class _IsolatedParserPool:
+    """基于标准库 ProcessPoolExecutor 的隔离解析子进程池（支持超时强杀与崩溃懒重建）。"""
+
+    def __init__(
+        self,
+        factory: DocumentParserFactory,
+        *,
+        max_workers: int,
+        timeout_seconds: int,
+        max_tasks_per_child: int = PARSER_CHILD_MAX_TASKS,
+    ) -> None:
+        if max_workers < 1:
+            raise ValueError("knowledge_parse_pool_size_invalid")
+        if timeout_seconds < 1 or max_tasks_per_child < 1:
+            raise ValueError("knowledge_parse_pool_config_invalid")
+        self._factory = factory
+        self._max_workers = max_workers
+        self._timeout_seconds = timeout_seconds
+        self._max_tasks_per_child = max_tasks_per_child
+        self._current: ProcessPoolExecutor | None = None
+        self._executors: set[ProcessPoolExecutor] = set()
+        self._inflight: dict[ProcessPoolExecutor, int] = {}
+        self._closed = False
+        # 仅捕获 _executors 集合，不持有 self 强引用，保证测试未调用 aclose() 退出时不挂起。
+        self._finalizer = weakref.finalize(self, _cleanup_executors_sync, self._executors)
+
+    def _get_or_create_executor(self) -> ProcessPoolExecutor:
+        if self._closed:
+            raise RuntimeError("knowledge_parser_pool_closed")
+        if self._current is None:
+            executor = ProcessPoolExecutor(
+                max_workers=self._max_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_init_parser_child,
+                initargs=(self._factory,),
+                max_tasks_per_child=self._max_tasks_per_child,
+            )
+            self._current = executor
+            self._executors.add(executor)
+        return self._current
+
+    async def _discard_executor(self, executor: ProcessPoolExecutor, *, force_kill: bool) -> None:
+        """淘汰旧子进程池：超时/崩溃立即强杀；脏状态轮换仅退位，待无在途任务时再关闭。"""
+        if self._current is executor:
+            self._current = None
+        # 幂等守卫：已被其他分支移除的旧池直接返回，避免重复触发 shutdown。
+        if executor not in self._executors:
+            return
+        if force_kill:
+            self._executors.discard(executor)
+            self._inflight.pop(executor, None)
+            await asyncio.to_thread(_shutdown_executor_sync, executor, force_kill=True)
+            return
+        if self._inflight.get(executor, 0) <= 0:
+            self._executors.discard(executor)
+            self._inflight.pop(executor, None)
+            await asyncio.to_thread(_shutdown_executor_sync, executor, force_kill=False)
+        # 同池仍有兄弟任务在途时仅靠置空 self._current 阻止新任务进入，
+        # 严禁提前调用 shutdown(wait=False) 清空 _processes，以免兄弟任务超时后无法强杀；
+        # 留待兄弟超时走 force_kill 或最后一个在途任务离开 finally 时执行唯一一次关闭。
+
+    async def parse(self, filename: str, content: bytes) -> ParsedDocument:
+        """在独立 spawn 子进程中执行解析，覆盖超时强杀、崩溃自愈与脏状态轮换。"""
+        executor = self._get_or_create_executor()
+        self._inflight[executor] = self._inflight.get(executor, 0) + 1
+        loop = asyncio.get_running_loop()
+        force_discard = False
+        future: asyncio.Future[tuple[bool, ParsedDocument | str, bool]] | None = None
+        try:
+            future = loop.run_in_executor(executor, _run_parser_child_task, filename, content)
+            succeeded, result, should_recycle = await asyncio.wait_for(
+                future,
+                timeout=self._timeout_seconds,
+            )
+        except TimeoutError:
+            force_discard = True
+            raise TimeoutError("knowledge_parse_timeout") from None
+        except BrokenProcessPool:
+            force_discard = True
+            raise RuntimeError("knowledge_parser_process_failed") from None
+        except asyncio.CancelledError:
+            if future is None or not future.done():
+                force_discard = True
+            raise
+        finally:
+            remaining = self._inflight.get(executor, 1) - 1
             if remaining <= 0:
-                break
-            try:
-                received = await asyncio.to_thread(result_queue.get, True, min(0.25, remaining))
-                break
-            except Empty:
-                pass
-            if sys.platform == "darwin" and process.pid is not None:
-                rss_mb = await asyncio.to_thread(_process_rss_mb, process.pid)
-                if rss_mb is None and process.is_alive():
-                    await _terminate_and_reap(process)
-                    raise RuntimeError("knowledge_parse_memory_monitor_unavailable")
-                if rss_mb is not None and rss_mb > memory_limit_mb:
-                    await _terminate_and_reap(process)
-                    raise ValueError("knowledge_parse_memory_limit")
-        # A child may publish its result just before exiting. Receiving from the
-        # queue is not proof that the process has exited; wait for it within the
-        # same deadline before treating it as a hung parser.
-        remaining = max(0.0, deadline - time.monotonic())
-        await asyncio.to_thread(process.join, remaining)
-        if process.is_alive():
-            await _terminate_and_reap(process)
-            raise TimeoutError("knowledge_parse_timeout")
-        if process.exitcode != 0:
-            raise RuntimeError("knowledge_parser_process_failed")
-        if received is None:
-            raise RuntimeError("knowledge_parser_result_missing")
-        succeeded, result = received
+                self._inflight.pop(executor, None)
+            else:
+                self._inflight[executor] = remaining
+            if force_discard:
+                try:
+                    await asyncio.shield(self._discard_executor(executor, force_kill=True))
+                except BaseException:
+                    self._executors.discard(executor)
+                    if self._current is executor:
+                        self._current = None
+                    _shutdown_executor_sync(executor, force_kill=True)
+            elif executor is not self._current and remaining <= 0 and executor in self._executors:
+                # 退位旧池的最后一个在途任务离开后，主动收尾回收该旧池。
+                await asyncio.shield(self._discard_executor(executor, force_kill=False))
+
+        if should_recycle:
+            await self._discard_executor(executor, force_kill=False)
         if not succeeded:
-            category = str(result)
-            if category.startswith("invalid:"):
-                raise ValueError(category.removeprefix("invalid:"))
-            if category.startswith("transient:"):
-                raise RuntimeError(category.removeprefix("transient:"))
-            if category.startswith("unsupported:"):
-                raise ValueError(category.removeprefix("unsupported:"))
-            raise RuntimeError("knowledge_parser_failed")
+            raise _decode_child_error(str(result))
         if not isinstance(result, ParsedDocument):
             raise RuntimeError("knowledge_parser_result_invalid")
         return result
-    except asyncio.CancelledError:
-        if started:
-            await _terminate_and_reap(process)
-        raise
-    except BaseException:
-        if started:
-            await _terminate_and_reap(process)
-        raise
-    finally:
-        result_queue.close()
-        result_queue.join_thread()
 
-
-async def _terminate_and_reap(process: _ChildProcess) -> None:
-    """Best-effort termination and mandatory join on every exceptional path."""
-    try:
-        if process.is_alive():
-            process.terminate()
-        await asyncio.shield(asyncio.to_thread(process.join, 2))
-        if process.is_alive():
-            process.kill()
-    except Exception:
-        try:
-            if process.is_alive():
-                process.kill()
-        except Exception:
-            pass
-    finally:
-        try:
-            await asyncio.shield(asyncio.to_thread(process.join))
-        except Exception:
-            pass
-
-
-def _parse_child_entry(
-    filename: str,
-    content: bytes,
-    factory: DocumentParserFactory,
-    result_queue: _ChildResultQueue,
-    memory_limit_mb: int,
-) -> None:
-    """子进程解析入口，确保 parser 和 OCR runtime 在子进程创建。"""
-    try:
-        import asyncio
-
-        if sys.platform != "darwin":
-            try:
-                import resource
-            except ImportError as error:
-                raise RuntimeError("resource_limits_unsupported") from error
-            memory_limit = memory_limit_mb * 1024 * 1024
-            try:
-                resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
-            except (OSError, ValueError) as error:
-                raise RuntimeError("resource_limits_unsupported") from error
-
-        # 工厂参数在子进程反序列化时（进入本函数前）导入 infrastructure 实现；
-        # create() 在本函数内实例化解析器。父进程无需加载 OCR runtime，
-        # 应用层也不直连 infrastructure。
-        parsed = asyncio.run(factory.create().parse(filename, content))
-        result_queue.put((True, parsed))
-    except Exception as error:
-        # Do not serialize exception text: it can contain source content or
-        # physical paths. Preserve only a safe retry category across IPC.
-        message = str(error)
-        safe_code = (
-            message
-            if message.startswith("knowledge_") and message.replace("_", "").isalnum()
-            else None
-        )
-        if message == "resource_limits_unsupported":
-            category = "unsupported:knowledge_parse_resource_limits_unsupported"
-        elif isinstance(error, ValueError):
-            category = f"invalid:{safe_code or 'knowledge_document_invalid'}"
-        else:
-            category = f"transient:{safe_code or 'knowledge_parser_transient'}"
-        result_queue.put((False, category))
+    async def aclose(self) -> None:
+        """优雅关闭并回收全部解析子进程池；可安全重复调用。"""
+        if self._closed and not self._executors:
+            return
+        self._closed = True
+        self._current = None
+        self._inflight.clear()
+        # 逐个关闭后再从 _executors 移除，防止中途取消导致剩余池脱离 weakref.finalize 兜底。
+        for executor in list(self._executors):
+            await asyncio.shield(
+                asyncio.to_thread(_shutdown_executor_sync, executor, force_kill=False)
+            )
+            self._executors.discard(executor)
+        if not self._executors:
+            self._finalizer.detach()

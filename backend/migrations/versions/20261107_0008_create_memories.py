@@ -16,51 +16,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # 历史重型记忆表已于 20261130_0033 下线；全新建库路径仅保留 pgvector 扩展与表结构，
+    # 不再创建 zhparser 扩展及 athena_memory_chinese 分词配置，解除 C 扩展构建依赖。
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    op.execute("CREATE EXTENSION IF NOT EXISTS zhparser")
-    if context.is_offline_mode():
-        # 离线 SQL 生成无法查询实时 schema 与 zhparser token 列表，使用标准 DO 块生成等价静态 DDL。
-        op.execute("CREATE TEXT SEARCH CONFIGURATION athena_memory_chinese (PARSER=zhparser)")
-        op.execute(
-            "DO $$ DECLARE aliases text; BEGIN "
-            "SELECT string_agg(quote_ident(alias), ', ' ORDER BY tokid) INTO aliases "
-            "FROM ts_token_type('zhparser'); "
-            "IF aliases IS NULL THEN "
-            "RAISE EXCEPTION 'zhparser returned no token types'; "
-            "END IF; "
-            "EXECUTE 'ALTER TEXT SEARCH CONFIGURATION athena_memory_chinese "
-            "ADD MAPPING FOR ' || aliases || ' WITH simple'; "
-            "END $$"
-        )
-    else:
-        bind = op.get_bind()
-        schema = bind.execute(sa.text("SELECT current_schema()")).scalar_one()
-        exists = bind.execute(
-            sa.text(
-                "SELECT EXISTS (SELECT 1 FROM pg_ts_config c "
-                "JOIN pg_namespace n ON n.oid=c.cfgnamespace "
-                "WHERE n.nspname=:schema AND c.cfgname=:config)"
-            ),
-            {"schema": schema, "config": "athena_memory_chinese"},
-        ).scalar_one()
-        if exists:
-            raise RuntimeError("athena_memory_chinese already exists in migration schema")
-        quote = bind.dialect.identifier_preparer.quote
-        config = f"{quote(schema)}.{quote('athena_memory_chinese')}"
-        op.execute(f"CREATE TEXT SEARCH CONFIGURATION {config} (PARSER=zhparser)")
-        aliases = (
-            op.get_bind()
-            .execute(sa.text("SELECT alias FROM ts_token_type('zhparser') ORDER BY tokid"))
-            .scalars()
-            .all()
-        )
-        if not aliases:
-            raise RuntimeError("zhparser returned no token types")
-        op.execute(
-            f"ALTER TEXT SEARCH CONFIGURATION {config} ADD MAPPING FOR "
-            + ", ".join(quote(alias) for alias in aliases)
-            + " WITH simple"
-        )
     op.create_table(
         "memories",
         sa.Column("id", sa.String(64), primary_key=True),

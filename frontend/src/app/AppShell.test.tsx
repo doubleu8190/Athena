@@ -86,7 +86,6 @@ function installShellFetch(options: ShellFetchOptions = {}) {
           compression_model_profile_id: null,
           created_at: null,
           id: null,
-          prompt_template_version: null,
           recent_ratio: null,
           recent_token_cap: null,
           summary_ratio: null,
@@ -637,7 +636,7 @@ describe("单层可折叠主应用壳层（AppShell）", () => {
     ).toHaveAttribute("href", "/admin/skills");
     expect(
       within(deptGroup).getByRole("link", { name: "部门知识库" }),
-    ).toHaveAttribute("href", "/knowledge?visibility_scope=department");
+    ).toHaveAttribute("href", "/knowledge?scope=department");
     expect(screen.queryByRole("button", { name: "管理后台" })).not.toBeInTheDocument();
     fireEvent.keyDown(window, { key: "b", metaKey: true });
     expect(

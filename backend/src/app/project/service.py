@@ -182,25 +182,6 @@ class ProjectService:
         )
         return project_page_to_result(result)
 
-    async def rename(
-        self,
-        owner_id: str,
-        project_id: str,
-        name: str,
-    ) -> ProjectResult:
-        """修改未删除项目名称。"""
-        owner = _normalized_owner_id(owner_id)
-        normalized = _normalize_name(name)
-        project = await self._repository.rename(
-            owner,
-            project_id,
-            normalized,
-            as_utc(self._clock()),
-        )
-        if project is None:
-            raise ProjectNotFoundError("project_not_found")
-        return project_to_result(project)
-
     async def update(
         self,
         owner_id: str,
@@ -224,9 +205,7 @@ class ProjectService:
             if name is None:
                 raise InvalidProjectNameError("project_name_invalid")
             normalized_name = _normalize_name(name)
-        normalized_description = (
-            _normalize_description(description) if update_description else None
-        )
+        normalized_description = _normalize_description(description) if update_description else None
         normalized_instructions = (
             _normalize_instructions(instructions) if update_instructions else None
         )

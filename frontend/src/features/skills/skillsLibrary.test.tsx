@@ -222,11 +222,13 @@ describe("技能库一级页面", () => {
           url.pathname === "/api/v1/me/skills/personal-notes" &&
           method === "PATCH"
         ) {
-          return jsonResponse({
-            ...PERSONAL_SKILL,
-            enabled: false,
-            revision: 2,
-          });
+          return jsonResponse(
+            makeSkillDetails({
+              ...PERSONAL_SKILL,
+              enabled: false,
+              revision: 2,
+            }),
+          );
         }
         if (url.pathname === "/api/v1/skills" && method === "GET") {
           return jsonResponse({ items: [] });

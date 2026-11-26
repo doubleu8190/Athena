@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 import tiktoken
+from access_support import make_test_access_policy
 from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, func, literal
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -301,6 +302,7 @@ async def _setup_env(
                     api_key_nonce=encrypted.nonce,
                     api_key_key_version=encrypted.key_version,
                     created_at=NOW,
+                    updated_at=NOW,
                 ),
             ]
         )
@@ -368,6 +370,7 @@ def _make_runtime(preferences: PreferenceService | None) -> RunToolRuntimeServic
         knowledge=None,
         project_knowledge=None,
         preferences=preferences,
+        access_policy=make_test_access_policy(),
         clock=lambda: NOW,
     )
 

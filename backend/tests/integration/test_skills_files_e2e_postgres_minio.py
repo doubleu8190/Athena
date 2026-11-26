@@ -23,6 +23,7 @@ from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.file import (
@@ -46,6 +47,7 @@ from api.file import build_session_file_router
 from api.messages import build_message_router
 from api.runs import build_run_router
 from api.skill import build_skill_admin_router, build_skill_user_router
+from app.access import AccessPolicyService
 from app.auth import AuthService
 from app.file import FileObjectMaintenance, SessionFileService
 from app.message import MessageService
@@ -250,14 +252,6 @@ def test_recording_store_fills_logical_page_across_shared_bucket_pages() -> None
 
 
 class _EmptyMcpCatalog:
-    async def list_runtime_tools(
-        self,
-        *,
-        limit: int,
-    ) -> tuple[RuntimeToolDefinition, ...]:
-        del limit
-        return ()
-
     async def list_readable_runtime_tools(
         self,
         snapshot: Any,
@@ -499,6 +493,7 @@ async def _seed(
                 temperature=None,
                 enabled=True,
                 created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -552,10 +547,12 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                 skill_repository = SqlAlchemySkillRepository(factory)
                 auth_service = AuthService(auth_repository, Argon2PasswordHasher())
                 run_service = RunService(run_repository)
+                access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(factory))
                 skill_service = SkillService(
                     skill_repository,
                     store,
                     auth_repository,
+                    access_policy=access_policy,
                 )
                 stream_service = RunStreamService(
                     run_repository,
@@ -582,6 +579,7 @@ def test_real_skills_import_approval_dual_artifact_and_next_run_reference() -> N
                     skills=skill_service,
                     session_files=file_service,
                     skill_execution=skill_execution,
+                    access_policy=access_policy,
                 )
                 app = FastAPI()
                 app.state.authenticator = auth_service

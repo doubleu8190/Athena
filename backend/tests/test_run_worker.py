@@ -34,6 +34,7 @@ from domain.run.model import (
     Run,
     RunLease,
     RunLeaseState,
+    RunModelSnapshot,
     RunStatus,
     RunUsage,
 )
@@ -67,6 +68,22 @@ def _lease(status: RunStatus = RunStatus.RUNNING) -> RunLease:
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile_worker_test",
+        model_snapshot=RunModelSnapshot(
+            id="profile_worker_test",
+            name="worker-test",
+            protocol="chat_completions",
+            base_url="https://llm.example/v1",
+            model="test",
+            context_window_tokens=8192,
+            tokenizer_encoding="o200k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=512,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=60,
+            max_concurrency=1,
+        ),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -290,6 +307,7 @@ def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
 
         class Profiles:
             async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
+                now = datetime.now(UTC)
                 return RuntimeModelProfile(
                     version=ModelProfileVersion(
                         id=profile_id,
@@ -297,7 +315,6 @@ def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
                         protocol="chat_completions",
                         base_url="https://llm.example/v1",
                         model="test",
-                        has_api_key=True,
                         context_window_tokens=8192,
                         tokenizer_encoding="o200k_base",
                         supports_stream=True,
@@ -308,7 +325,8 @@ def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
                         max_concurrency=1,
                         temperature=None,
                         enabled=True,
-                        created_at=datetime.now(UTC),
+                        created_at=now,
+                        updated_at=now,
                     ),
                     api_key="test-secret",
                 )
@@ -379,6 +397,7 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
 
         class Profiles:
             async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
+                now = datetime.now(UTC)
                 return RuntimeModelProfile(
                     version=ModelProfileVersion(
                         id=profile_id,
@@ -386,7 +405,6 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
                         protocol="chat_completions",
                         base_url="https://llm.example/v1",
                         model="test",
-                        has_api_key=True,
                         context_window_tokens=8192,
                         tokenizer_encoding="o200k_base",
                         supports_stream=True,
@@ -397,7 +415,8 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
                         max_concurrency=1,
                         temperature=None,
                         enabled=True,
-                        created_at=datetime.now(UTC),
+                        created_at=now,
+                        updated_at=now,
                     ),
                     api_key="test-secret",
                 )
@@ -716,6 +735,7 @@ def test_executor_does_not_start_provider_after_context_work_deadline() -> None:
 
         class Profiles:
             async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
+                now = datetime.now(UTC)
                 return RuntimeModelProfile(
                     version=ModelProfileVersion(
                         id=profile_id,
@@ -723,7 +743,6 @@ def test_executor_does_not_start_provider_after_context_work_deadline() -> None:
                         protocol="chat_completions",
                         base_url="https://llm.example/v1",
                         model="test",
-                        has_api_key=True,
                         context_window_tokens=8192,
                         tokenizer_encoding="o200k_base",
                         supports_stream=True,
@@ -734,7 +753,8 @@ def test_executor_does_not_start_provider_after_context_work_deadline() -> None:
                         max_concurrency=1,
                         temperature=None,
                         enabled=True,
-                        created_at=datetime.now(UTC),
+                        created_at=now,
+                        updated_at=now,
                     ),
                     api_key="test-secret",
                 )
@@ -1261,6 +1281,9 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
                             protocol="chat_completions",
                             base_url="https://llm.example.test/v1",
                             model="gpt-test",
+                            api_key_ciphertext=b"ciphertext",
+                            api_key_nonce=b"0123456789ab",
+                            api_key_key_version=1,
                             context_window_tokens=8192,
                             tokenizer_encoding="o200k_base",
                             supports_stream=True,
@@ -1272,6 +1295,7 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
                             max_concurrency=1,
                             enabled=True,
                             created_at=now,
+                            updated_at=now,
                         )
                     )
                     session.add_all(
@@ -1310,6 +1334,8 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
                             status="completed",
                             sequence=1,
                             parts=[{"type": "text", "text": "hi"}],
+                            run_id="run_lease_1",
+                            context_turn_id="msg_lease_1",
                             created_at=now,
                             metadata_json={},
                         )
@@ -1323,6 +1349,26 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
                             trigger_message_id="msg_lease_1",
                             context_cutoff_sequence=1,
                             model_config_version_id="mpv_lease",
+                            model_snapshot_json={
+                                "id": "mpv_lease",
+                                "name": "lease-model",
+                                "protocol": "chat_completions",
+                                "base_url": "https://llm.example.test/v1",
+                                "model": "gpt-test",
+                                "context_window_tokens": 8192,
+                                "tokenizer_encoding": "o200k_base",
+                                "supports_stream": True,
+                                "supports_tools": True,
+                                "supports_parallel_tool_calls": True,
+                                "max_output_tokens": 512,
+                                "request_timeout_seconds": 30,
+                                "execution_timeout_seconds": 60,
+                                "max_concurrency": 1,
+                                "temperature": None,
+                                "scenario_label": None,
+                                "supports_vision": False,
+                                "version": 1,
+                            },
                             main_prompt_version_id="spv_main_lease",
                             compression_prompt_version_id="spv_comp_lease",
                             prompt_template_version="run-v2",
@@ -1372,6 +1418,7 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
 
 
 def _runtime_profile(profile_id: str) -> RuntimeModelProfile:
+    now = datetime.now(UTC)
     return RuntimeModelProfile(
         version=ModelProfileVersion(
             id=profile_id,
@@ -1379,7 +1426,6 @@ def _runtime_profile(profile_id: str) -> RuntimeModelProfile:
             protocol="chat_completions",
             base_url="https://llm.example/v1",
             model="test",
-            has_api_key=True,
             context_window_tokens=8192,
             tokenizer_encoding="o200k_base",
             supports_stream=True,
@@ -1390,7 +1436,8 @@ def _runtime_profile(profile_id: str) -> RuntimeModelProfile:
             max_concurrency=1,
             temperature=None,
             enabled=True,
-            created_at=datetime.now(UTC),
+            created_at=now,
+            updated_at=now,
         ),
         api_key="test-secret",
     )
@@ -1413,7 +1460,8 @@ def _user_trigger_message(run: Run) -> Any:
         sequence=1,
         parts=(TextPart(text="hello"),),
         reply_to_message_id=None,
-        run_id=None,
+        run_id=run.id,
+        context_turn_id=run.trigger_message_id,
         client_message_id=None,
         created_at=run.created_at,
         completed_at=run.created_at,

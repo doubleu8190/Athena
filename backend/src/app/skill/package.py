@@ -99,8 +99,7 @@ class SkillPackageValidator:
             # 才据其拒绝链接和设备项，避免把普通 ZIP 误判成特殊文件。
             file_type = stat.S_IFMT(mode)
             if file_type and not (
-                (info.is_dir() and stat.S_ISDIR(mode))
-                or (not info.is_dir() and stat.S_ISREG(mode))
+                (info.is_dir() and stat.S_ISDIR(mode)) or (not info.is_dir() and stat.S_ISREG(mode))
             ):
                 raise _member_error("skill_zip_special_file", path)
             if info.is_dir():
@@ -114,9 +113,8 @@ class SkillPackageValidator:
             total_uncompressed += info.file_size
             if total_uncompressed > MAX_PACKAGE_UNCOMPRESSED_BYTES:
                 raise _member_error("skill_package_too_large", path)
-            if (
-                info.file_size > 0
-                and (info.compress_size == 0 or info.file_size / info.compress_size > 1000)
+            if info.file_size > 0 and (
+                info.compress_size == 0 or info.file_size / info.compress_size > 1000
             ):
                 raise _member_error("skill_zip_ratio_exceeded", path)
             total_compressed += max(1, info.compress_size)
@@ -210,11 +208,7 @@ def validate_parameter_schema(schema: dict[str, Any], value: Any) -> str | None:
         return None
     validation_error = errors[0]
     path = ".".join(str(item) for item in validation_error.absolute_path)
-    return (
-        f"{path}: {validation_error.message}"
-        if path
-        else validation_error.message
-    )
+    return f"{path}: {validation_error.message}" if path else validation_error.message
 
 
 def _checked_parameter_schema(schema: Any) -> dict[str, Any]:

@@ -6,6 +6,8 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from access_support import active_user_snapshot
+
 from adapter.auth.model import UserModel
 from adapter.skill.model import SkillModel, SkillVersionModel
 from adapter.skill.repository import build_run_skill_snapshot
@@ -130,7 +132,7 @@ def test_old_unsatisfied_check_does_not_hide_recovered_skill_from_run_snapshot()
         build_run_skill_snapshot(
             cast(Any, _Session([(skill, version)])),
             (skill.id,),
-            owner_id="usr_owner",
+            snapshot=active_user_snapshot("usr_owner"),
         )
     )
 

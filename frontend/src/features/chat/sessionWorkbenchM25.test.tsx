@@ -452,7 +452,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           id: "msg-user-1",
           parts: [{ text: "请总结 Q4 一线城市差旅标准", type: "text" }],
           role: "user",
-          run_id: null,
+          run_id: runningRun.id,
           sequence: 1,
           session_id: "session-m25",
         }),
@@ -552,7 +552,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           id: "msg-user-1",
           parts: [{ text: "查询差旅报销并提交报销单", type: "text" }],
           role: "user",
-          run_id: null,
+          run_id: currentRun.id,
           sequence: 1,
           session_id: "session-m25",
         }),
@@ -685,8 +685,11 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           tool_kind: "mcp",
         },
         {
+          approval_summary: null,
           batch_message_id: "batch-1",
           call_id: "call-skill-blocked",
+          display_name: null,
+          formatted_arguments: [],
           model_name: "skill_execute",
           ordinal: 2,
           requested_at: "2026-11-20T09:20:01Z",
@@ -857,7 +860,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           id: "msg-user-1",
           parts: [{ text: "请总结一线城市差旅标准", type: "text" }],
           role: "user",
-          run_id: null,
+          run_id: completedRun.id,
           sequence: 1,
           session_id: "session-m25",
         }),
@@ -1061,9 +1064,9 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
     ).toBeInTheDocument();
   });
 
-  it("审批卡片兜底详情返回技能 tool_id 或 safe_skill_projection(can_approve=false) 时严格拦截并不泄漏 arguments", async () => {
+  it("审批卡片对缺失投影或 can_approve=false 的技能严格阻断，且无 formatted_arguments 的工具不拉取原始参数并优雅渲染", async () => {
     const blockedDetailProjection: SafeSkillApprovalProjection = {
-      call_id: "call-opaque-blocked-proj",
+      call_id: "call-skill-blocked-proj",
       can_approve: false,
       hidden_parameter_count: 1,
       input_files: [],
@@ -1078,99 +1081,85 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
     };
 
     const approvalRun = makeRun({
-      id: "run-fallback-skill-guard",
+      id: "run-skill-and-empty-args-guard",
       pending_approvals: [
         {
-          batch_message_id: "batch-fallback",
-          call_id: "call-opaque-no-proj",
+          approval_summary: null,
+          batch_message_id: "batch-guard",
+          call_id: "call-skill-no-proj",
           display_name: "外部自动化脚本",
-          model_name: "opaque_automation_alias",
+          formatted_arguments: [],
+          model_name: "skill_execute",
           ordinal: 1,
           requested_at: "2026-11-20T09:20:00Z",
           safe_skill_projection: null,
           tool_kind: "builtin",
         },
         {
-          batch_message_id: "batch-fallback",
-          call_id: "call-opaque-blocked-proj",
+          approval_summary: null,
+          batch_message_id: "batch-guard",
+          call_id: "call-skill-blocked-proj",
           display_name: "财务凭证脚本",
-          model_name: "opaque_voucher_alias",
+          formatted_arguments: [],
+          model_name: "skill_execute",
           ordinal: 2,
           requested_at: "2026-11-20T09:20:01Z",
-          safe_skill_projection: null,
+          safe_skill_projection: blockedDetailProjection,
           tool_kind: "builtin",
+        },
+        {
+          approval_summary: null,
+          batch_message_id: "batch-guard",
+          call_id: "call-mcp-no-args",
+          display_name: "同步组织状态",
+          formatted_arguments: [],
+          model_name: "org_sync_status",
+          ordinal: 3,
+          requested_at: "2026-11-20T09:20:02Z",
+          safe_skill_projection: null,
+          tool_kind: "mcp",
         },
       ],
       session_id: "session-m25",
       status: "waiting_for_approval",
     });
 
+    let toolDetailRequests = 0;
     installM25Fetch({
       runs: () => [approvalRun],
-      toolCallDetail: (callId) => {
-        if (callId === "call-opaque-no-proj") {
-          return makeToolCallDetail({
-            arguments: { secret_token: "TOP_SECRET_LEAK_A" },
-            id: callId,
-            model_name: "opaque_automation_alias",
-            ordinal: 1,
-            safe_skill_projection: null,
-            tool_call_id: callId,
-            tool_id: "builtin_skill_execute",
-          });
-        }
-        if (callId === "call-opaque-blocked-proj") {
-          return makeToolCallDetail({
-            arguments: { secret_token: "TOP_SECRET_LEAK_B" },
-            id: callId,
-            model_name: "opaque_voucher_alias",
-            ordinal: 2,
-            safe_skill_projection: blockedDetailProjection,
-            tool_call_id: callId,
-            tool_id: "builtin_skill_execute",
-          });
-        }
+      toolCallDetail: () => {
+        toolDetailRequests += 1;
         return undefined;
       },
     });
 
-    const user = userEvent.setup();
     renderApp("/chat/session-m25");
 
-    // 1. 兜底详情返回技能 tool_id 但无 safe_skill_projection：立即展示阻断告警，绝不暴露 arguments 且禁用批准
+    // 1. 技能调用缺失 safe_skill_projection：直接展示阻断告警并禁用批准，仅允许拒绝
     const noProjCard = await screen.findByRole("article", {
       name: "操作确认：外部自动化脚本",
     });
-    await user.click(within(noProjCard).getByRole("button", { name: "查看参数" }));
     expect(
-      await within(noProjCard).findByText(/服务端没有返回可审批的安全投影/),
+      within(noProjCard).getByText(/服务端没有返回可审批的安全投影/),
     ).toBeInTheDocument();
-    expect(within(noProjCard).queryByText(/TOP_SECRET_LEAK_A/)).not.toBeInTheDocument();
-    expect(within(noProjCard).queryByText(/secret_token/)).not.toBeInTheDocument();
+    expect(
+      within(noProjCard).queryByRole("button", { name: "查看参数" }),
+    ).not.toBeInTheDocument();
     expect(
       within(noProjCard).getByRole("button", { name: "安全投影缺失，不可批准" }),
     ).toBeDisabled();
     expect(within(noProjCard).getByRole("button", { name: "拒绝" })).toBeEnabled();
 
-    // 2. 兜底详情返回 safe_skill_projection(can_approve=false)：展示安全投影，绝不暴露 arguments 且禁用批准
+    // 2. 技能调用返回 safe_skill_projection(can_approve=false)：展示安全投影且禁用批准
     const blockedProjCard = screen.getByRole("article", {
       name: "操作确认：财务凭证脚本",
     });
-    await user.click(
-      within(blockedProjCard).getByRole("button", { name: "查看参数" }),
-    );
     expect(
-      await within(blockedProjCard).findByText("合规凭证技能"),
+      within(blockedProjCard).getByText("合规凭证技能"),
     ).toBeInTheDocument();
     expect(
       within(blockedProjCard).getByText("技能已停用，禁止继续执行。"),
     ).toBeInTheDocument();
-    expect(
-      within(blockedProjCard).queryByText(/TOP_SECRET_LEAK_B/),
-    ).not.toBeInTheDocument();
-    expect(
-      within(blockedProjCard).queryByText(/secret_token/),
-    ).not.toBeInTheDocument();
     expect(
       within(blockedProjCard).getByRole("button", {
         name: "安全投影缺失，不可批准",
@@ -1179,6 +1168,18 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
     expect(
       within(blockedProjCard).getByRole("button", { name: "拒绝" }),
     ).toBeEnabled();
+
+    // 3. 普通工具无 approval_summary 且 formatted_arguments 为空：优雅渲染，不展示「查看参数」也不拉取 /tool-calls/{id}
+    const noArgsCard = screen.getByRole("article", {
+      name: "操作确认：同步组织状态",
+    });
+    expect(
+      within(noArgsCard).queryByRole("button", { name: "查看参数" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(noArgsCard).getByRole("button", { name: "确认执行" }),
+    ).toBeEnabled();
+    expect(toolDetailRequests).toBe(0);
   });
 
   it("React.StrictMode 双挂载下首轮无标题完成态仍正常触发退避自动标题刷新", async () => {
@@ -1204,7 +1205,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           id: "msg-strict-user",
           parts: [{ text: "汇总华东区差旅预算", type: "text" }],
           role: "user",
-          run_id: null,
+          run_id: completedRun.id,
           sequence: 1,
           session_id: "session-m25",
         }),

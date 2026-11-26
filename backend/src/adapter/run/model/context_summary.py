@@ -6,6 +6,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
     Index,
@@ -23,6 +24,8 @@ class SessionContextSummaryModel(Base):
 
     __tablename__ = "session_context_summaries"
     __table_args__ = (
+        CheckConstraint("covered_through_sequence > 0", name="ck_context_summary_coverage"),
+        CheckConstraint("execution_epoch > 0", name="ck_context_summary_epoch"),
         UniqueConstraint("id", "session_id", name="uq_context_summaries_id_session"),
         UniqueConstraint("run_id", "operation_id", name="uq_context_summary_run_operation"),
         ForeignKeyConstraint(
@@ -81,7 +84,6 @@ class SessionContextSummaryModel(Base):
     operation_id: Mapped[str] = mapped_column(String(128), nullable=False)
     policy_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
     compression_model_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
     compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

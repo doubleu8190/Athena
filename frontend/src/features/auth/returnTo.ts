@@ -2,7 +2,7 @@ const MAX_RETURN_TO_LENGTH = 1024;
 
 /**
  * 校验登录与 OAuth 授权后的站内回跳路径。
- * 严格拒绝外链、协议相对路径（//evil.com）、反斜杠、控制字符以及 /login、/register 自身路径，
+ * 严格拒绝外链、协议相对路径（//evil.com）、反斜杠、控制字符以及 /login 自身路径，
  * 防止开放重定向漏洞与登录页死循环。
  */
 export function sanitizeReturnTo(candidate: unknown): string {
@@ -17,7 +17,7 @@ export function sanitizeReturnTo(candidate: unknown): string {
     // 显式拦截 C0 控制字符与 DEL，防止跳转地址注入换行或非法控制序列。
     // eslint-disable-next-line no-control-regex
     /[\u0000-\u001f\u007f]/.test(candidate) ||
-    /^\/(?:login|register)(?:[/?#]|$)/i.test(candidate)
+    /^\/login(?:[/?#]|$)/i.test(candidate)
   ) {
     return "/chat";
   }

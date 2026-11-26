@@ -99,8 +99,7 @@ describe("项目知识库关联（单页工作文件夹右栏）", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    // 通过旧 /knowledge 路径访问，自动重定向至单页工作文件夹并渲染知识库卡片。
-    renderApp(`/projects/${PROJECT_A.id}/knowledge`);
+    renderApp(`/projects/${PROJECT_A.id}`);
 
     expect(
       await screen.findByRole("heading", { name: "项目知识库" }),

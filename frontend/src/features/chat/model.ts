@@ -1,5 +1,5 @@
 import type { ArtifactFileRef } from "../files/model";
-import type { LegacyCompatibleSkillScope } from "../skills/model";
+import type { SkillScope } from "../skills/model";
 
 export type MessageRole = "user" | "assistant";
 
@@ -39,7 +39,6 @@ export interface ToolResultMessagePart {
   tool_call_id: string;
   status: string;
   output: string | null;
-  artifact_id: string | null;
   artifacts: ArtifactFileRef[];
 }
 
@@ -57,7 +56,7 @@ export interface ConversationMessage {
   sequence: number;
   parts: ConversationMessagePart[];
   reply_to_message_id: string | null;
-  run_id: string | null;
+  run_id: string;
   created_at: string;
   completed_at: string | null;
 }
@@ -121,9 +120,9 @@ export interface RunPendingApproval {
   tool_kind: string | null;
   requested_at: string;
   safe_skill_projection: SafeSkillApprovalProjection | null;
-  display_name?: string | null;
-  approval_summary?: string | null;
-  formatted_arguments?: FormattedToolArgument[];
+  display_name: string | null;
+  approval_summary: string | null;
+  formatted_arguments: FormattedToolArgument[];
 }
 
 export interface SafeSkillInputFile {
@@ -163,7 +162,7 @@ export interface RunSkillEntry {
   version_id: string;
   version_label: string;
   requires_approval: boolean;
-  scope?: LegacyCompatibleSkillScope;
+  scope: SkillScope;
 }
 
 export interface RunModelSnapshot {
@@ -221,9 +220,9 @@ export interface PendingSubagentApproval {
   tool_kind: string | null;
   requested_at: string;
   safe_skill_projection: SafeSkillApprovalProjection | null;
-  display_name?: string | null;
-  approval_summary?: string | null;
-  formatted_arguments?: FormattedToolArgument[];
+  display_name: string | null;
+  approval_summary: string | null;
+  formatted_arguments: FormattedToolArgument[];
 }
 
 export interface Run {
@@ -245,25 +244,25 @@ export interface Run {
   cancel_requested_at: string | null;
   safe_error_code: string | null;
   report_message_id: string | null;
-  assistant_message_id?: string | null;
+  assistant_message_id: string | null;
   usage: RunUsage;
   pending_input: RunPendingInput | null;
   pending_approvals: RunPendingApproval[];
   skill_snapshot: RunSkillSnapshot | null;
   input_file_ids: string[];
-  knowledge_base_ids?: string[] | null;
-  model_snapshot?: RunModelSnapshot | null;
-  parent_run_id?: string | null;
-  root_run_id?: string | null;
-  parent_tool_call_id?: string | null;
-  depth?: number;
-  subagent_profile_id?: string | null;
-  subagent_slug?: string | null;
-  subagent_name?: string | null;
-  subagent_tasks?: SubagentTaskSummary[];
-  pending_subagent_inputs?: PendingSubagentInput[];
-  pending_subagent_approvals?: PendingSubagentApproval[];
-  input_interactions?: RunInputInteraction[];
+  knowledge_base_ids: string[] | null;
+  model_snapshot: RunModelSnapshot;
+  parent_run_id: string | null;
+  root_run_id: string | null;
+  parent_tool_call_id: string | null;
+  depth: number;
+  subagent_profile_id: string | null;
+  subagent_slug: string | null;
+  subagent_name: string | null;
+  subagent_tasks: SubagentTaskSummary[];
+  pending_subagent_inputs: PendingSubagentInput[];
+  pending_subagent_approvals: PendingSubagentApproval[];
+  input_interactions: RunInputInteraction[];
   replayed: boolean;
   retry_warning: string | null;
 }
@@ -306,31 +305,32 @@ export interface RunEventListResponse {
 
 export interface RunStreamMessage {
   id: string;
+  session_id: string;
   role: MessageRole;
   status: string;
   text: string;
   sequence: number;
   created_at: string;
-  // Batch 6 自包含增量字段：与 GET /api/v1/sessions/{id}/messages 响应 100% 同构；
-  // 旧 mock 或精简快照省略这些字段时保持向后兼容。
-  session_id?: string | null;
+  parts: ConversationMessagePart[];
+  /** 以下可空字段在后端 SSE model_dump_json(exclude_none=True) 时会被省略，消费侧统一映射为 null。 */
   run_id?: string | null;
   reply_to_message_id?: string | null;
   completed_at?: string | null;
-  parts?: ConversationMessagePart[] | null;
 }
 
 export interface RunSnapshotPayload {
   status: RunStatus;
   event_sequence: number;
   report_message_id: string | null;
-  assistant_message_id?: string | null;
+  assistant_message_id: string | null;
   messages: RunStreamMessage[];
   events: RunEvent[];
   messages_complete: boolean;
   messages_before_sequence: number | null;
   events_complete: boolean;
   events_after_sequence: number | null;
+  /** 快照内是否存在无法解析的消息（如未知 part 类型或契约缺键）；为 true 时必须触发权威 HTTP 补拉，禁止静默丢消息。 */
+  has_unparseable_messages?: boolean;
   subagent_tasks?: SubagentTaskSummary[];
   pending_subagent_inputs?: PendingSubagentInput[];
   pending_subagent_approvals?: PendingSubagentApproval[];
@@ -520,33 +520,6 @@ export function messageText(message: ConversationMessage): string {
     .join("");
 }
 
-function mergeSnapshotTextParts(
-  existing: ConversationMessage | null,
-  text: string,
-): ConversationMessagePart[] {
-  if (!existing) {
-    return text ? [{ text, type: "text" }] : [];
-  }
-
-  const parts: ConversationMessagePart[] = [];
-  let textWritten = false;
-  for (const part of existing.parts) {
-    if (part.type === "text") {
-      // 快照只提供文本投影；同一条历史消息仍保留其余类型化内容块。
-      if (!textWritten && text) {
-        parts.push({ text, type: "text" });
-        textWritten = true;
-      }
-      continue;
-    }
-    parts.push(part);
-  }
-  if (text && !textWritten) {
-    parts.unshift({ text, type: "text" });
-  }
-  return parts;
-}
-
 export function mergeConversationMessages(
   pages: ConversationMessagePage[],
   runId: string | null,
@@ -559,35 +532,25 @@ export function mergeConversationMessages(
       bySequence.set(message.sequence, message);
     }
   }
-  // 自包含 SSE 快照直接提供完整 parts 与关联字段；旧版纯文本快照则仅权威替换文本并保留历史非文本块。
+  // 后端 SSE 快照消息始终携带完整 session_id 与 parts；
+  // 仅对因 model_dump_json(exclude_none=True) 省略的可空字段做 null 归零映射。
   for (const message of snapshotMessages) {
     const previous = bySequence.get(message.sequence) ?? null;
     const existing = previous?.id === message.id ? previous : null;
-    const hasStructuredParts = Array.isArray(message.parts);
     bySequence.set(message.sequence, {
       completed_at:
-        message.completed_at !== undefined
-          ? message.completed_at
-          : (existing?.completed_at ?? null),
+        message.completed_at !== undefined ? message.completed_at : null,
       created_at: message.created_at,
       id: message.id,
-      parts: hasStructuredParts
-        ? message.parts ?? []
-        : mergeSnapshotTextParts(existing, message.text),
+      parts: message.parts,
       reply_to_message_id:
         message.reply_to_message_id !== undefined
           ? message.reply_to_message_id
-          : (existing?.reply_to_message_id ?? null),
+          : null,
       role: message.role,
-      run_id:
-        message.run_id !== undefined
-          ? message.run_id
-          : (existing?.run_id ?? runId),
+      run_id: message.run_id ?? existing?.run_id ?? runId ?? "",
       sequence: message.sequence,
-      session_id:
-        message.session_id !== undefined && message.session_id !== null
-          ? message.session_id
-          : (existing?.session_id ?? ""),
+      session_id: message.session_id,
       status: message.status,
     });
   }

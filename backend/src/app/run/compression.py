@@ -74,11 +74,9 @@ def _turn_groups(
     groups: list[list[ConversationMessage]] = []
     active_turn_id: str | None = None
     for message in messages:
-        turn_id = message.context_turn_id or message.run_id
+        turn_id = message.context_turn_id
         starts_new_run = (
-            message.role is ConversationRole.USER
-            and groups
-            and (turn_id is None or turn_id != active_turn_id)
+            message.role is ConversationRole.USER and groups and turn_id != active_turn_id
         )
         if not groups or starts_new_run:
             groups.append([])
@@ -446,7 +444,6 @@ class ContextCompressor:
                 text=final_summary,
                 policy_version_id=policy.id,
                 compression_model_version_id=runtime.version.id,
-                prompt_version=policy.prompt_template_version,
                 created_at=datetime.now(UTC),
                 batch_count=1,
             )

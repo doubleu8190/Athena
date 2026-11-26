@@ -8,14 +8,12 @@ export interface EmptyStateProps {
   compact?: boolean;
   description: string;
   icon?: IconName;
-  /** @deprecated 保留向后兼容，现代企业风视觉规范已移除全大写英文眉标。 */
-  kicker?: string;
   title: string;
   className?: string;
 }
 
 /**
- * 全站统一空状态面板：现代清爽中性灰边框与留白风格，向后兼容一期所有页面调用签名。
+ * 全站统一空状态面板：现代清爽中性灰边框与留白风格。
  */
 export function EmptyState({
   action,
@@ -23,11 +21,8 @@ export function EmptyState({
   compact = false,
   description,
   icon = "spark",
-  kicker: _kicker,
   title,
 }: EmptyStateProps) {
-  void _kicker;
-
   return (
     <section
       aria-label={title}

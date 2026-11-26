@@ -7,7 +7,6 @@ from domain.session import (
     InvalidSessionTitleError,
     InvalidSessionUpdateError,
     SessionNotFoundError,
-    SessionProjectLockedError,
 )
 
 __all__ = [
@@ -16,6 +15,5 @@ __all__ = [
     "InvalidSessionUpdateError",
     "ProjectNotFoundError",
     "SessionNotFoundError",
-    "SessionProjectLockedError",
     "SessionService",
 ]

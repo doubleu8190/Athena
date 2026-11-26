@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 
 from app.skill.model import SkillAdminDetails
 from app.skill.service import SkillAuthorizationError, SkillService
@@ -186,9 +187,7 @@ def _service(repository: Any, objects: _Objects) -> SkillService:
         manifest=version.manifest,
     )
     validator = SimpleNamespace(validate=lambda path: package)
-    checker = SimpleNamespace(
-        check=lambda requirements, *, checked_at: version.dependency_check
-    )
+    checker = SimpleNamespace(check=lambda requirements, *, checked_at: version.dependency_check)
     ids = iter(("skill_one", "skillver_one"))
     return SkillService(
         cast(Any, repository),
@@ -198,15 +197,19 @@ def _service(repository: Any, objects: _Objects) -> SkillService:
         dependency_checker=cast(Any, checker),
         id_factory=lambda prefix: next(ids),
         clock=lambda: NOW,
+        access_policy=make_test_access_policy(),
     )
 
 
-@pytest.mark.parametrize(("operation", "error"), [
-    ("import", RuntimeError("postgresql://secret/internal")),
-    ("import", asyncio.CancelledError()),
-    ("add_version", RuntimeError("postgresql://secret/internal")),
-    ("add_version", asyncio.CancelledError()),
-])
+@pytest.mark.parametrize(
+    ("operation", "error"),
+    [
+        ("import", RuntimeError("postgresql://secret/internal")),
+        ("import", asyncio.CancelledError()),
+        ("add_version", RuntimeError("postgresql://secret/internal")),
+        ("add_version", asyncio.CancelledError()),
+    ],
+)
 def test_unknown_or_cancelled_package_commit_retains_object(
     tmp_path: Path,
     operation: str,

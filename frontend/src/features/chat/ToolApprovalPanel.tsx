@@ -10,7 +10,6 @@ interface ToolApprovalPanelProps {
     approval: RunPendingApproval,
     decision: "approve" | "reject",
   ) => void | Promise<void>;
-  runId: string;
   sessionId: string;
 }
 
@@ -21,7 +20,6 @@ export function ToolApprovalPanel({
   decisionPending,
   errors,
   onDecision,
-  runId,
   sessionId,
 }: ToolApprovalPanelProps) {
   return (
@@ -61,7 +59,6 @@ export function ToolApprovalPanel({
                 key={approval.call_id}
                 onDecision={(decision) => onDecision(approval, decision)}
                 otherCommandPending={decisionPending && !busy}
-                runId={runId}
                 sessionId={sessionId}
                 total={approvals.length}
               />

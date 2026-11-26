@@ -18,7 +18,6 @@ import type {
   Project,
   ProjectCreateInput,
   ProjectListQuery,
-  ProjectNameInput,
   ProjectUpdateInput,
 } from "./model";
 import { projectKeys } from "./queryKeys";
@@ -71,18 +70,6 @@ export function useUpdateProjectMutation(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: ProjectUpdateInput) => updateProject(projectId, input),
-    onSuccess: async (project: Project) => {
-      queryClient.setQueryData(projectKeys.detail(projectId), project);
-      await invalidateProjectCaches(queryClient);
-    },
-  });
-}
-
-/** 保留旧 hook 导出以兼容既有改名弹窗调用方。 */
-export function useRenameProjectMutation(projectId: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: ProjectNameInput) => updateProject(projectId, input),
     onSuccess: async (project: Project) => {
       queryClient.setQueryData(projectKeys.detail(projectId), project);
       await invalidateProjectCaches(queryClient);

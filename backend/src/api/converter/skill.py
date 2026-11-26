@@ -118,11 +118,7 @@ def admin_details_to_response(details: SkillAdminDetails) -> SkillAdminDetailsRe
     """转换管理员详情并填充当前版本标签。"""
     versions = [version_to_response(item) for item in details.versions]
     current_label = next(
-        (
-            item.label
-            for item in details.versions
-            if item.id == details.skill.current_version_id
-        ),
+        (item.label for item in details.versions if item.id == details.skill.current_version_id),
         None,
     )
     summary = skill_to_response(details.skill).model_copy(

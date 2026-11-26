@@ -4,29 +4,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from domain.message.model.entity import (
-    ConversationMessage,
-    ConversationMessageDraft,
-    ConversationMessagePage,
-    ExecutionMessage,
-    ExecutionMessageDraft,
-)
+from domain.message.model.entity import ConversationMessagePage
 
 
 class MessageRepository(Protocol):
-    """会话消息与执行轨迹的持久化端口。"""
-
-    async def append_conversation(
-        self,
-        draft: ConversationMessageDraft,
-    ) -> ConversationMessage:
-        """按草稿 owner 幂等追加会话消息并分配 session 内 sequence。"""
-
-    async def append_execution(
-        self,
-        draft: ExecutionMessageDraft,
-    ) -> ExecutionMessage:
-        """按草稿 owner 追加执行轨迹消息并分配 session 内 sequence。"""
+    """公开会话历史的只读查询端口（消息写入统一经由 Run 事务路径执行）。"""
 
     async def list_conversation_for_owner(
         self,

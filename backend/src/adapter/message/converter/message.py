@@ -87,8 +87,6 @@ def serialize_parts(parts: tuple[MessagePart, ...]) -> list[dict[str, object]]:
             }
             if part.output is not None:
                 item["output"] = part.output
-            if part.artifact_id is not None:
-                item["artifact_id"] = part.artifact_id
             if part.artifacts:
                 item["artifacts"] = [
                     {
@@ -188,7 +186,6 @@ def deserialize_parts(values: list[dict[str, object]]) -> tuple[MessagePart, ...
                     tool_call_id=_required_string(value, "tool_call_id"),
                     status=status,
                     output=raw_output,
-                    artifact_id=_optional_string(value, "artifact_id"),
                     artifacts=tuple(artifacts),
                 )
             )

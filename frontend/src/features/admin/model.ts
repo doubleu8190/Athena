@@ -69,7 +69,6 @@ export interface ModelProfile {
   protocol: string;
   base_url: string;
   model: string;
-  has_api_key: boolean;
   context_window_tokens: number;
   tokenizer_encoding: TokenizerEncoding;
   supports_stream: boolean;
@@ -82,13 +81,12 @@ export interface ModelProfile {
   temperature: number | null;
   enabled: boolean;
   created_at: string;
-  /** 一期新增可选元数据，兼容旧测试夹具缺省字段。 */
-  visible_to_users?: boolean;
-  scenario_label?: string | null;
-  scenario_description?: string | null;
-  supports_vision?: boolean;
-  version?: number;
-  updated_at?: string;
+  visible_to_users: boolean;
+  scenario_label: string | null;
+  scenario_description: string | null;
+  supports_vision: boolean;
+  version: number;
+  updated_at: string;
 }
 
 export interface ModelProfileListResponse {
@@ -121,7 +119,6 @@ export interface CompressionPolicy {
   recent_token_cap: number | null;
   summary_ratio: number | null;
   summary_token_cap: number | null;
-  prompt_template_version: string | null;
   created_at: string | null;
 }
 
@@ -160,11 +157,10 @@ export interface McpServer {
   created_at: string;
   updated_at: string;
   tools_discovered_at: string | null;
-  /** 一期新增可选字段：独立启停开关与三层可见性。 */
-  enabled?: boolean;
-  visibility_scope?: "company" | "department";
-  owner_department_id?: string | null;
-  visibility_grants?: VisibilityGrant[];
+  enabled: boolean;
+  visibility_scope: "company" | "department";
+  owner_department_id: string | null;
+  visibility_grants: VisibilityGrant[];
 }
 
 export interface McpServerListResponse {
@@ -205,10 +201,9 @@ export interface AdminTool {
   server_id: string;
   remote_name: string;
   requires_approval: boolean;
-  /** 一期新增业务化展示元数据（可选兼容旧夹具）。 */
-  display_name?: string | null;
-  approval_summary_template?: string | null;
-  parameter_labels?: Record<string, string>;
+  display_name: string | null;
+  approval_summary_template: string | null;
+  parameter_labels: Record<string, string>;
 }
 
 export interface AdminToolListResponse {
@@ -835,7 +830,6 @@ export function mcpServerForm(server?: McpServer): McpServerFormValues {
 export function modelCanBeDefault(profile: ModelProfile): boolean {
   return (
     profile.enabled &&
-    profile.has_api_key &&
     profile.supports_stream &&
     profile.supports_tools
   );
@@ -858,10 +852,9 @@ export interface SubagentProfile {
   created_by: string | null;
   created_at: string;
   updated_at: string;
-  /** 一期新增可见范围与部门归属元数据。 */
-  visibility_scope?: "company" | "department";
-  owner_department_id?: string | null;
-  visibility_grants?: VisibilityGrant[];
+  visibility_scope: "company" | "department";
+  owner_department_id: string | null;
+  visibility_grants: VisibilityGrant[];
 }
 
 export interface SubagentListResponse {

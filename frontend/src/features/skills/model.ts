@@ -16,8 +16,6 @@ export const SKILL_SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
 export type SkillFormat = "markdown" | "package";
 export type SkillScope = "company" | "department" | "personal";
-/** 兼容后端历史与旧测试夹具可能出现的 "public" 枚举，运行时通过 skillScope() 统一归一为 "company"。 */
-export type LegacyCompatibleSkillScope = SkillScope | "public";
 
 export type DependencyCheckStatus =
   | "satisfied"
@@ -76,14 +74,13 @@ export interface Skill {
   enabled: boolean;
   script_requires_approval: boolean;
   revision: number;
-  scope?: LegacyCompatibleSkillScope;
-  owner_department_id?: string | null;
-  visibility_grants?: VisibilityGrant[];
-  /** M3.3 双形态字段（可选以兼容历史夹具缺省值）。 */
-  format?: SkillFormat;
-  has_scripts?: boolean;
-  featured?: boolean;
-  starter_prompt?: string | null;
+  scope: SkillScope;
+  owner_department_id: string | null;
+  visibility_grants: VisibilityGrant[];
+  format: SkillFormat;
+  has_scripts: boolean;
+  featured: boolean;
+  starter_prompt: string | null;
   updated_at: string;
   dependency_check: DependencyCheck | null;
 }
@@ -223,33 +220,19 @@ export function versionLabel(version: SkillVersion): string {
 export function skillScope(
   skill: Pick<Skill, "scope">,
 ): SkillScope {
-  // 统一将历史或旧测试夹具中的 "public" 与缺省值归一为 "company"，完整支持三层可见性。
-  if (skill.scope === "personal") {
-    return "personal";
-  }
-  if (skill.scope === "department") {
-    return "department";
-  }
-  return "company";
+  return skill.scope;
 }
 
 export function skillFormat(
-  skill: Pick<Skill, "format" | "scope">,
+  skill: Pick<Skill, "format">,
 ): SkillFormat {
-  // 个人技能恒为在线 Markdown；其余公共/部门技能在旧夹具缺省 format 时向后兼容回退为 ZIP 包。
-  if (skill.format === "markdown" || skill.format === "package") {
-    return skill.format;
-  }
-  return skillScope(skill) === "personal" ? "markdown" : "package";
+  return skill.format;
 }
 
 export function skillExecutionLabel(
   skill: Pick<Skill, "scope" | "script_requires_approval" | "format">,
 ): string {
-  if (
-    skillScope(skill) === "personal" ||
-    skillFormat(skill) === "markdown"
-  ) {
+  if (skill.scope === "personal" || skill.format === "markdown") {
     return "纯文档";
   }
   return skill.script_requires_approval

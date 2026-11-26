@@ -51,7 +51,7 @@ export const DEPT_ADMIN_NAVIGATION: ShellAdminNavItem[] = [
   {
     icon: "dept-knowledge",
     label: "部门知识库",
-    to: "/knowledge?visibility_scope=department",
+    to: "/knowledge?scope=department",
   },
 ];
 

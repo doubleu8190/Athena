@@ -71,27 +71,19 @@ def build_knowledge_router(
     async def create_base(
         request: KnowledgeBaseRequest, auth: CurrentAuth
     ) -> KnowledgeBaseResponse:
-        has_visibility = (
-            "visibility_scope" in request.model_fields_set
-            or "owner_department_id" in request.model_fields_set
-            or "visibility_grants" in request.model_fields_set
-        )
         try:
-            if has_visibility:
-                created = await service.create_base(
-                    auth.user.id,
-                    request.name,
-                    request.description,
-                    visibility_scope=VisibilityScope(request.visibility_scope),
-                    owner_department_id=request.owner_department_id,
-                    visibility_grants=(
-                        None
-                        if request.visibility_grants is None
-                        else tuple(item.to_domain() for item in request.visibility_grants)
-                    ),
-                )
-            else:
-                created = await service.create_base(auth.user.id, request.name, request.description)
+            created = await service.create_base(
+                auth.user.id,
+                request.name,
+                request.description,
+                visibility_scope=VisibilityScope(request.visibility_scope),
+                owner_department_id=request.owner_department_id,
+                visibility_grants=(
+                    None
+                    if request.visibility_grants is None
+                    else tuple(item.to_domain() for item in request.visibility_grants)
+                ),
+            )
             return _base_response(created)
         except KnowledgePermissionDeniedError as error:
             raise _forbidden(error) from error
@@ -109,18 +101,15 @@ def build_knowledge_router(
         owner_department_id: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     ) -> KnowledgeBaseListResponse:
         try:
-            if visibility_scope is not None or owner_department_id is not None:
-                items = await service.list_bases(
-                    auth.user.id,
-                    page=page,
-                    page_size=page_size,
-                    visibility_scope=(
-                        None if visibility_scope is None else VisibilityScope(visibility_scope)
-                    ),
-                    owner_department_id=owner_department_id,
-                )
-            else:
-                items = await service.list_bases(auth.user.id, page=page, page_size=page_size)
+            items = await service.list_bases(
+                auth.user.id,
+                page=page,
+                page_size=page_size,
+                visibility_scope=(
+                    None if visibility_scope is None else VisibilityScope(visibility_scope)
+                ),
+                owner_department_id=owner_department_id,
+            )
         except KnowledgeInputError as error:
             raise _bad_request(error) from error
         return KnowledgeBaseListResponse(
@@ -139,47 +128,35 @@ def build_knowledge_router(
         base_id: str, request: KnowledgeBasePatchRequest, auth: CurrentAuth
     ) -> KnowledgeBaseResponse:
         fields = request.model_fields_set
-        has_visibility_patch = bool(
-            fields & {"visibility_scope", "owner_department_id", "visibility_grants"}
-        )
         try:
-            if has_visibility_patch:
-                if "visibility_scope" in fields and request.visibility_scope is None:
-                    raise KnowledgeInputError("visibility_scope_invalid")
-                visibility_scope_arg: VisibilityScope | KnowledgeUnsetType = (
-                    VisibilityScope(request.visibility_scope)
-                    if "visibility_scope" in fields and request.visibility_scope is not None
-                    else KNOWLEDGE_UNSET
+            if "visibility_scope" in fields and request.visibility_scope is None:
+                raise KnowledgeInputError("visibility_scope_invalid")
+            visibility_scope_arg: VisibilityScope | KnowledgeUnsetType = (
+                VisibilityScope(request.visibility_scope)
+                if "visibility_scope" in fields and request.visibility_scope is not None
+                else KNOWLEDGE_UNSET
+            )
+            owner_department_arg: str | None | KnowledgeUnsetType = (
+                request.owner_department_id if "owner_department_id" in fields else KNOWLEDGE_UNSET
+            )
+            visibility_grants_arg: tuple[VisibilityGrantInput, ...] | None | KnowledgeUnsetType = (
+                (
+                    None
+                    if request.visibility_grants is None
+                    else tuple(item.to_domain() for item in request.visibility_grants)
                 )
-                owner_department_arg: str | None | KnowledgeUnsetType = (
-                    request.owner_department_id
-                    if "owner_department_id" in fields
-                    else KNOWLEDGE_UNSET
-                )
-                visibility_grants_arg: (
-                    tuple[VisibilityGrantInput, ...] | None | KnowledgeUnsetType
-                ) = (
-                    (
-                        None
-                        if request.visibility_grants is None
-                        else tuple(item.to_domain() for item in request.visibility_grants)
-                    )
-                    if "visibility_grants" in fields
-                    else KNOWLEDGE_UNSET
-                )
-                updated = await service.rename_base(
-                    auth.user.id,
-                    base_id,
-                    request.name,
-                    request.description,
-                    visibility_scope=visibility_scope_arg,
-                    owner_department_id=owner_department_arg,
-                    visibility_grants=visibility_grants_arg,
-                )
-            else:
-                updated = await service.rename_base(
-                    auth.user.id, base_id, request.name, request.description
-                )
+                if "visibility_grants" in fields
+                else KNOWLEDGE_UNSET
+            )
+            updated = await service.rename_base(
+                auth.user.id,
+                base_id,
+                request.name,
+                request.description,
+                visibility_scope=visibility_scope_arg,
+                owner_department_id=owner_department_arg,
+                visibility_grants=visibility_grants_arg,
+            )
             return _base_response(updated)
         except KnowledgeNotFoundError as error:
             raise _not_found(error) from error
@@ -236,6 +213,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
+            state="queued",
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 
@@ -280,6 +258,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
+            state="queued",
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 
@@ -326,6 +305,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
+            state="queued",
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 
@@ -366,6 +346,7 @@ def build_knowledge_router(
         return KnowledgeImportResponse(
             document_id=document.id,
             version_id=version_id,
+            state="queued",
             status_url=f"/api/v1/knowledge-bases/{base_id}/documents/{document.id}",
         )
 

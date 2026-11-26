@@ -21,12 +21,16 @@ import { runStreamUrl } from "./api";
 import {
   isTerminalRunStatus,
   type ConversationMessagePart,
+  type FormattedToolArgument,
   type PendingSubagentApproval,
   type PendingSubagentInput,
   type RunEvent,
   type RunSnapshotPayload,
   type RunStatus,
   type RunStreamMessage,
+  type SafeSkillApprovalProjection,
+  type SafeSkillInputFile,
+  type SkillParameterSummaryItem,
   type SubagentTaskSummary,
 } from "./model";
 import {
@@ -159,8 +163,6 @@ function parseMessagePart(value: unknown): ConversationMessagePart | null {
       }
     }
     return {
-      artifact_id:
-        typeof value.artifact_id === "string" ? value.artifact_id : null,
       artifacts,
       output: typeof value.output === "string" ? value.output : null,
       status: value.status,
@@ -172,68 +174,358 @@ function parseMessagePart(value: unknown): ConversationMessagePart | null {
 }
 
 function parseRunStreamMessage(value: unknown): RunStreamMessage | null {
+  // 对齐后端 RunStreamMessage 强契约：session_id 与 parts 始终必填非空；
+  // 缺少或包含非法 part 时丢弃该条异常消息（终态若缺失由单次有界兜底补拉）。
   if (
     !isRecord(value) ||
     typeof value.id !== "string" ||
+    typeof value.session_id !== "string" ||
     (value.role !== "user" && value.role !== "assistant") ||
     typeof value.status !== "string" ||
     typeof value.text !== "string" ||
     typeof value.sequence !== "number" ||
+    typeof value.created_at !== "string" ||
+    !Array.isArray(value.parts)
+  ) {
+    return null;
+  }
+  const parsedParts: ConversationMessagePart[] = [];
+  for (const rawPart of value.parts) {
+    const parsedPart = parseMessagePart(rawPart);
+    if (!parsedPart) {
+      return null;
+    }
+    parsedParts.push(parsedPart);
+  }
+  // 后端 SSE 使用 model_dump_json(exclude_none=True)，值为 null 的可空字段会在 JSON 中省略，此处统一还原为 null。
+  return {
+    completed_at:
+      typeof value.completed_at === "string" ? value.completed_at : null,
+    created_at: value.created_at,
+    id: value.id,
+    parts: parsedParts,
+    reply_to_message_id:
+      typeof value.reply_to_message_id === "string"
+        ? value.reply_to_message_id
+        : null,
+    role: value.role,
+    run_id: typeof value.run_id === "string" ? value.run_id : null,
+    sequence: value.sequence,
+    session_id: value.session_id,
+    status: value.status,
+    text: value.text,
+  };
+}
+
+const VALID_RUN_STATUSES = new Set<RunStatus>([
+  "queued",
+  "running",
+  "waiting_for_input",
+  "waiting_for_approval",
+  "waiting_for_subagents",
+  "cancelling",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+function parseRunStatus(value: unknown): RunStatus | null {
+  return typeof value === "string" &&
+    VALID_RUN_STATUSES.has(value as RunStatus)
+    ? (value as RunStatus)
+    : null;
+}
+
+function parseFormattedToolArgument(
+  value: unknown,
+): FormattedToolArgument | null {
+  if (
+    !isRecord(value) ||
+    typeof value.key !== "string" ||
+    typeof value.label !== "string" ||
+    typeof value.value !== "string"
+  ) {
+    return null;
+  }
+  return {
+    key: value.key,
+    label: value.label,
+    value: value.value,
+  };
+}
+
+function parseSafeSkillInputFile(value: unknown): SafeSkillInputFile | null {
+  if (
+    !isRecord(value) ||
+    typeof value.file_id !== "string" ||
+    typeof value.filename !== "string"
+  ) {
+    return null;
+  }
+  // 后端 SSE exclude_none=True 会省略值为 null 的 mime_type / size_bytes，必须显式还原为 null，
+  // 防止 SafeSkillProjection 按 size_bytes === null 判空时漏判 undefined 而渲染 NaN MB。
+  return {
+    available: typeof value.available === "boolean" ? value.available : true,
+    file_id: value.file_id,
+    filename: value.filename,
+    mime_type: typeof value.mime_type === "string" ? value.mime_type : null,
+    size_bytes: typeof value.size_bytes === "number" ? value.size_bytes : null,
+  };
+}
+
+function parseSkillParameterSummaryItem(
+  value: unknown,
+): SkillParameterSummaryItem | null {
+  if (
+    !isRecord(value) ||
+    typeof value.name !== "string" ||
+    typeof value.label !== "string" ||
+    typeof value.value !== "string"
+  ) {
+    return null;
+  }
+  return {
+    label: value.label,
+    name: value.name,
+    value: value.value,
+  };
+}
+
+function parseSafeSkillApprovalProjection(
+  value: unknown,
+): SafeSkillApprovalProjection | null {
+  if (
+    !isRecord(value) ||
+    typeof value.call_id !== "string" ||
+    typeof value.skill_id !== "string" ||
+    typeof value.skill_name !== "string" ||
+    typeof value.skill_version_id !== "string" ||
+    typeof value.skill_version_label !== "string" ||
+    typeof value.script_label !== "string" ||
+    typeof value.purpose !== "string"
+  ) {
+    return null;
+  }
+  const inputFiles: SafeSkillInputFile[] = [];
+  if (value.input_files !== undefined) {
+    if (!Array.isArray(value.input_files)) {
+      return null;
+    }
+    for (const rawFile of value.input_files) {
+      const parsedFile = parseSafeSkillInputFile(rawFile);
+      if (!parsedFile) {
+        return null;
+      }
+      inputFiles.push(parsedFile);
+    }
+  }
+  const parameterSummary: SkillParameterSummaryItem[] = [];
+  if (value.parameter_summary !== undefined) {
+    if (!Array.isArray(value.parameter_summary)) {
+      return null;
+    }
+    for (const rawParam of value.parameter_summary) {
+      const parsedParam = parseSkillParameterSummaryItem(rawParam);
+      if (!parsedParam) {
+        return null;
+      }
+      parameterSummary.push(parsedParam);
+    }
+  }
+  return {
+    call_id: value.call_id,
+    // 安全底线（fail-closed）：仅显式为布尔值时透传，缺失时默认禁止批准。
+    can_approve:
+      typeof value.can_approve === "boolean" ? value.can_approve : false,
+    hidden_parameter_count:
+      typeof value.hidden_parameter_count === "number"
+        ? value.hidden_parameter_count
+        : 0,
+    input_files: inputFiles,
+    parameter_summary: parameterSummary,
+    purpose: value.purpose,
+    script_label: value.script_label,
+    skill_id: value.skill_id,
+    skill_name: value.skill_name,
+    skill_version_id: value.skill_version_id,
+    skill_version_label: value.skill_version_label,
+    unavailable_reason:
+      typeof value.unavailable_reason === "string"
+        ? value.unavailable_reason
+        : null,
+  };
+}
+
+function parseSubagentTaskSummary(value: unknown): SubagentTaskSummary | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const status = parseRunStatus(value.status);
+  if (
+    !status ||
+    typeof value.sub_run_id !== "string" ||
+    typeof value.parent_tool_call_id !== "string" ||
+    typeof value.subagent_slug !== "string" ||
+    typeof value.subagent_name !== "string" ||
     typeof value.created_at !== "string"
   ) {
     return null;
   }
-  const message: RunStreamMessage = {
+  // 还原后端 SSE exclude_none=True 递归省略的可空字段，避免子任务面板读到 undefined。
+  return {
     created_at: value.created_at,
-    id: value.id,
-    role: value.role,
-    sequence: value.sequence,
-    status: value.status,
-    text: value.text,
+    finished_at:
+      typeof value.finished_at === "string" ? value.finished_at : null,
+    first_started_at:
+      typeof value.first_started_at === "string"
+        ? value.first_started_at
+        : null,
+    parent_tool_call_id: value.parent_tool_call_id,
+    safe_error_code:
+      typeof value.safe_error_code === "string" ? value.safe_error_code : null,
+    status,
+    sub_run_id: value.sub_run_id,
+    subagent_name: value.subagent_name,
+    subagent_profile_id:
+      typeof value.subagent_profile_id === "string"
+        ? value.subagent_profile_id
+        : null,
+    subagent_slug: value.subagent_slug,
+    task_index: typeof value.task_index === "number" ? value.task_index : 1,
+    task_summary:
+      typeof value.task_summary === "string" ? value.task_summary : "",
   };
-  if (typeof value.session_id === "string" || value.session_id === null) {
-    message.session_id = value.session_id;
-  }
-  if (typeof value.run_id === "string" || value.run_id === null) {
-    message.run_id = value.run_id;
-  }
+}
+
+function parsePendingSubagentInput(
+  value: unknown,
+): PendingSubagentInput | null {
   if (
-    typeof value.reply_to_message_id === "string" ||
-    value.reply_to_message_id === null
+    !isRecord(value) ||
+    typeof value.sub_run_id !== "string" ||
+    typeof value.subagent_slug !== "string" ||
+    typeof value.subagent_name !== "string" ||
+    typeof value.input_request_id !== "string" ||
+    typeof value.question_message_id !== "string" ||
+    typeof value.question_text !== "string" ||
+    typeof value.created_at !== "string"
   ) {
-    message.reply_to_message_id = value.reply_to_message_id;
+    return null;
   }
-  if (typeof value.completed_at === "string" || value.completed_at === null) {
-    message.completed_at = value.completed_at;
+  return {
+    created_at: value.created_at,
+    input_request_id: value.input_request_id,
+    question_message_id: value.question_message_id,
+    question_text: value.question_text,
+    sub_run_id: value.sub_run_id,
+    subagent_name: value.subagent_name,
+    subagent_slug: value.subagent_slug,
+    task_index: typeof value.task_index === "number" ? value.task_index : 1,
+    task_summary:
+      typeof value.task_summary === "string" ? value.task_summary : "",
+  };
+}
+
+function parsePendingSubagentApproval(
+  value: unknown,
+): PendingSubagentApproval | null {
+  if (
+    !isRecord(value) ||
+    typeof value.sub_run_id !== "string" ||
+    typeof value.subagent_slug !== "string" ||
+    typeof value.subagent_name !== "string" ||
+    typeof value.call_id !== "string" ||
+    typeof value.batch_message_id !== "string" ||
+    typeof value.ordinal !== "number" ||
+    typeof value.model_name !== "string" ||
+    typeof value.requested_at !== "string"
+  ) {
+    return null;
   }
-  if (Array.isArray(value.parts)) {
-    const parsedParts: ConversationMessagePart[] = [];
-    for (const rawPart of value.parts) {
-      const parsedPart = parseMessagePart(rawPart);
-      if (!parsedPart) {
-        // 存在未知或格式异常的内容块时放弃内联 parts，交由单次有界 /messages 兜底同步避免静默丢块。
-        return message;
+  const formattedArguments: FormattedToolArgument[] = [];
+  if (Array.isArray(value.formatted_arguments)) {
+    for (const rawArg of value.formatted_arguments) {
+      const parsedArg = parseFormattedToolArgument(rawArg);
+      if (parsedArg) {
+        formattedArguments.push(parsedArg);
       }
-      parsedParts.push(parsedPart);
     }
-    message.parts = parsedParts;
-  } else if (value.parts === null) {
-    message.parts = null;
   }
-  return message;
+  const safeSkillProjection =
+    value.safe_skill_projection !== undefined &&
+    value.safe_skill_projection !== null
+      ? parseSafeSkillApprovalProjection(value.safe_skill_projection)
+      : null;
+  // 还原后端 SSE exclude_none=True 递归省略的可空字段与默认空数组，保证审批卡片强契约不被击穿。
+  return {
+    approval_summary:
+      typeof value.approval_summary === "string"
+        ? value.approval_summary
+        : null,
+    batch_message_id: value.batch_message_id,
+    call_id: value.call_id,
+    display_name:
+      typeof value.display_name === "string" ? value.display_name : null,
+    formatted_arguments: formattedArguments,
+    model_name: value.model_name,
+    ordinal: value.ordinal,
+    requested_at: value.requested_at,
+    safe_skill_projection: safeSkillProjection,
+    sub_run_id: value.sub_run_id,
+    subagent_name: value.subagent_name,
+    subagent_slug: value.subagent_slug,
+    task_index: typeof value.task_index === "number" ? value.task_index : 1,
+    task_summary:
+      typeof value.task_summary === "string" ? value.task_summary : "",
+    tool_kind: typeof value.tool_kind === "string" ? value.tool_kind : null,
+  };
 }
 
 export function parseSnapshotPayload(value: unknown): RunSnapshotPayload | null {
-  if (!isRecord(value) || typeof value.status !== "string") {
+  if (!isRecord(value)) {
     return null;
   }
-  const status = value.status as RunStatus;
+  const status = parseRunStatus(value.status);
+  if (!status) {
+    return null;
+  }
   const messages: RunStreamMessage[] = [];
+  let hasUnparseableMessages = false;
   if (Array.isArray(value.messages)) {
     for (const rawMessage of value.messages) {
       const parsed = parseRunStreamMessage(rawMessage);
       if (parsed) {
         messages.push(parsed);
+      } else {
+        // 任一消息解析失败（如未知 part 类型或契约缺键）均标记为不完整，通知下游触发权威 HTTP 补拉。
+        hasUnparseableMessages = true;
+      }
+    }
+  }
+  const subagentTasks: SubagentTaskSummary[] = [];
+  if (Array.isArray(value.subagent_tasks)) {
+    for (const rawTask of value.subagent_tasks) {
+      const parsedTask = parseSubagentTaskSummary(rawTask);
+      if (parsedTask) {
+        subagentTasks.push(parsedTask);
+      }
+    }
+  }
+  const pendingSubagentInputs: PendingSubagentInput[] = [];
+  if (Array.isArray(value.pending_subagent_inputs)) {
+    for (const rawInput of value.pending_subagent_inputs) {
+      const parsedInput = parsePendingSubagentInput(rawInput);
+      if (parsedInput) {
+        pendingSubagentInputs.push(parsedInput);
+      }
+    }
+  }
+  const pendingSubagentApprovals: PendingSubagentApproval[] = [];
+  if (Array.isArray(value.pending_subagent_approvals)) {
+    for (const rawApproval of value.pending_subagent_approvals) {
+      const parsedApproval = parsePendingSubagentApproval(rawApproval);
+      if (parsedApproval) {
+        pendingSubagentApprovals.push(parsedApproval);
       }
     }
   }
@@ -253,27 +545,24 @@ export function parseSnapshotPayload(value: unknown): RunSnapshotPayload | null 
     events_complete: Boolean(value.events_complete),
     event_sequence:
       typeof value.event_sequence === "number" ? value.event_sequence : 0,
+    has_unparseable_messages: hasUnparseableMessages,
     messages,
     messages_before_sequence:
       typeof value.messages_before_sequence === "number"
         ? value.messages_before_sequence
         : null,
-    messages_complete: Boolean(value.messages_complete),
+    messages_complete: hasUnparseableMessages
+      ? false
+      : Boolean(value.messages_complete),
+    pending_subagent_approvals: pendingSubagentApprovals,
+    pending_subagent_inputs: pendingSubagentInputs,
     report_message_id:
       typeof value.report_message_id === "string" &&
       value.report_message_id
         ? value.report_message_id
         : null,
     status,
-    subagent_tasks: Array.isArray(value.subagent_tasks)
-      ? (value.subagent_tasks as SubagentTaskSummary[])
-      : [],
-    pending_subagent_inputs: Array.isArray(value.pending_subagent_inputs)
-      ? (value.pending_subagent_inputs as PendingSubagentInput[])
-      : [],
-    pending_subagent_approvals: Array.isArray(value.pending_subagent_approvals)
-      ? (value.pending_subagent_approvals as PendingSubagentApproval[])
-      : [],
+    subagent_tasks: subagentTasks,
   };
 }
 

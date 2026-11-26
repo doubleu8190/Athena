@@ -121,10 +121,10 @@ class McpServerResponse(BaseModel):
     config: dict[str, Any]
     secrets: list[dict[str, Any]]
     config_version: int
-    enabled: bool = True
-    visibility_scope: Literal["company", "department"] = "company"
-    owner_department_id: str | None = None
-    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
+    enabled: bool
+    visibility_scope: Literal["company", "department"]
+    owner_department_id: str | None
+    visibility_grants: list[VisibilityGrantResponse]
     created_by: str | None
     created_at: datetime
     updated_at: datetime

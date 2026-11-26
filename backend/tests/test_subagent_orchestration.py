@@ -6,11 +6,12 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from access_support import make_test_access_policy
 from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, event, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -20,6 +21,7 @@ from system_prompt_support import (
     FakeSystemPromptRepository,
 )
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.file.model import SessionFileModel
 from adapter.llm.model import ModelProfileVersionModel
@@ -33,6 +35,7 @@ from adapter.session.repository.session import SqlAlchemySessionRepository
 from adapter.subagent.model import SubagentModel
 from adapter.subagent.repository.subagent import SqlAlchemySubagentRepository
 from adapter.system_prompt.model import SystemPromptSettingModel, SystemPromptVersionModel
+from app.access import AccessPolicyService
 from app.run.config import RunWorkerConfig
 from app.run.executor import RunExecutor
 from app.run.service import RunService
@@ -104,7 +107,10 @@ class _StubMcpCatalog:
     def __init__(self, tools: tuple[RuntimeToolDefinition, ...] = ()) -> None:
         self._tools = tools
 
-    async def list_runtime_tools(self, *, limit: int = 200) -> tuple[RuntimeToolDefinition, ...]:
+    async def list_readable_runtime_tools(
+        self, snapshot: Any, *, limit: int = 200
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        del snapshot
         return self._tools[:limit]
 
     async def get_call_target(
@@ -126,7 +132,8 @@ class _StubSubagentRepo:
     def __init__(self, items: tuple[SubagentProfile, ...]) -> None:
         self._items = items
 
-    async def list_enabled(self) -> tuple[SubagentProfile, ...]:
+    async def list_readable_enabled(self, snapshot: Any) -> tuple[SubagentProfile, ...]:
+        del snapshot
         return tuple(item for item in self._items if item.enabled)
 
     async def get_by_slug(self, slug: str) -> SubagentProfile | None:
@@ -237,6 +244,7 @@ async def _setup_db(
                     api_key_nonce=b"nonce1234567",
                     api_key_key_version=1,
                     created_at=NOW,
+                    updated_at=NOW,
                 ),
             ]
         )
@@ -438,6 +446,7 @@ def test_tool_runtime_snapshot_injects_dispatch_and_filters_subagent_tools() -> 
             knowledge=None,
             project_knowledge=None,
             subagents=_StubSubagentRepo(()),  # type: ignore[arg-type]
+            access_policy=make_test_access_policy(),
         )
         snap_empty = await runtime_no_sub.build_snapshot("run-v2", ctx, depth=0)
         assert snap_empty.by_model_name("dispatch_subagents") is None
@@ -450,6 +459,7 @@ def test_tool_runtime_snapshot_injects_dispatch_and_filters_subagent_tools() -> 
             knowledge=None,
             project_knowledge=None,
             subagents=_StubSubagentRepo((profile,)),  # type: ignore[arg-type]
+            access_policy=make_test_access_policy(),
         )
         snap_main = await runtime.build_snapshot("run-v2", ctx, depth=0)
         dispatch_def = snap_main.by_model_name("dispatch_subagents")
@@ -486,6 +496,7 @@ def test_executor_dispatch_subagents_releases_lease_and_rejects_mixed_calls(
                 knowledge=None,
                 project_knowledge=None,
                 subagents=sub_repo,
+                access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
             )
             provider = _FakeProvider(
                 [
@@ -549,9 +560,9 @@ def test_executor_dispatch_subagents_releases_lease_and_rejects_mixed_calls(
                         execution_timeout_seconds=300,
                         max_concurrency=4,
                         temperature=0.0,
-                        has_api_key=True,
                         enabled=True,
                         created_at=NOW,
+                        updated_at=NOW,
                     ),
                     api_key="sk-test",
                 )
@@ -715,6 +726,26 @@ def test_begin_subagent_batch_enforces_limits_and_file_ownership(
                             trigger_message_id="msg_trigger_run_main",
                             context_cutoff_sequence=0,
                             model_config_version_id="mp_1",
+                            model_snapshot_json={
+                                "id": "mp_1",
+                                "name": "Default GPT",
+                                "protocol": "chat_completions",
+                                "base_url": "https://api.example.com/v1",
+                                "model": "gpt-4o",
+                                "context_window_tokens": 128000,
+                                "tokenizer_encoding": "o200k_base",
+                                "supports_stream": True,
+                                "supports_tools": True,
+                                "supports_parallel_tool_calls": True,
+                                "max_output_tokens": 4096,
+                                "request_timeout_seconds": 60,
+                                "execution_timeout_seconds": 300,
+                                "max_concurrency": 4,
+                                "temperature": None,
+                                "scenario_label": None,
+                                "supports_vision": False,
+                                "version": 1,
+                            },
                             main_prompt_version_id=TEST_MAIN_PROMPT_ID,
                             compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
                             prompt_template_version="run-v2",
@@ -2117,13 +2148,11 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
                     CompressionPolicyVersionModel(
                         id="cp_1",
                         compression_model_profile_id="mp_1",
-                        trigger_ratio=0.7,
                         trigger_tokens=80000,
                         recent_ratio=0.2,
-                        recent_token_cap=None,
+                        recent_token_cap=24000,
                         summary_ratio=0.1,
-                        summary_token_cap=None,
-                        prompt_template_version="run-v2",
+                        summary_token_cap=16000,
                         created_at=NOW,
                     )
                 )
@@ -2147,6 +2176,7 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
                 knowledge=None,
                 project_knowledge=None,
                 subagents=sub_repo,
+                access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
             )
             provider = _FakeProvider(
                 [
@@ -2229,9 +2259,9 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
                         execution_timeout_seconds=300,
                         max_concurrency=4,
                         temperature=0.0,
-                        has_api_key=True,
                         enabled=True,
                         created_at=NOW,
+                        updated_at=NOW,
                     ),
                     api_key="sk-test",
                 )
@@ -2249,7 +2279,6 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
                     recent_token_cap=24000,
                     summary_ratio=0.2,
                     summary_token_cap=16000,
-                    prompt_template_version="v1",
                     created_at=NOW,
                 )
 
@@ -2598,9 +2627,9 @@ def test_subagent_max_llm_requests_50_runs_without_budget_error(
                         execution_timeout_seconds=300,
                         max_concurrency=4,
                         temperature=0.0,
-                        has_api_key=True,
                         enabled=True,
                         created_at=NOW,
+                        updated_at=NOW,
                     ),
                     api_key="sk-test",
                 )
@@ -2673,6 +2702,7 @@ def test_dispatch_subagents_catalog_bounds_description_and_preserves_newlines() 
             knowledge=None,
             project_knowledge=None,
             subagents=_StubSubagentRepo(profiles),  # type: ignore[arg-type]
+            access_policy=make_test_access_policy(),
         )
         ctx = AuthorizedRunContext(
             owner_id="usr_1",
@@ -2797,6 +2827,65 @@ def test_get_stream_snapshot_deduplicates_subagent_metadata_queries(
             assert populated.pending_subagent_inputs[0].task_summary == "任务 run_sub_dedup_1"
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", _capture_sql)
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_begin_subagent_batch_rejects_invalid_task_message_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """begin_subagent_batch() 必须拦截错配 session/owner/run/thread 或非 user 角色的子任务草稿。"""
+
+    async def scenario() -> None:
+        engine, factory, repo = await _setup_db(monkeypatch)
+        try:
+            lease = await _submit_main_run(repo, run_id="run_main_task_guard")
+            base_cmd = _subagent_batch_command(
+                lease,
+                sequence=1,
+                sub_run_id="run_sub_task_guard",
+            )
+            valid_item = base_cmd.items[0]
+            invalid_task_messages = (
+                replace(valid_item.task_message, id="exec_bad_session", session_id="sess_other"),
+                replace(valid_item.task_message, id="exec_bad_owner", owner_id="usr_other"),
+                replace(valid_item.task_message, id="exec_bad_run", run_id=lease.run.id),
+                replace(valid_item.task_message, id="exec_bad_thread", thread_id=lease.run.id),
+                replace(
+                    valid_item.task_message,
+                    id="exec_bad_role",
+                    role=ExecutionRole.ASSISTANT,
+                ),
+            )
+            for bad_task in invalid_task_messages:
+                bad_cmd = replace(
+                    base_cmd,
+                    items=(replace(valid_item, task_message=bad_task),),
+                )
+                with pytest.raises(RunStateError, match="subagent_task_message_invalid"):
+                    await repo.begin_subagent_batch(bad_cmd)
+
+            # 所有非法批次均应零写入：主 Run 仍为 running，无子 Run 也无执行消息落库。
+            parent_after = await repo.get("sess_1", "usr_1", lease.run.id)
+            assert parent_after is not None and parent_after.status is RunStatus.RUNNING
+            async with factory() as session:
+                sub_count = await session.scalar(
+                    select(func.count(RunModel.id)).where(RunModel.depth >= 1)
+                )
+                exec_count = await session.scalar(
+                    select(func.count(ExecutionMessageModel.id)).where(
+                        ExecutionMessageModel.session_id == "sess_1"
+                    )
+                )
+            assert sub_count == 0
+            assert exec_count == 0
+
+            # 合法 task_message 可正常原子派发子 Run。
+            batch_result = await repo.begin_subagent_batch(base_cmd)
+            assert batch_result.run.status is RunStatus.WAITING_FOR_SUBAGENTS
+            assert len(batch_result.sub_runs) == 1
+        finally:
             await engine.dispose()
 
     asyncio.run(scenario())

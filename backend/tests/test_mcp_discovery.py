@@ -443,7 +443,6 @@ def test_http_transport_receives_only_current_operation_headers(
     monkeypatch.setattr(transport_module, "mcp_streamable_http_transport", http_transport)
     discovery = McpDiscoveryClient(
         client_factory=lambda _transport: FakeClient([_page([])]),
-        allowed_private_hosts=frozenset({"mcp.example.test"}),
     )
 
     async def discover_token(token: str) -> None:

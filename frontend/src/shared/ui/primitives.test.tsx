@@ -737,7 +737,7 @@ describe("shared/ui primitives", () => {
     expect(container).toBeTruthy();
   });
 
-  it("Brand 与 EmptyState 保持 Props 向后兼容并移除旧版全大写 kicker", () => {
+  it("Brand 与 EmptyState 正确渲染品牌标识与标准空状态面板", () => {
     const { rerender } = render(
       <div>
         <Brand />
@@ -745,7 +745,6 @@ describe("shared/ui primitives", () => {
           action={<Button>新建文档</Button>}
           description="上传文档后即可在对话中检索引用。"
           icon="book"
-          kicker="LEGACY UPPERCASE KICKER"
           title="暂无知识文档"
         />
       </div>,
@@ -756,8 +755,6 @@ describe("shared/ui primitives", () => {
     expect(screen.getByRole("region", { name: "暂无知识文档" })).toBeInTheDocument();
     expect(screen.getByText("上传文档后即可在对话中检索引用。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建文档" })).toBeInTheDocument();
-    // 旧版全大写英文 kicker 不应渲染。
-    expect(screen.queryByText("LEGACY UPPERCASE KICKER")).not.toBeInTheDocument();
 
     rerender(<Brand compact light />);
     expect(screen.getByText("Athena")).toBeInTheDocument();

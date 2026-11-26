@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 from openai import AsyncOpenAI
 from PIL import Image, PngImagePlugin
 
@@ -93,6 +94,7 @@ from domain.run.model import (
     RunInputFiles,
     RunInputImageAttachment,
     RunLease,
+    RunModelSnapshot,
     RunStatus,
     RunUsage,
     SaveContextSummaryCommand,
@@ -248,7 +250,6 @@ def _runtime_profile(
             protocol="chat_completions",
             base_url="https://llm.example/v1",
             model="gpt-4o-test",
-            has_api_key=True,
             context_window_tokens=context_window_tokens,
             tokenizer_encoding="o200k_base",
             supports_stream=True,
@@ -260,6 +261,7 @@ def _runtime_profile(
             temperature=None,
             enabled=True,
             created_at=NOW,
+            updated_at=NOW,
             supports_vision=supports_vision,
         ),
         api_key="secret-api-key",
@@ -284,6 +286,23 @@ def _sample_run(
         context_cutoff_sequence=10,
         retry_of_run_id=None,
         model_config_version_id=model_profile_id,
+        model_snapshot=RunModelSnapshot(
+            id=model_profile_id,
+            name="vision-test",
+            protocol="chat_completions",
+            base_url="https://llm.example/v1",
+            model="gpt-4o-test",
+            context_window_tokens=8192,
+            tokenizer_encoding="o200k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=512,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=60,
+            max_concurrency=2,
+            supports_vision=True,
+        ),
         main_prompt_version_id="spv_main",
         compression_prompt_version_id="spv_cmp",
         prompt_template_version="run-v2",
@@ -919,7 +938,6 @@ def test_compression_counts_vision_tokens_for_main_budget_but_sends_zero_images_
         recent_token_cap=60,
         summary_ratio=0.15,
         summary_token_cap=200,
-        prompt_template_version="compression-v1",
         created_at=NOW,
     )
     run = _sample_run(
@@ -982,7 +1000,7 @@ def test_compression_counts_vision_tokens_for_main_budget_but_sends_zero_images_
         status=MessageStatus.COMPLETED,
         parts=(TextPart("现在结合新图继续分析。"),),
         reply_to_message_id=None,
-        run_id=None,
+        run_id=run.id,
         client_message_id=None,
         created_at=NOW,
         completed_at=NOW,
@@ -1050,7 +1068,6 @@ def test_compression_counts_vision_tokens_for_main_budget_but_sends_zero_images_
                 operation_id=command.operation_id,
                 policy_version_id=command.policy_version_id,
                 compression_model_version_id=command.compression_model_version_id,
-                prompt_version=command.prompt_version,
                 compression_prompt_version_id=run.compression_prompt_version_id,
                 created_at=command.created_at,
             )
@@ -1384,7 +1401,9 @@ def _build_real_tool_runtime(
             0, result=SimpleNamespace(id=scope.session_id, project_id=None)
         )
     )
-    mcp_catalog = SimpleNamespace(list_runtime_tools=lambda limit: asyncio.sleep(0, result=()))
+    mcp_catalog = SimpleNamespace(
+        list_readable_runtime_tools=lambda snapshot, limit=201: asyncio.sleep(0, result=())
+    )
     mcp_executor = SimpleNamespace()
     return RunToolRuntimeService(
         auth=cast(Any, auth),
@@ -1394,6 +1413,7 @@ def _build_real_tool_runtime(
         knowledge=None,
         project_knowledge=None,
         session_files=session_files,
+        access_policy=make_test_access_policy(),
     )
 
 
@@ -1478,7 +1498,7 @@ def test_run_executor_vision_enabled_caches_caps_five_and_isolates_failures() ->
         status=MessageStatus.COMPLETED,
         parts=(TextPart("请看这些图片并结合工具回答。"),),
         reply_to_message_id=None,
-        run_id=None,
+        run_id=run.id,
         client_message_id=None,
         created_at=NOW,
         completed_at=NOW,
@@ -1590,7 +1610,7 @@ def test_run_executor_non_vision_model_gracefully_degrades_without_reading_objec
         status=MessageStatus.COMPLETED,
         parts=(TextPart("图里写了什么？"),),
         reply_to_message_id=None,
-        run_id=None,
+        run_id=run.id,
         client_message_id=None,
         created_at=NOW,
         completed_at=NOW,
@@ -1710,7 +1730,7 @@ def test_safe_stop_report_records_vision_status_and_never_persists_base64() -> N
         status=MessageStatus.COMPLETED,
         parts=(TextPart("分析这张图"),),
         reply_to_message_id=None,
-        run_id=None,
+        run_id=run.id,
         client_message_id=None,
         created_at=NOW,
         completed_at=NOW,

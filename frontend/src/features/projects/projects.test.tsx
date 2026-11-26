@@ -178,13 +178,13 @@ describe("项目中心与单页双栏工作文件夹", () => {
     expect(within(main).getByText("默认技能 2")).toBeInTheDocument();
   });
 
-  it("旧版 /projects/:id/:tab?page=2 路由温和重定向至 /projects/:id 并保留分页参数", async () => {
+  it("项目工作文件夹 /projects/:id?page=2 按查询参数分页加载项目对话", async () => {
     const { fetchMock } = installProjectWorkspaceFetch({
       sessions: [makeSession({ id: "s-p2", title: "第二页项目对话" })],
       sessionsTotal: 15,
     });
 
-    const app = renderApp(`/projects/${PROJECT_A.id}/sessions?page=2`);
+    const app = renderApp(`/projects/${PROJECT_A.id}?page=2`);
 
     expect(
       await screen.findByRole("heading", { level: 1, name: PROJECT_A.name }),
@@ -228,7 +228,7 @@ describe("项目中心与单页双栏工作文件夹", () => {
       }),
     );
 
-    renderApp("/projects/missing/overview");
+    renderApp("/projects/missing");
 
     expect(
       await screen.findByRole("heading", { name: "项目不存在或不可访问" }),

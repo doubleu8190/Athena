@@ -247,7 +247,6 @@ def build_api_dependencies(
         if mcp_use_case is None:
             mcp_settings = McpSettings.from_environment()
             mcp_discovery = McpDiscoveryClient(
-                allowed_private_hosts=mcp_settings.allowed_private_hosts,
                 stdio_base_environment=mcp_settings.stdio_base_environment(),
                 stdio_allowed_environment_names=mcp_settings.stdio_base_env_names,
             )

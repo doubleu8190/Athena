@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.llm.model.profile import CompressionPolicyVersionModel, ModelProfileVersionModel
@@ -175,15 +176,18 @@ def test_model_profile_migration_admin_and_runtime_credentials(
             unsupported_runtime = await repository.get_runtime(unsupported.id)
             assert unsupported_runtime is not None
             assert unsupported_runtime.version.supports_tools is False
-            no_key = await repository.create(actor, replace(value, name="Needs reconfiguration"))
-            async with factory() as session, session.begin():
-                profile = await session.get(ModelProfileVersionModel, no_key.id)
-                assert profile is not None
-                profile.api_key_ciphertext = None
-                profile.api_key_nonce = None
-                profile.api_key_key_version = None
-            with pytest.raises(ModelProfileNotFoundError):
-                await repository.set_default(actor, no_key.id)
+            # 数据库层已将加密凭据三元组收紧为 NOT NULL，置空必须被 PostgreSQL 拒绝。
+            with pytest.raises(IntegrityError):
+                async with factory() as session, session.begin():
+                    await session.execute(
+                        update(ModelProfileVersionModel)
+                        .where(ModelProfileVersionModel.id == unsupported.id)
+                        .values(
+                            api_key_ciphertext=None,
+                            api_key_nonce=None,
+                            api_key_key_version=None,
+                        )
+                    )
             assert await repository.get_default_id(actor) == created.id
             runtime = await repository.get_runtime(created.id)
             assert runtime is not None and runtime.api_key == "first-secret"

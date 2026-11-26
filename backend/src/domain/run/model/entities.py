@@ -381,8 +381,8 @@ class Run:
     cancel_requested_at: datetime | None
     safe_error_code: str | None
     usage: RunUsage
+    model_snapshot: RunModelSnapshot
     compression_policy_version_id: str | None = None
-    model_snapshot: RunModelSnapshot | None = None
     tool_snapshot: RuntimeToolSnapshot | None = None
     auth_session_id: str | None = None
     llm_request_count: int = 0

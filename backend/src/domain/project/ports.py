@@ -30,15 +30,6 @@ class ProjectRepository(ProjectReader, Protocol):
     ) -> ProjectPage:
         """分页读取未删除项目。"""
 
-    async def rename(
-        self,
-        owner_id: str,
-        project_id: str,
-        name: str,
-        updated_at: datetime,
-    ) -> Project | None:
-        """原子修改未删除项目的名称。"""
-
     async def update(
         self,
         owner_id: str,

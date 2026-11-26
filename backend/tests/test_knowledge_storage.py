@@ -398,6 +398,10 @@ def test_invalid_key_and_hash_mismatch_are_rejected_before_io() -> None:
         await store.start()
         with pytest.raises(OriginalStorageIntegrityError, match="key_invalid"):
             await store.get("../private")
+        digest = hashlib.sha256(b"expected").hexdigest()
+        legacy_three_segment = f"{'a' * 64}/{digest[:2]}/{digest}"
+        with pytest.raises(OriginalStorageIntegrityError, match="key_invalid"):
+            await store.get(legacy_three_segment)
         key = _key(b"expected")
         with pytest.raises(OriginalStorageIntegrityError, match="hash_mismatch"):
             await store.put(key, b"different")

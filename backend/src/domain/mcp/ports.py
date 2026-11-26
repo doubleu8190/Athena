@@ -92,11 +92,6 @@ class McpServerRepository(Protocol):
     async def list_page(self, *, offset: int, limit: int) -> McpServerPage:
         """分页读取未软删 Server 安全投影。"""
 
-    async def set_requires_approval(
-        self, actor: AuthContext, tool_id: str, requires_approval: bool
-    ) -> AdminToolDefinition:
-        """复核管理员后更新已注册工具的审批策略。"""
-
     async def update_tool_metadata(
         self, actor: AuthContext, tool_id: str, patch: ToolMetadataPatch
     ) -> AdminToolDefinition:
@@ -109,15 +104,6 @@ class McpServerRepository(Protocol):
         requires_approval: bool,
     ) -> tuple[AdminToolDefinition, ...]:
         """单事务原子批量切换全部目标工具的审批开关，任一缺失整批回滚。"""
-
-    async def list_public(
-        self,
-        *,
-        offset: int,
-        limit: int,
-        allowed_server_ids: Sequence[str] | None = None,
-    ) -> ToolPage[PublicToolDefinition]:
-        """读取供普通调用方使用的工具定义，支持按有权限的 MCP Server ID 集合过滤。"""
 
     async def list_readable_public(
         self,
@@ -153,9 +139,6 @@ class McpDiscovery(Protocol):
 
 class McpToolRuntimeReader(Protocol):
     """Read one current routing target without exposing it to API callers."""
-
-    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
-        """Read at most ``limit`` catalog rows with one config version per Server."""
 
     async def list_readable_runtime_tools(
         self,

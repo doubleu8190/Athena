@@ -45,12 +45,13 @@ class ExecutionMessageModel(Base):
             name="uq_execution_messages_id_session",
         ),
         ForeignKeyConstraint(
-            ["managed_run_id", "session_id"],
+            ["run_id", "session_id"],
             ["runs.id", "runs.session_id"],
-            name="fk_execution_messages_managed_run_session",
+            name="fk_execution_messages_run_session",
             deferrable=True,
             initially="DEFERRED",
             ondelete="RESTRICT",
+            use_alter=True,
         ),
         UniqueConstraint(
             "session_id",
@@ -77,7 +78,6 @@ class ExecutionMessageModel(Base):
         nullable=False,
     )
     run_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    managed_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)

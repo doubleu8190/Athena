@@ -154,9 +154,7 @@ def _execution_to_llm(message: ExecutionMessage) -> LlmMessage:
                 separators=(",", ":"),
             )
         )
-        base_output = result.output or (
-            f"附件引用：{result.artifact_id}" if result.artifact_id else ""
-        )
+        base_output = result.output or ""
         return LlmMessage(
             role=LlmRole.TOOL,
             content=base_output + artifact_content,

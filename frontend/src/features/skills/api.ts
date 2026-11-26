@@ -71,7 +71,7 @@ function toSkillAdminDetails(
     dependency_check: raw.dependency_check
       ? toDependencyCheck(raw.dependency_check)
       : null,
-    versions: (raw.versions ?? []).map(toSkillVersion),
+    versions: raw.versions.map(toSkillVersion),
   };
 }
 

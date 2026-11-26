@@ -183,16 +183,14 @@ export function AdminSubagentsPage() {
                         <span className="admin-status-badge">
                           v{subagent.version}
                         </span>
-                        {subagent.visibility_scope ? (
-                          <VisibilityBadge
-                            departmentName={
-                              subagent.visibility_scope === "department"
-                                ? (subagent.owner_department_id ?? null)
-                                : null
-                            }
-                            scope={subagent.visibility_scope}
-                          />
-                        ) : null}
+                        <VisibilityBadge
+                          departmentName={
+                            subagent.visibility_scope === "department"
+                              ? subagent.owner_department_id
+                              : null
+                          }
+                          scope={subagent.visibility_scope}
+                        />
                       </div>
                       <p className="admin-muted">{subagent.description}</p>
                     </div>

@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import httpx2
 import pytest
+from access_support import make_test_access_policy
 from fastapi import FastAPI
 from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
 from integration.postgres_harness import isolated_postgres_schema
@@ -364,6 +365,7 @@ async def _seed(
                 temperature=None,
                 enabled=True,
                 created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -417,6 +419,7 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                 knowledge=cast(Any, knowledge),
                 project_knowledge=cast(Any, project_knowledge),
                 preferences=preferences,
+                access_policy=make_test_access_policy(),
             )
             provider = _ScriptedProvider(
                 [
@@ -589,6 +592,7 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                     knowledge=cast(Any, knowledge),
                     project_knowledge=cast(Any, project_knowledge),
                     preferences=preferences,
+                    access_policy=make_test_access_policy(),
                 )
                 unknown_executor = RunExecutor(
                     run_repository,

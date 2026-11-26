@@ -75,7 +75,8 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                 revoked_time=None,
                 created_at=timestamp,
             )
-            await repository.create_user_with_session(user, first)
+            await repository.create_user(user)
+            await repository.create_session(first)
             assert user.role is UserRole.MEMBER
             await repository.create_session(second)
             assert user.email is not None
@@ -86,7 +87,7 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
             ) == promoted
 
             with pytest.raises(EmailAlreadyRegisteredError):
-                await repository.create_user_with_session(
+                await repository.create_user(
                     User(
                         id="usr_duplicate",
                         email=user.email,
@@ -95,15 +96,7 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                         status=UserStatus.ACTIVE,
                         created_at=timestamp,
                         updated_at=timestamp,
-                    ),
-                    AuthSession(
-                        id="ses_duplicate",
-                        user_id="usr_duplicate",
-                        token_hash="3" * 64,
-                        expires_at=timestamp + timedelta(days=7),
-                        revoked_time=None,
-                        created_at=timestamp,
-                    ),
+                    )
                 )
 
             async with session_factory() as session:
@@ -160,8 +153,8 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                     created_at=timestamp,
                     updated_at=timestamp,
                 )
-                return await repository.create_user_with_session(
-                    candidate,
+                created_user = await repository.create_user(candidate)
+                await repository.create_session(
                     AuthSession(
                         id=f"ses_concurrent_{index}",
                         user_id=candidate.id,
@@ -169,27 +162,34 @@ def test_auth_migration_and_repository_with_owned_resources() -> None:
                         expires_at=timestamp + timedelta(days=7),
                         revoked_time=None,
                         created_at=timestamp,
-                    ),
+                    )
                 )
+                return created_user
 
             concurrent_results = await asyncio.gather(
                 create_duplicate(4),
                 create_duplicate(5),
                 return_exceptions=True,
             )
-            assert sum(isinstance(item, User) for item in concurrent_results) == 1
+            concurrent_winners = [item for item in concurrent_results if isinstance(item, User)]
+            assert len(concurrent_winners) == 1
             assert (
                 sum(isinstance(item, EmailAlreadyRegisteredError) for item in concurrent_results)
                 == 1
             )
 
-            await db.downgrade_to("20261105_0005")
-            await db.upgrade_to("head")
             async with test_engine.connect() as connection:
                 assert (
                     await connection.scalar(
                         text("SELECT role FROM users WHERE id = :user_id"),
                         {"user_id": user.id},
+                    )
+                    == UserRole.SUPER_ADMIN.value
+                )
+                assert (
+                    await connection.scalar(
+                        text("SELECT role FROM users WHERE id = :user_id"),
+                        {"user_id": concurrent_winners[0].id},
                     )
                     == UserRole.MEMBER.value
                 )

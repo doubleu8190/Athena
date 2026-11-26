@@ -412,7 +412,10 @@ describe("管理表单纯校验", () => {
       version: 3,
       created_by: "admin-1",
       created_at: "2026-11-16T00:00:00Z",
+      owner_department_id: null,
       updated_at: "2026-11-16T00:00:00Z",
+      visibility_grants: [],
+      visibility_scope: "company",
     };
 
     const form = subagentForm(profile);

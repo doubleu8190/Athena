@@ -170,6 +170,9 @@ async function installWorkbenchFixtures(
     ] as SessionFixture[],
     uploadedFiles: [] as Array<{
       created_at: string;
+      extracted_text_bytes: number | null;
+      extraction_error_code: string | null;
+      extraction_status: "none" | "pending" | "ready" | "failed";
       filename: string;
       id: string;
       label: string | null;
@@ -183,15 +186,18 @@ async function installWorkbenchFixtures(
   const buildRun = (sessionId: string) => {
     const approved = state.activeRunApproved;
     return {
+      assistant_message_id: approved ? "msg-assistant-final" : null,
       cancel_requested_at: null,
       context_cutoff_sequence: 1,
       created_at: NOW,
+      depth: 0,
       event_sequence: approved ? 6 : 3,
       execution_epoch: 1,
       finished_at: approved ? "2026-11-24T09:00:02Z" : null,
       first_started_at: "2026-11-24T09:00:00Z",
       id: "run-workbench-1",
       input_file_ids: state.uploadedFiles.map((file) => file.id),
+      input_interactions: [],
       knowledge_base_ids:
         (state.lastSubmittedRunBody?.knowledge_base_ids as
           | string[]
@@ -206,6 +212,8 @@ async function installWorkbenchFixtures(
         supports_vision: true,
         version: 1,
       },
+      parent_run_id: null,
+      parent_tool_call_id: null,
       pending_approvals: approved
         ? []
         : [
@@ -231,12 +239,18 @@ async function installWorkbenchFixtures(
       pending_subagent_inputs: [],
       prompt_template_version: "v1",
       queued_at: NOW,
+      replayed: false,
       report_message_id: approved ? "msg-assistant-final" : null,
       retry_of_run_id: null,
+      retry_warning: null,
+      root_run_id: null,
       safe_error_code: null,
       session_id: sessionId,
       skill_snapshot: null,
       status: approved ? "completed" : "waiting_for_approval",
+      subagent_name: null,
+      subagent_profile_id: null,
+      subagent_slug: null,
       subagent_tasks: [],
       trigger_message_id: "msg-user-1",
       updated_at: approved ? "2026-11-24T09:00:02Z" : NOW,
@@ -326,6 +340,7 @@ async function installWorkbenchFixtures(
             name: "企业差旅与报销制度",
             owner_department_id: null,
             updated_at: NOW,
+            visibility_grants: [],
             visibility_scope: "company",
           },
         ],
@@ -510,6 +525,9 @@ async function installWorkbenchFixtures(
       if (method === "POST") {
         const uploaded = {
           created_at: NOW,
+          extracted_text_bytes: null,
+          extraction_error_code: null,
+          extraction_status: "none" as const,
           filename: "travel-plan.txt",
           id: "file-travel-plan",
           label: null,
@@ -593,6 +611,7 @@ async function installWorkbenchFixtures(
       if (method === "GET") {
         return json(route, {
           items: state.activeRunCreated ? [buildRun(sessionId)] : [],
+          next_cursor: null,
         });
       }
     }
@@ -872,14 +891,13 @@ test.describe("Athena v2 第二期核心工作台冒烟验收", () => {
     ).toHaveCount(0);
   });
 
-  test("场景 4：单页双栏项目文件夹、旧路由重定向与温和解绑删除项目", async ({
+  test("场景 4：单页双栏项目文件夹与温和解绑删除项目", async ({
     page,
   }) => {
     const state = await installWorkbenchFixtures(page);
     await page.setViewportSize({ height: 900, width: 1280 });
 
-    // 验证历史 4-Tab 路由 /projects/:id/overview 自动重定向到单页工作文件夹 /projects/:id。
-    await page.goto("/projects/proj-q4-budget/overview");
+    await page.goto("/projects/proj-q4-budget");
     await expect(page).toHaveURL(/\/projects\/proj-q4-budget$/);
     await expect(
       page.getByRole("heading", { level: 1, name: "Q4 预算专项" }),
@@ -1180,9 +1198,11 @@ async function installPhase3Fixtures(
   ];
 
   const buildCompletedRun = (sessionId: string) => ({
+    assistant_message_id: "msg-assistant-mm-1",
     cancel_requested_at: null,
     context_cutoff_sequence: 1,
     created_at: NOW,
+    depth: 0,
     event_sequence: 4,
     execution_epoch: 1,
     finished_at: "2026-11-24T09:00:02Z",
@@ -1191,6 +1211,7 @@ async function installPhase3Fixtures(
     input_file_ids: state.sessionFiles
       .filter((file) => file.source === "upload")
       .map((file) => file.id),
+    input_interactions: [],
     knowledge_base_ids: null,
     model_config_version_id: "model-analysis",
     model_snapshot: {
@@ -1201,18 +1222,26 @@ async function installPhase3Fixtures(
       supports_vision: true,
       version: 1,
     },
+    parent_run_id: null,
+    parent_tool_call_id: null,
     pending_approvals: [],
     pending_input: null,
     pending_subagent_approvals: [],
     pending_subagent_inputs: [],
     prompt_template_version: "v1",
     queued_at: NOW,
+    replayed: false,
     report_message_id: "msg-assistant-mm-1",
     retry_of_run_id: null,
+    retry_warning: null,
+    root_run_id: null,
     safe_error_code: null,
     session_id: sessionId,
     skill_snapshot: null,
     status: "completed",
+    subagent_name: null,
+    subagent_profile_id: null,
+    subagent_slug: null,
     subagent_tasks: [],
     trigger_message_id: "msg-user-mm-1",
     updated_at: "2026-11-24T09:00:02Z",
@@ -1672,7 +1701,6 @@ async function installPhase3Fixtures(
                 type: "text",
               },
               {
-                artifact_id: artifactCsvFile.id,
                 artifacts: [
                   {
                     file_id: artifactCsvFile.id,
@@ -1723,6 +1751,7 @@ async function installPhase3Fixtures(
       if (method === "GET") {
         return json(route, {
           items: state.runSubmitted ? [buildCompletedRun(sessionId)] : [],
+          next_cursor: null,
         });
       }
     }

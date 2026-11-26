@@ -168,7 +168,7 @@ def build_skill_service(
     skill_repository: SqlAlchemySkillRepository,
     object_store: FileObjectStore | None,
     auth_repository: CurrentSessionReader,
-    access_policy: AccessPolicyService | None,
+    access_policy: AccessPolicyService,
     python_executable: Path,
     package_cache: SkillPackageCache | None = None,
     skill_service_factory: Callable[..., SkillService] = SkillService,
@@ -330,7 +330,6 @@ def build_mcp_executor(
     """Create the single-call MCP executor with the deployment transport limits."""
     mcp_settings = McpSettings.from_environment()
     return McpToolCallClient(
-        allowed_private_hosts=mcp_settings.allowed_private_hosts,
         stdio_base_environment=mcp_settings.stdio_base_environment(),
         stdio_allowed_environment_names=mcp_settings.stdio_base_env_names,
         cleanup_timeout_seconds=cleanup_timeout_seconds,
@@ -349,7 +348,7 @@ def build_run_tool_runtime(
     session_files: SessionFileService | None = None,
     skill_execution: SkillExecutionService | None = None,
     subagents: SubagentRepository | None = None,
-    access_policy: AccessPolicyService | None = None,
+    access_policy: AccessPolicyService,
 ) -> RunToolRuntimeService:
     """绑定查询服务、轻量偏好服务、统一权限引擎与 MCP 端口到 Run 工具运行时。"""
     return RunToolRuntimeService(

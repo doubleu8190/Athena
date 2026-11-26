@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -76,37 +76,16 @@ class SqlAlchemyMessageRepository:
         """保存会话工厂。"""
         self._session_factory = session_factory
 
-    async def append_conversation(
-        self,
-        draft: ConversationMessageDraft,
-    ) -> ConversationMessage:
-        """在 Session 行锁内幂等写入会话消息。"""
-        async with self._session_factory() as session:
-            async with session.begin():
-                locked_session = await self._lock_session(
-                    session,
-                    draft.session_id,
-                    draft.owner_id,
-                )
-                await self._ensure_legacy_run_reference(session, draft.run_id)
-                result = await self.append_conversation_in_session(
-                    session, draft, locked_session=locked_session
-                )
-        return result
-
     async def append_conversation_in_session(
         self,
         session: AsyncSession,
         draft: ConversationMessageDraft,
         *,
         locked_session: SessionModel,
-        managed_run_id: str | None = None,
     ) -> ConversationMessage:
         """在调用方事务和已锁 Session 内写消息，不提交事务。"""
         if draft.session_id != locked_session.id or draft.owner_id != locked_session.owner_id:
             raise SessionNotFoundError("session_not_found")
-        if managed_run_id is not None and managed_run_id != draft.run_id:
-            raise InvalidMessageReferenceError("managed_run_reference_invalid")
         existing = await self._find_conversation(session, draft)
         if existing is not None:
             return self._accept_existing_conversation(existing, draft)
@@ -121,7 +100,6 @@ class SqlAlchemyMessageRepository:
             parts=serialize_parts(draft.parts),
             reply_to_message_id=draft.reply_to_message_id,
             run_id=draft.run_id,
-            managed_run_id=managed_run_id,
             context_turn_id=draft.context_turn_id,
             client_message_id=draft.client_message_id,
             created_at=draft.created_at,
@@ -132,46 +110,16 @@ class SqlAlchemyMessageRepository:
         await session.flush()
         return conversation_to_domain(row)
 
-    async def append_execution(
-        self,
-        draft: ExecutionMessageDraft,
-    ) -> ExecutionMessage:
-        """在 Session 行锁内校验引用关系并写入执行轨迹。"""
-        async with self._session_factory() as session:
-            async with session.begin():
-                locked_session = await self._lock_session(
-                    session,
-                    draft.session_id,
-                    draft.owner_id,
-                )
-                await self._ensure_legacy_run_reference(session, draft.run_id)
-                result = await self.append_execution_in_session(
-                    session, draft, locked_session=locked_session
-                )
-        return result
-
-    @staticmethod
-    async def _ensure_legacy_run_reference(session: AsyncSession, run_id: str | None) -> None:
-        """阻止旧公开入口为受管 Run 写入缺少 fencing 的消息。"""
-        if (
-            run_id is not None
-            and await session.scalar(select(RunModel.id).where(RunModel.id == run_id)) is not None
-        ):
-            raise InvalidMessageReferenceError("managed_run_write_requires_run_command")
-
     async def append_execution_in_session(
         self,
         session: AsyncSession,
         draft: ExecutionMessageDraft,
         *,
         locked_session: SessionModel,
-        managed_run_id: str | None = None,
     ) -> ExecutionMessage:
         """在调用方事务和已锁 Session 内写执行消息，不提交事务。"""
         if draft.session_id != locked_session.id or draft.owner_id != locked_session.owner_id:
             raise SessionNotFoundError("session_not_found")
-        if managed_run_id is not None and managed_run_id != draft.run_id:
-            raise InvalidMessageReferenceError("managed_run_reference_invalid")
         existing = await self._find_execution_tool_result(session, draft)
         if existing is not None:
             return self._accept_existing_execution(existing, draft)
@@ -185,7 +133,6 @@ class SqlAlchemyMessageRepository:
             id=draft.id,
             session_id=draft.session_id,
             run_id=draft.run_id,
-            managed_run_id=managed_run_id,
             thread_id=draft.thread_id,
             sequence=sequence,
             role=draft.role.value,
@@ -208,11 +155,11 @@ class SqlAlchemyMessageRepository:
         limit: int,
     ) -> ConversationMessagePage | None:
         """在同一 SQL 快照内校验会话可见性并读取一页公开消息。"""
-        # 隔离主聊天历史：先在子查询中过滤掉子 Run（depth >= 1）的澄清提问与定向回答，
-        # 再与 SessionModel 做 outerjoin，确保会话存在但仅有子 Run 消息时仍返回空页而非 None。
+        # 隔离主聊天历史：仅保留主 Run（depth = 0）产生的正式对话消息，排除子 Run 交互，
+        # 再与 SessionModel 做 outerjoin，确保会话存在但无主 Run 消息时仍返回空页而非 None。
         visible_messages = (
             select(ConversationMessageModel)
-            .outerjoin(RunModel, RunModel.id == ConversationMessageModel.managed_run_id)
+            .join(RunModel, RunModel.id == ConversationMessageModel.run_id)
             .where(
                 ConversationMessageModel.session_id == session_id,
                 *(
@@ -220,10 +167,7 @@ class SqlAlchemyMessageRepository:
                     if before_sequence is not None
                     else ()
                 ),
-                or_(
-                    ConversationMessageModel.managed_run_id.is_(None),
-                    RunModel.depth == 0,
-                ),
+                RunModel.depth == 0,
             )
             .order_by(ConversationMessageModel.sequence.desc())
             .limit(limit + 1)
@@ -291,26 +235,6 @@ class SqlAlchemyMessageRepository:
             )
         )
         return None if row is None else execution_to_domain(row)
-
-    @staticmethod
-    async def _lock_session(
-        session: AsyncSession,
-        session_id: str,
-        owner_id: str,
-    ) -> SessionModel:
-        """锁定当前 owner 的 Session 行，序列化同一 Session 内的消息写入。"""
-        locked = await session.scalar(
-            select(SessionModel)
-            .where(
-                SessionModel.id == session_id,
-                SessionModel.owner_id == owner_id,
-                SessionModel.deleted_time.is_(None),
-            )
-            .with_for_update()
-        )
-        if locked is None:
-            raise SessionNotFoundError("session_not_found")
-        return locked
 
     @staticmethod
     def _next_sequence(session: SessionModel, updated_at: datetime) -> int:

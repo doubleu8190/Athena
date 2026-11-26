@@ -32,12 +32,12 @@ class RunStreamMessage(BaseModel):
     text: str
     sequence: int
     created_at: datetime
-    # 向后兼容的增量自包含字段：与 GET /api/v1/sessions/{id}/messages 响应结构对齐，
-    # 供客户端在终态快照到达时直接合并完整消息与附件 parts，无需额外翻页查库。
-    session_id: str | None = None
+    # 与 GET /api/v1/sessions/{id}/messages 响应结构对齐：session_id 与 parts 始终必填非空；
+    # 其余可空字段保留 None 默认以配合 SSE exclude_none=True 压缩载荷。
+    session_id: str
+    parts: tuple[dict[str, object], ...]
     run_id: str | None = None
     reply_to_message_id: str | None = None
-    parts: tuple[dict[str, object], ...] | None = None
     completed_at: datetime | None = None
 
 

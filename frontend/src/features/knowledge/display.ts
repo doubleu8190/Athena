@@ -89,7 +89,7 @@ export function formatKnowledgeLocator(
   if (kind === "markdown") {
     return ["Markdown", lines].filter(Boolean).join(" · ");
   }
-  if (kind === "text" || kind === "txt") {
+  if (kind === "text") {
     return ["文本", lines].filter(Boolean).join(" · ");
   }
   if (lines || page || heading || sheet || cells || slide || mediaId) {

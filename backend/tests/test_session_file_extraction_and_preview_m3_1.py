@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import io
 import json
-import sqlite3
 import zipfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import redirect_stdout
@@ -18,11 +16,9 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-import sqlalchemy as sa
+from access_support import make_test_access_policy
 from alembic import command
 from alembic.config import Config
-from alembic.operations import Operations
-from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from auth_support import AuthTestClient, make_auth_service
 from docx import Document
@@ -32,6 +28,7 @@ from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from adapter.auth.model import UserModel
 from adapter.file.repository import (
@@ -72,6 +69,7 @@ from domain.run.model import (
     Run,
     RunInputFileContext,
     RunInputFiles,
+    RunModelSnapshot,
     RunStatus,
     RunUsage,
 )
@@ -1950,8 +1948,10 @@ def test_session_file_read_tool_reads_office_and_pdf_and_formats_errors(tmp_path
             )
 
     class _EmptyMcpCatalog:
-        async def list_runtime_tools(self, *, limit: int = 201) -> tuple[Any, ...]:
-            del limit
+        async def list_readable_runtime_tools(
+            self, snapshot: Any, *, limit: int = 201
+        ) -> tuple[Any, ...]:
+            del snapshot, limit
             return ()
 
         async def get_call_target(self, *_: Any) -> None:
@@ -1969,6 +1969,7 @@ def test_session_file_read_tool_reads_office_and_pdf_and_formats_errors(tmp_path
         knowledge=None,
         project_knowledge=None,
         session_files=file_service,
+        access_policy=make_test_access_policy(),
         clock=lambda: NOW,
     )
 
@@ -2115,6 +2116,22 @@ def test_session_file_read_tool_reads_office_and_pdf_and_formats_errors(tmp_path
             context_cutoff_sequence=1,
             retry_of_run_id=None,
             model_config_version_id="mpv_1",
+            model_snapshot=RunModelSnapshot(
+                id="mpv_1",
+                name="Extraction Test Model",
+                protocol="chat_completions",
+                base_url="https://api.example.com/v1",
+                model="gpt-4o-mini",
+                context_window_tokens=128000,
+                tokenizer_encoding="cl100k_base",
+                supports_stream=True,
+                supports_tools=True,
+                supports_parallel_tool_calls=False,
+                max_output_tokens=4096,
+                request_timeout_seconds=30,
+                execution_timeout_seconds=120,
+                max_concurrency=4,
+            ),
             main_prompt_version_id="spv_1",
             compression_prompt_version_id="spv_2",
             prompt_template_version="run-v2",
@@ -2273,29 +2290,28 @@ def test_bootstrap_injects_local_session_document_extractor(
         asyncio.run(_cleanup())
 
 
-def test_alembic_migration_0038_single_head_pg_sql_and_sqlite_roundtrip(tmp_path: Path) -> None:
-    """验证 20261205_0038 单一 head、PostgreSQL 离线 DDL 与 SQLite 在线升级/约束/降级。"""
+def test_alembic_initial_schema_session_file_extraction_constraints() -> None:
+    """验证 0001_initial_schema 单一 head、离线 DDL 及 PostgreSQL 提取缓存组合检查约束。"""
     pg_cfg = Config(str(ALEMBIC_INI))
     pg_cfg.set_main_option(
         "sqlalchemy.url",
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(pg_cfg)
-    # 保持 Alembic 单一 head，并验证 20261205_0038 位于主干迁移链中（兼容后续 M3.3+ 迁移）。
-    assert len(script.get_heads()) == 1
-    rev = script.get_revision("20261205_0038")
+    assert script.get_heads() == ["0001_initial_schema"]
+    rev = script.get_revision("0001_initial_schema")
     assert rev is not None
-    assert rev.down_revision == "20261204_0037"
+    assert rev.down_revision is None
 
     # 1. PostgreSQL 离线升级与回滚 SQL
     up_buf = StringIO()
     with redirect_stdout(up_buf):
-        command.upgrade(pg_cfg, "20261204_0037:20261205_0038", sql=True)
+        command.upgrade(pg_cfg, "head", sql=True)
     up_sql = up_buf.getvalue()
-    assert "ADD COLUMN extraction_status VARCHAR(16) DEFAULT 'none' NOT NULL" in up_sql
-    assert "ADD COLUMN extracted_text_key VARCHAR(1024)" in up_sql
-    assert "ADD COLUMN extracted_text_bytes BIGINT" in up_sql
-    assert "ADD COLUMN extraction_error_code VARCHAR(64)" in up_sql
+    assert "extraction_status VARCHAR(16) DEFAULT 'none' NOT NULL" in up_sql
+    assert "extracted_text_key VARCHAR(1024)" in up_sql
+    assert "extracted_text_bytes BIGINT" in up_sql
+    assert "extraction_error_code VARCHAR(64)" in up_sql
     assert "ck_session_files_extraction_status" in up_sql
     assert "ck_session_files_extracted_text_bytes" in up_sql
     assert "ck_session_files_extraction_consistency" in up_sql
@@ -2303,138 +2319,91 @@ def test_alembic_migration_0038_single_head_pg_sql_and_sqlite_roundtrip(tmp_path
 
     down_buf = StringIO()
     with redirect_stdout(down_buf):
-        command.downgrade(pg_cfg, "20261205_0038:20261204_0037", sql=True)
+        command.downgrade(pg_cfg, "0001_initial_schema:base", sql=True)
     down_sql = down_buf.getvalue()
-    assert "DROP INDEX uq_session_files_extracted_text_key" in down_sql
-    assert "DROP CONSTRAINT ck_session_files_extraction_consistency" in down_sql
-    assert "DROP CONSTRAINT ck_session_files_extracted_text_bytes" in down_sql
-    assert "DROP CONSTRAINT ck_session_files_extraction_status" in down_sql
-    assert "DROP COLUMN extraction_error_code" in down_sql
-    assert "DROP COLUMN extracted_text_bytes" in down_sql
-    assert "DROP COLUMN extracted_text_key" in down_sql
-    assert "DROP COLUMN extraction_status" in down_sql
+    assert "DROP TABLE session_files" in down_sql
 
-    # 2. 使用同步标准库 sqlite3 + Alembic Operations.context 验证升级 -> 一致性约束 -> 完整降级
-    migration_0038_path = (
-        Path(__file__).resolve().parents[1]
-        / "migrations"
-        / "versions"
-        / "20261205_0038_session_file_extraction_cache.py"
-    )
-    spec = importlib.util.spec_from_file_location("migration_20261205_0038", migration_0038_path)
-    assert spec is not None and spec.loader is not None
-    migration_0038: Any = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration_0038)
+    # 2. 在真实 PostgreSQL 单元测试库上验证 session_files 提取缓存组合 CHECK 约束
+    async def scenario() -> None:
+        async with pg_unit_db() as (_engine, factory):
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="u1",
+                        email="u1@example.com",
+                        password_hash="hash",
+                        display_name=None,
+                        status="active",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                await session.flush()
+                session.add(
+                    SessionModel(
+                        id="s1",
+                        owner_id="u1",
+                        last_message_sequence=0,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                await session.flush()
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO session_files (
+                            id, session_id, owner_id, source, filename, mime_type, size_bytes,
+                            sha256, object_key, idempotency_key, request_fingerprint, created_at
+                        ) VALUES (
+                            'f1', 's1', 'u1', 'upload', 'a.pdf', 'application/pdf', 100,
+                            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                            'session-files/aa/f1', 'k1', 'fp1', :now
+                        )
+                        """
+                    ),
+                    {"now": NOW},
+                )
 
-    db_path = tmp_path / "m3_1_migration.sqlite"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE sessions (
-            id VARCHAR(64) NOT NULL PRIMARY KEY,
-            owner_id VARCHAR(128) NOT NULL,
-            UNIQUE (id, owner_id)
-        );
-        CREATE TABLE run_tool_calls (id VARCHAR(128) NOT NULL PRIMARY KEY);
-        CREATE TABLE session_files (
-            id VARCHAR(128) NOT NULL PRIMARY KEY,
-            session_id VARCHAR(64) NOT NULL,
-            owner_id VARCHAR(128) NOT NULL,
-            source VARCHAR(16) NOT NULL,
-            filename VARCHAR(255) NOT NULL,
-            label VARCHAR(255),
-            mime_type VARCHAR(255) NOT NULL,
-            size_bytes BIGINT NOT NULL,
-            sha256 VARCHAR(64) NOT NULL,
-            object_key VARCHAR(1024) NOT NULL,
-            source_call_id VARCHAR(128),
-            output_index INTEGER,
-            idempotency_key VARCHAR(128),
-            request_fingerprint VARCHAR(64),
-            created_at DATETIME NOT NULL,
-            CONSTRAINT ck_session_files_source CHECK (source IN ('upload', 'artifact')),
-            CONSTRAINT ck_session_files_size CHECK (size_bytes >= 0),
-            CONSTRAINT uq_session_files_session_id UNIQUE (session_id, id),
-            CONSTRAINT uq_session_files_object_key UNIQUE (object_key),
-            CONSTRAINT fk_session_files_session_owner
-                FOREIGN KEY(session_id, owner_id)
-                REFERENCES sessions (id, owner_id) ON DELETE CASCADE,
-            CONSTRAINT fk_session_files_source_call
-                FOREIGN KEY(source_call_id) REFERENCES run_tool_calls (id) ON DELETE RESTRICT
-        );
-        CREATE INDEX ix_session_files_session_created
-            ON session_files (session_id, created_at, id);
-        """
-    )
-    conn.close()
+            # 违反组合约束（ready 缺少 key/bytes）必须被拦截
+            with pytest.raises(IntegrityError):
+                async with factory() as session, session.begin():
+                    await session.execute(
+                        text("UPDATE session_files SET extraction_status = 'ready' WHERE id = 'f1'")
+                    )
+            # 违反组合约束（failed 缺少 error_code）必须被拦截
+            with pytest.raises(IntegrityError):
+                async with factory() as session, session.begin():
+                    await session.execute(
+                        text(
+                            "UPDATE session_files SET extraction_status = 'failed' WHERE id = 'f1'"
+                        )
+                    )
+            # 合法 ready 与 failed 状态通过
+            async with factory() as session, session.begin():
+                await session.execute(
+                    text(
+                        """
+                        UPDATE session_files
+                        SET extraction_status = 'ready',
+                            extracted_text_key = 'session-files-extracted/aa/f1.txt',
+                            extracted_text_bytes = 64,
+                            extraction_error_code = NULL
+                        WHERE id = 'f1'
+                        """
+                    )
+                )
+                await session.execute(
+                    text(
+                        """
+                        UPDATE session_files
+                        SET extraction_status = 'failed',
+                            extracted_text_key = NULL,
+                            extracted_text_bytes = NULL,
+                            extraction_error_code = 'document_no_extractable_text'
+                        WHERE id = 'f1'
+                        """
+                    )
+                )
 
-    sync_engine = sa.create_engine(f"sqlite:///{db_path}")
-    try:
-        with sync_engine.begin() as sa_conn:
-            with Operations.context(MigrationContext.configure(sa_conn)):
-                migration_0038.upgrade()
-
-        conn = sqlite3.connect(db_path)
-        conn.execute("INSERT INTO sessions VALUES ('s1', 'u1')")
-        conn.execute(
-            """
-            INSERT INTO session_files (
-                id, session_id, owner_id, source, filename, mime_type, size_bytes,
-                sha256, object_key, idempotency_key, request_fingerprint, created_at
-            ) VALUES (
-                'f1', 's1', 'u1', 'upload', 'a.pdf', 'application/pdf', 100,
-                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                'session-files/aa/f1', 'k1', 'fp1', '2026-11-24 00:00:00'
-            )
-            """
-        )
-        # 违反组合约束（ready 缺少 key/bytes）必须被拦截
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE session_files SET extraction_status = 'ready' WHERE id = 'f1'")
-        # 违反组合约束（failed 缺少 error_code）必须被拦截
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE session_files SET extraction_status = 'failed' WHERE id = 'f1'")
-        # 合法 ready 状态通过
-        conn.execute(
-            """
-            UPDATE session_files
-            SET extraction_status = 'ready',
-                extracted_text_key = 'session-files-extracted/aa/f1.txt',
-                extracted_text_bytes = 64,
-                extraction_error_code = NULL
-            WHERE id = 'f1'
-            """
-        )
-        # 合法 failed 状态通过
-        conn.execute(
-            """
-            UPDATE session_files
-            SET extraction_status = 'failed',
-                extracted_text_key = NULL,
-                extracted_text_bytes = NULL,
-                extraction_error_code = 'document_no_extractable_text'
-            WHERE id = 'f1'
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        with sync_engine.begin() as sa_conn:
-            with Operations.context(MigrationContext.configure(sa_conn)):
-                migration_0038.downgrade()
-
-        conn = sqlite3.connect(db_path)
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(session_files)").fetchall()}
-        assert not cols.intersection(
-            {
-                "extraction_status",
-                "extracted_text_key",
-                "extracted_text_bytes",
-                "extraction_error_code",
-            }
-        )
-        conn.close()
-    finally:
-        sync_engine.dispose()
-    # 确认 sqlalchemy text 导出在无告警情况下可用
-    assert str(text("SELECT 1")) == "SELECT 1"
+    asyncio.run(scenario())

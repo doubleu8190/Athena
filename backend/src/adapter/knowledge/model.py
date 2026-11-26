@@ -26,7 +26,6 @@ from adapter.base import Base
 class KnowledgeBaseModel(Base):
     __tablename__ = "knowledge_bases"
     __table_args__ = (
-        UniqueConstraint("id", "owner_id", name="uq_knowledge_bases_id_owner"),
         CheckConstraint(
             "visibility_scope IN ('company', 'department', 'personal')",
             name="ck_knowledge_bases_visibility_scope",
@@ -65,7 +64,6 @@ class KnowledgeBaseModel(Base):
 class KnowledgeSourceModel(Base):
     __tablename__ = "knowledge_sources"
     __table_args__ = (
-        UniqueConstraint("id", "owner_id", name="uq_knowledge_sources_id_owner"),
         # 加速按 owner_id 统计与检索用户上传原件。
         Index("ix_knowledge_sources_owner_id", "owner_id"),
     )
@@ -82,7 +80,6 @@ class KnowledgeSourceModel(Base):
 class KnowledgeDocumentModel(Base):
     __tablename__ = "knowledge_documents"
     __table_args__ = (
-        UniqueConstraint("id", "owner_id", name="uq_knowledge_documents_id_owner"),
         # 拆除 (knowledge_base_id, owner_id) 复合外键，改为单列外键以支持同部门多管理员协作维护。
         ForeignKeyConstraint(
             ["knowledge_base_id"],
@@ -154,7 +151,6 @@ class KnowledgeVersionModel(Base):
     source_text: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     profile_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    processing_config: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(64))
     warnings: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
@@ -173,7 +169,7 @@ class KnowledgeChunkModel(Base):
             ondelete="CASCADE",
         ),
         Index("ix_knowledge_chunks_fts", "search_document", postgresql_using="gin"),
-        # 与迁移 20261123_0032 对齐：PostgreSQL 上使用 pgvector HNSW 余弦距离部分索引。
+        # 与基线迁移 0001_initial_schema 对齐：PostgreSQL 上使用 pgvector HNSW 余弦距离部分索引。
         Index(
             "ix_knowledge_chunks_embedding_hnsw",
             "embedding",
@@ -219,9 +215,6 @@ class KnowledgeJobModel(Base):
 
 class KnowledgeRequestModel(Base):
     __tablename__ = "knowledge_requests"
-    __table_args__ = (
-        UniqueConstraint("owner_id", "operation", "request_key", name="uq_knowledge_request_key"),
-    )
     owner_id: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )

@@ -34,7 +34,7 @@ class ProjectKnowledgeService:
         projects: ProjectService,
         repository: ProjectKnowledgeRepository,
         *,
-        access_policy: AccessPolicyService | None = None,
+        access_policy: AccessPolicyService,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
         """保存项目查询用例、关联仓储、统一权限引擎和可替换时钟。"""
@@ -53,7 +53,7 @@ class ProjectKnowledgeService:
         """读取当前用户项目关联且当前仍有读权限的知识库（员工调岗后旧部门库立即失效）。"""
         await self._projects.get(owner_id, project_id)
         bases = await self._repository.list_project_bases(owner_id, project_id)
-        if self._access_policy is None or not bases:
+        if not bases:
             return bases
         readable_ids = await self._access_policy.filter_readable_ids(
             owner_id,
@@ -66,15 +66,14 @@ class ProjectKnowledgeService:
     async def bind(self, owner_id: str, project_id: str, base_id: str) -> None:
         """幂等关联个人项目与当前用户有读权限的任意层级知识库。"""
         await self._projects.get(owner_id, project_id)
-        if self._access_policy is not None:
-            can_read = await self._access_policy.can_read_resource(
-                owner_id,
-                ResourceType.KNOWLEDGE_BASE,
-                base_id,
-            )
-            if not can_read:
-                # 不可读知识库统一返回 404，防止探测其他部门或他人知识库 ID。
-                raise KnowledgeNotFoundError("knowledge_base_not_found")
+        can_read = await self._access_policy.can_read_resource(
+            owner_id,
+            ResourceType.KNOWLEDGE_BASE,
+            base_id,
+        )
+        if not can_read:
+            # 不可读知识库统一返回 404，防止探测其他部门或他人知识库 ID。
+            raise KnowledgeNotFoundError("knowledge_base_not_found")
         try:
             found = await self._repository.bind_project_base(
                 owner_id,

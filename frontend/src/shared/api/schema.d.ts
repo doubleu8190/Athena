@@ -1990,11 +1990,11 @@ export interface components {
          */
         AdminToolResponse: {
             /** Approval Summary Template */
-            approval_summary_template?: string | null;
+            approval_summary_template: string | null;
             /** Description */
             description: string;
             /** Display Name */
-            display_name?: string | null;
+            display_name: string | null;
             /** Input Schema */
             input_schema: {
                 [key: string]: unknown;
@@ -2002,7 +2002,7 @@ export interface components {
             /** Model Name */
             model_name: string;
             /** Parameter Labels */
-            parameter_labels?: {
+            parameter_labels: {
                 [key: string]: string;
             };
             /** Remote Name */
@@ -2024,7 +2024,7 @@ export interface components {
             /** Filename */
             filename: string;
             /** Label */
-            label?: string | null;
+            label: string | null;
             /** Mime Type */
             mime_type: string;
             /** Size Bytes */
@@ -2043,11 +2043,8 @@ export interface components {
         AuthProvidersResponse: {
             /** Feishu Enabled */
             feishu_enabled: boolean;
-            /**
-             * Local Login Enabled
-             * @default true
-             */
-            local_login_enabled?: boolean;
+            /** Local Login Enabled */
+            local_login_enabled: boolean;
             /** Mock Enabled */
             mock_enabled: boolean;
         };
@@ -2075,9 +2072,9 @@ export interface components {
             /** Requires Approval */
             requires_approval: boolean;
             /** Server Id */
-            server_id?: string | null;
+            server_id: string | null;
             /** Server Name */
-            server_name?: string | null;
+            server_name: string | null;
             /** Source Type */
             source_type: string;
             /** Tool Id */
@@ -2184,8 +2181,6 @@ export interface components {
             created_at: string | null;
             /** Id */
             id: string | null;
-            /** Prompt Template Version */
-            prompt_template_version: string | null;
             /** Recent Ratio */
             recent_ratio: number | null;
             /** Recent Token Cap */
@@ -2228,7 +2223,7 @@ export interface components {
             /** Role */
             role: string;
             /** Run Id */
-            run_id: string | null;
+            run_id: string;
             /** Sequence */
             sequence: number;
             /** Session Id */
@@ -2334,9 +2329,9 @@ export interface components {
             /** Filename */
             filename: string;
             /** Mime Type */
-            mime_type?: string | null;
+            mime_type: string | null;
             /** Size Bytes */
-            size_bytes?: number | null;
+            size_bytes: number | null;
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -2482,17 +2477,16 @@ export interface components {
             /** Name */
             name: string;
             /** Owner Department Id */
-            owner_department_id?: string | null;
+            owner_department_id: string | null;
             /** Updated At */
             updated_at: string;
             /** Visibility Grants */
-            visibility_grants?: components["schemas"]["VisibilityGrantResponse"][];
+            visibility_grants: components["schemas"]["VisibilityGrantResponse"][];
             /**
              * Visibility Scope
-             * @default personal
              * @enum {string}
              */
-            visibility_scope?: "company" | "department" | "personal";
+            visibility_scope: "company" | "department" | "personal";
         };
         /** KnowledgeDocumentListResponse */
         KnowledgeDocumentListResponse: {
@@ -2518,7 +2512,7 @@ export interface components {
             id: string;
             /** Knowledge Base Id */
             knowledge_base_id: string;
-            latest_version?: components["schemas"]["KnowledgeVersionResponse"] | null;
+            latest_version: components["schemas"]["KnowledgeVersionResponse"] | null;
             /** Pending Version Id */
             pending_version_id: string | null;
             /** Title */
@@ -2530,11 +2524,8 @@ export interface components {
         KnowledgeImportResponse: {
             /** Document Id */
             document_id: string;
-            /**
-             * State
-             * @default queued
-             */
-            state?: string;
+            /** State */
+            state: string;
             /** Status Url */
             status_url: string;
             /** Version Id */
@@ -2547,7 +2538,7 @@ export interface components {
             /** Chunk Id */
             chunk_id: string;
             /** Chunk Ids */
-            chunk_ids?: string[];
+            chunk_ids: string[];
             /** Document Id */
             document_id: string;
             /** Locators */
@@ -2666,17 +2657,14 @@ export interface components {
             created_at: string;
             /** Created By */
             created_by: string | null;
-            /**
-             * Enabled
-             * @default true
-             */
-            enabled?: boolean;
+            /** Enabled */
+            enabled: boolean;
             /** Id */
             id: string;
             /** Name */
             name: string;
             /** Owner Department Id */
-            owner_department_id?: string | null;
+            owner_department_id: string | null;
             /** Secrets */
             secrets: {
                 [key: string]: unknown;
@@ -2691,13 +2679,12 @@ export interface components {
              */
             updated_at: string;
             /** Visibility Grants */
-            visibility_grants?: components["schemas"]["VisibilityGrantResponse"][];
+            visibility_grants: components["schemas"]["VisibilityGrantResponse"][];
             /**
              * Visibility Scope
-             * @default company
              * @enum {string}
              */
-            visibility_scope?: "company" | "department";
+            visibility_scope: "company" | "department";
         };
         MessagePartResponse: components["schemas"]["TextPartResponse"] | components["schemas"]["FileRefPartResponse"] | components["schemas"]["ToolCallPartResponse"] | components["schemas"]["ToolResultPartResponse"];
         /**
@@ -2722,21 +2709,21 @@ export interface components {
          */
         MockUserResponse: {
             /** Avatar Url */
-            avatar_url?: string | null;
+            avatar_url: string | null;
             /** Departments */
-            departments?: components["schemas"]["UserDepartmentItem"][];
+            departments: components["schemas"]["UserDepartmentItem"][];
             /** Display Name */
             display_name: string | null;
             /** Email */
             email: string | null;
             /** Employee No */
-            employee_no?: string | null;
+            employee_no: string | null;
             /** Id */
             id: string;
             /** Job Title */
-            job_title?: string | null;
+            job_title: string | null;
             /** Managed Department Ids */
-            managed_department_ids?: string[];
+            managed_department_ids: string[];
             role: components["schemas"]["UserRole"];
         };
         /**
@@ -2852,8 +2839,6 @@ export interface components {
             enabled: boolean;
             /** Execution Timeout Seconds */
             execution_timeout_seconds: number;
-            /** Has Api Key */
-            has_api_key: boolean;
             /** Id */
             id: string;
             /** Max Concurrency */
@@ -2968,7 +2953,7 @@ export interface components {
              */
             created_at: string;
             /** Departments */
-            departments?: components["schemas"]["UserDepartmentItem"][];
+            departments: components["schemas"]["UserDepartmentItem"][];
             /** Display Name */
             display_name: string | null;
             /** Email */
@@ -2982,9 +2967,9 @@ export interface components {
             /** Last Synced At */
             last_synced_at: string | null;
             /** Managed Department Ids */
-            managed_department_ids?: string[];
+            managed_department_ids: string[];
             /** Managed Departments */
-            managed_departments?: components["schemas"]["DeptAdminScopeResponse"][];
+            managed_departments: components["schemas"]["DeptAdminScopeResponse"][];
             role: components["schemas"]["UserRole"];
             status: components["schemas"]["UserStatus"];
             /**
@@ -2996,15 +2981,15 @@ export interface components {
         /** PendingSubagentApprovalResponse */
         PendingSubagentApprovalResponse: {
             /** Approval Summary */
-            approval_summary?: string | null;
+            approval_summary: string | null;
             /** Batch Message Id */
             batch_message_id: string;
             /** Call Id */
             call_id: string;
             /** Display Name */
-            display_name?: string | null;
+            display_name: string | null;
             /** Formatted Arguments */
-            formatted_arguments?: components["schemas"]["FormattedToolArgumentResponse"][];
+            formatted_arguments: components["schemas"]["FormattedToolArgumentResponse"][];
             /** Model Name */
             model_name: string;
             /** Ordinal */
@@ -3014,25 +2999,19 @@ export interface components {
              * Format: date-time
              */
             requested_at: string;
-            safe_skill_projection?: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
+            safe_skill_projection: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
             /** Sub Run Id */
             sub_run_id: string;
             /** Subagent Name */
             subagent_name: string;
             /** Subagent Slug */
             subagent_slug: string;
-            /**
-             * Task Index
-             * @default 1
-             */
-            task_index?: number;
-            /**
-             * Task Summary
-             * @default
-             */
-            task_summary?: string;
+            /** Task Index */
+            task_index: number;
+            /** Task Summary */
+            task_summary: string;
             /** Tool Kind */
-            tool_kind?: string | null;
+            tool_kind: string | null;
         };
         /** PendingSubagentInputResponse */
         PendingSubagentInputResponse: {
@@ -3053,16 +3032,10 @@ export interface components {
             subagent_name: string;
             /** Subagent Slug */
             subagent_slug: string;
-            /**
-             * Task Index
-             * @default 1
-             */
-            task_index?: number;
-            /**
-             * Task Summary
-             * @default
-             */
-            task_summary?: string;
+            /** Task Index */
+            task_index: number;
+            /** Task Summary */
+            task_summary: string;
         };
         /**
          * ProjectCreateRequest
@@ -3103,13 +3076,13 @@ export interface components {
              */
             created_at: string;
             /** Default Skill Ids */
-            default_skill_ids?: string[];
+            default_skill_ids: string[];
             /** Description */
-            description?: string | null;
+            description: string | null;
             /** Id */
             id: string;
             /** Instructions */
-            instructions?: string | null;
+            instructions: string | null;
             /** Name */
             name: string;
             /**
@@ -3175,30 +3148,24 @@ export interface components {
         RunAttemptUsageResponse: {
             /** Attempt */
             attempt: number;
-            /**
-             * Batch Index
-             * @default 0
-             */
-            batch_index?: number;
+            /** Batch Index */
+            batch_index: number;
             /** Complete */
             complete: boolean;
             /** Duration Ms */
-            duration_ms?: number | null;
+            duration_ms: number | null;
             /** Execution Epoch */
             execution_epoch: number;
             /** Input Tokens */
             input_tokens: number | null;
             /** Model Profile Id */
-            model_profile_id?: string | null;
+            model_profile_id: string | null;
             /** Operation Id */
-            operation_id?: string | null;
+            operation_id: string | null;
             /** Output Tokens */
             output_tokens: number | null;
-            /**
-             * Purpose
-             * @default answer
-             */
-            purpose?: string;
+            /** Purpose */
+            purpose: string;
             /** Total Tokens */
             total_tokens: number | null;
         };
@@ -3232,9 +3199,9 @@ export interface components {
         /** RunInputInteractionResponse */
         RunInputInteractionResponse: {
             /** Answer Text */
-            answer_text?: string | null;
+            answer_text: string | null;
             /** Answered At */
-            answered_at?: string | null;
+            answered_at: string | null;
             /**
              * Created At
              * Format: date-time
@@ -3280,30 +3247,24 @@ export interface components {
             /** Name */
             name: string;
             /** Scenario Label */
-            scenario_label?: string | null;
-            /**
-             * Supports Vision
-             * @default false
-             */
-            supports_vision?: boolean;
-            /**
-             * Version
-             * @default 1
-             */
-            version?: number;
+            scenario_label: string | null;
+            /** Supports Vision */
+            supports_vision: boolean;
+            /** Version */
+            version: number;
         };
         /** RunPendingToolApprovalResponse */
         RunPendingToolApprovalResponse: {
             /** Approval Summary */
-            approval_summary?: string | null;
+            approval_summary: string | null;
             /** Batch Message Id */
             batch_message_id: string;
             /** Call Id */
             call_id: string;
             /** Display Name */
-            display_name?: string | null;
+            display_name: string | null;
             /** Formatted Arguments */
-            formatted_arguments?: components["schemas"]["FormattedToolArgumentResponse"][];
+            formatted_arguments: components["schemas"]["FormattedToolArgumentResponse"][];
             /** Model Name */
             model_name: string;
             /** Ordinal */
@@ -3313,14 +3274,14 @@ export interface components {
              * Format: date-time
              */
             requested_at: string;
-            safe_skill_projection?: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
+            safe_skill_projection: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
             /** Tool Kind */
             tool_kind: string | null;
         };
         /** RunResponse */
         RunResponse: {
             /** Assistant Message Id */
-            assistant_message_id?: string | null;
+            assistant_message_id: string | null;
             /** Cancel Requested At */
             cancel_requested_at: string | null;
             /** Context Cutoff Sequence */
@@ -3330,11 +3291,8 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
-            /**
-             * Depth
-             * @default 0
-             */
-            depth?: number;
+            /** Depth */
+            depth: number;
             /** Event Sequence */
             event_sequence: number;
             /** Execution Epoch */
@@ -3348,23 +3306,23 @@ export interface components {
             /** Input File Ids */
             input_file_ids: string[];
             /** Input Interactions */
-            input_interactions?: components["schemas"]["RunInputInteractionResponse"][];
+            input_interactions: components["schemas"]["RunInputInteractionResponse"][];
             /** Knowledge Base Ids */
-            knowledge_base_ids?: string[] | null;
+            knowledge_base_ids: string[] | null;
             /** Model Config Version Id */
             model_config_version_id: string;
-            model_snapshot?: components["schemas"]["RunModelSnapshotResponse"] | null;
+            model_snapshot: components["schemas"]["RunModelSnapshotResponse"];
             /** Parent Run Id */
-            parent_run_id?: string | null;
+            parent_run_id: string | null;
             /** Parent Tool Call Id */
-            parent_tool_call_id?: string | null;
+            parent_tool_call_id: string | null;
             /** Pending Approvals */
-            pending_approvals?: components["schemas"]["RunPendingToolApprovalResponse"][];
-            pending_input?: components["schemas"]["RunInputRequestResponse"] | null;
+            pending_approvals: components["schemas"]["RunPendingToolApprovalResponse"][];
+            pending_input: components["schemas"]["RunInputRequestResponse"] | null;
             /** Pending Subagent Approvals */
-            pending_subagent_approvals?: components["schemas"]["PendingSubagentApprovalResponse"][];
+            pending_subagent_approvals: components["schemas"]["PendingSubagentApprovalResponse"][];
             /** Pending Subagent Inputs */
-            pending_subagent_inputs?: components["schemas"]["PendingSubagentInputResponse"][];
+            pending_subagent_inputs: components["schemas"]["PendingSubagentInputResponse"][];
             /** Prompt Template Version */
             prompt_template_version: string;
             /**
@@ -3372,19 +3330,16 @@ export interface components {
              * Format: date-time
              */
             queued_at: string;
-            /**
-             * Replayed
-             * @default false
-             */
-            replayed?: boolean;
+            /** Replayed */
+            replayed: boolean;
             /** Report Message Id */
             report_message_id: string | null;
             /** Retry Of Run Id */
             retry_of_run_id: string | null;
             /** Retry Warning */
-            retry_warning?: string | null;
+            retry_warning: string | null;
             /** Root Run Id */
-            root_run_id?: string | null;
+            root_run_id: string | null;
             /** Safe Error Code */
             safe_error_code: string | null;
             /** Session Id */
@@ -3393,13 +3348,13 @@ export interface components {
             /** Status */
             status: string;
             /** Subagent Name */
-            subagent_name?: string | null;
+            subagent_name: string | null;
             /** Subagent Profile Id */
-            subagent_profile_id?: string | null;
+            subagent_profile_id: string | null;
             /** Subagent Slug */
-            subagent_slug?: string | null;
+            subagent_slug: string | null;
             /** Subagent Tasks */
-            subagent_tasks?: components["schemas"]["SubagentTaskResponse"][];
+            subagent_tasks: components["schemas"]["SubagentTaskResponse"][];
             /** Trigger Message Id */
             trigger_message_id: string;
             /**
@@ -3475,11 +3430,11 @@ export interface components {
         /** RunToolCallDetailResponse */
         RunToolCallDetailResponse: {
             /** Arguments */
-            arguments?: {
+            arguments: {
                 [key: string]: unknown;
             } | null;
             /** Artifacts */
-            artifacts?: components["schemas"]["ArtifactFileRefResponse"][];
+            artifacts: components["schemas"]["ArtifactFileRefResponse"][];
             /** Duration Ms */
             duration_ms: number | null;
             /** Finished At */
@@ -3493,7 +3448,7 @@ export interface components {
             outcome: components["schemas"]["RunToolOutcomeResponse"] | null;
             /** Safe Error Code */
             safe_error_code: string | null;
-            safe_skill_projection?: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
+            safe_skill_projection: components["schemas"]["SafeSkillApprovalProjectionResponse"] | null;
             /** Started At */
             started_at: string | null;
             /** Status */
@@ -3544,7 +3499,7 @@ export interface components {
         /** RunToolOutcomeResponse */
         RunToolOutcomeResponse: {
             /** Cleanup Error Code */
-            cleanup_error_code?: string | null;
+            cleanup_error_code: string | null;
             /** Code */
             code: string;
             /** Data */
@@ -3561,13 +3516,13 @@ export interface components {
         /** RunUsageResponse */
         RunUsageResponse: {
             /** Answer Tokens */
-            answer_tokens?: number | null;
+            answer_tokens: number | null;
             /** Attempts */
             attempts: components["schemas"]["RunAttemptUsageResponse"][];
             /** Complete */
             complete: boolean;
             /** Compression Tokens */
-            compression_tokens?: number | null;
+            compression_tokens: number | null;
             /** Input Tokens */
             input_tokens: number | null;
             /** Output Tokens */
@@ -3579,20 +3534,14 @@ export interface components {
         SafeSkillApprovalProjectionResponse: {
             /** Call Id */
             call_id: string;
-            /**
-             * Can Approve
-             * @default true
-             */
-            can_approve?: boolean;
-            /**
-             * Hidden Parameter Count
-             * @default 0
-             */
-            hidden_parameter_count?: number;
+            /** Can Approve */
+            can_approve: boolean;
+            /** Hidden Parameter Count */
+            hidden_parameter_count: number;
             /** Input Files */
-            input_files?: components["schemas"]["SafeSkillInputFileResponse"][];
+            input_files: components["schemas"]["SafeSkillInputFileResponse"][];
             /** Parameter Summary */
-            parameter_summary?: components["schemas"]["SkillParameterSummaryItemResponse"][];
+            parameter_summary: components["schemas"]["SkillParameterSummaryItemResponse"][];
             /** Purpose */
             purpose: string;
             /** Script Label */
@@ -3606,7 +3555,7 @@ export interface components {
             /** Skill Version Label */
             skill_version_label: string;
             /** Unavailable Reason */
-            unavailable_reason?: string | null;
+            unavailable_reason: string | null;
         };
         /** SafeSkillInputFileResponse */
         SafeSkillInputFileResponse: {
@@ -3617,9 +3566,9 @@ export interface components {
             /** Filename */
             filename: string;
             /** Mime Type */
-            mime_type?: string | null;
+            mime_type: string | null;
             /** Size Bytes */
-            size_bytes?: number | null;
+            size_bytes: number | null;
         };
         /**
          * SessionCreateRequest
@@ -3665,15 +3614,14 @@ export interface components {
              */
             created_at: string;
             /** Extracted Text Bytes */
-            extracted_text_bytes?: number | null;
+            extracted_text_bytes: number | null;
             /** Extraction Error Code */
-            extraction_error_code?: string | null;
+            extraction_error_code: string | null;
             /**
              * Extraction Status
-             * @default none
              * @enum {string}
              */
-            extraction_status?: "none" | "ready" | "failed";
+            extraction_status: "none" | "ready" | "failed";
             /** Filename */
             filename: string;
             /** Id */
@@ -3741,33 +3689,26 @@ export interface components {
             current_version_id: string | null;
             /** Current Version Label */
             current_version_label: string | null;
-            dependency_check?: components["schemas"]["SkillDependencyCheckResponse"] | null;
+            dependency_check: components["schemas"]["SkillDependencyCheckResponse"] | null;
             /** Description */
             description: string;
             /** Enabled */
             enabled: boolean;
-            /**
-             * Featured
-             * @default false
-             */
-            featured?: boolean;
+            /** Featured */
+            featured: boolean;
             /**
              * Format
-             * @default package
              * @enum {string}
              */
-            format?: "markdown" | "package";
-            /**
-             * Has Scripts
-             * @default false
-             */
-            has_scripts?: boolean;
+            format: "markdown" | "package";
+            /** Has Scripts */
+            has_scripts: boolean;
             /** Id */
             id: string;
             /** Name */
             name: string;
             /** Owner Department Id */
-            owner_department_id?: string | null;
+            owner_department_id: string | null;
             /** Revision */
             revision: number;
             /**
@@ -3780,7 +3721,7 @@ export interface components {
             /** Slug */
             slug: string;
             /** Starter Prompt */
-            starter_prompt?: string | null;
+            starter_prompt: string | null;
             /**
              * Updated At
              * Format: date-time
@@ -3789,7 +3730,7 @@ export interface components {
             /** Versions */
             versions: components["schemas"]["SkillVersionResponse"][];
             /** Visibility Grants */
-            visibility_grants?: components["schemas"]["VisibilityGrantResponse"][];
+            visibility_grants: components["schemas"]["VisibilityGrantResponse"][];
         };
         /** SkillAdminListResponse */
         SkillAdminListResponse: {
@@ -3970,33 +3911,26 @@ export interface components {
             current_version_id: string | null;
             /** Current Version Label */
             current_version_label: string | null;
-            dependency_check?: components["schemas"]["SkillDependencyCheckResponse"] | null;
+            dependency_check: components["schemas"]["SkillDependencyCheckResponse"] | null;
             /** Description */
             description: string;
             /** Enabled */
             enabled: boolean;
-            /**
-             * Featured
-             * @default false
-             */
-            featured?: boolean;
+            /** Featured */
+            featured: boolean;
             /**
              * Format
-             * @default package
              * @enum {string}
              */
-            format?: "markdown" | "package";
-            /**
-             * Has Scripts
-             * @default false
-             */
-            has_scripts?: boolean;
+            format: "markdown" | "package";
+            /** Has Scripts */
+            has_scripts: boolean;
             /** Id */
             id: string;
             /** Name */
             name: string;
             /** Owner Department Id */
-            owner_department_id?: string | null;
+            owner_department_id: string | null;
             /** Revision */
             revision: number;
             /**
@@ -4009,14 +3943,14 @@ export interface components {
             /** Slug */
             slug: string;
             /** Starter Prompt */
-            starter_prompt?: string | null;
+            starter_prompt: string | null;
             /**
              * Updated At
              * Format: date-time
              */
             updated_at: string;
             /** Visibility Grants */
-            visibility_grants?: components["schemas"]["VisibilityGrantResponse"][];
+            visibility_grants: components["schemas"]["VisibilityGrantResponse"][];
         };
         /** SkillVersionListResponse */
         SkillVersionListResponse: {
@@ -4224,7 +4158,7 @@ export interface components {
             /** Name */
             name: string;
             /** Owner Department Id */
-            owner_department_id?: string | null;
+            owner_department_id: string | null;
             /** Slug */
             slug: string;
             /** System Prompt */
@@ -4239,13 +4173,12 @@ export interface components {
             /** Version */
             version: number;
             /** Visibility Grants */
-            visibility_grants?: components["schemas"]["VisibilityGrantResponse"][];
+            visibility_grants: components["schemas"]["VisibilityGrantResponse"][];
             /**
              * Visibility Scope
-             * @default company
              * @enum {string}
              */
-            visibility_scope?: "company" | "department";
+            visibility_scope: "company" | "department";
         };
         /** SubagentTaskResponse */
         SubagentTaskResponse: {
@@ -4255,13 +4188,13 @@ export interface components {
              */
             created_at: string;
             /** Finished At */
-            finished_at?: string | null;
+            finished_at: string | null;
             /** First Started At */
-            first_started_at?: string | null;
+            first_started_at: string | null;
             /** Parent Tool Call Id */
             parent_tool_call_id: string;
             /** Safe Error Code */
-            safe_error_code?: string | null;
+            safe_error_code: string | null;
             /** Status */
             status: string;
             /** Sub Run Id */
@@ -4269,19 +4202,13 @@ export interface components {
             /** Subagent Name */
             subagent_name: string;
             /** Subagent Profile Id */
-            subagent_profile_id?: string | null;
+            subagent_profile_id: string | null;
             /** Subagent Slug */
             subagent_slug: string;
-            /**
-             * Task Index
-             * @default 1
-             */
-            task_index?: number;
-            /**
-             * Task Summary
-             * @default
-             */
-            task_summary?: string;
+            /** Task Index */
+            task_index: number;
+            /** Task Summary */
+            task_summary: string;
         };
         /**
          * SubagentUpdateRequest
@@ -4474,12 +4401,10 @@ export interface components {
          * @description 工具结果内容块。
          */
         ToolResultPartResponse: {
-            /** Artifact Id */
-            artifact_id?: string | null;
             /** Artifacts */
-            artifacts?: components["schemas"]["ArtifactFileRefResponse"][];
+            artifacts: components["schemas"]["ArtifactFileRefResponse"][];
             /** Output */
-            output?: string | null;
+            output: string | null;
             /** Status */
             status: string;
             /** Tool Call Id */
@@ -4616,29 +4541,28 @@ export interface components {
          * @description 可安全返回给当前用户的账号与组织身份字段。
          */
         UserResponse: {
-            /** @default local */
-            auth_provider?: components["schemas"]["AuthProvider"];
+            auth_provider: components["schemas"]["AuthProvider"];
             /** Avatar Url */
-            avatar_url?: string | null;
+            avatar_url: string | null;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
             /** Departments */
-            departments?: components["schemas"]["UserDepartmentItem"][];
+            departments: components["schemas"]["UserDepartmentItem"][];
             /** Display Name */
             display_name: string | null;
             /** Email */
             email: string | null;
             /** Employee No */
-            employee_no?: string | null;
+            employee_no: string | null;
             /** Id */
             id: string;
             /** Job Title */
-            job_title?: string | null;
+            job_title: string | null;
             /** Managed Department Ids */
-            managed_department_ids?: string[];
+            managed_department_ids: string[];
             role: components["schemas"]["UserRole"];
         };
         /**

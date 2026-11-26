@@ -73,7 +73,7 @@ function formFromSkill(
   return {
     currentVersionId: skill.current_version_id ?? "",
     enabled: skill.enabled,
-    featured: Boolean(skill.featured),
+    featured: skill.featured,
     scriptRequiresApproval: skill.script_requires_approval,
     starterPrompt: skill.starter_prompt ?? "",
     visibilityGrants:

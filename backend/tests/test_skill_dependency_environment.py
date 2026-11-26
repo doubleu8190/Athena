@@ -16,10 +16,12 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 
 import app.skill.dependency as dependency_module
 from app.skill.dependency import DependencyChecker
 from app.skill.service import SkillService
+from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.skill import (
     DependencyCheck,
     DependencyCheckStatus,
@@ -29,6 +31,23 @@ from domain.skill import (
 from domain.skill.model import DependencyCheckItem
 
 CHECKED_AT = datetime(2026, 11, 12, tzinfo=UTC)
+
+
+def _member_actor() -> AuthContext:
+    """构造测试用普通成员认证上下文，用于调用统一三层用户目录接口。"""
+    return AuthContext(
+        user=User(
+            id="usr_member",
+            email="member@example.test",
+            password_hash="hash",
+            display_name="Member",
+            status=UserStatus.ACTIVE,
+            created_at=CHECKED_AT,
+            updated_at=CHECKED_AT,
+            role=UserRole.MEMBER,
+        ),
+        session_id="auth_member",
+    )
 
 
 class _ManualMonotonicClock:
@@ -101,14 +120,14 @@ class _DirectoryRepository:
         self.versions = {cast(str, version.id): version for version in versions}
         self.dependency_writes: list[DependencyCheck] = []
 
-    async def get_public_directory(self) -> tuple[Skill, ...]:
-        """返回全部候选，版本可用性由服务逐项读取。"""
-        return self.skills
-
-    async def get_public_directory_entries(
+    async def get_readable_user_directory_entries(
         self,
+        owner_id: str,
+        *,
+        snapshot: object = None,
     ) -> tuple[tuple[Skill, SimpleNamespace], ...]:
         """返回候选与对应当前版本二元组，匹配 SkillRepository 正式契约。"""
+        del owner_id, snapshot
         return tuple(
             (skill, self.versions[skill.current_version_id])
             for skill in self.skills
@@ -398,11 +417,13 @@ def test_public_directory_reuses_probe_timestamp_without_repeated_db_writes(
         cast(Any, object()),
         dependency_checker=checker,
         clock=lambda: CHECKED_AT,
+        access_policy=make_test_access_policy(),
     )
+    actor = _member_actor()
 
     async def scenario() -> tuple[tuple[Skill, ...], tuple[Skill, ...]]:
-        first = await service.public_directory()
-        second = await service.public_directory()
+        first = await service.user_directory(actor)
+        second = await service.user_directory(actor)
         return first, second
 
     first, second = asyncio.run(scenario())
@@ -465,12 +486,14 @@ def test_public_directory_restores_previously_unsatisfied_skill_after_probe_reco
         cast(Any, object()),
         dependency_checker=checker,
         clock=lambda: CHECKED_AT,
+        access_policy=make_test_access_policy(),
     )
+    actor = _member_actor()
 
     async def scenario() -> tuple[tuple[Skill, ...], tuple[Skill, ...]]:
-        first = await service.public_directory()
+        first = await service.user_directory(actor)
         clock.advance(61)
-        second = await service.public_directory()
+        second = await service.user_directory(actor)
         return first, second
 
     first, second = asyncio.run(scenario())
@@ -692,16 +715,13 @@ def test_directory_uses_joined_entries_and_skips_noop_writes_after_ttl(
             super().__init__((skill,), (version,))
             self.get_version_calls = 0
 
-        async def get_public_directory_entries(
-            self,
-        ) -> tuple[tuple[Skill, SimpleNamespace], ...]:
-            return ((skill, version),)
-
-        async def get_user_directory_entries(
+        async def get_readable_user_directory_entries(
             self,
             owner_id: str,
+            *,
+            snapshot: object = None,
         ) -> tuple[tuple[Skill, SimpleNamespace], ...]:
-            del owner_id
+            del owner_id, snapshot
             return ((skill, version),)
 
         async def get_version(self, version_id: str) -> SimpleNamespace | None:
@@ -720,19 +740,20 @@ def test_directory_uses_joined_entries_and_skips_noop_writes_after_ttl(
         cast(Any, object()),
         dependency_checker=checker,
         clock=lambda: wall_clock_value[0],
+        access_policy=make_test_access_policy(),
     )
-    actor = SimpleNamespace(user=SimpleNamespace(id="usr_member"))
+    actor = _member_actor()
 
     async def scenario() -> tuple[tuple[Skill, ...], tuple[Skill, ...], tuple[Skill, ...]]:
         # 首次读取与 TTL 过期后第二次读取，仅 checked_at 推进、依赖语义未变，不应写库。
-        first = await service.public_directory()
+        first = await service.user_directory(actor)
         clock.advance(61)
         wall_clock_value[0] = CHECKED_AT + timedelta(minutes=5)
-        second = await service.user_directory(cast(Any, actor))
+        second = await service.user_directory(actor)
         # 第三次探测版本降级为 1.0，语义变为 UNSATISFIED；GET 仅实时过滤，不触发写库。
         clock.advance(61)
         wall_clock_value[0] = CHECKED_AT + timedelta(minutes=10)
-        third = await service.public_directory()
+        third = await service.user_directory(actor)
         return first, second, third
 
     first, second, third = asyncio.run(scenario())
@@ -784,6 +805,7 @@ def test_recheck_version_dependencies_skips_write_when_unchanged_and_updates_on_
         cast(Any, object()),
         dependency_checker=checker,
         clock=lambda: wall_clock[0],
+        access_policy=make_test_access_policy(),
     )
 
     async def scenario() -> None:
@@ -814,7 +836,7 @@ def test_prepare_call_uses_cached_dependency_probe_and_avoids_duplicate_probe_be
 ) -> None:
     """prepare_call 复用缓存探针、execute 执行实时探针并刷新快照，避免单次调用双倍探针。"""
     from app.tool.runtime import SKILL_EXECUTE_DEFINITION, RunToolRuntimeService
-    from domain.run.model import Run, RunStatus, RunUsage
+    from domain.run.model import Run, RunModelSnapshot, RunStatus, RunUsage
     from domain.skill import (
         PackageResource,
         RunSkillEntry,
@@ -898,6 +920,7 @@ def test_prepare_call_uses_cached_dependency_probe_and_avoids_duplicate_probe_be
         cast(Any, object()),
         dependency_checker=checker,
         clock=lambda: wall_clock[0],
+        access_policy=make_test_access_policy(),
     )
 
     class _FakeFiles:
@@ -919,6 +942,7 @@ def test_prepare_call_uses_cached_dependency_probe_and_avoids_duplicate_probe_be
         project_knowledge=None,
         skills=service,
         session_files=cast(Any, _FakeFiles()),
+        access_policy=make_test_access_policy(),
     )
     snapshot = RunSkillSnapshot(
         skills=(
@@ -944,6 +968,22 @@ def test_prepare_call_uses_cached_dependency_probe_and_avoids_duplicate_probe_be
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="mpv_1",
+        model_snapshot=RunModelSnapshot(
+            id="mpv_1",
+            name="Skill Test Model",
+            protocol="chat_completions",
+            base_url="https://api.example.com/v1",
+            model="gpt-4o-mini",
+            context_window_tokens=128000,
+            tokenizer_encoding="cl100k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=4096,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=120,
+            max_concurrency=4,
+        ),
         main_prompt_version_id="prompt_main",
         compression_prompt_version_id="prompt_comp",
         prompt_template_version="run-v2",

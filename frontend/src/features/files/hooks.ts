@@ -21,10 +21,8 @@ function isSessionFileMetadataEqual(
 ): boolean {
   return (
     current.extraction_status === next.extraction_status &&
-    (current.extracted_text_bytes ?? null) ===
-      (next.extracted_text_bytes ?? null) &&
-    (current.extraction_error_code ?? null) ===
-      (next.extraction_error_code ?? null) &&
+    current.extracted_text_bytes === next.extracted_text_bytes &&
+    current.extraction_error_code === next.extraction_error_code &&
     current.filename === next.filename &&
     current.label === next.label &&
     current.mime_type === next.mime_type &&

@@ -76,8 +76,8 @@ async def _run_consumers(worker: KnowledgeWorker, concurrency: int) -> None:
 
 
 def _log_level() -> str:
-    """统一日志级别解析：优先 ATHENA_LOG_LEVEL，其次兼容 LOG_LEVEL，默认 INFO。"""
-    return LoggingSettings.from_environment(allow_legacy_log_level=True).level
+    """统一日志级别解析：仅读取 ATHENA_LOG_LEVEL，默认 INFO。"""
+    return LoggingSettings.from_environment().level
 
 
 async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:

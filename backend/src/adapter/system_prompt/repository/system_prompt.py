@@ -86,8 +86,7 @@ class SqlAlchemySystemPromptRepository(SystemPromptRepository):
                 .join(
                     SystemPromptSettingModel,
                     and_(
-                        SystemPromptSettingModel.current_version_id
-                        == SystemPromptVersionModel.id,
+                        SystemPromptSettingModel.current_version_id == SystemPromptVersionModel.id,
                         SystemPromptSettingModel.kind == SystemPromptVersionModel.kind,
                     ),
                 )
@@ -300,5 +299,6 @@ class SqlAlchemySystemPromptRepository(SystemPromptRepository):
         setting.current_version_id = row.id
         await session.flush()
         return system_prompt_version_to_domain(row)
+
 
 __all__ = ["SqlAlchemySystemPromptRepository", "current_system_prompts"]

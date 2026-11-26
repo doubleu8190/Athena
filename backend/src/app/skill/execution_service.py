@@ -84,9 +84,7 @@ class SkillExecutionService:
         self._repository = repository
         self._object_store = object_store
         self._runner = runner
-        self._temp_root = temp_root or (
-            Path(tempfile.gettempdir()) / "athena-skill-executions"
-        )
+        self._temp_root = temp_root or (Path(tempfile.gettempdir()) / "athena-skill-executions")
         self._package_cache = package_cache
         self._worker_instance_id = worker_instance_id or str(uuid4())
         self._active_working_directories: set[Path] = set()
@@ -110,13 +108,11 @@ class SkillExecutionService:
             return _error("skill_parameters_invalid", "脚本调用参数结构不合法。")
         skill_id, script_path, parameters, input_file_ids = parsed
         try:
-            entry, version, script, dependency_check = (
-                await self._skills.prepare_script_target(
-                    snapshot,
-                    skill_id=skill_id,
-                    script_path=script_path,
-                    parameters=parameters,
-                )
+            entry, version, script, dependency_check = await self._skills.prepare_script_target(
+                snapshot,
+                skill_id=skill_id,
+                script_path=script_path,
+                parameters=parameters,
             )
             if version.object_key is None:
                 # 纯 Markdown 版本不含对象存储 ZIP 包，显式拒绝进入脚本解包执行链路。
@@ -192,8 +188,7 @@ class SkillExecutionService:
                 )
                 return _unknown_existing_start_result(record, self._clock())
             logger.warning(
-                "skill_execution_start_recovered call_id=%s execution_id=%s "
-                "exception_type=%s",
+                "skill_execution_start_recovered call_id=%s execution_id=%s exception_type=%s",
                 call_id,
                 record.id,
                 type(start_error).__name__,
@@ -297,8 +292,7 @@ class SkillExecutionService:
             raise
         except Exception as error:
             logger.warning(
-                "skill_execution_persistence_failed execution_id=%s "
-                "exception_type=%s safe_code=%s",
+                "skill_execution_persistence_failed execution_id=%s exception_type=%s safe_code=%s",
                 record.id,
                 type(error).__name__,
                 public_skill_error_code(
@@ -313,9 +307,10 @@ class SkillExecutionService:
             if runner_owns_working_directory:
                 local_cleanup_error = None
             else:
-                local_cleanup_error, cleanup_cancelled = (
-                    await self._remove_unentered_directory_async(target_directory)
-                )
+                (
+                    local_cleanup_error,
+                    cleanup_cancelled,
+                ) = await self._remove_unentered_directory_async(target_directory)
                 if cleanup_cancelled is not None:
                     await self._finish_cancelled_execution(
                         record,
@@ -380,11 +375,7 @@ class SkillExecutionService:
                 else ToolOutcomeStatus.ERROR
             )
         )
-        error_code = (
-            None
-            if script_result.error_code is None
-            else script_result.error_code.value
-        )
+        error_code = None if script_result.error_code is None else script_result.error_code.value
         completion = SkillExecutionCompletion(
             execution_id=record.id,
             status=status,

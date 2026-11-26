@@ -103,30 +103,6 @@ class SqlAlchemyProjectRepository(ProjectRepository):
             ).all()
         return ProjectPage(items=tuple(project_to_domain(row) for row in rows), total=total)
 
-    async def rename(
-        self,
-        owner_id: str,
-        project_id: str,
-        name: str,
-        updated_at: datetime,
-    ) -> Project | None:
-        """原子修改未删除项目名称。"""
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = (
-                    await session.execute(
-                        update(ProjectModel)
-                        .where(
-                            ProjectModel.id == project_id,
-                            ProjectModel.owner_id == owner_id,
-                            ProjectModel.deleted_time.is_(None),
-                        )
-                        .values(name=name, updated_at=updated_at)
-                        .returning(ProjectModel)
-                    )
-                ).scalar_one_or_none()
-        return None if row is None else project_to_domain(row)
-
     async def update(
         self,
         owner_id: str,

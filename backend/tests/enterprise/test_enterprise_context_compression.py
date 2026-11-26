@@ -43,6 +43,7 @@ from domain.run.model import (
     RunCompressionStartedPayload,
     RunEvent,
     RunLease,
+    RunModelSnapshot,
     RunStatus,
     RunUsage,
 )
@@ -116,7 +117,6 @@ def _make_runtime_profile(
             protocol="chat_completions",
             base_url="https://llm.enterprise.test/v1",
             model=profile_id,
-            has_api_key=True,
             context_window_tokens=window,
             tokenizer_encoding=encoding,
             supports_stream=True,
@@ -128,6 +128,7 @@ def _make_runtime_profile(
             temperature=None,
             enabled=True,
             created_at=now,
+            updated_at=now,
         ),
         api_key="test-key",
     )
@@ -153,6 +154,22 @@ def _make_run(
         context_cutoff_sequence=cutoff_sequence,
         retry_of_run_id=None,
         model_config_version_id=main_profile_id,
+        model_snapshot=RunModelSnapshot(
+            id=main_profile_id,
+            name=main_profile_id,
+            protocol="chat_completions",
+            base_url="https://llm.enterprise.test/v1",
+            model=main_profile_id,
+            context_window_tokens=16384,
+            tokenizer_encoding="o200k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=512,
+            request_timeout_seconds=15,
+            execution_timeout_seconds=60,
+            max_concurrency=2,
+        ),
         main_prompt_version_id="prompt_main_v2",
         compression_prompt_version_id="prompt_cmp_v2",
         prompt_template_version="run-v2",
@@ -248,7 +265,6 @@ class _FakeCompressionRunRepository:
             operation_id=command.operation_id,
             policy_version_id=command.policy_version_id,
             compression_model_version_id=command.compression_model_version_id,
-            prompt_version=command.prompt_version,
             compression_prompt_version_id="prompt_cmp_v2",
             created_at=command.created_at,
         )
@@ -311,7 +327,6 @@ def test_12turn_enterprise_dialogue_triggers_compression_with_layered_project_an
         recent_token_cap=1200,
         summary_ratio=0.15,
         summary_token_cap=600,
-        prompt_template_version="context-summary-v1",
         created_at=base_time,
     )
     compact_summary = (
@@ -477,7 +492,6 @@ def test_compression_provider_failure_gracefully_falls_back_without_crashing() -
         recent_token_cap=1000,
         summary_ratio=0.15,
         summary_token_cap=500,
-        prompt_template_version="context-summary-v1",
         created_at=now,
     )
     run, lease = _make_run(

@@ -80,6 +80,7 @@ from domain.run.model import (
     Run,
     RunDetails,
     RunEvent,
+    RunModelSnapshot,
     RunQueuedPayload,
     RunStatus,
     RunUsage,
@@ -966,6 +967,7 @@ def test_access_policy_and_manageable_base_session_counts() -> None:
             kb_service = KnowledgeService(
                 cast(KnowledgeRepositoryPort, kb_repo),
                 _SimpleTokenizer(),
+                profile_id="bge-m3-default",
                 access_policy=policy,
             )
 
@@ -1049,6 +1051,7 @@ def test_high_frequency_list_endpoints_single_session_pushdown() -> None:
             kb_service = KnowledgeService(
                 cast(KnowledgeRepositoryPort, KnowledgeRepository(cast(Any, counting_factory))),
                 _SimpleTokenizer(),
+                profile_id="bge-m3-default",
                 access_policy=access_policy,
             )
             skill_service = SkillService(
@@ -1170,6 +1173,7 @@ def test_tool_runtime_build_snapshot_reuses_snapshot_and_fixes_mcp_limit_201() -
             kb_service = KnowledgeService(
                 cast(KnowledgeRepositoryPort, KnowledgeRepository(cast(Any, counting_factory))),
                 _SimpleTokenizer(),
+                profile_id="bge-m3-default",
                 access_policy=access_policy,
             )
             runtime = RunToolRuntimeService(
@@ -1229,7 +1233,7 @@ def test_tool_runtime_build_snapshot_reuses_snapshot_and_fixes_mcp_limit_201() -
 
 
 def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation() -> None:
-    """验证 skip_access_check、跳过冗余 validate_search_scope，以及检索中途调岗仍实时撤权。"""
+    """验证 skip_access_check、三层权限校验单次执行，以及检索中途调岗仍实时撤权。"""
 
     async def _scenario() -> None:
         engine, raw_factory = await _create_pg_db()
@@ -1251,12 +1255,7 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
 
             class _SpyKnowledgeRepo:
                 def __init__(self) -> None:
-                    self.validate_calls = 0
                     self.on_search: Any = None
-
-                async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None:
-                    del owner_id, base_ids
-                    self.validate_calls += 1
 
                 async def search_keyword(
                     self,
@@ -1319,16 +1318,15 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
             kb_service = KnowledgeService(
                 cast(KnowledgeRepositoryPort, spy_repo),
                 _SimpleTokenizer(),
+                profile_id="bge-m3-default",
                 access_policy=access_policy,
             )
 
-            # 1) HTTP search（access_policy 非空且 skip_access_check=False）：
-            #    走 1 次 filter_readable_ids，跳过冗余 validate_search_scope。
+            # 1) HTTP search（skip_access_check=False）：走 1 次统一三层权限 filter_readable_ids。
             counting_factory.reset()
             res = await kb_service.search("u_fin", ["kb_dept_fin_sub"], "报销")
             assert len(res.hits) == 1
             assert counting_factory.count == 1
-            assert spy_repo.validate_calls == 0
 
             # 2) skip_access_check=True：不再触发内部 filter_readable_ids（0 次权限 Session）
             counting_factory.reset()
@@ -1337,18 +1335,8 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
             )
             assert len(res_skip.hits) == 1
             assert counting_factory.count == 0
-            assert spy_repo.validate_calls == 0
 
-            # 3) access_policy=None 旧路径：仍保留 validate_search_scope 调用
-            legacy_kb = KnowledgeService(
-                cast(KnowledgeRepositoryPort, spy_repo),
-                _SimpleTokenizer(),
-                access_policy=None,
-            )
-            await legacy_kb.search("u_fin", ["kb_dept_fin_sub"], "报销")
-            assert spy_repo.validate_calls == 1
-
-            # 4) Agent knowledge_search 实时前置鉴权契约：
+            # 3) Agent knowledge_search 实时前置鉴权契约：
             #    调岗前仅执行 1 次 before_scope 权限查询（无 after_scope 二次重查），
             #    调岗至 dept_rd 后下一次调用在执行前即被实时拦截并拒绝检索。
             runtime = RunToolRuntimeService(
@@ -1522,6 +1510,7 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
                             parts=(TextPart(text="hello"),),
                             reply_to_message_id=None,
                             run_id="run_bad_kb",
+                            context_turn_id="msg_bad_kb",
                             client_message_id=None,
                             created_at=NOW,
                             completed_at=NOW,
@@ -1552,6 +1541,7 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
                             parts=(TextPart(text="hello"),),
                             reply_to_message_id=None,
                             run_id="run_bad_sk",
+                            context_turn_id="msg_bad_sk",
                             client_message_id=None,
                             created_at=NOW,
                             completed_at=NOW,
@@ -1582,6 +1572,7 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
                         parts=(TextPart(text="hello"),),
                         reply_to_message_id=None,
                         run_id="run_ok_1",
+                        context_turn_id="msg_ok_1",
                         client_message_id=None,
                         created_at=NOW,
                         completed_at=NOW,
@@ -1782,6 +1773,9 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             protocol="chat_completions",
                             base_url="https://llm.test/v1",
                             model="gpt-4o",
+                            api_key_ciphertext=b"ciphertext",
+                            api_key_nonce=b"0123456789ab",
+                            api_key_key_version=1,
                             context_window_tokens=16384,
                             tokenizer_encoding="cl100k_base",
                             supports_stream=True,
@@ -1793,6 +1787,7 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             max_concurrency=4,
                             enabled=True,
                             created_at=NOW,
+                            updated_at=NOW,
                         ),
                         SystemPromptVersionModel(
                             id="sp_main",
@@ -1851,6 +1846,8 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             status=MessageStatus.COMPLETED.value,
                             sequence=1,
                             parts=[{"type": "text", "text": "单任务"}],
+                            run_id="run_plain",
+                            context_turn_id="msg_trig_plain",
                             created_at=NOW,
                             completed_at=NOW,
                             metadata_json={},
@@ -1862,6 +1859,8 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             status=MessageStatus.COMPLETED.value,
                             sequence=2,
                             parts=[{"type": "text", "text": "主 Run 请确认参数？"}],
+                            run_id="run_plain",
+                            context_turn_id="msg_trig_plain",
                             created_at=NOW,
                             completed_at=NOW,
                             metadata_json={},
@@ -1873,6 +1872,8 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             status=MessageStatus.COMPLETED.value,
                             sequence=1,
                             parts=[{"type": "text", "text": "主任务"}],
+                            run_id="run_parent",
+                            context_turn_id="msg_trig",
                             created_at=NOW,
                             completed_at=NOW,
                             metadata_json={},
@@ -1884,6 +1885,8 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             status=MessageStatus.COMPLETED.value,
                             sequence=3,
                             parts=[{"type": "text", "text": "子任务需要哪一年度？"}],
+                            run_id="run_sub_input",
+                            context_turn_id="msg_trig",
                             created_at=NOW,
                             completed_at=NOW,
                             metadata_json={},
@@ -1895,6 +1898,8 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             status=MessageStatus.COMPLETED.value,
                             sequence=1,
                             parts=[{"type": "text", "text": "已删会话触发消息"}],
+                            run_id="run_hidden",
+                            context_turn_id="msg_trig_deleted",
                             created_at=NOW,
                             completed_at=NOW,
                             metadata_json={},
@@ -1925,6 +1930,26 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id="prof_1",
+                        model_snapshot_json={
+                            "id": "prof_1",
+                            "name": "默认模型",
+                            "protocol": "chat_completions",
+                            "base_url": "https://llm.test/v1",
+                            "model": "gpt-4o",
+                            "context_window_tokens": 16384,
+                            "tokenizer_encoding": "cl100k_base",
+                            "supports_stream": True,
+                            "supports_tools": True,
+                            "supports_parallel_tool_calls": True,
+                            "max_output_tokens": 1024,
+                            "request_timeout_seconds": 60,
+                            "execution_timeout_seconds": 300,
+                            "max_concurrency": 4,
+                            "temperature": None,
+                            "scenario_label": None,
+                            "supports_vision": False,
+                            "version": 1,
+                        },
                         main_prompt_version_id="sp_main",
                         compression_prompt_version_id="sp_comp",
                         prompt_template_version="run-v2",
@@ -2185,6 +2210,22 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id="prof_1",
+                        model_snapshot=RunModelSnapshot(
+                            id="prof_1",
+                            name="默认模型",
+                            protocol="chat_completions",
+                            base_url="https://llm.test/v1",
+                            model="gpt-4o",
+                            context_window_tokens=16384,
+                            tokenizer_encoding="cl100k_base",
+                            supports_stream=True,
+                            supports_tools=True,
+                            supports_parallel_tool_calls=True,
+                            max_output_tokens=1024,
+                            request_timeout_seconds=60,
+                            execution_timeout_seconds=300,
+                            max_concurrency=4,
+                        ),
                         main_prompt_version_id="sp_main",
                         compression_prompt_version_id="sp_comp",
                         prompt_template_version="run-v2",

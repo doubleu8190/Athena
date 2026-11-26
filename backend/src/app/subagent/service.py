@@ -53,7 +53,7 @@ class SubagentService:
         repository: SubagentRepository,
         auth_reader: CurrentSessionReader,
         *,
-        access_policy: AccessPolicyService | None = None,
+        access_policy: AccessPolicyService,
         model_checker: SubagentModelChecker | None = None,
         tool_catalog: SubagentToolCatalog | None = None,
         id_factory: Callable[[str], str] = new_id,
@@ -353,12 +353,6 @@ class SubagentService:
         preserve_existing_grants_when_none: bool = True,
     ) -> tuple[VisibilityScope, str | None, tuple[VisibilityGrantInput, ...] | None]:
         """校验 Subagent 可见范围、归属部门与授权清单，并按需补齐默认部门授权。"""
-        if self._access_policy is None:
-            if visibility_scope is not VisibilityScope.COMPANY or owner_department_id is not None:
-                raise SubagentValidationError("subagent_visibility_requires_access_policy")
-            if visibility_grants:
-                raise SubagentValidationError("visibility_grants_not_allowed")
-            return VisibilityScope.COMPANY, None, ()
         existing_target = (
             None
             if existing is None

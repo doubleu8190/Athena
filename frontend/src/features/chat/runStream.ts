@@ -339,17 +339,13 @@ export function projectRunStatus({
 }
 
 /**
- * 将携带完整结构化 parts 的快照消息转换为与 /messages 接口同构的 ConversationMessage。
- * 若缺少 parts（旧 mock 或精简快照），返回 null 交由单次有界兜底补拉。
+ * 将后端自包含 SSE 快照消息转换为与 /messages 接口同构的 ConversationMessage。
+ * 后端 SSE 使用 model_dump_json(exclude_none=True)，值为 null 的可空字段会在 JSON 中省略，此处统一映射为 null。
  */
 export function toConversationMessageFromSnapshot(
   message: RunStreamMessage,
-  fallbackSessionId: string,
-  fallbackRunId: string | null,
-): ConversationMessage | null {
-  if (!Array.isArray(message.parts)) {
-    return null;
-  }
+  fallbackRunId: string,
+): ConversationMessage {
   return {
     completed_at:
       message.completed_at !== undefined ? message.completed_at : null,
@@ -361,42 +357,45 @@ export function toConversationMessageFromSnapshot(
         ? message.reply_to_message_id
         : null,
     role: message.role,
-    run_id: message.run_id !== undefined ? message.run_id : fallbackRunId,
+    run_id: message.run_id ?? fallbackRunId,
     sequence: message.sequence,
-    session_id: message.session_id ?? fallbackSessionId,
+    session_id: message.session_id,
     status: message.status,
   };
 }
 
 export interface TerminalSnapshotResolution {
-  /** 快照中携带完整 parts、可直接并入消息缓存的全部消息。 */
+  /** 快照中可直接并入消息缓存的全部消息。 */
   messages: ConversationMessage[];
   /** 命中的权威终态消息（completed 最终回答或 failed 安全停止报告）。 */
   targetMessage: ConversationMessage;
 }
 
 /**
- * 校验终态 SSE 快照是否自包含完整目标消息（含 parts），命中后可直接落入 TanStack Query
- * 缓存并清理 transientText，实现零额外 /events 与 /messages HTTP 往返。
+ * 校验终态 SSE 快照是否自包含完整目标消息，命中后可直接落入 TanStack Query
+ * 缓存并清理 transientText，实现零额外 /events 与 /messages HTTP 往返；
+ * 若因 >512KB 快照裁剪导致目标消息未包含，返回 null 交由 fetchTerminalMessagesFallback 单次兜底。
  */
 export function resolveSelfContainedTerminalSnapshot(
   snapshot: RunSnapshotPayload,
-  sessionId: string,
   runId: string,
   triggerMessageId: string | null = null,
 ): TerminalSnapshotResolution | null {
-  if (snapshot.status !== "completed" && snapshot.status !== "failed") {
+  if (
+    (snapshot.status !== "completed" && snapshot.status !== "failed") ||
+    snapshot.has_unparseable_messages
+  ) {
+    // 终态快照内若存在无法解析的消息（如未知 part 类型），禁止内联收敛，
+    // 交由单次有界 fetchTerminalMessagesFallback 拉取完整权威消息，避免漏消息或误匹配早先澄清助手消息。
     return null;
   }
 
   const convertedMessages: ConversationMessage[] = [];
   const convertedById = new Map<string, ConversationMessage>();
   for (const raw of snapshot.messages) {
-    const converted = toConversationMessageFromSnapshot(raw, sessionId, runId);
-    if (converted) {
-      convertedMessages.push(converted);
-      convertedById.set(converted.id, converted);
-    }
+    const converted = toConversationMessageFromSnapshot(raw, runId);
+    convertedMessages.push(converted);
+    convertedById.set(converted.id, converted);
   }
   if (convertedMessages.length === 0) {
     return null;
@@ -416,18 +415,17 @@ export function resolveSelfContainedTerminalSnapshot(
       ) {
         return { messages: convertedMessages, targetMessage: matched };
       }
-      // 已明确给出目标 ID 但快照未包含（如超 512KB 被裁剪或缺 parts），不得误用旧交付消息。
+      // 已明确给出目标 ID 但快照未包含（如超 512KB 被裁剪），不得误用旧交付消息。
       return null;
     }
 
-    // 未显式携带 assistant_message_id 时，仅接受显式归属本 Run 且携带完整 parts 的最终助手消息。
+    // 未显式携带 assistant_message_id 时，仅接受显式归属本 Run 的最终已完成助手消息。
     for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
       const raw = snapshot.messages[index];
       if (
         raw.role === "assistant" &&
         raw.run_id === runId &&
-        raw.status === "completed" &&
-        Array.isArray(raw.parts)
+        raw.status === "completed"
       ) {
         const matched = convertedById.get(raw.id);
         if (matched) {
@@ -520,7 +518,7 @@ export function hasTerminalTargetMessage(
 
 /**
  * 终态单次有界兜底刷新：
- * 仅在极端 >512KB 裁剪、旧版缺 parts 快照或页面刷新无 SSE 场景下调用，
+ * 仅在极端 >512KB 快照裁剪、无终态 snapshot 断流或页面刷新无 SSE 场景下调用，
  * 固定发起 1 次 GET /sessions/{id}/messages?limit=20，绝不执行多页 while(true) 翻页或 /events 扫描。
  */
 export async function fetchTerminalMessagesFallback(

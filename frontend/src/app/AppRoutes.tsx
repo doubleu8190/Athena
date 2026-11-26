@@ -32,11 +32,6 @@ const ProjectsPage = lazy(() =>
     default: m.ProjectsPage,
   })),
 );
-const LegacyProjectTabRedirect = lazy(() =>
-  import("../features/projects/ProjectWorkspacePage").then((m) => ({
-    default: m.LegacyProjectTabRedirect,
-  })),
-);
 const ProjectWorkspacePage = lazy(() =>
   import("../features/projects/ProjectWorkspacePage").then((m) => ({
     default: m.ProjectWorkspacePage,
@@ -131,8 +126,6 @@ export function AppRoutes() {
     <Suspense fallback={<RouteLoadingFallback />}>
       <Routes>
         <Route element={<Navigate replace to="/chat" />} path="/" />
-        {/* 开放自助注册已在一期下线，历史 /register 书签统一重定向至登录页。 */}
-        <Route element={<Navigate replace to="/login" />} path="/register" />
 
         <Route element={<PublicOnlyRoute />}>
           <Route element={<LoginPage />} path="/login" />
@@ -151,11 +144,6 @@ export function AppRoutes() {
               <Route
                 element={<ProjectWorkspacePage />}
                 path="/projects/:projectId"
-              />
-              {/* 兼容历史 4-Tab 链接，重定向至单页工作文件夹并保留 ?page= 等查询参数。 */}
-              <Route
-                element={<LegacyProjectTabRedirect />}
-                path="/projects/:projectId/:tab"
               />
               <Route element={<KnowledgePage />} path="/knowledge" />
               <Route element={<PersonalSkillsPage />} path="/skills" />

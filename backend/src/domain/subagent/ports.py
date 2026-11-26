@@ -47,10 +47,6 @@ class SubagentRepository(Protocol):
         """分页读取未软删除的 Subagent 列表，支持按 enabled 过滤。"""
         ...
 
-    async def list_enabled(self) -> tuple[SubagentProfile, ...]:
-        """读取全部未软删除且已启用的 Subagent 配置。"""
-        ...
-
     async def list_readable_enabled(
         self,
         snapshot: UserAccessSnapshot | None,

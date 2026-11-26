@@ -5,14 +5,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access.repository import (
     build_readable_resource_clause,
     delete_resource_grants_in_session,
-    filter_readable_targets_in_session,
     load_grants_map_in_session,
     load_user_access_snapshot_in_session,
     sync_resource_grants_in_session,
@@ -26,7 +25,6 @@ from adapter.skill.converter import (
 )
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
 from domain.access import (
-    ResourceAccessTarget,
     ResourceType,
     UserAccessSnapshot,
     VisibilityGrantInput,
@@ -64,51 +62,25 @@ async def build_run_skill_snapshot(
     session: AsyncSession,
     selected_skill_ids: tuple[str, ...],
     *,
-    owner_id: str,
+    snapshot: UserAccessSnapshot,
     fallback_selected_skill_ids: tuple[str, ...] = (),
-    snapshot: UserAccessSnapshot | None = None,
 ) -> RunSkillSnapshot:
-    """在当前 Run 事务中按统一三层权限引擎实时过滤并固定一致 Skill 目录。
+    """在当前 Run 事务中按统一三层权限快照下推过滤并固定一致 Skill 目录。
 
     - selected_skill_ids：用户显式指定，任一不可用/无权均抛出 SkillConflictError；
     - fallback_selected_skill_ids：仅在用户未显式指定时生效（如项目默认技能），
       只保留当前用户仍可读且已启用的子集，失效项自动静默忽略；
-    - snapshot：调用方在同一事务内已加载的用户权限快照，传入时直接下推为单条 SQL EXISTS，
+    - snapshot：调用方在同一事务内加载的用户权限快照，直接下推为单条 SQL EXISTS，
       避免与同事务的显式知识库校验重复查询用户部门树。
     """
     if len(selected_skill_ids) != len(set(selected_skill_ids)):
         raise SkillConflictError("skill_selection_invalid")
 
-    if snapshot is not None:
-        if not snapshot.is_active:
-            readable_rows: list[tuple[SkillModel, SkillVersionModel]] = []
-        else:
-            # 复用同事务快照并将三层可读性直接下推至 SQL WHERE，跳过未授权技能的 JSONB 读取。
-            raw_rows = (
-                await session.execute(
-                    select(SkillModel, SkillVersionModel)
-                    .join(
-                        SkillVersionModel,
-                        SkillVersionModel.id == SkillModel.current_version_id,
-                    )
-                    .where(
-                        SkillModel.enabled.is_(True),
-                        SkillModel.deleted_at.is_(None),
-                        build_readable_resource_clause(
-                            snapshot,
-                            ResourceType.SKILL,
-                            id_col=SkillModel.id,
-                            scope_col=SkillModel.scope,
-                            owner_id_col=SkillModel.owner_id,
-                            owner_department_id_col=SkillModel.owner_department_id,
-                        ),
-                    )
-                    .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
-                )
-            ).all()
-            readable_rows = [(skill_row, version_row) for skill_row, version_row in raw_rows]
+    if not snapshot.is_active:
+        readable_rows: list[tuple[SkillModel, SkillVersionModel]] = []
     else:
-        rows = (
+        # 复用同事务快照并将三层可读性直接下推至 SQL WHERE，跳过未授权技能的 JSONB 读取。
+        raw_rows = (
             await session.execute(
                 select(SkillModel, SkillVersionModel)
                 .join(
@@ -118,36 +90,19 @@ async def build_run_skill_snapshot(
                 .where(
                     SkillModel.enabled.is_(True),
                     SkillModel.deleted_at.is_(None),
-                    or_(
-                        SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
-                        and_(
-                            SkillModel.scope == SkillScope.PERSONAL.value,
-                            SkillModel.owner_id == owner_id,
-                        ),
+                    build_readable_resource_clause(
+                        snapshot,
+                        ResourceType.SKILL,
+                        id_col=SkillModel.id,
+                        scope_col=SkillModel.scope,
+                        owner_id_col=SkillModel.owner_id,
+                        owner_department_id_col=SkillModel.owner_department_id,
                     ),
                 )
                 .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
             )
         ).all()
-
-        # 同一事务快照内通过统一权限引擎实时过滤 department/company/personal 可读技能，
-        # 员工调岗后无法将旧部门技能选入新 Run。
-        targets = tuple(
-            ResourceAccessTarget(
-                resource_type=ResourceType.SKILL,
-                resource_id=skill_row.id,
-                visibility_scope=VisibilityScope(skill_row.scope),
-                owner_id=skill_row.owner_id,
-                owner_department_id=skill_row.owner_department_id,
-            )
-            for skill_row, _ in rows
-        )
-        readable_ids = await filter_readable_targets_in_session(session, owner_id, targets)
-        readable_rows = [
-            (skill_row, version_row)
-            for skill_row, version_row in rows
-            if skill_row.id in readable_ids
-        ]
+        readable_rows = [(skill_row, version_row) for skill_row, version_row in raw_rows]
 
     available: list[tuple[SkillModel, SkillVersion]] = []
     for skill_row, version_row in readable_rows:
@@ -247,34 +202,6 @@ class SqlAlchemySkillRepository(SkillRepository):
             grants_map = await load_grants_map_in_session(session, ResourceType.SKILL, (row[0].id,))
             return skill_to_domain(row[0], row[1], grants=grants_map.get(row[0].id, ()))
 
-    async def get_public_directory_entries(self) -> tuple[tuple[Skill, SkillVersion], ...]:
-        """单次 JOIN 读取全部已启用公司级候选及其当前不可变版本。"""
-        async with self._session_factory() as session:
-            rows = (
-                await session.execute(
-                    select(SkillModel, SkillVersionModel)
-                    .join(
-                        SkillVersionModel,
-                        SkillVersionModel.id == SkillModel.current_version_id,
-                    )
-                    .where(
-                        SkillModel.enabled.is_(True),
-                        SkillModel.scope == SkillScope.COMPANY.value,
-                        SkillModel.deleted_at.is_(None),
-                    )
-                    .order_by(SkillModel.slug, SkillModel.id)
-                )
-            ).all()
-        return tuple(
-            (skill_to_domain(row, version), skill_version_to_domain(version))
-            for row, version in rows
-        )
-
-    async def get_public_directory(self) -> tuple[Skill, ...]:
-        """读取全部已启用公司级候选，依赖状态由服务层实时探测。"""
-        entries = await self.get_public_directory_entries()
-        return tuple(skill for skill, _ in entries)
-
     async def get_readable_user_directory_entries(
         self,
         owner_id: str,
@@ -330,48 +257,6 @@ class SqlAlchemySkillRepository(SkillRepository):
             )
             for row, version in rows
         )
-
-    async def get_user_directory_entries(
-        self, owner_id: str
-    ) -> tuple[tuple[Skill, SkillVersion], ...]:
-        """单次 JOIN 读取公司级、部门级及本人已启用候选及其当前版本，供权限引擎实时过滤。"""
-        async with self._session_factory() as session:
-            rows = (
-                await session.execute(
-                    select(SkillModel, SkillVersionModel)
-                    .join(
-                        SkillVersionModel,
-                        SkillVersionModel.id == SkillModel.current_version_id,
-                    )
-                    .where(
-                        SkillModel.enabled.is_(True),
-                        SkillModel.deleted_at.is_(None),
-                        or_(
-                            SkillModel.scope.in_(_ADMIN_MANAGED_SCOPES),
-                            and_(
-                                SkillModel.scope == SkillScope.PERSONAL.value,
-                                SkillModel.owner_id == owner_id,
-                            ),
-                        ),
-                    )
-                    .order_by(SkillModel.scope, SkillModel.slug, SkillModel.id)
-                )
-            ).all()
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.SKILL, [row.id for row, _ in rows]
-            )
-        return tuple(
-            (
-                skill_to_domain(row, version, grants=grants_map.get(row.id, ())),
-                skill_version_to_domain(version),
-            )
-            for row, version in rows
-        )
-
-    async def get_user_directory(self, owner_id: str) -> tuple[Skill, ...]:
-        """读取公共和本人已启用且未删除的 Skill 候选。"""
-        entries = await self.get_user_directory_entries(owner_id)
-        return tuple(skill for skill, _ in entries)
 
     async def list_personal_skills(self, owner_id: str) -> tuple[Skill, ...]:
         """读取一人未删除的个人 Skill，包含停用项。"""

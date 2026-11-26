@@ -69,6 +69,12 @@ class SkillModel(Base):
             postgresql_where=text("scope = 'personal' AND deleted_at IS NULL"),
         ),
         Index(
+            "ix_skills_public_order",
+            "enabled",
+            "slug",
+            "id",
+        ),
+        Index(
             "ix_skills_owner_scope_enabled",
             "owner_id",
             "scope",

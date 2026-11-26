@@ -55,7 +55,6 @@ import {
 } from "../knowledge/hooks";
 import {
   PROJECT_KNOWLEDGE_LIMIT,
-  knowledgeBaseScope,
   type KnowledgeBase,
 } from "../knowledge/model";
 import { usePublicSkills } from "../skills/hooks";
@@ -179,7 +178,7 @@ function AssociateKnowledgeDialog({
           ) : (
             <ul className="max-h-80 space-y-2 overflow-y-auto pr-1">
               {available.map((base) => {
-                const scope = knowledgeBaseScope(base);
+                const scope = base.visibility_scope;
                 const departmentName = resolveUserDepartmentName(
                   user,
                   base.owner_department_id,
@@ -395,10 +394,7 @@ export function ProjectConfigPanel({ project }: ProjectConfigPanelProps) {
   // ---- 2. 默认挂载技能 ----
   const skillsQuery = usePublicSkills();
   const updateSkillsMutation = useUpdateProjectMutation(project.id);
-  const savedSkillIds = useMemo(
-    () => project.default_skill_ids ?? [],
-    [project.default_skill_ids],
-  );
+  const savedSkillIds = project.default_skill_ids;
   const [draftSkillIds, setDraftSkillIds] = useState<string[]>(savedSkillIds);
   const syncedSkillsRef = useRef<string[]>(savedSkillIds);
   const syncedSkillProjectIdRef = useRef(project.id);
@@ -463,7 +459,7 @@ export function ProjectConfigPanel({ project }: ProjectConfigPanelProps) {
       const updated = await updateSkillsMutation.mutateAsync({
         default_skill_ids: draftSkillIds,
       });
-      const nextSaved = updated.default_skill_ids ?? [];
+      const nextSaved = updated.default_skill_ids;
       setDraftSkillIds(nextSaved);
       syncedSkillsRef.current = nextSaved;
       toast.success("默认挂载技能已保存");
@@ -896,7 +892,7 @@ export function ProjectConfigPanel({ project }: ProjectConfigPanelProps) {
           ) : (
             <ul aria-label="已关联知识库列表" className="space-y-2">
               {projectKnowledge.data.map((base) => {
-                const scope = knowledgeBaseScope(base);
+                const scope = base.visibility_scope;
                 const departmentName = resolveUserDepartmentName(
                   user,
                   base.owner_department_id,

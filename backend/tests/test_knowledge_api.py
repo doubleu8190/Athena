@@ -6,12 +6,15 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from access_support import make_test_access_policy
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from api.auth_middleware import AuthPrecheckMiddleware
 from api.knowledge import build_knowledge_router
 from api.security import get_current_auth
+from app.access import AccessPolicyService
 from app.knowledge.service import KnowledgeInputError, KnowledgeNotFoundError, KnowledgeService
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.knowledge.model import (
@@ -37,12 +40,29 @@ class ApiService:
             datetime(2026, 1, 1, tzinfo=UTC),
         )
 
-    async def create_base(self, owner_id: str, name: str, description: str | None) -> KnowledgeBase:
-        del owner_id, name, description
+    async def create_base(
+        self,
+        owner_id: str,
+        name: str,
+        description: str | None,
+        *,
+        visibility_scope: object = None,
+        owner_department_id: str | None = None,
+        visibility_grants: object = None,
+    ) -> KnowledgeBase:
+        del owner_id, name, description, visibility_scope, owner_department_id, visibility_grants
         return self.base
 
-    async def list_bases(self, owner_id: str, *, page: int, page_size: int) -> list[KnowledgeBase]:
-        del page, page_size
+    async def list_bases(
+        self,
+        owner_id: str,
+        *,
+        page: int,
+        page_size: int,
+        visibility_scope: object = None,
+        owner_department_id: str | None = None,
+    ) -> list[KnowledgeBase]:
+        del page, page_size, visibility_scope, owner_department_id
         return [self.base] if owner_id == self.owner else []
 
     async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase:
@@ -51,9 +71,17 @@ class ApiService:
         return self.base
 
     async def rename_base(
-        self, owner_id: str, base_id: str, name: str | None, description: str | None
+        self,
+        owner_id: str,
+        base_id: str,
+        name: str | None,
+        description: str | None,
+        *,
+        visibility_scope: object = None,
+        owner_department_id: str | None = None,
+        visibility_grants: object = None,
     ) -> KnowledgeBase:
-        del name, description
+        del name, description, visibility_scope, owner_department_id, visibility_grants
         await self.get_base(owner_id, base_id)
         return self.base
 
@@ -456,8 +484,8 @@ def test_replace_file_document_conflicts_return_http_409(
             return tuple(text.split())
 
     class _ConflictRepo:
-        async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None:
-            return KnowledgeBase(base_id, owner_id, "Base", None, now, now)
+        async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None:
+            return KnowledgeBase(base_id, "owner_a", "Base", None, now, now)
 
         async def get_document(
             self, owner_id: str, base_id: str, document_id: str
@@ -477,7 +505,9 @@ def test_replace_file_document_conflicts_return_http_409(
     service = KnowledgeService(
         cast(KnowledgeRepositoryPort, _ConflictRepo()),
         _SimpleTokenizer(),
+        profile_id="bge-m3-default",
         originals=MemoryOriginalStore(),
+        access_policy=make_test_access_policy(),
     )
     app = FastAPI()
     app.include_router(build_knowledge_router(service, LocalDocumentParser()))
@@ -598,7 +628,6 @@ def test_list_documents_endpoint_serializes_latest_version_summary_and_null() ->
                             source_text="old ready body",
                             content_hash="a" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=[],
@@ -614,7 +643,6 @@ def test_list_documents_endpoint_serializes_latest_version_summary_and_null() ->
                             source_text="new ready body",
                             content_hash="b" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=["ocr_low_confidence", "trimmed_table"],
@@ -630,7 +658,6 @@ def test_list_documents_endpoint_serializes_latest_version_summary_and_null() ->
                             source_text="active ready body",
                             content_hash="c" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=[],
@@ -646,7 +673,6 @@ def test_list_documents_endpoint_serializes_latest_version_summary_and_null() ->
                             source_text="broken update body",
                             content_hash="d" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="failed",
                             error_code="parser_failed",
                             warnings=["partial_extract"],
@@ -662,7 +688,6 @@ def test_list_documents_endpoint_serializes_latest_version_summary_and_null() ->
                             source_text="processing body",
                             content_hash="e" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="processing",
                             error_code=None,
                             warnings=[],
@@ -680,7 +705,12 @@ def test_list_documents_endpoint_serializes_latest_version_summary_and_null() ->
     engine, factory = asyncio.run(seed())
     try:
         repository = KnowledgeRepository(factory)
-        service = KnowledgeService(cast(KnowledgeRepositoryPort, repository), _SimpleTokenizer())
+        service = KnowledgeService(
+            cast(KnowledgeRepositoryPort, repository),
+            _SimpleTokenizer(),
+            profile_id="bge-m3-default",
+            access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
+        )
         app = FastAPI()
         app.include_router(build_knowledge_router(service, LocalDocumentParser()))
         app.dependency_overrides[get_current_auth] = lambda: _context("owner_a")

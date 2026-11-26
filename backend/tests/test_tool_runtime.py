@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 
 from app.knowledge.service import KnowledgeService
 from app.preference import PreferenceService
@@ -274,6 +275,7 @@ def _runtime(
                 if project_knowledge is None
                 else cast(ProjectKnowledgeService, project_knowledge)
             ),
+            access_policy=make_test_access_policy(),
         ),
         selected_auth,
     )
@@ -813,10 +815,12 @@ def test_skill_read_resource_without_minio_reads_markdown_and_returns_error_for_
             return versions.get(version_id)
 
     auth = _Auth()
+    access_policy = make_test_access_policy()
     skills = SkillService(
         cast(SkillRepository, _SkillRepo()),
         None,
         auth,
+        access_policy=access_policy,
         clock=lambda: NOW,
     )
     runtime = RunToolRuntimeService(
@@ -827,6 +831,7 @@ def test_skill_read_resource_without_minio_reads_markdown_and_returns_error_for_
         knowledge=None,
         project_knowledge=None,
         skills=skills,
+        access_policy=access_policy,
     )
     snapshot = RunSkillSnapshot(
         skills=(

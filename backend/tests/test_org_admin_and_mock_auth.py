@@ -1,4 +1,4 @@
-"""非生产本地 Mock 模式、超管组织与用户分权管理 API 及 Alembic 20261201_0034 迁移测试。"""
+"""非生产本地 Mock 模式、超管组织与用户分权管理 API 及 Alembic 基线迁移测试。"""
 
 from __future__ import annotations
 
@@ -514,41 +514,36 @@ def test_admin_org_sync_endpoint_runs_feishu_sync_and_reports_cycle_error() -> N
 
 
 # ---------------------------------------------------------------------------
-# 3. Alembic 单 head 与 20261201_0034 离线 upgrade/downgrade SQL 验证
+# 3. Alembic 基线单 head 与组织/身份离线 upgrade/downgrade SQL 验证
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_migration_20261201_0034_single_head_and_offline_sql() -> None:
-    """验证 Alembic 单 head 为 20261201_0034，且离线 upgrade/downgrade SQL 完整合法。"""
+def test_alembic_initial_schema_single_head_and_org_offline_sql() -> None:
+    """验证 Alembic 基线单 head 为 0001_initial_schema，且离线 SQL 包含完整组织与身份表结构。"""
     config = _migration_config()
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert len(heads) == 1
-    rev = script.get_revision("20261201_0034")
+    assert heads == ["0001_initial_schema"]
+    rev = script.get_revision("0001_initial_schema")
     assert rev is not None
-    assert rev.down_revision == "20261130_0033"
+    assert rev.down_revision is None
 
     upgrade_buf = StringIO()
     with redirect_stdout(upgrade_buf):
-        command.upgrade(config, "20261130_0033:20261201_0034", sql=True)
+        command.upgrade(config, "head", sql=True)
     upgrade_sql = upgrade_buf.getvalue()
 
     for expected in (
-        "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL",
-        "ALTER TABLE users DROP CONSTRAINT uq_users_email",
-        "ALTER TABLE users ALTER COLUMN email DROP NOT NULL",
         "CREATE UNIQUE INDEX uq_users_email_active ON users (email) "
         "WHERE email IS NOT NULL AND deleted_time IS NULL",
-        "UPDATE users SET role = 'super_admin' WHERE role = 'admin'",
-        "UPDATE users SET role = 'member' WHERE role = 'user'",
         "role IN ('super_admin', 'dept_admin', 'member')",
-        "ADD COLUMN auth_provider VARCHAR(16) DEFAULT 'local' NOT NULL",
-        "ADD COLUMN external_union_id VARCHAR(128)",
-        "ADD COLUMN external_open_id VARCHAR(128)",
-        "ADD COLUMN employee_no VARCHAR(64)",
-        "ADD COLUMN avatar_url VARCHAR(1024)",
-        "ADD COLUMN job_title VARCHAR(120)",
-        "ADD COLUMN last_synced_at TIMESTAMP WITH TIME ZONE",
+        "auth_provider VARCHAR(16) DEFAULT 'local' NOT NULL",
+        "external_union_id VARCHAR(128)",
+        "external_open_id VARCHAR(128)",
+        "employee_no VARCHAR(64)",
+        "avatar_url VARCHAR(1024)",
+        "job_title VARCHAR(120)",
+        "last_synced_at TIMESTAMP WITH TIME ZONE",
         "auth_provider IN ('local', 'feishu', 'mock')",
         "(auth_provider != 'local') OR (password_hash IS NOT NULL)",
         "CREATE UNIQUE INDEX uq_users_external_union_id ON users (external_union_id) "
@@ -566,16 +561,12 @@ def test_alembic_migration_20261201_0034_single_head_and_offline_sql() -> None:
 
     downgrade_buf = StringIO()
     with redirect_stdout(downgrade_buf):
-        command.downgrade(config, "20261201_0034:20261130_0033", sql=True)
+        command.downgrade(config, "0001_initial_schema:base", sql=True)
     downgrade_sql = downgrade_buf.getvalue()
     for expected in (
         "DROP TABLE dept_admin_scopes",
         "DROP TABLE user_departments",
         "DROP TABLE departments",
-        "DROP INDEX uq_users_external_open_id",
-        "DROP INDEX uq_users_external_union_id",
-        "UPDATE users SET role = 'admin' WHERE role = 'super_admin'",
-        "UPDATE users SET role = 'user' WHERE role IN ('dept_admin', 'member')",
-        "ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email)",
+        "DROP TABLE users",
     ):
         assert expected in downgrade_sql, f"missing downgrade SQL fragment: {expected}"

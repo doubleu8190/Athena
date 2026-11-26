@@ -217,13 +217,6 @@ class SkillImportRequestResult:
     request_version: SkillVersion | None = None
 
 
-def _normalize_legacy_skill_scope(value: object) -> object:
-    """兼容历史 Run 快照中持久化的 public 范围，归一化为 company 防止反序列化失败。"""
-    if isinstance(value, str) and value == "public":
-        return SkillScope.COMPANY.value
-    return value
-
-
 class RunSkillEntry(_FrozenModel):
     """Run 创建时固定、执行期间不再读取当前管理目录的一项技能。"""
 
@@ -235,12 +228,6 @@ class RunSkillEntry(_FrozenModel):
     version_label: str
     requires_approval: bool
     scope: SkillScope = SkillScope.COMPANY
-
-    @field_validator("scope", mode="before")
-    @classmethod
-    def _coerce_legacy_scope(cls, value: object) -> object:
-        """升级后兼容历史 runs.skill_snapshot 中的 public 范围值。"""
-        return _normalize_legacy_skill_scope(value)
 
 
 class RunSkillSnapshot(_FrozenModel):
@@ -270,9 +257,7 @@ class RunSkillSnapshot(_FrozenModel):
         requested_ids = {item.skill_id for item in requested.skills}
         if not requested_ids <= parent_ids:
             raise ValueError("run_skill_selection_invalid")
-        catalog = tuple(
-            item for item in self.skills if item.skill_id in requested_ids
-        )
+        catalog = tuple(item for item in self.skills if item.skill_id in requested_ids)
         return RunSkillSnapshot(
             skills=catalog,
             selected_skill_ids=requested.selected_skill_ids,
@@ -288,12 +273,6 @@ class ActiveSkillGuide(_FrozenModel):
     version_label: str
     guide: str
     scope: SkillScope = SkillScope.COMPANY
-
-    @field_validator("scope", mode="before")
-    @classmethod
-    def _coerce_legacy_scope(cls, value: object) -> object:
-        """兼容历史上下文或快照中的 public 范围值。"""
-        return _normalize_legacy_skill_scope(value)
 
 
 class RunSkillPromptContext(_FrozenModel):

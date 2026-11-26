@@ -116,7 +116,7 @@ export function ProjectsPage() {
           <ul className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {projects.data.map((project) => {
               const hasInstructions = Boolean(project.instructions?.trim());
-              const defaultSkillsCount = project.default_skill_ids?.length ?? 0;
+              const defaultSkillsCount = project.default_skill_ids.length;
               return (
                 <li
                   className="group relative flex flex-col justify-between rounded-xl border border-border-subtle bg-canvas p-4 shadow-xs transition-colors hover:border-border-strong"

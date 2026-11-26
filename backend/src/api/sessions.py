@@ -20,7 +20,6 @@ from app.session import (
     InvalidSessionUpdateError,
     ProjectNotFoundError,
     SessionNotFoundError,
-    SessionProjectLockedError,
     SessionService,
 )
 from domain.run.model.errors import SessionHasActiveRunError
@@ -29,7 +28,6 @@ SESSION_NOT_FOUND = "session_not_found"
 SESSION_TITLE_INVALID = "session_title_invalid"
 SESSION_UPDATE_INVALID = "session_update_invalid"
 SESSION_FILTER_INVALID = "invalid_session_filter"
-SESSION_PROJECT_LOCKED = "session_project_locked"
 PROJECT_NOT_FOUND = "project_not_found"
 
 
@@ -156,11 +154,6 @@ def build_session_router(service: SessionService) -> APIRouter:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="session_has_active_run",
-            ) from error
-        except SessionProjectLockedError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=SESSION_PROJECT_LOCKED,
             ) from error
         except SessionNotFoundError as error:
             raise _session_not_found(error) from error

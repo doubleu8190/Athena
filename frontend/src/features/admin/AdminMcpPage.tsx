@@ -130,25 +130,21 @@ export function AdminMcpPage() {
                       <span className="admin-status-badge">
                         v{server.config_version}
                       </span>
-                      {server.enabled !== undefined ? (
-                        <span
-                          className={`admin-status-badge${
-                            server.enabled ? " is-success" : " is-muted"
-                          }`}
-                        >
-                          {server.enabled ? "已启用" : "已停用"}
-                        </span>
-                      ) : null}
-                      {server.visibility_scope ? (
-                        <VisibilityBadge
-                          departmentName={
-                            server.visibility_scope === "department"
-                              ? (server.owner_department_id ?? null)
-                              : null
-                          }
-                          scope={server.visibility_scope}
-                        />
-                      ) : null}
+                      <span
+                        className={`admin-status-badge${
+                          server.enabled ? " is-success" : " is-muted"
+                        }`}
+                      >
+                        {server.enabled ? "已启用" : "已停用"}
+                      </span>
+                      <VisibilityBadge
+                        departmentName={
+                          server.visibility_scope === "department"
+                            ? server.owner_department_id
+                            : null
+                        }
+                        scope={server.visibility_scope}
+                      />
                     </div>
                     <p className="admin-muted">
                       {discoveredAtLabel(server)}

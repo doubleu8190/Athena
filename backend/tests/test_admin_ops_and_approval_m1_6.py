@@ -172,6 +172,7 @@ class _M16Harness:
         mcp_repo: SqlAlchemyMcpRepository,
         run_repo: SqlAlchemyRunRepository,
         tool_runtime: RunToolRuntimeService,
+        access_policy: AccessPolicyService,
         app: Any,
     ) -> None:
         self.engine = engine
@@ -184,6 +185,7 @@ class _M16Harness:
         self.mcp_repo = mcp_repo
         self.run_repo = run_repo
         self.tool_runtime = tool_runtime
+        self.access_policy = access_policy
         self.app = app
 
     async def aclose(self) -> None:
@@ -373,6 +375,7 @@ async def _create_harness(
         mcp_repo=mcp_repo,
         run_repo=run_repo,
         tool_runtime=tool_runtime,
+        access_policy=access_policy,
         app=app,
     )
 
@@ -431,7 +434,7 @@ def test_model_profile_patch_preserves_or_rotates_secret_and_enforces_invariants
             profile_id = created["id"]
             assert created["version"] == 1
             assert created["updated_at"] == created["created_at"]
-            assert created["has_api_key"] is True
+            assert "has_api_key" not in created
 
             # 普通用户无权编辑模型配置。
             forbidden = member_client.patch(
@@ -1248,7 +1251,11 @@ def test_mcp_stdio_placeholder_check_enabled_toggle_runtime_cutoff_and_soft_dele
             assert bad_remove.status_code == 422
 
             # 先读取运行态工具快照（模拟在途 Run 已冻结该工具）。
-            runtime_tools_before = _run(h.mcp_repo.list_runtime_tools(limit=201))
+            member_snapshot = _run(h.access_policy.get_user_snapshot("usr_member"))
+            assert member_snapshot is not None
+            runtime_tools_before = _run(
+                h.mcp_repo.list_readable_runtime_tools(member_snapshot, limit=201)
+            )
             assert len(runtime_tools_before) == 1
             frozen_def = runtime_tools_before[0]
             tool_id = frozen_def.tool_id
@@ -1290,7 +1297,7 @@ def test_mcp_stdio_placeholder_check_enabled_toggle_runtime_cutoff_and_soft_dele
             assert disabled.json()["enabled"] is False
             assert disabled.json()["config_version"] == 2
 
-            assert _run(h.mcp_repo.list_runtime_tools(limit=201)) == ()
+            assert _run(h.mcp_repo.list_readable_runtime_tools(member_snapshot, limit=201)) == ()
             assert member_client.get("/api/v1/tools").json()["total"] == 0
             assert member_client.get(f"/api/v1/tools/{tool_id}").status_code == 404
             # 管理员目录仍可见停用 Server 及其工具以便运维。
@@ -1338,7 +1345,9 @@ def test_mcp_stdio_placeholder_check_enabled_toggle_runtime_cutoff_and_soft_dele
             assert reenabled.status_code == 200
             assert reenabled.json()["enabled"] is True
             assert reenabled.json()["config_version"] == 3
-            assert len(_run(h.mcp_repo.list_runtime_tools(limit=201))) == 1
+            assert (
+                len(_run(h.mcp_repo.list_readable_runtime_tools(member_snapshot, limit=201))) == 1
+            )
             assert member_client.get("/api/v1/tools").json()["total"] == 1
 
             # 3) 软删除 Server：清空密文、删除工具与授权，并允许使用相同 name 重新注册。
@@ -1616,7 +1625,9 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                     "worker-a", lease_seconds=60, execution_seconds=120, limit=5
                 )
                 lease = next(item for item in leases if item.run.id == main_run_id)
-                runtime_defs = await h.mcp_repo.list_runtime_tools(limit=201)
+                member_snap = await h.access_policy.get_user_snapshot("usr_member")
+                assert member_snap is not None
+                runtime_defs = await h.mcp_repo.list_readable_runtime_tools(member_snap, limit=201)
                 await h.run_repo.initialize_tools(
                     InitializeRunToolsCommand(
                         run_id=main_run_id,
@@ -1874,7 +1885,11 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                     "worker-b", lease_seconds=60, execution_seconds=120, limit=5
                 )
                 parent_lease = next(item for item in leases if item.run.id == parent_id)
-                sub_runtime_defs = await h.mcp_repo.list_runtime_tools(limit=201)
+                member_snap = await h.access_policy.get_user_snapshot("usr_member")
+                assert member_snap is not None
+                sub_runtime_defs = await h.mcp_repo.list_readable_runtime_tools(
+                    member_snap, limit=201
+                )
                 sub_run_id = new_id("run")
                 await h.run_repo.begin_subagent_batch(
                     BeginSubagentBatchCommand(
@@ -2014,50 +2029,40 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_migration_0037_single_head_and_reversible_sql() -> None:
-    """校验 20261204_0037 保持单一 head，且离线 upgrade/downgrade SQL 包含全部关键 DDL。"""
+def test_alembic_baseline_contains_admin_ops_and_approval_ddl() -> None:
+    """校验收敛后的基线迁移 0001_initial_schema 保持单一 head，包含管理运维与审批 DDL。"""
     cfg = Config(str(ALEMBIC_INI))
     cfg.set_main_option(
         "sqlalchemy.url",
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(cfg)
-    # 保持 Alembic 单一 head，并验证 20261204_0037 节点链正确（兼容后续 M3.1+ 迁移脚本）。
-    heads = script.get_heads()
-    assert len(heads) == 1
-    revision = script.get_revision("20261204_0037")
+    assert script.get_heads() == ["0001_initial_schema"]
+    revision = script.get_revision("0001_initial_schema")
     assert revision is not None
-    assert revision.down_revision == "20261203_0036"
+    assert revision.down_revision is None
 
     up_buffer = StringIO()
     with redirect_stdout(up_buffer):
-        command.upgrade(cfg, "20261203_0036:20261204_0037", sql=True)
+        command.upgrade(cfg, "head", sql=True)
     up_sql = up_buffer.getvalue()
-    assert "ADD COLUMN version INTEGER DEFAULT 1 NOT NULL" in up_sql
+    assert "version INTEGER DEFAULT 1 NOT NULL" in up_sql
     assert "ck_llm_profile_version" in up_sql
-    assert "UPDATE llm_model_profile_versions SET updated_at = created_at" in up_sql
-    assert "ADD COLUMN model_snapshot_json JSONB" in up_sql
-    assert "ADD COLUMN enabled BOOLEAN DEFAULT true NOT NULL" in up_sql
-    assert "ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE" in up_sql
-    assert "DROP CONSTRAINT uq_mcp_servers_name" in up_sql
+    assert "updated_at TIMESTAMP WITH TIME ZONE NOT NULL" in up_sql
+    assert "model_snapshot_json JSONB NOT NULL" in up_sql
+    assert "enabled BOOLEAN DEFAULT true NOT NULL" in up_sql
+    assert "deleted_at TIMESTAMP WITH TIME ZONE" in up_sql
     assert "CREATE UNIQUE INDEX uq_mcp_servers_name_active" in up_sql
     assert "WHERE deleted_at IS NULL" in up_sql
-    assert "ADD COLUMN display_name VARCHAR(120)" in up_sql
-    assert "ADD COLUMN approval_summary_template VARCHAR(500)" in up_sql
-    assert "ADD COLUMN parameter_labels_json JSONB DEFAULT '{}' NOT NULL" in up_sql
+    assert "display_name VARCHAR(120)" in up_sql
+    assert "approval_summary_template VARCHAR(500)" in up_sql
+    assert "parameter_labels_json JSONB DEFAULT '{}' NOT NULL" in up_sql
 
     down_buffer = StringIO()
     with redirect_stdout(down_buffer):
-        command.downgrade(cfg, "20261204_0037:20261203_0036", sql=True)
+        command.downgrade(cfg, "0001_initial_schema:base", sql=True)
     down_sql = down_buffer.getvalue()
-    assert "DROP COLUMN parameter_labels_json" in down_sql
-    assert "DROP COLUMN approval_summary_template" in down_sql
-    assert "DROP COLUMN display_name" in down_sql
-    assert "DROP INDEX uq_mcp_servers_name_active" in down_sql
-    assert "ADD CONSTRAINT uq_mcp_servers_name UNIQUE (name)" in down_sql
-    assert "DROP COLUMN deleted_at" in down_sql
-    assert "DROP COLUMN enabled" in down_sql
-    assert "DROP COLUMN model_snapshot_json" in down_sql
-    assert "DROP COLUMN updated_at" in down_sql
-    assert "DROP CONSTRAINT ck_llm_profile_version" in down_sql
-    assert "DROP COLUMN version" in down_sql
+    assert "DROP TABLE mcp_tools" in down_sql
+    assert "DROP TABLE mcp_servers" in down_sql
+    assert "DROP TABLE runs" in down_sql
+    assert "DROP TABLE llm_model_profile_versions" in down_sql

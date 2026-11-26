@@ -7,7 +7,6 @@ from domain.session.model import (
     Session,
     SessionNotFoundError,
     SessionPage,
-    SessionProjectLockedError,
     SessionScope,
 )
 from domain.session.ports import SessionRepository
@@ -19,7 +18,6 @@ __all__ = [
     "Session",
     "SessionNotFoundError",
     "SessionPage",
-    "SessionProjectLockedError",
     "SessionRepository",
     "SessionScope",
 ]

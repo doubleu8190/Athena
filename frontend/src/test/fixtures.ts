@@ -89,14 +89,20 @@ export const TEST_USER: User = makeUser();
 
 export const PROJECT_A: Project = {
   created_at: "2026-11-08T08:00:00Z",
+  default_skill_ids: [],
+  description: null,
   id: "project-a",
+  instructions: null,
   name: "增长战略",
   updated_at: "2026-11-10T02:00:00Z",
 };
 
 export const PROJECT_B: Project = {
   created_at: "2026-11-09T09:00:00Z",
+  default_skill_ids: [],
+  description: null,
   id: "project-b",
+  instructions: null,
   name: "产品研究",
   updated_at: "2026-11-10T01:00:00Z",
 };
@@ -106,7 +112,10 @@ export const KNOWLEDGE_BASE_A: KnowledgeBase = {
   description: "产品访谈与竞品资料",
   id: "knowledge-a",
   name: "产品研究库",
+  owner_department_id: null,
   updated_at: "2026-11-10T04:00:00Z",
+  visibility_grants: [],
+  visibility_scope: "personal",
 };
 
 export const KNOWLEDGE_BASE_B: KnowledgeBase = {
@@ -114,18 +123,33 @@ export const KNOWLEDGE_BASE_B: KnowledgeBase = {
   description: null,
   id: "knowledge-b",
   name: "市场资料库",
+  owner_department_id: null,
   updated_at: "2026-11-10T05:00:00Z",
+  visibility_grants: [],
+  visibility_scope: "personal",
 };
 
 export function makeKnowledgeDocument(
   overrides: Partial<KnowledgeDocument> & Pick<KnowledgeDocument, "id">,
 ): KnowledgeDocument {
   const { id, ...rest } = overrides;
+  const activeVersionId =
+    rest.active_version_id !== undefined ? rest.active_version_id : "version-1";
+  const latestVersion =
+    rest.latest_version !== undefined
+      ? rest.latest_version
+      : activeVersionId !== null
+        ? makeKnowledgeVersion({
+            document_id: id,
+            id: activeVersionId,
+          })
+        : null;
   return {
-    active_version_id: "version-1",
+    active_version_id: activeVersionId,
     created_at: "2026-11-09T08:00:00Z",
     id,
     knowledge_base_id: KNOWLEDGE_BASE_A.id,
+    latest_version: latestVersion,
     pending_version_id: null,
     title: "真实知识文档",
     updated_at: "2026-11-10T04:30:00Z",
@@ -187,6 +211,9 @@ export function makeSessionFile(
   const { id, ...rest } = overrides;
   return {
     created_at: "2026-11-12T02:00:00Z",
+    extracted_text_bytes: null,
+    extraction_error_code: null,
+    extraction_status: "none",
     filename: "sales.csv",
     id,
     label: null,
@@ -242,28 +269,49 @@ export function makeRun(
 ): Run {
   const { id, session_id, status, ...rest } = overrides;
   return {
+    assistant_message_id: null,
     cancel_requested_at: null,
     context_cutoff_sequence: 0,
     created_at: "2026-11-10T03:00:00Z",
+    depth: 0,
     event_sequence: 1,
     execution_epoch: 1,
     finished_at: null,
     first_started_at: null,
     id,
-    model_config_version_id: "model-config-1",
     input_file_ids: [],
+    input_interactions: [],
+    knowledge_base_ids: null,
+    model_config_version_id: "model-config-1",
+    model_snapshot: {
+      id: "model-config-1",
+      model: "atlas-main",
+      name: "主力模型",
+      scenario_label: null,
+      supports_vision: false,
+      version: 1,
+    },
+    parent_run_id: null,
+    parent_tool_call_id: null,
     pending_approvals: [],
     pending_input: null,
+    pending_subagent_approvals: [],
+    pending_subagent_inputs: [],
     prompt_template_version: "run_prompt_v1",
     queued_at: "2026-11-10T03:00:00Z",
     replayed: false,
     retry_of_run_id: null,
     retry_warning: null,
     report_message_id: null,
+    root_run_id: null,
     safe_error_code: null,
     session_id,
     skill_snapshot: null,
     status,
+    subagent_name: null,
+    subagent_profile_id: null,
+    subagent_slug: null,
+    subagent_tasks: [],
     trigger_message_id: "msg-user-1",
     updated_at: "2026-11-10T03:00:00Z",
     usage: {

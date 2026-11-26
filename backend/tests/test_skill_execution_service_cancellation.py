@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, cast
 
 import pytest
+from access_support import make_test_access_policy
 
 from adapter.skill.execution import PythonScriptExecutor
 from app.skill.execution_service import SkillExecutionService, _open_exclusive_binary_0600
@@ -274,6 +275,7 @@ class _Repository:
         }
         return self.record
 
+
 def test_execution_audit_uses_refreshed_target_check_and_version(
     tmp_path: Path,
 ) -> None:
@@ -322,6 +324,7 @@ def test_execution_audit_uses_refreshed_target_check_and_version(
         cast(Any, None),
         dependency_checker=cast(Any, Checker()),
         clock=lambda: _NOW,
+        access_policy=make_test_access_policy(),
     )
     service = SkillExecutionService(
         skills=skills,
@@ -395,8 +398,7 @@ class _FailingRunner:
 
 
 @pytest.mark.skipif(
-    os.name != "posix"
-    or not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    os.name != "posix" or not (sys.platform.startswith("linux") or sys.platform == "darwin"),
     reason="真实进程身份核验需要 POSIX",
 )
 def test_service_cancellation_records_killpg_failure_and_cleans_runner_directory(

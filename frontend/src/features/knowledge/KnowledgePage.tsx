@@ -25,7 +25,6 @@ import { useKnowledgeList } from "./hooks";
 import {
   canManageKnowledgeBase,
   countExtraVisibilityGrants,
-  knowledgeBaseScope,
   type KnowledgeBase,
 } from "./model";
 
@@ -51,10 +50,9 @@ function parsePage(value: string | null): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
 }
 
-/** 同时兼容 ?scope=（M2.6 筛选参数）与侧栏部门快捷入口 ?visibility_scope=department。 */
+/** 解析知识库目录页的三层可见性筛选参数 ?scope=。 */
 function parseScopeFilter(searchParams: URLSearchParams): ScopeFilterValue {
-  const raw =
-    searchParams.get("scope") ?? searchParams.get("visibility_scope");
+  const raw = searchParams.get("scope");
   if (raw === "company" || raw === "department" || raw === "personal") {
     return raw;
   }
@@ -220,7 +218,7 @@ export function KnowledgePage() {
 
           <ul className="knowledge-card-grid">
             {bases.data.items.map((base) => {
-              const scope = knowledgeBaseScope(base);
+              const scope = base.visibility_scope;
               const departmentName = resolveUserDepartmentName(
                 user,
                 base.owner_department_id,

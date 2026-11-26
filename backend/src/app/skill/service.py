@@ -107,7 +107,7 @@ class SkillService:
         object_store: FileObjectStore | None,
         auth_reader: CurrentSessionReader,
         *,
-        access_policy: AccessPolicyService | None = None,
+        access_policy: AccessPolicyService,
         package_validator: SkillPackageValidator | None = None,
         dependency_checker: DependencyChecker | None = None,
         package_cache: SkillPackageCache | None = None,
@@ -137,8 +137,6 @@ class SkillService:
         skills = await self._repository.list_skills()
         if user.role is UserRole.SUPER_ADMIN:
             return skills
-        if self._access_policy is None:
-            return ()
         snapshot = await self._access_policy.get_user_snapshot(user.id)
         if snapshot is None or not snapshot.is_active:
             return ()
@@ -766,31 +764,24 @@ class SkillService:
         if scope is SkillScope.PERSONAL:
             raise SkillPackageError("skill_scope_invalid")
 
-        if self._access_policy is not None:
-            try:
-                (
-                    vis_scope,
-                    resolved_department_id,
-                    maybe_grants,
-                ) = await self._access_policy.resolve_and_validate_visibility(
-                    user_id=user.id,
-                    resource_type=ResourceType.SKILL,
-                    visibility_scope=VisibilityScope(scope.value),
-                    owner_department_id=owner_department_id,
-                    visibility_grants=visibility_grants,
-                    for_create=True,
-                )
-            except AccessPermissionDeniedError as error:
-                raise SkillAuthorizationError(error.code) from error
-            except InvalidVisibilityConfigError as error:
-                raise SkillPackageError(error.code) from error
-            return SkillScope(vis_scope.value), resolved_department_id, (maybe_grants or ())
-
-        if user.role is not UserRole.SUPER_ADMIN:
-            raise SkillAuthorizationError("admin_required")
-        if scope is not SkillScope.COMPANY or owner_department_id is not None:
-            raise SkillPackageError("skill_scope_requires_access_policy")
-        return scope, owner_department_id, ()
+        try:
+            (
+                vis_scope,
+                resolved_department_id,
+                maybe_grants,
+            ) = await self._access_policy.resolve_and_validate_visibility(
+                user_id=user.id,
+                resource_type=ResourceType.SKILL,
+                visibility_scope=VisibilityScope(scope.value),
+                owner_department_id=owner_department_id,
+                visibility_grants=visibility_grants,
+                for_create=True,
+            )
+        except AccessPermissionDeniedError as error:
+            raise SkillAuthorizationError(error.code) from error
+        except InvalidVisibilityConfigError as error:
+            raise SkillPackageError(error.code) from error
+        return SkillScope(vis_scope.value), resolved_department_id, (maybe_grants or ())
 
     async def _admin_details_for_replay(
         self,
@@ -1047,8 +1038,6 @@ class SkillService:
         )
         resolved_grants: tuple[VisibilityGrantInput, ...] | None = None
         if visibility_grants is not None:
-            if self._access_policy is None:
-                raise SkillPackageError("skill_scope_requires_access_policy")
             try:
                 _, _, resolved_grants = await self._access_policy.resolve_and_validate_visibility(
                     user_id=actor.user.id,
@@ -1134,19 +1123,12 @@ class SkillService:
         except ValueError as error:
             raise SkillPackageError(str(error)) from error
 
-    async def public_directory(self) -> tuple[Skill, ...]:
-        """返回实时满足当前解释器依赖的已启用公司级 Skill。"""
-        entries = await self._repository.get_public_directory_entries()
-        return await self._available_directory_entries(entries)
-
     async def _load_readable_user_entries(
         self,
         user_id: str,
     ) -> tuple[tuple[Skill, SkillVersion], ...]:
         """加载用户实时可读的 (Skill, 当前 SkillVersion) 候选集。"""
-        if self._access_policy is not None:
-            return await self._repository.get_readable_user_directory_entries(user_id)
-        return await self._repository.get_user_directory_entries(user_id)
+        return await self._repository.get_readable_user_directory_entries(user_id)
 
     async def user_directory(self, actor: AuthContext) -> tuple[Skill, ...]:
         """返回对当前用户实时可读的 company、department 及本人 personal 启用 Skill。"""
@@ -1466,8 +1448,6 @@ class SkillService:
             raise SkillNotFoundError()
         if user.role is UserRole.SUPER_ADMIN:
             return skill
-        if self._access_policy is None:
-            raise SkillAuthorizationError("admin_required")
         target = _skill_access_target(skill)
         # 单次快照合并可读与可管双判定，避免重复加载用户组织树。
         can_read, can_manage = await self._access_policy.evaluate_target_access(user.id, target)

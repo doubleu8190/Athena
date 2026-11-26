@@ -325,18 +325,8 @@ export function deleteSubagent(subagentId: string): Promise<void> {
   });
 }
 
-export async function listSubagentAvailableTools(): Promise<SubagentAvailableToolsResponse> {
-  const response = await apiGet("/api/v1/admin/subagents/available-tools");
-  return {
-    groups: response.groups.map((group) => ({
-      ...group,
-      items: group.items.map((item) => ({
-        ...item,
-        server_id: item.server_id ?? null,
-        server_name: item.server_name ?? null,
-      })),
-    })),
-  };
+export function listSubagentAvailableTools(): Promise<SubagentAvailableToolsResponse> {
+  return apiGet("/api/v1/admin/subagents/available-tools");
 }
 
 /** 查询企业组织部门树扁平列表（仅超管可调用，供部门共享知识库与部门技能选择器复用）。 */

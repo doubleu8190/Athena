@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
@@ -206,6 +205,7 @@ async def _seed_session_and_model(
                 temperature=None,
                 enabled=True,
                 created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -240,6 +240,7 @@ def _submit_command(
             parts=(TextPart("bind immutable prompts"),),
             reply_to_message_id=None,
             run_id=run_id,
+            context_turn_id=f"msg_{run_id}",
             client_message_id=None,
             created_at=now,
             completed_at=now,
@@ -279,6 +280,7 @@ async def _seed_prompt_closure_context(
                 temperature=None,
                 enabled=True,
                 created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -286,13 +288,11 @@ async def _seed_prompt_closure_context(
             CompressionPolicyVersionModel(
                 id=policy_id,
                 compression_model_profile_id=compression_profile_id,
-                trigger_ratio=0.4,
                 trigger_tokens=1_024,
                 recent_ratio=0.2,
                 recent_token_cap=2_048,
                 summary_ratio=0.1,
                 summary_token_cap=1_024,
-                prompt_template_version="context-summary-v1",
                 created_at=now,
             )
         )
@@ -306,6 +306,7 @@ async def _seed_prompt_closure_context(
         _add_compression_history(
             session,
             session_id=session_id,
+            owner_id=owner_id,
             id_prefix="msg_prompt_closure_history",
             now=now,
         )
@@ -319,13 +320,16 @@ def _add_compression_history(
     session: AsyncSession,
     *,
     session_id: str,
+    owner_id: str,
     id_prefix: str,
     now: datetime,
 ) -> None:
-    """向指定会话加入可稳定超过压缩触发阈值的两轮历史。"""
+    """向指定会话加入可稳定超过压缩触发阈值的两轮历史及所属已完成 Run。"""
+    history_run_id = f"run_{id_prefix}"
+    user_msg_id = f"{id_prefix}_user"
     history = (
         (
-            f"{id_prefix}_user",
+            user_msg_id,
             "user",
             "Plan a herb garden with light, soil, watering and seasonal care. " * 150,
             None,
@@ -334,7 +338,7 @@ def _add_compression_history(
             f"{id_prefix}_assistant",
             "assistant",
             "Group herbs by sunlight and water only after checking the top soil. " * 150,
-            f"{id_prefix}_user",
+            user_msg_id,
         ),
     )
     for sequence, (message_id, role, content, reply_to_message_id) in enumerate(
@@ -350,15 +354,57 @@ def _add_compression_history(
                 sequence=sequence,
                 parts=[{"type": "text", "text": content}],
                 reply_to_message_id=reply_to_message_id,
-                run_id=None,
-                managed_run_id=None,
-                context_turn_id=None,
+                run_id=history_run_id,
+                context_turn_id=user_msg_id,
                 client_message_id=None,
                 created_at=now,
                 completed_at=now,
                 metadata_json={},
             )
         )
+    session.add(
+        RunModel(
+            id=history_run_id,
+            session_id=session_id,
+            owner_id=owner_id,
+            status="completed",
+            trigger_message_id=user_msg_id,
+            context_cutoff_sequence=1,
+            retry_of_run_id=None,
+            model_config_version_id="llmprof_prompt",
+            model_snapshot_json={
+                "id": "llmprof_prompt",
+                "name": "Prompt integration",
+                "protocol": "chat_completions",
+                "base_url": "https://llm.example.test/v1",
+                "model": "prompt-integration",
+                "context_window_tokens": 8192,
+                "tokenizer_encoding": "o200k_base",
+                "supports_stream": True,
+                "supports_tools": True,
+                "supports_parallel_tool_calls": False,
+                "max_output_tokens": 512,
+                "request_timeout_seconds": 30,
+                "execution_timeout_seconds": 60,
+                "max_concurrency": 1,
+                "temperature": None,
+                "scenario_label": None,
+                "supports_vision": False,
+                "version": 1,
+            },
+            main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+            compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
+            prompt_template_version="run-v2",
+            event_sequence=0,
+            execution_epoch=0,
+            queued_at=now,
+            created_at=now,
+            updated_at=now,
+            finished_at=now,
+            usage={},
+            depth=0,
+        )
+    )
 
 
 class _PromptCaptureProvider:
@@ -458,120 +504,15 @@ async def _wait_for_run_status(
     )
 
 
-def test_system_prompt_migration_backfills_legacy_run_and_summary() -> None:
-    """从旧 revision 升级时初始化两类原文并回填既有 Run 和摘要。"""
+def test_system_prompt_initial_schema_seeds_defaults_and_enforces_not_null() -> None:
+    """基线迁移 0001_initial_schema 写入默认主/压缩提示词，并强制 runs 提示词外键非空。"""
 
     async def scenario() -> None:
-        async with _schema(revision="20261115_0016") as db:
+        async with _schema() as db:
             engine = db.engine
+            factory = db.session_factory
             now = datetime.now(UTC)
-            async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "INSERT INTO users "
-                        "(id,email,password_hash,display_name,status,role,created_at,"
-                        "updated_at,deleted_time) VALUES "
-                        "('usr_legacy_prompt','legacy-prompt@example.test','unused',NULL,"
-                        "'active','user',:now,:now,NULL)"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO sessions "
-                        "(id,owner_id,title,project_id,last_message_sequence,created_at,"
-                        "updated_at,deleted_time) VALUES "
-                        "('ses_legacy_prompt','usr_legacy_prompt',NULL,NULL,2,:now,:now,NULL)"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO llm_model_profile_versions "
-                        "(id,name,protocol,base_url,model,api_key_ciphertext,api_key_nonce,"
-                        "api_key_key_version,context_window_tokens,tokenizer_encoding,"
-                        "supports_stream,supports_tools,supports_parallel_tool_calls,"
-                        "max_output_tokens,request_timeout_seconds,execution_timeout_seconds,"
-                        "max_concurrency,temperature,enabled,created_at) VALUES "
-                        "('llmprof_legacy_prompt','Legacy','chat_completions',"
-                        "'https://legacy.example/v1','legacy',NULL,NULL,NULL,8192,"
-                        "'o200k_base',true,true,false,512,30,60,1,NULL,false,:now)"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO conversation_messages "
-                        "(id,session_id,role,status,sequence,parts,reply_to_message_id,run_id,"
-                        "managed_run_id,context_turn_id,client_message_id,created_at,"
-                        "completed_at,metadata) VALUES "
-                        "('msg_legacy_prompt','ses_legacy_prompt','user','completed',2,"
-                        "CAST(:parts AS jsonb),NULL,'run_legacy_prompt',NULL,NULL,NULL,"
-                        ":now,:now,CAST('{}' AS jsonb))"
-                    ),
-                    {
-                        "parts": json.dumps([{"type": "text", "text": "legacy"}]),
-                        "now": now,
-                    },
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO llm_compression_policy_versions "
-                        "(id,compression_model_profile_id,trigger_ratio,recent_ratio,"
-                        "summary_ratio,prompt_template_version,created_at) VALUES "
-                        "('cmpol_legacy_prompt','llmprof_legacy_prompt',0.8,0.2,0.1,"
-                        "'context-summary-v1',:now)"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO runs "
-                        "(id,session_id,owner_id,status,trigger_message_id,"
-                        "context_cutoff_sequence,retry_of_run_id,model_config_version_id,"
-                        "compression_policy_version_id,prompt_template_version,event_sequence,"
-                        "execution_epoch,queued_at,created_at,updated_at,usage) VALUES "
-                        "('run_legacy_prompt','ses_legacy_prompt','usr_legacy_prompt','failed',"
-                        "'msg_legacy_prompt',2,NULL,'llmprof_legacy_prompt',"
-                        "'cmpol_legacy_prompt','run-v2',0,1,:now,:now,:now,"
-                        "CAST('{}' AS jsonb))"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO session_context_summaries "
-                        "(id,session_id,owner_id,covered_through_sequence,parent_summary_id,"
-                        "text,run_id,execution_epoch,operation_id,policy_version_id,"
-                        "compression_model_version_id,prompt_version,created_at) VALUES "
-                        "('summary_legacy_prompt','ses_legacy_prompt','usr_legacy_prompt',1,"
-                        "NULL,'legacy summary','run_legacy_prompt',1,'cmpop_legacy_prompt',"
-                        "'cmpol_legacy_prompt','llmprof_legacy_prompt',"
-                        "'context-summary-v1',:now)"
-                    ),
-                    {"now": now},
-                )
-
-            await db.upgrade_to("head")
             async with engine.connect() as connection:
-                run_prompts = (
-                    await connection.execute(
-                        text(
-                            "SELECT main_prompt_version_id, compression_prompt_version_id,"
-                            "prompt_template_version FROM runs "
-                            "WHERE id = 'run_legacy_prompt'"
-                        )
-                    )
-                ).one()
-                summary_prompts = (
-                    await connection.execute(
-                        text(
-                            "SELECT compression_prompt_version_id, prompt_version "
-                            "FROM session_context_summaries "
-                            "WHERE id = 'summary_legacy_prompt'"
-                        )
-                    )
-                ).one()
                 settings: dict[str, str] = dict(
                     (
                         await connection.execute(
@@ -593,27 +534,31 @@ def test_system_prompt_migration_backfills_legacy_run_and_summary() -> None:
                         )
                     ).all()
                 )
-                assert tuple(run_prompts) == (
-                    INITIAL_SYSTEM_PROMPT_IDS["main"],
-                    INITIAL_SYSTEM_PROMPT_IDS["compression"],
-                    "run-v2",
-                )
-                assert tuple(summary_prompts) == (
-                    INITIAL_SYSTEM_PROMPT_IDS["compression"],
-                    "context-summary-v1",
-                )
                 assert settings == INITIAL_SYSTEM_PROMPT_IDS
                 assert contents == {
                     "main": INITIAL_MAIN_SYSTEM_PROMPT,
                     "compression": INITIAL_COMPRESSION_SYSTEM_PROMPT,
                 }
+
+            admin, _, _ = await _seed_admins(factory, now)
+            await _seed_session_and_model(factory, admin.user.id, "ses_prompt_not_null", now)
+            run_repo = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            submitted = await run_repo.submit(
+                "ses_prompt_not_null",
+                admin.user.id,
+                _submit_command(
+                    owner_id=admin.user.id,
+                    session_id="ses_prompt_not_null",
+                    now=now,
+                    run_id="run_prompt_not_null",
+                    request_id="req_prompt_not_null",
+                ),
+            )
             with pytest.raises(IntegrityError):
                 async with engine.begin() as connection:
                     await connection.execute(
-                        text(
-                            "UPDATE runs SET main_prompt_version_id = NULL "
-                            "WHERE id = 'run_legacy_prompt'"
-                        )
+                        text("UPDATE runs SET main_prompt_version_id = NULL WHERE id = :run_id"),
+                        {"run_id": submitted.run.id},
                     )
 
     asyncio.run(scenario())
@@ -1108,6 +1053,7 @@ def test_waiting_run_resumes_with_original_prompts_and_new_run_uses_new_versions
                 _add_compression_history(
                     session,
                     session_id=new_session_id,
+                    owner_id=admin.user.id,
                     id_prefix="msg_prompt_closure_new_history",
                     now=now,
                 )

@@ -103,7 +103,6 @@ describe("管理 API 契约", () => {
       compression_model_profile_id: null,
       created_at: null,
       id: null,
-      prompt_template_version: null,
       recent_ratio: null,
       recent_token_cap: null,
       summary_ratio: null,

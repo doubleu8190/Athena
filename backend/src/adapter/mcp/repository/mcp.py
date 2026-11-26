@@ -422,18 +422,6 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         except SQLAlchemyError:
             raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
 
-    async def set_requires_approval(
-        self, actor: AuthContext, tool_id: str, requires_approval: bool
-    ) -> AdminToolDefinition:
-        """复核管理员后更新未软删 Server 下单个工具的审批策略。"""
-        if not tool_id or len(tool_id) > 64 or type(requires_approval) is not bool:
-            raise ValueError("mcp_tool_policy_invalid")
-        return await self.update_tool_metadata(
-            actor,
-            tool_id,
-            ToolMetadataPatch(requires_approval=requires_approval),
-        )
-
     async def update_tool_metadata(
         self, actor: AuthContext, tool_id: str, patch: ToolMetadataPatch
     ) -> AdminToolDefinition:
@@ -571,25 +559,6 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                 grants=grants_map.get(row.id, ()),
             )
             return McpServerConnectionState(server=server, secrets=secrets)
-
-    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
-        """读取运行态可用工具：仅包含未软删且已启用（enabled=True）的 Server 工具。"""
-        if not 1 <= limit <= 201:
-            raise ValueError("mcp_runtime_tool_limit_invalid")
-        async with self._session_factory() as session:
-            rows = (
-                await session.execute(
-                    select(McpToolModel, McpServerModel)
-                    .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                    .where(
-                        McpServerModel.deleted_at.is_(None),
-                        McpServerModel.enabled.is_(True),
-                    )
-                    .order_by(McpToolModel.server_id, McpToolModel.model_name)
-                    .limit(limit)
-                )
-            ).all()
-        return tuple(self._runtime_tool_projection(tool, server) for tool, server in rows)
 
     async def list_readable_runtime_tools(
         self,
@@ -788,24 +757,6 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             )
         return ToolPage(items=tuple(tool_to_public(row) for row in rows), total=total)
 
-    async def list_public(
-        self,
-        *,
-        offset: int,
-        limit: int,
-        allowed_server_ids: Sequence[str] | None = None,
-    ) -> ToolPage[PublicToolDefinition]:
-        """读取普通用户可见的已启用 Server 工具分页，停用或软删 Server 的工具立即摘除。"""
-        if allowed_server_ids is not None and not allowed_server_ids:
-            return ToolPage(items=(), total=0)
-        rows, total = await self._tool_page(
-            offset,
-            limit,
-            allowed_server_ids=allowed_server_ids,
-            only_enabled_servers=True,
-        )
-        return ToolPage(items=tuple(tool_to_public(row) for row in rows), total=total)
-
     async def list_admin(
         self,
         *,
@@ -813,16 +764,14 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         limit: int,
     ) -> ToolPage[AdminToolDefinition]:
         """读取全部未软删 Server 的管理员工具分页（含停用 Server，便于后台运维）。"""
-        rows, total = await self._tool_page(offset, limit, only_enabled_servers=False)
+        rows, total = await self._tool_page(offset, limit)
         return ToolPage(items=tuple(tool_to_admin(row) for row in rows), total=total)
 
     async def list_server_admin(
         self, server_id: str, *, offset: int, limit: int
     ) -> ToolPage[AdminToolDefinition]:
         """读取指定未软删 Server 的管理员工具分页。"""
-        rows, total = await self._tool_page(
-            offset, limit, server_id=server_id, only_enabled_servers=False
-        )
+        rows, total = await self._tool_page(offset, limit, server_id=server_id)
         return ToolPage(items=tuple(tool_to_admin(row) for row in rows), total=total)
 
     async def get_public_tool(self, tool_id: str) -> PublicToolDefinition | None:
@@ -858,8 +807,6 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         limit: int,
         *,
         server_id: str | None = None,
-        allowed_server_ids: Sequence[str] | None = None,
-        only_enabled_servers: bool = False,
     ) -> tuple[list[McpToolModel], int]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("mcp_page_invalid")
@@ -875,16 +822,9 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                 .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
                 .where(McpServerModel.deleted_at.is_(None))
             )
-            if only_enabled_servers:
-                count_query = count_query.where(McpServerModel.enabled.is_(True))
-                rows_query = rows_query.where(McpServerModel.enabled.is_(True))
             if server_id is not None:
                 count_query = count_query.where(McpToolModel.server_id == server_id)
                 rows_query = rows_query.where(McpToolModel.server_id == server_id)
-            if allowed_server_ids is not None:
-                unique_ids = tuple(dict.fromkeys(allowed_server_ids))
-                count_query = count_query.where(McpToolModel.server_id.in_(unique_ids))
-                rows_query = rows_query.where(McpToolModel.server_id.in_(unique_ids))
             total = int(await session.scalar(count_query) or 0)
             rows = list(
                 (

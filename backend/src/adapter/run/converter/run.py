@@ -80,11 +80,7 @@ def run_to_domain(row: RunModel) -> Run:
     skill_snapshot = (
         None if row.skill_snapshot is None else RunSkillSnapshot.model_validate(row.skill_snapshot)
     )
-    model_snapshot = (
-        None
-        if row.model_snapshot_json is None
-        else RunModelSnapshot.model_validate(row.model_snapshot_json)
-    )
+    model_snapshot = RunModelSnapshot.model_validate(row.model_snapshot_json)
     return Run(
         id=row.id,
         session_id=row.session_id,

@@ -28,6 +28,7 @@ from typing import Any, cast
 
 import pytest
 import tiktoken
+from access_support import make_test_access_policy
 from mcp import Client
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 from pg_unit_harness import create_pg_unit_db
@@ -115,6 +116,7 @@ from domain.run.model import (
     RunEvent,
     RunInputFiles,
     RunLease,
+    RunModelSnapshot,
     RunStatus,
     RunUsage,
 )
@@ -155,7 +157,6 @@ def _make_vision_profile(*, profile_id: str, supports_vision: bool) -> RuntimeMo
             protocol="chat_completions",
             base_url="https://llm.xingchen.test/v1",
             model=profile_id,
-            has_api_key=True,
             context_window_tokens=16384,
             tokenizer_encoding="o200k_base",
             supports_stream=True,
@@ -167,6 +168,7 @@ def _make_vision_profile(*, profile_id: str, supports_vision: bool) -> RuntimeMo
             temperature=None,
             enabled=True,
             created_at=NOW,
+            updated_at=NOW,
             supports_vision=supports_vision,
         ),
         api_key="test-enterprise-key",
@@ -382,7 +384,9 @@ def _build_vision_run_and_executor(
             0, result=SimpleNamespace(id=scope.session_id, project_id=None)
         )
     )
-    mcp_catalog_stub = SimpleNamespace(list_runtime_tools=lambda limit: asyncio.sleep(0, result=()))
+    mcp_catalog_stub = SimpleNamespace(
+        list_readable_runtime_tools=lambda snapshot, *, limit=201: asyncio.sleep(0, result=())
+    )
     tool_runtime = RunToolRuntimeService(
         auth=cast(Any, auth_stub),
         sessions=cast(Any, sessions_stub),
@@ -391,6 +395,7 @@ def _build_vision_run_and_executor(
         knowledge=None,
         project_knowledge=None,
         session_files=file_service,
+        access_policy=make_test_access_policy(),
         # 显式注入固定时钟，确保任意未来运行日期下与 NOW 对齐、不触发墙上时钟漂移。
         clock=lambda: NOW,
     )
@@ -408,6 +413,23 @@ def _build_vision_run_and_executor(
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id=profile.version.id,
+        model_snapshot=RunModelSnapshot(
+            id=profile.version.id,
+            name=profile.version.name,
+            protocol=profile.version.protocol,
+            base_url=profile.version.base_url,
+            model=profile.version.model,
+            context_window_tokens=profile.version.context_window_tokens,
+            tokenizer_encoding=profile.version.tokenizer_encoding,
+            supports_stream=profile.version.supports_stream,
+            supports_tools=profile.version.supports_tools,
+            supports_parallel_tool_calls=profile.version.supports_parallel_tool_calls,
+            max_output_tokens=profile.version.max_output_tokens,
+            request_timeout_seconds=profile.version.request_timeout_seconds,
+            execution_timeout_seconds=profile.version.execution_timeout_seconds,
+            max_concurrency=profile.version.max_concurrency,
+            supports_vision=supports_vision,
+        ),
         main_prompt_version_id="spv_main",
         compression_prompt_version_id="spv_cmp",
         prompt_template_version="run-v2",
@@ -437,7 +459,7 @@ def _build_vision_run_and_executor(
         status=MessageStatus.COMPLETED,
         parts=(TextPart("请核验本次提交的 7 份差旅与 HR 凭证图片。"),),
         reply_to_message_id=None,
-        run_id=None,
+        run_id=run.id,
         client_message_id=None,
         created_at=NOW,
         completed_at=NOW,
@@ -649,7 +671,7 @@ class _DbToolCatalog:
         return ()
 
     async def list_available_tool_ids(self) -> frozenset[str]:
-        page = await self._mcp_repo.list_public(limit=100, offset=0)
+        page = await self._mcp_repo.list_admin(limit=100, offset=0)
         return frozenset(tool.tool_id for tool in page.items)
 
 
@@ -760,6 +782,7 @@ def test_regression2_org_transfer_realtime_revocation_and_offboarding_cookie_inv
             kb_service = KnowledgeService(
                 KnowledgeRepository(session_factory),
                 _SimpleTokenizer(),
+                profile_id="bge-m3-default",
                 originals=_InMemoryOriginalStore(),
                 access_policy=access_policy,
                 clock=lambda: NOW,

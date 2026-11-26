@@ -73,6 +73,7 @@ function snapshot(
   reportMessageId: string | null = null,
 ): RunSnapshotPayload {
   return {
+    assistant_message_id: null,
     events: [],
     event_sequence: 4,
     events_after_sequence: null,
@@ -82,8 +83,10 @@ function snapshot(
           {
             created_at: "2026-11-10T03:00:00Z",
             id: "msg-assistant",
+            parts: [{ text, type: "text" }],
             role: "assistant",
             sequence: 2,
+            session_id: "session-1",
             status: "completed",
             text,
           },
@@ -322,12 +325,11 @@ describe("Run 状态投影", () => {
 });
 
 describe("自包含终态快照解析与内联收敛", () => {
-  it("parseSnapshotPayload 完整解析 assistant_message_id 与 4 类 parts，并兼容旧版精简快照", () => {
+  it("parseSnapshotPayload 完整解析 assistant_message_id 与 4 类 parts，还原 exclude_none 省略的可空字段并丢弃非法消息", () => {
     const parsed = parseSnapshotPayload({
       assistant_message_id: "msg-final-1",
       event_sequence: 9,
       events: [],
-      events_after_sequence: null,
       events_complete: true,
       messages: [
         {
@@ -351,7 +353,6 @@ describe("自包含终态快照解析与内联收敛", () => {
               type: "tool_call",
             },
             {
-              artifact_id: "art-1",
               artifacts: [
                 {
                   file_id: "file-1",
@@ -376,34 +377,50 @@ describe("自包含终态快照解析与内联收敛", () => {
           status: "completed",
           text: "请查收报告附件。",
         },
-        // 旧版精简消息（缺少新增可选字段）保持向后兼容
+        // 后端 exclude_none=True 会省略值为 None 的 reply_to_message_id / completed_at / run_id
         {
           created_at: "2026-11-10T03:00:00Z",
-          id: "msg-legacy",
+          id: "msg-exclude-none",
+          parts: [{ text: "生成 Q4 汇总", type: "text" }],
           role: "user",
           sequence: 1,
+          session_id: "session-1",
           status: "completed",
           text: "生成 Q4 汇总",
         },
-        // 含未知 part 类型时保守丢弃内联 parts，避免静默吞掉新内容块
+        // 缺失必填 session_id 或 parts、或包含未知 part 类型时保守丢弃该条异常消息
         {
           created_at: "2026-11-10T03:00:06Z",
+          id: "msg-missing-parts",
+          role: "assistant",
+          sequence: 3,
+          session_id: "session-1",
+          status: "completed",
+          text: "缺 parts",
+        },
+        {
+          created_at: "2026-11-10T03:00:07Z",
           id: "msg-unknown-part",
           parts: [{ type: "future_widget", value: 1 }],
           role: "assistant",
-          sequence: 3,
+          sequence: 4,
+          session_id: "session-1",
           status: "completed",
           text: "未知块",
         },
       ],
-      messages_before_sequence: null,
       messages_complete: true,
-      report_message_id: null,
       status: "completed",
     });
 
     expect(parsed).not.toBeNull();
     expect(parsed?.assistant_message_id).toBe("msg-final-1");
+    expect(parsed?.report_message_id).toBeNull();
+    expect(parsed?.messages_before_sequence).toBeNull();
+    expect(parsed?.events_after_sequence).toBeNull();
+    expect(parsed?.has_unparseable_messages).toBe(true);
+    expect(parsed?.messages_complete).toBe(false);
+    expect(parsed?.messages).toHaveLength(2);
     expect(parsed?.messages[0]).toMatchObject({
       completed_at: "2026-11-10T03:00:05Z",
       id: "msg-final-1",
@@ -412,9 +429,228 @@ describe("自包含终态快照解析与内联收敛", () => {
       session_id: "session-1",
     });
     expect(parsed?.messages[0]?.parts).toHaveLength(4);
-    expect(parsed?.messages[1]?.parts).toBeUndefined();
-    expect(parsed?.messages[1]?.run_id).toBeUndefined();
-    expect(parsed?.messages[2]?.parts).toBeUndefined();
+    expect(parsed?.messages[1]).toMatchObject({
+      completed_at: null,
+      id: "msg-exclude-none",
+      reply_to_message_id: null,
+      run_id: null,
+      session_id: "session-1",
+    });
+
+    // 全部消息合法时 has_unparseable_messages 为 false 且保留原始 messages_complete。
+    const allValid = parseSnapshotPayload({
+      event_sequence: 10,
+      events: [],
+      events_complete: true,
+      messages: [
+        {
+          created_at: "2026-11-10T03:00:00Z",
+          id: "msg-valid-only",
+          parts: [{ text: "正常消息", type: "text" }],
+          role: "assistant",
+          run_id: "run-1",
+          sequence: 1,
+          session_id: "session-1",
+          status: "completed",
+          text: "正常消息",
+        },
+      ],
+      messages_complete: true,
+      status: "running",
+    });
+    expect(allValid?.has_unparseable_messages).toBe(false);
+    expect(allValid?.messages_complete).toBe(true);
+  });
+
+  it("parseSnapshotPayload 还原后端 exclude_none=True 省略的子任务、待审批与安全技能投影可空字段且无 undefined", () => {
+    const parsed = parseSnapshotPayload({
+      event_sequence: 12,
+      events: [],
+      events_complete: true,
+      messages: [],
+      messages_complete: true,
+      pending_subagent_approvals: [
+        {
+          batch_message_id: "msg-batch-1",
+          call_id: "call-skill-1",
+          model_name: "skill__run_script",
+          ordinal: 1,
+          requested_at: "2026-11-10T03:00:03Z",
+          // 模拟 exclude_none=True 省略 tool_kind / display_name / approval_summary / formatted_arguments
+          safe_skill_projection: {
+            call_id: "call-skill-1",
+            can_approve: true,
+            hidden_parameter_count: 1,
+            input_files: [
+              {
+                available: true,
+                file_id: "file-in-1",
+                filename: "raw-data.bin",
+                // 模拟 exclude_none=True 省略 mime_type 与 size_bytes
+              },
+            ],
+            // 模拟省略 parameter_summary 与 unavailable_reason
+            purpose: "汇总原始数据并生成图表",
+            script_label: "analyze.py",
+            skill_id: "skill-1",
+            skill_name: "数据分析",
+            skill_version_id: "sv-1",
+            skill_version_label: "v1",
+          },
+          sub_run_id: "sub-run-1",
+          subagent_name: "财务分析助手",
+          subagent_slug: "finance-analyst",
+          task_index: 1,
+          task_summary: "核对费用表",
+        },
+        {
+          batch_message_id: "msg-batch-2",
+          call_id: "call-mcp-1",
+          formatted_arguments: [
+            { key: "query", label: "查询词", value: "差旅标准" },
+          ],
+          model_name: "mcp__kb_search",
+          ordinal: 2,
+          requested_at: "2026-11-10T03:00:04Z",
+          // 模拟 exclude_none=True 省略 tool_kind / safe_skill_projection / display_name / approval_summary
+          sub_run_id: "sub-run-2",
+          subagent_name: "制度顾问",
+          subagent_slug: "policy-advisor",
+          task_index: 2,
+          task_summary: "检索差旅制度",
+        },
+      ],
+      pending_subagent_inputs: [
+        {
+          created_at: "2026-11-10T03:00:05Z",
+          input_request_id: "req-sub-1",
+          question_message_id: "msg-q-1",
+          question_text: "请确认币种",
+          sub_run_id: "sub-run-3",
+          subagent_name: "财务分析助手",
+          subagent_slug: "finance-analyst",
+          task_index: 3,
+          task_summary: "核对汇率",
+        },
+      ],
+      status: "waiting_for_subagents",
+      subagent_tasks: [
+        {
+          created_at: "2026-11-10T03:00:01Z",
+          parent_tool_call_id: "call-parent-1",
+          status: "queued",
+          sub_run_id: "sub-run-1",
+          subagent_name: "财务分析助手",
+          subagent_slug: "finance-analyst",
+          task_index: 1,
+          task_summary: "核对费用表",
+          // 模拟 exclude_none=True 省略 subagent_profile_id / safe_error_code / first_started_at / finished_at
+        },
+      ],
+    });
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.subagent_tasks).toEqual([
+      {
+        created_at: "2026-11-10T03:00:01Z",
+        finished_at: null,
+        first_started_at: null,
+        parent_tool_call_id: "call-parent-1",
+        safe_error_code: null,
+        status: "queued",
+        sub_run_id: "sub-run-1",
+        subagent_name: "财务分析助手",
+        subagent_profile_id: null,
+        subagent_slug: "finance-analyst",
+        task_index: 1,
+        task_summary: "核对费用表",
+      },
+    ]);
+    expect(
+      Object.values(parsed!.subagent_tasks![0]).every(
+        (field) => field !== undefined,
+      ),
+    ).toBe(true);
+
+    expect(parsed?.pending_subagent_inputs).toHaveLength(1);
+    expect(parsed?.pending_subagent_approvals).toHaveLength(2);
+
+    const skillApproval = parsed!.pending_subagent_approvals![0];
+    expect(skillApproval).toEqual({
+      approval_summary: null,
+      batch_message_id: "msg-batch-1",
+      call_id: "call-skill-1",
+      display_name: null,
+      formatted_arguments: [],
+      model_name: "skill__run_script",
+      ordinal: 1,
+      requested_at: "2026-11-10T03:00:03Z",
+      safe_skill_projection: {
+        call_id: "call-skill-1",
+        can_approve: true,
+        hidden_parameter_count: 1,
+        input_files: [
+          {
+            available: true,
+            file_id: "file-in-1",
+            filename: "raw-data.bin",
+            mime_type: null,
+            size_bytes: null,
+          },
+        ],
+        parameter_summary: [],
+        purpose: "汇总原始数据并生成图表",
+        script_label: "analyze.py",
+        skill_id: "skill-1",
+        skill_name: "数据分析",
+        skill_version_id: "sv-1",
+        skill_version_label: "v1",
+        unavailable_reason: null,
+      },
+      sub_run_id: "sub-run-1",
+      subagent_name: "财务分析助手",
+      subagent_slug: "finance-analyst",
+      task_index: 1,
+      task_summary: "核对费用表",
+      tool_kind: null,
+    });
+    expect(
+      Object.values(skillApproval).every((field) => field !== undefined),
+    ).toBe(true);
+    expect(
+      Object.values(skillApproval.safe_skill_projection!).every(
+        (field) => field !== undefined,
+      ),
+    ).toBe(true);
+    expect(
+      Object.values(skillApproval.safe_skill_projection!.input_files[0]).every(
+        (field) => field !== undefined,
+      ),
+    ).toBe(true);
+
+    const mcpApproval = parsed!.pending_subagent_approvals![1];
+    expect(mcpApproval).toEqual({
+      approval_summary: null,
+      batch_message_id: "msg-batch-2",
+      call_id: "call-mcp-1",
+      display_name: null,
+      formatted_arguments: [
+        { key: "query", label: "查询词", value: "差旅标准" },
+      ],
+      model_name: "mcp__kb_search",
+      ordinal: 2,
+      requested_at: "2026-11-10T03:00:04Z",
+      safe_skill_projection: null,
+      sub_run_id: "sub-run-2",
+      subagent_name: "制度顾问",
+      subagent_slug: "policy-advisor",
+      task_index: 2,
+      task_summary: "检索差旅制度",
+      tool_kind: null,
+    });
+    expect(
+      Object.values(mcpApproval).every((field) => field !== undefined),
+    ).toBe(true);
   });
 
   it("completed 自包含快照支持按 assistant_message_id 或同 Run 完成助手消息直接收敛（含 file_ref）", () => {
@@ -447,7 +683,6 @@ describe("自包含终态快照解析与内联收敛", () => {
           },
         ],
       },
-      "session-1",
       "run-1",
       "msg-trigger",
     );
@@ -458,7 +693,7 @@ describe("自包含终态快照解析与内联收敛", () => {
       type: "file_ref",
     });
 
-    // 未携带 assistant_message_id 时，同 Run 的已完成助手消息且含 parts 仍可直接收敛。
+    // 未携带 assistant_message_id 时，同 Run 的已完成助手消息仍可直接收敛。
     const byRoleAndRun = resolveSelfContainedTerminalSnapshot(
       {
         ...snapshot("completed"),
@@ -477,12 +712,11 @@ describe("自包含终态快照解析与内联收敛", () => {
           },
         ],
       },
-      "session-1",
       "run-1",
     );
     expect(byRoleAndRun?.targetMessage.id).toBe("msg-final-no-id");
 
-    // 显式指定目标 ID 但快照仅包含旧交付消息（目标被 >512KB 裁剪）或缺少 parts 时，返回 null 走单次兜底。
+    // 显式指定目标 ID 但快照仅包含旧交付消息（目标被 >512KB 裁剪）或未携带本 Run 终态消息时，返回 null 走单次兜底。
     expect(
       resolveSelfContainedTerminalSnapshot(
         {
@@ -503,20 +737,45 @@ describe("自包含终态快照解析与内联收敛", () => {
           ],
           messages_complete: false,
         },
-        "session-1",
         "run-1",
       ),
     ).toBeNull();
     expect(
       resolveSelfContainedTerminalSnapshot(
-        snapshot("completed", "旧版缺 parts 快照"),
-        "session-1",
+        snapshot("completed", "未带 run_id 与 assistant_message_id 的旧消息"),
+        "run-1",
+      ),
+    ).toBeNull();
+
+    // 终态快照含无法解析的消息（has_unparseable_messages=true）时必须返回 null，
+    // 即使快照内存在早先澄清助手消息或已匹配的 assistant_message_id，也不得内联收敛以免漏消息。
+    expect(
+      resolveSelfContainedTerminalSnapshot(
+        {
+          ...snapshot("completed"),
+          assistant_message_id: "msg-final",
+          has_unparseable_messages: true,
+          messages: [
+            {
+              created_at: "2026-11-10T03:00:02Z",
+              id: "msg-final",
+              parts: [{ text: "完整最终回答", type: "text" }],
+              role: "assistant",
+              run_id: "run-1",
+              sequence: 2,
+              session_id: "session-1",
+              status: "completed",
+              text: "完整最终回答",
+            },
+          ],
+          messages_complete: false,
+        },
         "run-1",
       ),
     ).toBeNull();
   });
 
-  it("failed 自包含快照仅在安全停止报告身份匹配且含 parts 时直接收敛", () => {
+  it("failed 自包含快照仅在安全停止报告身份匹配时直接收敛", () => {
     const resolved = resolveSelfContainedTerminalSnapshot(
       {
         ...snapshot("failed", "", "msg-report"),
@@ -536,7 +795,6 @@ describe("自包含终态快照解析与内联收敛", () => {
           },
         ],
       },
-      "session-1",
       "run-1",
       "msg-trigger",
     );
@@ -561,7 +819,6 @@ describe("自包含终态快照解析与内联收敛", () => {
             },
           ],
         },
-        "session-1",
         "run-1",
       ),
     ).toBeNull();
@@ -586,7 +843,6 @@ describe("自包含终态快照解析与内联收敛", () => {
             },
           ],
         },
-        "session-1",
         "run-1",
         "msg-trigger",
       ),
@@ -646,7 +902,7 @@ describe("单次有界终态兜底与报告身份校验", () => {
     const trigger = makeMessage({
       id: "msg-trigger",
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 5,
       session_id: "session-1",
     });

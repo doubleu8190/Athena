@@ -56,12 +56,11 @@ class ArtifactFileRef:
 
 @dataclass(frozen=True, slots=True)
 class ToolResultPart:
-    """工具调用产生的安全结果或大型结果引用。"""
+    """工具调用产生的安全结果或产物引用。"""
 
     tool_call_id: str
     status: ToolResultStatus
     output: str | None = None
-    artifact_id: str | None = None
     artifacts: tuple[ArtifactFileRef, ...] = ()
     type: Literal["tool_result"] = field(default="tool_result", init=False)
 

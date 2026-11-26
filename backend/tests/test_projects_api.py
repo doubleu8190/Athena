@@ -54,20 +54,6 @@ class InMemoryProjectRepository:
         )
         return ProjectPage(items=tuple(active[offset : offset + limit]), total=len(active))
 
-    async def rename(
-        self,
-        owner_id: str,
-        project_id: str,
-        name: str,
-        updated_at: datetime,
-    ) -> Project | None:
-        project = await self.get(owner_id, project_id)
-        if project is None:
-            return None
-        renamed = replace(project, name=name, updated_at=updated_at)
-        self.items[project_id] = renamed
-        return renamed
-
     async def update(
         self,
         owner_id: str,
@@ -144,15 +130,6 @@ class FailingProjectRepository:
         offset: int,
         limit: int,
     ) -> ProjectPage:
-        self._raise_database_error()
-
-    async def rename(
-        self,
-        owner_id: str,
-        project_id: str,
-        name: str,
-        updated_at: datetime,
-    ) -> Project | None:
         self._raise_database_error()
 
     async def update(

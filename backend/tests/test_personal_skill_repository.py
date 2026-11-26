@@ -12,9 +12,14 @@ from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from adapter.access.repository import (
+    SqlAlchemyAccessControlRepository,
+    load_user_access_snapshot_in_session,
+)
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.skill.model.skill import SkillModel, SkillVersionModel
 from adapter.skill.repository import SqlAlchemySkillRepository, build_run_skill_snapshot
+from app.access import AccessPolicyService
 from app.skill.service import SkillService
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.skill import (
@@ -95,6 +100,7 @@ async def _run_personal_skill_scenario() -> None:
             _AuthReader(),
             id_factory=lambda prefix: f"{prefix}_{next(sequence)}",
             clock=lambda: NOW,
+            access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
         )
 
         created_a = await service.create_personal(
@@ -122,12 +128,24 @@ async def _run_personal_skill_scenario() -> None:
         assert created_a.versions[0].package_sha256 == created_b.versions[0].package_sha256
 
         await _insert_public_skill(factory)
-        public_entries = await repository.get_public_directory_entries()
-        assert [(s.id, v.id) for s, v in public_entries] == [("skill_public", "skillver_public")]
-        user_entries = await repository.get_user_directory_entries(actor_a.user.id)
-        assert {(s.id, v.id) for s, v in user_entries} == {
+        access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(factory))
+        actor_a_snapshot = await access_policy.get_user_snapshot(actor_a.user.id)
+        actor_b_snapshot = await access_policy.get_user_snapshot(actor_b.user.id)
+        assert actor_a_snapshot is not None
+        assert actor_b_snapshot is not None
+        user_a_entries = await repository.get_readable_user_directory_entries(
+            actor_a.user.id, snapshot=actor_a_snapshot
+        )
+        assert {(s.id, v.id) for s, v in user_a_entries} == {
             ("skill_public", "skillver_public"),
             (created_a.skill.id, created_a.versions[0].id),
+        }
+        user_b_entries = await repository.get_readable_user_directory_entries(
+            actor_b.user.id, snapshot=actor_b_snapshot
+        )
+        assert {(s.id, v.id) for s, v in user_b_entries} == {
+            ("skill_public", "skillver_public"),
+            (created_b.skill.id, created_b.versions[0].id),
         }
         assert [item.id for item in await service.list_personal(actor_a)] == [created_a.skill.id]
         assert await repository.get_personal_skill(actor_b.user.id, created_a.skill.id) is None
@@ -135,10 +153,14 @@ async def _run_personal_skill_scenario() -> None:
             await service.get_personal(actor_b, created_a.skill.id)
 
         async with factory() as session:
+            actor_a_tx_snapshot = await load_user_access_snapshot_in_session(
+                session, actor_a.user.id
+            )
+            assert actor_a_tx_snapshot is not None
             snapshot = await build_run_skill_snapshot(
                 session,
                 (),
-                owner_id=actor_a.user.id,
+                snapshot=actor_a_tx_snapshot,
             )
         by_scope = {(item.slug, item.scope) for item in snapshot.skills}
         assert ("public-shared", SkillScope.COMPANY) in by_scope
@@ -146,10 +168,14 @@ async def _run_personal_skill_scenario() -> None:
         assert (created_b.skill.slug, SkillScope.PERSONAL) not in by_scope
         with pytest.raises(SkillConflictError, match="skill_selection_unavailable"):
             async with factory() as session:
+                actor_a_tx_snapshot = await load_user_access_snapshot_in_session(
+                    session, actor_a.user.id
+                )
+                assert actor_a_tx_snapshot is not None
                 await build_run_skill_snapshot(
                     session,
                     (created_b.skill.id,),
-                    owner_id=actor_a.user.id,
+                    snapshot=actor_a_tx_snapshot,
                 )
 
         published = await service.publish_personal(
@@ -195,10 +221,14 @@ async def _run_personal_skill_scenario() -> None:
             )
 
         async with factory() as session:
+            actor_a_tx_snapshot = await load_user_access_snapshot_in_session(
+                session, actor_a.user.id
+            )
+            assert actor_a_tx_snapshot is not None
             historical_snapshot = await build_run_skill_snapshot(
                 session,
                 (created_a.skill.id,),
-                owner_id=actor_a.user.id,
+                snapshot=actor_a_tx_snapshot,
             )
             version_count = await session.scalar(
                 select(func.count(SkillVersionModel.id)).where(
@@ -281,6 +311,7 @@ async def _run_personal_replay_current_scenario() -> None:
             _AuthReader(),
             id_factory=lambda prefix: f"{prefix}_{next(sequence)}",
             clock=lambda: NOW,
+            access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
         )
 
         created = await service.create_personal(

@@ -58,15 +58,6 @@ class InMemoryAuthRepository(AuthRepository):
         self.users[user.id] = user
         return user
 
-    async def create_user_with_session(
-        self,
-        user: User,
-        auth_session: AuthSession,
-    ) -> User:
-        await self.create_user(user)
-        self.sessions[auth_session.token_hash] = auth_session
-        return user
-
     async def upsert_local_super_admin(
         self,
         *,

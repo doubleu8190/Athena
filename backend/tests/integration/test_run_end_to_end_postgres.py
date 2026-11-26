@@ -164,6 +164,7 @@ def test_public_submit_worker_redis_sse_and_persisted_reply() -> None:
                             temperature=None,
                             enabled=True,
                             created_at=now,
+                            updated_at=now,
                         )
                     )
                     await session.flush()

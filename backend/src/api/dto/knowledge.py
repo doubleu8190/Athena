@@ -31,9 +31,9 @@ class KnowledgeBaseResponse(BaseModel):
     id: str
     name: str
     description: str | None
-    visibility_scope: Literal["company", "department", "personal"] = "personal"
-    owner_department_id: str | None = None
-    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
+    visibility_scope: Literal["company", "department", "personal"]
+    owner_department_id: str | None
+    visibility_grants: list[VisibilityGrantResponse]
     created_at: str
     updated_at: str
 
@@ -74,7 +74,7 @@ class KnowledgeDocumentResponse(BaseModel):
     pending_version_id: str | None
     created_at: str
     updated_at: str
-    latest_version: KnowledgeVersionResponse | None = None
+    latest_version: KnowledgeVersionResponse | None
 
 
 class KnowledgeDocumentListResponse(BaseModel):
@@ -86,7 +86,7 @@ class KnowledgeDocumentListResponse(BaseModel):
 class KnowledgeImportResponse(BaseModel):
     document_id: str
     version_id: str
-    state: str = "queued"
+    state: str
     status_url: str
 
 
@@ -98,7 +98,7 @@ class KnowledgeSearchRequest(BaseModel):
 
 class KnowledgeSearchHit(BaseModel):
     chunk_id: str
-    chunk_ids: list[str] = Field(default_factory=list)
+    chunk_ids: list[str]
     document_id: str
     version_id: str
     title: str

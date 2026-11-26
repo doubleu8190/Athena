@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
@@ -45,7 +44,6 @@ from domain.message import (
     ExecutionMessage,
     ExecutionMessageDraft,
     ExecutionRole,
-    InvalidMessageReferenceError,
     MessageMetadata,
     MessageStatus,
     TextPart,
@@ -77,6 +75,26 @@ from domain.run.ports import RunRepository
 from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
+_MODEL_SNAPSHOT: dict[str, object] = {
+    "id": "llmprof_run_test",
+    "name": "Run test",
+    "protocol": "chat_completions",
+    "base_url": "https://llm.example/v1",
+    "model": "test-model",
+    "context_window_tokens": 8192,
+    "tokenizer_encoding": "o200k_base",
+    "supports_stream": True,
+    "supports_tools": True,
+    "supports_parallel_tool_calls": False,
+    "max_output_tokens": 512,
+    "request_timeout_seconds": 30,
+    "execution_timeout_seconds": 60,
+    "max_concurrency": 1,
+    "temperature": None,
+    "scenario_label": None,
+    "supports_vision": False,
+    "version": 1,
+}
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is not configured"),
@@ -88,8 +106,9 @@ def _draft(
     message_id: str,
     owner_id: str,
     session_id: str,
-    run_id: str | None,
+    run_id: str,
     text_value: str,
+    context_turn_id: str | None = None,
     client_message_id: str | None = None,
 ) -> ConversationMessageDraft:
     return ConversationMessageDraft(
@@ -101,6 +120,7 @@ def _draft(
         parts=(TextPart(text_value),),
         reply_to_message_id=None,
         run_id=run_id,
+        context_turn_id=context_turn_id or message_id,
         client_message_id=client_message_id,
         created_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
@@ -160,19 +180,6 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
                     ),
                     {"now": now},
                 )
-                await connection.execute(
-                    text(
-                        "INSERT INTO conversation_messages "
-                        "(id,session_id,role,status,sequence,parts,run_id,"
-                        "client_message_id,created_at,metadata) VALUES "
-                        "('msg_subagent_parent','ses_subagent_parent','user','completed',"
-                        "1,CAST(:parts AS jsonb),NULL,NULL,:now,CAST('{}' AS jsonb))"
-                    ),
-                    {
-                        "parts": json.dumps([{"type": "text", "text": "parent ids"}]),
-                        "now": now,
-                    },
-                )
 
             parent_run_id = f"parent_{'r' * 121}"
             child_run_id = f"child_{'c' * 122}"
@@ -201,9 +208,27 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
                         temperature=None,
                         enabled=True,
                         created_at=now,
+                        updated_at=now,
                     )
                 )
                 await session.flush()
+                session.add(
+                    ConversationMessageModel(
+                        id="msg_subagent_parent",
+                        session_id="ses_subagent_parent",
+                        role="user",
+                        status="completed",
+                        sequence=1,
+                        parts=[{"type": "text", "text": "parent ids"}],
+                        reply_to_message_id=None,
+                        run_id=parent_run_id,
+                        context_turn_id="msg_subagent_parent",
+                        client_message_id=None,
+                        created_at=now,
+                        completed_at=now,
+                        metadata_json={},
+                    )
+                )
                 session.add(
                     RunModel(
                         id=parent_run_id,
@@ -214,6 +239,7 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id=profile_id,
+                        model_snapshot_json=dict(_MODEL_SNAPSHOT),
                         main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                         compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
@@ -237,6 +263,7 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id=profile_id,
+                        model_snapshot_json=dict(_MODEL_SNAPSHOT),
                         main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                         compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
@@ -264,91 +291,8 @@ def test_subagent_parent_id_columns_accept_domain_max_lengths() -> None:
     asyncio.run(scenario())
 
 
-def test_subagent_parent_id_width_migration_repairs_old_0029_layout() -> None:
-    """旧版 0029 库应安全扩宽，降级不回缩，异常更宽列则整体拒绝。"""
-    database_url = DATABASE_URL
-    if database_url is None:
-        pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
-
-    async def scenario() -> None:
-        async with isolated_postgres_schema(
-            database_url,
-            prefix="athena_v2_subagent_parent_widths",
-            revision="20261128_0029",
-        ) as db:
-            test_engine = db.engine
-
-            async def _read_widths() -> dict[str, int | None]:
-                """读取三个父 Run 关联列在真实 PostgreSQL 中的宽度。"""
-                async with test_engine.connect() as connection:
-                    return dict(
-                        (
-                            await connection.execute(
-                                text(
-                                    "SELECT column_name, character_maximum_length "
-                                    "FROM information_schema.columns "
-                                    "WHERE table_schema = current_schema() "
-                                    "AND table_name = 'runs' "
-                                    "AND column_name IN "
-                                    "('parent_run_id','root_run_id','parent_tool_call_id')"
-                                )
-                            )
-                        ).all()
-                    )
-
-            async with test_engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "ALTER TABLE runs "
-                        "ALTER COLUMN parent_run_id TYPE VARCHAR(64), "
-                        "ALTER COLUMN root_run_id TYPE VARCHAR(64), "
-                        "ALTER COLUMN parent_tool_call_id TYPE VARCHAR(64)"
-                    )
-                )
-            assert await _read_widths() == {
-                "parent_run_id": 64,
-                "root_run_id": 64,
-                "parent_tool_call_id": 64,
-            }
-
-            await db.upgrade_to("head")
-            assert await _read_widths() == {
-                "parent_run_id": 128,
-                "root_run_id": 128,
-                "parent_tool_call_id": 256,
-            }
-
-            await db.downgrade_to("20261128_0029")
-            assert await _read_widths() == {
-                "parent_run_id": 128,
-                "root_run_id": 128,
-                "parent_tool_call_id": 256,
-            }
-
-            async with test_engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        "ALTER TABLE runs "
-                        "ALTER COLUMN parent_run_id TYPE VARCHAR(256), "
-                        "ALTER COLUMN root_run_id TYPE VARCHAR(64)"
-                    )
-                )
-            with pytest.raises(
-                RuntimeError,
-                match="subagent_parent_id_width_unsafe:parent_run_id:256>128",
-            ):
-                await db.upgrade_to("head")
-            assert await _read_widths() == {
-                "parent_run_id": 256,
-                "root_run_id": 64,
-                "parent_tool_call_id": 256,
-            }
-
-    asyncio.run(scenario())
-
-
-def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
-    """真实迁移保留历史 run_id，事务命令、幂等及事件在 PostgreSQL 正确工作。"""
+def test_run_atomic_commands_snapshots_and_executor_lifecycle() -> None:
+    """基线迁移下 Run 事务命令、快照、澄清、重试、超时与执行器生命周期在 PostgreSQL 正确工作。"""
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
@@ -357,7 +301,6 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
         async with isolated_postgres_schema(
             database_url,
             prefix="athena_v2_run_test",
-            revision="20261110_0011",
         ) as db:
             test_engine = db.engine
             now = datetime.now(UTC)
@@ -378,44 +321,9 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                     ),
                     {"now": now},
                 )
-                await connection.execute(
-                    text(
-                        "INSERT INTO conversation_messages "
-                        "(id,session_id,role,status,sequence,parts,run_id,client_message_id,"
-                        "created_at,metadata) VALUES "
-                        "('msg_legacy','ses_run_test','user','completed',"
-                        "1,CAST(:parts AS jsonb),'legacy_run_id',NULL,:now,CAST('{}' AS jsonb))"
-                    ),
-                    {
-                        "parts": json.dumps([{"type": "text", "text": "history"}]),
-                        "now": now,
-                    },
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO execution_messages "
-                        "(id,session_id,run_id,thread_id,sequence,role,parts,tool_call_id,"
-                        "source_message_id,created_at,metadata) VALUES "
-                        "('exec_legacy','ses_run_test',"
-                        "'legacy_execution_id','thread_legacy',1,'assistant',CAST(:parts AS jsonb),"
-                        "NULL,NULL,:now,CAST('{}' AS jsonb))"
-                    ),
-                    {
-                        "parts": json.dumps([{"type": "text", "text": "internal history"}]),
-                        "now": now,
-                    },
-                )
-            await db.upgrade_to("head")
             factory = db.session_factory
-            async with factory() as session:
-                legacy = await session.get(ConversationMessageModel, "msg_legacy")
-                assert legacy is not None
-                assert legacy.run_id == "legacy_run_id"
-                assert legacy.managed_run_id is None
-                legacy_execution = await session.get(ExecutionMessageModel, "exec_legacy")
-                assert legacy_execution is not None
-                assert legacy_execution.run_id == "legacy_execution_id"
-                assert legacy_execution.managed_run_id is None
+            baseline_run_created_at = now - timedelta(seconds=10)
+            async with factory() as session, session.begin():
                 session.add(
                     ModelProfileVersionModel(
                         id="llmprof_run_test",
@@ -435,12 +343,28 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         temperature=None,
                         enabled=True,
                         created_at=now,
+                        updated_at=now,
                     )
                 )
                 await session.flush()
                 session.add(DefaultModelProfileModel(singleton_id=1, profile_id="llmprof_run_test"))
-                await session.commit()
-                baseline_run_created_at = now - timedelta(seconds=10)
+                session.add(
+                    ConversationMessageModel(
+                        id="msg_legacy",
+                        session_id="ses_run_test",
+                        role="user",
+                        status="completed",
+                        sequence=1,
+                        parts=[{"type": "text", "text": "history"}],
+                        reply_to_message_id=None,
+                        run_id="zz_baseline_clock_order",
+                        context_turn_id="msg_legacy",
+                        client_message_id=None,
+                        created_at=baseline_run_created_at,
+                        completed_at=baseline_run_created_at,
+                        metadata_json={},
+                    )
+                )
                 session.add(
                     RunModel(
                         id="zz_baseline_clock_order",
@@ -451,6 +375,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_run_test",
+                        model_snapshot_json=dict(_MODEL_SNAPSHOT),
                         main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                         compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
@@ -463,7 +388,6 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         usage={},
                     )
                 )
-                await session.commit()
 
             messages = SqlAlchemyMessageRepository(factory)
             repository = SqlAlchemyRunRepository(factory, messages)
@@ -526,7 +450,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                             parts=[{"type": "text", "text": f"历史消息 {sequence}"}],
                             reply_to_message_id=None,
                             run_id=submitted.run.id,
-                            managed_run_id=submitted.run.id,
+                            context_turn_id=submitted.message.id,
                             client_message_id=None,
                             created_at=now,
                             completed_at=now,
@@ -572,7 +496,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         parts=[{"type": "text", "text": "界" * 200_000}],
                         reply_to_message_id=None,
                         run_id=submitted.run.id,
-                        managed_run_id=submitted.run.id,
+                        context_turn_id=submitted.message.id,
                         client_message_id=None,
                         created_at=now,
                         completed_at=now,
@@ -596,51 +520,9 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
             )
             assert restored_utf8 is not None
             assert any(message.id == "msg_snapshot_utf8" for message in restored_utf8.items)
-            for suffix, text_value in (("a", "repeat one"), ("b", "repeat two")):
-                await messages.append_conversation(
-                    _draft(
-                        message_id=f"msg_same_role_{suffix}",
-                        owner_id="usr_run_test",
-                        session_id="ses_run_test",
-                        run_id="legacy_run_without_entity",
-                        text_value=text_value,
-                    )
-                )
-            with pytest.raises(
-                InvalidMessageReferenceError,
-                match="managed_run_write_requires_run_command",
-            ):
-                await messages.append_conversation(
-                    _draft(
-                        message_id="msg_public_managed_bypass",
-                        owner_id="usr_run_test",
-                        session_id="ses_run_test",
-                        run_id=submitted.run.id,
-                        text_value="must use run command",
-                    )
-                )
-            with pytest.raises(
-                InvalidMessageReferenceError,
-                match="managed_run_write_requires_run_command",
-            ):
-                await messages.append_execution(
-                    ExecutionMessageDraft(
-                        id="exec_public_managed_bypass",
-                        session_id="ses_run_test",
-                        owner_id="usr_run_test",
-                        run_id=submitted.run.id,
-                        thread_id="thread_run_test",
-                        role=ExecutionRole.ASSISTANT,
-                        parts=(ToolCallPart("call_public_bypass", "tool", {}),),
-                        tool_call_id=None,
-                        source_message_id=None,
-                        created_at=now,
-                        metadata=MessageMetadata(),
-                    )
-                )
             async with factory() as session:
                 managed = await session.get(ConversationMessageModel, submitted.message.id)
-                assert managed is not None and managed.managed_run_id == submitted.run.id
+                assert managed is not None and managed.run_id == submitted.run.id
                 event_rows = (
                     await session.scalars(
                         select(RunEventModel).where(RunEventModel.run_id == submitted.run.id)
@@ -874,8 +756,8 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 managed_question = await session.get(ConversationMessageModel, question.id)
                 managed_call = await session.get(ExecutionMessageModel, tool_call.id)
                 assert managed_question is not None
-                assert managed_question.managed_run_id == submitted.run.id
-                assert managed_call is not None and managed_call.managed_run_id == submitted.run.id
+                assert managed_question.run_id == submitted.run.id
+                assert managed_call is not None and managed_call.run_id == submitted.run.id
 
             answer_draft = replace(
                 command_value.message,
@@ -1233,6 +1115,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         context_cutoff_sequence=claimed_run.context_cutoff_sequence,
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_run_test",
+                        model_snapshot_json=dict(_MODEL_SNAPSHOT),
                         main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                         compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
                         prompt_template_version="run-v2",
@@ -2012,274 +1895,151 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         .where(ModelProfileVersionModel.id == "llmprof_run_test")
                         .values(enabled=True)
                     )
-            downgrade_error = "Cannot restore uq_conversation_messages_run_role"
-            with pytest.raises(RuntimeError, match=downgrade_error):
-                await db.downgrade_to("20261110_0011")
 
     asyncio.run(scenario())
 
 
-def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None:
-    """0014 的历史 Run、工具调用、MCP 与模型配置行可无损升级到审批版本。"""
+def test_fail_rejects_invalid_report_message_ownership_and_role() -> None:
+    """fail() 写入 report_message 前必须拦截跨 Run、跨会话、跨 owner 或非 assistant 角色草稿。"""
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
 
     async def scenario() -> None:
         async with isolated_postgres_schema(
-            database_url,
-            prefix="athena_v2_approval_migration",
-            revision="20261113_0014",
+            database_url, prefix="athena_v2_run_fail_report_guard"
         ) as db:
-            test_engine = db.engine
+            factory = db.session_factory
             now = datetime.now(UTC)
-            async with test_engine.begin() as connection:
-                await connection.execute(
+            profile_id = "llmprof_fail_guard"
+            async with db.engine.begin() as conn:
+                await conn.execute(
                     text(
-                        "INSERT INTO users "
-                        "(id,email,password_hash,status,created_at,updated_at) "
-                        "VALUES ('usr_approval_migration','migration@example.com','x',"
+                        "INSERT INTO users (id,email,password_hash,status,created_at,updated_at) "
+                        "VALUES ('usr_fail_guard','fail_guard@example.com','unused',"
                         "'active',:now,:now)"
                     ),
                     {"now": now},
                 )
-                await connection.execute(
+                await conn.execute(
                     text(
-                        "INSERT INTO sessions "
-                        "(id,owner_id,title,project_id,last_message_sequence,created_at,"
-                        "updated_at) VALUES ('ses_approval_migration','usr_approval_migration',"
-                        "NULL,NULL,1,:now,:now)"
+                        "INSERT INTO sessions (id,owner_id,title,project_id,"
+                        "last_message_sequence,created_at,updated_at) "
+                        "VALUES ('ses_fail_guard','usr_fail_guard',NULL,NULL,0,:now,:now)"
                     ),
                     {"now": now},
                 )
-                await connection.execute(
-                    text(
-                        "INSERT INTO conversation_messages "
-                        "(id,session_id,role,status,sequence,parts,run_id,client_message_id,"
-                        "created_at,metadata) VALUES "
-                        "('msg_approval_migration','ses_approval_migration','user',"
-                        "'completed',1,CAST(:parts AS jsonb),NULL,NULL,:now,"
-                        "CAST('{}' AS jsonb))"
-                    ),
-                    {
-                        "parts": json.dumps([{"type": "text", "text": "legacy"}]),
-                        "now": now,
-                    },
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO execution_messages "
-                        "(id,session_id,run_id,thread_id,sequence,role,parts,tool_call_id,"
-                        "source_message_id,created_at,metadata) VALUES "
-                        "('exec_approval_migration','ses_approval_migration',"
-                        "'run_approval_migration','thread_legacy',1,'assistant',"
-                        "CAST(:parts AS jsonb),NULL,NULL,:now,CAST('{}' AS jsonb))"
-                    ),
-                    {
-                        "parts": json.dumps(
-                            [
-                                {
-                                    "type": "tool_call",
-                                    "tool_call_id": "call_legacy",
-                                    "name": "legacy_tool",
-                                    "arguments": {"query": "legacy"},
-                                }
-                            ]
-                        ),
-                        "now": now,
-                    },
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO llm_model_profile_versions "
-                        "(id,name,protocol,base_url,model,credential_env,"
-                        "context_window_tokens,tokenizer_encoding,max_output_tokens,"
-                        "request_timeout_seconds,execution_timeout_seconds,max_concurrency,"
-                        "temperature,enabled,created_at) VALUES "
-                        "('llmprof_approval_migration','Legacy','chat_completions',"
-                        "'https://llm.example/v1','legacy','ATHENA_LLM_CREDENTIAL_LEGACY',"
-                        "8192,'o200k_base',512,30,60,1,NULL,true,:now)"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO llm_compression_policy_versions "
-                        "(id,compression_model_profile_id,trigger_ratio,recent_ratio,"
-                        "summary_ratio,prompt_template_version,created_at) VALUES "
-                        "('cmpol_approval_migration','llmprof_approval_migration',"
-                        "0.8,0.2,0.1,'context-summary-v1',:now)"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO llm_default_model_profile (singleton_id,profile_id) "
-                        "VALUES (1,'llmprof_approval_migration')"
-                    )
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO llm_current_compression_policy "
-                        "(singleton_id,policy_version_id) VALUES "
-                        "(1,'cmpol_approval_migration')"
-                    )
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO runs "
-                        "(id,session_id,owner_id,status,trigger_message_id,"
-                        "context_cutoff_sequence,model_config_version_id,"
-                        "compression_policy_version_id,"
-                        "prompt_template_version,execution_epoch,queued_at,created_at,"
-                        "updated_at) VALUES "
-                        "('run_approval_migration','ses_approval_migration',"
-                        "'usr_approval_migration','completed','msg_approval_migration',1,"
-                        "'llmprof_approval_migration','cmpol_approval_migration',"
-                        "'run-v2',1,:now,:now,:now)"
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO run_tool_calls "
-                        "(id,run_id,session_id,tool_call_id,ordinal,tool_id,tool_kind,"
-                        "model_name,execution_epoch,status,call_message_id,started_at,"
-                        "finished_at,safe_error_code,outcome,round) VALUES "
-                        "('toolcall_legacy','run_approval_migration',"
-                        "'ses_approval_migration','call_legacy',1,'builtin_legacy',"
-                        "'builtin','legacy_tool',1,'completed','exec_approval_migration',"
-                        ":started,:now,NULL,CAST(:outcome AS jsonb),0)"
-                    ),
-                    {
-                        "started": now - timedelta(seconds=1),
-                        "now": now,
-                        "outcome": json.dumps(
-                            {
-                                "status": "ok",
-                                "code": "tool_completed",
-                                "message": "done",
-                            }
-                        ),
-                    },
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO mcp_servers "
-                        "(id,name,transport,config_json,config_version,created_at,updated_at) "
-                        "VALUES ('mcp_legacy','Legacy','stdio',CAST(:config AS jsonb),1,"
-                        ":now,:now)"
-                    ),
-                    {
-                        "config": json.dumps(
-                            {
-                                "transport": "stdio",
-                                "command": "/bin/true",
-                                "args": [],
-                            }
-                        ),
-                        "now": now,
-                    },
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO mcp_tools "
-                        "(id,server_id,remote_name,model_name,description,"
-                        "input_schema_json,created_at) VALUES "
-                        "('tool_legacy','mcp_legacy','remote_legacy','mcp__legacy',"
-                        "'legacy',CAST(:schema AS jsonb),:now)"
-                    ),
-                    {"schema": json.dumps({"type": "object"}), "now": now},
-                )
-            await db.upgrade_to("head")
-            async with test_engine.connect() as connection:
-                tool_row = (
-                    await connection.execute(
-                        text(
-                            "SELECT status, requires_approval, requested_at = started_at "
-                            "AS requested_backfilled FROM run_tool_calls "
-                            "WHERE id = 'toolcall_legacy'"
-                        )
-                    )
-                ).one()
-                mcp_row = (
-                    await connection.execute(
-                        text("SELECT requires_approval FROM mcp_tools WHERE id = 'tool_legacy'")
-                    )
-                ).one()
-                profile_row = (
-                    await connection.execute(
-                        text(
-                            "SELECT supports_parallel_tool_calls "
-                            "FROM llm_model_profile_versions "
-                            "WHERE id = 'llmprof_approval_migration'"
-                        )
-                    )
-                ).one()
-                profile_state = (
-                    await connection.execute(
-                        text(
-                            "SELECT enabled, api_key_ciphertext IS NULL AS no_key "
-                            "FROM llm_model_profile_versions "
-                            "WHERE id = 'llmprof_approval_migration'"
-                        )
-                    )
-                ).one()
-                pointer_state = (
-                    await connection.execute(
-                        text(
-                            "SELECT (SELECT count(*) FROM llm_default_model_profile) "
-                            "AS defaults, (SELECT count(*) FROM llm_current_compression_policy) "
-                            "AS current_policies, (SELECT count(*) "
-                            "FROM llm_compression_policy_versions "
-                            "WHERE id = 'cmpol_approval_migration') AS history"
-                        )
-                    )
-                ).one()
-                run_snapshot = (
-                    await connection.execute(
-                        text(
-                            "SELECT model_config_version_id,compression_policy_version_id "
-                            "FROM runs WHERE id = 'run_approval_migration'"
-                        )
-                    )
-                ).one()
-                run_row = (
-                    await connection.execute(
-                        text("SELECT status FROM runs WHERE id = 'run_approval_migration'")
-                    )
-                ).one()
-            assert tool_row.status == "completed"
-            assert tool_row.requires_approval is False
-            assert tool_row.requested_backfilled is True
-            assert mcp_row.requires_approval is False
-            assert profile_row.supports_parallel_tool_calls is False
-            assert profile_state.enabled is False
-            assert profile_state.no_key is True
-            assert pointer_state.defaults == 0
-            assert pointer_state.current_policies == 0
-            assert pointer_state.history == 1
-            assert run_snapshot.model_config_version_id == "llmprof_approval_migration"
-            assert run_snapshot.compression_policy_version_id == "cmpol_approval_migration"
-            assert run_row.status == "completed"
-            factory = db.session_factory
-            messages = SqlAlchemyMessageRepository(factory)
-            repository = SqlAlchemyRunRepository(factory, messages)
             async with factory() as session, session.begin():
-                legacy_profile = await session.get(
-                    ModelProfileVersionModel, "llmprof_approval_migration"
-                )
-                assert legacy_profile is not None
-                legacy_profile.enabled = True
                 session.add(
-                    DefaultModelProfileModel(
-                        singleton_id=1,
-                        profile_id="llmprof_approval_migration",
+                    ModelProfileVersionModel(
+                        id=profile_id,
+                        name="Fail guard model",
+                        protocol="chat_completions",
+                        base_url="https://llm.example/v1",
+                        model="test-model",
+                        **encrypted_llm_key_fields(profile_id),
+                        context_window_tokens=8192,
+                        tokenizer_encoding="o200k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        max_output_tokens=512,
+                        request_timeout_seconds=30,
+                        execution_timeout_seconds=60,
+                        max_concurrency=1,
+                        temperature=None,
+                        enabled=True,
+                        created_at=now,
+                        updated_at=now,
                     )
                 )
                 await session.flush()
-                with pytest.raises(RunStateError, match="llm_default_profile_unavailable"):
-                    await repository._load_default_profile_row(session)
-                assert await repository._current_compression_policy_id(session) is None
+                session.add(DefaultModelProfileModel(singleton_id=1, profile_id=profile_id))
+
+            repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            await repository.submit(
+                "ses_fail_guard",
+                "usr_fail_guard",
+                SubmitRunCommand(
+                    run_id="run_fail_guard",
+                    request_id="req_fail_guard",
+                    fingerprint="f" * 64,
+                    prompt_template_version="run-v2",
+                    message=_draft(
+                        message_id="msg_fail_guard_trigger",
+                        owner_id="usr_fail_guard",
+                        session_id="ses_fail_guard",
+                        run_id="run_fail_guard",
+                        text_value="trigger fail guard",
+                    ),
+                    queued_at=now,
+                ),
+            )
+            lease = (
+                await repository.claim(
+                    "worker-fail-guard",
+                    lease_seconds=60,
+                    execution_seconds=300,
+                    limit=1,
+                )
+            )[0]
+
+            valid_report = ConversationMessageDraft(
+                id="msg_fail_guard_report",
+                session_id="ses_fail_guard",
+                owner_id="usr_fail_guard",
+                role=ConversationRole.ASSISTANT,
+                status=MessageStatus.COMPLETED,
+                parts=(TextPart("safe failure report"),),
+                reply_to_message_id="msg_fail_guard_trigger",
+                run_id="run_fail_guard",
+                context_turn_id="msg_fail_guard_trigger",
+                client_message_id=None,
+                created_at=now,
+                completed_at=now,
+                metadata=MessageMetadata(),
+            )
+            invalid_drafts = (
+                replace(valid_report, id="msg_bad_run", run_id="run_other"),
+                replace(valid_report, id="msg_bad_session", session_id="ses_other"),
+                replace(valid_report, id="msg_bad_owner", owner_id="usr_other"),
+                replace(valid_report, id="msg_bad_role", role=ConversationRole.USER),
+            )
+            for bad_draft in invalid_drafts:
+                with pytest.raises(RunStateError, match="run_report_message_invalid"):
+                    await repository.fail(
+                        FailRunCommand(
+                            run_id=lease.run.id,
+                            worker_id=lease.run.worker_id or "",
+                            execution_epoch=lease.run.execution_epoch,
+                            safe_error_code="context_budget_exceeded",
+                            failed_at=now,
+                            report_message=bad_draft,
+                        )
+                    )
+
+            # 所有非法草稿均应整事务回滚：Run 保持 running 且仅存触发消息。
+            still_running = await repository.get("ses_fail_guard", "usr_fail_guard", lease.run.id)
+            assert still_running is not None and still_running.status is RunStatus.RUNNING
+            async with factory() as session:
+                msg_count = await session.scalar(
+                    select(func.count(ConversationMessageModel.id)).where(
+                        ConversationMessageModel.session_id == "ses_fail_guard"
+                    )
+                )
+            assert msg_count == 1
+
+            # 合法归属的 assistant 报告消息可原子提交失败态。
+            failed = await repository.fail(
+                FailRunCommand(
+                    run_id=lease.run.id,
+                    worker_id=lease.run.worker_id or "",
+                    execution_epoch=lease.run.execution_epoch,
+                    safe_error_code="context_budget_exceeded",
+                    failed_at=now,
+                    report_message=valid_report,
+                )
+            )
+            assert failed is not None and failed.status is RunStatus.FAILED
+            assert failed.report_message_id == valid_report.id
 
     asyncio.run(scenario())

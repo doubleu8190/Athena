@@ -49,12 +49,13 @@ class ConversationMessageModel(Base):
             name="uq_conversation_messages_id_session",
         ),
         ForeignKeyConstraint(
-            ["managed_run_id", "session_id"],
+            ["run_id", "session_id"],
             ["runs.id", "runs.session_id"],
-            name="fk_conversation_messages_managed_run_session",
+            name="fk_conversation_messages_run_session",
             deferrable=True,
             initially="DEFERRED",
             ondelete="RESTRICT",
+            use_alter=True,
         ),
         Index(
             "ix_conversation_messages_session_role_sequence",
@@ -90,9 +91,8 @@ class ConversationMessageModel(Base):
         ForeignKey("conversation_messages.id", ondelete="SET NULL"),
         nullable=True,
     )
-    run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    managed_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    context_turn_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    context_turn_id: Mapped[str] = mapped_column(String(64), nullable=False)
     client_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(

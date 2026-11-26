@@ -75,8 +75,6 @@ class KnowledgeRepositoryPort(Protocol):
         visibility_grants: Sequence[VisibilityGrantInput] = (),
     ) -> KnowledgeBase: ...
 
-    async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None: ...
-
     async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None: ...
 
     async def is_storage_key_referenced(self, storage_key: str) -> bool: ...
@@ -95,10 +93,6 @@ class KnowledgeRepositoryPort(Protocol):
         size_bytes: int,
     ) -> tuple[Document, str] | None: ...
 
-    async def list_bases(
-        self, owner_id: str, *, offset: int, limit: int
-    ) -> list[KnowledgeBase]: ...
-
     async def list_readable_bases(
         self,
         user_id: str,
@@ -110,30 +104,16 @@ class KnowledgeRepositoryPort(Protocol):
         snapshot: UserAccessSnapshot | None = None,
     ) -> list[KnowledgeBase]: ...
 
-    async def list_bases_by_ids(
-        self,
-        base_ids: Sequence[str],
-        *,
-        offset: int,
-        limit: int,
-        visibility_scope: VisibilityScope | None = None,
-        owner_department_id: str | None = None,
-    ) -> list[KnowledgeBase]: ...
-
-    async def rename_base(
-        self, owner_id: str, base_id: str, name: str, description: str | None, at: datetime
-    ) -> KnowledgeBase | None: ...
-
     async def update_base(
         self,
         base_id: str,
         *,
         name: str,
         description: str | None,
-        visibility_scope: VisibilityScope,
-        owner_department_id: str | None,
-        visibility_grants: Sequence[VisibilityGrantInput] | None,
         at: datetime,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> KnowledgeBase | None: ...
 
     async def soft_delete_base(self, owner_id: str, base_id: str, at: datetime) -> bool: ...
@@ -247,8 +227,6 @@ class KnowledgeRepositoryPort(Protocol):
     async def get_document(
         self, owner_id: str, base_id: str, document_id: str
     ) -> Document | None: ...
-
-    async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None: ...
 
     async def search_keyword(
         self, owner_id: str, base_ids: list[str], tokens: tuple[str, ...], limit: int

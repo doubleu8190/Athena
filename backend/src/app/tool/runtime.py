@@ -406,7 +406,7 @@ class RunToolRuntimeService(RunToolRuntime):
         session_files: SessionFileService | None = None,
         skill_execution: SkillExecutionService | None = None,
         subagents: SubagentRepository | None = None,
-        access_policy: AccessPolicyService | None = None,
+        access_policy: AccessPolicyService,
         clock: Any = utc_now,
     ) -> None:
         self._auth = auth
@@ -425,8 +425,6 @@ class RunToolRuntimeService(RunToolRuntime):
 
     async def can_read_subagent(self, user_id: str, subagent_id: str) -> bool:
         """供 RunExecutor 调度子智能体前复核当前用户对目标 Subagent 的实时读权限。"""
-        if self._access_policy is None:
-            return True
         return await self._access_policy.can_read_resource(
             user_id,
             ResourceType.SUBAGENT,
@@ -508,26 +506,16 @@ class RunToolRuntimeService(RunToolRuntime):
                     "knowledge_scope_unavailable",
                     "指定的知识库数量超过单次检索上限。",
                 )
-            if self._access_policy is not None:
-                if snapshot_loaded and (snapshot is None or not snapshot.is_active):
-                    readable_ids: set[str] = set()
-                else:
-                    readable_ids = await self._access_policy.filter_readable_ids(
-                        owner_id,
-                        ResourceType.KNOWLEDGE_BASE,
-                        ordered_ids,
-                        snapshot=snapshot,
-                    )
-                effective = tuple(kb_id for kb_id in ordered_ids if kb_id in readable_ids)
+            if snapshot_loaded and (snapshot is None or not snapshot.is_active):
+                readable_ids: set[str] = set()
             else:
-                filtered: list[str] = []
-                for kb_id in ordered_ids:
-                    try:
-                        await self._knowledge.get_base(owner_id, kb_id)
-                    except KnowledgeNotFoundError:
-                        continue
-                    filtered.append(kb_id)
-                effective = tuple(filtered)
+                readable_ids = await self._access_policy.filter_readable_ids(
+                    owner_id,
+                    ResourceType.KNOWLEDGE_BASE,
+                    ordered_ids,
+                    snapshot=snapshot,
+                )
+            effective = tuple(kb_id for kb_id in ordered_ids if kb_id in readable_ids)
             if not effective:
                 return _KnowledgeScopeResolution(
                     (),
@@ -541,22 +529,15 @@ class RunToolRuntimeService(RunToolRuntime):
         resolved_loaded = snapshot_loaded
         project_ids: list[str] = []
         if project_id is not None and self._project_knowledge is not None:
-            if (
-                self._access_policy is not None
-                and not resolved_loaded
-                and resolved_snapshot is None
-            ):
+            if not resolved_loaded and resolved_snapshot is None:
                 resolved_snapshot = await self._access_policy.get_user_snapshot(owner_id)
                 resolved_loaded = True
             try:
-                if self._access_policy is not None:
-                    project_bases = await self._project_knowledge.list(
-                        owner_id,
-                        project_id,
-                        snapshot=resolved_snapshot,
-                    )
-                else:
-                    project_bases = await self._project_knowledge.list(owner_id, project_id)
+                project_bases = await self._project_knowledge.list(
+                    owner_id,
+                    project_id,
+                    snapshot=resolved_snapshot,
+                )
             except (ProjectNotFoundError, ProjectKnowledgeNotFoundError):
                 if not ignore_missing_project:
                     raise
@@ -569,29 +550,26 @@ class RunToolRuntimeService(RunToolRuntime):
                 )
             project_ids = [base.id for base in project_bases]
 
-        dept_ids: list[str] = []
-        company_ids: list[str] = []
-        if self._access_policy is not None:
-            readable_targets: tuple[ResourceAccessTarget, ...]
-            if resolved_loaded and (resolved_snapshot is None or not resolved_snapshot.is_active):
-                readable_targets = ()
-            else:
-                readable_targets = await self._access_policy.filter_readable_targets(
-                    owner_id,
-                    ResourceType.KNOWLEDGE_BASE,
-                    snapshot=resolved_snapshot,
-                )
-            # 仅自动纳入 company 与 department 共享知识库，未绑定项目的个人库不自动混入。
-            dept_ids = sorted(
-                target.resource_id
-                for target in readable_targets
-                if target.visibility_scope is VisibilityScope.DEPARTMENT
+        readable_targets: tuple[ResourceAccessTarget, ...]
+        if resolved_loaded and (resolved_snapshot is None or not resolved_snapshot.is_active):
+            readable_targets = ()
+        else:
+            readable_targets = await self._access_policy.filter_readable_targets(
+                owner_id,
+                ResourceType.KNOWLEDGE_BASE,
+                snapshot=resolved_snapshot,
             )
-            company_ids = sorted(
-                target.resource_id
-                for target in readable_targets
-                if target.visibility_scope is VisibilityScope.COMPANY
-            )
+        # 仅自动纳入 company 与 department 共享知识库，未绑定项目的个人库不自动混入。
+        dept_ids = sorted(
+            target.resource_id
+            for target in readable_targets
+            if target.visibility_scope is VisibilityScope.DEPARTMENT
+        )
+        company_ids = sorted(
+            target.resource_id
+            for target in readable_targets
+            if target.visibility_scope is VisibilityScope.COMPANY
+        )
 
         all_ordered = tuple(dict.fromkeys((*project_ids, *dept_ids, *company_ids)))
         if not all_ordered:
@@ -618,11 +596,8 @@ class RunToolRuntimeService(RunToolRuntime):
 
         # 入口仅加载 1 次实时用户权限快照，统一透传给知识库、MCP 与 Subagent 过滤路径，
         # 避免单次快照构造重复查询用户组织树。
-        access_snapshot: UserAccessSnapshot | None = None
-        access_snapshot_loaded = False
-        if self._access_policy is not None:
-            access_snapshot = await self._access_policy.get_user_snapshot(context.owner_id)
-            access_snapshot_loaded = True
+        access_snapshot = await self._access_policy.get_user_snapshot(context.owner_id)
+        access_snapshot_loaded = True
 
         definitions: list[RuntimeToolDefinition] = [REQUEST_USER_INPUT_DEFINITION]
         # 仅主 Run 且用户开启显式记忆开关时，暴露免审批的 save_user_memory 工具。
@@ -660,28 +635,22 @@ class RunToolRuntimeService(RunToolRuntime):
             )
         # 合并 MCP 目录中的工具定义：通过单 Session SQL EXISTS 下推读取可读工具，
         # 避免未授权部门工具占用 limit=201 额度。
-        if self._access_policy is not None:
-            mcp_tools = (
-                ()
-                if access_snapshot is None or not access_snapshot.is_active
-                else await self._mcp_catalog.list_readable_runtime_tools(
-                    access_snapshot,
-                    limit=201,
-                )
+        mcp_tools = (
+            ()
+            if access_snapshot is None or not access_snapshot.is_active
+            else await self._mcp_catalog.list_readable_runtime_tools(
+                access_snapshot,
+                limit=201,
             )
-        else:
-            mcp_tools = await self._mcp_catalog.list_runtime_tools(limit=201)
+        )
         definitions.extend(mcp_tools)
 
         if depth == 0 and self._subagents is not None:
-            if self._access_policy is not None:
-                enabled_subagents = (
-                    ()
-                    if access_snapshot is None or not access_snapshot.is_active
-                    else await self._subagents.list_readable_enabled(access_snapshot)
-                )
-            else:
-                enabled_subagents = await self._subagents.list_enabled()
+            enabled_subagents = (
+                ()
+                if access_snapshot is None or not access_snapshot.is_active
+                else await self._subagents.list_readable_enabled(access_snapshot)
+            )
             if enabled_subagents:
                 definitions.append(build_dispatch_subagents_definition(enabled_subagents))
         elif depth >= 1:
@@ -723,17 +692,16 @@ class RunToolRuntimeService(RunToolRuntime):
         ):
             validation = self.validate_call(definition, model_name, arguments)
             if validation is None and definition is not None and definition.source.kind == "mcp":
-                if self._access_policy is not None:
-                    # 审批/执行准备阶段实时复核 MCP 读权限，防员工调岗后仍进入审批或执行。
-                    if not await self._access_policy.can_read_resource(
-                        context.owner_id,
-                        ResourceType.MCP_SERVER,
-                        definition.source.server_id,
-                    ):
-                        return ToolCallPreparation(
-                            _error("tool_permission_denied", "当前用户无权使用该 MCP 工具。"),
-                            False,
-                        )
+                # 审批/执行准备阶段实时复核 MCP 读权限，防员工调岗后仍进入审批或执行。
+                if not await self._access_policy.can_read_resource(
+                    context.owner_id,
+                    ResourceType.MCP_SERVER,
+                    definition.source.server_id,
+                ):
+                    return ToolCallPreparation(
+                        _error("tool_permission_denied", "当前用户无权使用该 MCP 工具。"),
+                        False,
+                    )
                 # 同步复核 MCP Server 是否仍处于启用且版本匹配状态；停用、软删或变更后即刻拦截。
                 target = await self._mcp_catalog.get_call_target(
                     definition.tool_id,
@@ -783,17 +751,16 @@ class RunToolRuntimeService(RunToolRuntime):
                 _error("skill_parameters_invalid", "脚本调用参数结构不合法。"),
                 False,
             )
-        if self._access_policy is not None:
-            # 脚本审批准备阶段实时复核用户是否仍对该 Skill 拥有读权限（防调岗后沿用旧快照）。
-            if not await self._access_policy.can_read_resource(
-                context.owner_id,
-                ResourceType.SKILL,
-                skill_id,
-            ):
-                return ToolCallPreparation(
-                    _error("tool_permission_denied", "当前用户已失去该 Skill 的访问权限。"),
-                    False,
-                )
+        # 脚本审批准备阶段实时复核用户是否仍对该 Skill 拥有读权限（防调岗后沿用旧快照）。
+        if not await self._access_policy.can_read_resource(
+            context.owner_id,
+            ResourceType.SKILL,
+            skill_id,
+        ):
+            return ToolCallPreparation(
+                _error("tool_permission_denied", "当前用户已失去该 Skill 的访问权限。"),
+                False,
+            )
         try:
             # 审批准备阶段复用进程级 TTL 缓存探针，真正执行时由 SkillExecutionService 实时复核。
             entry, version, script, _dependency_check = await self._skills.prepare_script_target(
@@ -857,23 +824,22 @@ class RunToolRuntimeService(RunToolRuntime):
         if self._skills is None:
             raise ValueError("skill_runtime_unavailable")
         effective_snapshot = run.skill_snapshot
-        if self._access_policy is not None:
-            readable_ids = await self._access_policy.filter_readable_ids(
-                run.owner_id,
-                ResourceType.SKILL,
-                [item.skill_id for item in effective_snapshot.skills],
-            )
-            filtered_skills = tuple(
-                item for item in effective_snapshot.skills if item.skill_id in readable_ids
-            )
-            if not filtered_skills:
-                return RunSkillPromptContext()
-            effective_snapshot = RunSkillSnapshot(
-                skills=filtered_skills,
-                selected_skill_ids=tuple(
-                    sid for sid in effective_snapshot.selected_skill_ids if sid in readable_ids
-                ),
-            )
+        readable_ids = await self._access_policy.filter_readable_ids(
+            run.owner_id,
+            ResourceType.SKILL,
+            [item.skill_id for item in effective_snapshot.skills],
+        )
+        filtered_skills = tuple(
+            item for item in effective_snapshot.skills if item.skill_id in readable_ids
+        )
+        if not filtered_skills:
+            return RunSkillPromptContext()
+        effective_snapshot = RunSkillSnapshot(
+            skills=filtered_skills,
+            selected_skill_ids=tuple(
+                sid for sid in effective_snapshot.selected_skill_ids if sid in readable_ids
+            ),
+        )
         selected = set(effective_snapshot.selected_skill_ids)
         loaded = set(loaded_skill_ids)
         active_ids = tuple(
@@ -1107,15 +1073,14 @@ class RunToolRuntimeService(RunToolRuntime):
             )
         source = cast(McpToolSource, definition.source)
         # 调用前实时复核 MCP Server 组织可见性，员工调岗或撤权时立即阻断外部调用。
-        if self._access_policy is not None:
-            if not await self._access_policy.can_read_resource(
-                context.owner_id,
-                ResourceType.MCP_SERVER,
-                source.server_id,
-            ):
-                return ToolExecutionResult(
-                    _error("tool_permission_denied", "当前用户已失去该 MCP 工具的访问权限。")
-                )
+        if not await self._access_policy.can_read_resource(
+            context.owner_id,
+            ResourceType.MCP_SERVER,
+            source.server_id,
+        ):
+            return ToolExecutionResult(
+                _error("tool_permission_denied", "当前用户已失去该 MCP 工具的访问权限。")
+            )
         # 按冻结的 server/remote/config 版本重新解析调用目标，配置变更即视为不可用。
         target = await self._mcp_catalog.get_call_target(
             definition.tool_id,
@@ -1180,7 +1145,7 @@ class RunToolRuntimeService(RunToolRuntime):
                 return ToolExecutionResult(_error("tool_unavailable", "脚本执行能力未启用。"))
             skill_id = str(arguments.get("skill_id", ""))
             # 执行前实时复核用户是否仍对该 Skill 拥有读权限（防调岗或部门撤权后继续执行）。
-            if self._access_policy is not None and not await self._access_policy.can_read_resource(
+            if not await self._access_policy.can_read_resource(
                 context.owner_id,
                 ResourceType.SKILL,
                 skill_id,
@@ -1293,15 +1258,15 @@ class RunToolRuntimeService(RunToolRuntime):
         except ValueError:
             return _error("tool_arguments_invalid", "limit 必须是 1 到 8 之间的整数。")
         try:
-            # 调用前已由 before_scope 完成实时范围鉴权，开启统一权限引擎时向
-            # KnowledgeService 透传 skip_access_check 避免同一调用内重复鉴权。
+            # 调用前已由 before_scope 完成实时范围鉴权，直接向 KnowledgeService 透传
+            # skip_access_check=True 避免同一调用内重复鉴权。
             result = await self._knowledge.search(
                 context.owner_id,
                 base_ids,
                 query,
                 limit=limit,
                 context_budget=2000,
-                skip_access_check=self._access_policy is not None,
+                skip_access_check=True,
             )
         except (KnowledgeInputError, KnowledgeNotFoundError):
             return _error("knowledge_scope_unavailable", "知识库查询范围已不可用。")
@@ -1327,7 +1292,7 @@ class RunToolRuntimeService(RunToolRuntime):
             return _error("skill_snapshot_unavailable", "当前 Run 没有固定 Skill 目录。")
         skill_id = str(arguments["skill_id"])
         # 执行期复核部门/角色权限，确保员工调岗后无法加载旧快照中的原部门 Skill。
-        if self._access_policy is not None and not await self._access_policy.can_read_resource(
+        if not await self._access_policy.can_read_resource(
             context.owner_id,
             ResourceType.SKILL,
             skill_id,
@@ -1380,7 +1345,7 @@ class RunToolRuntimeService(RunToolRuntime):
             return _error("skill_snapshot_unavailable", "当前 Run 没有固定 Skill 目录。")
         skill_id = str(arguments["skill_id"])
         # 执行期复核权限，员工调岗后不得再读取原部门 Skill 包内资源文件。
-        if self._access_policy is not None and not await self._access_policy.can_read_resource(
+        if not await self._access_policy.can_read_resource(
             context.owner_id,
             ResourceType.SKILL,
             skill_id,

@@ -37,9 +37,7 @@ class SystemPromptService:
         self._auth_reader = auth_reader
         self._clock = clock
 
-    async def get_current(
-        self, actor: AuthContext, kind: SystemPromptKind
-    ) -> SystemPromptVersion:
+    async def get_current(self, actor: AuthContext, kind: SystemPromptKind) -> SystemPromptVersion:
         """读取指定类别当前正文；初始化配置缺失时返回明确错误。"""
         await self._authorize(actor)
         current = await self._repository.get_current(kind)

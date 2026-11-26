@@ -7,6 +7,7 @@ import math
 from typing import cast
 
 import pytest
+from access_support import make_test_access_policy
 
 from adapter.knowledge.repository import _retry_delay_seconds
 from app.knowledge.service import KnowledgeSearchUnavailableError, KnowledgeService
@@ -49,10 +50,6 @@ class _Repository:
         self.keyword_calls = 0
         self.semantic_calls = 0
         self.incompatible_profile = False
-
-    async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None:
-        assert owner_id == "owner"
-        assert base_ids == ["base"]
 
     async def search_keyword(
         self, owner_id: str, base_ids: list[str], tokens: tuple[str, ...], limit: int
@@ -112,7 +109,9 @@ def _service(repository: _Repository) -> KnowledgeService:
         cast(KnowledgeRepositoryPort, repository),
         _Tokenizer(),
         _Embedding(),
+        profile_id="bge-m3-default",
         counter=_Counter(),
+        access_policy=make_test_access_policy(),
     )
 
 
@@ -172,6 +171,8 @@ def test_invalid_semantic_vector_degrades_without_querying_database(invalid: flo
         cast(KnowledgeRepositoryPort, repository),
         _Tokenizer(),
         _InvalidEmbedding(invalid),
+        profile_id="bge-m3-default",
+        access_policy=make_test_access_policy(),
     )
     result = asyncio.run(service.search("owner", ["base"], "query"))
     assert repository.semantic_calls == 0
@@ -246,8 +247,10 @@ def test_knowledge_service_passes_semantic_min_score_when_supported_and_validate
         cast(KnowledgeRepositoryPort, repo),
         _Tokenizer(),
         _Embedding(),
+        profile_id="bge-m3-default",
         counter=_Counter(),
         semantic_min_score=0.42,
+        access_policy=make_test_access_policy(),
     )
 
     result = asyncio.run(service.search("owner", ["base"], "query"))
@@ -260,7 +263,9 @@ def test_knowledge_service_passes_semantic_min_score_when_supported_and_validate
                 cast(KnowledgeRepositoryPort, repo),
                 _Tokenizer(),
                 _Embedding(),
+                profile_id="bge-m3-default",
                 semantic_min_score=invalid_score,
+                access_policy=make_test_access_policy(),
             )
 
 
@@ -377,8 +382,10 @@ def test_mixed_profile_min_score_empty_hit_keeps_semantic_channel_when_compatibl
         cast(KnowledgeRepositoryPort, repo_with_compat),
         _Tokenizer(),
         _Embedding(),
+        profile_id="bge-m3-default",
         counter=_Counter(),
         semantic_min_score=0.35,
+        access_policy=make_test_access_policy(),
     )
     result = asyncio.run(service_with_compat.search("owner", ["base"], "无关查询"))
     assert result.hits == ()
@@ -392,8 +399,10 @@ def test_mixed_profile_min_score_empty_hit_keeps_semantic_channel_when_compatibl
         cast(KnowledgeRepositoryPort, repo_no_compat),
         _Tokenizer(),
         _Embedding(),
+        profile_id="bge-m3-default",
         counter=_Counter(),
         semantic_min_score=0.35,
+        access_policy=make_test_access_policy(),
     )
     degraded_result = asyncio.run(service_no_compat.search("owner", ["base"], "查询"))
     assert degraded_result.channels == ("keyword",)
@@ -489,7 +498,9 @@ def test_knowledge_service_search_runs_tokenizer_off_event_loop() -> None:
             cast(KnowledgeRepositoryPort, repository),
             _SlowThreadTrackingTokenizer(),
             _Embedding(),
+            profile_id="bge-m3-default",
             counter=_Counter(),
+            access_policy=make_test_access_policy(),
         )
         ticks = 0
         stop_ticker = asyncio.Event()

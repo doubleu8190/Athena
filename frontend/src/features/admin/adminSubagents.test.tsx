@@ -31,7 +31,10 @@ function makeSubagent(
     version: 1,
     created_by: TEST_ADMIN.id,
     created_at: "2026-11-16T00:00:00Z",
+    owner_department_id: null,
     updated_at: "2026-11-16T00:00:00Z",
+    visibility_grants: [],
+    visibility_scope: "company",
     ...overrides,
   };
 }

@@ -391,7 +391,6 @@ function SessionWorkbench({ session, sessionId }: SessionWorkbenchProps) {
             decisionPending={commandPending}
             errors={approvalErrors}
             onDecision={handleApproval}
-            runId={run.id}
             sessionId={sessionId}
           />
         ) : null}

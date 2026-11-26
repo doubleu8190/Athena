@@ -189,26 +189,6 @@ class SqlAlchemySubagentRepository(SubagentRepository):
             )
         return tuple(subagent_to_domain(row, grants=grants_map.get(row.id, ())) for row in rows)
 
-    async def list_enabled(self) -> tuple[SubagentProfile, ...]:
-        """读取全部未软删除且已启用的 Subagent 配置。"""
-        async with self._session_factory() as session:
-            rows = list(
-                (
-                    await session.scalars(
-                        select(SubagentModel)
-                        .where(
-                            SubagentModel.deleted_at.is_(None),
-                            SubagentModel.enabled.is_(True),
-                        )
-                        .order_by(SubagentModel.slug.asc(), SubagentModel.id.asc())
-                    )
-                ).all()
-            )
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.SUBAGENT, [row.id for row in rows]
-            )
-        return tuple(subagent_to_domain(row, grants=grants_map.get(row.id, ())) for row in rows)
-
     async def update(
         self,
         actor: AuthContext,

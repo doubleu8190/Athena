@@ -46,8 +46,8 @@ class RunToolApprovalRequest(BaseModel):
 class SafeSkillInputFileResponse(BaseModel):
     file_id: str
     filename: str
-    mime_type: str | None = None
-    size_bytes: int | None = None
+    mime_type: str | None
+    size_bytes: int | None
     available: bool
 
 
@@ -65,11 +65,11 @@ class SafeSkillApprovalProjectionResponse(BaseModel):
     skill_version_label: str
     script_label: str
     purpose: str
-    input_files: list[SafeSkillInputFileResponse] = Field(default_factory=list)
-    parameter_summary: list[SkillParameterSummaryItemResponse] = Field(default_factory=list)
-    hidden_parameter_count: int = 0
-    can_approve: bool = True
-    unavailable_reason: str | None = None
+    input_files: list[SafeSkillInputFileResponse]
+    parameter_summary: list[SkillParameterSummaryItemResponse]
+    hidden_parameter_count: int
+    can_approve: bool
+    unavailable_reason: str | None
 
 
 class FormattedToolArgumentResponse(BaseModel):
@@ -86,9 +86,9 @@ class RunModelSnapshotResponse(BaseModel):
     id: str
     name: str
     model: str
-    scenario_label: str | None = None
-    supports_vision: bool = False
-    version: int = 1
+    scenario_label: str | None
+    supports_vision: bool
+    version: int
 
 
 class RunPendingToolApprovalResponse(BaseModel):
@@ -98,10 +98,10 @@ class RunPendingToolApprovalResponse(BaseModel):
     model_name: str
     tool_kind: str | None
     requested_at: datetime
-    safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
-    display_name: str | None = None
-    approval_summary: str | None = None
-    formatted_arguments: list[FormattedToolArgumentResponse] = Field(default_factory=list)
+    safe_skill_projection: SafeSkillApprovalProjectionResponse | None
+    display_name: str | None
+    approval_summary: str | None
+    formatted_arguments: list[FormattedToolArgumentResponse]
 
 
 class RunAttemptUsageResponse(BaseModel):
@@ -111,11 +111,11 @@ class RunAttemptUsageResponse(BaseModel):
     output_tokens: int | None
     total_tokens: int | None
     complete: bool
-    purpose: str = "answer"
-    operation_id: str | None = None
-    batch_index: int = 0
-    model_profile_id: str | None = None
-    duration_ms: int | None = None
+    purpose: str
+    operation_id: str | None
+    batch_index: int
+    model_profile_id: str | None
+    duration_ms: int | None
 
 
 class RunUsageResponse(BaseModel):
@@ -124,8 +124,8 @@ class RunUsageResponse(BaseModel):
     total_tokens: int | None
     complete: bool
     attempts: list[RunAttemptUsageResponse]
-    answer_tokens: int | None = None
-    compression_tokens: int | None = None
+    answer_tokens: int | None
+    compression_tokens: int | None
 
 
 class RunInputRequestResponse(BaseModel):
@@ -139,9 +139,9 @@ class RunInputInteractionResponse(BaseModel):
     input_request_id: str
     status: str
     question_text: str
-    answer_text: str | None = None
+    answer_text: str | None
     created_at: datetime
-    answered_at: datetime | None = None
+    answered_at: datetime | None
 
 
 class RunSkillEntryResponse(BaseModel):
@@ -164,24 +164,24 @@ class RunSkillSnapshotResponse(BaseModel):
 class SubagentTaskResponse(BaseModel):
     sub_run_id: str
     parent_tool_call_id: str
-    subagent_profile_id: str | None = None
+    subagent_profile_id: str | None
     subagent_slug: str
     subagent_name: str
-    task_index: int = 1
-    task_summary: str = ""
+    task_index: int
+    task_summary: str
     status: str
-    safe_error_code: str | None = None
+    safe_error_code: str | None
     created_at: datetime
-    first_started_at: datetime | None = None
-    finished_at: datetime | None = None
+    first_started_at: datetime | None
+    finished_at: datetime | None
 
 
 class PendingSubagentInputResponse(BaseModel):
     sub_run_id: str
     subagent_slug: str
     subagent_name: str
-    task_index: int = 1
-    task_summary: str = ""
+    task_index: int
+    task_summary: str
     input_request_id: str
     question_message_id: str
     question_text: str
@@ -192,18 +192,18 @@ class PendingSubagentApprovalResponse(BaseModel):
     sub_run_id: str
     subagent_slug: str
     subagent_name: str
-    task_index: int = 1
-    task_summary: str = ""
+    task_index: int
+    task_summary: str
     call_id: str
     batch_message_id: str
     ordinal: int
     model_name: str
-    tool_kind: str | None = None
+    tool_kind: str | None
     requested_at: datetime
-    safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
-    display_name: str | None = None
-    approval_summary: str | None = None
-    formatted_arguments: list[FormattedToolArgumentResponse] = Field(default_factory=list)
+    safe_skill_projection: SafeSkillApprovalProjectionResponse | None
+    display_name: str | None
+    approval_summary: str | None
+    formatted_arguments: list[FormattedToolArgumentResponse]
 
 
 class RunResponse(BaseModel):
@@ -214,7 +214,7 @@ class RunResponse(BaseModel):
     context_cutoff_sequence: int
     retry_of_run_id: str | None
     model_config_version_id: str
-    model_snapshot: RunModelSnapshotResponse | None = None
+    model_snapshot: RunModelSnapshotResponse
     prompt_template_version: str
     event_sequence: int
     execution_epoch: int
@@ -226,26 +226,26 @@ class RunResponse(BaseModel):
     cancel_requested_at: datetime | None
     safe_error_code: str | None
     report_message_id: str | None
-    assistant_message_id: str | None = None
+    assistant_message_id: str | None
     usage: RunUsageResponse
     skill_snapshot: RunSkillSnapshotResponse | None
     input_file_ids: list[str]
-    knowledge_base_ids: list[str] | None = None
-    pending_input: RunInputRequestResponse | None = None
-    pending_approvals: list[RunPendingToolApprovalResponse] = Field(default_factory=list)
-    parent_run_id: str | None = None
-    root_run_id: str | None = None
-    parent_tool_call_id: str | None = None
-    depth: int = 0
-    subagent_profile_id: str | None = None
-    subagent_slug: str | None = None
-    subagent_name: str | None = None
-    subagent_tasks: list[SubagentTaskResponse] = Field(default_factory=list)
-    pending_subagent_inputs: list[PendingSubagentInputResponse] = Field(default_factory=list)
-    pending_subagent_approvals: list[PendingSubagentApprovalResponse] = Field(default_factory=list)
-    input_interactions: list[RunInputInteractionResponse] = Field(default_factory=list)
-    replayed: bool = False
-    retry_warning: str | None = None
+    knowledge_base_ids: list[str] | None
+    pending_input: RunInputRequestResponse | None
+    pending_approvals: list[RunPendingToolApprovalResponse]
+    parent_run_id: str | None
+    root_run_id: str | None
+    parent_tool_call_id: str | None
+    depth: int
+    subagent_profile_id: str | None
+    subagent_slug: str | None
+    subagent_name: str | None
+    subagent_tasks: list[SubagentTaskResponse]
+    pending_subagent_inputs: list[PendingSubagentInputResponse]
+    pending_subagent_approvals: list[PendingSubagentApprovalResponse]
+    input_interactions: list[RunInputInteractionResponse]
+    replayed: bool
+    retry_warning: str | None
 
 
 class RunListResponse(BaseModel):
@@ -273,7 +273,7 @@ class RunToolOutcomeResponse(BaseModel):
     message: str
     data: dict[str, object]
     truncated: bool
-    cleanup_error_code: str | None = None
+    cleanup_error_code: str | None
 
 
 class RunToolCallSummaryResponse(BaseModel):
@@ -292,10 +292,10 @@ class RunToolCallSummaryResponse(BaseModel):
 
 
 class RunToolCallDetailResponse(RunToolCallSummaryResponse):
-    arguments: dict[str, object] | None = None
+    arguments: dict[str, object] | None
     outcome: RunToolOutcomeResponse | None
-    artifacts: list[ArtifactFileRefResponse] = Field(default_factory=list)
-    safe_skill_projection: SafeSkillApprovalProjectionResponse | None = None
+    artifacts: list[ArtifactFileRefResponse]
+    safe_skill_projection: SafeSkillApprovalProjectionResponse | None
 
 
 class RunToolCallListResponse(BaseModel):

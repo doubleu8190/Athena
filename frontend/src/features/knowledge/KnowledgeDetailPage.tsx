@@ -27,7 +27,6 @@ import { formatKnowledgeWarnings } from "./display";
 import {
   useKnowledgeBase,
   useKnowledgeDocuments,
-  useKnowledgeVersions,
   useRetryKnowledgeVersionMutation,
 } from "./hooks";
 import { KnowledgeSearchDialog } from "./KnowledgeSearchDialog";
@@ -35,7 +34,6 @@ import { KnowledgeStateBadge } from "./KnowledgeStateBadge";
 import {
   canManageKnowledgeBase,
   countExtraVisibilityGrants,
-  knowledgeBaseScope,
   type KnowledgeDocument,
 } from "./model";
 
@@ -68,23 +66,10 @@ function DocumentRow({
   onReplace,
   onVersions,
 }: DocumentRowProps) {
-  // 列表接口已附带 latest_version（含 null）时直接消费摘要，彻底关闭按行 /versions 请求与并发轮询；
-  // 仅当旧契约或历史单测未返回该字段（undefined）时回退按行请求版本列表。
-  const hasInlineLatestVersion = document.latest_version !== undefined;
-  const versions = useKnowledgeVersions(
-    baseId,
-    document.id,
-    !hasInlineLatestVersion,
-  );
+  // 直接消费文档列表内联返回的 latest_version 摘要，由列表查询统一轮询 queued/processing 状态，不按行请求 /versions。
   const retry = useRetryKnowledgeVersionMutation(baseId, document.id);
-  const latest = hasInlineLatestVersion
-    ? (document.latest_version ?? null)
-    : (versions.data?.[0] ?? null);
-  const loadingStatus = !hasInlineLatestVersion && versions.isPending;
-  const statusError = !hasInlineLatestVersion && versions.isError;
-  const hasNoVersions = hasInlineLatestVersion
-    ? document.latest_version === null
-    : (versions.data?.length ?? 0) === 0;
+  const latest = document.latest_version;
+  const hasNoVersions = latest === null;
   const canRetry =
     canManage &&
     latest?.state === "failed" &&
@@ -104,75 +89,53 @@ function DocumentRow({
       </div>
 
       <div className="knowledge-document-status" aria-live="polite">
-        {loadingStatus ? (
-          <span className="knowledge-status-loading" role="status">
-            正在读取状态…
+        <KnowledgeStateBadge state={latest?.state ?? null} />
+        {latest?.state === "ready" ? (
+          <span>
+            {latest.chunk_count} 个检索片段
+            {latest.warnings.length > 0
+              ? ` · ${latest.warnings.length} 条警告：${formatKnowledgeWarnings(
+                  latest.warnings,
+                )}`
+              : ""}
           </span>
-        ) : statusError ? (
+        ) : null}
+        {latest?.state === "failed" ? (
+          <span className="knowledge-row-error">
+            {versionErrorMessage(latest.error_code)}
+            {activeVersionAvailable
+              ? " 当前检索仍使用上一已就绪版本。"
+              : " 当前没有可检索版本。"}
+          </span>
+        ) : null}
+        {latest?.state === "queued" || latest?.state === "processing" ? (
+          <span>
+            {activeVersionAvailable
+              ? "当前仍使用上一已就绪版本。"
+              : "处理完成后才可检索。"}
+          </span>
+        ) : null}
+        {hasNoVersions ? <span>后端未返回版本记录。</span> : null}
+        {canRetry && latest ? (
+          <button
+            className="text-button"
+            disabled={retry.isPending}
+            onClick={() => retry.mutate(latest.id)}
+            type="button"
+          >
+            {retry.isPending ? "正在重试…" : "重试失败版本"}
+          </button>
+        ) : null}
+        {retry.isError ? (
           <span className="knowledge-inline-error" role="alert">
-            状态读取失败
-            <button
-              className="text-button"
-              onClick={() => void versions.refetch()}
-              type="button"
-            >
-              重试
-            </button>
+            {knowledgeErrorMessage(retry.error)}
           </span>
-        ) : (
-          <>
-            <KnowledgeStateBadge state={latest?.state ?? null} />
-            {latest?.state === "ready" ? (
-              <span>
-                {latest.chunk_count} 个检索片段
-                {latest.warnings.length > 0
-                  ? ` · ${latest.warnings.length} 条警告：${formatKnowledgeWarnings(
-                      latest.warnings,
-                    )}`
-                  : ""}
-              </span>
-            ) : null}
-            {latest?.state === "failed" ? (
-              <span className="knowledge-row-error">
-                {versionErrorMessage(latest.error_code)}
-                {activeVersionAvailable
-                  ? " 当前检索仍使用上一已就绪版本。"
-                  : " 当前没有可检索版本。"}
-              </span>
-            ) : null}
-            {latest?.state === "queued" ||
-            latest?.state === "processing" ? (
-              <span>
-                {activeVersionAvailable
-                  ? "当前仍使用上一已就绪版本。"
-                  : "处理完成后才可检索。"}
-              </span>
-            ) : null}
-            {hasNoVersions ? (
-              <span>后端未返回版本记录。</span>
-            ) : null}
-            {canRetry && latest ? (
-              <button
-                className="text-button"
-                disabled={retry.isPending}
-                onClick={() => retry.mutate(latest.id)}
-                type="button"
-              >
-                {retry.isPending ? "正在重试…" : "重试失败版本"}
-              </button>
-            ) : null}
-            {retry.isError ? (
-              <span className="knowledge-inline-error" role="alert">
-                {knowledgeErrorMessage(retry.error)}
-              </span>
-            ) : null}
-            {retry.isSuccess ? (
-              <span className="knowledge-status-success" role="status">
-                已重新排队
-              </span>
-            ) : null}
-          </>
-        )}
+        ) : null}
+        {retry.isSuccess ? (
+          <span className="knowledge-status-success" role="status">
+            已重新排队
+          </span>
+        ) : null}
       </div>
 
       <time
@@ -335,7 +298,7 @@ export function KnowledgeDetailPage() {
     );
   }
 
-  const scope = knowledgeBaseScope(base.data);
+  const scope = base.data.visibility_scope;
   const departmentName = resolveUserDepartmentName(
     user,
     base.data.owner_department_id,

@@ -23,7 +23,6 @@ import { knowledgeErrorMessage } from "../knowledge/errorMessages";
 import { useKnowledgeDirectory } from "../knowledge/hooks";
 import {
   PROJECT_KNOWLEDGE_LIMIT,
-  knowledgeBaseScope,
   type KnowledgeBase,
 } from "../knowledge/model";
 
@@ -109,7 +108,7 @@ export function KnowledgeScopePopover({
       personal: [],
     };
     for (const base of filteredBases) {
-      groups[knowledgeBaseScope(base)].push(base);
+      groups[base.visibility_scope].push(base);
     }
     return groups;
   }, [filteredBases]);

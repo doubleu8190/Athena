@@ -47,6 +47,7 @@ async def async_chunks(values: Sequence[object]) -> AsyncIterator[object]:
 
 def runtime_profile() -> RuntimeModelProfile:
     """创建不依赖外部凭据的测试配置。"""
+    now = datetime.now(UTC)
     return RuntimeModelProfile(
         version=ModelProfileVersion(
             id="llmprof_test",
@@ -54,7 +55,6 @@ def runtime_profile() -> RuntimeModelProfile:
             protocol="chat_completions",
             base_url="https://llm.example/v1",
             model="test-model",
-            has_api_key=True,
             context_window_tokens=8192,
             tokenizer_encoding="o200k_base",
             supports_stream=True,
@@ -65,7 +65,8 @@ def runtime_profile() -> RuntimeModelProfile:
             max_concurrency=1,
             temperature=None,
             enabled=True,
-            created_at=datetime.now(UTC),
+            created_at=now,
+            updated_at=now,
         ),
         api_key="test-secret",
     )

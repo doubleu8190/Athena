@@ -27,8 +27,6 @@ export type AuthStatus =
   | "loading";
 
 interface AuthContextValue {
-  /** 兼容别名，语义等同于 superAdminAccessDenied（供超管页面导航阻塞等复用）。 */
-  adminAccessDenied: boolean;
   clearSessionExpired: () => void;
   error: unknown;
   refetch: () => void;
@@ -224,7 +222,6 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
 
     return {
-      adminAccessDenied: superAdminAccessDenied,
       clearSessionExpired,
       error,
       refetch: () => {

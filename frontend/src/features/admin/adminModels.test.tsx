@@ -75,10 +75,10 @@ describe("管理模型页", () => {
       id: "model-eligible",
       name: "候选模型",
     });
-    const missingKey = makeModelProfile({
-      has_api_key: false,
-      id: "model-missing-key",
-      name: "待重配模型",
+    const disabledProfile = makeModelProfile({
+      enabled: false,
+      id: "model-disabled-candidate",
+      name: "停用模型",
     });
     let defaultCalls = 0;
     const fetchMock = baseFetch((url, init) => {
@@ -88,7 +88,7 @@ describe("管理模型页", () => {
       ) {
         return jsonResponse({
           default_profile_id: PRIMARY.id,
-          items: [PRIMARY, eligible, missingKey],
+          items: [PRIMARY, eligible, disabledProfile],
         });
       }
       if (
@@ -113,7 +113,6 @@ describe("管理模型页", () => {
             compression_model_profile_id: null,
             created_at: null,
             id: null,
-            prompt_template_version: null,
             recent_ratio: null,
             recent_token_cap: null,
             summary_ratio: null,
@@ -130,12 +129,12 @@ describe("管理模型页", () => {
     renderApp("/admin/models");
 
     await screen.findByText(eligible.name);
-    const missingKeyCard = screen
-      .getAllByRole("heading", { name: missingKey.name })
+    const disabledCard = screen
+      .getAllByRole("heading", { name: disabledProfile.name })
       .map((heading) => heading.closest("li"))
       .find((element) => element !== null) as HTMLElement;
     expect(
-      within(missingKeyCard).getByRole("button", { name: "设为默认" }),
+      within(disabledCard).getByRole("button", { name: "设为默认" }),
     ).toBeDisabled();
     const eligibleCard = screen
       .getAllByRole("heading", { name: eligible.name })
@@ -226,7 +225,6 @@ describe("管理模型页", () => {
             compression_model_profile_id: null,
             created_at: null,
             id: null,
-            prompt_template_version: null,
             recent_ratio: null,
             recent_token_cap: null,
             summary_ratio: null,
@@ -338,7 +336,6 @@ describe("管理模型页", () => {
             compression_model_profile_id: null,
             created_at: null,
             id: null,
-            prompt_template_version: null,
             recent_ratio: null,
             recent_token_cap: null,
             summary_ratio: null,
@@ -564,7 +561,6 @@ describe("管理模型页", () => {
             compression_model_profile_id: null,
             created_at: null,
             id: null,
-            prompt_template_version: null,
             recent_ratio: null,
             recent_token_cap: null,
             summary_ratio: null,
@@ -692,7 +688,6 @@ describe("管理模型页", () => {
       compression_model_profile_id: null,
       created_at: null,
       id: null,
-      prompt_template_version: null,
       recent_ratio: null,
       recent_token_cap: null,
       summary_ratio: null,

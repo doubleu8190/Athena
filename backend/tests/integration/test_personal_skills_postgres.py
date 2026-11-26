@@ -39,28 +39,26 @@ def test_personal_skill_migration_backfill_and_scoped_constraints() -> None:
 
 
 async def _run_personal_skill_migration_scenario(database_url: str) -> None:
-    """在随机 schema 中只执行本测试创建和清理的迁移。"""
+    """在随机 schema 中执行基线迁移并验证企业与个人 Skill 唯一索引及检查约束。"""
     async with isolated_postgres_schema(
         database_url,
         prefix="athena_v2_personal_skills",
-        revision="20261129_0030",
     ) as db:
         test_engine = db.engine
-        await _insert_pre_migration_public_skill(test_engine)
-        await db.upgrade_to("head")
+        await _seed_users_and_company_skill(test_engine)
 
         async with test_engine.connect() as connection:
-            backfilled = (
+            seeded = (
                 await connection.execute(
                     text(
                         "SELECT scope, owner_id, deleted_at "
-                        "FROM skills WHERE id = 'skill_legacy_public'"
+                        "FROM skills WHERE id = 'skill_company_seeded'"
                     )
                 )
             ).one()
-        assert backfilled.scope == "company"
-        assert backfilled.owner_id is None
-        assert backfilled.deleted_at is None
+        assert seeded.scope == "company"
+        assert seeded.owner_id is None
+        assert seeded.deleted_at is None
 
         await _insert_personal_skill(
             test_engine,
@@ -223,8 +221,8 @@ def _is_connection_refused(error: BaseException) -> bool:
     return False
 
 
-async def _insert_pre_migration_public_skill(test_engine: Any) -> None:
-    """在旧 schema 中写入两个用户和一条既有公共 Skill。"""
+async def _seed_users_and_company_skill(test_engine: Any) -> None:
+    """写入两个普通用户和一条企业级 Skill，验证同 slug 在不同 scope 下的约束边界。"""
     now = datetime.now(UTC)
     async with test_engine.begin() as connection:
         await connection.execute(
@@ -232,9 +230,9 @@ async def _insert_pre_migration_public_skill(test_engine: Any) -> None:
                 "INSERT INTO users "
                 "(id, email, password_hash, display_name, status, role, "
                 "created_at, updated_at, deleted_time) VALUES "
-                "('usr_personal_a', 'a@example.test', 'unused', NULL, 'active', 'user', "
+                "('usr_personal_a', 'a@example.test', 'unused', NULL, 'active', 'member', "
                 ":now, :now, NULL), "
-                "('usr_personal_b', 'b@example.test', 'unused', NULL, 'active', 'user', "
+                "('usr_personal_b', 'b@example.test', 'unused', NULL, 'active', 'member', "
                 ":now, :now, NULL)"
             ),
             {"now": now},
@@ -242,10 +240,10 @@ async def _insert_pre_migration_public_skill(test_engine: Any) -> None:
         await connection.execute(
             text(
                 "INSERT INTO skills "
-                "(id, slug, current_version_id, enabled, script_requires_approval, "
+                "(id, slug, scope, current_version_id, enabled, script_requires_approval, "
                 "revision, created_by, created_at, updated_at) "
-                "VALUES ('skill_legacy_public', 'shared-scope-slug', NULL, false, false, "
-                "1, NULL, :now, :now)"
+                "VALUES ('skill_company_seeded', 'shared-scope-slug', 'company', NULL, false, "
+                "false, 1, NULL, :now, :now)"
             ),
             {"now": now},
         )

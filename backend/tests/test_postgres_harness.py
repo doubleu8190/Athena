@@ -119,16 +119,16 @@ def test_isolated_postgres_schema_lifecycle_and_exception_cleanup(
             async with isolated_postgres_schema(
                 "postgresql+asyncpg://u:p@localhost/db",
                 prefix="athena_unit",
-                revision="20261122_0023",
+                revision="0001_initial_schema",
                 connect_args={"timeout": 8},
                 server_settings={"lock_timeout": "5000"},
                 engine_server_settings={"application_name": "race-app"},
                 pool_size=1,
             ) as db:
                 assert db.schema.startswith("athena_unit_")
-                assert db.head_revision() is not None
+                assert db.head_revision() == "0001_initial_schema"
                 await db.upgrade_to("head")
-                await db.downgrade_to("20261122_0023")
+                await db.downgrade_to("base")
                 raise RuntimeError("boom")
 
     asyncio.run(scenario())
@@ -146,9 +146,9 @@ def test_isolated_postgres_schema_lifecycle_and_exception_cleanup(
 
     assert events[0].startswith('CREATE SCHEMA "athena_unit_')
     assert events[1:4] == [
-        "alembic:upgrade:20261122_0023",
+        "alembic:upgrade:0001_initial_schema",
         "alembic:upgrade:head",
-        "alembic:downgrade:20261122_0023",
+        "alembic:downgrade:base",
     ]
     assert events[4] == "dispose:test"
     assert events[5].startswith('DROP SCHEMA IF EXISTS "athena_unit_')

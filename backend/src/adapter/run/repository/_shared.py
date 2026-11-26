@@ -141,11 +141,6 @@ class RunRepositorySupportMixin:
     _session_factory: async_sessionmaker[AsyncSession]
     _message_repo: SqlAlchemyMessageRepository
 
-    @property
-    def _messages(self) -> SqlAlchemyMessageRepository:
-        """平滑兼容属性，指向内部消息仓储实例。"""
-        return self._message_repo
-
     @staticmethod
     def _aggregate_usage(attempts: tuple[RunAttemptUsage, ...]) -> RunUsage:
         def total(field: str) -> int | None:
@@ -328,7 +323,6 @@ class RunRepositorySupportMixin:
                     session,
                     result_draft,
                     locked_session=locked_session,
-                    managed_run_id=run.id,
                 )
                 record.result_message_id = result_message_id
                 record.outcome = outcome.model_dump(mode="json")
@@ -546,7 +540,6 @@ class RunRepositorySupportMixin:
             session,
             result_draft,
             locked_session=locked_session,
-            managed_run_id=parent.id,
         )
         if tool_call_row is not None and tool_call_row.status == ToolCallStatus.EXECUTING.value:
             outcome = ToolOutcome(
@@ -650,7 +643,7 @@ class RunRepositorySupportMixin:
             "temperature": profile.temperature,
             "scenario_label": profile.scenario_label,
             "supports_vision": bool(profile.supports_vision),
-            "version": 1 if profile.version is None else int(profile.version),
+            "version": int(profile.version),
         }
 
     @staticmethod
@@ -780,10 +773,9 @@ class RunRepositorySupportMixin:
     def _is_usable_profile(
         profile: ModelProfileVersionModel | None,
         *,
-        require_key: bool = True,
         require_visible: bool = False,
     ) -> bool:
-        """统一校验模型版本未软删、已启用、支持流式与工具调用及必要凭据/可见性。"""
+        """统一校验模型版本未软删、已启用、支持流式与工具调用及必要可见性。"""
         if (
             profile is None
             or profile.deleted_at is not None
@@ -794,12 +786,6 @@ class RunRepositorySupportMixin:
             return False
         if require_visible and not profile.visible_to_users:
             return False
-        if require_key and (
-            profile.api_key_ciphertext is None
-            or profile.api_key_nonce is None
-            or profile.api_key_key_version is None
-        ):
-            return False
         return True
 
     @classmethod
@@ -808,13 +794,11 @@ class RunRepositorySupportMixin:
         profile: ModelProfileVersionModel | None,
         *,
         error: Exception,
-        require_key: bool = True,
         require_visible: bool = False,
     ) -> ModelProfileVersionModel:
         """复核模型版本可用性，不满足条件时抛出指定领域异常。"""
         if not cls._is_usable_profile(
             profile,
-            require_key=require_key,
             require_visible=require_visible,
         ):
             raise error

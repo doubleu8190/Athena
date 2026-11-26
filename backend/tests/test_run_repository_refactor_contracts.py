@@ -59,7 +59,7 @@ def test_settle_cancelled_contract_and_patch_removed() -> None:
 
 
 def test_message_repository_property_and_attribute() -> None:
-    """验证仓储内部持有的 _message_repo 命名及 _messages 兼容属性。"""
+    """验证仓储内部统一持有 _message_repo，已移除旧过渡兼容属性 _messages。"""
     mock_session_factory = MagicMock()
     mock_message_repo = MagicMock()
 
@@ -67,9 +67,8 @@ def test_message_repository_property_and_attribute() -> None:
         mock_session_factory,
         mock_message_repo,
     )
-    # 验证主属性与兼容属性均指向传入的消息仓储实例
     assert repo._message_repo is mock_message_repo
-    assert repo._messages is mock_message_repo
+    assert not hasattr(repo, "_messages")
 
 
 def test_shared_and_lifecycle_method_signatures() -> None:
@@ -203,6 +202,9 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
                             protocol="chat_completions",
                             base_url="https://llm.example.test/v1",
                             model="gpt-test",
+                            api_key_ciphertext=b"ciphertext",
+                            api_key_nonce=b"0123456789ab",
+                            api_key_key_version=1,
                             context_window_tokens=128000,
                             tokenizer_encoding="cl100k_base",
                             max_output_tokens=4096,
@@ -210,6 +212,7 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
                             execution_timeout_seconds=120,
                             max_concurrency=4,
                             created_at=now,
+                            updated_at=now,
                         ),
                         SystemPromptVersionModel(
                             id="main_1",
@@ -248,6 +251,8 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
                             status="completed",
                             sequence=1,
                             parts=[{"type": "text", "text": "hello"}],
+                            run_id="run_lock",
+                            context_turn_id="msg_1",
                             created_at=now,
                             completed_at=now,
                             metadata_json={},
@@ -279,6 +284,26 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
                             context_cutoff_sequence=1,
                             retry_of_run_id=None,
                             model_config_version_id="prof_1",
+                            model_snapshot_json={
+                                "id": "prof_1",
+                                "name": "Lock Model",
+                                "protocol": "chat_completions",
+                                "base_url": "https://llm.example.test/v1",
+                                "model": "gpt-test",
+                                "context_window_tokens": 128000,
+                                "tokenizer_encoding": "cl100k_base",
+                                "supports_stream": True,
+                                "supports_tools": True,
+                                "supports_parallel_tool_calls": False,
+                                "max_output_tokens": 4096,
+                                "request_timeout_seconds": 30,
+                                "execution_timeout_seconds": 120,
+                                "max_concurrency": 4,
+                                "temperature": None,
+                                "scenario_label": None,
+                                "supports_vision": False,
+                                "version": 1,
+                            },
                             main_prompt_version_id="main_1",
                             compression_prompt_version_id="comp_1",
                             prompt_template_version="v1",

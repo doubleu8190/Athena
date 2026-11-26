@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 from knowledge_fakes import MemoryOriginalStore
 from pg_unit_harness import pg_unit_db
 
@@ -74,10 +75,6 @@ class _UploadRepository:
         del visibility_grants
         self.bases[item.id] = item
         return item
-
-    async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None:
-        base = self.bases.get(base_id)
-        return base if base and base.owner_id == owner_id else None
 
     async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None:
         return self.bases.get(base_id)
@@ -179,9 +176,11 @@ def _make(
     service = KnowledgeService(
         cast(KnowledgeRepositoryPort, repository),
         _Tokenizer(),
+        profile_id="bge-m3-default",
         originals=originals or MemoryOriginalStore(),
         id_factory=lambda kind: f"{kind}_{next(identities)}",
         clock=lambda: now,
+        access_policy=make_test_access_policy(),
     )
     return service, repository
 

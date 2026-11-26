@@ -5,10 +5,6 @@ class SessionNotFoundError(LookupError):
     """会话不存在、已经删除或不属于当前用户。"""
 
 
-class SessionProjectLockedError(ValueError):
-    """会话已经产生消息，不能再修改项目绑定。"""
-
-
 class InvalidSessionTitleError(ValueError):
     """会话标题不满足展示名称约束。"""
 
@@ -26,5 +22,4 @@ __all__ = [
     "InvalidSessionTitleError",
     "InvalidSessionUpdateError",
     "SessionNotFoundError",
-    "SessionProjectLockedError",
 ]

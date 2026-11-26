@@ -45,25 +45,11 @@ export interface KnowledgeBase {
   id: string;
   name: string;
   description: string | null;
-  visibility_scope?: VisibilityScope;
-  owner_department_id?: string | null;
-  visibility_grants?: VisibilityGrant[];
+  visibility_scope: VisibilityScope;
+  owner_department_id: string | null;
+  visibility_grants: VisibilityGrant[];
   created_at: string;
   updated_at: string;
-}
-
-/** 统一解析知识库可见性层级，兼容旧测试夹具缺省字段（按后端创建默认值为 personal）。 */
-export function knowledgeBaseScope(
-  base: Pick<KnowledgeBase, "visibility_scope">,
-): VisibilityScope {
-  if (
-    base.visibility_scope === "company" ||
-    base.visibility_scope === "department" ||
-    base.visibility_scope === "personal"
-  ) {
-    return base.visibility_scope;
-  }
-  return "personal";
 }
 
 /**
@@ -80,7 +66,7 @@ export function canManageKnowledgeBase(
   if (!user) {
     return false;
   }
-  const scope = knowledgeBaseScope(base);
+  const scope = base.visibility_scope;
   if (scope === "personal") {
     return true;
   }
@@ -111,11 +97,11 @@ export function countExtraVisibilityGrants(
     "visibility_scope" | "owner_department_id" | "visibility_grants"
   >,
 ): number {
-  if (knowledgeBaseScope(base) !== "department") {
+  if (base.visibility_scope !== "department") {
     return 0;
   }
   const ownerDeptId = base.owner_department_id?.trim() ?? "";
-  if (!ownerDeptId || !base.visibility_grants?.length) {
+  if (!ownerDeptId || base.visibility_grants.length === 0) {
     return 0;
   }
   const seen = new Set<string>([`department:${ownerDeptId}`]);
@@ -176,8 +162,8 @@ export interface KnowledgeDocument {
   title: string;
   active_version_id: string | null;
   pending_version_id: string | null;
-  // 文档列表附带的最新版本摘要；缺省（undefined）时回退按行请求版本列表兼容旧接口/旧测例。
-  latest_version?: KnowledgeVersion | null;
+  /** 文档列表与详情接口始终附带的最新版本摘要；尚无版本记录时为 null。 */
+  latest_version: KnowledgeVersion | null;
   created_at: string;
   updated_at: string;
 }

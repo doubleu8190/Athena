@@ -56,9 +56,9 @@ class OrgUserResponse(BaseModel):
     last_synced_at: datetime | None
     created_at: datetime
     updated_at: datetime
-    departments: list[UserDepartmentItem] = Field(default_factory=list)
-    managed_departments: list[DeptAdminScopeResponse] = Field(default_factory=list)
-    managed_department_ids: list[str] = Field(default_factory=list)
+    departments: list[UserDepartmentItem]
+    managed_departments: list[DeptAdminScopeResponse]
+    managed_department_ids: list[str]
 
 
 class OrgUserListResponse(BaseModel):

@@ -56,12 +56,12 @@ class ConversationMessageDraft:
     status: MessageStatus
     parts: tuple[MessagePart, ...]
     reply_to_message_id: str | None
-    run_id: str | None
+    run_id: str
     client_message_id: str | None
     created_at: datetime
     completed_at: datetime | None
     metadata: MessageMetadata
-    context_turn_id: str | None = None
+    context_turn_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,12 +75,12 @@ class ConversationMessage:
     sequence: int
     parts: tuple[MessagePart, ...]
     reply_to_message_id: str | None
-    run_id: str | None
+    run_id: str
     client_message_id: str | None
     created_at: datetime
     completed_at: datetime | None
     metadata: MessageMetadata
-    context_turn_id: str | None = None
+    context_turn_id: str
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import httpx2
 import pytest
+from access_support import make_test_access_policy
 from mcp import types
 from mcp_types import (
     DiscoverResult,
@@ -849,6 +850,7 @@ def test_skill_service_read_resource_o1_utf8_boundaries(
         cast(SkillRepository, _Repo()),
         cast(Any, store),
         cast(Any, None),
+        access_policy=make_test_access_policy(),
         package_cache=cache,
     )
     snapshot = RunSkillSnapshot(
@@ -1164,6 +1166,7 @@ def test_skill_service_validate_offloop_waits_for_thread_before_propagating_canc
         cast(SkillRepository, object()),
         cast(Any, object()),
         cast(Any, _AuthStub()),
+        access_policy=make_test_access_policy(),
         package_validator=_SlowValidator(),
     )
 

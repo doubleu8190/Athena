@@ -62,6 +62,7 @@ const COMPANY_KB: KnowledgeBase = {
   name: "集团规章制度库",
   owner_department_id: null,
   updated_at: "2026-11-10T08:00:00Z",
+  visibility_grants: [],
   visibility_scope: "company",
 };
 
@@ -72,6 +73,7 @@ const DEPT_KB: KnowledgeBase = {
   name: "研发部技术规范库",
   owner_department_id: "dept-rd",
   updated_at: "2026-11-10T08:00:00Z",
+  visibility_grants: [],
   visibility_scope: "department",
 };
 
@@ -82,6 +84,7 @@ const PERSONAL_KB: KnowledgeBase = {
   name: "我的项目备忘",
   owner_department_id: null,
   updated_at: "2026-11-10T08:00:00Z",
+  visibility_grants: [],
   visibility_scope: "personal",
 };
 
@@ -340,6 +343,7 @@ describe("M2.4 对话首页与一体化吸底输入器", () => {
         name: `业务制度库 ${index + 1}`,
         owner_department_id: "dept-rd",
         updated_at: "2026-11-10T08:00:00Z",
+        visibility_grants: [],
         visibility_scope: "department" as const,
       })),
     ];

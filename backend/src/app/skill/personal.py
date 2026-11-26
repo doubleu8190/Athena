@@ -158,9 +158,8 @@ def validate_starter_prompt(value: str | None) -> str | None:
     normalized = value.strip()
     if not normalized:
         return None
-    if (
-        len(normalized) > MAX_SKILL_STARTER_PROMPT_CHARACTERS
-        or _CONTROL_CHARACTER.search(normalized)
+    if len(normalized) > MAX_SKILL_STARTER_PROMPT_CHARACTERS or _CONTROL_CHARACTER.search(
+        normalized
     ):
         raise SkillPackageError("skill_starter_prompt_invalid")
     return normalized

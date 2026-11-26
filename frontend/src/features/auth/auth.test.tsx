@@ -261,7 +261,7 @@ describe("认证领域工具与安全路径校验", () => {
     ).toBe("Athena 员工");
   });
 
-  it("拦截外链、协议相对路径、反斜杠、控制字符以及 /login 与 /register", () => {
+  it("拦截外链、协议相对路径、反斜杠、控制字符以及 /login", () => {
     expect(sanitizeReturnTo("/projects?view=all#top")).toBe(
       "/projects?view=all#top",
     );
@@ -271,7 +271,6 @@ describe("认证领域工具与安全路径校验", () => {
     expect(sanitizeReturnTo("/chat\r\nSet-Cookie: bad=1")).toBe("/chat");
     expect(sanitizeReturnTo("/login")).toBe("/chat");
     expect(sanitizeReturnTo("/login?reason=expired")).toBe("/chat");
-    expect(sanitizeReturnTo("/register")).toBe("/chat");
     expect(sanitizeReturnTo("")).toBe("/chat");
     expect(sanitizeReturnTo(null)).toBe("/chat");
 
@@ -321,26 +320,6 @@ describe("认证领域工具与安全路径校验", () => {
 });
 
 describe("企业登录页动态状态机（飞书 SSO + Mock 快捷切换 + 应急本地登录）", () => {
-  it("访问已下线的 /register 会自动重定向至 /login", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = getRequestUrl(input);
-        if (url.endsWith("/auth/me")) {
-          return jsonResponse({ detail: "not_authenticated" }, 401);
-        }
-        if (url.endsWith("/auth/providers")) {
-          return jsonResponse(LOCAL_ONLY_PROVIDERS);
-        }
-        throw new Error(`Unexpected request: ${url}`);
-      }),
-    );
-
-    const app = renderApp("/register");
-    await waitForStableLocalLoginScreen(app);
-    expect(app.getLocation().pathname).toBe("/login");
-  });
-
   it("providers 加载期间显示骨架屏，失败时展示错误并支持重新加载恢复", async () => {
     const providersGate = deferred<Response>();
     let providerCalls = 0;
@@ -1728,7 +1707,6 @@ describe("全站三级角色与分级路由守卫", () => {
             compression_model_profile_id: null,
             created_at: null,
             id: null,
-            prompt_template_version: null,
             recent_ratio: null,
             recent_token_cap: null,
             summary_ratio: null,
@@ -1799,7 +1777,7 @@ describe("全站三级角色与分级路由守卫", () => {
     ).toHaveAttribute("href", "/admin/skills");
     expect(
       within(deptGroup).getByRole("link", { name: "部门知识库" }),
-    ).toHaveAttribute("href", "/knowledge?visibility_scope=department");
+    ).toHaveAttribute("href", "/knowledge?scope=department");
     expect(
       screen.queryByRole("link", { name: "模型与压缩策略" }),
     ).not.toBeInTheDocument();
@@ -2035,7 +2013,6 @@ describe("全站三级角色与分级路由守卫", () => {
             compression_model_profile_id: null,
             created_at: null,
             id: null,
-            prompt_template_version: null,
             recent_ratio: null,
             recent_token_cap: null,
             summary_ratio: null,

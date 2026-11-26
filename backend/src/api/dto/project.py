@@ -34,9 +34,9 @@ class ProjectResponse(BaseModel):
 
     id: str
     name: str
-    description: str | None = None
-    instructions: str | None = None
-    default_skill_ids: list[str] = Field(default_factory=list)
+    description: str | None
+    instructions: str | None
+    default_skill_ids: list[str]
     created_at: datetime
     updated_at: datetime
 

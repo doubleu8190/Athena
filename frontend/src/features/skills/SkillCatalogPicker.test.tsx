@@ -23,8 +23,7 @@ const COMPANY_LEGACY_SKILL = makeSkill({
   description: "按统一模板生成项目复盘。",
   id: "company-review",
   name: "项目复盘",
-  // 故意保留历史 "public" 枚举，验证前端将其安全归一到「全公司技能」。
-  scope: "public",
+  scope: "company",
   script_requires_approval: true,
   slug: "project-review",
 });

@@ -158,7 +158,7 @@ class ToolManager:
         discovery: McpDiscovery,
         auth_repository: CurrentSessionReader,
         *,
-        access_policy: AccessPolicyService | None = None,
+        access_policy: AccessPolicyService,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = now_utc,
     ) -> None:
@@ -477,15 +477,6 @@ class ToolManager:
             raise McpServerNotFoundError("mcp_tool_not_found")
         return tool
 
-    async def update_tool_approval_policy(
-        self, actor: AuthContext, tool_id: str, requires_approval: bool
-    ) -> AdminToolDefinition:
-        """仅允许管理员更新已注册 MCP 工具的审批策略。"""
-        await self._authorize(actor, admin=True)
-        if not tool_id or len(tool_id) > 64 or type(requires_approval) is not bool:
-            raise ValueError("mcp_tool_policy_invalid")
-        return await self._servers.set_requires_approval(actor, tool_id, requires_approval)
-
     async def update_tool_metadata(
         self, actor: AuthContext, tool_id: str, patch: ToolMetadataPatch
     ) -> AdminToolDefinition:
@@ -542,27 +533,24 @@ class ToolManager:
         """授权有效用户后按当前用户实时可读且已启用的 MCP Server 过滤读取工具目录。"""
         await self._authorize(actor, admin=False)
         self._validate_page(offset, limit)
-        if self._access_policy is not None:
-            return await self._tools.list_readable_public(
-                actor.user.id,
-                offset=offset,
-                limit=limit,
-            )
-        return await self._tools.list_public(offset=offset, limit=limit)
+        return await self._tools.list_readable_public(
+            actor.user.id,
+            offset=offset,
+            limit=limit,
+        )
 
     async def get_public_tool(self, actor: AuthContext, tool_id: str) -> PublicToolDefinition:
         """授权有效用户后按 ID 读取公共工具投影；停用或无权访问返回 404。"""
         await self._authorize(actor, admin=False)
-        if self._access_policy is not None:
-            admin_tool = await self._tools.get_admin_tool(tool_id)
-            if admin_tool is None:
-                raise McpServerNotFoundError("mcp_tool_not_found")
-            if not await self._access_policy.can_read_resource(
-                actor.user.id,
-                ResourceType.MCP_SERVER,
-                admin_tool.server_id,
-            ):
-                raise McpServerNotFoundError("mcp_tool_not_found")
+        admin_tool = await self._tools.get_admin_tool(tool_id)
+        if admin_tool is None:
+            raise McpServerNotFoundError("mcp_tool_not_found")
+        if not await self._access_policy.can_read_resource(
+            actor.user.id,
+            ResourceType.MCP_SERVER,
+            admin_tool.server_id,
+        ):
+            raise McpServerNotFoundError("mcp_tool_not_found")
         tool = await self._tools.get_public_tool(tool_id)
         if tool is None:
             raise McpServerNotFoundError("mcp_tool_not_found")
@@ -602,12 +590,6 @@ class ToolManager:
         preserve_existing_grants_when_none: bool = True,
     ) -> tuple[VisibilityScope, str | None, tuple[VisibilityGrantInput, ...] | None]:
         """校验可见性配置；当局部更新未传 grants 且部门未变时返回 None 保留原授权。"""
-        if self._access_policy is None:
-            if visibility_scope is not VisibilityScope.COMPANY or owner_department_id is not None:
-                raise ValueError("mcp_visibility_requires_access_policy")
-            if visibility_grants:
-                raise ValueError("mcp_visibility_grants_not_allowed")
-            return VisibilityScope.COMPANY, None, ()
         existing_target = (
             None
             if existing is None

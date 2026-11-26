@@ -18,7 +18,6 @@ from domain.project import Project, ProjectHasSessionsError, ProjectNotFoundErro
 from domain.session import (
     Session,
     SessionPage,
-    SessionProjectLockedError,
     SessionScope,
 )
 from main import create_app
@@ -232,8 +231,6 @@ class InMemorySessionRepository:
         project_changed = update_project and project_id != session.project_id
         if not title_changed and not project_changed:
             return session
-        if project_changed and session.last_message_sequence > 0:
-            raise SessionProjectLockedError("session_project_locked")
         if project_changed and project_id is not None:
             await self._require_visible_project(scope.owner_id, project_id)
         updated = replace(
@@ -570,10 +567,6 @@ def test_patch_updates_title_and_binding_until_first_message() -> None:
             project_id=project.json()["id"],
             last_message_sequence=1,
         )
-        locked = client.patch(
-            f"/api/v1/sessions/{session_id}",
-            json={"project_id": None},
-        )
         title_after_message = client.patch(
             f"/api/v1/sessions/{session_id}",
             json={"title": "消息后标题"},
@@ -586,8 +579,6 @@ def test_patch_updates_title_and_binding_until_first_message() -> None:
     assert unbound.json()["title"] is None
     assert empty_update.status_code == 422
     assert empty_update.json() == {"detail": "session_update_invalid"}
-    assert locked.status_code == 409
-    assert locked.json() == {"detail": "session_project_locked"}
     assert title_after_message.status_code == 200
     assert title_after_message.json()["title"] == "消息后标题"
     assert title_after_message.json()["project_id"] == project.json()["id"]

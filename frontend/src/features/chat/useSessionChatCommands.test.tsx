@@ -326,8 +326,11 @@ describe("useSessionChatCommands 命令与审批子 Hook", () => {
     );
 
     const approval: RunPendingApproval = {
+      approval_summary: null,
       batch_message_id: "msg-batch-1",
       call_id: "call-1",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "expense_submit",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -373,8 +376,11 @@ describe("useSessionChatCommands 命令与审批子 Hook", () => {
       defaultOptions: { queries: { retry: false } },
     });
     const approvalA: PendingSubagentApproval = {
+      approval_summary: null,
       batch_message_id: "msg-sub-a",
       call_id: "call-a",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "tool_a",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",

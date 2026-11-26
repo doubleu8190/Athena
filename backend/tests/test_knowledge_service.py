@@ -9,10 +9,21 @@ from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+from access_support import make_test_access_policy
 from knowledge_fakes import MemoryOriginalStore
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
+from app.access import AccessPolicyService
 from app.knowledge.service import KnowledgeInputError, KnowledgeNotFoundError, KnowledgeService
-from domain.access import VisibilityGrantInput
+from domain.access import (
+    GrantTargetType,
+    ResourceAccessTarget,
+    ResourceType,
+    UserAccessSnapshot,
+    VisibilityGrant,
+    VisibilityGrantInput,
+    VisibilityScope,
+)
 from domain.knowledge.model import (
     Document,
     KnowledgeBase,
@@ -33,6 +44,7 @@ class MemoryKnowledgeRepository:
         self.semantic_calls: list[tuple[str, list[str], list[float], int, str | None]] = []
         self.deleted_documents: list[str] = []
         self.source_reference: SourceReference | None = None
+        self.update_base_calls: list[dict[str, object]] = []
 
     async def create_base(
         self,
@@ -44,35 +56,88 @@ class MemoryKnowledgeRepository:
         self.bases[item.id] = item
         return item
 
-    async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None:
-        item = self.bases.get(base_id)
-        return item if item and item.owner_id == owner_id and item.deleted_time is None else None
-
     async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None:
         item = self.bases.get(base_id)
         return item if item and item.deleted_time is None else None
 
-    async def list_bases(self, owner_id: str, *, offset: int, limit: int) -> list[KnowledgeBase]:
-        items = [item for item in self.bases.values() if item.owner_id == owner_id]
+    async def list_readable_bases(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+        snapshot: UserAccessSnapshot | None = None,
+    ) -> list[KnowledgeBase]:
+        del user_id, snapshot
+        items = [
+            item
+            for item in self.bases.values()
+            if item.deleted_time is None
+            and (visibility_scope is None or item.visibility_scope is visibility_scope)
+            and (owner_department_id is None or item.owner_department_id == owner_department_id)
+        ]
         return items[offset : offset + limit]
 
-    async def rename_base(
+    async def update_base(
         self,
-        owner_id: str,
         base_id: str,
+        *,
         name: str,
         description: str | None,
         at: datetime,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> KnowledgeBase | None:
-        item = await self.get_base(owner_id, base_id)
+        self.update_base_calls.append(
+            {
+                "base_id": base_id,
+                "name": name,
+                "description": description,
+                "visibility_scope": visibility_scope,
+                "owner_department_id": owner_department_id,
+                "visibility_grants": visibility_grants,
+            }
+        )
+        item = await self.get_base_by_id(base_id)
         if item is None:
             return None
-        updated = KnowledgeBase(item.id, owner_id, name, description, item.created_at, at)
+        next_scope = item.visibility_scope if visibility_scope is None else visibility_scope
+        next_dept = item.owner_department_id if visibility_scope is None else owner_department_id
+        if visibility_scope is not None and visibility_grants is not None:
+            next_grants = tuple(
+                VisibilityGrant(
+                    id=f"rvg_{idx}",
+                    resource_type=ResourceType.KNOWLEDGE_BASE,
+                    resource_id=item.id,
+                    target_type=grant.target_type,
+                    target_id=grant.target_id,
+                    include_subdepartments=grant.include_subdepartments,
+                    created_at=at,
+                )
+                for idx, grant in enumerate(visibility_grants, start=1)
+            )
+        else:
+            next_grants = item.visibility_grants
+        updated = KnowledgeBase(
+            item.id,
+            item.owner_id,
+            name,
+            description,
+            item.created_at,
+            at,
+            visibility_scope=next_scope,
+            owner_department_id=next_dept,
+            visibility_grants=next_grants,
+        )
         self.bases[base_id] = updated
         return updated
 
     async def soft_delete_base(self, owner_id: str, base_id: str, at: datetime) -> bool:
-        item = await self.get_base(owner_id, base_id)
+        del owner_id
+        item = await self.get_base_by_id(base_id)
         if item is None:
             return False
         self.bases[base_id] = KnowledgeBase(
@@ -143,9 +208,6 @@ class MemoryKnowledgeRepository:
         del owner_id, base_id, document_id
         return None
 
-    async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None:
-        self.scope_calls.append((owner_id, list(base_ids)))
-
     async def search_keyword(
         self, owner_id: str, base_ids: list[str], tokens: tuple[str, ...], limit: int
     ) -> tuple[SearchHit, ...]:
@@ -181,7 +243,8 @@ class MemoryKnowledgeRepository:
     async def delete_document(
         self, owner_id: str, base_id: str, document_id: str
     ) -> list[str] | None:
-        if await self.get_base(owner_id, base_id) is None:
+        del owner_id
+        if await self.get_base_by_id(base_id) is None:
             return None
         self.deleted_documents.append(document_id)
         return []
@@ -189,8 +252,8 @@ class MemoryKnowledgeRepository:
     async def get_source(
         self, owner_id: str, base_id: str, document_id: str, version_id: str
     ) -> SourceReference | None:
-        del document_id, version_id
-        if await self.get_base(owner_id, base_id) is None:
+        del owner_id, document_id, version_id
+        if await self.get_base_by_id(base_id) is None:
             return None
         return self.source_reference
 
@@ -205,12 +268,35 @@ class Embedding:
         return [[0.25] * 1024 for _ in texts]
 
 
+def _access_policy_for(repository: MemoryKnowledgeRepository) -> AccessPolicyService:
+    """为内存知识库仓储构建动态反映个人/部门归属的真实 AccessPolicyService。"""
+
+    def _targets(resource_type: ResourceType) -> tuple[ResourceAccessTarget, ...]:
+        if resource_type is not ResourceType.KNOWLEDGE_BASE:
+            return ()
+        return tuple(
+            ResourceAccessTarget(
+                resource_type=ResourceType.KNOWLEDGE_BASE,
+                resource_id=base.id,
+                visibility_scope=base.visibility_scope,
+                owner_id=base.owner_id,
+                owner_department_id=base.owner_department_id,
+            )
+            for base in repository.bases.values()
+            if base.deleted_time is None
+        )
+
+    return make_test_access_policy(targets_provider=_targets, permissive_unknown=False)
+
+
 def _service(repository: MemoryKnowledgeRepository) -> KnowledgeService:
     return KnowledgeService(
         cast(KnowledgeRepositoryPort, repository),
         Tokenizer(),
+        profile_id="bge-m3-default",
         id_factory=lambda prefix: f"{prefix}_fixed",
         clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        access_policy=_access_policy_for(repository),
     )
 
 
@@ -223,6 +309,51 @@ def test_owner_scope_hides_another_users_base() -> None:
         asyncio.run(service.get_base("owner_b", "kb_fixed"))
     with pytest.raises(KnowledgeNotFoundError):
         asyncio.run(service.create_text_document("owner_b", "kb_fixed", "title", "body", "key"))
+
+
+def test_rename_base_metadata_only_preserves_visibility_and_grants() -> None:
+    """仅改名称/说明调用 rename_base 时不传可见性参数，且原样保留部门归属与授权清单。"""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    grant = VisibilityGrant(
+        id="rvg_fin_1",
+        resource_type=ResourceType.KNOWLEDGE_BASE,
+        resource_id="kb_dept_fin",
+        target_type=GrantTargetType.DEPARTMENT,
+        target_id="dept_fin",
+        include_subdepartments=True,
+        created_at=now,
+    )
+    repository = MemoryKnowledgeRepository()
+    repository.bases["kb_dept_fin"] = KnowledgeBase(
+        id="kb_dept_fin",
+        owner_id="admin_fin",
+        name="原财务制度",
+        description="原说明",
+        created_at=now,
+        updated_at=now,
+        visibility_scope=VisibilityScope.DEPARTMENT,
+        owner_department_id="dept_fin",
+        visibility_grants=(grant,),
+    )
+    service = _service(repository)
+
+    renamed = asyncio.run(service.rename_base("admin_fin", "kb_dept_fin", "新财务制度", "新说明"))
+
+    assert renamed.name == "新财务制度"
+    assert renamed.description == "新说明"
+    assert renamed.visibility_scope is VisibilityScope.DEPARTMENT
+    assert renamed.owner_department_id == "dept_fin"
+    assert renamed.visibility_grants == (grant,)
+    assert repository.update_base_calls == [
+        {
+            "base_id": "kb_dept_fin",
+            "name": "新财务制度",
+            "description": "新说明",
+            "visibility_scope": None,
+            "owner_department_id": None,
+            "visibility_grants": None,
+        }
+    ]
 
 
 def test_text_import_is_idempotent_and_conflicts_when_payload_changes() -> None:
@@ -265,15 +396,24 @@ def test_text_import_is_idempotent_and_conflicts_when_payload_changes() -> None:
 
 def test_search_passes_owner_scope_and_same_tokens_and_vector_to_repository() -> None:
     repository = MemoryKnowledgeRepository()
-    service = KnowledgeService(cast(KnowledgeRepositoryPort, repository), Tokenizer(), Embedding())
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    asyncio.run(repository.create_base(KnowledgeBase("kb_a", "owner_a", "a", None, now, now)))
+    service = KnowledgeService(
+        cast(KnowledgeRepositoryPort, repository),
+        Tokenizer(),
+        Embedding(),
+        profile_id="bge-m3-default",
+        access_policy=_access_policy_for(repository),
+    )
     result = asyncio.run(service.search("owner_a", ["kb_a"], "PostgreSQL 中文", limit=7))
 
-    assert repository.scope_calls == [("owner_a", ["kb_a"])]
     assert repository.keyword_calls == [("owner_a", ["kb_a"], ("PostgreSQL", "中文"), 40)]
     owner, bases, vector, limit, profile_id = repository.semantic_calls[0]
     assert (owner, bases, limit, profile_id) == ("owner_a", ["kb_a"], 40, "bge-m3-default")
     assert vector == [0.25] * 1024
     assert result.channels == ("keyword", "semantic")
+    with pytest.raises(KnowledgeNotFoundError, match="knowledge_base_not_found"):
+        asyncio.run(service.search("owner_b", ["kb_a"], "PostgreSQL 中文", limit=7))
 
 
 @pytest.mark.parametrize("query,limit", [("", 8), ("good", 0), ("good", 21)])
@@ -294,7 +434,9 @@ def test_document_delete_never_accesses_original_storage() -> None:
         service = KnowledgeService(
             cast(KnowledgeRepositoryPort, repository),
             Tokenizer(),
+            profile_id="bge-m3-default",
             originals=FailingStore(),
+            access_policy=_access_policy_for(repository),
         )
         base = await service.create_base("owner_a", "private", None)
         await service.delete_document("owner_a", base.id, "doc_a")
@@ -313,7 +455,9 @@ def test_source_authorization_failure_does_not_read_original_storage() -> None:
         service = KnowledgeService(
             cast(KnowledgeRepositoryPort, repository),
             Tokenizer(),
+            profile_id="bge-m3-default",
             originals=FailingStore(),
+            access_policy=_access_policy_for(repository),
         )
         base = await service.create_base("owner_a", "private", None)
         digest = hashlib.sha256(b"private").hexdigest()
@@ -324,7 +468,7 @@ def test_source_authorization_failure_does_not_read_original_storage() -> None:
             None,
         )
 
-        with pytest.raises(KnowledgeNotFoundError, match="source_not_found"):
+        with pytest.raises(KnowledgeNotFoundError, match="knowledge_base_not_found"):
             await service.source("owner_b", base.id, "doc_a", "ver_a")
 
     asyncio.run(scenario())
@@ -336,6 +480,8 @@ def test_text_source_does_not_require_an_original_store() -> None:
         service = KnowledgeService(
             cast(KnowledgeRepositoryPort, repository),
             Tokenizer(),
+            profile_id="bge-m3-default",
+            access_policy=_access_policy_for(repository),
         )
         base = await service.create_base("owner_a", "private", None)
         repository.source_reference = SourceReference("notes.txt", "text/plain", None, "body")
@@ -353,7 +499,9 @@ def test_missing_source_object_maps_to_source_not_found() -> None:
         service = KnowledgeService(
             cast(KnowledgeRepositoryPort, repository),
             Tokenizer(),
+            profile_id="bge-m3-default",
             originals=store,
+            access_policy=_access_policy_for(repository),
         )
         base = await service.create_base("owner_a", "private", None)
         digest = hashlib.sha256(b"missing").hexdigest()
@@ -382,7 +530,9 @@ def test_storage_unavailability_during_download_is_not_hidden_as_not_found() -> 
         service = KnowledgeService(
             cast(KnowledgeRepositoryPort, repository),
             Tokenizer(),
+            profile_id="bge-m3-default",
             originals=UnavailableStore(),
+            access_policy=_access_policy_for(repository),
         )
         base = await service.create_base("owner_a", "private", None)
         digest = hashlib.sha256(b"unavailable").hexdigest()
@@ -431,7 +581,12 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
 
         try:
             repository = KnowledgeRepository(factory)
-            service = KnowledgeService(cast(KnowledgeRepositoryPort, repository), Tokenizer())
+            service = KnowledgeService(
+                cast(KnowledgeRepositoryPort, repository),
+                Tokenizer(),
+                profile_id="bge-m3-default",
+                access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
+            )
             now = datetime(2026, 3, 1, 8, 0, tzinfo=UTC)
             same_time = datetime(2026, 3, 1, 8, 5, tzinfo=UTC)
 
@@ -527,7 +682,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
                             source_text="v1",
                             content_hash="1" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=["w1"],
@@ -543,7 +697,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
                             source_text="v2",
                             content_hash="2" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="failed",
                             error_code="embedding_timeout",
                             warnings=["partial"],
@@ -560,7 +713,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
                             source_text="tie-a",
                             content_hash="3" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=[],
@@ -576,7 +728,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
                             source_text="tie-z",
                             content_hash="4" * 64,
                             profile_id="bge-m3-default",
-                            processing_config={},
                             state="processing",
                             error_code=None,
                             warnings=[],

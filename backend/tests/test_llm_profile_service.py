@@ -51,7 +51,6 @@ class _ProfileRepository:
             protocol="chat_completions",
             base_url=value.base_url,
             model=value.model,
-            has_api_key=bool(value.api_key),
             context_window_tokens=value.context_window_tokens,
             tokenizer_encoding=value.tokenizer_encoding,
             supports_stream=value.supports_stream,
@@ -63,6 +62,7 @@ class _ProfileRepository:
             temperature=value.temperature,
             enabled=True,
             created_at=timestamp,
+            updated_at=timestamp,
             supports_parallel_tool_calls=value.supports_parallel_tool_calls,
             visible_to_users=value.visible_to_users,
             scenario_label=value.scenario_label,
@@ -151,7 +151,6 @@ class _CompressionPolicyRepository(_ProfileRepository):
             recent_token_cap=value.recent_token_cap,
             summary_ratio=value.summary_ratio,
             summary_token_cap=value.summary_token_cap,
-            prompt_template_version="context-summary-v1",
             created_at=datetime.now(UTC),
         )
 
@@ -450,7 +449,7 @@ def test_model_profile_admin_api_requires_auth_and_never_returns_secret(
         response = client.post("/api/v1/admin/llm/model-profiles", json=body)
     assert response.status_code == 201
     assert "sensitive-value" not in response.text
-    assert response.json()["has_api_key"] is True
+    assert "has_api_key" not in response.json()
 
 
 def test_compression_policy_admin_api_and_user_denial() -> None:
@@ -478,7 +477,6 @@ def test_compression_policy_admin_api_and_user_denial() -> None:
                 recent_token_cap=32_768,
                 summary_ratio=0.1,
                 summary_token_cap=8_192,
-                prompt_template_version="context-summary-v1",
                 created_at=datetime.now(UTC),
             )
             return self.current

@@ -20,7 +20,6 @@ def model_profile_to_response(value: ModelProfileVersion) -> ModelProfileRespons
         protocol=value.protocol,
         base_url=value.base_url,
         model=value.model,
-        has_api_key=value.has_api_key,
         context_window_tokens=value.context_window_tokens,
         tokenizer_encoding=value.tokenizer_encoding,
         supports_stream=value.supports_stream,
@@ -38,7 +37,7 @@ def model_profile_to_response(value: ModelProfileVersion) -> ModelProfileRespons
         supports_vision=value.supports_vision,
         version=value.version,
         created_at=value.created_at,
-        updated_at=value.updated_at or value.created_at,
+        updated_at=value.updated_at,
     )
 
 
@@ -77,7 +76,6 @@ def compression_policy_to_response(
         recent_token_cap=None if value is None else value.recent_token_cap,
         summary_ratio=None if value is None else value.summary_ratio,
         summary_token_cap=None if value is None else value.summary_token_cap,
-        prompt_template_version=None if value is None else value.prompt_template_version,
         created_at=None if value is None else value.created_at,
     )
 

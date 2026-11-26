@@ -23,10 +23,8 @@ from infrastructure.storage.minio_client import MinioObjectClient, StorageErrorK
 logger = logging.getLogger(__name__)
 # 同桶多业务隔离：知识库原件在底层 S3 统一落入 knowledge/ 前缀，上层维持无前缀逻辑键。
 KNOWLEDGE_OBJECT_PREFIX = "knowledge/"
-_KEY = re.compile(
-    r"^(?:[a-f0-9]{64}/[a-f0-9]{2}/[a-f0-9]{64}|"
-    r"[a-f0-9]{64}/[a-z0-9_-]{1,64}/[a-f0-9]{2}/[a-f0-9]{64})$"
-)
+# 仅接受四段式内容寻址逻辑键：{owner_scope}/{source_id}/{sha256[:2]}/{sha256}。
+_KEY = re.compile(r"^[a-f0-9]{64}/[a-z0-9_-]{1,64}/[a-f0-9]{2}/[a-f0-9]{64}$")
 _MAX_WORKERS = 4
 _ResultT = TypeVar("_ResultT")
 _KNOWLEDGE_ERRORS: dict[StorageErrorKind, Callable[[], _km.OriginalStorageError]] = {

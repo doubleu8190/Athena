@@ -86,7 +86,6 @@ class McpToolCallClient(McpToolExecutor):
     def __init__(
         self,
         *,
-        allowed_private_hosts: frozenset[str] = frozenset(),
         stdio_base_environment: Mapping[str, str] | None = None,
         stdio_allowed_environment_names: frozenset[str] = frozenset(),
         client_factory: ClientFactory | None = None,
@@ -94,8 +93,6 @@ class McpToolCallClient(McpToolExecutor):
         cleanup_timeout_seconds: float = DEFAULT_CLEANUP_TIMEOUT_SECONDS,
         maximum_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
-        # allowed_private_hosts 保留兼容参数；超管受控内网 MCP 默认放行内网并仅拦截云元数据 IP。
-        del allowed_private_hosts
         base_environment = dict(stdio_base_environment or {})
         if (
             not set(base_environment) <= stdio_allowed_environment_names

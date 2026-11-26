@@ -1,25 +1,14 @@
 import { apiGet, apiPost, type ApiSchemas } from "../../shared/api/client";
-import type { ArtifactFileRef } from "../files/model";
-import type { LegacyCompatibleSkillScope } from "../skills/model";
+import type { SkillScope } from "../skills/model";
 import type {
-  ConversationMessage,
   ConversationMessagePage,
-  ConversationMessagePart,
-  PendingSubagentApproval,
-  PendingSubagentInput,
   Run,
   RunEventListResponse,
   RunListResponse,
-  RunModelSnapshot,
-  RunPendingApproval,
   RunSkillSnapshot,
   RunStatus,
   RunToolCallDetail,
   RunToolCallListResponse,
-  RunUsage,
-  RunUsageAttempt,
-  SafeSkillApprovalProjection,
-  SafeSkillInputFile,
   SubagentTaskSummary,
 } from "./model";
 
@@ -42,111 +31,15 @@ function toRunStatus(value: string): RunStatus {
   }
 }
 
-function toSkillScope(value: string): LegacyCompatibleSkillScope {
+function toSkillScope(value: string): SkillScope {
   if (
     value === "company" ||
     value === "department" ||
-    value === "personal" ||
-    value === "public"
+    value === "personal"
   ) {
     return value;
   }
   return "company";
-}
-
-function toArtifactFileRef(
-  raw: ApiSchemas["ArtifactFileRefResponse"],
-): ArtifactFileRef {
-  return {
-    ...raw,
-    label: raw.label ?? null,
-  };
-}
-
-function toSafeSkillInputFile(
-  raw: ApiSchemas["SafeSkillInputFileResponse"],
-): SafeSkillInputFile {
-  return {
-    ...raw,
-    mime_type: raw.mime_type ?? null,
-    size_bytes: raw.size_bytes ?? null,
-  };
-}
-
-function toSafeSkillApprovalProjection(
-  raw: ApiSchemas["SafeSkillApprovalProjectionResponse"],
-): SafeSkillApprovalProjection {
-  return {
-    ...raw,
-    can_approve: raw.can_approve ?? true,
-    hidden_parameter_count: raw.hidden_parameter_count ?? 0,
-    input_files: (raw.input_files ?? []).map(toSafeSkillInputFile),
-    parameter_summary: raw.parameter_summary ?? [],
-    unavailable_reason: raw.unavailable_reason ?? null,
-  };
-}
-
-function toMessagePart(
-  raw: ApiSchemas["MessagePartResponse"],
-): ConversationMessagePart {
-  if (raw.type === "file_ref") {
-    return {
-      ...raw,
-      mime_type: raw.mime_type ?? null,
-      size_bytes: raw.size_bytes ?? null,
-    };
-  }
-  if (raw.type === "tool_result") {
-    return {
-      ...raw,
-      artifact_id: raw.artifact_id ?? null,
-      artifacts: (raw.artifacts ?? []).map(toArtifactFileRef),
-      output: raw.output ?? null,
-    };
-  }
-  return raw;
-}
-
-function toConversationMessage(
-  raw: ApiSchemas["ConversationMessageResponse"],
-): ConversationMessage {
-  return {
-    ...raw,
-    parts: (raw.parts ?? []).map(toMessagePart),
-  };
-}
-
-function toRunUsageAttempt(
-  raw: ApiSchemas["RunAttemptUsageResponse"],
-): RunUsageAttempt {
-  return {
-    ...raw,
-    batch_index: raw.batch_index ?? 0,
-    duration_ms: raw.duration_ms ?? null,
-    model_profile_id: raw.model_profile_id ?? null,
-    operation_id: raw.operation_id ?? null,
-    purpose: raw.purpose ?? "answer",
-  };
-}
-
-function toRunUsage(raw: ApiSchemas["RunUsageResponse"]): RunUsage {
-  return {
-    ...raw,
-    answer_tokens: raw.answer_tokens ?? null,
-    attempts: (raw.attempts ?? []).map(toRunUsageAttempt),
-    compression_tokens: raw.compression_tokens ?? null,
-  };
-}
-
-function toRunPendingApproval(
-  raw: ApiSchemas["RunPendingToolApprovalResponse"],
-): RunPendingApproval {
-  return {
-    ...raw,
-    safe_skill_projection: raw.safe_skill_projection
-      ? toSafeSkillApprovalProjection(raw.safe_skill_projection)
-      : null,
-  };
 }
 
 function toRunSkillSnapshot(
@@ -154,21 +47,10 @@ function toRunSkillSnapshot(
 ): RunSkillSnapshot {
   return {
     ...raw,
-    skills: (raw.skills ?? []).map((entry) => ({
+    skills: raw.skills.map((entry) => ({
       ...entry,
       scope: toSkillScope(entry.scope),
     })),
-  };
-}
-
-function toRunModelSnapshot(
-  raw: ApiSchemas["RunModelSnapshotResponse"],
-): RunModelSnapshot {
-  return {
-    ...raw,
-    scenario_label: raw.scenario_label ?? null,
-    supports_vision: raw.supports_vision ?? false,
-    version: raw.version ?? 1,
   };
 }
 
@@ -177,112 +59,22 @@ function toSubagentTaskSummary(
 ): SubagentTaskSummary {
   return {
     ...raw,
-    finished_at: raw.finished_at ?? null,
-    first_started_at: raw.first_started_at ?? null,
-    safe_error_code: raw.safe_error_code ?? null,
     status: toRunStatus(raw.status),
-    subagent_profile_id: raw.subagent_profile_id ?? null,
-    task_index: raw.task_index ?? 1,
-    task_summary: raw.task_summary ?? "",
-  };
-}
-
-function toPendingSubagentInput(
-  raw: ApiSchemas["PendingSubagentInputResponse"],
-): PendingSubagentInput {
-  return {
-    ...raw,
-    task_index: raw.task_index ?? 1,
-    task_summary: raw.task_summary ?? "",
-  };
-}
-
-function toPendingSubagentApproval(
-  raw: ApiSchemas["PendingSubagentApprovalResponse"],
-): PendingSubagentApproval {
-  return {
-    ...raw,
-    safe_skill_projection: raw.safe_skill_projection
-      ? toSafeSkillApprovalProjection(raw.safe_skill_projection)
-      : null,
-    task_index: raw.task_index ?? 1,
-    task_summary: raw.task_summary ?? "",
-    tool_kind: raw.tool_kind ?? null,
   };
 }
 
 function toRun(raw: ApiSchemas["RunResponse"]): Run {
-  const {
-    assistant_message_id,
-    input_interactions,
-    model_snapshot,
-    pending_subagent_approvals,
-    pending_subagent_inputs,
-    subagent_tasks,
-    ...rest
-  } = raw;
-  const normalized: Run = {
-    ...rest,
-    pending_approvals: (raw.pending_approvals ?? []).map(toRunPendingApproval),
-    pending_input: raw.pending_input ?? null,
-    replayed: raw.replayed ?? false,
-    retry_warning: raw.retry_warning ?? null,
+  return {
+    ...raw,
     skill_snapshot: raw.skill_snapshot
       ? toRunSkillSnapshot(raw.skill_snapshot)
       : null,
     status: toRunStatus(raw.status),
-    usage: toRunUsage(raw.usage),
-  };
-  if (assistant_message_id !== undefined) {
-    normalized.assistant_message_id = assistant_message_id;
-  }
-  if (model_snapshot !== undefined) {
-    normalized.model_snapshot =
-      model_snapshot === null ? null : toRunModelSnapshot(model_snapshot);
-  }
-  if (input_interactions !== undefined) {
-    normalized.input_interactions = input_interactions.map((interaction) => ({
-      ...interaction,
-      answer_text: interaction.answer_text ?? null,
-      answered_at: interaction.answered_at ?? null,
-    }));
-  }
-  if (subagent_tasks !== undefined) {
-    normalized.subagent_tasks = subagent_tasks.map(toSubagentTaskSummary);
-  }
-  if (pending_subagent_inputs !== undefined) {
-    normalized.pending_subagent_inputs = pending_subagent_inputs.map(
-      toPendingSubagentInput,
-    );
-  }
-  if (pending_subagent_approvals !== undefined) {
-    normalized.pending_subagent_approvals = pending_subagent_approvals.map(
-      toPendingSubagentApproval,
-    );
-  }
-  return normalized;
-}
-
-function toRunToolCallDetail(
-  raw: ApiSchemas["RunToolCallDetailResponse"],
-): RunToolCallDetail {
-  return {
-    ...raw,
-    arguments: raw.arguments ?? null,
-    artifacts: (raw.artifacts ?? []).map(toArtifactFileRef),
-    outcome: raw.outcome
-      ? {
-          ...raw.outcome,
-          cleanup_error_code: raw.outcome.cleanup_error_code ?? null,
-        }
-      : null,
-    safe_skill_projection: raw.safe_skill_projection
-      ? toSafeSkillApprovalProjection(raw.safe_skill_projection)
-      : null,
+    subagent_tasks: raw.subagent_tasks.map(toSubagentTaskSummary),
   };
 }
 
-export async function listMessages(
+export function listMessages(
   sessionId: string,
   beforeSequence?: number,
   limit = 20,
@@ -291,16 +83,12 @@ export async function listMessages(
   if (beforeSequence !== undefined) {
     query.before_sequence = beforeSequence;
   }
-  const response = await apiGet("/api/v1/sessions/{session_id}/messages", {
+  return apiGet("/api/v1/sessions/{session_id}/messages", {
     params: {
       path: { session_id: sessionId },
       query,
     },
   });
-  return {
-    items: response.items.map(toConversationMessage),
-    next_before_sequence: response.next_before_sequence,
-  };
 }
 
 export async function listRuns(
@@ -480,20 +268,18 @@ export function listRunToolCalls(
   });
 }
 
-export async function getRunToolCall(
+export function getRunToolCall(
   sessionId: string,
   runId: string,
   callId: string,
 ): Promise<RunToolCallDetail> {
-  return toRunToolCallDetail(
-    await apiGet(
-      "/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/{call_id}",
-      {
-        params: {
-          path: { call_id: callId, run_id: runId, session_id: sessionId },
-        },
+  return apiGet(
+    "/api/v1/sessions/{session_id}/runs/{run_id}/tool-calls/{call_id}",
+    {
+      params: {
+        path: { call_id: callId, run_id: runId, session_id: sessionId },
       },
-    ),
+    },
   );
 }
 

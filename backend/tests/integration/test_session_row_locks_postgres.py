@@ -25,27 +25,54 @@ from adapter.auth.repository import (
     SqlAlchemyAuthRepository,
     SqlAlchemyAuthTransactionGuard,
 )
+from adapter.llm.model import ModelProfileVersionModel
 from adapter.message.model import ConversationMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.project.model import ProjectModel
 from adapter.project.repository import SqlAlchemyProjectRepository
+from adapter.run.model import RunModel
 from adapter.session.model import SessionModel
 from adapter.session.repository import SqlAlchemySessionRepository
-from app.message.service import MessageService
 from app.project.service import ProjectService
 from app.session.service import SessionService
 from common.ids import now_utc
 from domain.message import (
     ConversationMessage,
     ConversationMessageDraft,
+    ConversationRole,
+    MessageMetadata,
+    MessageStatus,
     SessionNotFoundError,
     TextPart,
 )
 from domain.project import ProjectHasSessionsError, ProjectNotFoundError
+from domain.system_prompt.defaults import INITIAL_SYSTEM_PROMPT_IDS
+from domain.system_prompt.model import SystemPromptKind
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 LOCK_WAIT_TIMEOUT = 30.0
 TASK_TIMEOUT = 30.0
+_LOCK_TEST_PROFILE_ID = "profile_row_lock_test"
+_LOCK_TEST_MODEL_SNAPSHOT: dict[str, object] = {
+    "id": _LOCK_TEST_PROFILE_ID,
+    "name": "行锁测试模型",
+    "protocol": "chat_completions",
+    "base_url": "https://api.example.com/v1",
+    "model": "gpt-4o-mini",
+    "context_window_tokens": 128000,
+    "tokenizer_encoding": "cl100k_base",
+    "supports_stream": True,
+    "supports_tools": True,
+    "supports_parallel_tool_calls": False,
+    "max_output_tokens": 2048,
+    "request_timeout_seconds": 30,
+    "execution_timeout_seconds": 120,
+    "max_concurrency": 4,
+    "temperature": None,
+    "scenario_label": None,
+    "supports_vision": False,
+    "version": 1,
+}
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -74,6 +101,79 @@ class PausingMessageRepository(SqlAlchemyMessageRepository):
             self.session_locked.set()
             await self.release_session.wait()
         return await super()._find_conversation(session, draft)
+
+    async def append_user_message_with_completed_run(
+        self,
+        session_id: str,
+        text_content: str,
+        *,
+        owner_id: str,
+        run_id: str,
+        client_message_id: str,
+        created_at: datetime,
+    ) -> ConversationMessage:
+        """在 Session 行锁内原子写入用户消息及关联的已完成 Run，模拟真实写入事务。"""
+        message_id = f"msg_{run_id}"
+        draft = ConversationMessageDraft(
+            id=message_id,
+            session_id=session_id,
+            owner_id=owner_id,
+            role=ConversationRole.USER,
+            status=MessageStatus.COMPLETED,
+            parts=(TextPart(text_content),),
+            reply_to_message_id=None,
+            run_id=run_id,
+            context_turn_id=message_id,
+            client_message_id=client_message_id,
+            created_at=created_at,
+            completed_at=created_at,
+            metadata=MessageMetadata(),
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked_session = await session.scalar(
+                    select(SessionModel)
+                    .where(
+                        SessionModel.id == session_id,
+                        SessionModel.owner_id == owner_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
+                    .with_for_update()
+                )
+                if locked_session is None:
+                    raise SessionNotFoundError("session_not_found")
+                message = await self.append_conversation_in_session(
+                    session,
+                    draft,
+                    locked_session=locked_session,
+                )
+                session.add(
+                    RunModel(
+                        id=run_id,
+                        session_id=session_id,
+                        owner_id=owner_id,
+                        status="completed",
+                        trigger_message_id=message.id,
+                        context_cutoff_sequence=message.sequence,
+                        model_config_version_id=_LOCK_TEST_PROFILE_ID,
+                        model_snapshot_json=dict(_LOCK_TEST_MODEL_SNAPSHOT),
+                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[SystemPromptKind.MAIN],
+                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                            SystemPromptKind.COMPRESSION
+                        ],
+                        prompt_template_version="run-v2",
+                        event_sequence=0,
+                        execution_epoch=0,
+                        queued_at=created_at,
+                        created_at=created_at,
+                        updated_at=created_at,
+                        finished_at=created_at,
+                        usage={},
+                        depth=0,
+                    )
+                )
+                await session.flush()
+                return message
 
 
 class PausingSessionRepository(SqlAlchemySessionRepository):
@@ -121,6 +221,44 @@ def _engine(database_url: str, schema: str, application_name: str) -> AsyncEngin
             }
         },
     )
+
+
+async def _ensure_model_profile(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """幂等预置共享模型配置，避免并发写入 Run 外键时重复插入。"""
+    timestamp = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            if await session.get(ModelProfileVersionModel, _LOCK_TEST_PROFILE_ID) is None:
+                session.add(
+                    ModelProfileVersionModel(
+                        id=_LOCK_TEST_PROFILE_ID,
+                        name="行锁测试模型",
+                        protocol="chat_completions",
+                        base_url="https://api.example.com/v1",
+                        model="gpt-4o-mini",
+                        api_key_ciphertext=b"ciphertext",
+                        api_key_nonce=b"0123456789ab",
+                        api_key_key_version=1,
+                        context_window_tokens=128000,
+                        tokenizer_encoding="cl100k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        supports_parallel_tool_calls=False,
+                        max_output_tokens=2048,
+                        request_timeout_seconds=30,
+                        execution_timeout_seconds=120,
+                        max_concurrency=4,
+                        temperature=None,
+                        enabled=True,
+                        visible_to_users=True,
+                        supports_vision=False,
+                        version=1,
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                    )
+                )
 
 
 async def _seed_user(
@@ -284,25 +422,23 @@ def test_session_rebind_and_first_message_serialize_on_session_row(
         owner_id = f"user_{suffix}"
         project_id = f"project_{suffix}"
         message_repository = PausingMessageRepository(session_factory)
-        message_service = MessageService(
-            message_repository,
-            clock=lambda: datetime(2026, 1, 1, 13, 0, tzinfo=UTC),
-        )
         session_service = SessionService(SqlAlchemySessionRepository(session_factory))
         message_task: asyncio.Task[Any] | None = None
         update_task: asyncio.Task[Any] | None = None
         try:
+            await _ensure_model_profile(session_factory)
             await _seed_user(session_factory, owner_id)
             await _seed_project(session_factory, project_id, owner_id)
             created = await session_service.create(owner_id)
 
             message_task = asyncio.create_task(
-                message_service.append_user_message(
+                message_repository.append_user_message_with_completed_run(
                     created.id,
-                    (TextPart("首条消息"),),
+                    "首条消息",
                     owner_id=owner_id,
                     run_id=f"run_{suffix}",
                     client_message_id=f"client_{suffix}",
+                    created_at=datetime(2026, 1, 1, 13, 0, tzinfo=UTC),
                 )
             )
             await asyncio.wait_for(
@@ -355,10 +491,6 @@ def test_session_patch_keeps_updated_at_after_blocked_message_write(
         stale_update_at = datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
         later_message_at = datetime(2026, 1, 1, 13, 0, tzinfo=UTC)
         pausing_message_repository = PausingMessageRepository(session_factory)
-        message_service = MessageService(
-            pausing_message_repository,
-            clock=lambda: later_message_at,
-        )
         session_service = SessionService(
             SqlAlchemySessionRepository(session_factory),
             clock=lambda: stale_update_at,
@@ -366,6 +498,7 @@ def test_session_patch_keeps_updated_at_after_blocked_message_write(
         message_task: asyncio.Task[Any] | None = None
         update_task: asyncio.Task[Any] | None = None
         try:
+            await _ensure_model_profile(session_factory)
             await _seed_user(session_factory, owner_id)
             created = await SessionService(
                 SqlAlchemySessionRepository(session_factory),
@@ -373,12 +506,13 @@ def test_session_patch_keeps_updated_at_after_blocked_message_write(
             ).create(owner_id)
 
             message_task = asyncio.create_task(
-                message_service.append_user_message(
+                pausing_message_repository.append_user_message_with_completed_run(
                     created.id,
-                    (TextPart("较晚消息"),),
+                    "较晚消息",
                     owner_id=owner_id,
                     run_id=f"run_{suffix}",
                     client_message_id=f"client_{suffix}",
+                    created_at=later_message_at,
                 )
             )
             await asyncio.wait_for(
@@ -713,16 +847,14 @@ def test_session_delete_and_message_append_serialize_on_session_row(
         session_repository = SqlAlchemySessionRepository(session_factory)
         session_service = SessionService(session_repository)
         pausing_message_repository = PausingMessageRepository(session_factory)
-        pausing_message_service = MessageService(
-            pausing_message_repository,
-            clock=lambda: datetime(2026, 1, 1, 14, 0, tzinfo=UTC),
-        )
+        message_created_at = datetime(2026, 1, 1, 14, 0, tzinfo=UTC)
         deleting_connection: Any = None
         deleting_transaction: Any = None
         blocked_message_task: asyncio.Task[Any] | None = None
         message_first_task: asyncio.Task[Any] | None = None
         delete_task: asyncio.Task[Any] | None = None
         try:
+            await _ensure_model_profile(session_factory)
             await _seed_user(session_factory, owner_id)
 
             deleted_first = await session_service.create(owner_id)
@@ -744,12 +876,13 @@ def test_session_delete_and_message_append_serialize_on_session_row(
                 },
             )
             blocked_message_task = asyncio.create_task(
-                pausing_message_service.append_user_message(
+                pausing_message_repository.append_user_message_with_completed_run(
                     deleted_first.id,
-                    (TextPart("不应写入"),),
+                    "不应写入",
                     owner_id=owner_id,
                     run_id=f"run_deleted_{suffix}",
                     client_message_id=f"client_deleted_{suffix}",
+                    created_at=message_created_at,
                 )
             )
             await _wait_for_blocked_task(
@@ -769,12 +902,13 @@ def test_session_delete_and_message_append_serialize_on_session_row(
 
             message_first = await session_service.create(owner_id)
             message_first_task = asyncio.create_task(
-                pausing_message_service.append_user_message(
+                pausing_message_repository.append_user_message_with_completed_run(
                     message_first.id,
-                    (TextPart("先写入"),),
+                    "先写入",
                     owner_id=owner_id,
                     run_id=f"run_message_{suffix}",
                     client_message_id=f"client_message_{suffix}",
+                    created_at=message_created_at,
                 )
             )
             await asyncio.wait_for(
@@ -789,12 +923,13 @@ def test_session_delete_and_message_append_serialize_on_session_row(
             await asyncio.wait_for(delete_task, timeout=TASK_TIMEOUT)
 
             with pytest.raises(SessionNotFoundError):
-                await pausing_message_service.append_user_message(
+                await pausing_message_repository.append_user_message_with_completed_run(
                     message_first.id,
-                    (TextPart("删除后不应写入"),),
+                    "删除后不应写入",
                     owner_id=owner_id,
                     run_id=f"run_after_delete_{suffix}",
                     client_message_id=f"client_after_delete_{suffix}",
+                    created_at=message_created_at,
                 )
 
             message_first_row = await _session_row(session_factory, message_first.id)
@@ -894,9 +1029,7 @@ def test_admin_guard_serializes_with_session_revocation_and_role_changes(
             async with holder_factory() as database_session:
                 async with database_session.begin():
                     await database_session.execute(
-                        text(
-                            "UPDATE users SET role = 'super_admin' WHERE id IN (:first, :second)"
-                        ),
+                        text("UPDATE users SET role = 'super_admin' WHERE id IN (:first, :second)"),
                         {"first": role_guard_user, "second": role_first_user},
                     )
 

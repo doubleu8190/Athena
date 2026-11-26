@@ -40,7 +40,6 @@ class ModelProfileVersion:
     protocol: Literal["chat_completions"]
     base_url: str
     model: str
-    has_api_key: bool
     context_window_tokens: int
     tokenizer_encoding: Literal["cl100k_base", "o200k_base"]
     supports_stream: bool
@@ -52,18 +51,13 @@ class ModelProfileVersion:
     temperature: float | None
     enabled: bool
     created_at: datetime
+    updated_at: datetime
     supports_parallel_tool_calls: bool = False
     visible_to_users: bool = True
     scenario_label: str | None = None
     scenario_description: str | None = None
     supports_vision: bool = False
     version: int = 1
-    updated_at: datetime | None = None
-
-    def __post_init__(self) -> None:
-        """兼容未显式传入 updated_at 的历史构造路径，缺省对齐 created_at。"""
-        if self.updated_at is None:
-            object.__setattr__(self, "updated_at", self.created_at)
 
 
 @dataclass(frozen=True, slots=True)

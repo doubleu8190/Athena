@@ -141,7 +141,7 @@ async function copyText(value: string): Promise<void> {
 }
 
 export function AdminSystemPromptsPage() {
-  const { adminAccessDenied, status, user } = useAuth();
+  const { status, superAdminAccessDenied, user } = useAuth();
   const [activeKind, setActiveKind] = useState<SystemPromptKind>("main");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [historyPage, setHistoryPage] = useState(1);
@@ -183,13 +183,13 @@ export function AdminSystemPromptsPage() {
       nextLocation: { hash: string; pathname: string; search: string };
     }) =>
       status === "authenticated" &&
-      !adminAccessDenied &&
+      !superAdminAccessDenied &&
       isSuperAdmin(user) &&
       Boolean(isDirty) &&
       (currentLocation.pathname !== nextLocation.pathname ||
         currentLocation.search !== nextLocation.search ||
         currentLocation.hash !== nextLocation.hash),
-    [adminAccessDenied, isDirty, status, user],
+    [isDirty, status, superAdminAccessDenied, user],
   );
   const blocker = useBlocker(shouldBlockNavigation);
   const validationError = editor

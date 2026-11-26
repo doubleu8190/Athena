@@ -86,7 +86,6 @@ class ModelProfileResponse(BaseModel):
     protocol: str
     base_url: str
     model: str
-    has_api_key: bool
     context_window_tokens: int
     tokenizer_encoding: str
     supports_stream: bool
@@ -183,7 +182,6 @@ class CompressionPolicyResponse(BaseModel):
     recent_token_cap: int | None
     summary_ratio: float | None
     summary_token_cap: int | None
-    prompt_template_version: str | None
     created_at: datetime | None
 
 

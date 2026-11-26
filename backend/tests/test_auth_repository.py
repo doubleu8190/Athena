@@ -77,14 +77,25 @@ def _session(
     )
 
 
-def test_repository_creates_user_and_session_atomically() -> None:
+async def _seed_user_with_session(
+    repository: SqlAlchemyAuthRepository,
+    user: User,
+    auth_session: AuthSession,
+) -> User:
+    """测试辅助函数：依次通过正式 create_user + create_session 接口写入用户与登录会话。"""
+    created = await repository.create_user(user)
+    await repository.create_session(auth_session)
+    return created
+
+
+def test_repository_creates_user_and_session() -> None:
     async def scenario() -> None:
         engine, _, repository = await _make_repository()
         try:
             user = _user("usr_1", "user@example.com")
             session = _session("ses_1", user.id, "1" * 64)
 
-            created = await repository.create_user_with_session(user, session)
+            created = await _seed_user_with_session(repository, user, session)
 
             assert created == user
             assert await repository.get_user_by_email("user@example.com") == user
@@ -106,13 +117,15 @@ def test_repository_rejects_duplicate_email_once() -> None:
         engine, _, repository = await _make_repository()
         try:
             user = _user("usr_1", "user@example.com")
-            await repository.create_user_with_session(
+            await _seed_user_with_session(
+                repository,
                 user,
                 _session("ses_1", user.id, "1" * 64),
             )
 
             with pytest.raises(EmailAlreadyRegisteredError):
-                await repository.create_user_with_session(
+                await _seed_user_with_session(
+                    repository,
                     _user("usr_2", "user@example.com"),
                     _session("ses_2", "usr_2", "2" * 64),
                 )
@@ -143,7 +156,8 @@ def test_repository_hides_disabled_deleted_expired_and_revoked_sessions() -> Non
                 (disabled, "b" * 64),
                 (deleted, "c" * 64),
             ):
-                await repository.create_user_with_session(
+                await _seed_user_with_session(
+                    repository,
                     user,
                     _session(f"ses_{user.id}", user.id, token),
                 )
@@ -181,7 +195,7 @@ def test_password_change_revokes_other_sessions_and_keeps_current() -> None:
             first = _session("ses_1", user.id, "1" * 64)
             second = _session("ses_2", user.id, "2" * 64)
             third = _session("ses_3", user.id, "3" * 64)
-            await repository.create_user_with_session(user, first)
+            await _seed_user_with_session(repository, user, first)
             await repository.create_session(second)
             await repository.create_session(third)
             changed_at = datetime(2026, 1, 2, tzinfo=UTC)
@@ -226,7 +240,7 @@ def test_display_name_update_only_changes_name_and_requires_active_session() -> 
                 "e" * 64,
                 expires_at=now - timedelta(seconds=1),
             )
-            await repository.create_user_with_session(user, active_session)
+            await _seed_user_with_session(repository, user, active_session)
             await repository.create_session(expired_session)
 
             updated = await repository.update_display_name(
@@ -281,7 +295,7 @@ def test_repository_revalidates_current_role_and_session_state() -> None:
             now = datetime(2026, 1, 2, tzinfo=UTC)
             user = _user("usr_role", "role@example.com")
             auth_session = _session("ses_role", user.id, "e" * 64)
-            await repository.create_user_with_session(user, auth_session)
+            await _seed_user_with_session(repository, user, auth_session)
 
             async with session_factory() as db_session:
                 async with db_session.begin():
@@ -317,7 +331,8 @@ def test_repository_promotes_only_active_non_deleted_users_idempotently() -> Non
             )
             deleted = _user("usr_deleted_promote", "deleted-promote@example.com", deleted=True)
             for user in (active, disabled, deleted):
-                await repository.create_user_with_session(
+                await _seed_user_with_session(
+                    repository,
                     user,
                     _session(f"ses_{user.id}", user.id, (user.id * 64)[:64]),
                 )
@@ -387,7 +402,7 @@ def test_transaction_guard_checks_locked_user_and_session_state() -> None:
                         revoked_time=now - timedelta(seconds=1),
                         created_at=auth_session.created_at,
                     )
-                await repository.create_user_with_session(user, auth_session)
+                await _seed_user_with_session(repository, user, auth_session)
                 if suffix == "admin":
                     async with session_factory() as db_session:
                         async with db_session.begin():
@@ -482,13 +497,13 @@ def test_password_change_rejects_revoked_expired_foreign_disabled_and_deleted_se
             disabled_sess = _session("ses_disabled", disabled.id, "f" * 64)
             deleted_sess = _session("ses_deleted", deleted.id, "g" * 64)
 
-            await repository.create_user_with_session(active, active_sess)
+            await _seed_user_with_session(repository, active, active_sess)
             await repository.create_session(active_sibling)
             await repository.create_session(revoked_sess)
             await repository.create_session(expired_sess)
-            await repository.create_user_with_session(other_user, other_sess)
-            await repository.create_user_with_session(disabled, disabled_sess)
-            await repository.create_user_with_session(deleted, deleted_sess)
+            await _seed_user_with_session(repository, other_user, other_sess)
+            await _seed_user_with_session(repository, disabled, disabled_sess)
+            await _seed_user_with_session(repository, deleted, deleted_sess)
             assert await repository.revoke_session("c" * 64, now) is True
 
             # 1. 已登出（已撤销）会话被拒绝

@@ -12,11 +12,13 @@ from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import String, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.llm.model import ModelProfileVersionModel
 from adapter.models import Base
 from adapter.subagent import SqlAlchemySubagentModelChecker, SqlAlchemySubagentRepository
+from app.access import AccessPolicyService
 from app.auth.service import AuthService
 from app.subagent import DefaultSubagentToolCatalog, SubagentService
 from domain.auth import AuthContext, UserRole, UserStatus
@@ -64,6 +66,9 @@ async def _build_subagent_app() -> tuple[
                         protocol="chat_completions",
                         base_url="https://api.example.com/v1",
                         model="gpt-4o",
+                        api_key_ciphertext=b"ciphertext",
+                        api_key_nonce=b"0123456789ab",
+                        api_key_key_version=1,
                         context_window_tokens=128000,
                         tokenizer_encoding="o200k_base",
                         supports_stream=True,
@@ -75,6 +80,7 @@ async def _build_subagent_app() -> tuple[
                         max_concurrency=4,
                         enabled=True,
                         created_at=NOW,
+                        updated_at=NOW,
                     ),
                     ModelProfileVersionModel(
                         id="mp_disabled",
@@ -82,6 +88,9 @@ async def _build_subagent_app() -> tuple[
                         protocol="chat_completions",
                         base_url="https://api.example.com/v1",
                         model="gpt-4o-mini",
+                        api_key_ciphertext=b"ciphertext",
+                        api_key_nonce=b"0123456789ab",
+                        api_key_key_version=1,
                         context_window_tokens=128000,
                         tokenizer_encoding="o200k_base",
                         supports_stream=True,
@@ -93,6 +102,7 @@ async def _build_subagent_app() -> tuple[
                         max_concurrency=4,
                         enabled=False,
                         created_at=NOW,
+                        updated_at=NOW,
                     ),
                 ]
             )
@@ -123,6 +133,7 @@ async def _build_subagent_app() -> tuple[
         auth_repo,
         model_checker=SqlAlchemySubagentModelChecker(session_factory),
         tool_catalog=DefaultSubagentToolCatalog(),
+        access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(session_factory)),
     )
     app = create_app(
         auth_service=auth_service,

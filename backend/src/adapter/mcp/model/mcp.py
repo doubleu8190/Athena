@@ -117,7 +117,12 @@ class McpToolModel(Base):
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(String(8192), nullable=False)
     input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    requires_approval: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     # 面向业务审批人展示的中文别名、审批摘要模板与参数标签映射。
     display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approval_summary_template: Mapped[str | None] = mapped_column(String(500), nullable=True)

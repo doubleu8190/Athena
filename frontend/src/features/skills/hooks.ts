@@ -47,7 +47,7 @@ async function refreshSkillCatalogs(
       queryKey: skillKeys.adminList(),
     }),
     queryClient.invalidateQueries({
-      queryKey: skillKeys.publicList(),
+      queryKey: skillKeys.catalog(),
     }),
     skillId
       ? queryClient.invalidateQueries({

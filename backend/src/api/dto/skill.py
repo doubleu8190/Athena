@@ -70,13 +70,13 @@ class SkillSummaryResponse(BaseModel):
     script_requires_approval: bool
     revision: int
     updated_at: datetime
-    dependency_check: SkillDependencyCheckResponse | None = None
-    owner_department_id: str | None = None
-    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
-    format: Literal["markdown", "package"] = "package"
-    has_scripts: bool = False
-    featured: bool = False
-    starter_prompt: str | None = None
+    dependency_check: SkillDependencyCheckResponse | None
+    owner_department_id: str | None
+    visibility_grants: list[VisibilityGrantResponse]
+    format: Literal["markdown", "package"]
+    has_scripts: bool
+    featured: bool
+    starter_prompt: str | None
 
 
 class SkillAdminDetailsResponse(SkillSummaryResponse):

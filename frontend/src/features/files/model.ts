@@ -19,9 +19,9 @@ export interface SessionFile {
   label: string | null;
   mime_type: string;
   size_bytes: number;
-  extraction_status?: SessionFileExtractionStatus;
-  extracted_text_bytes?: number | null;
-  extraction_error_code?: string | null;
+  extraction_status: SessionFileExtractionStatus;
+  extracted_text_bytes: number | null;
+  extraction_error_code: string | null;
   created_at: string;
 }
 
@@ -349,8 +349,8 @@ export function sessionFileToPreviewTarget(
   file: SessionFile,
 ): FilePreviewTarget {
   return {
-    extractedTextBytes: file.extracted_text_bytes ?? null,
-    extractionErrorCode: file.extraction_error_code ?? null,
+    extractedTextBytes: file.extracted_text_bytes,
+    extractionErrorCode: file.extraction_error_code,
     extractionStatus: file.extraction_status,
     fileId: file.id,
     filename: file.filename,

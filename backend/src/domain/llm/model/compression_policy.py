@@ -38,7 +38,6 @@ class CompressionPolicyVersion:
     recent_token_cap: int
     summary_ratio: float
     summary_token_cap: int
-    prompt_template_version: str
     created_at: datetime
 
 

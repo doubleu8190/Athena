@@ -50,6 +50,26 @@ from domain.run.model.errors import RunStateError
 from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
+_MODEL_SNAPSHOT: dict[str, object] = {
+    "id": "llmprof_main_pg",
+    "name": "main test",
+    "protocol": "chat_completions",
+    "base_url": "https://llm.example.test/v1",
+    "model": "main-model",
+    "context_window_tokens": 2048,
+    "tokenizer_encoding": "o200k_base",
+    "supports_stream": True,
+    "supports_tools": True,
+    "supports_parallel_tool_calls": False,
+    "max_output_tokens": 128,
+    "request_timeout_seconds": 10,
+    "execution_timeout_seconds": 30,
+    "max_concurrency": 1,
+    "temperature": None,
+    "scenario_label": None,
+    "supports_vision": False,
+    "version": 1,
+}
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is required"),
@@ -128,9 +148,8 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                                 sequence=1,
                                 parts=[{"type": "text", "text": "older snapshot history"}],
                                 reply_to_message_id=None,
-                                run_id=None,
-                                managed_run_id=None,
-                                context_turn_id=None,
+                                run_id="run_snapshot_history",
+                                context_turn_id="msg_snapshot_history",
                                 client_message_id=None,
                                 created_at=now,
                                 completed_at=now,
@@ -154,6 +173,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                                 temperature=None,
                                 enabled=True,
                                 created_at=now,
+                                updated_at=now,
                             ),
                             ModelProfileVersionModel(
                                 id="llmprof_main_pg",
@@ -173,6 +193,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                                 temperature=None,
                                 enabled=True,
                                 created_at=now,
+                                updated_at=now,
                             ),
                             ConversationMessageModel(
                                 id="msg_compression_history",
@@ -182,8 +203,8 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                                 sequence=1,
                                 parts=[{"type": "text", "text": "history"}],
                                 reply_to_message_id=None,
-                                run_id=None,
-                                managed_run_id=None,
+                                run_id="run_compression_history",
+                                context_turn_id="msg_compression_history",
                                 client_message_id=None,
                                 created_at=now,
                                 completed_at=now,
@@ -198,7 +219,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                                 parts=[{"type": "text", "text": "trigger"}],
                                 reply_to_message_id=None,
                                 run_id="run_compression_pg",
-                                managed_run_id="run_compression_pg",
+                                context_turn_id="msg_compression_trigger",
                                 client_message_id=None,
                                 created_at=now,
                                 completed_at=now,
@@ -211,13 +232,11 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                         CompressionPolicyVersionModel(
                             id="cmpol_compression_pg",
                             compression_model_profile_id="llmprof_compression_pg",
-                            trigger_ratio=0.8,
                             trigger_tokens=262_144,
                             recent_ratio=0.2,
                             recent_token_cap=32_768,
                             summary_ratio=0.1,
                             summary_token_cap=8_192,
-                            prompt_template_version="context-summary-v1",
                             created_at=now,
                         )
                     )
@@ -229,35 +248,90 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                             ),
                         ]
                     )
-                    session.add(
-                        RunModel(
-                            id="run_compression_pg",
-                            session_id="ses_compression_pg",
-                            owner_id="usr_compression_pg",
-                            status="running",
-                            trigger_message_id="msg_compression_trigger",
-                            context_cutoff_sequence=2,
-                            retry_of_run_id=None,
-                            model_config_version_id="llmprof_compression_pg",
-                            compression_policy_version_id="cmpol_compression_pg",
-                            main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
-                            compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
-                            prompt_template_version="run-v2",
-                            event_sequence=0,
-                            execution_epoch=1,
-                            worker_id="worker_compression_pg",
-                            lease_expires_at=now + timedelta(minutes=2),
-                            execution_started_at=now,
-                            execution_deadline_at=now + timedelta(minutes=2),
-                            queued_at=now,
-                            first_started_at=now,
-                            finished_at=None,
-                            created_at=now,
-                            updated_at=now,
-                            cancel_requested_at=None,
-                            safe_error_code=None,
-                            usage={},
-                        )
+                    session.add_all(
+                        [
+                            RunModel(
+                                id="run_snapshot_history",
+                                session_id="ses_snapshot_pg",
+                                owner_id="usr_compression_pg",
+                                status="completed",
+                                trigger_message_id="msg_snapshot_history",
+                                context_cutoff_sequence=1,
+                                retry_of_run_id=None,
+                                model_config_version_id="llmprof_main_pg",
+                                model_snapshot_json=dict(_MODEL_SNAPSHOT),
+                                compression_policy_version_id=None,
+                                main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                                compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                                    "compression"
+                                ],
+                                prompt_template_version="run-v2",
+                                event_sequence=0,
+                                execution_epoch=0,
+                                queued_at=now,
+                                created_at=now,
+                                updated_at=now,
+                                finished_at=now,
+                                usage={},
+                                depth=0,
+                            ),
+                            RunModel(
+                                id="run_compression_history",
+                                session_id="ses_compression_pg",
+                                owner_id="usr_compression_pg",
+                                status="completed",
+                                trigger_message_id="msg_compression_history",
+                                context_cutoff_sequence=1,
+                                retry_of_run_id=None,
+                                model_config_version_id="llmprof_main_pg",
+                                model_snapshot_json=dict(_MODEL_SNAPSHOT),
+                                compression_policy_version_id=None,
+                                main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                                compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                                    "compression"
+                                ],
+                                prompt_template_version="run-v2",
+                                event_sequence=0,
+                                execution_epoch=0,
+                                queued_at=now,
+                                created_at=now,
+                                updated_at=now,
+                                finished_at=now,
+                                usage={},
+                                depth=0,
+                            ),
+                            RunModel(
+                                id="run_compression_pg",
+                                session_id="ses_compression_pg",
+                                owner_id="usr_compression_pg",
+                                status="running",
+                                trigger_message_id="msg_compression_trigger",
+                                context_cutoff_sequence=2,
+                                retry_of_run_id=None,
+                                model_config_version_id="llmprof_compression_pg",
+                                model_snapshot_json=dict(_MODEL_SNAPSHOT),
+                                compression_policy_version_id="cmpol_compression_pg",
+                                main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                                compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                                    "compression"
+                                ],
+                                prompt_template_version="run-v2",
+                                event_sequence=0,
+                                execution_epoch=1,
+                                worker_id="worker_compression_pg",
+                                lease_expires_at=now + timedelta(minutes=2),
+                                execution_started_at=now,
+                                execution_deadline_at=now + timedelta(minutes=2),
+                                queued_at=now,
+                                first_started_at=now,
+                                finished_at=None,
+                                created_at=now,
+                                updated_at=now,
+                                cancel_requested_at=None,
+                                safe_error_code=None,
+                                usage={},
+                            ),
+                        ]
                     )
 
                 repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
@@ -278,6 +352,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                             parts=(TextPart("snapshot"),),
                             reply_to_message_id=None,
                             run_id="run_snapshot_pg",
+                            context_turn_id="msg_snapshot_pg",
                             client_message_id=None,
                             created_at=now,
                             completed_at=now,
@@ -298,7 +373,6 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                     text="verified history summary",
                     policy_version_id="cmpol_compression_pg",
                     compression_model_version_id="llmprof_compression_pg",
-                    prompt_version="context-summary-v1",
                     created_at=now,
                     batch_count=1,
                 )
@@ -427,7 +501,6 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                     text="summary must not commit after cancellation",
                     policy_version_id="cmpol_compression_pg",
                     compression_model_version_id="llmprof_compression_pg",
-                    prompt_version="context-summary-v1",
                     created_at=datetime.now(UTC),
                 )
                 summary_attempted = asyncio.Event()
@@ -506,7 +579,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                         )
                         == "csum_compression_pg"
                     )
-                # 升级前创建的消息没有 context_turn_id；重试 Run 关联必须仍恢复原触发轮次。
+                # 重试 Run 的澄清回答复用原触发消息的 context_turn_id，保持同轮次分组不拆开。
                 async with factory() as session, session.begin():
                     original = await session.get(RunModel, "run_compression_pg")
                     assert original is not None
@@ -515,9 +588,6 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                     original.finished_at = datetime.now(UTC)
                     original.worker_id = None
                     original.lease_expires_at = None
-                    trigger = await session.get(ConversationMessageModel, "msg_compression_trigger")
-                    assert trigger is not None
-                    trigger.context_turn_id = None
                     session.add(
                         ConversationMessageModel(
                             id="msg_legacy_retry_answer",
@@ -528,8 +598,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                             parts=[{"type": "text", "text": "clarification answer"}],
                             reply_to_message_id=None,
                             run_id="run_legacy_retry_pg",
-                            managed_run_id="run_legacy_retry_pg",
-                            context_turn_id=None,
+                            context_turn_id="msg_compression_trigger",
                             client_message_id=None,
                             created_at=datetime.now(UTC),
                             completed_at=datetime.now(UTC),
@@ -546,6 +615,7 @@ def test_summary_commit_competes_with_cancel_under_session_lock(
                             context_cutoff_sequence=3,
                             retry_of_run_id="run_compression_pg",
                             model_config_version_id="llmprof_main_pg",
+                            model_snapshot_json=dict(_MODEL_SNAPSHOT),
                             compression_policy_version_id="cmpol_compression_pg",
                             main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                             compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],

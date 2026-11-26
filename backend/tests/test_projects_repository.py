@@ -110,11 +110,18 @@ def test_repository_allows_duplicate_names_and_renames_atomically() -> None:
             await repository.create(_project("project_2", "同名项目", minute=2))
             updated_at = created.updated_at + timedelta(minutes=5)
 
-            renamed = await repository.rename(
+            renamed = await repository.update(
                 "user_1",
                 created.id,
-                "改名后",
-                updated_at,
+                update_name=True,
+                name="改名后",
+                update_description=False,
+                description=None,
+                update_instructions=False,
+                instructions=None,
+                update_default_skills=False,
+                default_skill_ids=None,
+                updated_at=updated_at,
             )
 
             assert renamed is not None
@@ -122,11 +129,18 @@ def test_repository_allows_duplicate_names_and_renames_atomically() -> None:
             assert renamed.created_at == created.created_at
             assert renamed.updated_at == updated_at
             assert (
-                await repository.rename(
+                await repository.update(
                     "user_1",
                     "project_missing",
-                    "不存在",
-                    updated_at,
+                    update_name=True,
+                    name="不存在",
+                    update_description=False,
+                    description=None,
+                    update_instructions=False,
+                    instructions=None,
+                    update_default_skills=False,
+                    default_skill_ids=None,
+                    updated_at=updated_at,
                 )
                 is None
             )
@@ -154,11 +168,18 @@ def test_repository_soft_deletes_idempotently_and_keeps_row() -> None:
             assert second_delete is True
             assert await repository.get("user_1", original.id) is None
             assert (
-                await repository.rename(
+                await repository.update(
                     "user_1",
                     original.id,
-                    "不能复活",
-                    deleted_at,
+                    update_name=True,
+                    name="不能复活",
+                    update_description=False,
+                    description=None,
+                    update_instructions=False,
+                    instructions=None,
+                    update_default_skills=False,
+                    default_skill_ids=None,
+                    updated_at=deleted_at,
                 )
                 is None
             )
@@ -205,11 +226,18 @@ def test_repository_isolates_projects_by_owner() -> None:
 
             assert await repository.get("user_1", user_two.id) is None
             assert (
-                await repository.rename(
+                await repository.update(
                     "user_1",
                     user_two.id,
-                    "跨用户改名",
-                    user_two.updated_at,
+                    update_name=True,
+                    name="跨用户改名",
+                    update_description=False,
+                    description=None,
+                    update_instructions=False,
+                    instructions=None,
+                    update_default_skills=False,
+                    default_skill_ids=None,
+                    updated_at=user_two.updated_at,
                 )
                 is None
             )

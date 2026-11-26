@@ -1137,22 +1137,6 @@ class KnowledgeRepository:
             )
             return _base(model, grants=grants)
 
-    async def get_base(self, owner_id: str, base_id: str) -> KnowledgeBase | None:
-        async with self._sessions() as session:
-            model = await session.scalar(
-                select(KnowledgeBaseModel).where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-            )
-            if model is None:
-                return None
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.KNOWLEDGE_BASE, (model.id,)
-            )
-            return _base(model, grants=grants_map.get(model.id, ()))
-
     async def get_base_by_id(self, base_id: str) -> KnowledgeBase | None:
         """按主键读取未软删除的知识库（供权限引擎统一鉴权使用）。"""
         async with self._sessions() as session:
@@ -1168,25 +1152,6 @@ class KnowledgeRepository:
                 session, ResourceType.KNOWLEDGE_BASE, (model.id,)
             )
             return _base(model, grants=grants_map.get(model.id, ()))
-
-    async def list_bases(self, owner_id: str, *, offset: int, limit: int) -> list[KnowledgeBase]:
-        async with self._sessions() as session:
-            rows = list(
-                await session.scalars(
-                    select(KnowledgeBaseModel)
-                    .where(
-                        KnowledgeBaseModel.owner_id == owner_id,
-                        KnowledgeBaseModel.deleted_time.is_(None),
-                    )
-                    .order_by(KnowledgeBaseModel.updated_at.desc(), KnowledgeBaseModel.id.desc())
-                    .offset(offset)
-                    .limit(limit)
-                )
-            )
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.KNOWLEDGE_BASE, [row.id for row in rows]
-            )
-            return [_base(item, grants=grants_map.get(item.id, ())) for item in rows]
 
     async def list_readable_bases(
         self,
@@ -1244,76 +1209,18 @@ class KnowledgeRepository:
             )
             return [_base(item, grants=grants_map.get(item.id, ())) for item in rows]
 
-    async def list_bases_by_ids(
-        self,
-        base_ids: Sequence[str],
-        *,
-        offset: int,
-        limit: int,
-        visibility_scope: VisibilityScope | None = None,
-        owner_department_id: str | None = None,
-    ) -> list[KnowledgeBase]:
-        """按已通过权限引擎过滤的可读 ID 集合与可选筛选条件稳定分页。"""
-        unique_ids = tuple(dict.fromkeys(base_ids))
-        if not unique_ids:
-            return []
-        conditions: list[ColumnElement[bool]] = [
-            KnowledgeBaseModel.id.in_(unique_ids),
-            KnowledgeBaseModel.deleted_time.is_(None),
-        ]
-        if visibility_scope is not None:
-            conditions.append(KnowledgeBaseModel.visibility_scope == visibility_scope.value)
-        if owner_department_id is not None:
-            conditions.append(KnowledgeBaseModel.owner_department_id == owner_department_id)
-        async with self._sessions() as session:
-            rows = list(
-                await session.scalars(
-                    select(KnowledgeBaseModel)
-                    .where(*conditions)
-                    .order_by(KnowledgeBaseModel.updated_at.desc(), KnowledgeBaseModel.id.desc())
-                    .offset(offset)
-                    .limit(limit)
-                )
-            )
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.KNOWLEDGE_BASE, [row.id for row in rows]
-            )
-            return [_base(item, grants=grants_map.get(item.id, ())) for item in rows]
-
-    async def rename_base(
-        self, owner_id: str, base_id: str, name: str, description: str | None, at: datetime
-    ) -> KnowledgeBase | None:
-        async with self._sessions() as session, session.begin():
-            model = await session.scalar(
-                select(KnowledgeBaseModel)
-                .where(
-                    KnowledgeBaseModel.id == base_id,
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-                .with_for_update()
-            )
-            if model is None:
-                return None
-            model.name, model.description, model.updated_at = name, description, at
-            await session.flush()
-            grants_map = await load_grants_map_in_session(
-                session, ResourceType.KNOWLEDGE_BASE, (model.id,)
-            )
-            return _base(model, grants=grants_map.get(model.id, ()))
-
     async def update_base(
         self,
         base_id: str,
         *,
         name: str,
         description: str | None,
-        visibility_scope: VisibilityScope,
-        owner_department_id: str | None,
-        visibility_grants: Sequence[VisibilityGrantInput] | None,
         at: datetime,
+        visibility_scope: VisibilityScope | None = None,
+        owner_department_id: str | None = None,
+        visibility_grants: Sequence[VisibilityGrantInput] | None = None,
     ) -> KnowledgeBase | None:
-        """在单事务内原子更新知识库元数据、三层可见性及授权清单。"""
+        """在单事务行锁内更新知识库元数据，仅当提供 visibility_scope 时才变更可见性与授权。"""
         async with self._sessions() as session, session.begin():
             model = await session.scalar(
                 select(KnowledgeBaseModel)
@@ -1327,11 +1234,15 @@ class KnowledgeRepository:
                 return None
             model.name = name
             model.description = description
-            model.visibility_scope = visibility_scope.value
-            model.owner_department_id = owner_department_id
             model.updated_at = at
+            # 仅改名/改说明时 visibility_scope 为 None：在 FOR UPDATE 行锁内绝不覆写
+            # visibility_scope、owner_department_id 与 resource_visibility_grants，
+            # 防止旧读快照在并发下覆盖另一管理员刚提交的权限配置。
+            if visibility_scope is not None:
+                model.visibility_scope = visibility_scope.value
+                model.owner_department_id = owner_department_id
             await session.flush()
-            if visibility_grants is not None:
+            if visibility_scope is not None and visibility_grants is not None:
                 grants = await sync_resource_grants_in_session(
                     session,
                     ResourceType.KNOWLEDGE_BASE,
@@ -1506,24 +1417,18 @@ class KnowledgeRepository:
             )
             source_id: str | None = None
             if file_source is not None:
-                source = await session.scalar(
-                    select(KnowledgeSourceModel).where(
-                        KnowledgeSourceModel.owner_id == owner_id,
-                        KnowledgeSourceModel.storage_key == file_source.storage_key,
-                    )
+                # 每次上传均分配独立 source_id 并编入四段式 storage_key，直接写入新原件记录。
+                source = KnowledgeSourceModel(
+                    id=file_source.source_id,
+                    owner_id=owner_id,
+                    storage_key=file_source.storage_key,
+                    filename=file_source.filename,
+                    media_type=file_source.media_type,
+                    size_bytes=file_source.size_bytes,
+                    sha256=file_source.sha256,
+                    created_at=at,
                 )
-                if source is None:
-                    source = KnowledgeSourceModel(
-                        id=file_source.source_id,
-                        owner_id=owner_id,
-                        storage_key=file_source.storage_key,
-                        filename=file_source.filename,
-                        media_type=file_source.media_type,
-                        size_bytes=file_source.size_bytes,
-                        sha256=file_source.sha256,
-                        created_at=at,
-                    )
-                    session.add(source)
+                session.add(source)
                 source_id = source.id
             version = KnowledgeVersionModel(
                 id=version_id,
@@ -1533,7 +1438,6 @@ class KnowledgeRepository:
                 source_text=source_text,
                 content_hash=content_hash,
                 profile_id=profile_id,
-                processing_config={},
                 state="queued",
                 warnings=[],
                 chunk_count=0,
@@ -2029,18 +1933,6 @@ class KnowledgeRepository:
                 0.0,
                 knowledge_base_id=base_id,
             )
-
-    async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None:
-        async with self._sessions() as session:
-            visible = await session.scalars(
-                select(KnowledgeBaseModel.id).where(
-                    KnowledgeBaseModel.id.in_(base_ids),
-                    _personal_privacy_guard(owner_id),
-                    KnowledgeBaseModel.deleted_time.is_(None),
-                )
-            )
-            if set(visible) != set(base_ids):
-                raise LookupError("knowledge_base_not_found")
 
     async def search_keyword(
         self, owner_id: str, base_ids: list[str], tokens: tuple[str, ...], limit: int

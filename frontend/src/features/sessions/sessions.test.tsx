@@ -105,7 +105,7 @@ describe("项目会话管理（单页工作文件夹左栏）", () => {
     });
     const user = userEvent.setup();
 
-    renderApp(`/projects/${PROJECT_A.id}/sessions`);
+    renderApp(`/projects/${PROJECT_A.id}`);
 
     expect(await screen.findByText("未命名对话")).toBeInTheDocument();
     await user.click(
@@ -265,7 +265,7 @@ describe("项目会话管理（单页工作文件夹左栏）", () => {
     ).toBeInTheDocument();
   });
 
-  it("分页参数通过旧路由重定向后仍写入 URL 并可恢复对应页面", async () => {
+  it("分页参数写入 URL 并可恢复对应页面", async () => {
     const fetchMock = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
@@ -313,7 +313,7 @@ describe("项目会话管理（单页工作文件夹左栏）", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    renderApp(`/projects/${PROJECT_A.id}/sessions?page=2`);
+    renderApp(`/projects/${PROJECT_A.id}?page=2`);
 
     expect(await screen.findByText("第二页会话")).toBeInTheDocument();
     expect(screen.getByText("第 2 / 2 页")).toBeInTheDocument();

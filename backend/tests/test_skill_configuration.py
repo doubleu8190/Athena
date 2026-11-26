@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 
 from app.skill.service import SkillAuthorizationError, SkillService
 from domain.auth import AuthContext, User, UserRole, UserStatus
@@ -167,6 +168,7 @@ def _service(repository: _Repository, checker: _Checker) -> tuple[SkillService, 
             _Auth(actor),
             dependency_checker=cast(Any, checker),
             clock=lambda: NOW,
+            access_policy=make_test_access_policy(),
         ),
         actor,
     )

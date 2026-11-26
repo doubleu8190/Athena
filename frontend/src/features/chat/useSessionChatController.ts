@@ -221,6 +221,8 @@ export function useSessionChatController({
     streamStatus: null,
   });
   const settledTerminalRunsRef = useRef(new Set<string>());
+  // 记录终态快照中出现无法解析消息（has_unparseable_messages）的 Run，禁止终态 effect 因缓存已含部分合法消息而跳过权威补拉。
+  const unparseableTerminalRunsRef = useRef(new Set<string>());
   // 记录每个终态 Run 已执行过单次有界兜底的 retry 序号，防止后台 Run 查询刷新重复触发自动兜底，
   // 同时允许用户点击手动重试按钮（terminalMessageRetry 递增）发起下一次单次有界拉取。
   const attemptedTerminalFallbackRef = useRef(new Map<string, number>());
@@ -390,9 +392,7 @@ export function useSessionChatController({
         shouldApplyStreamSnapshot(existing, snapshot)
           ? {
               ...existing,
-              ...(snapshot.assistant_message_id !== undefined
-                ? { assistant_message_id: snapshot.assistant_message_id }
-                : {}),
+              assistant_message_id: snapshot.assistant_message_id,
               event_sequence: snapshot.event_sequence,
               pending_subagent_approvals:
                 snapshot.pending_subagent_approvals ?? [],
@@ -416,10 +416,14 @@ export function useSessionChatController({
       }
 
       // completed / failed 终态快照优先直接消费内联完整消息（含 parts），零额外 /events 或 /messages 往返；
-      // 仅当目标消息因 >512KB 被裁剪或旧快照缺 parts 时，交由终态 effect 执行单次有界 GET /messages 兜底。
+      // 仅当目标消息因 >512KB 被裁剪未包含在快照内，或快照内存在无法解析的消息（如未知 part）时，交由终态 effect 执行单次有界 GET /messages 兜底。
       if (snapshot.status === "completed" || snapshot.status === "failed") {
         suppressNextScheduledReconcileRef.current = true;
         clearReconcileTimer();
+        const terminalKey = `${currentRunId}:${snapshot.status}`;
+        if (snapshot.has_unparseable_messages) {
+          unparseableTerminalRunsRef.current.add(terminalKey);
+        }
         const statusConsistent =
           !existingRun ||
           !isTerminalRunStatus(existingRun.status) ||
@@ -427,7 +431,6 @@ export function useSessionChatController({
         if (statusConsistent) {
           const resolved = resolveSelfContainedTerminalSnapshot(
             snapshot,
-            sessionId,
             currentRunId,
             existingRun?.trigger_message_id ?? null,
           );
@@ -441,44 +444,45 @@ export function useSessionChatController({
                   snapshot.messages_before_sequence,
                 ),
             );
-            settledTerminalRunsRef.current.add(
-              `${currentRunId}:${snapshot.status}`,
-            );
+            settledTerminalRunsRef.current.add(terminalKey);
             setTerminalMessageFailure(null);
             settleStreamTerminalRef.current(currentRunId, snapshot.status);
           } else {
-            // 未命中完整终态目标时，仍把快照内自带完整 parts 的已有消息合入缓存，保留 transientText 等待兜底。
-            const completeSnapshotMessages = snapshot.messages
-              .map((message) =>
-                toConversationMessageFromSnapshot(
-                  message,
-                  sessionId,
-                  currentRunId,
-                ),
-              )
-              .filter(
-                (message): message is ConversationMessage => message !== null,
-              );
-            if (completeSnapshotMessages.length > 0) {
+            // 终态快照因 >512KB 裁剪或包含无法解析消息无法直接收敛时，先并入其余合法消息，保留 transientText 等待单次兜底。
+            const snapshotMessages = snapshot.messages.map((message) =>
+              toConversationMessageFromSnapshot(message, currentRunId),
+            );
+            if (snapshotMessages.length > 0) {
               queryClient.setQueryData<MessageInfiniteData>(
                 chatKeys.messages(sessionId),
                 (current) =>
                   upsertMessagesIntoInfiniteData(
                     current,
-                    completeSnapshotMessages,
+                    snapshotMessages,
                     snapshot.messages_before_sequence,
                   ),
               );
             }
           }
         }
+        // 无报告普通 failed 不会进入 fetchTerminalMessagesFallback，若其快照内含不可解析消息则在此顺带刷新消息流。
+        const needsFailedMessageFallback = Boolean(
+          snapshot.has_unparseable_messages &&
+            snapshot.status === "failed" &&
+            !snapshot.report_message_id &&
+            !failedEventReportMessageId(snapshot.events, currentRunId),
+        );
         // 仅刷新 Run 详情与工具调用元数据（usage / finished_at / toolCalls），避免重复触发 /messages 查询。
-        invalidateRunQueries({ includeMessages: false });
+        invalidateRunQueries({ includeMessages: needsFailedMessageFallback });
         return;
       }
 
-      // 运行中快照出现未缓存新消息：携带完整 parts 时直接合入缓存，旧版纯文本快照则精准补拉消息与文件列表。
-      if (!snapshotAccepted || snapshot.messages.length === 0) {
+      // 运行中快照出现未缓存新消息：直接将自包含结构化消息写入缓存，有文件产物时同步刷新文件列表；
+      // 若快照内存在无法解析的消息（如未知 part），合并其余合法消息后触发 /messages 与 /files 补拉避免静默丢消息。
+      if (
+        !snapshotAccepted ||
+        (snapshot.messages.length === 0 && !snapshot.has_unparseable_messages)
+      ) {
         return;
       }
       const cachedMessages = queryClient.getQueryData<MessageInfiniteData>(
@@ -495,7 +499,6 @@ export function useSessionChatController({
         }
       }
       const selfContainedUnseen: ConversationMessage[] = [];
-      const legacyUnseenIds: string[] = [];
       for (const message of snapshot.messages) {
         if (
           cachedMessageIds.has(message.id) ||
@@ -503,16 +506,9 @@ export function useSessionChatController({
         ) {
           continue;
         }
-        const converted = toConversationMessageFromSnapshot(
-          message,
-          sessionId,
-          currentRunId,
+        selfContainedUnseen.push(
+          toConversationMessageFromSnapshot(message, currentRunId),
         );
-        if (converted) {
-          selfContainedUnseen.push(converted);
-        } else {
-          legacyUnseenIds.push(message.id);
-        }
       }
       if (selfContainedUnseen.length > 0) {
         for (const message of selfContainedUnseen) {
@@ -527,24 +523,20 @@ export function useSessionChatController({
               snapshot.messages_before_sequence,
             ),
         );
-        if (selfContainedUnseen.some(messageCarriesFileArtifact)) {
-          void queryClient.invalidateQueries({
-            queryKey: sessionFileKeys.list(sessionId),
-          });
-        }
       }
-      if (legacyUnseenIds.length === 0) {
-        return;
+      if (snapshot.has_unparseable_messages) {
+        void queryClient.invalidateQueries({
+          queryKey: chatKeys.messages(sessionId),
+        });
       }
-      for (const messageId of legacyUnseenIds) {
-        requestedSnapshotMessageIdsRef.current.add(messageId);
+      if (
+        snapshot.has_unparseable_messages ||
+        selfContainedUnseen.some(messageCarriesFileArtifact)
+      ) {
+        void queryClient.invalidateQueries({
+          queryKey: sessionFileKeys.list(sessionId),
+        });
       }
-      void queryClient.invalidateQueries({
-        queryKey: chatKeys.messages(sessionId),
-      });
-      void queryClient.invalidateQueries({
-        queryKey: sessionFileKeys.list(sessionId),
-      });
     },
     [
       clearReconcileTimer,
@@ -812,7 +804,7 @@ export function useSessionChatController({
   // 1) 若仅收到终态 run_event 预告且 SSE 仍打开、REST 尚未独立确认终态，暂缓关流等待下一帧自包含终态 snapshot；
   // 2) 自包含终态快照已在 handleStreamSnapshot 内联落盘并标记 settled，此处直接跳过 HTTP 拉取；
   // 3) 普通无报告 failed 与 cancelled 保留瞬时未完成文本，不发起 /events 或 /messages 查询；
-  // 4) 仅在 >512KB 裁剪、旧快照缺 parts、无 snapshot 断流或缓存缺口时执行单次有界 GET /messages?limit=20；
+  // 4) 仅在 >512KB 裁剪、无 snapshot 断流或缓存缺口时执行单次有界 GET /messages?limit=20；
   //    未命中时保留 transientText 并暴露 not_found 手动重试入口，绝不陷入多页翻页循环。
   useEffect(() => {
     if (!currentRunId || !status || !isTerminalRunStatus(status)) {
@@ -887,8 +879,12 @@ export function useSessionChatController({
       observedActiveRunIdsRef.current.has(terminalRunId) || streamMatchesRun;
     const cachedHasTarget = hasTerminalTargetMessage(cachedMessages, matcher);
 
-    // 已明确知道权威消息 ID 且当前消息缓存已命中，直接收敛零额外请求。
-    if (hasExactTargetId && cachedHasTarget) {
+    // 已明确知道权威消息 ID、当前消息缓存已命中且快照未出现不可解析消息时，直接收敛零额外请求。
+    if (
+      hasExactTargetId &&
+      cachedHasTarget &&
+      !unparseableTerminalRunsRef.current.has(terminalKey)
+    ) {
       settledTerminalRunsRef.current.add(terminalKey);
       setTerminalMessageFailure(null);
       settleStreamTerminal(terminalRunId, terminalStatus);
@@ -952,6 +948,7 @@ export function useSessionChatController({
               result.page.next_before_sequence,
             ),
         );
+        unparseableTerminalRunsRef.current.delete(terminalKey);
         if (result.targetFound) {
           settledTerminalRunsRef.current.add(terminalKey);
           setTerminalMessageFailure(null);
@@ -1053,8 +1050,8 @@ export function useSessionChatController({
   const transientUnfinished =
     Boolean(transientText) && (status === "failed" || status === "cancelled");
   const currentRunModelLabel =
-    run?.model_snapshot?.scenario_label?.trim() ||
-    run?.model_snapshot?.name?.trim() ||
+    run?.model_snapshot.scenario_label?.trim() ||
+    run?.model_snapshot.name.trim() ||
     null;
 
   return {

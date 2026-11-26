@@ -12,10 +12,13 @@ import pytest
 from integration.postgres_harness import isolated_postgres_schema
 from sqlalchemy import text
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import KnowledgeDocumentModel
 from adapter.knowledge.repository import KnowledgeRepository
+from app.access import AccessPolicyService
 from app.knowledge.worker import KnowledgeWorker
+from domain.access import ResourceType
 from domain.knowledge.model import KnowledgeBase
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -446,8 +449,13 @@ def test_expired_job_reclaim_fences_late_worker_publish() -> None:
                 )
                 assert remaining_sibling_versions == 0
                 assert sibling_cleanup_state == "done"
-            assert await repository.get_base("lease_owner", "lease_kb") is None
-            with pytest.raises(LookupError, match="knowledge_base_not_found"):
-                await repository.validate_search_scope("lease_owner", ["lease_kb"])
+            assert await repository.get_base_by_id("lease_kb") is None
+            access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(factory))
+            assert (
+                await access_policy.filter_readable_ids(
+                    "lease_owner", ResourceType.KNOWLEDGE_BASE, ["lease_kb"]
+                )
+                == set()
+            )
 
     asyncio.run(scenario())

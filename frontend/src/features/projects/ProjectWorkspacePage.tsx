@@ -6,7 +6,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
-import { Link, Navigate, useLocation, useParams } from "react-router-dom";
+import { Link, Navigate, useParams } from "react-router-dom";
 
 import { formatDateTime } from "../../shared/lib/format";
 import {
@@ -23,24 +23,6 @@ import type { Project } from "./model";
 import { ProjectConfigPanel } from "./ProjectConfigPanel";
 import { EditProjectInfoDialog } from "./ProjectNameDialogs";
 import { ProjectSessionsPanel } from "./ProjectSessionsPanel";
-
-/**
- * 兼容旧版 4-Tab 项目路由（/projects/:projectId/:tab）：
- * 温和重定向到新的单页工作文件夹 /projects/:projectId，并完整保留查询参数（如 ?page=2）。
- */
-export function LegacyProjectTabRedirect() {
-  const { projectId } = useParams<{ projectId: string }>();
-  const location = useLocation();
-  if (!projectId) {
-    return <Navigate replace to="/projects" />;
-  }
-  return (
-    <Navigate
-      replace
-      to={`/projects/${encodeURIComponent(projectId)}${location.search}`}
-    />
-  );
-}
 
 interface ProjectWorkspaceContentProps {
   project: Project;

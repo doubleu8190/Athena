@@ -40,13 +40,6 @@ class AuthRepository(CurrentSessionReader, Protocol):
     async def create_user(self, user: User) -> User:
         """受控创建单个用户记录（邮箱冲突时抛 EmailAlreadyRegisteredError）。"""
 
-    async def create_user_with_session(
-        self,
-        user: User,
-        auth_session: AuthSession,
-    ) -> User:
-        """在同一事务中创建用户与首个登录会话。"""
-
     async def upsert_local_super_admin(
         self,
         *,

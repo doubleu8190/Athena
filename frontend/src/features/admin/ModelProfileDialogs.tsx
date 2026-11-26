@@ -564,10 +564,7 @@ export function CompressionPolicyDialog({
 }: CompressionPolicyDialogProps) {
   const formId = useId();
   const enabledProfiles = useMemo(
-    () =>
-      profiles.filter(
-        (profile) => profile.enabled && profile.has_api_key,
-      ),
+    () => profiles.filter((profile) => profile.enabled),
     [profiles],
   );
   const [values, setValues] = useState<CompressionPolicyFormValues>(

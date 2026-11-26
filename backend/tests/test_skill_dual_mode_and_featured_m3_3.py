@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.util
 import io
-import sqlite3
 import zipfile
 from collections.abc import AsyncIterator, Sequence
 from contextlib import redirect_stdout
@@ -16,19 +14,20 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from alembic.operations import Operations
-from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adapter.access.repository import SqlAlchemyAccessControlRepository
+from adapter.access.repository import (
+    SqlAlchemyAccessControlRepository,
+    load_user_access_snapshot_in_session,
+)
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
@@ -376,158 +375,126 @@ class _M33Harness:
 
 
 # ---------------------------------------------------------------------------
-# 1. Alembic 20261206_0039 迁移单一 head、PG 离线 DDL 与 SQLite 在线升级/约束/回滚
+# 1. Alembic 基线迁移 0001_initial_schema 单一 head、PG 离线 DDL 与双形态检查约束
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_migration_0039_single_head_pg_sql_and_sqlite_roundtrip(
-    tmp_path: Path,
-) -> None:
-    """验证 20261206_0039 单一 head、PG 离线 SQL 及 SQLite 回填/CheckConstraint/降级。"""
+def test_alembic_initial_schema_skill_dual_mode_and_featured_constraints() -> None:
+    """验证 0001_initial_schema 单一 head、PG 离线 SQL 及 PostgreSQL 技能双形态组合检查约束。"""
     pg_cfg = Config(str(ALEMBIC_INI))
     pg_cfg.set_main_option(
         "sqlalchemy.url",
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(pg_cfg)
-    assert len(script.get_heads()) == 1
-    rev = script.get_revision("20261206_0039")
+    assert script.get_heads() == ["0001_initial_schema"]
+    rev = script.get_revision("0001_initial_schema")
     assert rev is not None
-    assert rev.down_revision == "20261205_0038"
+    assert rev.down_revision is None
 
     # 1. PostgreSQL 离线 upgrade / downgrade SQL 校验
     up_buf = StringIO()
     with redirect_stdout(up_buf):
-        command.upgrade(pg_cfg, "20261205_0038:20261206_0039", sql=True)
+        command.upgrade(pg_cfg, "head", sql=True)
     up_sql = up_buf.getvalue()
-    assert "ADD COLUMN format VARCHAR(16) DEFAULT 'package' NOT NULL" in up_sql
-    assert "ADD COLUMN featured BOOLEAN DEFAULT false NOT NULL" in up_sql
-    assert "ADD COLUMN starter_prompt VARCHAR(500)" in up_sql
-    assert "UPDATE skills SET format = 'markdown' WHERE scope = 'personal'" in up_sql
+    assert "format VARCHAR(16) DEFAULT 'package' NOT NULL" in up_sql
+    assert "featured BOOLEAN DEFAULT false NOT NULL" in up_sql
+    assert "starter_prompt VARCHAR(500)" in up_sql
     assert "ck_skills_format" in up_sql
     assert "ck_skills_personal_format_and_featured" in up_sql
-    # 确保数据回填发生在施加个人组合约束之前
-    assert up_sql.index("UPDATE skills SET format = 'markdown'") < up_sql.index(
-        "ck_skills_personal_format_and_featured"
-    )
 
     down_buf = StringIO()
     with redirect_stdout(down_buf):
-        command.downgrade(pg_cfg, "20261206_0039:20261205_0038", sql=True)
+        command.downgrade(pg_cfg, "0001_initial_schema:base", sql=True)
     down_sql = down_buf.getvalue()
-    assert "DROP CONSTRAINT ck_skills_personal_format_and_featured" in down_sql
-    assert "DROP CONSTRAINT ck_skills_format" in down_sql
-    assert "DROP COLUMN starter_prompt" in down_sql
-    assert "DROP COLUMN featured" in down_sql
-    assert "DROP COLUMN format" in down_sql
+    assert "DROP TABLE skills" in down_sql
 
-    # 2. 用同步标准库 sqlite3 + Alembic Operations.context 构造基线 skills 表并验证升降级
-    migration_0039_path = (
-        Path(__file__).resolve().parents[1]
-        / "migrations"
-        / "versions"
-        / "20261206_0039_skill_dual_mode_and_featured.py"
-    )
-    spec = importlib.util.spec_from_file_location("migration_20261206_0039", migration_0039_path)
-    assert spec is not None and spec.loader is not None
-    migration_0039: Any = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration_0039)
+    # 2. 在真实 PostgreSQL 单元测试库验证 skills 双形态与 featured 组合 CHECK 约束
+    async def scenario() -> None:
+        engine, factory = await create_pg_unit_db()
+        try:
+            async with factory() as session, session.begin():
+                session.add(
+                    UserModel(
+                        id="usr_1",
+                        email="usr_1@example.com",
+                        password_hash="hash",
+                        display_name=None,
+                        status="active",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                session.add(
+                    DepartmentModel(
+                        id="dept_1",
+                        external_id="ext_dept_1",
+                        name="财务部",
+                        parent_id=None,
+                        path="/dept_1/",
+                        order_index=0,
+                        status="active",
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+                await session.flush()
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO skills (
+                            id, slug, scope, format, featured, owner_id, owner_department_id,
+                            deleted_at, enabled, script_requires_approval, revision,
+                            created_by, created_at, updated_at
+                        ) VALUES
+                            ('sk_company', 'legacy-co', 'company', 'package', false, NULL, NULL,
+                                NULL, true, false, 1, 'usr_1', :now, :now),
+                            (
+                                'sk_dept', 'legacy-dept', 'department', 'package', false, NULL,
+                                'dept_1', NULL, true, false, 1, 'usr_1', :now, :now
+                            ),
+                            (
+                                'sk_personal', 'legacy-me', 'personal', 'markdown', false, 'usr_1',
+                                NULL, NULL, true, false, 1, 'usr_1', :now, :now
+                            )
+                        """
+                    ),
+                    {"now": NOW},
+                )
 
-    db_path = tmp_path / "m3_3_migration.sqlite"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE users (id VARCHAR(128) NOT NULL PRIMARY KEY);
-        CREATE TABLE departments (id VARCHAR(64) NOT NULL PRIMARY KEY);
-        INSERT INTO users VALUES ('usr_1');
-        INSERT INTO departments VALUES ('dept_1');
-        CREATE TABLE skills (
-            id VARCHAR(128) NOT NULL PRIMARY KEY,
-            slug VARCHAR(64) NOT NULL,
-            scope VARCHAR(16) NOT NULL DEFAULT 'company',
-            owner_id VARCHAR(128),
-            owner_department_id VARCHAR(64),
-            deleted_at DATETIME,
-            current_version_id VARCHAR(128),
-            enabled BOOLEAN NOT NULL DEFAULT 0,
-            script_requires_approval BOOLEAN NOT NULL DEFAULT 0,
-            revision INTEGER NOT NULL DEFAULT 1,
-            created_by VARCHAR(128),
-            created_at DATETIME NOT NULL,
-            updated_at DATETIME NOT NULL,
-            CONSTRAINT ck_skills_revision CHECK (revision >= 1),
-            CONSTRAINT ck_skills_scope CHECK (scope IN ('company', 'department', 'personal')),
-            CONSTRAINT ck_skills_owner_scope CHECK (
-                (scope = 'company' AND owner_id IS NULL AND owner_department_id IS NULL
-                    AND deleted_at IS NULL) OR
-                (scope = 'department' AND owner_id IS NULL AND owner_department_id IS NOT NULL) OR
-                (scope = 'personal' AND owner_id IS NOT NULL AND owner_department_id IS NULL)
-            )
-        );
-        INSERT INTO skills (
-            id, slug, scope, owner_id, owner_department_id, deleted_at,
-            enabled, script_requires_approval, revision, created_by, created_at, updated_at
-        ) VALUES
-            ('sk_company', 'legacy-co', 'company', NULL, NULL, NULL,
-                1, 0, 1, 'usr_1', '2026-11-24 00:00:00', '2026-11-24 00:00:00'),
-            ('sk_dept', 'legacy-dept', 'department', NULL, 'dept_1', NULL,
-                1, 0, 1, 'usr_1', '2026-11-24 00:00:00', '2026-11-24 00:00:00'),
-            ('sk_personal', 'legacy-me', 'personal', 'usr_1', NULL, NULL,
-                1, 0, 1, 'usr_1', '2026-11-24 00:00:00', '2026-11-24 00:00:00');
-        """
-    )
-    conn.close()
+            # 非法 format 值必须被 ck_skills_format 拦截
+            with pytest.raises(IntegrityError):
+                async with factory() as session, session.begin():
+                    await session.execute(
+                        text("UPDATE skills SET format = 'zip' WHERE id = 'sk_company'")
+                    )
+            # 个人技能修改为 format='package' 必须被 ck_skills_personal_format_and_featured 拦截
+            with pytest.raises(IntegrityError):
+                async with factory() as session, session.begin():
+                    await session.execute(
+                        text("UPDATE skills SET format = 'package' WHERE id = 'sk_personal'")
+                    )
+            # 个人技能设为 featured=true 必须被 ck_skills_personal_format_and_featured 拦截
+            with pytest.raises(IntegrityError):
+                async with factory() as session, session.begin():
+                    await session.execute(
+                        text("UPDATE skills SET featured = true WHERE id = 'sk_personal'")
+                    )
+            # 公司/部门技能允许设为 markdown + featured=true + starter_prompt
+            async with factory() as session, session.begin():
+                await session.execute(
+                    text(
+                        """
+                        UPDATE skills
+                        SET format = 'markdown', featured = true, starter_prompt = '请上传财务凭证'
+                        WHERE id = 'sk_dept'
+                        """
+                    )
+                )
+        finally:
+            await engine.dispose()
 
-    sync_engine = sa.create_engine(f"sqlite:///{db_path}")
-    try:
-        with sync_engine.begin() as sa_conn:
-            with Operations.context(MigrationContext.configure(sa_conn)):
-                migration_0039.upgrade()
-
-        conn = sqlite3.connect(db_path)
-        rows = {
-            row[0]: (row[1], row[2], row[3])
-            for row in conn.execute(
-                "SELECT id, format, featured, starter_prompt FROM skills"
-            ).fetchall()
-        }
-        assert rows["sk_company"] == ("package", 0, None)
-        assert rows["sk_dept"] == ("package", 0, None)
-        # 历史个人技能必须自动回填为 format='markdown', featured=0
-        assert rows["sk_personal"] == ("markdown", 0, None)
-
-        # 非法 format 值必须被 ck_skills_format 拦截
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE skills SET format = 'zip' WHERE id = 'sk_company'")
-        # 个人技能修改为 format='package' 必须被 ck_skills_personal_format_and_featured 拦截
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE skills SET format = 'package' WHERE id = 'sk_personal'")
-        # 个人技能设为 featured=1 必须被 ck_skills_personal_format_and_featured 拦截
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE skills SET featured = 1 WHERE id = 'sk_personal'")
-        # 公司/部门技能允许设为 markdown + featured=1 + starter_prompt
-        conn.execute(
-            """
-            UPDATE skills
-            SET format = 'markdown', featured = 1, starter_prompt = '请上传财务凭证'
-            WHERE id = 'sk_dept'
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        # 完整降级回滚到 20261205_0038
-        with sync_engine.begin() as sa_conn:
-            with Operations.context(MigrationContext.configure(sa_conn)):
-                migration_0039.downgrade()
-
-        conn = sqlite3.connect(db_path)
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(skills)").fetchall()}
-        assert not cols.intersection({"format", "featured", "starter_prompt"})
-        conn.close()
-    finally:
-        sync_engine.dispose()
-    assert str(text("SELECT 1")) == "SELECT 1"
+    asyncio.run(scenario())
 
 
 # ---------------------------------------------------------------------------
@@ -1448,10 +1415,12 @@ def test_directory_projection_sorting_and_run_snapshot_execution(
         #    无权研发员工尝试选中该财务部门技能必须被权限快照拒绝。
         async def _verify_run_mounting() -> None:
             async with harness.session_factory() as session:
+                fin_snapshot = await load_user_access_snapshot_in_session(session, "usr_fin_member")
+                assert fin_snapshot is not None
                 snapshot = await build_run_skill_snapshot(
                     session,
                     selected_skill_ids=(dept_md["id"],),
-                    owner_id="usr_fin_member",
+                    snapshot=fin_snapshot,
                 )
             assert snapshot.selected_skill_ids == (dept_md["id"],)
             prompt_ctx = await harness.skill_service.prompt_context(
@@ -1464,11 +1433,13 @@ def test_directory_projection_sorting_and_run_snapshot_execution(
             assert "逐项核对金额、税率与审批链" in prompt_ctx.active[0].guide
 
             async with harness.session_factory() as session:
+                rd_snapshot = await load_user_access_snapshot_in_session(session, "usr_rd_member")
+                assert rd_snapshot is not None
                 with pytest.raises(SkillConflictError, match="skill_selection_unavailable"):
                     await build_run_skill_snapshot(
                         session,
                         selected_skill_ids=(dept_md["id"],),
-                        owner_id="usr_rd_member",
+                        snapshot=rd_snapshot,
                     )
 
             # 直接复核仓储级格式锁：即使绕过服务预检直接调用仓储，

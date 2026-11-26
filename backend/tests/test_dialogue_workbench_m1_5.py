@@ -446,7 +446,6 @@ async def _insert_model_profile(
     visible_to_users: bool = True,
     supports_stream: bool = True,
     supports_tools: bool = True,
-    include_api_key: bool = True,
     scenario_label: str | None = None,
     scenario_description: str | None = None,
     supports_vision: bool = False,
@@ -455,11 +454,7 @@ async def _insert_model_profile(
     created_at: datetime = NOW,
 ) -> None:
     """直接写入加密后的模型配置记录，供单元测试夹具初始化。"""
-    sealed = (
-        cipher.seal(profile_id, McpSecretPurpose.LLM_API_KEY, {"api_key": "sk-secret-key"})
-        if include_api_key
-        else None
-    )
+    sealed = cipher.seal(profile_id, McpSecretPurpose.LLM_API_KEY, {"api_key": "sk-secret-key"})
     session.add(
         ModelProfileVersionModel(
             id=profile_id,
@@ -467,9 +462,9 @@ async def _insert_model_profile(
             protocol="chat_completions",
             base_url="https://api.example.invalid/v1",
             model=model,
-            api_key_ciphertext=None if sealed is None else sealed.ciphertext,
-            api_key_nonce=None if sealed is None else sealed.nonce,
-            api_key_key_version=None if sealed is None else sealed.key_version,
+            api_key_ciphertext=sealed.ciphertext,
+            api_key_nonce=sealed.nonce,
+            api_key_key_version=sealed.key_version,
             context_window_tokens=16_384,
             tokenizer_encoding="cl100k_base",
             supports_stream=supports_stream,
@@ -487,6 +482,7 @@ async def _insert_model_profile(
             supports_vision=supports_vision,
             deleted_at=deleted_at,
             created_at=created_at,
+            updated_at=created_at,
         )
     )
     if is_default:
@@ -1320,7 +1316,7 @@ def test_models_catalog_filters_unready_dialogue_models_and_hides_unready_defaul
         try:
             await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
-                # 预置 3 个虽 enabled=True & visible_to_users=True，但不满足对话前置条件的模型。
+                # 预置 2 个虽 enabled=True & visible_to_users=True，但不满足对话前置条件的模型。
                 await _insert_model_profile(
                     session,
                     cipher,
@@ -1329,7 +1325,6 @@ def test_models_catalog_filters_unready_dialogue_models_and_hides_unready_defaul
                     model="gpt-no-stream",
                     supports_stream=False,
                     supports_tools=True,
-                    include_api_key=True,
                     created_at=NOW + timedelta(seconds=1),
                 )
                 await _insert_model_profile(
@@ -1340,19 +1335,7 @@ def test_models_catalog_filters_unready_dialogue_models_and_hides_unready_defaul
                     model="gpt-no-tools",
                     supports_stream=True,
                     supports_tools=False,
-                    include_api_key=True,
                     created_at=NOW + timedelta(seconds=2),
-                )
-                await _insert_model_profile(
-                    session,
-                    cipher,
-                    profile_id="llmprof_no_key",
-                    name="无凭据模型",
-                    model="gpt-no-key",
-                    supports_stream=True,
-                    supports_tools=True,
-                    include_api_key=False,
-                    created_at=NOW + timedelta(seconds=3),
                 )
 
             auth_repo = SqlAlchemyAuthRepository(factory)
@@ -1367,15 +1350,15 @@ def test_models_catalog_filters_unready_dialogue_models_and_hides_unready_defaul
             )
 
             with _login_client(app, "rd@example.com") as client:
-                # 1) 三个不满足对话前置条件的模型全部被过滤，仅返回 llmprof_default。
+                # 1) 两个不满足对话前置条件的模型全部被过滤，仅返回 llmprof_default。
                 resp = client.get("/api/v1/models")
                 assert resp.status_code == 200
                 body = resp.json()
                 assert [item["id"] for item in body["items"]] == ["llmprof_default"]
                 assert body["default_model_id"] == "llmprof_default"
 
-                # 2) 若默认指针指向不支持流式或缺失凭据的模型，default_model_id 必须为 None。
-                for unready_default_id in ("llmprof_no_stream", "llmprof_no_key"):
+                # 2) 若默认指针指向不支持流式或不支持工具的模型，default_model_id 必须为 None。
+                for unready_default_id in ("llmprof_no_stream", "llmprof_no_tools"):
                     async with factory() as db_sess, db_sess.begin():
                         await db_sess.execute(
                             update(DefaultModelProfileModel)
@@ -2167,13 +2150,11 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
                     CompressionPolicyVersionModel(
                         id="cmpol_1",
                         compression_model_profile_id="llmprof_compress",
-                        trigger_ratio=0.8,
                         trigger_tokens=10_000,
                         recent_ratio=0.4,
                         recent_token_cap=4000,
                         summary_ratio=0.2,
                         summary_token_cap=2000,
-                        prompt_template_version="context-summary-v1",
                         created_at=NOW,
                     )
                 )
@@ -2225,6 +2206,7 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
                 mcp_executor=_NoopMcpExecutor(),
                 knowledge=None,
                 project_knowledge=None,
+                access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
             )
 
             # 1) 正常自动标题：优先选用压缩模型 llmprof_compress，并清洗引号与末尾句号。
@@ -2384,6 +2366,7 @@ def test_auto_title_timeout_error_fallback_and_db_error_isolation(
                 mcp_executor=_NoopMcpExecutor(),
                 knowledge=None,
                 project_knowledge=None,
+                access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
             )
 
             # 1) 超时降级（0.05s 超时，模型休眠 1s -> 降级截取用户消息前 24 字）。
@@ -2550,6 +2533,7 @@ def test_subagent_run_never_triggers_auto_title(monkeypatch: pytest.MonkeyPatch)
                 knowledge=None,
                 project_knowledge=None,
                 subagents=subagents_repo,
+                access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
             )
 
             provider = _ScriptedLlmProvider(
@@ -2612,45 +2596,33 @@ def test_subagent_run_never_triggers_auto_title(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_alembic_single_head_and_m1_5_offline_sql(monkeypatch: pytest.MonkeyPatch) -> None:
-    """校验 Alembic 唯一 head 为 20261203_0036，且 upgrade/downgrade 离线 SQL 完整可逆。"""
+    """校验 Alembic 唯一 head 为 0001_initial_schema，且离线 SQL 完整覆盖 M1.5 列并可逆。"""
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://u:p@localhost/athena_test")
     config = Config(str(ALEMBIC_INI))
     script = ScriptDirectory.from_config(config)
-    # 保持 Alembic 单一 head，并验证 M1.5 迁移节点链正确（兼容后续 M1.6+ 迁移脚本）。
-    heads = script.get_heads()
-    assert len(heads) == 1
-    revision = script.get_revision("20261203_0036")
+    assert script.get_heads() == ["0001_initial_schema"]
+    revision = script.get_revision("0001_initial_schema")
     assert revision is not None
-    assert revision.down_revision == "20261202_0035"
+    assert revision.down_revision is None
 
     upgrade_buf = StringIO()
     with redirect_stdout(upgrade_buf):
-        command.upgrade(config, "20261202_0035:20261203_0036", sql=True)
+        command.upgrade(config, "head", sql=True)
     upgrade_sql = upgrade_buf.getvalue()
-    assert "ALTER TABLE projects ADD COLUMN description VARCHAR(500)" in upgrade_sql
-    assert "ALTER TABLE projects ADD COLUMN instructions TEXT" in upgrade_sql
-    assert "ALTER TABLE projects ADD COLUMN default_skill_ids JSONB" in upgrade_sql
-    assert "ALTER TABLE runs ADD COLUMN knowledge_base_ids JSONB" in upgrade_sql
-    assert (
-        "ALTER TABLE llm_model_profile_versions ADD COLUMN visible_to_users BOOLEAN" in upgrade_sql
-    )
-    assert (
-        "ALTER TABLE llm_model_profile_versions ADD COLUMN scenario_label VARCHAR(64)"
-        in upgrade_sql
-    )
-    assert (
-        "ALTER TABLE llm_model_profile_versions ADD COLUMN scenario_description VARCHAR(255)"
-        in upgrade_sql
-    )
-    assert (
-        "ALTER TABLE llm_model_profile_versions ADD COLUMN supports_vision BOOLEAN" in upgrade_sql
-    )
-    assert "ALTER TABLE llm_model_profile_versions ADD COLUMN deleted_at TIMESTAMP" in upgrade_sql
+    assert "description VARCHAR(500)" in upgrade_sql
+    assert "instructions TEXT" in upgrade_sql
+    assert "default_skill_ids JSONB" in upgrade_sql
+    assert "knowledge_base_ids JSONB" in upgrade_sql
+    assert "visible_to_users BOOLEAN" in upgrade_sql
+    assert "scenario_label VARCHAR(64)" in upgrade_sql
+    assert "scenario_description VARCHAR(255)" in upgrade_sql
+    assert "supports_vision BOOLEAN" in upgrade_sql
+    assert "deleted_at TIMESTAMP" in upgrade_sql
 
     downgrade_buf = StringIO()
     with redirect_stdout(downgrade_buf):
-        command.downgrade(config, "20261203_0036:20261202_0035", sql=True)
+        command.downgrade(config, "0001_initial_schema:base", sql=True)
     downgrade_sql = downgrade_buf.getvalue()
-    assert "ALTER TABLE llm_model_profile_versions DROP COLUMN deleted_at" in downgrade_sql
-    assert "ALTER TABLE runs DROP COLUMN knowledge_base_ids" in downgrade_sql
-    assert "ALTER TABLE projects DROP COLUMN default_skill_ids" in downgrade_sql
+    assert "DROP TABLE llm_model_profile_versions" in downgrade_sql
+    assert "DROP TABLE runs" in downgrade_sql
+    assert "DROP TABLE projects" in downgrade_sql

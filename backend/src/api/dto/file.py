@@ -16,9 +16,9 @@ class SessionFileResponse(BaseModel):
     label: str | None
     mime_type: str
     size_bytes: int
-    extraction_status: Literal["none", "ready", "failed"] = "none"
-    extracted_text_bytes: int | None = None
-    extraction_error_code: str | None = None
+    extraction_status: Literal["none", "ready", "failed"]
+    extracted_text_bytes: int | None
+    extraction_error_code: str | None
     created_at: datetime
 
 

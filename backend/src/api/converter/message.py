@@ -19,9 +19,10 @@ from domain.message import FileRefPart, MessagePart, TextPart, ToolCallPart
 def _part_to_response(part: MessagePart) -> MessagePartResponse:
     """转换一个消息内容块。"""
     if isinstance(part, TextPart):
-        return TextPartResponse(text=part.text)
+        return TextPartResponse(type="text", text=part.text)
     if isinstance(part, FileRefPart):
         return FileRefPartResponse(
+            type="file_ref",
             file_id=part.file_id,
             filename=part.filename,
             mime_type=part.mime_type,
@@ -29,15 +30,16 @@ def _part_to_response(part: MessagePart) -> MessagePartResponse:
         )
     if isinstance(part, ToolCallPart):
         return ToolCallPartResponse(
+            type="tool_call",
             tool_call_id=part.tool_call_id,
             name=part.name,
             arguments=part.arguments,
         )
     return ToolResultPartResponse(
+        type="tool_result",
         tool_call_id=part.tool_call_id,
         status=part.status.value,
         output=part.output,
-        artifact_id=part.artifact_id,
         artifacts=[
             ArtifactFileRefResponse(
                 file_id=artifact.file_id,

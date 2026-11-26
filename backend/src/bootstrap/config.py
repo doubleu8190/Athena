@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import math
 import os
 import re
@@ -100,34 +99,13 @@ def env_csv_set(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> frozenset[str]:
-    """解析逗号分隔的部署白名单，拒绝空项和非法主机/变量名。"""
+    """解析逗号分隔的环境变量名白名单，拒绝空项和非法变量名。"""
     raw = _source(environ).get(name, "")
     if not raw.strip():
         return frozenset()
     parts = [part.strip() for part in raw.split(",")]
     if any(not part for part in parts):
         raise ValueError(f"{name}_invalid")
-    if name == "ATHENA_MCP_ALLOWED_PRIVATE_HOSTS":
-        normalized_hosts: set[str] = set()
-        try:
-            for part in parts:
-                try:
-                    host = ipaddress.ip_address(part).compressed
-                except ValueError:
-                    ascii_host = part.encode("idna").decode("ascii").lower()
-                    labels = ascii_host.split(".")
-                    if len(ascii_host) > 253 or any(
-                        not label
-                        or len(label) > 63
-                        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
-                        for label in labels
-                    ):
-                        raise ValueError from None
-                    host = ascii_host
-                normalized_hosts.add(host)
-        except (UnicodeError, ValueError):
-            raise ValueError(f"{name}_invalid") from None
-        return frozenset(normalized_hosts)
     valid = all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) for part in parts)
     if not valid:
         raise ValueError(f"{name}_invalid")
@@ -213,21 +191,16 @@ class AuthSettings(BaseModel):
 
 
 class McpSettings(BaseModel):
-    """MCP 传输安全白名单与 stdio 宿主环境变量白名单。"""
+    """MCP stdio 宿主环境变量白名单设置。"""
 
     model_config = ConfigDict(frozen=True)
 
-    allowed_private_hosts: frozenset[str] = frozenset()
     stdio_base_env_names: frozenset[str] = frozenset()
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> McpSettings:
         source = _source(environ)
         return cls(
-            allowed_private_hosts=env_csv_set(
-                "ATHENA_MCP_ALLOWED_PRIVATE_HOSTS",
-                environ=source,
-            ),
             stdio_base_env_names=env_csv_set(
                 "ATHENA_MCP_STDIO_BASE_ENV_NAMES",
                 environ=source,
@@ -383,7 +356,7 @@ class RunWorkerSettings(BaseModel):
 
 
 class LoggingSettings(BaseModel):
-    """进程日志级别设置（可选兼容旧 LOG_LEVEL 回退）。"""
+    """进程日志级别设置（统一读取 ATHENA_LOG_LEVEL，默认 INFO）。"""
 
     model_config = ConfigDict(frozen=True)
 
@@ -393,13 +366,9 @@ class LoggingSettings(BaseModel):
     def from_environment(
         cls,
         environ: Mapping[str, str] | None = None,
-        *,
-        allow_legacy_log_level: bool = False,
     ) -> LoggingSettings:
         source = _source(environ)
         level = (source.get("ATHENA_LOG_LEVEL") or "").strip()
-        if not level and allow_legacy_log_level:
-            level = (source.get("LOG_LEVEL") or "").strip()
         return cls(level=(level or "INFO").upper())
 
 

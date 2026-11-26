@@ -23,10 +23,27 @@ const USER = {
   role: "member" as const,
 };
 
+// 对齐后端 SkillDependencyCheckResponse 契约：版本级 dependency_check 始终为非空对象。
+interface SkillDependencyCheckFixture {
+  checked_at: string;
+  items: unknown[];
+  python_implementation: string;
+  python_version: string;
+  status: "satisfied";
+}
+
+const MARKDOWN_DEPENDENCY_CHECK: SkillDependencyCheckFixture = {
+  checked_at: NOW,
+  items: [],
+  python_implementation: "markdown-only",
+  python_version: "not-checked",
+  status: "satisfied",
+};
+
 interface SkillVersionFixture {
   created_at: string;
   dependencies: string[];
-  dependency_check: null;
+  dependency_check: SkillDependencyCheckFixture;
   description: string;
   files: Array<{
     path: string;
@@ -48,18 +65,23 @@ interface SkillVersionFixture {
 interface SkillFixture {
   current_version_id: string;
   current_version_label: string;
-  dependency_check: null;
+  dependency_check: SkillDependencyCheckFixture | null;
   description: string;
   enabled: boolean;
+  featured: boolean;
+  format: "markdown" | "package";
+  has_scripts: boolean;
   id: string;
   name: string;
-  owner_department_id?: string | null;
+  owner_department_id: string | null;
   revision: number;
   scope: "company" | "personal";
   script_requires_approval: boolean;
   slug: string;
+  starter_prompt: string | null;
   updated_at: string;
   versions?: SkillVersionFixture[];
+  visibility_grants: unknown[];
 }
 
 interface PersonalSkillFixtureState {
@@ -83,7 +105,8 @@ function makeVersion(
   return {
     created_at: NOW,
     dependencies: [],
-    dependency_check: null,
+    // 个人纯 Markdown 技能版本固定返回非空 satisfied 依赖检查结果，供 toSkillVersion 解析。
+    dependency_check: MARKDOWN_DEPENDENCY_CHECK,
     description: input.description,
     files: [
       {
@@ -115,6 +138,9 @@ async function installPersonalSkillsFixtures(
       dependency_check: null,
       description: "需要审批脚本的全公司技能。",
       enabled: true,
+      featured: false,
+      format: "package",
+      has_scripts: true,
       id: "company-skill-1",
       name: "全公司审批技能",
       owner_department_id: null,
@@ -122,7 +148,9 @@ async function installPersonalSkillsFixtures(
       scope: "company",
       script_requires_approval: true,
       slug: "company-approval-skill",
+      starter_prompt: null,
       updated_at: NOW,
+      visibility_grants: [],
     },
     personal: null,
   };
@@ -184,9 +212,12 @@ async function installPersonalSkillsFixtures(
       state.personal = {
         current_version_id: "personal-skill-e2e-version-1",
         current_version_label: "v1",
-        dependency_check: null,
+        dependency_check: MARKDOWN_DEPENDENCY_CHECK,
         description: input.description,
         enabled: true,
+        featured: false,
+        format: "markdown",
+        has_scripts: false,
         id: identity.id,
         name: input.name,
         owner_department_id: null,
@@ -194,8 +225,10 @@ async function installPersonalSkillsFixtures(
         scope: "personal",
         script_requires_approval: false,
         slug: identity.slug,
+        starter_prompt: null,
         updated_at: NOW,
         versions: [makeVersion(identity, input)],
+        visibility_grants: [],
       };
       return json(route, state.personal, 201);
     }

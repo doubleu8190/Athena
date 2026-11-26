@@ -125,13 +125,13 @@ def test_model_start_failure_closes_all_created_resources(
 
 
 def test_knowledge_worker_log_level_priority(monkeypatch: pytest.MonkeyPatch) -> None:
-    """验证日志级别优先读取 ATHENA_LOG_LEVEL，其次 LOG_LEVEL，默认 INFO。"""
+    """验证日志级别仅读取 ATHENA_LOG_LEVEL，忽略历史 LOG_LEVEL，默认 INFO。"""
     monkeypatch.delenv("ATHENA_LOG_LEVEL", raising=False)
     monkeypatch.delenv("LOG_LEVEL", raising=False)
     assert knowledge_worker._log_level() == "INFO"
 
     monkeypatch.setenv("LOG_LEVEL", "warning")
-    assert knowledge_worker._log_level() == "WARNING"
+    assert knowledge_worker._log_level() == "INFO"
 
     monkeypatch.setenv("ATHENA_LOG_LEVEL", "debug")
     assert knowledge_worker._log_level() == "DEBUG"

@@ -13,11 +13,8 @@ from app.auth.service import AuthService
 from app.message import MessageService
 from domain.message import (
     ConversationMessage,
-    ConversationMessageDraft,
     ConversationMessagePage,
     ConversationRole,
-    ExecutionMessage,
-    ExecutionMessageDraft,
     MessageMetadata,
     MessageStatus,
     TextPart,
@@ -31,18 +28,6 @@ class QueryMessageRepository:
     def __init__(self, messages: tuple[ConversationMessage, ...] = ()) -> None:
         self.messages = messages
         self.calls: list[tuple[str, str, int | None, int]] = []
-
-    async def append_conversation(
-        self,
-        draft: ConversationMessageDraft,
-    ) -> ConversationMessage:
-        raise AssertionError("read API must not append conversation messages")
-
-    async def append_execution(
-        self,
-        draft: ExecutionMessageDraft,
-    ) -> ExecutionMessage:
-        raise AssertionError("read API must not append execution messages")
 
     async def list_conversation_for_owner(
         self,
@@ -116,6 +101,7 @@ def _message(
         parts=(TextPart(text),),
         reply_to_message_id="msg_user" if role is ConversationRole.ASSISTANT else None,
         run_id="run_1",
+        context_turn_id="msg_user",
         client_message_id="client_1" if role is ConversationRole.USER else None,
         created_at=timestamp,
         completed_at=timestamp,

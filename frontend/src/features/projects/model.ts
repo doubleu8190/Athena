@@ -7,13 +7,13 @@ export const PROJECT_DEFAULT_SKILLS_MAX = 20;
 
 export interface Project {
   created_at: string;
-  /** 项目默认挂载技能 ID 列表（可选兼容旧夹具，消费时统一 ?? []）。 */
-  default_skill_ids?: string[];
-  /** 可选项目简介（最大 500 字，消费时统一 ?? null）。 */
-  description?: string | null;
+  /** 项目默认挂载技能 ID 列表。 */
+  default_skill_ids: string[];
+  /** 项目简介（最大 500 字，未填写时为 null）。 */
+  description: string | null;
   id: string;
-  /** 可选项目专属背景指令（最大 8,000 字，仅注入主对话，消费时统一 ?? null）。 */
-  instructions?: string | null;
+  /** 项目专属背景指令（最大 8,000 字，仅注入主对话，未配置时为 null）。 */
+  instructions: string | null;
   name: string;
   updated_at: string;
 }
@@ -28,10 +28,6 @@ export interface ProjectListResponse {
 export interface ProjectListQuery {
   page?: number;
   pageSize?: number;
-}
-
-export interface ProjectNameInput {
-  name: string;
 }
 
 export interface ProjectCreateInput {

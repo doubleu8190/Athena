@@ -69,35 +69,6 @@ class SqlAlchemyAuthRepository(AuthRepository, CurrentSessionReader):
             raise
         return user
 
-    async def create_user_with_session(
-        self,
-        user: User,
-        auth_session: AuthSession,
-    ) -> User:
-        """原子创建用户及首个登录会话。"""
-        try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    session.add(_user_to_model(user))
-                    await session.flush()
-                    session.add(
-                        AuthSessionModel(
-                            id=auth_session.id,
-                            user_id=auth_session.user_id,
-                            token_hash=auth_session.token_hash,
-                            expires_at=auth_session.expires_at,
-                            revoked_time=auth_session.revoked_time,
-                            created_at=auth_session.created_at,
-                        )
-                    )
-        except IntegrityError as error:
-            if user.email is not None:
-                existing = await self.get_user_by_email(user.email)
-                if existing is not None:
-                    raise EmailAlreadyRegisteredError("email_exists") from error
-            raise
-        return user
-
     async def upsert_local_super_admin(
         self,
         *,

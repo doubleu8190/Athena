@@ -125,7 +125,7 @@ class RunModel(Base):
     retry_of_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     model_config_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
     # 固化创建 Run 时的非密钥模型元数据快照，严禁存放任何明文或密文 api_key。
-    model_snapshot_json: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    model_snapshot_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     main_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -144,8 +144,12 @@ class RunModel(Base):
         BigInteger, nullable=False, default=0, server_default=text("0")
     )
     prompt_template_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    event_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    event_sequence: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
+    execution_epoch: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
     worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     execution_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -158,7 +162,9 @@ class RunModel(Base):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     report_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    usage: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    usage: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     # Phase 2 Subagent 编排预留字段，默认兼容主 Run（depth=0）。
     parent_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     root_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

@@ -72,9 +72,7 @@ def main() -> int:
         命令行参数错误由 ``argparse`` 以非零状态退出；运行失败由入口转换为
         稳定的非零状态码。
     """
-    parser = argparse.ArgumentParser(
-        description="停写窗口内回收未被数据库引用的 Athena 文件对象"
-    )
+    parser = argparse.ArgumentParser(description="停写窗口内回收未被数据库引用的 Athena 文件对象")
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -94,9 +92,7 @@ def main() -> int:
     if not database_url:
         parser.error("ATHENA_DATABASE_URL is required")
     if arguments.execute and not arguments.confirm_all_writers_stopped:
-        parser.error(
-            "--execute requires --confirm-all-writers-stopped"
-        )
+        parser.error("--execute requires --confirm-all-writers-stopped")
     try:
         result = asyncio.run(
             _maintain(

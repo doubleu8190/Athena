@@ -152,35 +152,28 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         if "requires_approval" in fields_set and request.requires_approval is None:
             raise HTTPException(422, "mcp_request_invalid")
         try:
-            if fields_set == {"requires_approval"}:
-                assert request.requires_approval is not None
-                result = await manager.update_tool_approval_policy(
-                    actor, tool_id, request.requires_approval
-                )
-            else:
-                patch = ToolMetadataPatch(
-                    requires_approval=(
-                        TOOL_FIELD_UNSET
-                        if "requires_approval" not in fields_set
-                        else cast(bool, request.requires_approval)
-                    ),
-                    display_name=(
-                        TOOL_FIELD_UNSET
-                        if "display_name" not in fields_set
-                        else request.display_name
-                    ),
-                    approval_summary_template=(
-                        TOOL_FIELD_UNSET
-                        if "approval_summary_template" not in fields_set
-                        else request.approval_summary_template
-                    ),
-                    parameter_labels=(
-                        TOOL_FIELD_UNSET
-                        if "parameter_labels" not in fields_set
-                        else request.parameter_labels
-                    ),
-                )
-                result = await manager.update_tool_metadata(actor, tool_id, patch)
+            # 统一走局部元信息更新通道，避免仅改审批开关时的冗余路由分叉。
+            patch = ToolMetadataPatch(
+                requires_approval=(
+                    TOOL_FIELD_UNSET
+                    if "requires_approval" not in fields_set
+                    else cast(bool, request.requires_approval)
+                ),
+                display_name=(
+                    TOOL_FIELD_UNSET if "display_name" not in fields_set else request.display_name
+                ),
+                approval_summary_template=(
+                    TOOL_FIELD_UNSET
+                    if "approval_summary_template" not in fields_set
+                    else request.approval_summary_template
+                ),
+                parameter_labels=(
+                    TOOL_FIELD_UNSET
+                    if "parameter_labels" not in fields_set
+                    else request.parameter_labels
+                ),
+            )
+            result = await manager.update_tool_metadata(actor, tool_id, patch)
         except Exception as error:
             raise mcp_error_to_http(error) from error
         return admin_tool_to_response(result)

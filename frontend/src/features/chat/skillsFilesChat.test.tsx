@@ -694,8 +694,11 @@ describe("聊天技能选择与会话文件", () => {
 describe("安全技能审批与多文件交付", () => {
   it("审批和执行详情只展示服务端安全投影，并可下载多文件产物", async () => {
     const pending = {
+      approval_summary: null,
       batch_message_id: "batch-skill",
       call_id: "call-skill",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "skill_execute",
       ordinal: 1,
       requested_at: "2026-11-12T03:00:00Z",
@@ -713,6 +716,7 @@ describe("安全技能审批与多文件交付", () => {
             description: SKILL.description,
             name: SKILL.name,
             requires_approval: true,
+            scope: "company",
             skill_id: SKILL.id,
             slug: SKILL.slug,
             version_id: "skill-version-1",
@@ -785,7 +789,6 @@ describe("安全技能审批与多文件交付", () => {
           id: "tool-result-message",
           parts: [
             {
-              artifact_id: null,
               artifacts,
               output: "private skill execution log",
               status: "success",
@@ -888,8 +891,11 @@ describe("安全技能审批与多文件交付", () => {
       id: "run-skill-without-projection",
       pending_approvals: [
         {
+          approval_summary: null,
           batch_message_id: "batch-missing-projection",
           call_id: "call-missing-projection",
+          display_name: null,
+          formatted_arguments: [],
           model_name: "skill_execute",
           ordinal: 1,
           requested_at: "2026-11-12T03:00:00Z",

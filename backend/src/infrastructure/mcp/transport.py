@@ -17,13 +17,11 @@ __all__ = ["build_controlled_mcp_transport"]
 def build_controlled_mcp_transport(
     connection: McpConnectionInput,
     *,
-    allowed_private_hosts: frozenset[str] = frozenset(),
     maximum_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     stdio_base_environment: Mapping[str, str] | None = None,
     transport_factory: Callable[[McpConnectionInput], Transport] | None = None,
 ) -> Transport:
-    """通过受控 HTTP/stdio transport 建立连接；allowed_private_hosts 保留兼容参数。"""
-    del allowed_private_hosts
+    """通过受控 HTTP/stdio transport 建立连接。"""
     if transport_factory is not None:
         return transport_factory(connection)
     config = connection.config

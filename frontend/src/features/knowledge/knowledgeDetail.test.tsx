@@ -57,15 +57,28 @@ function createFetchMock(
 }
 
 describe("知识库文档状态", () => {
-  it("从版本接口展示真实状态、片段数与处理中限制", async () => {
+  it("从文档列表内联 latest_version 展示真实状态、片段数与处理中限制且不发 /versions N+1 请求", async () => {
     const readyDocument = makeKnowledgeDocument({
       active_version_id: "version-ready",
       id: "document-ready",
+      latest_version: makeKnowledgeVersion({
+        chunk_count: 12,
+        document_id: "document-ready",
+        id: "version-ready",
+        state: "ready",
+      }),
       title: "已就绪文档",
     });
     const pendingDocument = makeKnowledgeDocument({
       active_version_id: "version-old",
       id: "document-pending",
+      latest_version: makeKnowledgeVersion({
+        chunk_count: 0,
+        completed_at: null,
+        document_id: "document-pending",
+        id: "version-queued",
+        state: "queued",
+      }),
       pending_version_id: "version-queued",
       title: "处理中文档",
     });
@@ -84,34 +97,6 @@ describe("知识库文档状态", () => {
             10,
           ),
         );
-      }
-      if (
-        url.pathname.endsWith(
-          "/documents/document-ready/versions",
-        )
-      ) {
-        return jsonResponse([
-          makeKnowledgeVersion({
-            chunk_count: 12,
-            document_id: readyDocument.id,
-            id: "version-ready",
-          }),
-        ]);
-      }
-      if (
-        url.pathname.endsWith(
-          "/documents/document-pending/versions",
-        )
-      ) {
-        return jsonResponse([
-          makeKnowledgeVersion({
-            chunk_count: 0,
-            completed_at: null,
-            document_id: pendingDocument.id,
-            id: "version-queued",
-            state: "queued",
-          }),
-        ]);
       }
       throw new Error(
         `Unexpected request: ${init?.method ?? "GET"} ${url}`,
@@ -144,10 +129,10 @@ describe("知识库文档状态", () => {
   });
 
   it(
-    "排队中的版本会在轮询后更新为真实就绪状态",
+    "排队中的版本会在列表轮询后更新为真实就绪状态",
     async () => {
-      let versionCalls = 0;
-      const document = makeKnowledgeDocument({
+      let listCalls = 0;
+      const baseDocument = makeKnowledgeDocument({
         active_version_id: "version-old",
         id: "document-polling",
         pending_version_id: "version-new",
@@ -164,27 +149,31 @@ describe("知识库文档状态", () => {
           url.pathname ===
           `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}/documents`
         ) {
-          return jsonResponse(
-            knowledgeListResponse([document], 1, 10),
-          );
-        }
-        if (url.pathname.endsWith("/versions")) {
-          versionCalls += 1;
-          return jsonResponse([
-            versionCalls === 1
-              ? makeKnowledgeVersion({
-                  chunk_count: 0,
-                  completed_at: null,
-                  document_id: document.id,
-                  id: "version-new",
-                  state: "queued",
-                })
-              : makeKnowledgeVersion({
-                  chunk_count: 6,
-                  document_id: document.id,
-                  id: "version-new",
-                }),
-          ]);
+          listCalls += 1;
+          const current =
+            listCalls === 1
+              ? {
+                  ...baseDocument,
+                  latest_version: makeKnowledgeVersion({
+                    chunk_count: 0,
+                    completed_at: null,
+                    document_id: baseDocument.id,
+                    id: "version-new",
+                    state: "queued",
+                  }),
+                }
+              : {
+                  ...baseDocument,
+                  active_version_id: "version-new",
+                  latest_version: makeKnowledgeVersion({
+                    chunk_count: 6,
+                    document_id: baseDocument.id,
+                    id: "version-new",
+                    state: "ready",
+                  }),
+                  pending_version_id: null,
+                };
+          return jsonResponse(knowledgeListResponse([current], 1, 10));
         }
         throw new Error(
           `Unexpected request: ${init?.method ?? "GET"} ${url}`,
@@ -202,26 +191,27 @@ describe("知识库文档状态", () => {
         },
         { timeout: 5_000 },
       );
-      expect(versionCalls).toBeGreaterThanOrEqual(2);
+      expect(listCalls).toBeGreaterThanOrEqual(2);
     },
     8_000,
   );
 
   it("失败的最新版本可重试并回到排队状态", async () => {
     let retried = false;
-    const document = makeKnowledgeDocument({
-      active_version_id: null,
-      id: "document-failed",
-      pending_version_id: null,
-      title: "失败文档",
-    });
     const failedVersion = makeKnowledgeVersion({
       chunk_count: 0,
       completed_at: "2026-11-10T04:32:00Z",
-      document_id: document.id,
+      document_id: "document-failed",
       error_code: "knowledge_document_text_empty",
       id: "version-failed",
       state: "failed",
+    });
+    const document = makeKnowledgeDocument({
+      active_version_id: null,
+      id: "document-failed",
+      latest_version: failedVersion,
+      pending_version_id: null,
+      title: "失败文档",
     });
     const fetchMock = createFetchMock((url, init) => {
       if (
@@ -235,7 +225,19 @@ describe("知识库文档状态", () => {
         `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}/documents`
       ) {
         return jsonResponse(
-          knowledgeListResponse([document], 1, 10),
+          knowledgeListResponse(
+            [
+              {
+                ...document,
+                latest_version: retried
+                  ? { ...failedVersion, state: "queued" }
+                  : failedVersion,
+                pending_version_id: retried ? failedVersion.id : null,
+              },
+            ],
+            1,
+            10,
+          ),
         );
       }
       if (
@@ -249,11 +251,6 @@ describe("知识库文档状态", () => {
           { ...failedVersion, state: "queued" },
           202,
         );
-      }
-      if (url.pathname.endsWith("/documents/document-failed/versions")) {
-        return jsonResponse([
-          retried ? { ...failedVersion, state: "queued" } : failedVersion,
-        ]);
       }
       throw new Error(
         `Unexpected request: ${init?.method ?? "GET"} ${url}`,
@@ -479,12 +476,10 @@ describe("知识库文档状态", () => {
 
 describe("知识库版本替换", () => {
   it(
-    "文本替换成功会刷新版本缓存并轮询新状态",
+    "文本替换成功会刷新文档列表并轮询新状态",
     async () => {
       let replaced = false;
-      let replacementVersionCalls = 0;
-      let latestState: "queued" | "processing" | "ready" =
-        "queued";
+      let replacementListCalls = 0;
       const document = makeKnowledgeDocument({
         active_version_id: "version-old",
         id: "document-text-replace",
@@ -508,68 +503,79 @@ describe("知识库版本替换", () => {
           url.pathname ===
           `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}/documents`
         ) {
+          if (!replaced) {
+            return jsonResponse(
+              knowledgeListResponse(
+                [{ ...document, latest_version: oldVersion }],
+                1,
+                10,
+              ),
+            );
+          }
+          replacementListCalls += 1;
+          if (replacementListCalls === 1) {
+            return jsonResponse(
+              knowledgeListResponse(
+                [
+                  {
+                    ...document,
+                    active_version_id: "version-old",
+                    latest_version: makeKnowledgeVersion({
+                      chunk_count: 0,
+                      completed_at: null,
+                      document_id: document.id,
+                      id: "version-new",
+                      state: "queued",
+                    }),
+                    pending_version_id: "version-new",
+                  },
+                ],
+                1,
+                10,
+              ),
+            );
+          }
+          if (replacementListCalls === 2) {
+            return jsonResponse(
+              knowledgeListResponse(
+                [
+                  {
+                    ...document,
+                    active_version_id: "version-old",
+                    latest_version: makeKnowledgeVersion({
+                      chunk_count: 0,
+                      completed_at: null,
+                      document_id: document.id,
+                      id: "version-new",
+                      state: "processing",
+                    }),
+                    pending_version_id: "version-new",
+                  },
+                ],
+                1,
+                10,
+              ),
+            );
+          }
           return jsonResponse(
             knowledgeListResponse(
               [
                 {
                   ...document,
-                  active_version_id:
-                    latestState === "ready"
-                      ? "version-new"
-                      : "version-old",
-                  pending_version_id:
-                    replaced && latestState !== "ready"
-                      ? "version-new"
-                      : null,
+                  active_version_id: "version-new",
+                  latest_version: makeKnowledgeVersion({
+                    chunk_count: 8,
+                    document_id: document.id,
+                    id: "version-new",
+                    state: "ready",
+                  }),
+                  pending_version_id: null,
                 },
               ],
               1,
               10,
             ),
           );
-        }
-        if (
-          url.pathname.endsWith(
-            `/documents/${document.id}/versions`,
-          )
-        ) {
-          if (!replaced) {
-            return jsonResponse([oldVersion]);
-          }
-          replacementVersionCalls += 1;
-          if (replacementVersionCalls === 1) {
-            latestState = "queued";
-            return jsonResponse([
-              makeKnowledgeVersion({
-                chunk_count: 0,
-                completed_at: null,
-                document_id: document.id,
-                id: "version-new",
-                state: "queued",
-              }),
-            ]);
-          }
-          if (replacementVersionCalls === 2) {
-            latestState = "processing";
-            return jsonResponse([
-              makeKnowledgeVersion({
-                chunk_count: 0,
-                completed_at: null,
-                document_id: document.id,
-                id: "version-new",
-                state: "processing",
-              }),
-            ]);
-          }
-          latestState = "ready";
-          return jsonResponse([
-            makeKnowledgeVersion({
-              chunk_count: 8,
-              document_id: document.id,
-              id: "version-new",
-              state: "ready",
-            }),
-          ]);
         }
         if (
           url.pathname.endsWith(
@@ -639,7 +645,7 @@ describe("知识库版本替换", () => {
         text: "这是新的版本正文。",
         title: "待替换文档",
       });
-      expect(replacementVersionCalls).toBeGreaterThanOrEqual(3);
+      expect(replacementListCalls).toBeGreaterThanOrEqual(3);
     },
     15_000,
   );
@@ -648,8 +654,7 @@ describe("知识库版本替换", () => {
     "文件替换失败后会刷新为新版本失败状态并保留旧活动版本说明",
     async () => {
       let replaced = false;
-      let replacementVersionCalls = 0;
-      let latestState: "processing" | "failed" = "processing";
+      let replacementListCalls = 0;
       const document = makeKnowledgeDocument({
         active_version_id: "version-old",
         id: "document-file-replace",
@@ -675,54 +680,57 @@ describe("知识库版本替换", () => {
           url.pathname ===
           `/api/v1/knowledge-bases/${KNOWLEDGE_BASE_A.id}/documents`
         ) {
+          if (!replaced) {
+            return jsonResponse(
+              knowledgeListResponse(
+                [{ ...document, latest_version: oldVersion }],
+                1,
+                10,
+              ),
+            );
+          }
+          replacementListCalls += 1;
+          if (replacementListCalls === 1) {
+            return jsonResponse(
+              knowledgeListResponse(
+                [
+                  {
+                    ...document,
+                    latest_version: makeKnowledgeVersion({
+                      chunk_count: 0,
+                      completed_at: null,
+                      document_id: document.id,
+                      id: "version-new",
+                      state: "processing",
+                    }),
+                    pending_version_id: "version-new",
+                  },
+                ],
+                1,
+                10,
+              ),
+            );
+          }
           return jsonResponse(
             knowledgeListResponse(
               [
                 {
                   ...document,
-                  pending_version_id:
-                    replaced && latestState === "processing"
-                      ? "version-new"
-                      : null,
+                  latest_version: makeKnowledgeVersion({
+                    chunk_count: 0,
+                    completed_at: "2026-11-10T04:35:00Z",
+                    document_id: document.id,
+                    error_code: "knowledge_document_text_empty",
+                    id: "version-new",
+                    state: "failed",
+                  }),
+                  pending_version_id: null,
                 },
               ],
               1,
               10,
             ),
           );
-        }
-        if (
-          url.pathname.endsWith(
-            `/documents/${document.id}/versions`,
-          )
-        ) {
-          if (!replaced) {
-            return jsonResponse([oldVersion]);
-          }
-          replacementVersionCalls += 1;
-          if (replacementVersionCalls === 1) {
-            latestState = "processing";
-            return jsonResponse([
-              makeKnowledgeVersion({
-                chunk_count: 0,
-                completed_at: null,
-                document_id: document.id,
-                id: "version-new",
-                state: "processing",
-              }),
-            ]);
-          }
-          latestState = "failed";
-          return jsonResponse([
-            makeKnowledgeVersion({
-              chunk_count: 0,
-              completed_at: "2026-11-10T04:35:00Z",
-              document_id: document.id,
-              error_code: "knowledge_document_text_empty",
-              id: "version-new",
-              state: "failed",
-            }),
-          ]);
         }
         if (
           url.pathname.endsWith(
@@ -784,7 +792,7 @@ describe("知识库版本替换", () => {
       expect(
         screen.getByText(/当前检索仍使用上一已就绪版本/),
       ).toBeInTheDocument();
-      expect(replacementVersionCalls).toBeGreaterThanOrEqual(2);
+      expect(replacementListCalls).toBeGreaterThanOrEqual(2);
     },
     10_000,
   );

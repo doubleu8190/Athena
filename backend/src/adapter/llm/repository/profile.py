@@ -68,15 +68,23 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 if self._secret_cipher is None:
                     raise ModelProfileError("llm_secret_key_missing")
                 now = self._clock()
+                profile_id = new_id("llmprof")
+                # 先完成凭据信封加密再构造非空 ORM 行，确保库内不存在空密文半成品记录。
+                try:
+                    sealed = self._secret_cipher.seal(
+                        profile_id, McpSecretPurpose.LLM_API_KEY, {"api_key": value.api_key}
+                    )
+                except McpSecretError:
+                    raise ModelProfileError("llm_model_credential_invalid") from None
                 row = ModelProfileVersionModel(
-                    id=new_id("llmprof"),
+                    id=profile_id,
                     name=value.name,
                     protocol="chat_completions",
                     base_url=value.base_url,
                     model=value.model,
-                    api_key_ciphertext=None,
-                    api_key_nonce=None,
-                    api_key_key_version=None,
+                    api_key_ciphertext=sealed.ciphertext,
+                    api_key_nonce=sealed.nonce,
+                    api_key_key_version=sealed.key_version,
                     context_window_tokens=value.context_window_tokens,
                     tokenizer_encoding=value.tokenizer_encoding,
                     supports_stream=value.supports_stream,
@@ -97,15 +105,6 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                     created_at=now,
                     updated_at=now,
                 )
-                try:
-                    sealed = self._secret_cipher.seal(
-                        row.id, McpSecretPurpose.LLM_API_KEY, {"api_key": value.api_key}
-                    )
-                except McpSecretError:
-                    raise ModelProfileError("llm_model_credential_invalid") from None
-                row.api_key_ciphertext = sealed.ciphertext
-                row.api_key_nonce = sealed.nonce
-                row.api_key_key_version = sealed.key_version
                 session.add(row)
                 try:
                     await session.flush()
@@ -163,8 +162,8 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
     ) -> tuple[tuple[ModelProfileVersion, ...], str | None]:
         """面向普通用户读取可对话、已启用、对用户可见且未软删除的模型目录及默认模型标识。"""
         async with self._session_factory() as session:
-            # 与 Run 提交校验（_lock_selected_profile_id / get_default_runtime）保持严格一致：
-            # 仅暴露支持流式、支持工具调用且已配置完整加密凭据的模型，避免前端选出不可提交的模型。
+            # 与 Run 提交校验保持一致：仅暴露支持流式与工具调用的启用可见模型，
+            # 避免前端选出不可提交的模型。
             rows = (
                 await session.scalars(
                     select(ModelProfileVersionModel)
@@ -174,9 +173,6 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                         ModelProfileVersionModel.deleted_at.is_(None),
                         ModelProfileVersionModel.supports_stream.is_(True),
                         ModelProfileVersionModel.supports_tools.is_(True),
-                        ModelProfileVersionModel.api_key_ciphertext.is_not(None),
-                        ModelProfileVersionModel.api_key_nonce.is_not(None),
-                        ModelProfileVersionModel.api_key_key_version.is_not(None),
                     )
                     .order_by(
                         ModelProfileVersionModel.created_at,
@@ -564,14 +560,11 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                 row = CompressionPolicyVersionModel(
                     id=new_id("cmpol"),
                     compression_model_profile_id=profile.id,
-                    # 历史列只用于滚动升级兼容，新实例只读取绝对 Token 阈值。
-                    trigger_ratio=0.8,
                     trigger_tokens=value.trigger_tokens,
                     recent_ratio=value.recent_ratio,
                     recent_token_cap=value.recent_token_cap,
                     summary_ratio=value.summary_ratio,
                     summary_token_cap=value.summary_token_cap,
-                    prompt_template_version="context-summary-v1",
                     created_at=now,
                 )
                 session.add(row)
@@ -580,10 +573,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
                     CurrentCompressionPolicyModel(singleton_id=1, policy_version_id=row.id)
                 )
                 await session.flush()
-                result = _compression_policy_to_domain(row)
-                if result is None:
-                    raise RuntimeError("llm_compression_policy_projection_invalid")
-                return result
+                return _compression_policy_to_domain(row)
 
     async def get_default_id(self, actor: AuthContext) -> str | None:
         """无锁只读会话内复核管理员身份并返回当前未软删除的默认版本标识。"""
@@ -616,12 +606,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
     def _runtime(self, row: ModelProfileVersionModel | None) -> RuntimeModelProfile | None:
         if row is None or not row.enabled or row.deleted_at is not None:
             return None
-        if (
-            self._secret_cipher is None
-            or row.api_key_ciphertext is None
-            or row.api_key_nonce is None
-            or row.api_key_key_version is None
-        ):
+        if self._secret_cipher is None:
             return None
         try:
             secrets = self._secret_cipher.open(
@@ -652,10 +637,8 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository, CompressionPolicy
 
 def _compression_policy_to_domain(
     row: CompressionPolicyVersionModel,
-) -> CompressionPolicyVersion | None:
-    """只投影完整的新格式策略，旧浮点策略安全视为未配置。"""
-    if row.trigger_tokens is None or row.recent_token_cap is None or row.summary_token_cap is None:
-        return None
+) -> CompressionPolicyVersion:
+    """将压缩策略版本 ORM 行映射为领域对象。"""
     return CompressionPolicyVersion(
         id=row.id,
         compression_model_profile_id=row.compression_model_profile_id,
@@ -664,7 +647,6 @@ def _compression_policy_to_domain(
         recent_token_cap=row.recent_token_cap,
         summary_ratio=row.summary_ratio,
         summary_token_cap=row.summary_token_cap,
-        prompt_template_version=row.prompt_template_version,
         created_at=row.created_at,
     )
 

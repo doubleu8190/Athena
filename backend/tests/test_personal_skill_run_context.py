@@ -8,7 +8,7 @@ import pytest
 
 from app.run.context import messages_to_llm
 from domain.llm.model import LlmRole
-from domain.run.model import Run, RunStatus, RunUsage
+from domain.run.model import Run, RunModelSnapshot, RunStatus, RunUsage
 from domain.skill import (
     ActiveSkillGuide,
     RunSkillEntry,
@@ -238,9 +238,7 @@ def test_subrun_subset_rebuilds_entries_from_parent_snapshot() -> None:
     with pytest.raises(ValueError, match="run_skill_selection_invalid"):
         parent.trusted_subset(
             RunSkillSnapshot(
-                skills=(
-                    parent_entry.model_copy(update={"skill_id": "skill_other"}),
-                ),
+                skills=(parent_entry.model_copy(update={"skill_id": "skill_other"}),),
                 selected_skill_ids=("skill_other",),
             )
         )
@@ -257,6 +255,22 @@ def _run() -> Run:
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile_context",
+        model_snapshot=RunModelSnapshot(
+            id="profile_context",
+            name="上下文模型",
+            protocol="chat_completions",
+            base_url="https://api.example.com/v1",
+            model="gpt-4o-mini",
+            context_window_tokens=128000,
+            tokenizer_encoding="cl100k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=4096,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=120,
+            max_concurrency=4,
+        ),
         main_prompt_version_id="prompt_main",
         compression_prompt_version_id="prompt_compression",
         prompt_template_version="run-v2",

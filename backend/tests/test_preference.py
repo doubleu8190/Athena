@@ -663,36 +663,33 @@ def test_preference_http_api_requires_auth_and_verifies_origin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Alembic 迁移 20261130_0033 与代码/依赖清理检查
+# 4. Alembic 基线迁移 0001_initial_schema 与代码/依赖清理检查
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_migration_20261130_0033_chain_upgrade_and_downgrade_sql() -> None:
-    """验证 Alembic 迁移链保持单 head，且 20261130_0033 离线 upgrade/downgrade SQL 完整合法。"""
+def test_alembic_initial_schema_contains_preference_tables_and_no_legacy_memory() -> None:
+    """验证 Alembic 基线单 head 为 0001_initial_schema，包含偏好表且不含已清理的旧记忆表。"""
     config = _migration_config()
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert len(heads) == 1
-    rev = script.get_revision("20261130_0033")
+    assert heads == ["0001_initial_schema"]
+    rev = script.get_revision("0001_initial_schema")
     assert rev is not None
-    assert rev.down_revision == "20261123_0032"
+    assert rev.down_revision is None
 
     upgrade_sql_buf = StringIO()
     with redirect_stdout(upgrade_sql_buf):
-        command.upgrade(config, "20261123_0032:20261130_0033", sql=True)
+        command.upgrade(config, "head", sql=True)
     upgrade_sql = upgrade_sql_buf.getvalue()
 
     for old_table in (
-        "DROP TABLE memory_sources",
-        "DROP TABLE memory_jobs",
-        "DROP TABLE memory_scope_state",
-        "DROP TABLE memory_settings",
-        "DROP TABLE memories",
+        "CREATE TABLE memory_sources",
+        "CREATE TABLE memory_jobs",
+        "CREATE TABLE memory_scope_state",
+        "CREATE TABLE memory_settings",
+        "CREATE TABLE memories",
     ):
-        assert old_table in upgrade_sql
-    assert "DROP INDEX ix_runs_memory_owner_pending" in upgrade_sql
-    assert "DROP INDEX ix_runs_memory_pending" in upgrade_sql
-    assert "DROP CONSTRAINT ck_runs_memory_extraction_status" in upgrade_sql
+        assert old_table not in upgrade_sql
     for old_col in (
         "memory_project_id",
         "memory_input_message_ids",
@@ -702,19 +699,17 @@ def test_alembic_migration_20261130_0033_chain_upgrade_and_downgrade_sql() -> No
         "memory_extraction_batch_id",
         "memory_extraction_safe_error_code",
     ):
-        assert f"DROP COLUMN {old_col}" in upgrade_sql
+        assert old_col not in upgrade_sql
     assert "CREATE TABLE user_work_profiles" in upgrade_sql
     assert "CREATE TABLE user_memories" in upgrade_sql
     assert "CREATE INDEX ix_user_memories_user_updated ON user_memories" in upgrade_sql
 
     downgrade_sql_buf = StringIO()
     with redirect_stdout(downgrade_sql_buf):
-        command.downgrade(config, "20261130_0033:20261123_0032", sql=True)
+        command.downgrade(config, "0001_initial_schema:base", sql=True)
     downgrade_sql = downgrade_sql_buf.getvalue()
     assert "DROP TABLE user_memories" in downgrade_sql
     assert "DROP TABLE user_work_profiles" in downgrade_sql
-    assert "CREATE TABLE memories" in downgrade_sql
-    assert "CREATE TABLE memory_sources" in downgrade_sql
 
 
 def test_backend_src_and_pyproject_have_no_heavy_memory_or_local_hf_residuals() -> None:

@@ -16,6 +16,7 @@ from typing import Any, Self, cast
 
 import httpx2
 import pytest
+from access_support import make_test_access_policy
 from pg_unit_harness import create_pg_unit_db
 from PIL import Image
 from sqlalchemy import DateTime, event, func, literal, select
@@ -328,9 +329,6 @@ def test_search_parallelizes_keyword_and_semantic_branches_and_subqueries() -> N
                 return [[0.2] * 1024]
 
         class _ParallelRepo:
-            async def validate_search_scope(self, owner_id: str, base_ids: list[str]) -> None:
-                del owner_id, base_ids
-
             async def search_keyword(
                 self, owner_id: str, base_ids: list[str], tokens: tuple[str, ...], limit: int
             ) -> tuple[SearchHit, ...]:
@@ -399,6 +397,8 @@ def test_search_parallelizes_keyword_and_semantic_branches_and_subqueries() -> N
             cast(KnowledgeRepositoryPort, _ParallelRepo()),
             _Tokenizer(),
             _BlockingEmbedding(),
+            profile_id="bge-m3-default",
+            access_policy=make_test_access_policy(),
         )
         result = await service.search("owner", ["kb_1"], "差旅 报销")
         assert result.channels == ("keyword", "semantic")
@@ -414,6 +414,8 @@ def test_search_parallelizes_keyword_and_semantic_branches_and_subqueries() -> N
             cast(KnowledgeRepositoryPort, _ParallelRepo()),
             _Tokenizer(),
             _CancellingEmbedding(),
+            profile_id="bge-m3-default",
+            access_policy=make_test_access_policy(),
         )
         with pytest.raises(asyncio.CancelledError):
             await cancelling_service.search("owner", ["kb_1"], "差旅")
@@ -613,7 +615,6 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
                             source_text="旧版正文",
                             content_hash="1" * 64,
                             profile_id="prof_1",
-                            processing_config={},
                             state="ready",
                             warnings=[],
                             chunk_count=1,
@@ -628,7 +629,6 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
                             source_text="新版正文",
                             content_hash="2" * 64,
                             profile_id="prof_1",
-                            processing_config={},
                             state="processing",
                             warnings=[],
                             chunk_count=0,

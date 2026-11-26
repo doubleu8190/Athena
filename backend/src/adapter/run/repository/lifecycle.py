@@ -159,9 +159,8 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     skill_snapshot = await build_run_skill_snapshot(
                         session,
                         command.selected_skill_ids,
-                        owner_id=owner_id,
-                        fallback_selected_skill_ids=project_default_skill_ids,
                         snapshot=access_snapshot,
+                        fallback_selected_skill_ids=project_default_skill_ids,
                     )
                     input_file_ids = await self._validate_and_merge_input_file_ids(
                         session,
@@ -236,10 +235,8 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     session.add(row)
                     await session.flush()
-                    message_row = await session.get(ConversationMessageModel, message.id)
-                    if message_row is None:
-                        raise RuntimeError("run_trigger_message_missing")
-                    message_row.managed_run_id = command.run_id
+                    # conversation_messages.run_id 已随触发消息落库，
+                    # 与 runs.trigger_message_id 构成双向延迟复合外键。
                     await self._append_event(
                         session,
                         row,
@@ -335,13 +332,11 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         session,
                         command.answer_message,
                         locked_session=locked_session,
-                        managed_run_id=row.id,
                     )
                     await self._message_repo.append_execution_in_session(
                         session,
                         command.execution_message,
                         locked_session=locked_session,
-                        managed_run_id=row.id,
                     )
                     request.status = InputRequestStatus.ANSWERED.value
                     request.answer_message_id = answer.id
@@ -431,7 +426,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         ModelProfileVersionModel, row.model_config_version_id
                     )
                     db_now = await self._database_now(session)
-                    if not self._is_usable_profile(profile, require_key=False):
+                    if not self._is_usable_profile(profile):
                         row.status = RunStatus.FAILED.value
                         row.safe_error_code = "model_profile_unavailable"
                         row.finished_at = db_now
@@ -575,14 +570,12 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     session,
                     command.question_message,
                     locked_session=locked_session,
-                    managed_run_id=row.id,
                 )
                 for execution in command.execution_messages:
                     await self._message_repo.append_execution_in_session(
                         session,
                         execution,
                         locked_session=locked_session,
-                        managed_run_id=row.id,
                     )
                 request = RunInputRequestModel(
                     id=command.input_request_id,
@@ -715,7 +708,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                             session,
                             reply_exec,
                             locked_session=locked_session,
-                            managed_run_id=row.id,
                         )
                         assistant_message_id = persisted_reply.id
                     else:
@@ -723,7 +715,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                             session,
                             command.reply_message,
                             locked_session=locked_session,
-                            managed_run_id=row.id,
                         )
                         assistant_message_id = reply.id
                     row.status = RunStatus.COMPLETED.value
@@ -784,6 +775,14 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 locked_session = await session.get(SessionModel, row.session_id)
                 if locked_session is None or locked_session.deleted_time is not None:
                     raise SessionNotFoundError("session_not_found")
+                if command.report_message is not None and (
+                    command.report_message.session_id != row.session_id
+                    or command.report_message.owner_id != row.owner_id
+                    or command.report_message.run_id != row.id
+                    or command.report_message.role is not ConversationRole.ASSISTANT
+                ):
+                    # 校验失败报告消息严格归属当前 Run 与会话且角色为 assistant，防跨 Run 误绑定。
+                    raise RunStateError("run_report_message_invalid")
                 await self._settle_unfinished_tool_calls(
                     session,
                     locked_session,
@@ -798,7 +797,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         session,
                         command.report_message,
                         locked_session=locked_session,
-                        managed_run_id=row.id,
                     )
                     report_message_id = persisted_report.id
                 row.status = RunStatus.FAILED.value
@@ -1122,7 +1120,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     skill_snapshot = await build_run_skill_snapshot(
                         session,
                         selected_skill_ids,
-                        owner_id=owner_id,
                         snapshot=access_snapshot,
                     )
                     input_file_ids = await self._validate_and_merge_input_file_ids(
@@ -1635,6 +1632,15 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     ]
                 ] = []
                 for item in command.items:
+                    if (
+                        item.task_message.session_id != row.session_id
+                        or item.task_message.owner_id != row.owner_id
+                        or item.task_message.run_id != item.sub_run_id
+                        or item.task_message.thread_id != item.sub_run_id
+                        or item.task_message.role is not ExecutionRole.USER
+                    ):
+                        # 校验子任务草稿归属对应子 Run 及独立 thread，防污染父或兄弟 Run 上下文。
+                        raise RunStateError("subagent_task_message_invalid")
                     subagent_row = await session.scalar(
                         select(SubagentModel).where(
                             SubagentModel.id == item.subagent_profile_id,
@@ -1692,7 +1698,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     session,
                     command.call_message,
                     locked_session=locked_session,
-                    managed_run_id=row.id,
                 )
                 session.add(
                     RunToolCallModel(
@@ -1773,7 +1778,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         session,
                         item.task_message,
                         locked_session=locked_session,
-                        managed_run_id=child.id,
                     )
                     await self._append_event(
                         session,

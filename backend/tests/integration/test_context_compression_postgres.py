@@ -52,6 +52,26 @@ from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
+_MODEL_SNAPSHOT: dict[str, object] = {
+    "id": "llmprof_main_pg",
+    "name": "main test",
+    "protocol": "chat_completions",
+    "base_url": "https://llm.example.test/v1",
+    "model": "main-model",
+    "context_window_tokens": 2048,
+    "tokenizer_encoding": "o200k_base",
+    "supports_stream": True,
+    "supports_tools": True,
+    "supports_parallel_tool_calls": False,
+    "max_output_tokens": 128,
+    "request_timeout_seconds": 10,
+    "execution_timeout_seconds": 30,
+    "max_concurrency": 1,
+    "temperature": None,
+    "scenario_label": None,
+    "supports_vision": False,
+    "version": 1,
+}
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ATHENA_TEST_DATABASE_URL is required"),
@@ -130,6 +150,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                             temperature=None,
                             enabled=True,
                             created_at=now,
+                            updated_at=now,
                         ),
                         ModelProfileVersionModel(
                             id="llmprof_main_pg",
@@ -149,6 +170,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                             temperature=None,
                             enabled=True,
                             created_at=now,
+                            updated_at=now,
                         ),
                         ConversationMessageModel(
                             id="msg_compression_history",
@@ -158,8 +180,8 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                             sequence=1,
                             parts=[{"type": "text", "text": "history"}],
                             reply_to_message_id=None,
-                            run_id=None,
-                            managed_run_id=None,
+                            run_id="run_compression_history",
+                            context_turn_id="msg_compression_history",
                             client_message_id=None,
                             created_at=now,
                             completed_at=now,
@@ -174,7 +196,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                             parts=[{"type": "text", "text": "trigger"}],
                             reply_to_message_id=None,
                             run_id="run_compression_pg",
-                            managed_run_id="run_compression_pg",
+                            context_turn_id="msg_compression_trigger",
                             client_message_id=None,
                             created_at=now,
                             completed_at=now,
@@ -187,13 +209,11 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                     CompressionPolicyVersionModel(
                         id="cmpol_compression_pg",
                         compression_model_profile_id="llmprof_compression_pg",
-                        trigger_ratio=0.8,
                         trigger_tokens=262_144,
                         recent_ratio=0.2,
                         recent_token_cap=32_768,
                         summary_ratio=0.1,
                         summary_token_cap=8_192,
-                        prompt_template_version="context-summary-v1",
                         created_at=now,
                     )
                 )
@@ -205,35 +225,61 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                         ),
                     ]
                 )
-                session.add(
-                    RunModel(
-                        id="run_compression_pg",
-                        session_id="ses_compression_pg",
-                        owner_id="usr_compression_pg",
-                        status="running",
-                        trigger_message_id="msg_compression_trigger",
-                        context_cutoff_sequence=2,
-                        retry_of_run_id=None,
-                        model_config_version_id="llmprof_compression_pg",
-                        compression_policy_version_id="cmpol_compression_pg",
-                        main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
-                        compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
-                        prompt_template_version="run-v2",
-                        event_sequence=0,
-                        execution_epoch=1,
-                        worker_id="worker_compression_pg",
-                        lease_expires_at=now + timedelta(minutes=2),
-                        execution_started_at=now,
-                        execution_deadline_at=now + timedelta(minutes=2),
-                        queued_at=now,
-                        first_started_at=now,
-                        finished_at=None,
-                        created_at=now,
-                        updated_at=now,
-                        cancel_requested_at=None,
-                        safe_error_code=None,
-                        usage={},
-                    )
+                session.add_all(
+                    [
+                        RunModel(
+                            id="run_compression_history",
+                            session_id="ses_compression_pg",
+                            owner_id="usr_compression_pg",
+                            status="completed",
+                            trigger_message_id="msg_compression_history",
+                            context_cutoff_sequence=1,
+                            retry_of_run_id=None,
+                            model_config_version_id="llmprof_main_pg",
+                            model_snapshot_json=dict(_MODEL_SNAPSHOT),
+                            compression_policy_version_id=None,
+                            main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                            compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                            prompt_template_version="run-v2",
+                            event_sequence=0,
+                            execution_epoch=0,
+                            queued_at=now,
+                            created_at=now,
+                            updated_at=now,
+                            finished_at=now,
+                            usage={},
+                            depth=0,
+                        ),
+                        RunModel(
+                            id="run_compression_pg",
+                            session_id="ses_compression_pg",
+                            owner_id="usr_compression_pg",
+                            status="running",
+                            trigger_message_id="msg_compression_trigger",
+                            context_cutoff_sequence=2,
+                            retry_of_run_id=None,
+                            model_config_version_id="llmprof_compression_pg",
+                            model_snapshot_json=dict(_MODEL_SNAPSHOT),
+                            compression_policy_version_id="cmpol_compression_pg",
+                            main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
+                            compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
+                            prompt_template_version="run-v2",
+                            event_sequence=0,
+                            execution_epoch=1,
+                            worker_id="worker_compression_pg",
+                            lease_expires_at=now + timedelta(minutes=2),
+                            execution_started_at=now,
+                            execution_deadline_at=now + timedelta(minutes=2),
+                            queued_at=now,
+                            first_started_at=now,
+                            finished_at=None,
+                            created_at=now,
+                            updated_at=now,
+                            cancel_requested_at=None,
+                            safe_error_code=None,
+                            usage={},
+                        ),
+                    ]
                 )
 
             repository = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
@@ -254,6 +300,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                         parts=(TextPart("snapshot"),),
                         reply_to_message_id=None,
                         run_id="run_snapshot_pg",
+                        context_turn_id="msg_snapshot_pg",
                         client_message_id=None,
                         created_at=now,
                         completed_at=now,
@@ -274,7 +321,6 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                 text="verified history summary",
                 policy_version_id="cmpol_compression_pg",
                 compression_model_version_id="llmprof_compression_pg",
-                prompt_version="context-summary-v1",
                 created_at=now,
                 batch_count=1,
             )
@@ -367,7 +413,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                 )
             )
             assert rejected_usage is None
-            # 升级前创建的消息没有 context_turn_id；重试 Run 关联必须仍恢复原触发轮次。
+            # 重试 Run 的澄清回答复用原触发消息的 context_turn_id，保持同轮次分组不拆开。
             async with factory() as session, session.begin():
                 original = await session.get(RunModel, "run_compression_pg")
                 assert original is not None
@@ -376,9 +422,6 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                 original.finished_at = datetime.now(UTC)
                 original.worker_id = None
                 original.lease_expires_at = None
-                trigger = await session.get(ConversationMessageModel, "msg_compression_trigger")
-                assert trigger is not None
-                trigger.context_turn_id = None
                 session.add(
                     ConversationMessageModel(
                         id="msg_legacy_retry_answer",
@@ -389,8 +432,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                         parts=[{"type": "text", "text": "clarification answer"}],
                         reply_to_message_id=None,
                         run_id="run_legacy_retry_pg",
-                        managed_run_id="run_legacy_retry_pg",
-                        context_turn_id=None,
+                        context_turn_id="msg_compression_trigger",
                         client_message_id=None,
                         created_at=datetime.now(UTC),
                         completed_at=datetime.now(UTC),
@@ -407,6 +449,7 @@ def test_summary_and_completed_event_commit_atomically_and_require_live_lease() 
                         context_cutoff_sequence=3,
                         retry_of_run_id="run_compression_pg",
                         model_config_version_id="llmprof_main_pg",
+                        model_snapshot_json=dict(_MODEL_SNAPSHOT),
                         compression_policy_version_id="cmpol_compression_pg",
                         main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                         compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
@@ -491,6 +534,7 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
                         temperature=None,
                         enabled=True,
                         created_at=now,
+                        updated_at=now,
                     )
                 )
                 session.add(
@@ -516,8 +560,7 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
                         parts=[{"type": "text", "text": "trigger"}],
                         reply_to_message_id=None,
                         run_id="run_context_report",
-                        managed_run_id="run_context_report",
-                        context_turn_id=None,
+                        context_turn_id="msg_context_report_trigger",
                         client_message_id=None,
                         created_at=now,
                         completed_at=now,
@@ -534,6 +577,7 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_context_report",
+                        model_snapshot_json=dict(_MODEL_SNAPSHOT),
                         compression_policy_version_id=None,
                         main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                         compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
@@ -645,8 +689,7 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
                         parts=[{"type": "text", "text": "cancel race"}],
                         reply_to_message_id=None,
                         run_id="run_context_report_cancel",
-                        managed_run_id="run_context_report_cancel",
-                        context_turn_id=None,
+                        context_turn_id="msg_context_report_cancel_trigger",
                         client_message_id=None,
                         created_at=now + timedelta(seconds=2),
                         completed_at=now + timedelta(seconds=2),
@@ -666,6 +709,7 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
                         context_cutoff_sequence=3,
                         retry_of_run_id=None,
                         model_config_version_id="llmprof_context_report",
+                        model_snapshot_json=dict(_MODEL_SNAPSHOT),
                         compression_policy_version_id=None,
                         main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                         compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],
@@ -740,8 +784,8 @@ def test_context_report_and_failed_state_are_atomic_idempotent_and_cancel_aware(
     asyncio.run(scenario())
 
 
-def test_0024_upgrades_old_policy_and_run_references_without_rewriting() -> None:
-    """既有浮点策略及其 Run/current 引用保留，新格式字段为空且不被静默换算。"""
+def test_compression_policy_enforces_non_null_token_caps_and_omits_legacy_columns() -> None:
+    """基线 Schema 强制压缩策略 token 上限非空，并已移除 trigger_ratio 与模板版本旧列。"""
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is required")
@@ -749,179 +793,74 @@ def test_0024_upgrades_old_policy_and_run_references_without_rewriting() -> None
     async def scenario() -> None:
         async with isolated_postgres_schema(
             database_url,
-            prefix="athena_context_policy_upgrade",
-            revision="20261122_0023",
+            prefix="athena_context_policy_strict",
         ) as db:
             engine = db.engine
-            now = datetime.now(UTC)
-            async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO users (
-                            id, email, password_hash, display_name, status, role,
-                            created_at, updated_at, deleted_time
-                        ) VALUES (
-                            'usr_policy_upgrade', 'policy-upgrade@example.test', 'unused',
-                            NULL, 'active', 'user', :now, :now, NULL
-                        )
-                        """
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO llm_model_profile_versions (
-                            id, name, protocol, base_url, model, api_key_ciphertext,
-                            api_key_nonce, api_key_key_version, context_window_tokens,
-                            tokenizer_encoding, supports_stream, supports_tools,
-                            supports_parallel_tool_calls, max_output_tokens,
-                            request_timeout_seconds, execution_timeout_seconds,
-                            max_concurrency, temperature, enabled, created_at
-                        ) VALUES (
-                            'llmprof_policy_upgrade', 'legacy model', 'chat_completions',
-                            'https://llm.example.test/v1', 'legacy-model', NULL, NULL, NULL,
-                            8192, 'o200k_base', true, true, false, 256, 10, 30, 1,
-                            NULL, true, :now
-                        )
-                        """
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO sessions (
-                            id, owner_id, title, project_id, last_message_sequence,
-                            created_at, updated_at, deleted_time
-                        ) VALUES (
-                            'ses_policy_upgrade', 'usr_policy_upgrade', NULL, NULL, 1,
-                            :now, :now, NULL
-                        )
-                        """
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO conversation_messages (
-                            id, session_id, role, status, sequence, parts,
-                            reply_to_message_id, run_id, managed_run_id, context_turn_id,
-                            client_message_id, created_at, completed_at, metadata
-                        ) VALUES (
-                            'msg_policy_upgrade_trigger', 'ses_policy_upgrade', 'user',
-                            'completed', 1, '[{"type":"text","text":"trigger"}]'::jsonb,
-                            NULL, NULL, NULL, NULL, NULL, :now, :now, '{}'::jsonb
-                        )
-                        """
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO llm_compression_policy_versions (
-                            id, compression_model_profile_id, trigger_ratio,
-                            recent_ratio, summary_ratio, prompt_template_version, created_at
-                        ) VALUES (
-                            'cmpol_legacy_upgrade', 'llmprof_policy_upgrade', 0.75,
-                            0.2, 0.1, 'context-summary-v1', :now
-                        )
-                        """
-                    ),
-                    {"now": now},
-                )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO llm_current_compression_policy (
-                            singleton_id, policy_version_id
-                        ) VALUES (1, 'cmpol_legacy_upgrade')
-                        """
-                    )
-                )
-                await connection.execute(
-                    text(
-                        """
-                        INSERT INTO runs (
-                            id, session_id, owner_id, status, trigger_message_id,
-                            context_cutoff_sequence, retry_of_run_id,
-                            model_config_version_id, main_prompt_version_id,
-                            compression_prompt_version_id, compression_policy_version_id,
-                            prompt_template_version, event_sequence, execution_epoch,
-                            queued_at, created_at, updated_at, usage
-                        ) VALUES (
-                            'run_policy_upgrade', 'ses_policy_upgrade',
-                            'usr_policy_upgrade', 'failed', 'msg_policy_upgrade_trigger',
-                            1, NULL, 'llmprof_policy_upgrade', :main_prompt_id,
-                            :compression_prompt_id, 'cmpol_legacy_upgrade', 'run-v2',
-                            1, 1, :now, :now, :now, '{}'::jsonb
-                        )
-                        """
-                    ),
-                    {
-                        "now": now,
-                        "main_prompt_id": INITIAL_SYSTEM_PROMPT_IDS["main"],
-                        "compression_prompt_id": INITIAL_SYSTEM_PROMPT_IDS["compression"],
-                    },
-                )
-
-            await db.upgrade_to("head")
             factory = db.session_factory
+            now = datetime.now(UTC)
             async with engine.connect() as connection:
-                policy_row = (
+                columns = set(
                     (
-                        await connection.execute(
+                        await connection.scalars(
                             text(
-                                """
-                            SELECT trigger_ratio, trigger_tokens, recent_ratio,
-                                   recent_token_cap, summary_ratio, summary_token_cap
-                            FROM llm_compression_policy_versions
-                            WHERE id = 'cmpol_legacy_upgrade'
-                            """
+                                "SELECT column_name FROM information_schema.columns "
+                                "WHERE table_schema = current_schema() "
+                                "AND table_name = 'llm_compression_policy_versions'"
                             )
                         )
-                    )
-                    .mappings()
-                    .one()
+                    ).all()
                 )
-                current_policy_id = await connection.scalar(
-                    text(
-                        """
-                        SELECT policy_version_id
-                        FROM llm_current_compression_policy
-                        WHERE singleton_id = 1
-                        """
+            assert "trigger_ratio" not in columns
+            assert "prompt_template_version" not in columns
+            assert {"trigger_tokens", "recent_token_cap", "summary_token_cap"}.issubset(columns)
+
+            async with factory() as session, session.begin():
+                session.add(
+                    ModelProfileVersionModel(
+                        id="llmprof_policy_strict",
+                        name="strict model",
+                        protocol="chat_completions",
+                        base_url="https://llm.example.test/v1",
+                        model="strict-model",
+                        **encrypted_llm_key_fields("llmprof_policy_strict"),
+                        context_window_tokens=8192,
+                        tokenizer_encoding="o200k_base",
+                        supports_stream=True,
+                        supports_tools=True,
+                        max_output_tokens=256,
+                        request_timeout_seconds=10,
+                        execution_timeout_seconds=30,
+                        max_concurrency=1,
+                        temperature=None,
+                        enabled=True,
+                        created_at=now,
+                        updated_at=now,
                     )
                 )
-                run_policy_id, report_message_id = (
+
+            with pytest.raises(IntegrityError):
+                async with engine.begin() as connection:
                     await connection.execute(
                         text(
                             """
-                            SELECT compression_policy_version_id, report_message_id
-                            FROM runs
-                            WHERE id = 'run_policy_upgrade'
+                            INSERT INTO llm_compression_policy_versions (
+                                id, compression_model_profile_id, trigger_tokens,
+                                recent_ratio, recent_token_cap, summary_ratio,
+                                summary_token_cap, created_at
+                            ) VALUES (
+                                'cmpol_null_cap', 'llmprof_policy_strict', NULL,
+                                0.2, 1024, 0.1, 512, :now
+                            )
                             """
-                        )
+                        ),
+                        {"now": now},
                     )
-                ).one()
-            assert policy_row["trigger_ratio"] == pytest.approx(0.75)
-            assert policy_row["trigger_tokens"] is None
-            assert policy_row["recent_ratio"] == pytest.approx(0.2)
-            assert policy_row["recent_token_cap"] is None
-            assert policy_row["summary_ratio"] == pytest.approx(0.1)
-            assert policy_row["summary_token_cap"] is None
-            assert current_policy_id == "cmpol_legacy_upgrade"
-            assert run_policy_id == "cmpol_legacy_upgrade"
-            assert report_message_id is None
+
             repository = SqlAlchemyModelProfileRepository(
                 factory,
                 McpSecretCipher(bytes(range(32))),
             )
             assert await repository.get_current_compression_policy() is None
-            assert await repository.get_compression_policy("cmpol_legacy_upgrade") is None
 
     asyncio.run(scenario())
 
@@ -971,6 +910,7 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
                         temperature=None,
                         enabled=True,
                         created_at=now,
+                        updated_at=now,
                     )
                 )
                 session.add(
@@ -997,8 +937,7 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
                             parts=[{"type": "text", "text": "trigger"}],
                             reply_to_message_id=None,
                             run_id="run_report_rollback",
-                            managed_run_id="run_report_rollback",
-                            context_turn_id=None,
+                            context_turn_id="msg_report_rollback_trigger",
                             client_message_id=None,
                             created_at=now,
                             completed_at=now,
@@ -1012,9 +951,8 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
                             sequence=2,
                             parts=[{"type": "text", "text": "already present"}],
                             reply_to_message_id="msg_report_rollback_trigger",
-                            run_id=None,
-                            managed_run_id=None,
-                            context_turn_id=None,
+                            run_id="run_report_rollback",
+                            context_turn_id="msg_report_rollback_trigger",
                             client_message_id=None,
                             created_at=now,
                             completed_at=now,
@@ -1029,6 +967,7 @@ def test_failed_report_insert_rolls_back_run_usage_and_events() -> None:
                             context_cutoff_sequence=1,
                             retry_of_run_id=None,
                             model_config_version_id="llmprof_report_rollback",
+                            model_snapshot_json=dict(_MODEL_SNAPSHOT),
                             compression_policy_version_id=None,
                             main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["main"],
                             compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS["compression"],

@@ -66,10 +66,7 @@ Vite 默认从 `http://localhost:5173` 提供页面，并把 `/api` 代理到
 | `/chat/new?project=<id>` | 继承指定项目的本地新对话草稿 |
 | `/chat/:sessionId` | 完整对话工作台：历史消息、Run、SSE、审批、补充输入与轨迹 |
 | `/projects` | 真实项目列表、空态和新建入口 |
-| `/projects/:projectId/overview` | 项目真实时间和 Session 概览 |
-| `/projects/:projectId/sessions` | 真实分页 Session、改名和删除 |
-| `/projects/:projectId/knowledge` | 真实项目知识库关联、解除和 20 个上限 |
-| `/projects/:projectId/settings` | 项目改名、时间和删除边界 |
+| `/projects/:projectId` | 单页项目工作区：左侧分页 Session，右侧项目指令、默认技能、知识库关联与项目设置 |
 | `/knowledge` | 真实知识库分页、创建、改名和删除 |
 | `/knowledge/:baseId` | 文档、版本、来源下载与检索测试 |
 | `/admin` | 重定向到模型管理 |
@@ -77,8 +74,7 @@ Vite 默认从 `http://localhost:5173` 提供页面，并把 `/api` 代理到
 | `/admin/mcp` | MCP Server 真实目录、创建和完整替换编辑 |
 | `/admin/tools` | 已注册 MCP 工具的逐项审批策略 |
 
-未知项目 Tab 会回到 `overview`；项目不存在、已删除或不属于当前用户时显示
-明确的不可访问状态。Session 分页使用 `?page=`，刷新后保持当前页。
+项目不存在、已删除或不属于当前用户时显示明确的不可访问状态。Session 分页使用 `?page=`，刷新后保持当前页。
 
 ## 对话与 Run
 

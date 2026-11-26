@@ -1283,7 +1283,7 @@ describe("消息流原图灯箱、助手交付产物在线预览、文件抽屉�
             },
           ],
           role: "user",
-          run_id: null,
+          run_id: completedRun.id,
           sequence: 1,
           session_id: SESSION.id,
         }),
@@ -1291,7 +1291,6 @@ describe("消息流原图灯箱、助手交付产物在线预览、文件抽屉�
           id: "msg-assistant-artifacts",
           parts: [
             {
-              artifact_id: null,
               artifacts: [
                 makeArtifact({
                   file_id: artifactMd.id,

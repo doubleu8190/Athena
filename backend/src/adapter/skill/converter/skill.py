@@ -92,8 +92,7 @@ def skill_execution_to_domain(row: SkillExecutionModel) -> SkillExecutionRecord:
         error_code=row.error_code,
         cleanup_error_code=row.cleanup_error_code,
         result_artifacts=tuple(
-            SkillExecutionArtifact.model_validate(item)
-            for item in row.result_artifacts
+            SkillExecutionArtifact.model_validate(item) for item in row.result_artifacts
         ),
         created_at=as_utc(row.created_at),
         finished_at=None if row.finished_at is None else as_utc(row.finished_at),

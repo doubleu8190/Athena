@@ -19,10 +19,12 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import KnowledgeJobModel, KnowledgeSourceModel
 from adapter.knowledge.repository import KnowledgeRepository
 from adapter.knowledge.storage import MinioOriginalStore, MinioStorageConfig
+from app.access import AccessPolicyService
 from app.knowledge.service import KnowledgeService
 from app.knowledge.worker import KnowledgeWorker
 from domain.knowledge.model import (
@@ -256,11 +258,13 @@ def test_joint_pg_minio_ambiguous_commit_keeps_object_and_replays_idempotently()
                 await _seed_base(sessions, repository, owner=owner, base_id=base_id)
                 recording = _RecordingStore(store)
                 ambiguous_repository = _CommitThenRaiseRepository(repository)
+                access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(sessions))
                 service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, ambiguous_repository),
                     _WhitespaceTokenizer(),
                     originals=recording,
                     profile_id="profile-v1",
+                    access_policy=access_policy,
                 )
                 content = f"ambiguous commit {token_hex(8)}".encode()
                 with pytest.raises(ConnectionError, match="lost response"):
@@ -293,6 +297,7 @@ def test_joint_pg_minio_ambiguous_commit_keeps_object_and_replays_idempotently()
                     _WhitespaceTokenizer(),
                     originals=recording,
                     profile_id="profile-v1",
+                    access_policy=access_policy,
                 )
                 replay = await replay_service.create_file_document(
                     owner,
@@ -336,6 +341,7 @@ def test_joint_pg_minio_cleanup_survives_transient_delete_failure() -> None:
                     _WhitespaceTokenizer(),
                     originals=recording,
                     profile_id="profile-v1",
+                    access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(sessions)),
                 )
                 content = f"cleanup retry {token_hex(8)}".encode()
                 document, version_id = await service.create_file_document(
@@ -433,6 +439,7 @@ def test_joint_pg_minio_orphan_scan_preserves_source_references() -> None:
                     _WhitespaceTokenizer(),
                     originals=recording,
                     profile_id="profile-v1",
+                    access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(sessions)),
                 )
                 source_content = f"referenced source {token_hex(8)}".encode()
                 document, version_id = await service.create_file_document(

@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from access_support import make_test_access_policy
 from mcp import types
 from system_prompt_support import (
     TEST_COMPRESSION_PROMPT_ID,
@@ -72,6 +73,7 @@ from domain.run.model import (
     Run,
     RunInputFiles,
     RunLease,
+    RunModelSnapshot,
     RunStatus,
     RunUsage,
 )
@@ -127,7 +129,6 @@ def _runtime_profile(*, supports_parallel_tool_calls: bool = False) -> RuntimeMo
             protocol="chat_completions",
             base_url="https://llm.example/v1",
             model="tools-model",
-            has_api_key=True,
             context_window_tokens=8192,
             tokenizer_encoding="o200k_base",
             supports_stream=True,
@@ -139,6 +140,7 @@ def _runtime_profile(*, supports_parallel_tool_calls: bool = False) -> RuntimeMo
             temperature=None,
             enabled=True,
             created_at=NOW,
+            updated_at=NOW,
             supports_parallel_tool_calls=supports_parallel_tool_calls,
         ),
         api_key="test-secret",
@@ -212,6 +214,22 @@ def _lease(
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile-tools",
+        model_snapshot=RunModelSnapshot(
+            id="profile-tools",
+            name="tools",
+            protocol="chat_completions",
+            base_url="https://llm.example/v1",
+            model="tools-model",
+            context_window_tokens=8192,
+            tokenizer_encoding="o200k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=256,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=60,
+            max_concurrency=1,
+        ),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -607,8 +625,10 @@ class _DeliverySessions:
 
 
 class _DeliveryMcpCatalog:
-    async def list_runtime_tools(self, *, limit: int) -> tuple[RuntimeToolDefinition, ...]:
-        del limit
+    async def list_readable_runtime_tools(
+        self, snapshot: Any, *, limit: int = 201
+    ) -> tuple[RuntimeToolDefinition, ...]:
+        del snapshot, limit
         return ()
 
     async def get_call_target(
@@ -706,6 +726,7 @@ def _delivery_runtime(
         mcp_executor=mcp_executor,
         knowledge=None,
         project_knowledge=None,
+        access_policy=make_test_access_policy(),
     )
 
 
@@ -2046,7 +2067,6 @@ def test_hard_window_stop_uses_hard_window_reason(
             recent_token_cap=32_768,
             summary_ratio=0.1,
             summary_token_cap=8_192,
-            prompt_template_version="context-summary-v1",
             created_at=NOW,
         )
         run = replace(lease.run, compression_policy_version_id=policy.id)
@@ -2305,7 +2325,6 @@ def test_context_safety_gate_covers_exhausted_compression_slots(
             recent_token_cap=32_768,
             summary_ratio=0.1,
             summary_token_cap=8_192,
-            prompt_template_version="context-summary-v1",
             created_at=NOW,
         )
         executor = RunExecutor(
@@ -2371,7 +2390,6 @@ def test_oversized_existing_summary_without_new_history_stops_at_safety_line(
             recent_token_cap=32_768,
             summary_ratio=0.1,
             summary_token_cap=8_192,
-            prompt_template_version="context-summary-v1",
             created_at=NOW,
         )
         executor = RunExecutor(
@@ -2482,6 +2500,7 @@ def test_safe_stop_report_lists_artifact_filenames_and_redacts_sensitive_payload
             ),
             reply_to_message_id=None,
             run_id=lease.run.id,
+            context_turn_id=lease.run.trigger_message_id,
             client_message_id=None,
             created_at=NOW,
             completed_at=NOW,

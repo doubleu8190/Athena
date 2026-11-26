@@ -53,19 +53,19 @@ class UserResponse(BaseModel):
     display_name: str | None
     created_at: datetime
     role: UserRole
-    auth_provider: AuthProvider = AuthProvider.LOCAL
-    employee_no: str | None = None
-    job_title: str | None = None
-    avatar_url: str | None = None
-    departments: list[UserDepartmentItem] = Field(default_factory=list)
-    managed_department_ids: list[str] = Field(default_factory=list)
+    auth_provider: AuthProvider
+    employee_no: str | None
+    job_title: str | None
+    avatar_url: str | None
+    departments: list[UserDepartmentItem]
+    managed_department_ids: list[str]
 
 
 class AuthProvidersResponse(BaseModel):
     """当前部署启用的登录入口能力声明。"""
 
     feishu_enabled: bool
-    local_login_enabled: bool = True
+    local_login_enabled: bool
     mock_enabled: bool
 
 
@@ -76,11 +76,11 @@ class MockUserResponse(BaseModel):
     display_name: str | None
     email: str | None
     role: UserRole
-    employee_no: str | None = None
-    job_title: str | None = None
-    avatar_url: str | None = None
-    departments: list[UserDepartmentItem] = Field(default_factory=list)
-    managed_department_ids: list[str] = Field(default_factory=list)
+    employee_no: str | None
+    job_title: str | None
+    avatar_url: str | None
+    departments: list[UserDepartmentItem]
+    managed_department_ids: list[str]
 
 
 class MockUserListResponse(BaseModel):

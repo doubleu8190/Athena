@@ -19,7 +19,7 @@ class ConversationMessageResult:
     sequence: int
     parts: tuple[MessagePart, ...]
     reply_to_message_id: str | None
-    run_id: str | None
+    run_id: str
     created_at: datetime
     completed_at: datetime | None
 

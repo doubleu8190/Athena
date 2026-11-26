@@ -246,20 +246,18 @@ def test_api_dependencies_wire_shared_redis_auth_rate_limiters_and_close_once(
     assert close_calls == 1
 
 
-def test_build_mcp_executor_rejects_invalid_private_host_allowlist(
+def test_build_mcp_executor_rejects_invalid_stdio_base_env_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS", "bad host")
-    monkeypatch.delenv("ATHENA_MCP_STDIO_BASE_ENV_NAMES", raising=False)
+    monkeypatch.setenv("ATHENA_MCP_STDIO_BASE_ENV_NAMES", "NOT-AN-ENV")
 
-    with pytest.raises(ValueError, match="ATHENA_MCP_ALLOWED_PRIVATE_HOSTS_invalid"):
+    with pytest.raises(ValueError, match="ATHENA_MCP_STDIO_BASE_ENV_NAMES_invalid"):
         bootstrap_tool.build_mcp_executor()
 
 
-def test_build_mcp_executor_accepts_valid_allowlist_and_environment_names(
+def test_build_mcp_executor_accepts_valid_environment_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS", "mcp.internal,10.0.0.8")
     monkeypatch.setenv("ATHENA_MCP_STDIO_BASE_ENV_NAMES", "GOOD_NAME")
     monkeypatch.setenv("GOOD_NAME", "value")
 
@@ -300,7 +298,6 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
         "ATHENA_REDIS_URL": "redis://cache.internal:6379/1",
         "ATHENA_COOKIE_SECURE": "true",
         "ATHENA_PUBLIC_ORIGIN": "https://athena.example.com",
-        "ATHENA_MCP_ALLOWED_PRIVATE_HOSTS": "mcp.internal,10.0.0.5",
         "ATHENA_MCP_STDIO_BASE_ENV_NAMES": "HOME,PATH",
         "ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE": "0.42",
         "ATHENA_KNOWLEDGE_OCR_CACHE_ROOT": "/var/cache/ocr",
@@ -330,7 +327,8 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
     assert redis.url == "redis://cache.internal:6379/1"
     assert auth.cookie_secure is True
     assert auth.public_origin == "https://athena.example.com"
-    assert mcp.allowed_private_hosts == frozenset({"mcp.internal", "10.0.0.5"})
+    assert not hasattr(mcp, "allowed_private_hosts")
+    assert mcp.stdio_base_env_names == frozenset({"HOME", "PATH"})
     assert not hasattr(knowledge, "enabled")
     assert knowledge.semantic_min_score == pytest.approx(0.42)
     assert knowledge.ocr_cache_root == "/var/cache/ocr"
@@ -348,15 +346,8 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
     with pytest.raises(ValidationError):
         database.pool_size = 99
 
-    # LOG_LEVEL 兼容回退仅在 allow_legacy_log_level=True 时生效。
+    # 统一只读取 ATHENA_LOG_LEVEL，忽略已下线的 LOG_LEVEL。
     assert LoggingSettings.from_environment({"LOG_LEVEL": "debug"}).level == "INFO"
-    assert (
-        LoggingSettings.from_environment(
-            {"LOG_LEVEL": "debug"},
-            allow_legacy_log_level=True,
-        ).level
-        == "DEBUG"
-    )
 
     with pytest.raises(ValueError, match="athena_knowledge_semantic_min_score_invalid"):
         KnowledgeSettings.from_environment({"ATHENA_KNOWLEDGE_SEMANTIC_MIN_SCORE": "nan"})

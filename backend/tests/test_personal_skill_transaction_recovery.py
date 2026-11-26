@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 
 from app.skill.execution_service import SkillExecutionService
 from app.skill.service import SkillService
@@ -178,6 +179,7 @@ def test_personal_unknown_commit_replay_works_with_no_object_store() -> None:
         _AuthReader(),
         id_factory=lambda _: "skillver_prepared",
         clock=lambda: NOW,
+        access_policy=make_test_access_policy(),
     )
 
     details = asyncio.run(
@@ -207,6 +209,7 @@ def test_personal_unknown_commit_replay_propagates_deleted_not_found() -> None:
         _AuthReader(),
         id_factory=lambda _: "skillver_prepared",
         clock=lambda: NOW,
+        access_policy=make_test_access_policy(),
     )
 
     with pytest.raises(SkillNotFoundError):
@@ -314,7 +317,13 @@ def test_markdown_read_resource_reads_from_db_without_minio_and_rejects_other_pa
     objects = _StrictUnusedObjects()
     # 同时验证 object_store 不可用或为 None 两种情况均正常读取 SKILL.md。
     for store in (cast(Any, objects), None):
-        service = SkillService(cast(Any, _VersionRepo()), store, _AuthReader(), clock=lambda: NOW)
+        service = SkillService(
+            cast(Any, _VersionRepo()),
+            store,
+            _AuthReader(),
+            clock=lambda: NOW,
+            access_policy=make_test_access_policy(),
+        )
         offset = 0
         chunks: list[str] = []
         while True:
@@ -419,6 +428,7 @@ def test_personal_skill_script_target_is_always_rejected() -> None:
         None,
         _AuthReader(),
         clock=lambda: NOW,
+        access_policy=make_test_access_policy(),
     )
     with pytest.raises(SkillNotFoundError, match="skill_script_not_registered"):
         asyncio.run(
@@ -533,6 +543,7 @@ def _service(repository: _Repository, objects: _StrictUnusedObjects) -> SkillSer
         _AuthReader(),
         id_factory=lambda prefix: next(values),
         clock=lambda: NOW,
+        access_policy=make_test_access_policy(),
     )
 
 

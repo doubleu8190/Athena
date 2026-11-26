@@ -47,7 +47,7 @@ from domain.mcp import (
     McpServerPage,
     StreamableHttpConfig,
 )
-from domain.tool import AdminToolDefinition, PublicToolDefinition, ToolPage
+from domain.tool import AdminToolDefinition, PublicToolDefinition, ToolMetadataPatch, ToolPage
 from main import create_app
 
 
@@ -88,9 +88,7 @@ def test_server_update_requires_config_version() -> None:
     [McpServerCreateRequest, McpServerUpdateRequest],
 )
 @pytest.mark.parametrize("args", ["missing", None])
-def test_stdio_request_requires_explicit_args_array(
-    request_type: object, args: object
-) -> None:
+def test_stdio_request_requires_explicit_args_array(request_type: object, args: object) -> None:
     payload: dict[str, object] = {
         "name": "x",
         "transport": "stdio",
@@ -205,7 +203,7 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
     manager.list_server_tools = AsyncMock(return_value=ToolPage((tool,), 1))  # type: ignore[attr-defined]
     manager.list_admin_tools = AsyncMock(return_value=ToolPage((tool,), 1))  # type: ignore[attr-defined]
     manager.get_admin_tool = AsyncMock(return_value=tool)  # type: ignore[attr-defined]
-    manager.update_tool_approval_policy = AsyncMock(  # type: ignore[attr-defined]
+    manager.update_tool_metadata = AsyncMock(  # type: ignore[attr-defined]
         return_value=replace(tool, requires_approval=True)
     )
     auth_service = make_auth_service()
@@ -286,8 +284,8 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
     assert invalid_policy.status_code == 422
     assert updated_policy.status_code == 200
     assert updated_policy.json()["requires_approval"] is True
-    manager.update_tool_approval_policy.assert_awaited_once_with(  # type: ignore[attr-defined]
-        ANY, tool.tool_id, True
+    manager.update_tool_metadata.assert_awaited_once_with(  # type: ignore[attr-defined]
+        ANY, tool.tool_id, ToolMetadataPatch(requires_approval=True)
     )
     assert deleted.status_code == 204
     assert public_tools.status_code == 200
@@ -546,7 +544,6 @@ def test_database_default_assembly_reuses_auth_repository(monkeypatch: pytest.Mo
     monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-test")
     monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
     monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
-    monkeypatch.delenv("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS", raising=False)
     monkeypatch.delenv("ATHENA_MCP_STDIO_BASE_ENV_NAMES", raising=False)
     monkeypatch.setattr(minio, "Minio", _FakeMinio)
     app = create_app()
@@ -561,8 +558,6 @@ def test_database_default_assembly_reuses_auth_repository(monkeypatch: pytest.Mo
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS", "mcp.internal,,other.internal"),
-        ("ATHENA_MCP_ALLOWED_PRIVATE_HOSTS", "bad host"),
         ("ATHENA_MCP_STDIO_BASE_ENV_NAMES", "GOOD_NAME,,OTHER_NAME"),
         ("ATHENA_MCP_STDIO_BASE_ENV_NAMES", "NOT-AN-ENV"),
     ],

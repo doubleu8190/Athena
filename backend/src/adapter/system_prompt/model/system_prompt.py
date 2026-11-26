@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -32,6 +33,12 @@ class SystemPromptVersionModel(Base):
             ["system_prompt_versions.id", "system_prompt_versions.kind"],
             name="fk_system_prompt_versions_restored_same_kind",
             ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_system_prompt_versions_kind_created_id",
+            "kind",
+            "created_at",
+            "id",
         ),
     )
 

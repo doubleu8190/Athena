@@ -82,7 +82,6 @@ class McpDiscoveryClient(McpDiscovery):
     def __init__(
         self,
         *,
-        allowed_private_hosts: frozenset[str] = frozenset(),
         stdio_base_environment: Mapping[str, str] | None = None,
         stdio_allowed_environment_names: frozenset[str] = frozenset(),
         client_factory: ClientFactory | None = None,
@@ -90,10 +89,10 @@ class McpDiscoveryClient(McpDiscovery):
         deadline_seconds: float = DISCOVERY_DEADLINE_SECONDS,
         maximum_response_bytes: int = MAX_DISCOVERY_RESPONSE_BYTES,
     ) -> None:
-        """保存部署网络/环境策略与可替换的测试依赖。
+        """保存部署环境策略与可替换的测试依赖。
 
-        参数：allowed_private_hosts 是部署精确主机白名单；stdio_base_environment 是部署提供的
-        最小环境映射；stdio_allowed_environment_names 是允许出现的环境变量名；client_factory 与
+        参数：stdio_base_environment 是部署提供的最小环境映射；
+        stdio_allowed_environment_names 是允许出现的环境变量名；client_factory 与
         transport_factory 仅供测试注入；deadline_seconds 和 maximum_response_bytes 是单次上限。
         返回：可复用发现服务。
         异常：环境映射越过变量名白名单或资源上限不合法时抛 ValueError。
@@ -106,7 +105,6 @@ class McpDiscoveryClient(McpDiscovery):
             or maximum_response_bytes > DEFAULT_MAX_RESPONSE_BYTES
         ):
             raise ValueError("mcp_discovery_policy_invalid")
-        self._allowed_private_hosts = allowed_private_hosts
         self._stdio_base_environment = base_environment
         self._stdio_allowed_environment_names = stdio_allowed_environment_names
         self._client_factory = client_factory or (
@@ -239,7 +237,6 @@ class McpDiscoveryClient(McpDiscovery):
         try:
             return build_controlled_mcp_transport(
                 connection,
-                allowed_private_hosts=self._allowed_private_hosts,
                 maximum_response_bytes=self._maximum_response_bytes,
                 stdio_base_environment=self._stdio_base_environment,
                 transport_factory=self._transport_factory,

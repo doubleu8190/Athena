@@ -67,6 +67,8 @@ from domain.run.model import (
     RunStatus,
     RunStreamEvent,
 )
+from domain.system_prompt.defaults import INITIAL_SYSTEM_PROMPT_IDS
+from domain.system_prompt.model import SystemPromptKind
 from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -136,6 +138,7 @@ async def _seed_user_and_profile(
                 temperature=None,
                 enabled=True,
                 created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -159,6 +162,8 @@ async def _seed_oversize_history(
         "Historical garden maintenance notes unrelated to this Run. " * 1400
     )
     async with session_factory() as session, session.begin():
+        session_row = await session.get(SessionModel, session_id)
+        assert session_row is not None
         session.add(
             ConversationMessageModel(
                 id="msg_context_safety_history",
@@ -168,17 +173,59 @@ async def _seed_oversize_history(
                 sequence=1,
                 parts=[{"type": "text", "text": history_text}],
                 reply_to_message_id=None,
-                run_id=None,
-                managed_run_id=None,
-                context_turn_id=None,
+                run_id="run_context_safety_history",
+                context_turn_id="msg_context_safety_history",
                 client_message_id=None,
                 created_at=now,
                 completed_at=now,
                 metadata_json={},
             )
         )
-        session_row = await session.get(SessionModel, session_id)
-        assert session_row is not None
+        session.add(
+            RunModel(
+                id="run_context_safety_history",
+                session_id=session_id,
+                owner_id=session_row.owner_id,
+                status="completed",
+                trigger_message_id="msg_context_safety_history",
+                context_cutoff_sequence=1,
+                retry_of_run_id=None,
+                model_config_version_id="llmprof_context_safety_e2e",
+                model_snapshot_json={
+                    "id": "llmprof_context_safety_e2e",
+                    "name": "Context safety E2E deterministic model",
+                    "protocol": "chat_completions",
+                    "base_url": "https://llm.example.test/v1",
+                    "model": "context-safety-main",
+                    "context_window_tokens": 4096,
+                    "tokenizer_encoding": "o200k_base",
+                    "supports_stream": True,
+                    "supports_tools": True,
+                    "supports_parallel_tool_calls": False,
+                    "max_output_tokens": 128,
+                    "request_timeout_seconds": 30,
+                    "execution_timeout_seconds": 60,
+                    "max_concurrency": 1,
+                    "temperature": None,
+                    "scenario_label": None,
+                    "supports_vision": False,
+                    "version": 1,
+                },
+                main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[SystemPromptKind.MAIN],
+                compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                    SystemPromptKind.COMPRESSION
+                ],
+                prompt_template_version="run-v2",
+                event_sequence=0,
+                execution_epoch=0,
+                queued_at=now,
+                created_at=now,
+                updated_at=now,
+                finished_at=now,
+                usage={},
+                depth=0,
+            )
+        )
         session_row.last_message_sequence = 1
         session_row.updated_at = now
 

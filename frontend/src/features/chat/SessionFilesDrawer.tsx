@@ -171,8 +171,7 @@ function FileRow({
     file.extraction_status === "ready" || file.extraction_status === "failed";
 
   const readyTooltip =
-    file.extracted_text_bytes !== null &&
-    file.extracted_text_bytes !== undefined
+    file.extracted_text_bytes !== null
       ? `已完成结构化文本提取（${formatBytes(file.extracted_text_bytes)}）`
       : "已完成结构化文本提取，支持在线预览与对话阅读";
 

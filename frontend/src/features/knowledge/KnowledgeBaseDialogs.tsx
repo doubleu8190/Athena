@@ -26,7 +26,6 @@ import {
   useUpdateKnowledgeBaseMutation,
 } from "./hooks";
 import {
-  knowledgeBaseScope,
   normalizeKnowledgeDescription,
   normalizeKnowledgeName,
   validateKnowledgeDescription,
@@ -589,7 +588,7 @@ export function EditKnowledgeBaseDialog({
   const formId = useId();
   const nameErrorId = useId();
   const descriptionErrorId = useId();
-  const initialScope = knowledgeBaseScope(base);
+  const initialScope = base.visibility_scope;
   const initialOwnerDeptId = base.owner_department_id ?? "";
   // 基线授权与后端当前持久化授权对齐，用于精准比较「同部门仅改动附加授权」是否产生真实差异。
   const initialGrants = useMemo(

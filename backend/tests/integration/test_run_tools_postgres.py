@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.file.model import SessionFileModel
 from adapter.file.repository import SqlAlchemySessionFileRepository
@@ -36,6 +37,7 @@ from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
 from adapter.skill import SqlAlchemySkillRepository
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
+from app.access import AccessPolicyService
 from app.file import FileObjectMaintenance
 from app.run.budget import RunLlmBudget
 from app.skill.service import SkillService
@@ -135,8 +137,8 @@ async def _database(
         yield db.session_factory, db.engine, db.admin_engine, db.schema
 
 
-def test_0023_round_trip_removes_only_online_maintenance_tables_in_isolated_schema() -> None:
-    """只在隔离 schema 中验证 0023 的 downgrade 与再次 upgrade。"""
+def test_initial_schema_omits_removed_online_maintenance_tables() -> None:
+    """基线迁移 0001_initial_schema 不再包含已移除的在线维护表。"""
     database_url = DATABASE_URL
     if database_url is None:
         pytest.skip("ATHENA_TEST_DATABASE_URL is not configured")
@@ -145,43 +147,6 @@ def test_0023_round_trip_removes_only_online_maintenance_tables_in_isolated_sche
         async with isolated_postgres_schema(database_url, prefix="athena_v2_tool_test") as db:
             engine = db.engine
             schema = db.schema
-            async with engine.connect() as connection:
-                for table_name in (
-                    "file_object_publications",
-                    "file_object_reclamation_cursors",
-                ):
-                    exists = await connection.scalar(
-                        text(
-                            "SELECT 1 FROM information_schema.tables "
-                            "WHERE table_schema = :schema AND table_name = :table_name"
-                        ),
-                        {"schema": schema, "table_name": table_name},
-                    )
-                    assert exists is None
-
-            await db.downgrade_to("20261121_0022")
-            async with engine.connect() as connection:
-                for table_name in (
-                    "file_object_publications",
-                    "file_object_reclamation_cursors",
-                ):
-                    exists = await connection.scalar(
-                        text(
-                            "SELECT 1 FROM information_schema.tables "
-                            "WHERE table_schema = :schema AND table_name = :table_name"
-                        ),
-                        {"schema": schema, "table_name": table_name},
-                    )
-                    assert exists == 1
-                cursor_generation = await connection.scalar(
-                    text(
-                        "SELECT generation FROM file_object_reclamation_cursors "
-                        "WHERE id = 'file-orphan-objects'"
-                    )
-                )
-                assert cursor_generation == 0
-
-            await db.upgrade_to("20261122_0023")
             async with engine.connect() as connection:
                 for table_name in (
                     "file_object_publications",
@@ -240,6 +205,7 @@ async def _seed_owner_and_profile(
                 temperature=None,
                 enabled=True,
                 created_at=now,
+                updated_at=now,
             )
         )
         await session.flush()
@@ -308,6 +274,7 @@ async def _running_run(
                 parts=(TextPart("perform the tool task"),),
                 reply_to_message_id=None,
                 run_id=run_id,
+                context_turn_id=message_id,
                 client_message_id=None,
                 created_at=now,
                 completed_at=now,
@@ -659,6 +626,7 @@ def _skill_finish_command(
             ),
             reply_to_message_id=lease.run.trigger_message_id,
             run_id=lease.run.id,
+            context_turn_id=lease.run.trigger_message_id,
             client_message_id=None,
             created_at=now,
             completed_at=now,
@@ -721,6 +689,7 @@ def _reply(run: Run, *, suffix: str) -> ConversationMessageDraft:
         parts=(TextPart("final answer"),),
         reply_to_message_id=run.trigger_message_id,
         run_id=run.id,
+        context_turn_id=run.trigger_message_id,
         client_message_id=None,
         created_at=now,
         completed_at=now,
@@ -2431,6 +2400,7 @@ def test_pool_size_one_maintenance_imports_and_publishes_without_nested_connecti
                 skill_repository,
                 store,  # type: ignore[arg-type]
                 AdminReader(actor_user),
+                access_policy=AccessPolicyService(SqlAlchemyAccessControlRepository(factory)),
                 package_validator=SimpleNamespace(
                     validate=lambda path: SimpleNamespace(
                         package_sha256=package_sha256,

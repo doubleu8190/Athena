@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+from access_support import make_test_access_policy
 
 from app.subagent import DefaultSubagentToolCatalog, SubagentService
 from domain.auth import AuthContext, User, UserRole, UserStatus
@@ -127,14 +128,6 @@ class _StubMcpRepo:
         )
         return McpServerPage(items=(server,), total=1)
 
-    async def set_requires_approval(
-        self, actor: AuthContext, tool_id: str, requires_approval: bool
-    ) -> AdminToolDefinition:
-        raise NotImplementedError
-
-    async def list_public(self, *, offset: int, limit: int) -> ToolPage[object]:
-        raise NotImplementedError
-
     async def list_readable_public(
         self,
         user_id: str,
@@ -143,8 +136,8 @@ class _StubMcpRepo:
         limit: int,
         snapshot: object = None,
     ) -> ToolPage[object]:
-        del user_id, snapshot
-        return await self.list_public(offset=offset, limit=limit)
+        del user_id, offset, limit, snapshot
+        raise NotImplementedError
 
     async def list_server_admin(
         self, server_id: str, *, offset: int, limit: int
@@ -200,17 +193,14 @@ class _InMemorySubagentRepo:
             limit=limit,
         )
 
-    async def list_enabled(self) -> tuple[SubagentProfile, ...]:
-        return tuple(
-            item for item in self.items.values() if item.deleted_at is None and item.enabled
-        )
-
     async def list_readable_enabled(
         self,
         snapshot: object,
     ) -> tuple[SubagentProfile, ...]:
         del snapshot
-        return await self.list_enabled()
+        return tuple(
+            item for item in self.items.values() if item.deleted_at is None and item.enabled
+        )
 
     async def update(
         self,
@@ -376,17 +366,23 @@ def test_service_authorization_and_external_checks() -> None:
             tool_catalog=catalog,
             id_factory=lambda prefix: f"{prefix}_001",
             clock=lambda: NOW,
+            access_policy=make_test_access_policy(),
         )
 
         # 非管理员 / 失效会话拦截
         non_admin_service = SubagentService(
             repo,
             _StubAuthReader(_actor(UserRole.MEMBER).user),
+            access_policy=make_test_access_policy(default_role=UserRole.MEMBER),
         )
         with pytest.raises(SubagentAdminRequiredError):
             await non_admin_service.list_subagents(actor)
 
-        expired_service = SubagentService(repo, _StubAuthReader(None))
+        expired_service = SubagentService(
+            repo,
+            _StubAuthReader(None),
+            access_policy=make_test_access_policy(),
+        )
         with pytest.raises(SubagentInvalidSessionError):
             await expired_service.list_subagents(actor)
 

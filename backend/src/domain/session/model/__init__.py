@@ -6,7 +6,6 @@ from domain.session.model.errors import (
     InvalidSessionTitleError,
     InvalidSessionUpdateError,
     SessionNotFoundError,
-    SessionProjectLockedError,
 )
 
 __all__ = [
@@ -16,6 +15,5 @@ __all__ = [
     "Session",
     "SessionNotFoundError",
     "SessionPage",
-    "SessionProjectLockedError",
     "SessionScope",
 ]

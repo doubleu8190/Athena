@@ -12,7 +12,6 @@ import {
   deleteProject,
   getProject,
   listProjects,
-  renameProject,
   updateProject,
 } from "./api";
 import { projectErrorMessage } from "./errorMessages";
@@ -70,7 +69,7 @@ describe("项目 API 契约", () => {
       description: null,
       instructions: null,
     });
-    await renameProject("project-a", { name: "新名称" });
+    await updateProject("project-a", { name: "新名称" });
     await expect(deleteProject("project-a")).resolves.toBeUndefined();
     await expect(
       deleteProject("project-a", { detachSessions: true }),

@@ -14,13 +14,16 @@ from integration.postgres_harness import isolated_postgres_schema
 from knowledge_fakes import MemoryOriginalStore
 from sqlalchemy import event, insert, text
 
+from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import (
     KnowledgeDocumentModel,
     KnowledgeVersionModel,
 )
 from adapter.knowledge.repository import KnowledgeRepository
+from app.access import AccessPolicyService
 from app.knowledge.service import KnowledgeService
+from domain.access import ResourceType
 from domain.knowledge.model import Document, DocumentState, KnowledgeBase
 from domain.knowledge.ports import ClaimedKnowledgeJob, KnowledgeRepositoryPort
 
@@ -89,6 +92,7 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
         ) as db:
             session_factory = db.session_factory
             repository = KnowledgeRepository(session_factory)
+            access_policy = AccessPolicyService(SqlAlchemyAccessControlRepository(session_factory))
             now = datetime(2026, 1, 1, tzinfo=UTC)
             async with session_factory() as session, session.begin():
                 session.add_all(
@@ -146,7 +150,9 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 upload_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
                     _UploadTokenizer(),
+                    profile_id="bge-m3-default",
                     originals=originals,
+                    access_policy=access_policy,
                 )
                 upload_content = b"same hash uploaded by two concurrent requests"
                 upload_results = await asyncio.gather(
@@ -181,7 +187,9 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 canonical_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
                     _UploadTokenizer(),
+                    profile_id="bge-m3-default",
                     originals=originals,
+                    access_policy=access_policy,
                 )
                 await repository.create_base(
                     KnowledgeBase("kb_a_other", "kb_owner_a", "other", None, now, now)
@@ -259,7 +267,9 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 uncertain_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, ambiguous_commit),
                     _UploadTokenizer(),
+                    profile_id="bge-m3-default",
                     originals=originals,
+                    access_policy=access_policy,
                 )
                 with pytest.raises(ConnectionError, match="simulated response loss"):
                     await uncertain_service.create_file_document(
@@ -450,9 +460,15 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                     warnings=[],
                 )
 
-            await repository.validate_search_scope("kb_owner_a", ["kb_a"])
-            with pytest.raises(LookupError, match="knowledge_base_not_found"):
-                await repository.validate_search_scope("kb_owner_a", ["kb_b"])
+            assert await access_policy.filter_readable_ids(
+                "kb_owner_a", ResourceType.KNOWLEDGE_BASE, ["kb_a"]
+            ) == {"kb_a"}
+            assert (
+                await access_policy.filter_readable_ids(
+                    "kb_owner_a", ResourceType.KNOWLEDGE_BASE, ["kb_b"]
+                )
+                == set()
+            )
             keyword_hits = await repository.search_keyword(
                 "kb_owner_a", ["kb_a"], ("PostgreSQL",), 40
             )
@@ -605,7 +621,10 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
             assert await repository.get_chunk("kb_owner_b", "kb_a", chunk_id) is None
 
             renamed_replay_service = KnowledgeService(
-                cast(KnowledgeRepositoryPort, repository), _UploadTokenizer()
+                cast(KnowledgeRepositoryPort, repository),
+                _UploadTokenizer(),
+                profile_id="bge-m3-default",
+                access_policy=access_policy,
             )
             text_replace = await renamed_replay_service.replace_text_document(
                 "kb_owner_a",
@@ -647,7 +666,9 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 file_replace_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
                     _UploadTokenizer(),
+                    profile_id="bge-m3-default",
                     originals=replacement_store,
+                    access_policy=access_policy,
                 )
                 replacement_payload = b"replacement file content after rename"
                 file_replace = await file_replace_service.replace_file_document(
@@ -868,7 +889,9 @@ def test_knowledge_migration_and_repository_use_owner_scoped_postgres_search() -
                 quota_service = KnowledgeService(
                     cast(KnowledgeRepositoryPort, repository),
                     _UploadTokenizer(),
+                    profile_id="bge-m3-default",
                     originals=quota_store,
+                    access_policy=access_policy,
                 )
                 with pytest.raises(ValueError, match="knowledge_storage_quota_exceeded"):
                     await quota_service.create_file_document(
@@ -986,7 +1009,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query() -> None:
                             source_text="v1",
                             content_hash="1" * 64,
                             profile_id="profile-v1",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=[],
@@ -1002,7 +1024,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query() -> None:
                             source_text="v2",
                             content_hash="2" * 64,
                             profile_id="profile-v1",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=["ocr_fallback"],
@@ -1018,7 +1039,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query() -> None:
                             source_text="active",
                             content_hash="3" * 64,
                             profile_id="profile-v1",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=[],
@@ -1034,7 +1054,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query() -> None:
                             source_text="broken",
                             content_hash="4" * 64,
                             profile_id="profile-v1",
-                            processing_config={},
                             state="failed",
                             error_code="parser_failed",
                             warnings=["partial_page"],
@@ -1050,7 +1069,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query() -> None:
                             source_text="tie-a",
                             content_hash="5" * 64,
                             profile_id="profile-v1",
-                            processing_config={},
                             state="ready",
                             error_code=None,
                             warnings=[],
@@ -1066,7 +1084,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query() -> None:
                             source_text="tie-z",
                             content_hash="6" * 64,
                             profile_id="profile-v1",
-                            processing_config={},
                             state="processing",
                             error_code=None,
                             warnings=[],

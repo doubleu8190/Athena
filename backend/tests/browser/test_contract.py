@@ -46,14 +46,15 @@ def _provider_payload(
 
 def test_configured_default_clone_preserves_provider_compatibility() -> None:
     """真实模型克隆保留温度和能力声明，只收缩测试预算。"""
+    now = datetime.now(UTC)
     source = ModelProfileVersionModel(
         id="mdl_source",
         name="Configured",
         protocol="chat_completions",
         base_url="https://model.invalid/v1",
         model="configured-model",
-        api_key_ciphertext="ciphertext",
-        api_key_nonce="nonce",
+        api_key_ciphertext=b"ciphertext",
+        api_key_nonce=b"0123456789ab",
         api_key_key_version=1,
         context_window_tokens=131_072,
         tokenizer_encoding="cl100k_base",
@@ -66,7 +67,8 @@ def test_configured_default_clone_preserves_provider_compatibility() -> None:
         max_concurrency=8,
         temperature=None,
         enabled=True,
-        created_at=datetime.now(UTC),
+        created_at=now,
+        updated_at=now,
     )
 
     clone = _configured_default_clone(source)

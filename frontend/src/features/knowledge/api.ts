@@ -61,33 +61,12 @@ function toKnowledgeVersion(
 function toKnowledgeDocument(
   raw: ApiSchemas["KnowledgeDocumentResponse"],
 ): KnowledgeDocument {
-  if (raw.latest_version === undefined) {
-    return raw as KnowledgeDocument;
-  }
   return {
     ...raw,
     latest_version:
       raw.latest_version === null
         ? null
         : toKnowledgeVersion(raw.latest_version),
-  };
-}
-
-function toKnowledgeImportResponse(
-  raw: ApiSchemas["KnowledgeImportResponse"],
-): KnowledgeImportResponse {
-  return {
-    ...raw,
-    state: raw.state ?? "queued",
-  };
-}
-
-function toKnowledgeSearchHit(
-  raw: ApiSchemas["KnowledgeSearchHit"],
-): KnowledgeSearchHit {
-  return {
-    ...raw,
-    chunk_ids: raw.chunk_ids ?? [raw.chunk_id],
   };
 }
 
@@ -209,24 +188,22 @@ export async function listKnowledgeVersions(
   return response.map(toKnowledgeVersion);
 }
 
-export async function importKnowledgeText(
+export function importKnowledgeText(
   baseId: string,
   title: string,
   text: string,
   idempotencyKey: string,
 ): Promise<KnowledgeImportResponse> {
-  return toKnowledgeImportResponse(
-    await apiPost("/api/v1/knowledge-bases/{base_id}/documents/text", {
-      body: { title, text },
-      params: {
-        header: { "Idempotency-Key": idempotencyKey },
-        path: { base_id: baseId },
-      },
-    }),
-  );
+  return apiPost("/api/v1/knowledge-bases/{base_id}/documents/text", {
+    body: { title, text },
+    params: {
+      header: { "Idempotency-Key": idempotencyKey },
+      path: { base_id: baseId },
+    },
+  });
 }
 
-export async function uploadKnowledgeDocument(
+export function uploadKnowledgeDocument(
   baseId: string,
   title: string,
   file: File,
@@ -235,36 +212,33 @@ export async function uploadKnowledgeDocument(
   const form = new FormData();
   form.set("title", title);
   form.set("file", file);
-  const response = await apiMultipart<ApiSchemas["KnowledgeImportResponse"]>(
+  return apiMultipart<ApiSchemas["KnowledgeImportResponse"]>(
     `${basePath(baseId)}/documents/upload`,
     form,
     { method: "POST", headers: idempotencyHeaders(idempotencyKey) },
   );
-  return toKnowledgeImportResponse(response);
 }
 
-export async function replaceKnowledgeText(
+export function replaceKnowledgeText(
   baseId: string,
   documentId: string,
   title: string,
   text: string,
   idempotencyKey: string,
 ): Promise<KnowledgeImportResponse> {
-  return toKnowledgeImportResponse(
-    await apiPost(
-      "/api/v1/knowledge-bases/{base_id}/documents/{document_id}/versions/text",
-      {
-        body: { title, text },
-        params: {
-          header: { "Idempotency-Key": idempotencyKey },
-          path: { base_id: baseId, document_id: documentId },
-        },
+  return apiPost(
+    "/api/v1/knowledge-bases/{base_id}/documents/{document_id}/versions/text",
+    {
+      body: { title, text },
+      params: {
+        header: { "Idempotency-Key": idempotencyKey },
+        path: { base_id: baseId, document_id: documentId },
       },
-    ),
+    },
   );
 }
 
-export async function replaceKnowledgeFile(
+export function replaceKnowledgeFile(
   baseId: string,
   documentId: string,
   file: File,
@@ -272,12 +246,11 @@ export async function replaceKnowledgeFile(
 ): Promise<KnowledgeImportResponse> {
   const form = new FormData();
   form.set("file", file);
-  const response = await apiMultipart<ApiSchemas["KnowledgeImportResponse"]>(
+  return apiMultipart<ApiSchemas["KnowledgeImportResponse"]>(
     `${documentPath(baseId, documentId)}/versions/upload`,
     form,
     { method: "POST", headers: idempotencyHeaders(idempotencyKey) },
   );
-  return toKnowledgeImportResponse(response);
 }
 
 export async function renameKnowledgeDocument(
@@ -342,30 +315,24 @@ export function downloadKnowledgeSource(
   );
 }
 
-export async function searchKnowledgeBase(
+export function searchKnowledgeBase(
   baseId: string,
   query: string,
   limit: number,
 ): Promise<KnowledgeSearchResponse> {
-  const response = await apiPost("/api/v1/knowledge-bases/{base_id}/search", {
+  return apiPost("/api/v1/knowledge-bases/{base_id}/search", {
     body: { query, limit },
     params: { path: { base_id: baseId } },
   });
-  return {
-    ...response,
-    hits: response.hits.map(toKnowledgeSearchHit),
-  };
 }
 
-export async function getKnowledgeChunk(
+export function getKnowledgeChunk(
   baseId: string,
   chunkId: string,
 ): Promise<KnowledgeSearchHit> {
-  return toKnowledgeSearchHit(
-    await apiGet("/api/v1/knowledge-bases/{base_id}/chunks/{chunk_id}", {
-      params: { path: { base_id: baseId, chunk_id: chunkId } },
-    }),
-  );
+  return apiGet("/api/v1/knowledge-bases/{base_id}/chunks/{chunk_id}", {
+    params: { path: { base_id: baseId, chunk_id: chunkId } },
+  });
 }
 
 export function listProjectKnowledgeBases(

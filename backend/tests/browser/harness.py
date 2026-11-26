@@ -219,6 +219,7 @@ async def _seed_accounts_and_model(
                         temperature=0,
                         enabled=True,
                         created_at=now,
+                        updated_at=now,
                     )
                 )
             elif model_source == "configured-default":
@@ -270,6 +271,7 @@ def _configured_default_clone(
     source: ModelProfileVersionModel,
 ) -> ModelProfileVersionModel:
     """复制真实模型连接与请求参数，只收缩本次测试的预算、超时和并发。"""
+    now = datetime.now(UTC)
     return ModelProfileVersionModel(
         id=source.id,
         name=f"Browser E2E Clone {source.name}"[:120],
@@ -291,7 +293,8 @@ def _configured_default_clone(
         # 温度属于供应商兼容参数，测试克隆不得擅自覆盖，否则可能触发真实端点 400。
         temperature=source.temperature,
         enabled=True,
-        created_at=datetime.now(UTC),
+        created_at=now,
+        updated_at=now,
     )
 
 

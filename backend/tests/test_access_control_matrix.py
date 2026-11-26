@@ -21,13 +21,16 @@ from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pg_unit_harness import create_pg_unit_db
+from pydantic import ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access import ResourceVisibilityGrantModel, SqlAlchemyAccessControlRepository
+from adapter.access.repository import load_user_access_snapshot_in_session
 from adapter.auth.model import UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.knowledge.model import (
+    KnowledgeBaseModel,
     KnowledgeChunkModel,
     KnowledgeDocumentModel,
     KnowledgeVersionModel,
@@ -93,7 +96,7 @@ from domain.mcp import (
     McpRuntimeToolTarget,
 )
 from domain.org import DepartmentStatus
-from domain.run import Run, RunStatus, RunUsage
+from domain.run import Run, RunModelSnapshot, RunStatus, RunUsage
 from domain.skill import (
     ActiveSkillGuide,
     RunSkillSnapshot,
@@ -306,7 +309,7 @@ class _SimpleToolCatalog:
         return ()
 
     async def list_available_tool_ids(self) -> frozenset[str]:
-        page = await self._mcp_repo.list_public(limit=100, offset=0)
+        page = await self._mcp_repo.list_admin(limit=100, offset=0)
         return frozenset(tool.tool_id for tool in page.items)
 
 
@@ -558,6 +561,7 @@ class _Harness:
         self.knowledge_service = KnowledgeService(
             self.kb_repo,
             self.tokenizer,
+            profile_id="bge-m3-default",
             originals=self.originals,
             access_policy=self.access_policy,
             clock=lambda: NOW,
@@ -801,6 +805,22 @@ def _make_run(
         context_cutoff_sequence=0,
         retry_of_run_id=None,
         model_config_version_id="model_1",
+        model_snapshot=RunModelSnapshot(
+            id="model_1",
+            name="测试模型",
+            protocol="chat_completions",
+            base_url="https://api.example.com/v1",
+            model="gpt-test",
+            context_window_tokens=128000,
+            tokenizer_encoding="cl100k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=4096,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=120,
+            max_concurrency=4,
+        ),
         main_prompt_version_id="prompt_main",
         compression_prompt_version_id="prompt_comp",
         prompt_template_version="run-v2",
@@ -1306,7 +1326,9 @@ def test_cross_department_isolation_across_all_four_resources(tmp_path: Path) ->
             assert rd_skills == {co_skill_id, rd_skill_id}
             with pytest.raises(SkillConflictError, match="skill_selection_unavailable"):
                 async with h.session_factory() as session:
-                    await build_run_skill_snapshot(session, (fin_skill_id,), owner_id="u_rd_member")
+                    rd_snapshot = await load_user_access_snapshot_in_session(session, "u_rd_member")
+                    assert rd_snapshot is not None
+                    await build_run_skill_snapshot(session, (fin_skill_id,), snapshot=rd_snapshot)
 
             rd_tools = {
                 item["tool_id"] for item in rd_member_c.get("/api/v1/tools").json()["items"]
@@ -2000,8 +2022,10 @@ def test_realtime_revocation_after_department_transfer(tmp_path: Path) -> None:
             frozen_tool_snap = await h.tool_runtime.build_snapshot("run-v2", emp_auth, depth=0)
             fin_tool_def = next(t for t in frozen_tool_snap.tools if t.tool_id == fin_tool_id)
             async with h.session_factory() as session:
+                fin_snapshot = await load_user_access_snapshot_in_session(session, "u_fin_member")
+                assert fin_snapshot is not None
                 frozen_skill_snap = await build_run_skill_snapshot(
-                    session, (fin_skill_id,), owner_id="u_fin_member"
+                    session, (fin_skill_id,), snapshot=fin_snapshot
                 )
             assert [s.skill_id for s in frozen_skill_snap.skills] == [fin_skill_id]
 
@@ -2093,8 +2117,12 @@ def test_realtime_revocation_after_department_transfer(tmp_path: Path) -> None:
             assert emp.get("/api/v1/skills").json()["items"] == []
             with pytest.raises(SkillConflictError, match="skill_selection_unavailable"):
                 async with h.session_factory() as session:
+                    fin_post_snapshot = await load_user_access_snapshot_in_session(
+                        session, "u_fin_member"
+                    )
+                    assert fin_post_snapshot is not None
                     await build_run_skill_snapshot(
-                        session, (fin_skill_id,), owner_id="u_fin_member"
+                        session, (fin_skill_id,), snapshot=fin_post_snapshot
                     )
 
             post_load = await h.tool_runtime.execute(
@@ -2399,50 +2427,70 @@ def test_scope_cleanup_filters_and_admin_route_boundaries(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_run_skill_snapshot_public_scope_compatibility() -> None:
-    """历史 runs.skill_snapshot 与上下文中的 scope='public' 必须自动归一化为 company。"""
-    legacy_snapshot = RunSkillSnapshot.model_validate(
+def test_legacy_run_skill_snapshot_public_scope_is_rejected() -> None:
+    """已移除历史 scope='public' 兼容转换：快照与激活指引必须拒绝非法 scope。"""
+    with pytest.raises(ValidationError):
+        RunSkillSnapshot.model_validate(
+            {
+                "version": 1,
+                "skills": [
+                    {
+                        "skill_id": "skill_legacy_pub",
+                        "slug": "legacy-pub",
+                        "name": "历史公共技能",
+                        "description": "迁移前持久化的公共技能快照",
+                        "version_id": "skillver_legacy_1",
+                        "version_label": "v1",
+                        "requires_approval": False,
+                        "scope": "public",
+                    }
+                ],
+                "selected_skill_ids": ["skill_legacy_pub"],
+            }
+        )
+
+    valid_snapshot = RunSkillSnapshot.model_validate(
         {
             "version": 1,
             "skills": [
                 {
-                    "skill_id": "skill_legacy_pub",
-                    "slug": "legacy-pub",
-                    "name": "历史公共技能",
-                    "description": "迁移前持久化的公共技能快照",
-                    "version_id": "skillver_legacy_1",
+                    "skill_id": "skill_company",
+                    "slug": "company-skill",
+                    "name": "企业技能",
+                    "description": "企业级技能快照",
+                    "version_id": "skillver_company_1",
                     "version_label": "v1",
                     "requires_approval": False,
-                    "scope": "public",
+                    "scope": "company",
                 },
                 {
-                    "skill_id": "skill_legacy_priv",
-                    "slug": "legacy-priv",
-                    "name": "历史个人技能",
-                    "description": "迁移前持久化的个人技能快照",
-                    "version_id": "skillver_legacy_2",
+                    "skill_id": "skill_personal",
+                    "slug": "personal-skill",
+                    "name": "个人技能",
+                    "description": "个人级技能快照",
+                    "version_id": "skillver_personal_1",
                     "version_label": "v1",
                     "requires_approval": False,
                     "scope": "personal",
                 },
             ],
-            "selected_skill_ids": ["skill_legacy_pub"],
+            "selected_skill_ids": ["skill_company"],
         }
     )
-    assert legacy_snapshot.skills[0].scope is SkillScope.COMPANY
-    assert legacy_snapshot.skills[1].scope is SkillScope.PERSONAL
+    assert valid_snapshot.skills[0].scope is SkillScope.COMPANY
+    assert valid_snapshot.skills[1].scope is SkillScope.PERSONAL
 
-    legacy_guide = ActiveSkillGuide.model_validate(
-        {
-            "skill_id": "skill_legacy_pub",
-            "name": "历史公共技能",
-            "version_id": "skillver_legacy_1",
-            "version_label": "v1",
-            "guide": "历史正文",
-            "scope": "public",
-        }
-    )
-    assert legacy_guide.scope is SkillScope.COMPANY
+    with pytest.raises(ValidationError):
+        ActiveSkillGuide.model_validate(
+            {
+                "skill_id": "skill_legacy_pub",
+                "name": "历史公共技能",
+                "version_id": "skillver_legacy_1",
+                "version_label": "v1",
+                "guide": "历史正文",
+                "scope": "public",
+            }
+        )
 
 
 def test_dept_admin_non_subtree_scope_cannot_escalate_to_subdepartments(
@@ -2765,58 +2813,130 @@ def test_skill_import_idempotency_fingerprint_covers_visibility_grants(
     _run(_scenario())
 
 
+def test_knowledge_base_rename_only_patch_preserves_department_visibility_and_grants(
+    tmp_path: Path,
+) -> None:
+    """部门管理员仅改名 PATCH 部门知识库时，必须在行锁内原样保留可见范围、归属部门与全部授权。"""
+
+    async def _scenario() -> None:
+        h = await _make_harness(tmp_path / "kb_rename_only.db")
+        try:
+            fin_admin = h.login_client("fin.admin.a@acme.com")
+            fin_member = h.login_client("fin.member@acme.com")
+            tax_member = h.login_client("tax.member@acme.com")
+            rd_member = h.login_client("rd.member@acme.com")
+
+            created = fin_admin.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "name": "财务制度库",
+                    "description": "初始描述",
+                    "visibility_scope": "department",
+                    "owner_department_id": "dept_fin",
+                    "visibility_grants": [
+                        {
+                            "target_type": "department",
+                            "target_id": "dept_fin",
+                            "include_subdepartments": True,
+                        }
+                    ],
+                },
+            )
+            assert created.status_code == 201, created.text
+            fin_kb_id = created.json()["id"]
+            grants_before = created.json()["visibility_grants"]
+            assert len(grants_before) == 1
+            assert grants_before[0]["target_id"] == "dept_fin"
+            assert grants_before[0]["include_subdepartments"] is True
+
+            # 仅修改名称与说明，不携带任何可见性字段。
+            patched = fin_admin.patch(
+                f"/api/v1/knowledge-bases/{fin_kb_id}",
+                json={"name": "财务制度库（2026修订版）", "description": "仅更新元数据"},
+            )
+            assert patched.status_code == 200, patched.text
+            payload = patched.json()
+            assert payload["name"] == "财务制度库（2026修订版）"
+            assert payload["description"] == "仅更新元数据"
+            assert payload["visibility_scope"] == "department"
+            assert payload["owner_department_id"] == "dept_fin"
+            assert payload["visibility_grants"] == grants_before
+
+            # 核验数据库持久化状态未发生任何可见性或授权覆写/重建。
+            async with h.session_factory() as session:
+                kb_row = await session.get(KnowledgeBaseModel, fin_kb_id)
+                assert kb_row is not None
+                assert kb_row.name == "财务制度库（2026修订版）"
+                assert kb_row.description == "仅更新元数据"
+                assert kb_row.visibility_scope == "department"
+                assert kb_row.owner_department_id == "dept_fin"
+                db_grants = (
+                    await session.scalars(
+                        select(ResourceVisibilityGrantModel).where(
+                            ResourceVisibilityGrantModel.resource_type == "knowledge_base",
+                            ResourceVisibilityGrantModel.resource_id == fin_kb_id,
+                        )
+                    )
+                ).all()
+                assert len(db_grants) == 1
+                assert db_grants[0].id == grants_before[0]["id"]
+                assert db_grants[0].target_type == "department"
+                assert db_grants[0].target_id == "dept_fin"
+                assert db_grants[0].include_subdepartments is True
+
+            # 核验部门成员及子部门成员仍可读，非本部门成员仍被 404 隔离。
+            assert fin_member.get(f"/api/v1/knowledge-bases/{fin_kb_id}").status_code == 200
+            assert tax_member.get(f"/api/v1/knowledge-bases/{fin_kb_id}").status_code == 200
+            assert rd_member.get(f"/api/v1/knowledge-bases/{fin_kb_id}").status_code == 404
+        finally:
+            await h.aclose()
+
+    _run(_scenario())
+
+
 # ---------------------------------------------------------------------------
-# 7. Alembic 20261202_0035 迁移链与离线升级/回滚 SQL 验证
+# 7. Alembic 基线迁移 0001_initial_schema 权限与外键离线 SQL 验证
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_20261202_0035_migration_chain_and_sql() -> None:
-    """验证 Alembic 单一 head=20261202_0035 以及升级/回滚离线 SQL 完整无误。"""
+def test_alembic_initial_schema_contains_access_grants_and_fks() -> None:
+    """验证 Alembic 基线 0001_initial_schema 单一 head 及权限表、外键、唯一索引离线 SQL。"""
     config = Config(str(ALEMBIC_INI))
     config.set_main_option(
         "sqlalchemy.url",
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(config)
-    # 保持 Alembic 单一 head，兼容后续新增的 M1.5+ 迁移脚本。
     heads = script.get_heads()
-    assert len(heads) == 1
-    revision = script.get_revision("20261202_0035")
+    assert heads == ["0001_initial_schema"]
+    revision = script.get_revision("0001_initial_schema")
     assert revision is not None
-    assert revision.down_revision == "20261201_0034"
+    assert revision.down_revision is None
 
     up_buf = StringIO()
     with redirect_stdout(up_buf):
-        command.upgrade(config, "20261201_0034:20261202_0035", sql=True)
+        command.upgrade(config, "head", sql=True)
     up_sql = up_buf.getvalue()
     for expected in (
         "CREATE TABLE resource_visibility_grants",
         "uq_resource_visibility_grant",
         "ix_resource_visibility_grants_lookup",
-        "ix_resource_visibility_grants_resource",
-        "ALTER TABLE knowledge_bases ADD COLUMN visibility_scope",
-        "ALTER TABLE knowledge_bases ADD COLUMN owner_department_id",
+        "visibility_scope",
+        "owner_department_id",
         "ix_knowledge_bases_visibility_dept",
         "fk_knowledge_documents_base",
         "fk_knowledge_versions_document",
         "fk_knowledge_versions_source",
         "fk_project_knowledge_bases_base",
-        "UPDATE skills SET scope = 'company' WHERE scope = 'public'",
         "uq_skills_company_slug",
         "uq_skills_department_slug",
-        "ALTER TABLE mcp_servers ADD COLUMN visibility_scope",
-        "ALTER TABLE subagents ADD COLUMN visibility_scope",
     ):
         assert expected in up_sql, f"升级 SQL 缺少预期片段: {expected}"
+    # 冗余前缀索引 ix_resource_visibility_grants_resource 已由 uq_resource_visibility_grant 覆盖。
+    assert "ix_resource_visibility_grants_resource" not in up_sql
 
     down_buf = StringIO()
     with redirect_stdout(down_buf):
-        command.downgrade(config, "20261202_0035:20261201_0034", sql=True)
+        command.downgrade(config, "0001_initial_schema:base", sql=True)
     down_sql = down_buf.getvalue()
-    for expected in (
-        "DROP TABLE resource_visibility_grants",
-        "UPDATE skills SET scope = 'public' WHERE scope = 'company'",
-        "uq_skills_public_slug",
-        "DROP COLUMN visibility_scope",
-    ):
-        assert expected in down_sql, f"回滚 SQL 缺少预期片段: {expected}"
+    assert "DROP TABLE resource_visibility_grants" in down_sql

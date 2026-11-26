@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from access_support import make_test_access_policy
 
 from app.tool import ToolManager
 from domain.auth import AuthContext, User, UserRole, UserStatus
@@ -27,6 +28,7 @@ from domain.tool import (
     AdminToolDefinition,
     PublicToolDefinition,
     ToolDefinition,
+    ToolMetadataPatch,
     ToolPage,
 )
 
@@ -123,10 +125,11 @@ class FakeServers:
             (self.server,) if self.server is not None else (), int(self.server is not None)
         )
 
-    async def set_requires_approval(
-        self, actor: AuthContext, tool_id: str, requires_approval: bool
+    async def update_tool_metadata(
+        self, actor: AuthContext, tool_id: str, patch: ToolMetadataPatch
     ) -> AdminToolDefinition:
         del actor
+        requires_approval = bool(patch.requires_approval)
         self.policy_calls.append((tool_id, requires_approval))
         return AdminToolDefinition(
             tool_id,
@@ -157,7 +160,15 @@ class FakeTools:
             {},
         )
 
-    async def list_public(self, *, offset: int, limit: int) -> ToolPage[PublicToolDefinition]:
+    async def list_readable_public(
+        self,
+        user_id: str,
+        *,
+        offset: int,
+        limit: int,
+        snapshot: Any = None,
+    ) -> ToolPage[PublicToolDefinition]:
+        del user_id, offset, limit, snapshot
         self.reads.append("public")
         return ToolPage((self.public,), 1)
 
@@ -215,7 +226,7 @@ def _manager(
     def create_id(prefix: str) -> str:
         return "mcp_" + "a" * 32 if prefix == "mcp" else next(tool_ids)
 
-    servers.list_public = tools.list_public  # type: ignore[attr-defined]
+    servers.list_readable_public = tools.list_readable_public  # type: ignore[attr-defined]
     servers.list_admin = tools.list_admin  # type: ignore[attr-defined]
     servers.list_server_admin = tools.list_server_admin  # type: ignore[attr-defined]
     servers.get_public_tool = tools.get_public_tool  # type: ignore[attr-defined]
@@ -224,6 +235,9 @@ def _manager(
         cast(Any, servers),
         found,
         auth,
+        access_policy=make_test_access_policy(
+            default_role=role if role is not None else UserRole.MEMBER
+        ),
         id_factory=create_id,
         clock=lambda: _NOW,
     )
@@ -317,13 +331,27 @@ def test_only_admin_can_update_approval_policy_with_a_real_bool() -> None:
     user_actor = AuthContext(_user(UserRole.MEMBER), "ses_user")
     manager, _, servers, _, _ = _manager(role=UserRole.MEMBER)
     with pytest.raises(McpAdminRequiredError):
-        _run(manager.update_tool_approval_policy(user_actor, "tool_x", True))
+        _run(
+            manager.update_tool_metadata(
+                user_actor, "tool_x", ToolMetadataPatch(requires_approval=True)
+            )
+        )
     assert servers.policy_calls == []
 
     admin_actor = AuthContext(_user(), "ses_admin")
     manager, _, servers, _, _ = _manager()
     with pytest.raises(ValueError, match="mcp_tool_policy_invalid"):
-        _run(manager.update_tool_approval_policy(admin_actor, "tool_x", 1))  # type: ignore[arg-type]
-    result = _run(manager.update_tool_approval_policy(admin_actor, "tool_x", True))
+        _run(
+            manager.update_tool_metadata(
+                admin_actor,
+                "tool_x",
+                ToolMetadataPatch(requires_approval=1),  # type: ignore[arg-type]
+            )
+        )
+    result = _run(
+        manager.update_tool_metadata(
+            admin_actor, "tool_x", ToolMetadataPatch(requires_approval=True)
+        )
+    )
     assert result.requires_approval is True
     assert servers.policy_calls == [("tool_x", True)]

@@ -70,11 +70,32 @@ from domain.run.model import (
     RunEventPayload,
     RunInputFileContext,
     RunLease,
+    RunModelSnapshot,
     RunStatus,
     RunUsage,
     SaveContextSummaryCommand,
 )
 from domain.run.ports import RunRepository
+
+
+def _model_snapshot(profile_id: str) -> RunModelSnapshot:
+    """构造测试 Run 必需的非空模型元数据快照。"""
+    return RunModelSnapshot(
+        id=profile_id,
+        name=profile_id,
+        protocol="chat_completions",
+        base_url="https://llm.example.test/v1",
+        model="main-model",
+        context_window_tokens=8192,
+        tokenizer_encoding="o200k_base",
+        supports_stream=True,
+        supports_tools=True,
+        supports_parallel_tool_calls=False,
+        max_output_tokens=512,
+        request_timeout_seconds=10,
+        execution_timeout_seconds=30,
+        max_concurrency=1,
+    )
 
 
 def _message(
@@ -85,6 +106,8 @@ def _message(
     context_turn_id: str | None = None,
 ) -> ConversationMessage:
     """创建仅用于轮次边界测试的正式消息。"""
+    resolved_run_id = run_id or f"run_{sequence}"
+    resolved_turn_id = context_turn_id or run_id or f"msg_{sequence}"
     return ConversationMessage(
         id=f"msg_{sequence}",
         session_id="ses_test",
@@ -93,12 +116,12 @@ def _message(
         sequence=sequence,
         parts=(TextPart(f"message {sequence}"),),
         reply_to_message_id=None,
-        run_id=run_id,
+        run_id=resolved_run_id,
         client_message_id=None,
         created_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
         metadata=MessageMetadata(),
-        context_turn_id=context_turn_id,
+        context_turn_id=resolved_turn_id,
     )
 
 
@@ -205,6 +228,7 @@ def test_recent_suffix_budget_uses_complete_main_request_count_for_short_message
         context_cutoff_sequence=101,
         retry_of_run_id=None,
         model_config_version_id="profile_recent_budget",
+        model_snapshot=_model_snapshot("profile_recent_budget"),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -229,7 +253,6 @@ def test_recent_suffix_budget_uses_complete_main_request_count_for_short_message
         protocol="chat_completions",
         base_url="https://llm.example.test/v1",
         model="main-model",
-        has_api_key=True,
         context_window_tokens=8192,
         tokenizer_encoding="o200k_base",
         supports_stream=True,
@@ -241,6 +264,7 @@ def test_recent_suffix_budget_uses_complete_main_request_count_for_short_message
         temperature=None,
         enabled=True,
         created_at=now,
+        updated_at=now,
     )
     messages = tuple(
         _message(
@@ -305,7 +329,6 @@ def test_single_compression_attempt_consumes_one_atomic_llm_budget_slot() -> Non
         protocol="chat_completions",
         base_url="https://llm.example.test/v1",
         model="compression-model",
-        has_api_key=True,
         context_window_tokens=8192,
         tokenizer_encoding="o200k_base",
         supports_stream=False,
@@ -317,6 +340,7 @@ def test_single_compression_attempt_consumes_one_atomic_llm_budget_slot() -> Non
         temperature=None,
         enabled=True,
         created_at=now,
+        updated_at=now,
     )
     runtime = RuntimeModelProfile(version=profile_version, api_key="test")
     run = Run(
@@ -328,6 +352,7 @@ def test_single_compression_attempt_consumes_one_atomic_llm_budget_slot() -> Non
         context_cutoff_sequence=2,
         retry_of_run_id=None,
         model_config_version_id="profile_main_budget",
+        model_snapshot=_model_snapshot("profile_main_budget"),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -419,6 +444,7 @@ def test_prepare_bounds_summary_output_across_tokenizers(
         context_cutoff_sequence=9,
         retry_of_run_id=None,
         model_config_version_id="profile_main_cross",
+        model_snapshot=_model_snapshot("profile_main_cross"),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -451,7 +477,6 @@ def test_prepare_bounds_summary_output_across_tokenizers(
                 protocol="chat_completions",
                 base_url="https://llm.example.test/v1",
                 model=profile_id,
-                has_api_key=True,
                 context_window_tokens=window,
                 tokenizer_encoding=encoding,
                 supports_stream=profile_id == "profile_main_cross",
@@ -463,6 +488,7 @@ def test_prepare_bounds_summary_output_across_tokenizers(
                 temperature=None,
                 enabled=True,
                 created_at=now,
+                updated_at=now,
             ),
             api_key="test",
         )
@@ -477,7 +503,6 @@ def test_prepare_bounds_summary_output_across_tokenizers(
         recent_token_cap=256,
         summary_ratio=0.1,
         summary_token_cap=128,
-        prompt_template_version="context-summary-v1",
         created_at=now,
     )
     messages = tuple(
@@ -539,7 +564,6 @@ def test_prepare_bounds_summary_output_across_tokenizers(
                     operation_id="cmpop_cross_tokenizer",
                     policy_version_id=policy.id,
                     compression_model_version_id=compression.version.id,
-                    prompt_version=policy.prompt_template_version,
                     compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
                     created_at=now,
                 ),
@@ -702,6 +726,7 @@ def test_compression_provider_error_is_not_retried_and_records_unknown_usage_onc
         context_cutoff_sequence=2,
         retry_of_run_id=None,
         model_config_version_id="profile_main",
+        model_snapshot=_model_snapshot("profile_main"),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -726,7 +751,6 @@ def test_compression_provider_error_is_not_retried_and_records_unknown_usage_onc
         protocol="chat_completions",
         base_url="https://llm.example.test/v1",
         model="summary-model",
-        has_api_key=True,
         context_window_tokens=4096,
         tokenizer_encoding="o200k_base",
         supports_stream=False,
@@ -738,6 +762,7 @@ def test_compression_provider_error_is_not_retried_and_records_unknown_usage_onc
         temperature=None,
         enabled=True,
         created_at=now,
+        updated_at=now,
     )
     runtime = RuntimeModelProfile(version=profile, api_key="test")
     provider = SimpleNamespace(
@@ -788,6 +813,7 @@ def test_compression_does_not_retry_uncertain_provider_outcome() -> None:
         context_cutoff_sequence=2,
         retry_of_run_id=None,
         model_config_version_id="profile_main",
+        model_snapshot=_model_snapshot("profile_main"),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -812,7 +838,6 @@ def test_compression_does_not_retry_uncertain_provider_outcome() -> None:
         protocol="chat_completions",
         base_url="https://llm.example.test/v1",
         model="summary-model",
-        has_api_key=True,
         context_window_tokens=2048,
         tokenizer_encoding="o200k_base",
         supports_stream=False,
@@ -824,6 +849,7 @@ def test_compression_does_not_retry_uncertain_provider_outcome() -> None:
         temperature=None,
         enabled=True,
         created_at=now,
+        updated_at=now,
     )
     runtime = RuntimeModelProfile(version=profile, api_key="test")
     provider = SimpleNamespace(
@@ -860,6 +886,7 @@ def test_compression_does_not_retry_uncertain_provider_outcome() -> None:
 
 def _main_runtime_for_prepare(*, context_window_tokens: int = 1000) -> RuntimeModelProfile:
     """构造 prepare 测试使用的固定主模型。"""
+    now = datetime.now(UTC)
     return RuntimeModelProfile(
         version=ModelProfileVersion(
             id="profile_main",
@@ -867,7 +894,6 @@ def _main_runtime_for_prepare(*, context_window_tokens: int = 1000) -> RuntimeMo
             protocol="chat_completions",
             base_url="https://llm.example.test/v1",
             model="main-model",
-            has_api_key=True,
             context_window_tokens=context_window_tokens,
             tokenizer_encoding="o200k_base",
             supports_stream=True,
@@ -878,7 +904,8 @@ def _main_runtime_for_prepare(*, context_window_tokens: int = 1000) -> RuntimeMo
             max_concurrency=1,
             temperature=None,
             enabled=True,
-            created_at=datetime.now(UTC),
+            created_at=now,
+            updated_at=now,
         ),
         api_key="test",
     )
@@ -907,6 +934,7 @@ def _prepare_test_context(
         context_cutoff_sequence=4,
         retry_of_run_id=None,
         model_config_version_id="profile_main",
+        model_snapshot=_model_snapshot("profile_main"),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -933,7 +961,6 @@ def _prepare_test_context(
             protocol="chat_completions",
             base_url="https://llm.example.test/v1",
             model="summary-model",
-            has_api_key=True,
             context_window_tokens=compression_window,
             tokenizer_encoding="cl100k_base",
             supports_stream=False,
@@ -945,6 +972,7 @@ def _prepare_test_context(
             temperature=None,
             enabled=True,
             created_at=now,
+            updated_at=now,
         ),
         api_key="test",
     )
@@ -956,7 +984,6 @@ def _prepare_test_context(
         recent_token_cap=15,
         summary_ratio=0.1,
         summary_token_cap=100,
-        prompt_template_version="context-summary-v1",
         created_at=now,
     )
     messages = tuple(
@@ -1091,7 +1118,6 @@ class _RecoverableCompressionRepository(_RunRepositoryFake):
             operation_id=command.operation_id,
             policy_version_id=command.policy_version_id,
             compression_model_version_id=command.compression_model_version_id,
-            prompt_version=command.prompt_version,
             compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
             created_at=command.created_at,
         )
@@ -1186,7 +1212,6 @@ def test_prepare_calls_summary_once_and_preserves_current_trigger(
                     operation_id="cmpop_prepare_test",
                     policy_version_id=policy.id,
                     compression_model_version_id=compression_runtime.version.id,
-                    prompt_version=policy.prompt_template_version,
                     compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
                     created_at=now,
                 ),
@@ -1274,7 +1299,6 @@ def test_prepare_failure_keeps_compatible_snapshot_without_retry(
         operation_id="cmpop_previous",
         policy_version_id=policy.id,
         compression_model_version_id=compression_runtime.version.id,
-        prompt_version=policy.prompt_template_version,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         created_at=now,
     )
@@ -1493,7 +1517,6 @@ def test_oversized_existing_summary_without_new_history_is_reused(
         operation_id="cmpop_previous",
         policy_version_id=policy.id,
         compression_model_version_id=compression_runtime.version.id,
-        prompt_version=policy.prompt_template_version,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         created_at=now,
     )
@@ -1588,7 +1611,6 @@ def test_oversized_existing_summary_with_new_history_is_merged_once(
         operation_id="cmpop_previous",
         policy_version_id=policy.id,
         compression_model_version_id=compression_runtime.version.id,
-        prompt_version=policy.prompt_template_version,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         created_at=now,
     )
@@ -1684,7 +1706,6 @@ def test_compression_input_preflight_has_zero_provider_slot_and_usage(
             protocol="chat_completions",
             base_url="https://llm.example.test/v1",
             model="summary-model",
-            has_api_key=True,
             context_window_tokens=80,
             tokenizer_encoding="o200k_base",
             supports_stream=False,
@@ -1696,6 +1717,7 @@ def test_compression_input_preflight_has_zero_provider_slot_and_usage(
             temperature=None,
             enabled=True,
             created_at=now,
+            updated_at=now,
         ),
         api_key="test",
     )
@@ -1708,6 +1730,7 @@ def test_compression_input_preflight_has_zero_provider_slot_and_usage(
         context_cutoff_sequence=2,
         retry_of_run_id=None,
         model_config_version_id="profile_main",
+        model_snapshot=_model_snapshot("profile_main"),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",

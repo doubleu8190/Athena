@@ -83,8 +83,7 @@ export function SidebarWorkspaceNav({
 
   const activeProjectId = activeProjectIdFromPath(location.pathname);
   const searchParams = new URLSearchParams(location.search);
-  const knowledgeScopeParam =
-    searchParams.get("scope") ?? searchParams.get("visibility_scope");
+  const knowledgeScopeParam = searchParams.get("scope");
   const isDeptKnowledgeActive =
     adminSection?.kind === "dept_admin" &&
     location.pathname.startsWith("/knowledge") &&

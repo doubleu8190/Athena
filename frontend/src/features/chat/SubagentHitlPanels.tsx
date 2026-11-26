@@ -64,7 +64,6 @@ export function SubagentApprovalPanel({
               index={index}
               key={key}
               onDecision={(decision) => onDecision(approval, decision)}
-              runId={approval.sub_run_id}
               sessionId={sessionId}
               subagentName={approval.subagent_name}
               subagentTaskSummary={approval.task_summary}

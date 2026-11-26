@@ -107,7 +107,7 @@ from domain.mcp import (
     McpRuntimeToolTarget,
 )
 from domain.org import RemoteDepartment, RemoteEmployee
-from domain.run.model import Run, RunStatus, RunUsage
+from domain.run.model import Run, RunModelSnapshot, RunStatus, RunUsage
 from domain.skill import RunSkillSnapshot
 from domain.tool import McpToolSource, ToolExecutionContext, ToolOutcomeStatus
 from infrastructure.feishu import FeishuUserIdentity
@@ -639,6 +639,7 @@ async def _create_harness(
         knowledge_repo,
         _SimpleTokenizer(),
         embedding=None,
+        profile_id="bge-m3-default",
         originals=_MemoryOriginalStore(),
         access_policy=access_policy,
         clock=clock,
@@ -1355,6 +1356,22 @@ def test_e2e_3_three_tier_access_isolation_and_transfer_revocation(
                 context_cutoff_sequence=1,
                 retry_of_run_id=None,
                 model_config_version_id="llm_dummy",
+                model_snapshot=RunModelSnapshot(
+                    id="llm_dummy",
+                    name="E2E Dummy",
+                    protocol="chat_completions",
+                    base_url="https://api.example.com/v1",
+                    model="gpt-4o-mini",
+                    context_window_tokens=128000,
+                    tokenizer_encoding="cl100k_base",
+                    supports_stream=True,
+                    supports_tools=True,
+                    supports_parallel_tool_calls=False,
+                    max_output_tokens=4096,
+                    request_timeout_seconds=30,
+                    execution_timeout_seconds=120,
+                    max_concurrency=4,
+                ),
                 main_prompt_version_id="sp_main_e2e",
                 compression_prompt_version_id="sp_comp_e2e",
                 prompt_template_version="run-v2",
@@ -1865,7 +1882,7 @@ def test_e2e_5_mcp_secret_patch_toggle_rediscover_batch_approval_and_business_ca
             )
             assert patched_model.status_code == 200
             assert patched_model.json()["version"] == 2
-            assert patched_model.json()["has_api_key"] is True
+            assert "has_api_key" not in patched_model.json()
             # 底层解密校验原 API Key 完整保留。
             runtime_model = _run(h.profile_repo.get_runtime(primary_model["id"]))
             assert runtime_model is not None
@@ -2076,23 +2093,20 @@ def test_e2e_5_mcp_secret_patch_toggle_rediscover_batch_approval_and_business_ca
 
 
 def test_e2e_6_alembic_full_migration_chain_and_phase1_downgrade_sql() -> None:
-    """校验唯一迁移 head、base->head 完整离线升级 SQL 关键对象与第一期全部 5 个迁移回滚 SQL。"""
+    """校验唯一基线 head=0001_initial_schema、base->head 离线升级 SQL 与基线回滚 SQL。"""
     config = Config(str(ALEMBIC_INI))
     config.set_main_option(
         "sqlalchemy.url",
         "postgresql+asyncpg://athena:athena@127.0.0.1:5432/athena_acceptance",
     )
 
-    # 1. 校验 alembic heads 严格保持单一 head，且 20261204_0037 位于主干迁移链中
-    # （兼容后续 M3.1+ 迁移）。
     script_dir = ScriptDirectory.from_config(config)
     heads = script_dir.get_heads()
-    assert len(heads) == 1
-    revision = script_dir.get_revision("20261204_0037")
+    assert heads == ["0001_initial_schema"]
+    revision = script_dir.get_revision("0001_initial_schema")
     assert revision is not None
-    assert revision.down_revision == "20261203_0036"
+    assert revision.down_revision is None
 
-    # 2. 生成完整 base -> head 离线升级 SQL 并核验全部第一期关键表、索引与字段。
     upgrade_buffer = StringIO()
     with redirect_stdout(upgrade_buffer):
         command.upgrade(config, "head", sql=True)
@@ -2116,24 +2130,10 @@ def test_e2e_6_alembic_full_migration_chain_and_phase1_downgrade_sql() -> None:
     for token in required_tokens:
         assert token in upgrade_sql, f"base->head 离线迁移 SQL 缺少关键对象: {token}"
 
-    # 3. 完整回滚第一期 5 个迁移（20261204_0037 -> 20261123_0032），并逐版本校验无报错。
     full_downgrade_buffer = StringIO()
     with redirect_stdout(full_downgrade_buffer):
-        command.downgrade(config, "20261204_0037:20261123_0032", sql=True)
+        command.downgrade(config, "0001_initial_schema:base", sql=True)
     full_downgrade_sql = full_downgrade_buffer.getvalue()
     assert "DROP TABLE user_work_profiles" in full_downgrade_sql
     assert "DROP TABLE departments" in full_downgrade_sql
     assert "DROP TABLE resource_visibility_grants" in full_downgrade_sql
-
-    phase1_steps = (
-        "20261204_0037:20261203_0036",
-        "20261203_0036:20261202_0035",
-        "20261202_0035:20261201_0034",
-        "20261201_0034:20261130_0033",
-        "20261130_0033:20261123_0032",
-    )
-    for step in phase1_steps:
-        step_buffer = StringIO()
-        with redirect_stdout(step_buffer):
-            command.downgrade(config, step, sql=True)
-        assert len(step_buffer.getvalue().strip()) > 0, f"回滚步骤 {step} 未生成任何 DDL"

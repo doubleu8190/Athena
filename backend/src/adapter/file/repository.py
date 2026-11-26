@@ -299,9 +299,7 @@ class SqlAlchemySessionFileRepository(
             async with session.begin():
                 # 锁定目标文件行（PostgreSQL 下 FOR UPDATE），防止并发惰性补解析相互覆盖缓存键。
                 row = await session.scalar(
-                    select(SessionFileModel)
-                    .where(SessionFileModel.id == file_id)
-                    .with_for_update()
+                    select(SessionFileModel).where(SessionFileModel.id == file_id).with_for_update()
                 )
                 if row is None:
                     return None
@@ -382,9 +380,7 @@ async def _is_object_key_referenced_in_session(
 ) -> bool:
     """只要任一业务表仍引用原件或提取文本缓存对象，离线维护都必须保留它。"""
     if await session.scalar(
-        select(SessionFileModel.id)
-        .where(SessionFileModel.object_key == object_key)
-        .limit(1)
+        select(SessionFileModel.id).where(SessionFileModel.object_key == object_key).limit(1)
     ):
         return True
     # 独立命中 uq_session_files_extracted_text_key，避免离线维护误删活跃文档提取缓存。
@@ -395,9 +391,7 @@ async def _is_object_key_referenced_in_session(
     ):
         return True
     if await session.scalar(
-        select(SkillVersionModel.id)
-        .where(SkillVersionModel.object_key == object_key)
-        .limit(1)
+        select(SkillVersionModel.id).where(SkillVersionModel.object_key == object_key).limit(1)
     ):
         return True
     return bool(

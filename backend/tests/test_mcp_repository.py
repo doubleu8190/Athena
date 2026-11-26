@@ -26,7 +26,7 @@ from domain.mcp import (
     McpServerWrite,
     StdioConfig,
 )
-from domain.tool import ToolDefinition
+from domain.tool import ToolDefinition, ToolMetadataPatch
 from infrastructure.security.mcp_secrets import McpSecretCipher
 
 _NOW = datetime(2026, 1, 2, tzinfo=UTC)
@@ -139,13 +139,15 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             assert not hasattr(before_alpha, "secrets")
             assert before_alpha.model_name.startswith("mcp__")
             assert before_alpha.requires_approval is False
-            updated_alpha = await repository.set_requires_approval(
-                actor, before_alpha.tool_id, True
+            updated_alpha = await repository.update_tool_metadata(
+                actor, before_alpha.tool_id, ToolMetadataPatch(requires_approval=True)
             )
             assert updated_alpha.requires_approval is True
             with pytest.raises(McpServerNotFoundError):
-                await repository.set_requires_approval(actor, "tool_missing", True)
-            public_tools = await repository.list_public(offset=0, limit=10)
+                await repository.update_tool_metadata(
+                    actor, "tool_missing", ToolMetadataPatch(requires_approval=True)
+                )
+            public_tools = await repository.list_readable_public(actor.user.id, offset=0, limit=10)
             assert not hasattr(public_tools.items[0], "server_id")
             assert not hasattr(public_tools.items[0], "remote_name")
             server_tools = await repository.list_server_admin("mcp_1", offset=0, limit=10)
@@ -205,7 +207,9 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
 
             await repository.delete(actor, "mcp_1")
             assert await repository.get("mcp_1") is None
-            assert (await repository.list_public(offset=0, limit=10)).total == 0
+            assert (
+                await repository.list_readable_public(actor.user.id, offset=0, limit=10)
+            ).total == 0
             with pytest.raises(McpServerNotFoundError):
                 await repository.delete(actor, "mcp_1")
         finally:

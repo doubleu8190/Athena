@@ -95,7 +95,7 @@ describe("流式渲染期间非流式兄弟组件重渲染隔离", () => {
                 id: running.trigger_message_id,
                 parts: [{ text: "请流式输出一份报告", type: "text" }],
                 role: "user",
-                run_id: null,
+                run_id: running.id,
                 sequence: 1,
                 session_id: session.id,
               }),

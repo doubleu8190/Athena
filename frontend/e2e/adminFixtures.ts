@@ -29,7 +29,6 @@ interface ModelFixture {
   created_at: string;
   enabled: boolean;
   execution_timeout_seconds: number;
-  has_api_key: boolean;
   id: string;
   max_concurrency: number;
   max_output_tokens: number;
@@ -121,7 +120,6 @@ function makeModel(body: Record<string, unknown>): ModelFixture {
       ModelFixture,
       | "created_at"
       | "enabled"
-      | "has_api_key"
       | "id"
       | "protocol"
       | "scenario_description"
@@ -133,7 +131,6 @@ function makeModel(body: Record<string, unknown>): ModelFixture {
     >),
     created_at: NOW,
     enabled: true,
-    has_api_key: true,
     id: "model-e2e",
     protocol: "chat_completions",
     scenario_description:
@@ -286,7 +283,6 @@ export async function installAdminFixtures(
         compression_model_profile_id: null,
         created_at: null,
         id: null,
-        prompt_template_version: null,
         recent_ratio: null,
         recent_token_cap: null,
         summary_ratio: null,

@@ -22,9 +22,9 @@ class AdminToolResponse(PublicToolResponse):
     server_id: str
     remote_name: str
     requires_approval: bool
-    display_name: str | None = None
-    approval_summary_template: str | None = None
-    parameter_labels: dict[str, str] = Field(default_factory=dict)
+    display_name: str | None
+    approval_summary_template: str | None
+    parameter_labels: dict[str, str]
 
 
 class ToolApprovalPolicyRequest(BaseModel):

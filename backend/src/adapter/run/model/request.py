@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKeyConstraint, Index, String, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,6 +23,10 @@ class RunRequestModel(Base):
 
     __tablename__ = "run_requests"
     __table_args__ = (
+        CheckConstraint(
+            "operation IN ('submit', 'answer', 'retry', 'decide_tool_approval')",
+            name="ck_run_requests_op",
+        ),
         UniqueConstraint(
             "owner_id",
             "session_id",

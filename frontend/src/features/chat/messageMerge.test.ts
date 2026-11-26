@@ -49,8 +49,10 @@ describe("会话消息合并", () => {
       {
         created_at: "2026-11-10T03:00:00Z",
         id: "m4",
+        parts: [{ text: "快照第四", type: "text" }],
         role: "assistant",
         sequence: 4,
+        session_id: "s1",
         status: "completed",
         text: "快照第四",
       },
@@ -63,7 +65,7 @@ describe("会话消息合并", () => {
     ]);
   });
 
-  it("快照只权威替换文本，保留同一条消息的非文本 parts 和关联字段", () => {
+  it("快照携带完整结构化 parts 覆盖同序号历史消息，并将 exclude_none 省略的可空字段归零为 null", () => {
     const filePart = {
       file_id: "file-1",
       filename: "季度报告.pdf",
@@ -78,7 +80,6 @@ describe("会话消息合并", () => {
       type: "tool_call" as const,
     };
     const resultPart = {
-      artifact_id: "artifact-1",
       artifacts: [],
       output: "查询完成",
       status: "completed",
@@ -114,8 +115,15 @@ describe("会话消息合并", () => {
         {
           created_at: "2026-11-10T03:03:00Z",
           id: "msg-full",
+          parts: [
+            filePart,
+            { text: "快照权威文本", type: "text" },
+            callPart,
+            resultPart,
+          ],
           role: "assistant",
           sequence: 5,
+          session_id: "s1",
           status: "completed",
           text: "快照权威文本",
         },
@@ -124,10 +132,10 @@ describe("会话消息合并", () => {
 
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({
-      completed_at: "2026-11-10T03:02:00Z",
+      completed_at: null,
       created_at: "2026-11-10T03:03:00Z",
       id: "msg-full",
-      reply_to_message_id: "msg-user",
+      reply_to_message_id: null,
       role: "assistant",
       run_id: "history-run",
       sequence: 5,
@@ -238,6 +246,7 @@ function makeSnapshot(
   overrides: Partial<RunSnapshotPayload> = {},
 ): RunSnapshotPayload {
   return {
+    assistant_message_id: null,
     event_sequence: 5,
     events: [],
     events_after_sequence: null,

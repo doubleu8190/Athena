@@ -115,6 +115,3 @@ export function SkillAdminRoute() {
   }
   return <Outlet />;
 }
-
-/** 保留向后兼容别名，语义等同于 SuperAdminRoute。 */
-export const AdminRoute = SuperAdminRoute;

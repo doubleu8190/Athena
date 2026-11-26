@@ -21,7 +21,6 @@ class ContextSummary:
     operation_id: str
     policy_version_id: str
     compression_model_version_id: str
-    prompt_version: str
     compression_prompt_version_id: str
     created_at: datetime
 
@@ -40,7 +39,6 @@ class SaveContextSummaryCommand:
     text: str
     policy_version_id: str
     compression_model_version_id: str
-    prompt_version: str
     created_at: datetime
     batch_count: int = 1
 

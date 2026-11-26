@@ -28,7 +28,7 @@ from adapter.llm.model.profile import (
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
-from adapter.run.model import RunEventModel, SessionContextSummaryModel
+from adapter.run.model import RunEventModel, RunModel, SessionContextSummaryModel
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
@@ -51,6 +51,8 @@ from domain.llm.model import (
 from domain.llm.model.profile import RuntimeModelProfile
 from domain.llm.model.types import LlmRequest
 from domain.run.model import RunEvent, RunStatus
+from domain.system_prompt.defaults import INITIAL_SYSTEM_PROMPT_IDS
+from domain.system_prompt.model import SystemPromptKind
 from infrastructure.security import Argon2PasswordHasher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
@@ -184,6 +186,7 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                             temperature=None,
                             enabled=True,
                             created_at=now,
+                            updated_at=now,
                         )
                     )
                     await session.flush()
@@ -209,6 +212,7 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                             temperature=None,
                             enabled=True,
                             created_at=now,
+                            updated_at=now,
                         )
                     )
                     await session.flush()
@@ -216,13 +220,11 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                         CompressionPolicyVersionModel(
                             id="cmpol_run_e2e",
                             compression_model_profile_id="llmprof_compression_e2e",
-                            trigger_ratio=0.4,
                             trigger_tokens=1_024,
                             recent_ratio=0.2,
                             recent_token_cap=2_048,
                             summary_ratio=0.1,
                             summary_token_cap=1_024,
-                            prompt_template_version="context-summary-v1",
                             created_at=now,
                         )
                     )
@@ -253,9 +255,8 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                                     }
                                 ],
                                 reply_to_message_id=None,
-                                run_id=None,
-                                managed_run_id=None,
-                                context_turn_id=None,
+                                run_id="run_compression_history",
+                                context_turn_id="msg_compression_history_user",
                                 client_message_id=None,
                                 created_at=now,
                                 completed_at=now,
@@ -279,13 +280,57 @@ def test_compressed_public_run_worker_and_sse_recover_missed_events(
                                     }
                                 ],
                                 reply_to_message_id="msg_compression_history_user",
-                                run_id=None,
-                                managed_run_id=None,
-                                context_turn_id=None,
+                                run_id="run_compression_history",
+                                context_turn_id="msg_compression_history_user",
                                 client_message_id=None,
                                 created_at=now,
                                 completed_at=now,
                                 metadata_json={},
+                            ),
+                            RunModel(
+                                id="run_compression_history",
+                                session_id="ses_run_e2e",
+                                owner_id="usr_run_e2e",
+                                status="completed",
+                                trigger_message_id="msg_compression_history_user",
+                                context_cutoff_sequence=1,
+                                retry_of_run_id=None,
+                                model_config_version_id="llmprof_run_e2e",
+                                model_snapshot_json={
+                                    "id": "llmprof_run_e2e",
+                                    "name": "E2E fake streaming provider",
+                                    "protocol": "chat_completions",
+                                    "base_url": "https://llm.example.test/v1",
+                                    "model": "fake-stream-model",
+                                    "context_window_tokens": 2048,
+                                    "tokenizer_encoding": "o200k_base",
+                                    "supports_stream": True,
+                                    "supports_tools": True,
+                                    "supports_parallel_tool_calls": False,
+                                    "max_output_tokens": 64,
+                                    "request_timeout_seconds": 30,
+                                    "execution_timeout_seconds": 60,
+                                    "max_concurrency": 1,
+                                    "temperature": None,
+                                    "scenario_label": None,
+                                    "supports_vision": False,
+                                    "version": 1,
+                                },
+                                main_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                                    SystemPromptKind.MAIN
+                                ],
+                                compression_prompt_version_id=INITIAL_SYSTEM_PROMPT_IDS[
+                                    SystemPromptKind.COMPRESSION
+                                ],
+                                prompt_template_version="run-v2",
+                                event_sequence=0,
+                                execution_epoch=0,
+                                queued_at=now,
+                                created_at=now,
+                                updated_at=now,
+                                finished_at=now,
+                                usage={},
+                                depth=0,
                             ),
                         ]
                     )

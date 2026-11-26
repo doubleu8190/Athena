@@ -21,9 +21,9 @@ class SubagentResponse(BaseModel):
     model_profile_id: str | None
     allowed_tool_ids: list[str]
     enabled: bool
-    visibility_scope: Literal["company", "department"] = "company"
-    owner_department_id: str | None = None
-    visibility_grants: list[VisibilityGrantResponse] = Field(default_factory=list)
+    visibility_scope: Literal["company", "department"]
+    owner_department_id: str | None
+    visibility_grants: list[VisibilityGrantResponse]
     max_llm_requests: int | None
     timeout_seconds: int | None
     version: int
@@ -95,8 +95,8 @@ class AvailableToolItemResponse(BaseModel):
     description: str
     source_type: str
     requires_approval: bool
-    server_id: str | None = None
-    server_name: str | None = None
+    server_id: str | None
+    server_name: str | None
 
 
 class AvailableToolGroupResponse(BaseModel):

@@ -79,29 +79,20 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _CREATE_ADAPTER)
-        has_visibility = bool(
-            request.model_fields_set
-            & {"visibility_scope", "owner_department_id", "visibility_grants"}
-        )
         try:
-            if has_visibility:
-                server = await manager.register_mcp(
-                    actor,
-                    request.name,
-                    request.to_domain_config(),
-                    request.secrets,
-                    visibility_scope=VisibilityScope(request.visibility_scope),
-                    owner_department_id=request.owner_department_id,
-                    visibility_grants=(
-                        None
-                        if request.visibility_grants is None
-                        else tuple(item.to_domain() for item in request.visibility_grants)
-                    ),
-                )
-            else:
-                server = await manager.register_mcp(
-                    actor, request.name, request.to_domain_config(), request.secrets
-                )
+            server = await manager.register_mcp(
+                actor,
+                request.name,
+                request.to_domain_config(),
+                request.secrets,
+                visibility_scope=VisibilityScope(request.visibility_scope),
+                owner_department_id=request.owner_department_id,
+                visibility_grants=(
+                    None
+                    if request.visibility_grants is None
+                    else tuple(item.to_domain() for item in request.visibility_grants)
+                ),
+            )
         except Exception as error:
             raise mcp_error_to_http(error) from error
         response.headers["Location"] = f"/api/v1/admin/mcp/servers/{server.id}"
@@ -149,36 +140,22 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         response: Response,
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _UPDATE_ADAPTER)
-        has_visibility = bool(
-            request.model_fields_set
-            & {"visibility_scope", "owner_department_id", "visibility_grants"}
-        )
         try:
-            if has_visibility:
-                result = await manager.update_mcp(
-                    actor,
-                    server_id,
-                    request.expected_config_version,
-                    request.name,
-                    request.to_domain_config(),
-                    request.secrets,
-                    visibility_scope=VisibilityScope(request.visibility_scope),
-                    owner_department_id=request.owner_department_id,
-                    visibility_grants=(
-                        None
-                        if request.visibility_grants is None
-                        else tuple(item.to_domain() for item in request.visibility_grants)
-                    ),
-                )
-            else:
-                result = await manager.update_mcp(
-                    actor,
-                    server_id,
-                    request.expected_config_version,
-                    request.name,
-                    request.to_domain_config(),
-                    request.secrets,
-                )
+            result = await manager.update_mcp(
+                actor,
+                server_id,
+                request.expected_config_version,
+                request.name,
+                request.to_domain_config(),
+                request.secrets,
+                visibility_scope=VisibilityScope(request.visibility_scope),
+                owner_department_id=request.owner_department_id,
+                visibility_grants=(
+                    None
+                    if request.visibility_grants is None
+                    else tuple(item.to_domain() for item in request.visibility_grants)
+                ),
+            )
         except Exception as error:
             raise mcp_error_to_http(error) from error
         response.headers["Cache-Control"] = "no-store"

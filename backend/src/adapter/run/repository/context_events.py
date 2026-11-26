@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 
 from pydantic import TypeAdapter
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy import text as sql_text
 
 from adapter.message.converter.message import conversation_to_domain, execution_to_domain
@@ -104,7 +103,6 @@ def _stream_message_parts(parts: tuple[MessagePart, ...]) -> tuple[dict[str, obj
                     "tool_call_id": part.tool_call_id,
                     "status": part.status.value,
                     "output": part.output,
-                    "artifact_id": part.artifact_id,
                     "artifacts": [
                         {
                             "file_id": artifact.file_id,
@@ -172,24 +170,22 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             if run is None:
                 return None
             # 子 Run 严格上下文隔离：不拉取主会话正式对话历史，仅加载本子 Run 执行消息。
-            # 主 Run 上下文也须隔离掉子 Run（depth >= 1）的提问与回答。
+            # 主 Run 上下文也须隔离掉子 Run（depth >= 1）的提问与回答；
+            # conversation_messages.run_id 与 context_turn_id 均已收紧为非空，直接内连接过滤即可。
             conversation_rows = (
                 ()
                 if run.depth >= 1
                 else (
                     await session.scalars(
                         select(ConversationMessageModel)
-                        .outerjoin(
+                        .join(
                             RunModel,
-                            RunModel.id == ConversationMessageModel.managed_run_id,
+                            RunModel.id == ConversationMessageModel.run_id,
                         )
                         .where(
                             ConversationMessageModel.session_id == session_id,
                             ConversationMessageModel.sequence <= run.context_cutoff_sequence,
-                            or_(
-                                ConversationMessageModel.managed_run_id.is_(None),
-                                RunModel.depth == 0,
-                            ),
+                            RunModel.depth == 0,
                         )
                         .order_by(ConversationMessageModel.sequence)
                     )
@@ -212,26 +208,8 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     .order_by(RunToolCallModel.ordinal)
                 )
             ).all()
-            run_trigger_by_id = dict(
-                (
-                    await session.execute(
-                        select(RunModel.id, RunModel.trigger_message_id).where(
-                            RunModel.session_id == session_id,
-                            RunModel.owner_id == owner_id,
-                        )
-                    )
-                ).all()
-            )
         messages: list[ConversationMessage | ExecutionMessage] = [
-            *(
-                replace(
-                    conversation_to_domain(row),
-                    context_turn_id=(
-                        row.context_turn_id or run_trigger_by_id.get(row.managed_run_id or "")
-                    ),
-                )
-                for row in conversation_rows
-            ),
+            *(conversation_to_domain(row) for row in conversation_rows),
             *(execution_to_domain(row) for row in execution_rows),
         ]
         result_ids_by_call_message = {
@@ -434,7 +412,6 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     operation_id=command.operation_id,
                     policy_version_id=command.policy_version_id,
                     compression_model_version_id=command.compression_model_version_id,
-                    prompt_version=command.prompt_version,
                     compression_prompt_version_id=row.compression_prompt_version_id,
                     created_at=db_now or command.created_at,
                 )

@@ -921,11 +921,8 @@ describe("管理端公共/部门技能双形态与在线 Markdown 发布", () =>
   });
 
   it("纯函数校验与 M3.3 错误码映射符合契约边界", () => {
-    expect(skillFormat({ scope: "personal" })).toBe("markdown");
-    expect(skillFormat({ scope: "company" })).toBe("package");
-    expect(skillFormat({ format: "markdown", scope: "company" })).toBe(
-      "markdown",
-    );
+    expect(skillFormat({ format: "markdown" })).toBe("markdown");
+    expect(skillFormat({ format: "package" })).toBe("package");
 
     expect(validateStarterPrompt("   ")).toBeNull();
     expect(validateStarterPrompt("请上传报销单\n逐项审核\t完成")).toBeNull();

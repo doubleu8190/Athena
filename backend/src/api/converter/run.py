@@ -172,17 +172,13 @@ def run_to_response(
         context_cutoff_sequence=run.context_cutoff_sequence,
         retry_of_run_id=run.retry_of_run_id,
         model_config_version_id=run.model_config_version_id,
-        model_snapshot=(
-            None
-            if run.model_snapshot is None
-            else RunModelSnapshotResponse(
-                id=run.model_snapshot.id,
-                name=run.model_snapshot.name,
-                model=run.model_snapshot.model,
-                scenario_label=run.model_snapshot.scenario_label,
-                supports_vision=run.model_snapshot.supports_vision,
-                version=run.model_snapshot.version,
-            )
+        model_snapshot=RunModelSnapshotResponse(
+            id=run.model_snapshot.id,
+            name=run.model_snapshot.name,
+            model=run.model_snapshot.model,
+            scenario_label=run.model_snapshot.scenario_label,
+            supports_vision=run.model_snapshot.supports_vision,
+            version=run.model_snapshot.version,
         ),
         prompt_template_version=run.prompt_template_version,
         event_sequence=run.event_sequence,

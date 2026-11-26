@@ -170,7 +170,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     session,
                     command.call_message,
                     locked_session=locked_session,
-                    managed_run_id=row.id,
                 )
                 records: list[RunToolCallModel] = []
                 pending_record_ids: list[str] = []
@@ -237,7 +236,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                             session,
                             item.result_message,
                             locked_session=locked_session,
-                            managed_run_id=row.id,
                         )
                         record.result_message_id = item.result_message.id
                         await self._append_event(
@@ -488,7 +486,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         session,
                         result_message,
                         locked_session=locked_session,
-                        managed_run_id=row.id,
                     )
                     # 记录终态与可审计的 outcome，并关联刚追加的结果消息。
                     record.status = ToolCallStatus.FAILED.value
@@ -641,7 +638,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     session,
                     command.result_message,
                     locked_session=locked_session,
-                    managed_run_id=row.id,
                 )
                 if command.delivery_message is not None:
                     # 产物交付同时作为普通助手消息发布，使分页刷新后的公开消息流
@@ -650,7 +646,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                         session,
                         command.delivery_message,
                         locked_session=locked_session,
-                        managed_run_id=row.id,
                     )
                 record.status = persisted_status_for_outcome(outcome).value
                 record.result_message_id = command.result_message.id

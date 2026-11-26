@@ -596,8 +596,11 @@ describe("Run 命令与真实状态", () => {
 
   it("latest list 与 detail 同版本时保留 detail 的待审批投影", async () => {
     const pending: RunPendingApproval = {
+      approval_summary: null,
       batch_message_id: "batch-1",
       call_id: "call-1",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "approval_tool",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:02Z",
@@ -921,7 +924,7 @@ describe("Run 命令与真实状态", () => {
       id: running.trigger_message_id,
       parts: [{ text: "请生成财务复盘并附 Excel 报表", type: "text" }],
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 1,
       session_id: SESSION.id,
     });
@@ -1062,7 +1065,7 @@ describe("Run 命令与真实状态", () => {
       id: running.trigger_message_id,
       parts: [{ text: "请生成分包测试总结", type: "text" }],
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 1,
       session_id: SESSION.id,
     });
@@ -1190,7 +1193,7 @@ describe("Run 命令与真实状态", () => {
       id: running.trigger_message_id,
       parts: [{ text: "请总结 EOF 兜底", type: "text" }],
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 1,
       session_id: SESSION.id,
     });
@@ -1423,7 +1426,6 @@ describe("Run 命令与真实状态", () => {
         id: `msg-${terminalStatus}-delivery`,
         parts: [
           {
-            artifact_id: "artifact-1",
             artifacts: [],
             output: null,
             status: "success",
@@ -1509,7 +1511,7 @@ describe("Run 命令与真实状态", () => {
       parts: [{ text: "触发上下文安全停止", type: "text" }],
       reply_to_message_id: null,
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 1,
       session_id: SESSION.id,
     });
@@ -1615,7 +1617,7 @@ describe("Run 命令与真实状态", () => {
       parts: [{ text: "触发安全收尾", type: "text" }],
       reply_to_message_id: null,
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 3,
       session_id: SESSION.id,
     });
@@ -1715,7 +1717,7 @@ describe("Run 命令与真实状态", () => {
       parts: [{ text: "刷新前的触发消息", type: "text" }],
       reply_to_message_id: null,
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 3,
       session_id: SESSION.id,
     });
@@ -1794,7 +1796,7 @@ describe("Run 命令与真实状态", () => {
       parts: [{ text: "触发报告校验", type: "text" }],
       reply_to_message_id: null,
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 3,
       session_id: SESSION.id,
     });
@@ -2603,8 +2605,13 @@ describe("Run 命令与真实状态", () => {
 describe("审批与失败重试", () => {
   it("展示真实审批字段与参数，并逐项 approve/reject", async () => {
     const pendingOne: RunPendingApproval = {
+      approval_summary: "即将更新 CRM 客户记录",
       batch_message_id: "batch-1",
       call_id: "call-record-1",
+      display_name: null,
+      formatted_arguments: [
+        { key: "query", label: "查询条件", value: "真实参数" },
+      ],
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -2612,8 +2619,11 @@ describe("审批与失败重试", () => {
       tool_kind: "mcp",
     };
     const pendingTwo: RunPendingApproval = {
+      approval_summary: null,
       batch_message_id: "batch-1",
       call_id: "call-record-2",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "send_email",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:01Z",
@@ -2663,12 +2673,6 @@ describe("审批与失败重试", () => {
         throw new Error(`Unexpected write: ${pathname}`);
       },
       messages: () => ({ items: [], next_before_sequence: null }),
-      toolCallDetail: (_runId, callId) =>
-        makeToolCallDetail({
-          id: callId,
-          ordinal: callId.endsWith("1") ? 1 : 2,
-          tool_call_id: `protocol-${callId}`,
-        }),
     });
     const user = userEvent.setup();
 
@@ -2680,12 +2684,11 @@ describe("审批与失败重试", () => {
     expect(screen.getByText("send_email")).toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
     expect(screen.getByText("2 / 2")).toBeInTheDocument();
-
-    await user.click(
-      screen.getAllByRole("button", { name: "查看参数" })[0],
-    );
-    expect(await screen.findByText("query")).toBeInTheDocument();
+    expect(screen.getByText("查询条件")).toBeInTheDocument();
     expect(screen.getByText("真实参数")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "查看参数" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getAllByRole("button", { name: "确认执行" })[0]);
     await waitFor(() => expect(decisions).toHaveLength(1));
@@ -2704,8 +2707,11 @@ describe("审批与失败重试", () => {
 
   it("审批请求串行提交，延迟响应不会覆盖最后的 queued 状态", async () => {
     const pendingOne: RunPendingApproval = {
+      approval_summary: null,
       batch_message_id: "batch-serial",
       call_id: "call-serial-1",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -2713,8 +2719,11 @@ describe("审批与失败重试", () => {
       tool_kind: "mcp",
     };
     const pendingTwo: RunPendingApproval = {
+      approval_summary: null,
       batch_message_id: "batch-serial",
       call_id: "call-serial-2",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "send_email",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:01Z",
@@ -2810,8 +2819,11 @@ describe("审批与失败重试", () => {
 
   it("审批响应迟到时不能回退先完成的取消状态", async () => {
     const pending: RunPendingApproval = {
+      approval_summary: null,
       batch_message_id: "batch-stale-approval",
       call_id: "call-stale-approval",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -2882,8 +2894,11 @@ describe("审批与失败重试", () => {
 
   it("取消请求在途时审批入口被共享锁阻止，最终保持已取消", async () => {
     const pending: RunPendingApproval = {
+      approval_summary: null,
       batch_message_id: "batch-cancel-lock",
       call_id: "call-cancel-lock",
+      display_name: null,
+      formatted_arguments: [],
       model_name: "send_email",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -3729,7 +3744,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
       id: running.trigger_message_id,
       parts: [{ text: "帮我生成季度汇总", type: "text" }],
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 1,
       session_id: SESSION.id,
     });
@@ -3807,7 +3822,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     ).toHaveLength(0);
   });
 
-  it("运行中无产物 tool_call_finished 不重拉消息；但 live snapshot 出现未缓存交付消息 ID 时精准补拉消息与文件并渲染附件卡片", async () => {
+  it("运行中无产物 tool_call_finished 不重拉消息；但 live snapshot 出现未缓存自包含交付消息时直接合入消息并刷新文件列表渲染附件卡片", async () => {
     const running = makeRun({
       event_sequence: 2,
       id: "run-live-delivery",
@@ -3818,7 +3833,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
       id: running.trigger_message_id,
       parts: [{ text: "请执行财务技能导出报表并继续分析", type: "text" }],
       role: "user",
-      run_id: null,
+      run_id: "run-1",
       sequence: 1,
       session_id: SESSION.id,
     });
@@ -3925,10 +3940,23 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     expect(countRequests("/messages")).toBe(baselineMessageCalls);
     expect(countRequests("/files")).toBe(baselineFileCalls);
 
-    // 2. Skill 脚本完成产出交付文件，后端在 running 态推送含新消息 ID（纯文本投影）的 snapshot：
-    //    精准触发 /messages 与 /files 补拉，运行期间立即渲染 FileRefPart 附件卡片并同步文件计数。
+    // 2. Skill 脚本完成产出交付文件，后端在 running 态推送含结构化 parts 的自包含 snapshot：
+    //    直接将交付消息合入缓存（零额外 /messages 补拉），同时精准刷新 /files 列表渲染附件卡片与计数。
     currentMessages = [deliveryMessage, trigger];
     currentFiles = [deliveredFile];
+    const deliverySnapshotMessage = {
+      completed_at: deliveryMessage.completed_at,
+      created_at: deliveryMessage.created_at,
+      id: deliveryMessage.id,
+      parts: deliveryMessage.parts,
+      reply_to_message_id: deliveryMessage.reply_to_message_id,
+      role: "assistant",
+      run_id: deliveryMessage.run_id,
+      sequence: deliveryMessage.sequence,
+      session_id: deliveryMessage.session_id,
+      status: "completed",
+      text: "已生成以下交付文件。",
+    };
     act(() => {
       source.emit("run_event", {
         payload: {
@@ -3948,16 +3976,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
           events: [],
           events_after_sequence: null,
           events_complete: true,
-          messages: [
-            {
-              created_at: deliveryMessage.created_at,
-              id: deliveryMessage.id,
-              role: "assistant",
-              sequence: deliveryMessage.sequence,
-              status: "completed",
-              text: "已生成以下交付文件。",
-            },
-          ],
+          messages: [deliverySnapshotMessage],
           messages_before_sequence: null,
           messages_complete: true,
           report_message_id: null,
@@ -3983,7 +4002,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     expect(
       await screen.findByRole("button", { name: "会话文件（1）" }),
     ).toBeInTheDocument();
-    expect(countRequests("/messages")).toBe(baselineMessageCalls + 1);
+    expect(countRequests("/messages")).toBe(baselineMessageCalls);
     expect(countRequests("/files")).toBe(baselineFileCalls + 1);
 
     // 3. 同一交付消息 ID 的后续周期 running snapshot 不得重复触发 /messages 或 /files 失效。
@@ -3994,16 +4013,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
           events: [],
           events_after_sequence: null,
           events_complete: true,
-          messages: [
-            {
-              created_at: deliveryMessage.created_at,
-              id: deliveryMessage.id,
-              role: "assistant",
-              sequence: deliveryMessage.sequence,
-              status: "completed",
-              text: "已生成以下交付文件。",
-            },
-          ],
+          messages: [deliverySnapshotMessage],
           messages_before_sequence: null,
           messages_complete: true,
           report_message_id: null,
@@ -4017,8 +4027,257 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
       await Promise.resolve();
       await Promise.resolve();
     });
+    expect(countRequests("/messages")).toBe(baselineMessageCalls);
+    expect(countRequests("/files")).toBe(baselineFileCalls + 1);
+  });
+
+  it("运行中快照含未知 part 消息时不静默丢弃，合并其余合法消息后触发 /messages 与 /files 补拉", async () => {
+    const running = makeRun({
+      event_sequence: 2,
+      id: "run-live-unknown-part",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "请执行分析", type: "text" }],
+      role: "user",
+      run_id: running.id,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    const validMidMessage = makeMessage({
+      id: "msg-live-valid-mid",
+      parts: [{ text: "已完成阶段一汇总。", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 2,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const authoritativeUnknownPartMessage = makeMessage({
+      id: "msg-live-unknown-part",
+      parts: [{ text: "补拉回来的未知块降级文本", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 3,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const deliveredFile = makeSessionFile({
+      filename: "chart.png",
+      id: "file-live-unknown-1",
+      label: "图表",
+      mime_type: "image/png",
+      session_id: SESSION.id,
+      size_bytes: 2_048,
+      source: "artifact",
+    });
+
+    let currentMessages = [trigger];
+    let currentFiles: SessionFile[] = [];
+    const fetchMock = installWorkspaceFetch({
+      getFiles: () => currentFiles,
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: currentMessages,
+        next_before_sequence: null,
+      }),
+    });
+
+    renderApp(`/chat/${SESSION.id}`);
+    expect(await screen.findByText("请执行分析")).toBeInTheDocument();
+
+    const source = FakeSseStream.instances[0];
+    const countRequests = (suffix: string) =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          suffix,
+        ),
+      ).length;
+    const baselineMessageCalls = countRequests("/messages");
+    const baselineFileCalls = countRequests("/files");
+
+    currentMessages = [
+      authoritativeUnknownPartMessage,
+      validMidMessage,
+      trigger,
+    ];
+    currentFiles = [deliveredFile];
+
+    // 运行中快照同时包含一条合法消息与一条含未知 part 的消息：不得静默丢弃，必须触发补拉。
+    act(() => {
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: 4,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              completed_at: validMidMessage.completed_at,
+              created_at: validMidMessage.created_at,
+              id: validMidMessage.id,
+              parts: validMidMessage.parts,
+              role: "assistant",
+              run_id: running.id,
+              sequence: validMidMessage.sequence,
+              session_id: SESSION.id,
+              status: "completed",
+              text: "已完成阶段一汇总。",
+            },
+            {
+              created_at: authoritativeUnknownPartMessage.created_at,
+              id: authoritativeUnknownPartMessage.id,
+              parts: [{ payload: { v: 1 }, type: "future_widget" }],
+              role: "assistant",
+              run_id: running.id,
+              sequence: authoritativeUnknownPartMessage.sequence,
+              session_id: SESSION.id,
+              status: "completed",
+              text: "补拉回来的未知块降级文本",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "running",
+        },
+      });
+    });
+
+    expect(await screen.findByText("已完成阶段一汇总。")).toBeInTheDocument();
+    expect(
+      await screen.findByText("补拉回来的未知块降级文本"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "会话文件（1）" }),
+    ).toBeInTheDocument();
     expect(countRequests("/messages")).toBe(baselineMessageCalls + 1);
     expect(countRequests("/files")).toBe(baselineFileCalls + 1);
+  });
+
+  it("终态快照含未知 part 消息时拒绝内联收敛并触发单次有界 GET /messages 兜底补齐完整消息", async () => {
+    const running = makeRun({
+      event_sequence: 2,
+      id: "run-terminal-unknown-part",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const completed = makeRun({
+      ...running,
+      assistant_message_id: "msg-final-valid",
+      event_sequence: 6,
+      finished_at: "2026-11-10T03:00:08Z",
+      status: "completed",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "请给出结论", type: "text" }],
+      role: "user",
+      run_id: running.id,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    const authoritativeDelivery = makeMessage({
+      id: "msg-delivery-unknown-part",
+      parts: [{ text: "终态兜底恢复的扩展交付消息", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 2,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    const finalMessage = makeMessage({
+      id: "msg-final-valid",
+      parts: [{ text: "最终权威回答", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 3,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+
+    let currentRun = running;
+    let currentMessages = [trigger];
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [currentRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: currentMessages,
+        next_before_sequence: null,
+      }),
+    });
+
+    renderApp(`/chat/${SESSION.id}`);
+    expect(await screen.findByText("请给出结论")).toBeInTheDocument();
+
+    const source = FakeSseStream.instances[0];
+    const countRequests = (suffix: string) =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          suffix,
+        ),
+      ).length;
+    const baselineMessageCalls = countRequests("/messages");
+
+    currentRun = completed;
+    currentMessages = [finalMessage, authoritativeDelivery, trigger];
+
+    // 终态快照即使已包含合法的 assistant_message_id 消息，只要同快照内存在无法解析的消息，
+    // 仍必须拒绝内联收敛并执行单次有界 GET /messages 补齐缺失消息，杜绝静默吞消息。
+    act(() => {
+      source.emit("text_delta", { payload: { text: "流式草稿" } });
+      source.emit("snapshot", {
+        payload: {
+          assistant_message_id: finalMessage.id,
+          event_sequence: 6,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              created_at: authoritativeDelivery.created_at,
+              id: authoritativeDelivery.id,
+              parts: [{ data: "unsupported", type: "future_widget" }],
+              role: "assistant",
+              run_id: running.id,
+              sequence: authoritativeDelivery.sequence,
+              session_id: SESSION.id,
+              status: "completed",
+              text: "终态兜底恢复的扩展交付消息",
+            },
+            {
+              completed_at: finalMessage.completed_at,
+              created_at: finalMessage.created_at,
+              id: finalMessage.id,
+              parts: finalMessage.parts,
+              role: "assistant",
+              run_id: running.id,
+              sequence: finalMessage.sequence,
+              session_id: SESSION.id,
+              status: "completed",
+              text: "最终权威回答",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "completed",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText("终态兜底恢复的扩展交付消息"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("最终权威回答")).toBeInTheDocument();
+    expect(countRequests("/messages")).toBe(baselineMessageCalls + 1);
   });
 });
 
@@ -4207,7 +4466,6 @@ describe("会话文件抽屉与顶层预览弹窗互斥层叠与焦点归还", (
             id: "msg-artifact-preview-return",
             parts: [
               {
-                artifact_id: null,
                 artifacts: [
                   makeArtifact({
                     file_id: artifactFile.id,

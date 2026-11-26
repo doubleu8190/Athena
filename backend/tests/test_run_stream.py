@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -34,6 +34,7 @@ from domain.run.model import (
     RunEvent,
     RunFailedPayload,
     RunInterruptedEvent,
+    RunModelSnapshot,
     RunPersistedEvent,
     RunPersistedEventPayload,
     RunQueuedPayload,
@@ -65,6 +66,22 @@ def _run(status: RunStatus, epoch: int) -> Run:
         context_cutoff_sequence=1,
         retry_of_run_id=None,
         model_config_version_id="profile_stream_test",
+        model_snapshot=RunModelSnapshot(
+            id="profile_stream_test",
+            name="Stream Test Model",
+            protocol="chat_completions",
+            base_url="https://api.example.com/v1",
+            model="gpt-4o-mini",
+            context_window_tokens=128000,
+            tokenizer_encoding="cl100k_base",
+            supports_stream=True,
+            supports_tools=True,
+            supports_parallel_tool_calls=False,
+            max_output_tokens=4096,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=120,
+            max_concurrency=4,
+        ),
         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
         prompt_template_version="run-v2",
@@ -255,6 +272,8 @@ def test_failed_reconnect_snapshot_carries_persisted_report_reference() -> None:
                 text="上下文安全停止。任务未标记为完成。",
                 sequence=2,
                 created_at=now,
+                session_id="session_stream_test",
+                parts=({"type": "text", "text": "上下文安全停止。任务未标记为完成。"},),
             )
             failed_event = RunEvent(
                 id="event_context_safety_failed",
@@ -638,6 +657,8 @@ def test_database_reconciliation_delivers_result_after_lost_notification(
         text="database committed result",
         sequence=2,
         created_at=now,
+        session_id="session_stream_test",
+        parts=({"type": "text", "text": "database committed result"},),
     )
 
     class CommittedRepository(_FakeRepository):
@@ -1602,7 +1623,26 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
         report_message_id=None,
         usage={},
         compression_policy_version_id=None,
-        model_snapshot_json=None,
+        model_snapshot_json={
+            "id": "profile_1",
+            "name": "Stream Model",
+            "protocol": "chat_completions",
+            "base_url": "https://api.example.com/v1",
+            "model": "gpt-4o-mini",
+            "context_window_tokens": 128000,
+            "tokenizer_encoding": "cl100k_base",
+            "supports_stream": True,
+            "supports_tools": True,
+            "supports_parallel_tool_calls": False,
+            "max_output_tokens": 4096,
+            "request_timeout_seconds": 30,
+            "execution_timeout_seconds": 120,
+            "max_concurrency": 4,
+            "temperature": None,
+            "scenario_label": None,
+            "supports_vision": False,
+            "version": 1,
+        },
         tool_snapshot=None,
         auth_session_id=None,
         llm_request_count=0,
@@ -1631,12 +1671,11 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
             parts=[{"type": "text", "text": "B" * 600}],
             reply_to_message_id=None,
             run_id="run_snap_1",
-            managed_run_id="run_snap_1",
             client_message_id=None,
             created_at=now,
             completed_at=now,
             metadata_json={},
-            context_turn_id=None,
+            context_turn_id="msg_1",
         ),
         SimpleNamespace(
             id="msg_2",
@@ -1647,12 +1686,11 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
             parts=[{"type": "text", "text": "A" * 1700}],
             reply_to_message_id=None,
             run_id="run_snap_1",
-            managed_run_id="run_snap_1",
             client_message_id=None,
             created_at=now,
             completed_at=now,
             metadata_json={},
-            context_turn_id=None,
+            context_turn_id="msg_1",
         ),
     ]
     evt_rows = [
@@ -1728,7 +1766,7 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
 
     class _Repo(RunContextEventsMixin):
         def __init__(self) -> None:
-            self._session_factory = lambda: _FakeSession()  # type: ignore[assignment]
+            self._session_factory = cast(Any, lambda: _FakeSession())
 
     snapshot = asyncio.run(_Repo().get_stream_snapshot("ses_snap_1", "usr_snap_1", "run_snap_1"))
     assert snapshot is not None
@@ -2161,27 +2199,42 @@ def test_stream_reconciles_on_subagent_and_waiting_approval_even_when_contiguous
 def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_protection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """终态快照填充自包含消息与 assistant_message_id，兼容旧格式并优先裁事件保护终态消息。"""
+    """终态快照填充自包含消息与 assistant_message_id，校验必填字段契约并优先裁事件保护终态消息。"""
     from collections.abc import Sequence
     from types import SimpleNamespace
+
+    from pydantic import ValidationError
 
     from adapter.run.model import RunModel
     from adapter.run.repository import context_events as ctx_module
     from adapter.run.repository.context_events import RunContextEventsMixin
 
     now = datetime.now(UTC)
-    # 1. 验证旧格式 RunStreamMessage / RunSnapshotPayload JSON 100% 向后兼容反序列化。
-    legacy_snapshot_json = (
+    # 1. 验证 RunStreamMessage 收紧后的契约：session_id 与 parts 必填，可空元信息字段仍允许省略。
+    missing_required_json = (
         '{"type":"snapshot","run_id":"r1","execution_epoch":1,"stream_sequence":0,'
         '"payload":{"status":"completed","event_sequence":2,"messages":[{"id":"m1",'
         '"role":"assistant","status":"completed","text":"legacy","sequence":2,'
         '"created_at":"2026-01-01T00:00:00Z"}],"events":[]}}'
     )
-    parsed_legacy = redis_module._EVENT_ADAPTER.validate_json(legacy_snapshot_json)
-    assert isinstance(parsed_legacy, RunSnapshotEvent)
-    assert parsed_legacy.payload.assistant_message_id is None
-    assert parsed_legacy.payload.messages[0].parts is None
-    assert parsed_legacy.payload.messages[0].session_id is None
+    with pytest.raises(ValidationError):
+        redis_module._EVENT_ADAPTER.validate_json(missing_required_json)
+
+    minimal_snapshot_json = (
+        '{"type":"snapshot","run_id":"r1","execution_epoch":1,"stream_sequence":0,'
+        '"payload":{"status":"completed","event_sequence":2,"messages":[{"id":"m1",'
+        '"session_id":"s1","role":"assistant","status":"completed","text":"ok",'
+        '"parts":[{"type":"text","text":"ok"}],"sequence":2,'
+        '"created_at":"2026-01-01T00:00:00Z"}],"events":[]}}'
+    )
+    parsed_minimal = redis_module._EVENT_ADAPTER.validate_json(minimal_snapshot_json)
+    assert isinstance(parsed_minimal, RunSnapshotEvent)
+    assert parsed_minimal.payload.assistant_message_id is None
+    assert parsed_minimal.payload.messages[0].session_id == "s1"
+    assert parsed_minimal.payload.messages[0].parts == ({"type": "text", "text": "ok"},)
+    assert parsed_minimal.payload.messages[0].run_id is None
+    assert parsed_minimal.payload.messages[0].reply_to_message_id is None
+    assert parsed_minimal.payload.messages[0].completed_at is None
 
     # 2. 验证 completed 终态填充完整 parts（含 file_ref）、assistant_message_id 与裁剪保护。
     run_row = RunModel(
@@ -2212,7 +2265,26 @@ def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_p
         report_message_id=None,
         usage={},
         compression_policy_version_id=None,
-        model_snapshot_json=None,
+        model_snapshot_json={
+            "id": "profile_1",
+            "name": "Stream Model",
+            "protocol": "chat_completions",
+            "base_url": "https://api.example.com/v1",
+            "model": "gpt-4o-mini",
+            "context_window_tokens": 128000,
+            "tokenizer_encoding": "cl100k_base",
+            "supports_stream": True,
+            "supports_tools": True,
+            "supports_parallel_tool_calls": False,
+            "max_output_tokens": 4096,
+            "request_timeout_seconds": 30,
+            "execution_timeout_seconds": 120,
+            "max_concurrency": 4,
+            "temperature": None,
+            "scenario_label": None,
+            "supports_vision": False,
+            "version": 1,
+        },
         tool_snapshot=None,
         auth_session_id=None,
         llm_request_count=1,
@@ -2249,12 +2321,11 @@ def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_p
             ],
             reply_to_message_id="msg_user_1",
             run_id="run_term_1",
-            managed_run_id="run_term_1",
             client_message_id=None,
             created_at=now,
             completed_at=now,
             metadata_json={},
-            context_turn_id=None,
+            context_turn_id="msg_user_1",
         ),
         SimpleNamespace(
             id="msg_user_1",
@@ -2265,12 +2336,11 @@ def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_p
             parts=[{"type": "text", "text": "U" * 500}],
             reply_to_message_id=None,
             run_id="run_term_1",
-            managed_run_id="run_term_1",
             client_message_id=None,
             created_at=now,
             completed_at=now,
             metadata_json={},
-            context_turn_id=None,
+            context_turn_id="msg_user_1",
         ),
     ]
     evt_rows = [
@@ -2335,7 +2405,7 @@ def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_p
 
     class _Repo(RunContextEventsMixin):
         def __init__(self) -> None:
-            self._session_factory = lambda: _FakeSession()  # type: ignore[assignment]
+            self._session_factory = cast(Any, lambda: _FakeSession())
 
     # 紧凑预算：全量消息+事件超限，裁掉旧用户消息与尾部事件后可完整保留最终助手消息。
     monkeypatch.setattr(ctx_module, "_STREAM_SNAPSHOT_BYTES", 2000)
@@ -2400,6 +2470,9 @@ def test_sqlalchemy_completed_run_snapshot_beyond_100_events_and_get_details_ass
                             protocol="chat_completions",
                             base_url="https://llm.example.test/v1",
                             model="gpt-test",
+                            api_key_ciphertext=b"ciphertext",
+                            api_key_nonce=b"0123456789ab",
+                            api_key_key_version=1,
                             context_window_tokens=128000,
                             tokenizer_encoding="cl100k_base",
                             max_output_tokens=4096,
@@ -2407,6 +2480,7 @@ def test_sqlalchemy_completed_run_snapshot_beyond_100_events_and_get_details_ass
                             execution_timeout_seconds=120,
                             max_concurrency=4,
                             created_at=now,
+                            updated_at=now,
                         ),
                         SystemPromptVersionModel(
                             id=TEST_MAIN_PROMPT_ID,
@@ -2435,7 +2509,7 @@ def test_sqlalchemy_completed_run_snapshot_beyond_100_events_and_get_details_ass
                     )
                 )
                 await session.flush()
-                # runs.trigger_message_id 与 conversation_messages.managed_run_id 均为 DEFERRABLE，
+                # runs.trigger_message_id 与 conversation_messages.run_id 均为 DEFERRABLE，
                 # 同事务内先 flush 消息与 Run 再插入关联的 run_events。
                 session.add_all(
                     [
@@ -2448,7 +2522,7 @@ def test_sqlalchemy_completed_run_snapshot_beyond_100_events_and_get_details_ass
                             parts=[{"type": "text", "text": "请生成报告"}],
                             reply_to_message_id=None,
                             run_id="run_sq_1",
-                            managed_run_id="run_sq_1",
+                            context_turn_id="msg_sq_user",
                             created_at=now,
                             completed_at=now,
                             metadata_json={},
@@ -2471,7 +2545,7 @@ def test_sqlalchemy_completed_run_snapshot_beyond_100_events_and_get_details_ass
                             ],
                             reply_to_message_id="msg_sq_user",
                             run_id="run_sq_1",
-                            managed_run_id="run_sq_1",
+                            context_turn_id="msg_sq_user",
                             created_at=now,
                             completed_at=now,
                             metadata_json={},
@@ -2488,6 +2562,26 @@ def test_sqlalchemy_completed_run_snapshot_beyond_100_events_and_get_details_ass
                         context_cutoff_sequence=1,
                         retry_of_run_id=None,
                         model_config_version_id="prof_1",
+                        model_snapshot_json={
+                            "id": "prof_1",
+                            "name": "Stream Model",
+                            "protocol": "chat_completions",
+                            "base_url": "https://llm.example.test/v1",
+                            "model": "gpt-test",
+                            "context_window_tokens": 128000,
+                            "tokenizer_encoding": "cl100k_base",
+                            "supports_stream": True,
+                            "supports_tools": True,
+                            "supports_parallel_tool_calls": False,
+                            "max_output_tokens": 4096,
+                            "request_timeout_seconds": 30,
+                            "execution_timeout_seconds": 120,
+                            "max_concurrency": 4,
+                            "temperature": None,
+                            "scenario_label": None,
+                            "supports_vision": False,
+                            "version": 1,
+                        },
                         main_prompt_version_id=TEST_MAIN_PROMPT_ID,
                         compression_prompt_version_id=TEST_COMPRESSION_PROMPT_ID,
                         prompt_template_version="run-v2",

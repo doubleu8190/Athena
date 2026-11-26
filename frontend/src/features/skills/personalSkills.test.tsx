@@ -786,7 +786,7 @@ describe("普通用户个人技能管理", () => {
     const publicSkill = makeSkill({
       id: "public-skill",
       name: "公共审批技能",
-      scope: "public",
+      scope: "company",
       script_requires_approval: true,
       slug: "public-approval",
     });

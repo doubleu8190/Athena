@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -90,7 +91,9 @@ class RunToolCallModel(Base):
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     outcome: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     safe_skill_projection: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
-    round: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    round: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=text("0")
+    )
 
 
 __all__ = ["RunToolCallModel"]

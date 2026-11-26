@@ -9,7 +9,6 @@ import type {
   ProjectCreateInput,
   ProjectListQuery,
   ProjectListResponse,
-  ProjectNameInput,
   ProjectUpdateInput,
 } from "./model";
 
@@ -72,14 +71,6 @@ export function updateProject(
     body: input,
     params: { path: { project_id: projectId } },
   });
-}
-
-/** 保留旧导出别名以兼容仅改名调用方。 */
-export function renameProject(
-  projectId: string,
-  input: ProjectNameInput,
-): Promise<Project> {
-  return updateProject(projectId, input);
 }
 
 export function deleteProject(

@@ -29,10 +29,5 @@ class SqlAlchemyRunRepository(
         # 统一使用 _message_repo 命名持有时效消息子仓储
         self._message_repo = message_repository
 
-    @property
-    def _messages(self) -> SqlAlchemyMessageRepository:
-        """平滑兼容属性，指向内部消息仓储实例。"""
-        return self._message_repo
-
 
 __all__ = ["SqlAlchemyRunRepository"]

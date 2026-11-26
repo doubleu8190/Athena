@@ -18,7 +18,6 @@ import {
 import { projectErrorMessage } from "./errorMessages";
 import {
   useCreateProjectMutation,
-  useRenameProjectMutation,
   useUpdateProjectMutation,
 } from "./hooks";
 import {
@@ -275,7 +274,7 @@ export function RenameProjectDialog({
   const [name, setName] = useState(project.name);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
-  const mutation = useRenameProjectMutation(project.id);
+  const mutation = useUpdateProjectMutation(project.id);
   const { reset: resetMutation } = mutation;
 
   useEffect(() => {
@@ -478,7 +477,7 @@ export function EditProjectInfoDialog({
 
     const normalizedName = normalizeProjectName(name);
     const normalizedDescription = normalizeProjectDescription(description);
-    const currentDescription = project.description ?? null;
+    const currentDescription = project.description;
 
     const patch: ProjectUpdateInput = {};
     if (normalizedName !== project.name) {

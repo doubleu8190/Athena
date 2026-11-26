@@ -251,6 +251,20 @@ printf '%s\\n' "$*" >> {str(curl_log)!r}
     assert "ENV_ROOT_ONLY=from-root-dotenv" not in command_text
     assert "from-generated-env" not in command_text
     assert "--env-file /dev/null" in command_text
+    assert "-f compose.yml -f docker/compose.test-mcp.override.yml" in command_text
     assert curl_log.read_text(encoding="utf-8").strip().endswith(
         "http://127.0.0.1:19080/health"
     )
+
+
+def test_production_dockerfile_excludes_mock_mcp_servers_and_mounts_readonly() -> None:
+    """生产后端镜像不得打包 mcp_servers/，测试叠加编排仅对 API 与 Worker 只读挂载。"""
+    dockerfile_text = (PROJECT_ROOT / "docker" / "Dockerfile.backend").read_text(encoding="utf-8")
+    assert "COPY mcp_servers/" not in dockerfile_text
+
+    override_path = PROJECT_ROOT / "docker" / "compose.test-mcp.override.yml"
+    assert override_path.is_file()
+    override_text = override_path.read_text(encoding="utf-8")
+    assert "backend-api:" in override_text
+    assert "backend-worker:" in override_text
+    assert "./mcp_servers:/app/mcp_servers:ro" in override_text

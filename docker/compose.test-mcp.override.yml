@@ -1,0 +1,17 @@
+# ==============================================================================
+# Athena v2 本地 Docker 测试栈扩展配置：只读挂载测试/演示用 Mock MCP Server
+# ==============================================================================
+# 用途：生产镜像 athena-backend:latest 不再打包 mcp_servers/；
+#       仅在通过 scripts/test-docker.sh 启动本地测试栈时叠加本文件，
+#       使 backend-api 与 backend-worker 可直接运行 /app/mcp_servers 下的测试 Mock Server。
+# 说明：配合根 compose.yml 使用时，相对路径按首个 -f 文件所在目录（仓库根目录）解析。
+# ==============================================================================
+
+services:
+  backend-api:
+    volumes:
+      - ./mcp_servers:/app/mcp_servers:ro
+
+  backend-worker:
+    volumes:
+      - ./mcp_servers:/app/mcp_servers:ro

@@ -9,7 +9,7 @@ name: athena
 
 # 通用后端环境变量定义（通过 YAML Anchor 避免在 API 与 Worker 间冗余重复）
 x-backend-environment: &backend-environment
-  # 核心数据库连接：支持标准 PostgreSQL+asyncpg（需包含 pgvector 与 zhparser 扩展）
+  # 核心数据库连接：支持标准 PostgreSQL+asyncpg（需包含 pgvector 扩展）
   ATHENA_DATABASE_URL: ${ATHENA_DATABASE_URL:-postgresql+asyncpg://postgres:postgres@host.docker.internal:5432/athena}
   ATHENA_DATABASE_POOL_SIZE: ${ATHENA_DATABASE_POOL_SIZE:-5}
   ATHENA_DATABASE_MAX_OVERFLOW: ${ATHENA_DATABASE_MAX_OVERFLOW:-10}
@@ -97,8 +97,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
-      args:
-        INSTALL_KNOWLEDGE: ${ATHENA_INSTALL_KNOWLEDGE:-false}
     image: athena-backend:latest
     container_name: athena-backend-api
     command: ["api"]
@@ -133,8 +131,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
-      args:
-        INSTALL_KNOWLEDGE: ${ATHENA_INSTALL_KNOWLEDGE:-false}
     image: athena-backend:latest
     container_name: athena-backend-worker
     command: ["worker"]
@@ -142,7 +138,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       <<: *backend-environment
-      # Worker 专属并发与执行租约参数
+      # Worker 专属并发、执行租约与工具调用边界参数
       ATHENA_RUN_WORKER_CONCURRENCY: ${ATHENA_RUN_WORKER_CONCURRENCY:-4}
       ATHENA_RUN_LEASE_SECONDS: ${ATHENA_RUN_LEASE_SECONDS:-30}
       ATHENA_RUN_HEARTBEAT_SECONDS: ${ATHENA_RUN_HEARTBEAT_SECONDS:-5}
@@ -150,6 +146,13 @@ services:
       ATHENA_RUN_CANCEL_POLL_SECONDS: ${ATHENA_RUN_CANCEL_POLL_SECONDS:-1}
       ATHENA_RUN_QUEUE_POLL_SECONDS: ${ATHENA_RUN_QUEUE_POLL_SECONDS:-1}
       ATHENA_RUN_RECLAIM_SECONDS: ${ATHENA_RUN_RECLAIM_SECONDS:-5}
+      ATHENA_RUN_LLM_REQUEST_LIMIT: ${ATHENA_RUN_LLM_REQUEST_LIMIT:-40}
+      ATHENA_RUN_TOOL_TIMEOUT_SECONDS: ${ATHENA_RUN_TOOL_TIMEOUT_SECONDS:-30.0}
+      ATHENA_RUN_TOOL_ARGUMENT_BYTES: ${ATHENA_RUN_TOOL_ARGUMENT_BYTES:-65536}
+      ATHENA_RUN_TOOL_RESULT_BYTES: ${ATHENA_RUN_TOOL_RESULT_BYTES:-65536}
+      ATHENA_RUN_TOOL_CLEANUP_SECONDS: ${ATHENA_RUN_TOOL_CLEANUP_SECONDS:-10.0}
+      ATHENA_RUN_TOOL_BATCH_LIMIT: ${ATHENA_RUN_TOOL_BATCH_LIMIT:-8}
+      ATHENA_RUN_TOOL_CONCURRENCY: ${ATHENA_RUN_TOOL_CONCURRENCY:-4}
     volumes:
       - athena-var:/app/var
     depends_on:
@@ -168,8 +171,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
-      args:
-        INSTALL_KNOWLEDGE: ${ATHENA_INSTALL_KNOWLEDGE:-false}
     image: athena-backend:latest
     container_name: athena-backend-knowledge-worker
     command: ["knowledge-worker"]
@@ -179,7 +180,7 @@ services:
       <<: *backend-environment
       ATHENA_KNOWLEDGE_WORKER_CONCURRENCY: ${ATHENA_KNOWLEDGE_WORKER_CONCURRENCY:-2}
       ATHENA_KNOWLEDGE_OWNER_CONCURRENCY: ${ATHENA_KNOWLEDGE_OWNER_CONCURRENCY:-2}
-      ATHENA_KNOWLEDGE_PARSE_MEMORY_MB: ${ATHENA_KNOWLEDGE_PARSE_MEMORY_MB:-4096}
+      ATHENA_KNOWLEDGE_OCR_CACHE_ROOT: ${ATHENA_KNOWLEDGE_OCR_CACHE_ROOT:-}
     volumes:
       - athena-var:/app/var
     depends_on:
@@ -200,8 +201,6 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
-      args:
-        INSTALL_KNOWLEDGE: ${ATHENA_INSTALL_KNOWLEDGE:-false}
     image: athena-backend:latest
     command: ["migrate"]
     extra_hosts:

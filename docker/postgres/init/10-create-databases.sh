@@ -7,5 +7,5 @@ test_database="${POSTGRES_TEST_DB:-athena_test}"
 createdb --username="$POSTGRES_USER" --owner="$POSTGRES_USER" "$test_database"
 for database in "$POSTGRES_DB" "$test_database"; do
   psql --username="$POSTGRES_USER" --dbname="$database" --set=ON_ERROR_STOP=1 \
-    --command='CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS zhparser;'
+    --command='CREATE EXTENSION IF NOT EXISTS vector;'
 done

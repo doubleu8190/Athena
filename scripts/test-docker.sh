@@ -24,6 +24,7 @@ cd "$ROOT_DIR"
 
 COMPOSE_PROJECT="athena-test"
 BUSINESS_COMPOSE_FILE="compose.yml"
+TEST_MCP_OVERRIDE_FILE="docker/compose.test-mcp.override.yml"
 DEPS_COMPOSE_FILE="compose.test.yml"
 TEST_ENV_FILE="$ROOT_DIR/docker/test.env"
 TEST_ENV_EXAMPLE="$ROOT_DIR/docker/test.env.example"
@@ -153,7 +154,9 @@ prepare_compose_environment() {
 
 business_compose() {
   "${COMPOSE_ENV[@]}" docker compose \
-    --env-file /dev/null -p "$COMPOSE_PROJECT" -f "$BUSINESS_COMPOSE_FILE" "$@"
+    --env-file /dev/null -p "$COMPOSE_PROJECT" \
+    -f "$BUSINESS_COMPOSE_FILE" \
+    -f "$TEST_MCP_OVERRIDE_FILE" "$@"
 }
 
 dependency_compose() {

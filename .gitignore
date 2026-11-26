@@ -24,3 +24,4 @@ data/
 secrets/
 .agents/
 AGENTS.md
+datasets/enterprise_hroa/generated/

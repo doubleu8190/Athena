@@ -581,3 +581,49 @@ def test_v3_boundary_attachments_multipage_scanned_webp_cards_and_corrupt_png() 
     assert err19.value.code == "vision_image_invalid"
     with pytest.raises(ValueError, match="knowledge_image_invalid"):
         LocalDocumentParser(enable_ocr=False).validate_file(att19.name, att19)
+
+
+def test_enterprise_conftest_checks_file_count_size_bytes_and_source_mtime(tmp_path: Path) -> None:
+    """验证企业测试夹具会识别空清单、产物字节漂移及源码更新以触发自动重建。"""
+    import importlib.util
+    import os
+
+    conftest_path = Path(__file__).resolve().with_name("conftest.py")
+    spec = importlib.util.spec_from_file_location("_enterprise_conftest_under_test", conftest_path)
+    assert spec is not None and spec.loader is not None
+    conftest_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(conftest_mod)
+    is_complete = conftest_mod._is_generated_assets_complete
+
+    src_dir = tmp_path / "sources"
+    out_dir = tmp_path / "generated"
+    src_dir.mkdir()
+    out_dir.mkdir()
+    source_file = src_dir / "doc.md"
+    source_file.write_text("source v1", encoding="utf-8")
+    os.utime(source_file, (1_000_000.0, 1_000_000.0))
+
+    # 1. 空清单（file_count == 0）必须判定不完整。
+    checksums = out_dir / "checksums.json"
+    checksums.write_text(json.dumps({"file_count": 0, "files": {}}), encoding="utf-8")
+    os.utime(checksums, (1_000_010.0, 1_000_010.0))
+    assert is_complete(out_dir, source_dirs=(src_dir,)) is False
+
+    # 2. 完整且大小与时间戳匹配的产物返回 True。
+    artifact = out_dir / "sample.bin"
+    artifact.write_bytes(b"hello")
+    checksums.write_text(
+        json.dumps({"file_count": 1, "files": {"sample.bin": {"size_bytes": 5}}}),
+        encoding="utf-8",
+    )
+    os.utime(checksums, (1_000_010.0, 1_000_010.0))
+    assert is_complete(out_dir, source_dirs=(src_dir,)) is True
+
+    # 3. 产物磁盘大小与 checksums.json 声明不一致时返回 False。
+    artifact.write_bytes(b"hello-drift")
+    assert is_complete(out_dir, source_dirs=(src_dir,)) is False
+
+    # 4. 恢复文件大小后若源码更新（mtime 更新于 checksums.json），返回 False。
+    artifact.write_bytes(b"hello")
+    os.utime(source_file, (1_000_020.0, 1_000_020.0))
+    assert is_complete(out_dir, source_dirs=(src_dir,)) is False

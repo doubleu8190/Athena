@@ -11,8 +11,8 @@ has_extensions() {
   database="$1"
   extension_count="$(PGPASSWORD="$postgres_password" psql -X -h 127.0.0.1 \
     -U "$postgres_user" -d "$database" -v ON_ERROR_STOP=1 -Atqc \
-    "SELECT count(*) FROM pg_extension WHERE extname IN ('vector','zhparser')")" || return 1
-  [ "$extension_count" = 2 ]
+    "SELECT count(*) FROM pg_extension WHERE extname = 'vector'")" || return 1
+  [ "$extension_count" = 1 ]
 }
 
 # 两个应用数据库都必须可连接且具备迁移依赖的扩展，才能报告服务健康。

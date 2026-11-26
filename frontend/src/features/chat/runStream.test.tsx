@@ -18,13 +18,14 @@ import type {
 } from "./model";
 import {
   INITIAL_RUN_STREAM_STATE,
+  fetchTerminalMessagesFallback,
+  hasTerminalTargetMessage,
   projectRunStatus,
-  reconcileCompletedRun,
-  reconcileFailedRun,
+  resolveSelfContainedTerminalSnapshot,
   runStreamReducer,
   type RunStreamAction,
 } from "./runStream";
-import { useRunStream } from "./useRunStream";
+import { parseSnapshotPayload, useRunStream } from "./useRunStream";
 
 beforeEach(() => {
   FakeSseStream.instances = [];
@@ -285,193 +286,354 @@ describe("Run 状态投影", () => {
     expect(updated.lastHeartbeatAt).toBe("2026-11-10T03:01:00Z");
     expect(updated.status).toBe("running");
   });
-});
-
-describe("完成态精确对账与内存事件复用", () => {
-  it("knownEvents 已含当前 Run 的 completed 事件时直接跳过 /events 分页请求", async () => {
-    const trigger = makeMessage({
-      id: "msg-completed-trigger",
-      role: "user",
-      run_id: null,
-      sequence: 1,
-      session_id: "session-1",
-    });
-    const finalAnswer = makeMessage({
-      id: "msg-completed-answer",
-      role: "assistant",
-      run_id: "run-1",
-      sequence: 2,
-      session_id: "session-1",
-      status: "completed",
-    });
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(getRequestUrl(input), "http://localhost");
-      if (url.pathname.endsWith("/events")) {
-        throw new Error("命中内存 completed 事件时不应请求 /events");
-      }
-      return jsonResponse({
-        items: [finalAnswer, trigger],
-        next_before_sequence: null,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await reconcileCompletedRun(
-      "session-1",
-      "run-1",
-      trigger.id,
-      [
-        event("started", 1),
-        event("completed", 2, { assistant_message_id: finalAnswer.id }),
-      ],
-    );
-
-    expect(result.kind).toBe("settled");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(
-      new URL(getRequestUrl(fetchMock.mock.calls[0][0]), "http://localhost")
-        .pathname,
-    ).toBe("/api/v1/sessions/session-1/messages");
-  });
-
-  it("knownEvents 未命中当前 Run 的 completed 事件时回退分页拉取 /events", async () => {
-    const trigger = makeMessage({
-      id: "msg-fallback-trigger",
-      role: "user",
-      run_id: null,
-      sequence: 1,
-      session_id: "session-1",
-    });
-    const finalAnswer = makeMessage({
-      id: "msg-fallback-answer",
-      role: "assistant",
-      run_id: "run-1",
-      sequence: 2,
-      session_id: "session-1",
-      status: "completed",
-    });
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(getRequestUrl(input), "http://localhost");
-      if (url.pathname.endsWith("/events")) {
-        return jsonResponse({
-          items: [
-            event("completed", 3, { assistant_message_id: finalAnswer.id }),
-          ],
-          next_after_sequence: null,
-        });
-      }
-      return jsonResponse({
-        items: [finalAnswer, trigger],
-        next_before_sequence: null,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    // 传入其他 Run 的 completed 事件不应被误复用。
-    const otherRunEvent: RunEvent = {
-      ...event("completed", 2, { assistant_message_id: "msg-other" }),
-      run_id: "run-other",
-    };
-    const result = await reconcileCompletedRun(
-      "session-1",
-      "run-1",
-      trigger.id,
-      [otherRunEvent],
-    );
-
-    expect(result.kind).toBe("settled");
-    expect(
-      fetchMock.mock.calls.filter(([input]) =>
-        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
-          "/events",
-        ),
-      ),
-    ).toHaveLength(1);
-  });
-});
-
-describe("失败报告精确对账", () => {
-  it("跨事件页找到报告 ID，再跨消息页校验 Run、触发关联和序号", async () => {
-    const trigger = makeMessage({
-      id: "msg-trigger",
-      role: "user",
-      run_id: null,
-      sequence: 5,
-      session_id: "session-1",
-    });
-    const report = makeMessage({
-      id: "msg-report",
-      reply_to_message_id: trigger.id,
-      role: "assistant",
-      run_id: "run-1",
-      sequence: 6,
-      session_id: "session-1",
-      status: "completed",
-    });
-    const unrelatedDelivery = makeMessage({
-      id: "msg-delivery",
-      reply_to_message_id: null,
-      role: "assistant",
-      run_id: "run-1",
-      sequence: 9,
-      session_id: "session-1",
-    });
-    const fetchMock = vi.fn(
-      async (input: RequestInfo | URL) => {
-        const url = new URL(getRequestUrl(input), "http://localhost");
-        if (url.pathname.endsWith("/events")) {
-          const after = Number(url.searchParams.get("after_sequence"));
-          return after === 0
-            ? jsonResponse({
-                items: [event("started", 1)],
-                next_after_sequence: 1,
-              })
-            : jsonResponse({
-                items: [
-                  event("failed", 2, {
-                    report_message_id: report.id,
-                    safe_error_code: "run_context_safety_stop",
-                  }),
-                ],
-                next_after_sequence: null,
-              });
-        }
-        const before = url.searchParams.get("before_sequence");
-        if (before === null) {
-          return jsonResponse({
-            items: [unrelatedDelivery],
-            next_before_sequence: 9,
-          });
-        }
-        if (before === "9") {
-          return jsonResponse({
-            items: [report],
-            next_before_sequence: 6,
-          });
-        }
-        return jsonResponse({
-          items: [trigger],
-          next_before_sequence: null,
-        });
+  it("completed snapshot 和 completed 事件都对称保留 assistantMessageId，且仅终态 snapshot 置位 terminalSnapshotReceived", () => {
+    const eventState = runStreamReducer(
+      { ...INITIAL_RUN_STREAM_STATE, runId: "run-1" },
+      {
+        event: event("completed", 6, {
+          assistant_message_id: "msg-assistant-event",
+        }),
+        type: "run_event",
       },
     );
-    vi.stubGlobal("fetch", fetchMock);
+    expect(eventState.assistantMessageId).toBe("msg-assistant-event");
+    expect(eventState.terminalSnapshotReceived).toBe(false);
 
-    const result = await reconcileFailedRun(
+    const snapshotState = runStreamReducer(eventState, {
+      payload: {
+        ...snapshot("completed", "最终答案"),
+        assistant_message_id: "msg-assistant",
+        messages_complete: false,
+      },
+      type: "snapshot",
+    });
+    expect(snapshotState.assistantMessageId).toBe("msg-assistant");
+    expect(snapshotState.messagesComplete).toBe(false);
+    expect(snapshotState.terminalSnapshotReceived).toBe(true);
+
+    // 切换 Run 时 terminalSnapshotReceived 必须复位。
+    const switched = runStreamReducer(snapshotState, {
+      runId: "run-2",
+      status: "running",
+      type: "start",
+    });
+    expect(switched.terminalSnapshotReceived).toBe(false);
+  });
+});
+
+describe("自包含终态快照解析与内联收敛", () => {
+  it("parseSnapshotPayload 完整解析 assistant_message_id 与 4 类 parts，并兼容旧版精简快照", () => {
+    const parsed = parseSnapshotPayload({
+      assistant_message_id: "msg-final-1",
+      event_sequence: 9,
+      events: [],
+      events_after_sequence: null,
+      events_complete: true,
+      messages: [
+        {
+          completed_at: "2026-11-10T03:00:05Z",
+          created_at: "2026-11-10T03:00:01Z",
+          id: "msg-final-1",
+          parts: [
+            { text: "请查收报告附件。", type: "text" },
+            {
+              file_id: "file-1",
+              filename: "summary.xlsx",
+              mime_type:
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              size_bytes: 2048,
+              type: "file_ref",
+            },
+            {
+              arguments: { quarter: "Q4" },
+              name: "export_report",
+              tool_call_id: "tc-1",
+              type: "tool_call",
+            },
+            {
+              artifact_id: "art-1",
+              artifacts: [
+                {
+                  file_id: "file-1",
+                  filename: "summary.xlsx",
+                  label: "Q4 汇总表",
+                  mime_type:
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                  size_bytes: 2048,
+                },
+              ],
+              output: "导出完成",
+              status: "completed",
+              tool_call_id: "tc-1",
+              type: "tool_result",
+            },
+          ],
+          reply_to_message_id: "msg-user-1",
+          role: "assistant",
+          run_id: "run-1",
+          sequence: 2,
+          session_id: "session-1",
+          status: "completed",
+          text: "请查收报告附件。",
+        },
+        // 旧版精简消息（缺少新增可选字段）保持向后兼容
+        {
+          created_at: "2026-11-10T03:00:00Z",
+          id: "msg-legacy",
+          role: "user",
+          sequence: 1,
+          status: "completed",
+          text: "生成 Q4 汇总",
+        },
+        // 含未知 part 类型时保守丢弃内联 parts，避免静默吞掉新内容块
+        {
+          created_at: "2026-11-10T03:00:06Z",
+          id: "msg-unknown-part",
+          parts: [{ type: "future_widget", value: 1 }],
+          role: "assistant",
+          sequence: 3,
+          status: "completed",
+          text: "未知块",
+        },
+      ],
+      messages_before_sequence: null,
+      messages_complete: true,
+      report_message_id: null,
+      status: "completed",
+    });
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.assistant_message_id).toBe("msg-final-1");
+    expect(parsed?.messages[0]).toMatchObject({
+      completed_at: "2026-11-10T03:00:05Z",
+      id: "msg-final-1",
+      reply_to_message_id: "msg-user-1",
+      run_id: "run-1",
+      session_id: "session-1",
+    });
+    expect(parsed?.messages[0]?.parts).toHaveLength(4);
+    expect(parsed?.messages[1]?.parts).toBeUndefined();
+    expect(parsed?.messages[1]?.run_id).toBeUndefined();
+    expect(parsed?.messages[2]?.parts).toBeUndefined();
+  });
+
+  it("completed 自包含快照支持按 assistant_message_id 或同 Run 完成助手消息直接收敛（含 file_ref）", () => {
+    const byId = resolveSelfContainedTerminalSnapshot(
+      {
+        ...snapshot("completed"),
+        assistant_message_id: "msg-final",
+        messages: [
+          {
+            completed_at: "2026-11-10T03:00:05Z",
+            created_at: "2026-11-10T03:00:02Z",
+            id: "msg-final",
+            parts: [
+              { text: "完整最终回答", type: "text" },
+              {
+                file_id: "file-9",
+                filename: "report.pdf",
+                mime_type: "application/pdf",
+                size_bytes: 1024,
+                type: "file_ref",
+              },
+            ],
+            reply_to_message_id: "msg-trigger",
+            role: "assistant",
+            run_id: "run-1",
+            sequence: 2,
+            session_id: "session-1",
+            status: "completed",
+            text: "完整最终回答",
+          },
+        ],
+      },
       "session-1",
       "run-1",
-      trigger.id,
-      null,
+      "msg-trigger",
     );
+    expect(byId?.targetMessage.id).toBe("msg-final");
+    expect(byId?.targetMessage.parts).toHaveLength(2);
+    expect(byId?.targetMessage.parts[1]).toMatchObject({
+      file_id: "file-9",
+      type: "file_ref",
+    });
 
-    expect(result.kind).toBe("settled");
-    if (result.kind === "settled") {
-      expect(result.messages.map((item) => item.page)).toEqual([
-        expect.objectContaining({ items: [unrelatedDelivery] }),
-        expect.objectContaining({ items: [report] }),
-        expect.objectContaining({ items: [trigger] }),
-      ]);
-    }
+    // 未携带 assistant_message_id 时，同 Run 的已完成助手消息且含 parts 仍可直接收敛。
+    const byRoleAndRun = resolveSelfContainedTerminalSnapshot(
+      {
+        ...snapshot("completed"),
+        assistant_message_id: null,
+        messages: [
+          {
+            created_at: "2026-11-10T03:00:02Z",
+            id: "msg-final-no-id",
+            parts: [{ text: "按角色与 run_id 命中", type: "text" }],
+            role: "assistant",
+            run_id: "run-1",
+            sequence: 2,
+            session_id: "session-1",
+            status: "completed",
+            text: "按角色与 run_id 命中",
+          },
+        ],
+      },
+      "session-1",
+      "run-1",
+    );
+    expect(byRoleAndRun?.targetMessage.id).toBe("msg-final-no-id");
+
+    // 显式指定目标 ID 但快照仅包含旧交付消息（目标被 >512KB 裁剪）或缺少 parts 时，返回 null 走单次兜底。
+    expect(
+      resolveSelfContainedTerminalSnapshot(
+        {
+          ...snapshot("completed"),
+          assistant_message_id: "msg-trimmed-out",
+          messages: [
+            {
+              created_at: "2026-11-10T03:00:01Z",
+              id: "msg-earlier-delivery",
+              parts: [{ text: "旧交付", type: "text" }],
+              role: "assistant",
+              run_id: "run-1",
+              sequence: 1,
+              session_id: "session-1",
+              status: "completed",
+              text: "旧交付",
+            },
+          ],
+          messages_complete: false,
+        },
+        "session-1",
+        "run-1",
+      ),
+    ).toBeNull();
+    expect(
+      resolveSelfContainedTerminalSnapshot(
+        snapshot("completed", "旧版缺 parts 快照"),
+        "session-1",
+        "run-1",
+      ),
+    ).toBeNull();
+  });
+
+  it("failed 自包含快照仅在安全停止报告身份匹配且含 parts 时直接收敛", () => {
+    const resolved = resolveSelfContainedTerminalSnapshot(
+      {
+        ...snapshot("failed", "", "msg-report"),
+        messages: [
+          {
+            completed_at: "2026-11-10T03:00:05Z",
+            created_at: "2026-11-10T03:00:04Z",
+            id: "msg-report",
+            parts: [{ text: "安全停止说明报告", type: "text" }],
+            reply_to_message_id: "msg-trigger",
+            role: "assistant",
+            run_id: "run-1",
+            sequence: 4,
+            session_id: "session-1",
+            status: "completed",
+            text: "安全停止说明报告",
+          },
+        ],
+      },
+      "session-1",
+      "run-1",
+      "msg-trigger",
+    );
+    expect(resolved?.targetMessage.id).toBe("msg-report");
+
+    // 无 report_message_id 的普通失败不得收敛清理未完成文本。
+    expect(
+      resolveSelfContainedTerminalSnapshot(
+        {
+          ...snapshot("failed", "", null),
+          messages: [
+            {
+              created_at: "2026-11-10T03:00:04Z",
+              id: "msg-delivery",
+              parts: [{ text: "中途交付", type: "text" }],
+              role: "assistant",
+              run_id: "run-1",
+              sequence: 4,
+              session_id: "session-1",
+              status: "completed",
+              text: "中途交付",
+            },
+          ],
+        },
+        "session-1",
+        "run-1",
+      ),
+    ).toBeNull();
+
+    // 报告归属错误 Run 或触发消息不匹配时拒绝内联收敛。
+    expect(
+      resolveSelfContainedTerminalSnapshot(
+        {
+          ...snapshot("failed", "", "msg-report"),
+          messages: [
+            {
+              created_at: "2026-11-10T03:00:04Z",
+              id: "msg-report",
+              parts: [{ text: "冒充报告", type: "text" }],
+              reply_to_message_id: "msg-other-trigger",
+              role: "assistant",
+              run_id: "run-1",
+              sequence: 4,
+              session_id: "session-1",
+              status: "completed",
+              text: "冒充报告",
+            },
+          ],
+        },
+        "session-1",
+        "run-1",
+        "msg-trigger",
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("单次有界终态兜底与报告身份校验", () => {
+  it("fetchTerminalMessagesFallback 仅发起 1 次 GET /messages?limit=20，即使存在 next_before_sequence 也不再翻页", async () => {
+    const unrelated = makeMessage({
+      id: "msg-other",
+      role: "assistant",
+      run_id: "run-other",
+      sequence: 20,
+      session_id: "session-1",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(getRequestUrl(input), "http://localhost");
+      if (url.pathname.endsWith("/events")) {
+        throw new Error("终态兜底严禁请求 /events");
+      }
+      if (url.searchParams.has("before_sequence")) {
+        throw new Error("终态兜底严禁多页 while(true) 翻页");
+      }
+      return jsonResponse({
+        items: [unrelated],
+        next_before_sequence: 19,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchTerminalMessagesFallback("session-1", {
+      assistantMessageId: "msg-missing-far-back",
+      runId: "run-1",
+      status: "completed",
+    });
+
+    expect(result.targetFound).toBe(false);
+    expect(result.page.items).toEqual([unrelated]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestUrl = new URL(
+      getRequestUrl(fetchMock.mock.calls[0][0]),
+      "http://localhost",
+    );
+    expect(requestUrl.pathname).toBe("/api/v1/sessions/session-1/messages");
+    expect(requestUrl.searchParams.get("limit")).toBe("20");
+    expect(requestUrl.searchParams.get("before_sequence")).toBeNull();
   });
 
   it.each([
@@ -480,7 +642,7 @@ describe("失败报告精确对账", () => {
     ["未完成", { status: "streaming" }],
     ["触发关联错误", { reply_to_message_id: "msg-other-trigger" }],
     ["早于触发消息", { sequence: 4 }],
-  ])("拒绝%s的报告身份", async (_label, reportOverride) => {
+  ])("hasTerminalTargetMessage 拒绝%s的失败报告身份", (_label, reportOverride) => {
     const trigger = makeMessage({
       id: "msg-trigger",
       role: "user",
@@ -500,56 +662,104 @@ describe("失败报告精确对账", () => {
       }),
       ...reportOverride,
     };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          items: [report, trigger],
-          next_before_sequence: null,
-        }),
-      ),
-    );
 
-    await expect(
-      reconcileFailedRun(
-        "session-1",
-        "run-1",
-        trigger.id,
-        report.id,
-      ),
-    ).resolves.toEqual({
-      kind: "not_found",
-      reason: "report_message",
-    });
-  });
-
-  it("普通 failed 没有报告事件时不猜测 latest assistant", async () => {
-    const fetchMock = vi.fn(
-      async (_input: RequestInfo | URL) =>
-        jsonResponse({
-          items: [event("failed", 2, { safe_error_code: "ordinary_failure" })],
-          next_after_sequence: null,
-        }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      reconcileFailedRun("session-1", "run-1", "msg-trigger", null),
-    ).resolves.toEqual({
-      kind: "not_found",
-      reason: "failed_event",
-    });
     expect(
-      fetchMock.mock.calls.every(([input]) =>
-        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
-          "/events",
-        ),
-      ),
-    ).toBe(true);
+      hasTerminalTargetMessage([report, trigger], {
+        reportMessageId: report.id,
+        runId: "run-1",
+        status: "failed",
+        triggerMessageId: trigger.id,
+      }),
+    ).toBe(false);
   });
 });
 
 describe("fetch + eventsource-parser Run SSE hook", () => {
+  it("终态 run_event 先到达时保持连接等待下一帧终态 snapshot；若随后直接 EOF 则安静关流不报错不重连", async () => {
+    // 场景 1：分包先收 run_event(completed)，保持连接直到收到终态 snapshot 才关闭。
+    const sseFetch = createFakeSseFetch();
+    const { result, unmount } = renderHook(() =>
+      useRunStream({
+        fetch: sseFetch,
+        runId: "run-1",
+        sessionId: "session-1",
+        status: "running",
+      }),
+    );
+    await waitFor(() => {
+      expect(result.current.state.connection).toBe("open");
+    });
+    const source1 = FakeSseStream.instances.at(-1)!;
+
+    act(() => {
+      source1.emit("run_event", {
+        payload: {
+          event: event("completed", 3, { assistant_message_id: "msg-final" }),
+        },
+      });
+    });
+    await flushStreamTasks();
+    expect(result.current.state.status).toBe("completed");
+    expect(result.current.state.terminalSnapshotReceived).toBe(false);
+    expect(result.current.state.connection).toBe("open");
+    expect(source1.closed).toBe(false);
+
+    act(() => {
+      source1.emit("snapshot", {
+        payload: {
+          ...snapshot("completed", "最终答案"),
+          assistant_message_id: "msg-final",
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.state.terminalSnapshotReceived).toBe(true);
+    });
+    expect(result.current.state.connection).toBe("closed");
+    expect(source1.closed).toBe(true);
+    expect(FakeSseStream.instances).toHaveLength(1);
+    unmount();
+
+    // 场景 2：分包收到 run_event(completed) 后服务端直接 EOF（无 snapshot），安静关流且不报错不重连。
+    FakeSseStream.instances = [];
+    const eofFetch = createFakeSseFetch();
+    const hook2 = renderHook(() =>
+      useRunStream({
+        fetch: eofFetch,
+        runId: "run-2",
+        sessionId: "session-1",
+        status: "running",
+      }),
+    );
+    await waitFor(() => {
+      expect(hook2.result.current.state.connection).toBe("open");
+    });
+    const source2 = FakeSseStream.instances.at(-1)!;
+
+    act(() => {
+      source2.emit("run_event", {
+        payload: {
+          event: {
+            ...event("completed", 4, { assistant_message_id: "msg-eof" }),
+            run_id: "run-2",
+          },
+        },
+      });
+    });
+    await flushStreamTasks();
+    expect(source2.closed).toBe(false);
+
+    act(() => {
+      source2.end();
+    });
+    await waitFor(() => {
+      expect(hook2.result.current.state.connection).toBe("closed");
+    });
+    expect(hook2.result.current.state.notice).toBeNull();
+    expect(FakeSseStream.instances).toHaveLength(1);
+    hook2.unmount();
+  });
+
   it("失败快照解析并保留权威报告 ID 且立即关闭流", async () => {
     const sseFetch = createFakeSseFetch();
     const { result } = renderHook(() =>

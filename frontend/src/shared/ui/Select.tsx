@@ -101,6 +101,8 @@ export const SelectContent = React.forwardRef<
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
         ref={ref}
+        // 声明由下拉浮层自身优先消费 Escape，避免嵌套在旧 Modal 内时被 capture 阶段监听抢先关闭弹窗。
+        data-modal-escape-owner="self"
         className={cn(
           "relative z-[var(--z-popover)] max-h-72 min-w-[8rem] overflow-hidden rounded-lg border border-border-default bg-canvas text-text-primary shadow-md",
           position === "popper" &&

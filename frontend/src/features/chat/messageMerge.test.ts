@@ -6,6 +6,7 @@ import {
   shouldApplyStreamSnapshot,
   type RunSnapshotPayload,
 } from "./model";
+import { upsertMessagesIntoInfiniteData } from "./useSessionChatController";
 
 describe("会话消息合并", () => {
   it("按 sequence 跨页去重，并让当前 Run 快照覆盖同序号历史文本", () => {
@@ -144,6 +145,92 @@ describe("会话消息合并", () => {
         (part) => part.type === "text" && part.text === "旧的历史文本",
       ),
     ).toBe(false);
+  });
+
+  it("自包含快照携带完整 parts 与关联字段时直接保留附件块与元数据，无需历史缓存兜底", () => {
+    const filePart = {
+      file_id: "file-inline-1",
+      filename: "季度汇总.xlsx",
+      mime_type:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      size_bytes: 4096,
+      type: "file_ref" as const,
+    };
+    const merged = mergeConversationMessages([], "run-inline", [
+      {
+        completed_at: "2026-11-10T03:05:00Z",
+        created_at: "2026-11-10T03:04:00Z",
+        id: "msg-inline-final",
+        parts: [
+          { text: "这是完整的最终回复。", type: "text" },
+          filePart,
+        ],
+        reply_to_message_id: "msg-user-1",
+        role: "assistant",
+        run_id: "run-inline",
+        sequence: 2,
+        session_id: "s-inline",
+        status: "completed",
+        text: "这是完整的最终回复。",
+      },
+    ]);
+
+    expect(merged).toEqual([
+      {
+        completed_at: "2026-11-10T03:05:00Z",
+        created_at: "2026-11-10T03:04:00Z",
+        id: "msg-inline-final",
+        parts: [
+          { text: "这是完整的最终回复。", type: "text" },
+          filePart,
+        ],
+        reply_to_message_id: "msg-user-1",
+        role: "assistant",
+        run_id: "run-inline",
+        sequence: 2,
+        session_id: "s-inline",
+        status: "completed",
+      },
+    ]);
+  });
+
+  it("upsertMessagesIntoInfiniteData 已有 seq 1..3 且 next_before_sequence 为 null 时合入 seq 4 绝不覆写游标", () => {
+    const existing = {
+      pageParams: [undefined],
+      pages: [
+        {
+          items: [
+            makeMessage({ id: "m1", sequence: 1, session_id: "s1" }),
+            makeMessage({ id: "m2", sequence: 2, session_id: "s1" }),
+            makeMessage({ id: "m3", sequence: 3, session_id: "s1" }),
+          ],
+          next_before_sequence: null,
+        },
+      ],
+    };
+    const incoming = [makeMessage({ id: "m4", sequence: 4, session_id: "s1" })];
+
+    const updated = upsertMessagesIntoInfiniteData(existing, incoming, 4);
+    expect(updated?.pages).toHaveLength(1);
+    expect(updated?.pages[0]?.items.map((m) => m.sequence)).toEqual([
+      1, 2, 3, 4,
+    ]);
+    // 历史已触顶（next_before_sequence === null）时，裁剪快照传入的 fallbackNextBeforeSequence=4 不得覆写为非空。
+    expect(updated?.pages[0]?.next_before_sequence).toBeNull();
+
+    // 冷缓存初始化与空占位页首次填充仍采用 fallbackNextBeforeSequence。
+    const cold = upsertMessagesIntoInfiniteData(undefined, incoming, 4);
+    expect(cold?.pages[0]?.next_before_sequence).toBe(4);
+
+    const emptyPlaceholder = upsertMessagesIntoInfiniteData(
+      {
+        pageParams: [undefined],
+        pages: [{ items: [], next_before_sequence: null }],
+      },
+      incoming,
+      4,
+    );
+    expect(emptyPlaceholder?.pages[0]?.next_before_sequence).toBe(4);
   });
 });
 

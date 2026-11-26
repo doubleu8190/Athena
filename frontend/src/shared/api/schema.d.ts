@@ -3319,6 +3319,8 @@ export interface components {
         };
         /** RunResponse */
         RunResponse: {
+            /** Assistant Message Id */
+            assistant_message_id?: string | null;
             /** Cancel Requested At */
             cancel_requested_at: string | null;
             /** Context Cutoff Sequence */

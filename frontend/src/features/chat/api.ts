@@ -213,6 +213,7 @@ function toPendingSubagentApproval(
 
 function toRun(raw: ApiSchemas["RunResponse"]): Run {
   const {
+    assistant_message_id,
     input_interactions,
     model_snapshot,
     pending_subagent_approvals,
@@ -232,6 +233,9 @@ function toRun(raw: ApiSchemas["RunResponse"]): Run {
     status: toRunStatus(raw.status),
     usage: toRunUsage(raw.usage),
   };
+  if (assistant_message_id !== undefined) {
+    normalized.assistant_message_id = assistant_message_id;
+  }
   if (model_snapshot !== undefined) {
     normalized.model_snapshot =
       model_snapshot === null ? null : toRunModelSnapshot(model_snapshot);

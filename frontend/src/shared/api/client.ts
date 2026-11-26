@@ -9,7 +9,6 @@ import type { components, paths } from "./schema";
 
 const API_PREFIX = "/api/v1";
 
-export type { components, paths };
 export type ApiSchemas = components["schemas"];
 
 export const AUTH_UNAUTHORIZED_EVENT = "athena:auth-unauthorized";
@@ -285,7 +284,9 @@ function createTrackedFetch(
   };
 }
 
-export const openapiClient: Client<paths> = createClient<paths>({
+// 仅限本模块内部经 apiGet/apiPost/apiPut/apiPatch/apiDelete 调用，
+// 确保所有请求统一经过 executeOpenApiRequest 的三段身份代次校验与 401/403 事件派发。
+const openapiClient: Client<paths> = createClient<paths>({
   // 生成的 OpenAPI paths 已携带 /api/v1 前缀，此处必须置空防止重复拼接。
   baseUrl: "",
   credentials: "same-origin",

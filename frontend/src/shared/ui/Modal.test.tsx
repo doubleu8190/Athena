@@ -10,6 +10,13 @@ import { useState } from "react";
 import { describe, expect, it } from "vitest";
 
 import { Modal } from "./Modal";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./Select";
 
 function ModalHarness() {
   const [open, setOpen] = useState(false);
@@ -342,6 +349,64 @@ describe("Modal", () => {
     } finally {
       document.body.style.overflow = "";
     }
+  });
+
+  it("弹窗内展开 Radix Select 时，首次 Escape 仅关闭下拉列表，再次 Escape 才关闭弹窗", async () => {
+    const user = userEvent.setup();
+
+    function ModalWithSelectHarness() {
+      const [open, setOpen] = useState(false);
+      const [value, setValue] = useState("v1");
+      return (
+        <>
+          <button onClick={() => setOpen(true)} type="button">
+            打开选择弹窗
+          </button>
+          <Modal
+            onClose={() => setOpen(false)}
+            open={open}
+            title="版本设置"
+          >
+            <Select onValueChange={setValue} value={value}>
+              <SelectTrigger aria-label="目标版本">
+                <SelectValue placeholder="请选择版本" />
+              </SelectTrigger>
+              <SelectContent aria-label="目标版本列表">
+                <SelectItem value="v1">v1</SelectItem>
+                <SelectItem value="v2">v2</SelectItem>
+              </SelectContent>
+            </Select>
+          </Modal>
+        </>
+      );
+    }
+
+    render(<ModalWithSelectHarness />);
+    const openButton = screen.getByRole("button", { name: "打开选择弹窗" });
+    await user.click(openButton);
+    const dialog = screen.getByRole("dialog", { name: "版本设置" });
+    const combobox = within(dialog).getByRole("combobox", {
+      name: "目标版本",
+    });
+
+    await user.click(combobox);
+    expect(
+      screen.getByRole("listbox", { name: "目标版本列表" }),
+    ).toBeInTheDocument();
+
+    // 首次 Escape 仅收起 Radix Select，外层 Modal 保持打开。
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("listbox", { name: "目标版本列表" }),
+    ).not.toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
+
+    // 再次 Escape 关闭 Modal 并归还焦点。
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("dialog", { name: "版本设置" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => expect(openButton).toHaveFocus());
   });
 });
 

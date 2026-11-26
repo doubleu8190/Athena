@@ -245,6 +245,7 @@ export interface Run {
   cancel_requested_at: string | null;
   safe_error_code: string | null;
   report_message_id: string | null;
+  assistant_message_id?: string | null;
   usage: RunUsage;
   pending_input: RunPendingInput | null;
   pending_approvals: RunPendingApproval[];
@@ -310,12 +311,20 @@ export interface RunStreamMessage {
   text: string;
   sequence: number;
   created_at: string;
+  // Batch 6 自包含增量字段：与 GET /api/v1/sessions/{id}/messages 响应 100% 同构；
+  // 旧 mock 或精简快照省略这些字段时保持向后兼容。
+  session_id?: string | null;
+  run_id?: string | null;
+  reply_to_message_id?: string | null;
+  completed_at?: string | null;
+  parts?: ConversationMessagePart[] | null;
 }
 
 export interface RunSnapshotPayload {
   status: RunStatus;
   event_sequence: number;
   report_message_id: string | null;
+  assistant_message_id?: string | null;
   messages: RunStreamMessage[];
   events: RunEvent[];
   messages_complete: boolean;
@@ -389,7 +398,9 @@ export function isActiveRunStatus(status: RunStatus | null | undefined): boolean
   return status ? ACTIVE_RUN_STATUSES.has(status) : false;
 }
 
-export function isTerminalRunStatus(status: RunStatus | null | undefined): boolean {
+export function isTerminalRunStatus(
+  status: RunStatus | null | undefined,
+): status is "completed" | "failed" | "cancelled" {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
@@ -548,23 +559,35 @@ export function mergeConversationMessages(
       bySequence.set(message.sequence, message);
     }
   }
-  // SSE 快照权威更新文本，但同一消息的文件引用、工具调用和关联字段
-  // 来自历史接口，不能在仅有文本投影的快照里被覆盖丢失。
+  // 自包含 SSE 快照直接提供完整 parts 与关联字段；旧版纯文本快照则仅权威替换文本并保留历史非文本块。
   for (const message of snapshotMessages) {
     const previous = bySequence.get(message.sequence) ?? null;
     const existing = previous?.id === message.id ? previous : null;
+    const hasStructuredParts = Array.isArray(message.parts);
     bySequence.set(message.sequence, {
-      ...(existing ?? {
-        completed_at: null,
-        reply_to_message_id: null,
-        run_id: runId,
-        session_id: "",
-      }),
+      completed_at:
+        message.completed_at !== undefined
+          ? message.completed_at
+          : (existing?.completed_at ?? null),
       created_at: message.created_at,
       id: message.id,
-      parts: mergeSnapshotTextParts(existing, message.text),
+      parts: hasStructuredParts
+        ? message.parts ?? []
+        : mergeSnapshotTextParts(existing, message.text),
+      reply_to_message_id:
+        message.reply_to_message_id !== undefined
+          ? message.reply_to_message_id
+          : (existing?.reply_to_message_id ?? null),
       role: message.role,
+      run_id:
+        message.run_id !== undefined
+          ? message.run_id
+          : (existing?.run_id ?? runId),
       sequence: message.sequence,
+      session_id:
+        message.session_id !== undefined && message.session_id !== null
+          ? message.session_id
+          : (existing?.session_id ?? ""),
       status: message.status,
     });
   }

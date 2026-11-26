@@ -519,14 +519,15 @@ describe("管理员技能管理", () => {
 
     await user.click(combobox);
     expect(combobox).toHaveAttribute("aria-expanded", "true");
-    expect(
-      within(dialog).getByRole("listbox", { name: "当前版本列表" }),
-    ).toBeInTheDocument();
+    // Radix SelectContent 通过 Portal 挂载到 document.body，需在全局 screen 中检索 listbox。
+    const listbox = screen.getByRole("listbox", { name: "当前版本列表" });
+    expect(listbox).toBeInTheDocument();
+    expect(listbox).toHaveAttribute("aria-label", "当前版本列表");
 
     await user.keyboard("{Escape}");
     expect(combobox).toHaveAttribute("aria-expanded", "false");
     expect(
-      within(dialog).queryByRole("listbox", {
+      screen.queryByRole("listbox", {
         name: "当前版本列表",
       }),
     ).not.toBeInTheDocument();
@@ -1100,11 +1101,14 @@ describe("管理员技能管理", () => {
     expect(fileInput).not.toHaveFocus();
 
     await user.click(combobox);
-    const optionV2 = within(dialog).getByRole("option", { name: /候选版/ });
+    // Radix SelectContent 通过 Portal 挂载到 document.body，先定位 listbox 再查找候选版本项。
+    const listbox = screen.getByRole("listbox", { name: "当前版本列表" });
+    const optionV2 = within(listbox).getByRole("option", { name: /候选版/ });
     expect(optionV2).toHaveTextContent("依赖未满足");
     await user.click(optionV2);
 
     expect(combobox).toHaveTextContent(/候选版/);
+    expect(combobox).not.toHaveTextContent("依赖未满足");
     expect(within(dialog).getByText("未保存变更")).toBeInTheDocument();
 
     expect(within(dialog).getByText("未选择 .zip 文件")).toBeInTheDocument();

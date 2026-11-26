@@ -634,12 +634,8 @@ describe("Run 命令与真实状态", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("查询终态关闭流并在持久消息到达后收敛同一 Run 的临时输出", async () => {
+  it("旧版缺 parts 终态快照走单次有界 GET /messages 兜底收敛临时输出且零 /events 请求", async () => {
     let latestMessagesPage: ConversationMessagePage = {
-      items: [],
-      next_before_sequence: null,
-    };
-    let olderMessagesPage: ConversationMessagePage = {
       items: [],
       next_before_sequence: null,
     };
@@ -650,46 +646,19 @@ describe("Run 命令与真实状态", () => {
         status: "running",
       }),
     ];
-    installWorkspaceFetch({
+    const fetchMock = installWorkspaceFetch({
       getRuns: () => runs,
       handleWrite: async () => {
         throw new Error("unexpected write");
       },
-      messages: (beforeSequence) =>
-        beforeSequence === undefined
-          ? latestMessagesPage
-          : olderMessagesPage,
-      runEvents: (afterSequence) => {
-        if (afterSequence === 0) {
-          return {
-            items: [
-              {
-                created_at: "2026-11-10T03:00:01Z",
-                id: "event-started",
-                payload: {},
-                run_id: runs[0].id,
-                sequence: 1,
-                type: "started",
-              },
-            ],
-            next_after_sequence: 1,
-          };
+      messages: (beforeSequence) => {
+        if (beforeSequence !== undefined) {
+          throw new Error("终态兜底不得触发多页 while(true) 翻页");
         }
-        return {
-          items: [
-            {
-              created_at: "2026-11-10T03:00:03Z",
-              id: "event-completed",
-              payload: {
-                assistant_message_id: "msg-terminal-assistant",
-              },
-              run_id: runs[0].id,
-              sequence: 2,
-              type: "completed",
-            },
-          ],
-          next_after_sequence: null,
-        };
+        return latestMessagesPage;
+      },
+      runEvents: () => {
+        throw new Error("终态收敛不得发起 /events 分页查询");
       },
     });
     renderApp(`/chat/${SESSION.id}`);
@@ -697,6 +666,14 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
+    const countMessageCalls = () =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/messages",
+        ),
+      ).length;
+    const messageCallsBeforeTerminal = countMessageCalls();
+
     const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("snapshot", {
@@ -721,6 +698,7 @@ describe("Run 命令与真实状态", () => {
 
     const completed = {
       ...runs[0],
+      assistant_message_id: "msg-terminal-assistant",
       event_sequence: 3,
       finished_at: "2026-11-10T03:00:03Z",
       status: "completed" as const,
@@ -733,32 +711,28 @@ describe("Run 命令与真实状态", () => {
           parts: [{ text: "已交付文件", type: "text" }],
           role: "assistant",
           run_id: completed.id,
-          sequence: 3,
+          sequence: 2,
           session_id: SESSION.id,
           status: "completed",
         }),
-      ],
-      next_before_sequence: 2,
-    };
-    olderMessagesPage = {
-      items: [
         makeMessage({
           id: "msg-terminal-assistant",
           parts: [{ text: "持久最终回答 42", type: "text" }],
           role: "assistant",
           run_id: completed.id,
-          sequence: 2,
+          sequence: 3,
           session_id: SESSION.id,
           status: "completed",
         }),
       ],
-      next_before_sequence: null,
+      next_before_sequence: 1,
     };
     runs = [completed];
     act(() => {
-      // 终态 snapshot 只带旧交付消息；清理 transient 必须等 events 中的精确 ID 对账。
+      // 旧版精简终态 snapshot 不含 parts：仅执行单次有界 GET /messages?limit=20 兜底收敛。
       source.emit("snapshot", {
         payload: {
+          assistant_message_id: "msg-terminal-assistant",
           event_sequence: completed.event_sequence,
           events: [],
           events_after_sequence: null,
@@ -766,9 +740,9 @@ describe("Run 命令与真实状态", () => {
           messages: [
             {
               created_at: "2026-11-10T03:00:02Z",
-              id: "msg-terminal-delivery-snapshot",
+              id: "msg-terminal-delivery",
               role: "assistant",
-              sequence: 3,
+              sequence: 2,
               status: "completed",
               text: "已交付文件",
             },
@@ -791,12 +765,20 @@ describe("Run 命令与真实状态", () => {
     expect(source.closed).toBe(true);
     expect(
       await screen.findByRole("article", {
-        name: "Athena的消息，序号 2",
+        name: "Athena的消息，序号 3",
       }),
     ).toHaveTextContent("持久最终回答 42");
     expect(
       screen.queryByLabelText("Athena 的临时流式输出"),
     ).not.toBeInTheDocument();
+    expect(countMessageCalls()).toBe(messageCallsBeforeTerminal + 1);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/events",
+        ),
+      ),
+    ).toHaveLength(0);
   });
 
   it("同 Run 缓存交付消息时，终态 refetch 503 仍保留草稿并等待最终回答", async () => {
@@ -928,9 +910,376 @@ describe("Run 命令与真实状态", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("completed 的消息页耗尽时保留草稿且不回退旧交付消息", async () => {
+  it("自包含 completed 终态快照内联落盘（含 file_ref 附件）并清理瞬态文本，触发 0 次 /events 与 0 次额外 /messages 请求", async () => {
     const running = makeRun({
-      id: "run-message-exhausted",
+      event_sequence: 2,
+      id: "run-self-contained-completed",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "请生成财务复盘并附 Excel 报表", type: "text" }],
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    const deliveredFile = makeSessionFile({
+      filename: "finance-review.xlsx",
+      id: "file-self-contained-1",
+      label: "财务复盘明细表",
+      mime_type:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      session_id: SESSION.id,
+      size_bytes: 4_096,
+      source: "artifact",
+    });
+    let currentRun: Run = running;
+    const fetchMock = installWorkspaceFetch({
+      getFiles: () => [deliveredFile],
+      getRuns: () => [currentRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [trigger],
+        next_before_sequence: null,
+      }),
+      runEvents: () => {
+        throw new Error("自包含终态快照严禁请求 /events");
+      },
+    });
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
+    expect(
+      await screen.findByText("请生成财务复盘并附 Excel 报表"),
+    ).toBeInTheDocument();
+
+    const countPath = (suffix: string) =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          suffix,
+        ),
+      ).length;
+    const baselineMessageCalls = countPath("/messages");
+    const source = FakeSseStream.instances[0];
+
+    act(() => {
+      source.emit("text_delta", {
+        payload: { text: "复盘报告已生成，请查收附件。" },
+      });
+    });
+    expect(
+      await screen.findByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("复盘报告已生成，请查收附件。");
+
+    currentRun = {
+      ...running,
+      assistant_message_id: "msg-self-contained-final",
+      event_sequence: 5,
+      finished_at: "2026-11-10T03:00:08Z",
+      status: "completed",
+      updated_at: "2026-11-10T03:00:08Z",
+    };
+
+    act(() => {
+      source.emit("snapshot", {
+        payload: {
+          assistant_message_id: "msg-self-contained-final",
+          event_sequence: 5,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              completed_at: "2026-11-10T03:00:08Z",
+              created_at: "2026-11-10T03:00:07Z",
+              id: "msg-self-contained-final",
+              parts: [
+                { text: "复盘报告已生成，请查收附件。", type: "text" },
+                {
+                  file_id: deliveredFile.id,
+                  filename: deliveredFile.filename,
+                  mime_type: deliveredFile.mime_type,
+                  size_bytes: deliveredFile.size_bytes,
+                  type: "file_ref",
+                },
+              ],
+              reply_to_message_id: trigger.id,
+              role: "assistant",
+              run_id: running.id,
+              sequence: 2,
+              session_id: SESSION.id,
+              status: "completed",
+              text: "复盘报告已生成，请查收附件。",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "completed",
+        },
+      });
+    });
+
+    const finalArticle = await screen.findByRole("article", {
+      name: "Athena的消息，序号 2",
+    });
+    expect(finalArticle).toHaveTextContent("复盘报告已生成，请查收附件。");
+    expect(
+      within(finalArticle).getByRole("button", {
+        name: "下载文件：finance-review.xlsx",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(finalArticle).getByRole("button", {
+        name: "预览文件：finance-review.xlsx",
+      }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
+    });
+    expect(source.closed).toBe(true);
+    // 关键门禁：自包含终态快照直接完成缓存写入，新增 /messages 与 /events 请求均为 0。
+    expect(countPath("/messages")).toBe(baselineMessageCalls);
+    expect(countPath("/events")).toBe(0);
+  });
+
+  it("真实分包序：先 emit run_event(completed) 等待渲染后再 emit 自包含终态 snapshot，连接不提前切断且新增 /messages 为 0", async () => {
+    const running = makeRun({
+      event_sequence: 2,
+      id: "run-split-chunk-completed",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "请生成分包测试总结", type: "text" }],
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    let currentRun: Run = running;
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [currentRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [trigger],
+        next_before_sequence: null,
+      }),
+      runEvents: () => {
+        throw new Error("分包自包含快照严禁请求 /events");
+      },
+    });
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
+    const countPath = (suffix: string) =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          suffix,
+        ),
+      ).length;
+    const baselineMessageCalls = countPath("/messages");
+    const source = FakeSseStream.instances[0];
+
+    act(() => {
+      source.emit("text_delta", { payload: { text: "分包流式输出完成。" } });
+    });
+    expect(
+      await screen.findByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("分包流式输出完成。");
+
+    // 第 1 帧：后端先 yield run_event(completed)，等待 React 完整提交一轮渲染。
+    act(() => {
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:08Z",
+            id: "event-split-completed",
+            payload: { assistant_message_id: "msg-split-final" },
+            run_id: running.id,
+            sequence: 5,
+            type: "completed",
+          },
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "发送消息" }),
+      ).toBeInTheDocument();
+    });
+    // 连接尚未被提前切断，也尚未抢跑发起 /messages 兜底请求。
+    expect(source.closed).toBe(false);
+    expect(countPath("/messages")).toBe(baselineMessageCalls);
+
+    // 第 2 帧：后端紧接着 yield 自包含终态 snapshot，直接落盘并关闭流。
+    currentRun = {
+      ...running,
+      assistant_message_id: "msg-split-final",
+      event_sequence: 5,
+      finished_at: "2026-11-10T03:00:08Z",
+      status: "completed",
+    };
+    act(() => {
+      source.emit("snapshot", {
+        payload: {
+          assistant_message_id: "msg-split-final",
+          event_sequence: 5,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              completed_at: "2026-11-10T03:00:08Z",
+              created_at: "2026-11-10T03:00:07Z",
+              id: "msg-split-final",
+              parts: [{ text: "分包流式输出完成。", type: "text" }],
+              reply_to_message_id: trigger.id,
+              role: "assistant",
+              run_id: running.id,
+              sequence: 2,
+              session_id: SESSION.id,
+              status: "completed",
+              text: "分包流式输出完成。",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: null,
+          status: "completed",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 2",
+      }),
+    ).toHaveTextContent("分包流式输出完成。");
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
+    });
+    expect(source.closed).toBe(true);
+    expect(countPath("/messages")).toBe(baselineMessageCalls);
+    expect(countPath("/events")).toBe(0);
+  });
+
+  it("仅 emit run_event(completed) 后流直接 EOF（无终态 snapshot）时，自动触发单次 GET /messages?limit=20 兜底收敛", async () => {
+    const running = makeRun({
+      event_sequence: 2,
+      id: "run-eof-fallback",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "请总结 EOF 兜底", type: "text" }],
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    const finalAnswer = makeMessage({
+      id: "msg-eof-final",
+      parts: [{ text: "EOF 兜底拉回的最终回答。", type: "text" }],
+      reply_to_message_id: trigger.id,
+      role: "assistant",
+      run_id: running.id,
+      sequence: 2,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    let currentMessages = [trigger];
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [running],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: (beforeSequence) => {
+        if (beforeSequence !== undefined) {
+          throw new Error("EOF 兜底不得多页翻页");
+        }
+        return {
+          items: currentMessages,
+          next_before_sequence: null,
+        };
+      },
+      runEvents: () => {
+        throw new Error("EOF 兜底不得请求 /events");
+      },
+    });
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
+    const countPath = (suffix: string) =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          suffix,
+        ),
+      ).length;
+    const baselineMessageCalls = countPath("/messages");
+    const source = FakeSseStream.instances[0];
+
+    act(() => {
+      source.emit("text_delta", { payload: { text: "EOF 前临时输出" } });
+    });
+    expect(
+      await screen.findByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("EOF 前临时输出");
+
+    currentMessages = [finalAnswer, trigger];
+    act(() => {
+      source.emit("run_event", {
+        payload: {
+          event: {
+            created_at: "2026-11-10T03:00:08Z",
+            id: "event-eof-completed",
+            payload: { assistant_message_id: finalAnswer.id },
+            run_id: running.id,
+            sequence: 5,
+            type: "completed",
+          },
+        },
+      });
+      // 服务端无终态 snapshot 直接 EOF 结束流。
+      source.end();
+    });
+
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 2",
+      }),
+    ).toHaveTextContent("EOF 兜底拉回的最终回答。");
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText(/实时连接中断/)).not.toBeInTheDocument();
+    expect(countPath("/messages")).toBe(baselineMessageCalls + 1);
+    expect(countPath("/events")).toBe(0);
+  });
+
+  it("超 512KB 裁剪快照（messages_complete: false 且不含目标）单次兜底未命中时保留瞬态文本与 not_found 重试入口，点击重试单次收敛且绝不翻页", async () => {
+    const running = makeRun({
+      id: "run-trimmed-snapshot",
       session_id: SESSION.id,
       status: "running",
     });
@@ -942,174 +1291,121 @@ describe("Run 命令与真实状态", () => {
       sequence: 3,
       session_id: SESSION.id,
     });
+    const recoveredAnswer = makeMessage({
+      id: "msg-trimmed-missing",
+      parts: [{ text: "手动重试后同步回来的超长最终回答", type: "text" }],
+      role: "assistant",
+      run_id: running.id,
+      sequence: 4,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    let currentItems = [delivery];
     const fetchMock = installWorkspaceFetch({
       getRuns: () => [running],
       handleWrite: async () => {
         throw new Error("unexpected write");
       },
       messages: (beforeSequence) => {
-        if (beforeSequence === undefined) {
-          return {
-            items: [delivery],
-            next_before_sequence: 2,
-          };
+        if (beforeSequence !== undefined) {
+          throw new Error("超限裁剪兜底绝不允许发起第二页翻页请求");
         }
-        if (beforeSequence === 2) {
-          return {
-            items: [
-              makeMessage({
-                id: running.trigger_message_id,
-                parts: [{ text: "当前 Run 的触发消息", type: "text" }],
-                role: "user",
-                run_id: null,
-                sequence: 1,
-                session_id: SESSION.id,
-              }),
-            ],
-            next_before_sequence: 1,
-          };
-        }
-        throw new Error("不应扫描当前 Run 触发消息之前的会话历史");
+        return {
+          items: currentItems,
+          next_before_sequence: 2,
+        };
       },
-      runEvents: () => ({
-        items: [
-          {
-            created_at: "2026-11-10T03:00:03Z",
-            id: "event-message-exhausted",
-            payload: { assistant_message_id: "msg-authoritative-missing" },
-            run_id: running.id,
-            sequence: 4,
-            type: "completed",
-          },
-        ],
-        next_after_sequence: null,
-      }),
+      runEvents: () => {
+        throw new Error("终态兜底绝不允许请求 /events");
+      },
     });
-    const { client } = renderApp(`/chat/${SESSION.id}`);
+    renderApp(`/chat/${SESSION.id}`);
 
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
+    const countMessageCalls = () =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/messages",
+        ),
+      ).length;
+    const baselineMessageCalls = countMessageCalls();
     const source = FakeSseStream.instances[0];
+
     act(() => {
       source.emit("text_delta", {
-        payload: { text: "消息耗尽时仍需保留" },
+        payload: { text: "超 512KB 被裁剪的流式输出" },
       });
     });
-    const completed = {
-      ...running,
-      event_sequence: 4,
-      status: "completed" as const,
-      updated_at: "2026-11-10T03:00:03Z",
-    };
+    expect(
+      await screen.findByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("超 512KB 被裁剪的流式输出");
+
     act(() => {
-      client.setQueryData(chatKeys.latestRun(SESSION.id), {
-        items: [completed],
-        next_cursor: null,
+      source.emit("snapshot", {
+        payload: {
+          assistant_message_id: recoveredAnswer.id,
+          event_sequence: 4,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [],
+          messages_before_sequence: 4,
+          messages_complete: false,
+          report_message_id: null,
+          status: "completed",
+        },
       });
-      client.setQueryData(chatKeys.run(SESSION.id, running.id), completed);
     });
 
+    // 单次有界 GET /messages?limit=20 未命中时，保留 transientText 并展示 not_found 提示与手动重试按钮，绝不自动翻页。
     expect(
-      await screen.findByText(/未找到对应的最终回复/),
+      await screen.findByText(
+        "任务已完成，但未找到对应的最终回复。清空草稿前请重试同步。",
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByLabelText("Athena 的临时流式输出"),
-    ).toHaveTextContent("消息耗尽时仍需保留");
+    ).toHaveTextContent("超 512KB 被裁剪的流式输出");
     expect(screen.getByText("旧文件交付")).toBeInTheDocument();
+    expect(countMessageCalls()).toBe(baselineMessageCalls + 1);
     expect(
       fetchMock.mock.calls.some(([input]) => {
         const url = new URL(getRequestUrl(input), "http://localhost");
         return (
           url.pathname === `/api/v1/sessions/${SESSION.id}/messages` &&
-          url.searchParams.get("before_sequence") === "2"
+          url.searchParams.has("before_sequence")
         );
       }),
-    ).toBe(true);
-  });
+    ).toBe(false);
 
-  it("completed 的事件页耗尽时保留草稿且不读取 latest assistant", async () => {
-    const running = makeRun({
-      id: "run-event-exhausted",
-      session_id: SESSION.id,
-      status: "running",
-    });
-    const delivery = makeMessage({
-      id: "msg-event-old-delivery",
-      parts: [{ text: "旧交付不能被当成最终回答", type: "text" }],
-      role: "assistant",
-      run_id: running.id,
-      sequence: 2,
-      session_id: SESSION.id,
-    });
-    const fetchMock = installWorkspaceFetch({
-      getRuns: () => [running],
-      handleWrite: async () => {
-        throw new Error("unexpected write");
-      },
-      messages: () => ({
-        items: [delivery],
-        next_before_sequence: null,
+    // 点击手动重试按钮后再次发起单次有界 GET /messages?limit=20，命中目标后收敛清理瞬态文本与告警。
+    currentItems = [recoveredAnswer, delivery];
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "重试加载最终消息" }));
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 4",
       }),
-      runEvents: (afterSequence) =>
-        afterSequence === 0
-          ? {
-              items: [
-                {
-                  created_at: "2026-11-10T03:00:02Z",
-                  id: "event-started-exhausted",
-                  payload: {},
-                  run_id: running.id,
-                  sequence: 2,
-                  type: "started",
-                },
-              ],
-              next_after_sequence: 2,
-            }
-          : {
-              items: [],
-              next_after_sequence: null,
-            },
+    ).toHaveTextContent("手动重试后同步回来的超长最终回答");
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
     });
-    const { client } = renderApp(`/chat/${SESSION.id}`);
-
     expect(
-      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
-    ).toBeDisabled();
-    const source = FakeSseStream.instances[0];
-    act(() => {
-      source.emit("text_delta", {
-        payload: { text: "事件耗尽时仍需保留" },
-      });
-    });
-    const completed = {
-      ...running,
-      event_sequence: 4,
-      status: "completed" as const,
-      updated_at: "2026-11-10T03:00:03Z",
-    };
-    act(() => {
-      client.setQueryData(chatKeys.latestRun(SESSION.id), {
-        items: [completed],
-        next_cursor: null,
-      });
-      client.setQueryData(chatKeys.run(SESSION.id, running.id), completed);
-    });
-
-    expect(
-      await screen.findByText(/未找到对应的最终回复/),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByLabelText("Athena 的临时流式输出"),
-    ).toHaveTextContent("事件耗尽时仍需保留");
-    expect(screen.getByText("旧交付不能被当成最终回答")).toBeInTheDocument();
+      screen.queryByText(/未找到对应的最终回复/),
+    ).not.toBeInTheDocument();
+    expect(countMessageCalls()).toBe(baselineMessageCalls + 2);
     expect(
       fetchMock.mock.calls.filter(([input]) =>
         new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
           "/events",
         ),
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
   });
 
   it.each([
@@ -1198,11 +1494,117 @@ describe("Run 命令与真实状态", () => {
           "/events",
         ),
       );
-      expect(eventLookups).toHaveLength(terminalStatus === "failed" ? 1 : 0);
+      expect(eventLookups).toHaveLength(0);
     },
   );
 
-  it("failed 事件有报告 ID 时跨消息页恢复权威报告并清除瞬时文本", async () => {
+  it("自包含 failed 安全停止快照内联落盘报告并清理瞬态文本，触发 0 次 /events 与 0 次额外 /messages 请求", async () => {
+    const running = makeRun({
+      id: "run-failed-self-contained",
+      session_id: SESSION.id,
+      status: "running",
+    });
+    const trigger = makeMessage({
+      id: running.trigger_message_id,
+      parts: [{ text: "触发上下文安全停止", type: "text" }],
+      reply_to_message_id: null,
+      role: "user",
+      run_id: null,
+      sequence: 1,
+      session_id: SESSION.id,
+    });
+    let currentRun: Run = running;
+    const fetchMock = installWorkspaceFetch({
+      getRuns: () => [currentRun],
+      handleWrite: async () => {
+        throw new Error("unexpected write");
+      },
+      messages: () => ({
+        items: [trigger],
+        next_before_sequence: null,
+      }),
+      runEvents: () => {
+        throw new Error("自包含 failed 快照严禁请求 /events");
+      },
+    });
+    renderApp(`/chat/${SESSION.id}`);
+
+    expect(
+      await screen.findByRole("button", { name: "运行中，暂不可发送" }),
+    ).toBeDisabled();
+    expect(await screen.findByText("触发上下文安全停止")).toBeInTheDocument();
+
+    const countPath = (suffix: string) =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          suffix,
+        ),
+      ).length;
+    const baselineMessageCalls = countPath("/messages");
+    const source = FakeSseStream.instances[0];
+
+    act(() => {
+      source.emit("text_delta", {
+        payload: { text: "不能当作报告的瞬时回答" },
+      });
+    });
+    expect(
+      await screen.findByLabelText("Athena 的临时流式输出"),
+    ).toHaveTextContent("不能当作报告的瞬时回答");
+
+    currentRun = {
+      ...running,
+      event_sequence: 4,
+      report_message_id: "msg-failed-inline-report",
+      safe_error_code: "run_context_safety_stop",
+      status: "failed",
+    };
+
+    act(() => {
+      source.emit("snapshot", {
+        payload: {
+          event_sequence: 4,
+          events: [],
+          events_after_sequence: null,
+          events_complete: true,
+          messages: [
+            {
+              completed_at: "2026-11-10T03:00:04Z",
+              created_at: "2026-11-10T03:00:03Z",
+              id: "msg-failed-inline-report",
+              parts: [{ text: "权威失败报告：上下文超限安全停止", type: "text" }],
+              reply_to_message_id: trigger.id,
+              role: "assistant",
+              run_id: running.id,
+              sequence: 2,
+              session_id: SESSION.id,
+              status: "completed",
+              text: "权威失败报告：上下文超限安全停止",
+            },
+          ],
+          messages_before_sequence: null,
+          messages_complete: true,
+          report_message_id: "msg-failed-inline-report",
+          status: "failed",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 2",
+      }),
+    ).toHaveTextContent("权威失败报告：上下文超限安全停止");
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
+    });
+    expect(countPath("/messages")).toBe(baselineMessageCalls);
+    expect(countPath("/events")).toBe(0);
+  });
+
+  it("failed 事件有报告 ID 时通过单次有界 GET /messages 恢复权威报告并清除瞬时文本", async () => {
     const running = makeRun({
       id: "run-failed-report",
       session_id: SESSION.id,
@@ -1233,48 +1635,27 @@ describe("Run 命令与真实状态", () => {
       reply_to_message_id: null,
       role: "assistant",
       run_id: running.id,
-      sequence: 9,
+      sequence: 4,
       session_id: SESSION.id,
       status: "completed",
     });
-    const otherRunReport = makeMessage({
-      id: "msg-other-run-report",
-      parts: [{ text: "其他 Run 的报告", type: "text" }],
-      reply_to_message_id: trigger.id,
-      role: "assistant",
-      run_id: "run-other",
-      sequence: 7,
-      session_id: SESSION.id,
-      status: "completed",
-    });
-    installWorkspaceFetch({
+    let currentMessages = [trigger];
+    const fetchMock = installWorkspaceFetch({
       getRuns: () => [running],
       handleWrite: async () => {
         throw new Error("unexpected write");
       },
       messages: (beforeSequence) => {
-        if (beforeSequence === undefined) {
-          return {
-            items: [delivery],
-            next_before_sequence: 9,
-          };
-        }
-        if (beforeSequence === 9) {
-          return {
-            items: [otherRunReport],
-            next_before_sequence: 7,
-          };
-        }
-        if (beforeSequence === 7) {
-          return {
-            items: [report],
-            next_before_sequence: 5,
-          };
+        if (beforeSequence !== undefined) {
+          throw new Error("失败报告兜底不得多页翻页");
         }
         return {
-          items: [trigger],
-          next_before_sequence: null,
+          items: currentMessages,
+          next_before_sequence: 1,
         };
+      },
+      runEvents: () => {
+        throw new Error("失败报告兜底不得请求 /events");
       },
     });
     renderApp(`/chat/${SESSION.id}`);
@@ -1282,7 +1663,16 @@ describe("Run 命令与真实状态", () => {
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
+    const countMessageCalls = () =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/messages",
+        ),
+      ).length;
+    const baselineMessageCalls = countMessageCalls();
     const source = FakeSseStream.instances[0];
+    currentMessages = [report, delivery, trigger];
+
     act(() => {
       source.emit("text_delta", {
         payload: { text: "不能当作报告的瞬时回答" },
@@ -1316,10 +1706,10 @@ describe("Run 命令与真实状态", () => {
       ).not.toBeInTheDocument();
     });
     expect(screen.getByText("普通工具交付消息")).toBeInTheDocument();
-    expect(screen.getByText("其他 Run 的报告")).toBeInTheDocument();
+    expect(countMessageCalls()).toBe(baselineMessageCalls + 1);
   });
 
-  it("刷新后的 failed Run 从投影报告 ID 精确恢复，不读取 latest assistant", async () => {
+  it("刷新后的 failed Run 复用首屏 GET /messages 展示权威报告，零额外 /events 或重复 /messages 请求", async () => {
     const trigger = makeMessage({
       id: "msg-refresh-trigger",
       parts: [{ text: "刷新前的触发消息", type: "text" }],
@@ -1339,16 +1729,6 @@ describe("Run 命令与真实状态", () => {
       session_id: SESSION.id,
       status: "completed",
     });
-    const latestAssistant = makeMessage({
-      id: "msg-latest-assistant",
-      parts: [{ text: "另一个 Run 的 latest assistant", type: "text" }],
-      reply_to_message_id: null,
-      role: "assistant",
-      run_id: "run-other",
-      sequence: 9,
-      session_id: SESSION.id,
-      status: "completed",
-    });
     const failed = makeRun({
       id: "run-refresh-report",
       report_message_id: report.id,
@@ -1363,22 +1743,16 @@ describe("Run 命令与真实状态", () => {
         throw new Error("unexpected write");
       },
       messages: (beforeSequence) => {
-        if (beforeSequence === undefined) {
-          return {
-            items: [latestAssistant],
-            next_before_sequence: 9,
-          };
-        }
-        if (beforeSequence === 9) {
-          return {
-            items: [report],
-            next_before_sequence: 5,
-          };
+        if (beforeSequence !== undefined) {
+          throw new Error("刷新后终态恢复不应多页翻页");
         }
         return {
-          items: [trigger],
-          next_before_sequence: null,
+          items: [report, trigger],
+          next_before_sequence: 1,
         };
+      },
+      runEvents: () => {
+        throw new Error("刷新后终态恢复不应请求 /events");
       },
     });
 
@@ -1394,17 +1768,22 @@ describe("Run 命令与真实状态", () => {
       screen.queryByText(/未找到对应的权威说明/),
     ).not.toBeInTheDocument();
     expect(
-      fetchMock.mock.calls.some(([input]) => {
-        const url = new URL(getRequestUrl(input), "http://localhost");
-        return (
-          url.pathname === `/api/v1/sessions/${SESSION.id}/messages` &&
-          url.searchParams.get("before_sequence") === "9"
-        );
-      }),
-    ).toBe(true);
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/messages",
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/events",
+        ),
+      ),
+    ).toHaveLength(0);
   });
 
-  it("failed 报告身份不匹配时保留瞬时文本并显示明确安全状态", async () => {
+  it("failed 报告在单页未命中合法身份时保留瞬态文本并展示 not_found 重试入口，点击重试单次拉取后收敛", async () => {
     const running = makeRun({
       id: "run-invalid-report",
       session_id: SESSION.id,
@@ -1429,21 +1808,47 @@ describe("Run 命令与真实状态", () => {
       session_id: SESSION.id,
       status: "completed",
     });
-    installWorkspaceFetch({
+    const validReport = makeMessage({
+      id: "msg-invalid-report",
+      parts: [{ text: "重试后同步的合法失败报告", type: "text" }],
+      reply_to_message_id: trigger.id,
+      role: "assistant",
+      run_id: running.id,
+      sequence: 5,
+      session_id: SESSION.id,
+      status: "completed",
+    });
+    let currentItems = [wrongRunReport, trigger];
+    const fetchMock = installWorkspaceFetch({
       getRuns: () => [running],
       handleWrite: async () => {
         throw new Error("unexpected write");
       },
-      messages: () => ({
-        items: [wrongRunReport, trigger],
-        next_before_sequence: null,
-      }),
+      messages: (beforeSequence) => {
+        if (beforeSequence !== undefined) {
+          throw new Error("单次兜底未命中后绝不翻页");
+        }
+        return {
+          items: currentItems,
+          next_before_sequence: 2,
+        };
+      },
+      runEvents: () => {
+        throw new Error("绝不请求 /events");
+      },
     });
     renderApp(`/chat/${SESSION.id}`);
 
     expect(
       await screen.findByRole("button", { name: "运行中，暂不可发送" }),
     ).toBeDisabled();
+    const countMessageCalls = () =>
+      fetchMock.mock.calls.filter(([input]) =>
+        new URL(getRequestUrl(input), "http://localhost").pathname.endsWith(
+          "/messages",
+        ),
+      ).length;
+    const baselineMessageCalls = countMessageCalls();
     const source = FakeSseStream.instances[0];
     act(() => {
       source.emit("text_delta", {
@@ -1464,6 +1869,7 @@ describe("Run 命令与真实状态", () => {
           },
         },
       });
+      source.end();
     });
 
     expect(
@@ -1474,6 +1880,24 @@ describe("Run 命令与真实状态", () => {
     expect(
       screen.getByLabelText("Athena 的临时流式输出"),
     ).toHaveTextContent("身份不符时必须保留的瞬时文本");
+    expect(countMessageCalls()).toBe(baselineMessageCalls + 1);
+
+    // 点击重试按钮后再次发起单次有界 GET /messages?limit=20，命中合法报告后收敛清理。
+    currentItems = [validReport, trigger];
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "重试加载失败报告" }));
+    expect(
+      await screen.findByRole("article", {
+        name: "Athena的消息，序号 5",
+      }),
+    ).toHaveTextContent("重试后同步的合法失败报告");
+    await waitFor(() => {
+      expect(
+        screen.queryByLabelText("Athena 的临时流式输出"),
+      ).not.toBeInTheDocument();
+    });
+    expect(countMessageCalls()).toBe(baselineMessageCalls + 2);
   });
 
   it("SSE run_event 先于查询刷新投影取消中，终态快照关闭连接", async () => {

@@ -16,14 +16,17 @@ import {
   type SseFetch,
   type SseMessage,
 } from "../../shared/api/sse";
+import type { ArtifactFileRef } from "../files/model";
 import { runStreamUrl } from "./api";
 import {
   isTerminalRunStatus,
+  type ConversationMessagePart,
   type PendingSubagentApproval,
   type PendingSubagentInput,
   type RunEvent,
   type RunSnapshotPayload,
   type RunStatus,
+  type RunStreamMessage,
   type SubagentTaskSummary,
 } from "./model";
 import {
@@ -89,30 +92,157 @@ function parseEventData(raw: string): Record<string, unknown> | null {
   }
 }
 
-function parseSnapshotPayload(value: unknown): RunSnapshotPayload | null {
+function parseArtifactFileRef(value: unknown): ArtifactFileRef | null {
+  if (
+    !isRecord(value) ||
+    typeof value.file_id !== "string" ||
+    typeof value.filename !== "string" ||
+    typeof value.mime_type !== "string" ||
+    typeof value.size_bytes !== "number"
+  ) {
+    return null;
+  }
+  return {
+    file_id: value.file_id,
+    filename: value.filename,
+    label: typeof value.label === "string" ? value.label : null,
+    mime_type: value.mime_type,
+    size_bytes: value.size_bytes,
+  };
+}
+
+function parseMessagePart(value: unknown): ConversationMessagePart | null {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return null;
+  }
+  if (value.type === "text" && typeof value.text === "string") {
+    return { text: value.text, type: "text" };
+  }
+  if (
+    value.type === "file_ref" &&
+    typeof value.file_id === "string" &&
+    typeof value.filename === "string"
+  ) {
+    return {
+      file_id: value.file_id,
+      filename: value.filename,
+      mime_type: typeof value.mime_type === "string" ? value.mime_type : null,
+      size_bytes: typeof value.size_bytes === "number" ? value.size_bytes : null,
+      type: "file_ref",
+    };
+  }
+  if (
+    value.type === "tool_call" &&
+    typeof value.tool_call_id === "string" &&
+    typeof value.name === "string"
+  ) {
+    return {
+      arguments: isRecord(value.arguments) ? value.arguments : {},
+      name: value.name,
+      tool_call_id: value.tool_call_id,
+      type: "tool_call",
+    };
+  }
+  if (
+    value.type === "tool_result" &&
+    typeof value.tool_call_id === "string" &&
+    typeof value.status === "string"
+  ) {
+    const artifacts: ArtifactFileRef[] = [];
+    if (Array.isArray(value.artifacts)) {
+      for (const rawArtifact of value.artifacts) {
+        const parsedArtifact = parseArtifactFileRef(rawArtifact);
+        if (!parsedArtifact) {
+          return null;
+        }
+        artifacts.push(parsedArtifact);
+      }
+    }
+    return {
+      artifact_id:
+        typeof value.artifact_id === "string" ? value.artifact_id : null,
+      artifacts,
+      output: typeof value.output === "string" ? value.output : null,
+      status: value.status,
+      tool_call_id: value.tool_call_id,
+      type: "tool_result",
+    };
+  }
+  return null;
+}
+
+function parseRunStreamMessage(value: unknown): RunStreamMessage | null {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    (value.role !== "user" && value.role !== "assistant") ||
+    typeof value.status !== "string" ||
+    typeof value.text !== "string" ||
+    typeof value.sequence !== "number" ||
+    typeof value.created_at !== "string"
+  ) {
+    return null;
+  }
+  const message: RunStreamMessage = {
+    created_at: value.created_at,
+    id: value.id,
+    role: value.role,
+    sequence: value.sequence,
+    status: value.status,
+    text: value.text,
+  };
+  if (typeof value.session_id === "string" || value.session_id === null) {
+    message.session_id = value.session_id;
+  }
+  if (typeof value.run_id === "string" || value.run_id === null) {
+    message.run_id = value.run_id;
+  }
+  if (
+    typeof value.reply_to_message_id === "string" ||
+    value.reply_to_message_id === null
+  ) {
+    message.reply_to_message_id = value.reply_to_message_id;
+  }
+  if (typeof value.completed_at === "string" || value.completed_at === null) {
+    message.completed_at = value.completed_at;
+  }
+  if (Array.isArray(value.parts)) {
+    const parsedParts: ConversationMessagePart[] = [];
+    for (const rawPart of value.parts) {
+      const parsedPart = parseMessagePart(rawPart);
+      if (!parsedPart) {
+        // 存在未知或格式异常的内容块时放弃内联 parts，交由单次有界 /messages 兜底同步避免静默丢块。
+        return message;
+      }
+      parsedParts.push(parsedPart);
+    }
+    message.parts = parsedParts;
+  } else if (value.parts === null) {
+    message.parts = null;
+  }
+  return message;
+}
+
+export function parseSnapshotPayload(value: unknown): RunSnapshotPayload | null {
   if (!isRecord(value) || typeof value.status !== "string") {
     return null;
   }
   const status = value.status as RunStatus;
-  const messages = Array.isArray(value.messages)
-    ? value.messages.filter(
-        (message): message is RunSnapshotPayload["messages"][number] => {
-          if (
-            !isRecord(message) ||
-            typeof message.id !== "string" ||
-            (message.role !== "user" && message.role !== "assistant") ||
-            typeof message.status !== "string" ||
-            typeof message.text !== "string" ||
-            typeof message.sequence !== "number" ||
-            typeof message.created_at !== "string"
-          ) {
-            return false;
-          }
-          return true;
-        },
-      )
-    : [];
+  const messages: RunStreamMessage[] = [];
+  if (Array.isArray(value.messages)) {
+    for (const rawMessage of value.messages) {
+      const parsed = parseRunStreamMessage(rawMessage);
+      if (parsed) {
+        messages.push(parsed);
+      }
+    }
+  }
   return {
+    assistant_message_id:
+      typeof value.assistant_message_id === "string" &&
+      value.assistant_message_id
+        ? value.assistant_message_id
+        : null,
     events: Array.isArray(value.events)
       ? (value.events as RunEvent[])
       : [],
@@ -166,7 +296,7 @@ type WireEventOutcome =
   | { kind: "snapshot_waiting" }
   | { kind: "snapshot_terminal" }
   | { kind: "snapshot_live" }
-  | { eventType?: RunEvent["type"]; kind: "run_event" }
+  | { eventRunId?: string; eventType?: RunEvent["type"]; kind: "run_event" }
   | { kind: "interrupted" }
   | null;
 
@@ -244,7 +374,7 @@ function dispatchWireEvent(
     if (event) {
       dispatch({ event, type: "run_event" });
     }
-    return { eventType: event?.type, kind: "run_event" };
+    return { eventRunId: event?.run_id, eventType: event?.type, kind: "run_event" };
   }
   return null;
 }
@@ -282,11 +412,16 @@ export function useRunStream({
     kind: "raf" | "timeout";
   } | null>(null);
   const mode = runStreamMode(status);
+  // 仅当同一 Run 已收到终态权威 snapshot，或流在终态下已关闭/出错时才阻断/断开 SSE；
+  // 若仅由终态 run_event 预告终态且连接仍打开，必须保持连接接收服务端下一帧发出的自包含终态 snapshot。
   const alreadyTerminalInStream =
     Boolean(runId) &&
     state.runId === runId &&
-    isTerminalRunStatus(state.status);
-  // 等待和终态由查询/快照承载；同一 Run 已在实时流中确认终态后，禁止迟到的非终态查询重新拉起 SSE 并覆盖终态。
+    isTerminalRunStatus(state.status) &&
+    (state.terminalSnapshotReceived ||
+      state.connection === "closed" ||
+      state.connection === "error");
+  // 等待和终态由查询/快照承载；同一 Run 已在实时流中终态收尾后，禁止迟到的非终态查询重新拉起 SSE 并覆盖终态。
   const shouldConnect = Boolean(
     enabled && runId && mode === "live" && !alreadyTerminalInStream,
   );
@@ -449,6 +584,7 @@ export function useRunStream({
 
     let acceptEvents = true;
     let snapshotReceived = false;
+    let terminalEventSeen = false;
     let connection: EventStreamConnection | null = null;
 
     const closeConnection = () => {
@@ -485,6 +621,14 @@ export function useRunStream({
         snapshotReceived = true;
       }
       if (outcome.kind === "run_event") {
+        if (
+          outcome.eventRunId === runId &&
+          (outcome.eventType === "completed" ||
+            outcome.eventType === "failed" ||
+            outcome.eventType === "cancelled")
+        ) {
+          terminalEventSeen = true;
+        }
         reconcileRef.current?.({ eventType: outcome.eventType });
       }
       if (
@@ -516,15 +660,20 @@ export function useRunStream({
           if (!acceptEvents) {
             return;
           }
+          // 已收到当前 Run 终态 run_event 预告后若服务端直接 EOF 结束流（无终态 snapshot），
+          // 立即安静关流阻止 sse.ts 误判断线重连，并交由控制器接管单次有界兜底。
+          if (terminalEventSeen && errorInfo.reason === "stream_closed") {
+            flushPendingText();
+            closeConnection();
+            dispatch({ type: "closed" });
+            return;
+          }
           // 断线或 401/403/404 停流前先刷出缓冲草稿，保证用户看到的保留文本不缺失最后 1 帧。
           flushPendingText();
           dispatch({ type: "error" });
-          if (errorInfo.fatal) {
-            // 401/403/404 等不可恢复错误已由底层 sse.ts 永久停流并完成权限事件派发，本地同步断开句柄。
-            acceptEvents = false;
-            if (connection && connectionRef.current === connection) {
-              connectionRef.current = null;
-            }
+          if (errorInfo.fatal || terminalEventSeen) {
+            // 401/403/404 等不可恢复错误或终态事件后的断流永久停流，本地同步断开句柄。
+            closeConnection();
           }
         },
         onEvent: handleEvent,

@@ -7,6 +7,11 @@ import {
   Badge,
   Button,
   InlineAlert,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   Switch,
   cn,
   toast,
@@ -15,7 +20,6 @@ import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Icon } from "../../shared/ui/Icons";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { Modal } from "../../shared/ui/Modal";
-import { SelectDropdown } from "../../shared/ui/SelectDropdown";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
 import {
   VisibilityGrantsEditor,
@@ -402,6 +406,7 @@ export function AdminSkillDetailDialog({
   const [notice, setNotice] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [versionSelectOpen, setVersionSelectOpen] = useState(false);
   const submitLock = useRef(false);
 
   useEffect(() => {
@@ -414,6 +419,7 @@ export function AdminSkillDetailDialog({
     setNotice(null);
     setDeleteDialogOpen(false);
     setDeleteError(null);
+    setVersionSelectOpen(false);
     setVersionPageNumber(1);
     submitLock.current = false;
   }, [open, skillId]);
@@ -686,6 +692,50 @@ export function AdminSkillDetailDialog({
 
   const pending = update.isPending || deleteSkillMutation.isPending;
 
+  useEffect(() => {
+    if (pending) {
+      // 保存或删除提交期间禁用版本选择器，同时立即收起已展开的下拉菜单。
+      setVersionSelectOpen(false);
+    }
+  }, [pending]);
+
+  const versionOptions = useMemo(() => {
+    if (!detail.data || !form) {
+      return [];
+    }
+    return [
+      ...(!selectedVersion && form.currentVersionId
+        ? [
+            {
+              badge: selectedDependencySatisfied ? undefined : "依赖未满足",
+              label: `${
+                detail.data.current_version_label ?? form.currentVersionId
+              } · 正在读取版本详情`,
+              value: form.currentVersionId,
+            },
+          ]
+        : []),
+      ...versions.map((version) => ({
+        badge: dependencySatisfied(version.dependency_check)
+          ? undefined
+          : "依赖未满足",
+        label: versionLabel(version),
+        value: version.id,
+      })),
+    ];
+  }, [
+    detail.data,
+    form,
+    selectedDependencySatisfied,
+    selectedVersion,
+    versions,
+  ]);
+
+  const selectedVersionOptionLabel = form?.currentVersionId
+    ? versionOptions.find((option) => option.value === form.currentVersionId)
+        ?.label
+    : undefined;
+
   return (
     <Modal
       closeDisabled={pending}
@@ -810,13 +860,15 @@ export function AdminSkillDetailDialog({
                     <span className="admin-skill-dirty-badge">未保存变更</span>
                   ) : null}
                 </div>
-                <SelectDropdown
-                  classPrefix="admin-skill-dropdown"
+                {/* 使用统一 Radix Select，并在展开态向旧 Modal 声明 Escape 归属权以避免误关外层详情弹窗 */}
+                <Select
                   disabled={pending}
-                  id={versionSelectId}
-                  label="当前版本"
-                  listboxLabel="当前版本列表"
-                  onChange={(nextVersionId) => {
+                  onOpenChange={(nextOpen) => {
+                    if (!pending) {
+                      setVersionSelectOpen(nextOpen);
+                    }
+                  }}
+                  onValueChange={(nextVersionId) => {
                     setForm((current) =>
                       current
                         ? {
@@ -828,32 +880,43 @@ export function AdminSkillDetailDialog({
                     setRequestError(null);
                     setNotice(null);
                   }}
-                  options={[
-                    ...(!selectedVersion && form.currentVersionId
-                      ? [
-                          {
-                            badge: selectedDependencySatisfied
-                              ? undefined
-                              : "依赖未满足",
-                            label: `${
-                              detail.data.current_version_label ??
-                              form.currentVersionId
-                            } · 正在读取版本详情`,
-                            value: form.currentVersionId,
-                          },
-                        ]
-                      : []),
-                    ...versions.map((version) => ({
-                      badge: dependencySatisfied(version.dependency_check)
-                        ? undefined
-                        : "依赖未满足",
-                      label: versionLabel(version),
-                      value: version.id,
-                    })),
-                  ]}
-                  placeholder="请选择版本"
+                  open={versionSelectOpen}
                   value={form.currentVersionId}
-                />
+                >
+                  <SelectTrigger
+                    aria-label="当前版本"
+                    className="min-w-0 text-left"
+                    // 下拉刚展开、Popper 尚未将焦点切入列表项的瞬间，确保触发器自身也阻止旧 Modal 抢先消费 Escape。
+                    data-modal-escape-owner={
+                      versionSelectOpen ? "self" : undefined
+                    }
+                    id={versionSelectId}
+                  >
+                    {/* 仅在触发器内展示纯版本号文案，避免把下拉项中的“依赖未满足”徽章带入触发器导致布局拥挤 */}
+                    <SelectValue placeholder="请选择版本">
+                      {selectedVersionOptionLabel}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent aria-label="当前版本列表">
+                    {versionOptions.map((option) => (
+                      <SelectItem
+                        className="[&>span:first-child]:flex [&>span:first-child]:min-w-0 [&>span:first-child]:flex-1 [&>span:first-child]:items-center [&>span:first-child]:justify-between [&>span:first-child]:gap-2"
+                        key={option.value}
+                        textValue={option.label}
+                        value={option.value}
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {option.label}
+                        </span>
+                        {option.badge ? (
+                          <span className="shrink-0 rounded-full border border-warning-border bg-warning-bg px-1.5 py-px text-xs font-semibold whitespace-nowrap text-warning">
+                            {option.badge}
+                          </span>
+                        ) : null}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <small>
                   保存后只影响新 Run；已创建 Run 始终使用创建时固定版本。
                 </small>

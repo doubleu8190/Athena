@@ -1,5 +1,7 @@
+import { listMessages } from "./api";
 import {
   isTerminalRunStatus,
+  type ConversationMessage,
   type ConversationMessagePage,
   type PendingSubagentApproval,
   type PendingSubagentInput,
@@ -9,7 +11,6 @@ import {
   type RunStreamMessage,
   type SubagentTaskSummary,
 } from "./model";
-import { listMessages, listRunEvents } from "./api";
 
 export type RunStreamConnection =
   | "idle"
@@ -20,11 +21,13 @@ export type RunStreamConnection =
   | "closed";
 
 export interface RunStreamState {
+  assistantMessageId: string | null;
   connection: RunStreamConnection;
   events: RunEvent[];
   hasSnapshot: boolean;
   lastHeartbeatAt: string | null;
   messages: RunStreamMessage[];
+  messagesComplete: boolean;
   notice: string | null;
   pendingSubagentApprovals: PendingSubagentApproval[];
   pendingSubagentInputs: PendingSubagentInput[];
@@ -32,6 +35,8 @@ export interface RunStreamState {
   runId: string | null;
   status: RunStatus | null;
   subagentTasks: SubagentTaskSummary[];
+  /** 是否已收到终态权威 snapshot；仅收到终态 run_event 预告时保持 false，避免提前切断 SSE 丢弃紧随其后的自包含快照。 */
+  terminalSnapshotReceived: boolean;
   transientText: string;
 }
 
@@ -50,11 +55,13 @@ export type RunStreamAction =
   | { type: "snapshot"; payload: RunSnapshotPayload };
 
 export const INITIAL_RUN_STREAM_STATE: RunStreamState = {
+  assistantMessageId: null,
   connection: "idle",
   events: [],
   hasSnapshot: false,
   lastHeartbeatAt: null,
   messages: [],
+  messagesComplete: false,
   notice: null,
   pendingSubagentApprovals: [],
   pendingSubagentInputs: [],
@@ -62,6 +69,7 @@ export const INITIAL_RUN_STREAM_STATE: RunStreamState = {
   runId: null,
   status: null,
   subagentTasks: [],
+  terminalSnapshotReceived: false,
   transientText: "",
 };
 
@@ -92,8 +100,26 @@ function eventStatus(type: string): RunStatus | null {
   }
 }
 
-function failedEventReportMessageId(
-  events: RunEvent[],
+export function completedEventAssistantMessageId(
+  events: readonly RunEvent[],
+  runId: string,
+): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (
+      event.run_id === runId &&
+      event.type === "completed" &&
+      typeof event.payload.assistant_message_id === "string" &&
+      event.payload.assistant_message_id
+    ) {
+      return event.payload.assistant_message_id;
+    }
+  }
+  return null;
+}
+
+export function failedEventReportMessageId(
+  events: readonly RunEvent[],
   runId: string,
 ): string | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -204,16 +230,21 @@ export function runStreamReducer(
       ) {
         return state;
       }
+      const nextEvents = [...state.events, action.event];
       return {
         ...state,
-        events: [...state.events, action.event],
+        assistantMessageId:
+          action.event.run_id === state.runId &&
+          action.event.type === "completed"
+            ? completedEventAssistantMessageId(nextEvents, action.event.run_id) ??
+              state.assistantMessageId
+            : state.assistantMessageId,
+        events: nextEvents,
         reportMessageId:
           action.event.run_id === state.runId &&
           action.event.type === "failed"
-            ? failedEventReportMessageId(
-                [...state.events, action.event],
-                action.event.run_id,
-              ) ?? state.reportMessageId
+            ? failedEventReportMessageId(nextEvents, action.event.run_id) ??
+              state.reportMessageId
             : state.reportMessageId,
         status: eventStatus(action.event.type) ?? state.status,
       };
@@ -221,27 +252,39 @@ export function runStreamReducer(
     case "snapshot": {
       const authoritativeStatus = action.payload.status;
       const terminalSnapshot = isTerminalRunStatus(authoritativeStatus);
+      const snapshotAssistantMessageId =
+        action.payload.assistant_message_id ??
+        (state.runId
+          ? completedEventAssistantMessageId(action.payload.events, state.runId)
+          : null);
+      const snapshotReportMessageId =
+        action.payload.report_message_id ??
+        (state.runId
+          ? failedEventReportMessageId(action.payload.events, state.runId)
+          : null);
       return {
         ...state,
+        assistantMessageId: snapshotAssistantMessageId,
         connection:
           authoritativeStatus === "waiting_for_input" ||
           authoritativeStatus === "waiting_for_approval" ||
-          isTerminalRunStatus(authoritativeStatus)
+          terminalSnapshot
             ? "closed"
             : "open",
         events: action.payload.events,
         hasSnapshot: true,
         messages: action.payload.messages,
+        messagesComplete: action.payload.messages_complete,
+        // 非终态快照代表可继续生成的权威进度；终态快照由控制器确认自包含落盘或单次兜底后再显式 settle 清理临时文本。
+        transientText: terminalSnapshot ? state.transientText : "",
+        notice: null,
         pendingSubagentApprovals:
           action.payload.pending_subagent_approvals ?? [],
         pendingSubagentInputs: action.payload.pending_subagent_inputs ?? [],
-        // 非终态快照代表可继续生成的权威进度；终态 snapshot 不含未完成文本，
-        // 必须等 completed 或带报告的 failed 精确对账后才能收敛临时文本。
-        transientText: terminalSnapshot ? state.transientText : "",
-        notice: null,
-        reportMessageId: action.payload.report_message_id,
+        reportMessageId: snapshotReportMessageId,
         status: authoritativeStatus,
         subagentTasks: action.payload.subagent_tasks ?? [],
+        terminalSnapshotReceived: terminalSnapshot,
       };
     }
     default:
@@ -295,270 +338,198 @@ export function projectRunStatus({
   return queryStatus;
 }
 
-export type CompletedRunReconciliation =
-  | {
-      kind: "settled";
-      messages: {
-        page: ConversationMessagePage;
-        beforeSequence: number | undefined;
-      }[];
-    }
-  | {
-      kind: "not_found";
-      reason: "completed_event" | "final_message";
-    };
-
-export type FailedRunReconciliation =
-  | {
-      kind: "settled";
-      messages: {
-        page: ConversationMessagePage;
-        beforeSequence: number | undefined;
-      }[];
-    }
-  | {
-      kind: "not_found";
-      reason: "failed_event" | "report_message";
-    };
-
-function completedAssistantMessageId(
-  events: RunEvent[],
-  runId: string,
-): string | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (
-      event.run_id !== runId ||
-      event.type !== "completed" ||
-      typeof event.payload.assistant_message_id !== "string" ||
-      !event.payload.assistant_message_id
-    ) {
-      continue;
-    }
-    return event.payload.assistant_message_id;
+/**
+ * 将携带完整结构化 parts 的快照消息转换为与 /messages 接口同构的 ConversationMessage。
+ * 若缺少 parts（旧 mock 或精简快照），返回 null 交由单次有界兜底补拉。
+ */
+export function toConversationMessageFromSnapshot(
+  message: RunStreamMessage,
+  fallbackSessionId: string,
+  fallbackRunId: string | null,
+): ConversationMessage | null {
+  if (!Array.isArray(message.parts)) {
+    return null;
   }
-  return null;
+  return {
+    completed_at:
+      message.completed_at !== undefined ? message.completed_at : null,
+    created_at: message.created_at,
+    id: message.id,
+    parts: message.parts,
+    reply_to_message_id:
+      message.reply_to_message_id !== undefined
+        ? message.reply_to_message_id
+        : null,
+    role: message.role,
+    run_id: message.run_id !== undefined ? message.run_id : fallbackRunId,
+    sequence: message.sequence,
+    session_id: message.session_id ?? fallbackSessionId,
+    status: message.status,
+  };
 }
 
-async function findCompletedAssistantMessageId(
-  sessionId: string,
-  runId: string,
-  knownEvents: RunEvent[] = [],
-): Promise<string | null> {
-  // 优先复用 SSE 内存中已收到的 completed 事件，命中后免去分页拉取 /events。
-  const knownAssistantMessageId = completedAssistantMessageId(
-    knownEvents,
-    runId,
-  );
-  if (knownAssistantMessageId) {
-    return knownAssistantMessageId;
-  }
-
-  let afterSequence = 0;
-  while (true) {
-    const page = await listRunEvents(sessionId, runId, afterSequence, 100);
-    const assistantMessageId = completedAssistantMessageId(
-      page.items,
-      runId,
-    );
-    if (assistantMessageId) {
-      return assistantMessageId;
-    }
-    const next = page.next_after_sequence;
-    // 游标不前进说明接口已耗尽或返回异常，不能猜测 latest assistant 回退。
-    if (next === null || next <= afterSequence) {
-      return null;
-    }
-    afterSequence = next;
-  }
+export interface TerminalSnapshotResolution {
+  /** 快照中携带完整 parts、可直接并入消息缓存的全部消息。 */
+  messages: ConversationMessage[];
+  /** 命中的权威终态消息（completed 最终回答或 failed 安全停止报告）。 */
+  targetMessage: ConversationMessage;
 }
 
-async function finalAssistantMessageExists(
+/**
+ * 校验终态 SSE 快照是否自包含完整目标消息（含 parts），命中后可直接落入 TanStack Query
+ * 缓存并清理 transientText，实现零额外 /events 与 /messages HTTP 往返。
+ */
+export function resolveSelfContainedTerminalSnapshot(
+  snapshot: RunSnapshotPayload,
   sessionId: string,
   runId: string,
-  assistantMessageId: string,
-  triggerMessageId: string,
-): Promise<{
-  found: boolean;
-  pages: {
-    page: ConversationMessagePage;
-    beforeSequence: number | undefined;
-  }[];
-}> {
-  let beforeSequence: number | undefined;
-  const pages: {
-    page: ConversationMessagePage;
-    beforeSequence: number | undefined;
-  }[] = [];
-  while (true) {
-    const page = await listMessages(sessionId, beforeSequence, 20);
-    pages.push({ page, beforeSequence });
-    if (
-      page.items.some(
-        (message) =>
-          message.id === assistantMessageId &&
-          message.role === "assistant" &&
-          message.run_id === runId &&
-          message.status === "completed",
-      )
-    ) {
-      return { found: true, pages };
-    }
-    if (
-      page.items.some(
-        (message) => message.id === triggerMessageId,
-      )
-    ) {
-      return { found: false, pages };
-    }
-    const next = page.next_before_sequence;
-    if (
-      next === null ||
-      (beforeSequence !== undefined && next >= beforeSequence)
-    ) {
-      return { found: false, pages };
-    }
-    beforeSequence = next;
-  }
-}
-
-async function findFailedReportMessageId(
-  sessionId: string,
-  runId: string,
-  knownEvents: RunEvent[],
-): Promise<string | null> {
-  const knownReportMessageId = failedEventReportMessageId(
-    knownEvents,
-    runId,
-  );
-  if (knownReportMessageId) {
-    return knownReportMessageId;
+  triggerMessageId: string | null = null,
+): TerminalSnapshotResolution | null {
+  if (snapshot.status !== "completed" && snapshot.status !== "failed") {
+    return null;
   }
 
-  let afterSequence = 0;
-  while (true) {
-    const page = await listRunEvents(sessionId, runId, afterSequence, 100);
-    const reportMessageId = failedEventReportMessageId(page.items, runId);
-    if (reportMessageId) {
-      return reportMessageId;
+  const convertedMessages: ConversationMessage[] = [];
+  const convertedById = new Map<string, ConversationMessage>();
+  for (const raw of snapshot.messages) {
+    const converted = toConversationMessageFromSnapshot(raw, sessionId, runId);
+    if (converted) {
+      convertedMessages.push(converted);
+      convertedById.set(converted.id, converted);
     }
-    const next = page.next_after_sequence;
-    // 事件游标不前进时明确失败，不能转为猜测其他 assistant 消息。
-    if (next === null || next <= afterSequence) {
-      return null;
-    }
-    afterSequence = next;
   }
-}
+  if (convertedMessages.length === 0) {
+    return null;
+  }
 
-async function failedReportMessageExists(
-  sessionId: string,
-  runId: string,
-  reportMessageId: string,
-  triggerMessageId: string,
-): Promise<{
-  found: boolean;
-  pages: {
-    page: ConversationMessagePage;
-    beforeSequence: number | undefined;
-  }[];
-}> {
-  let beforeSequence: number | undefined;
-  let reportSequence: number | null = null;
-  let triggerSequence: number | null = null;
-  const pages: {
-    page: ConversationMessagePage;
-    beforeSequence: number | undefined;
-  }[] = [];
-
-  while (true) {
-    const page = await listMessages(sessionId, beforeSequence, 20);
-    pages.push({ page, beforeSequence });
-
-    for (const message of page.items) {
-      if (message.id === triggerMessageId) {
-        triggerSequence = message.sequence;
-      }
+  if (snapshot.status === "completed") {
+    const expectedId =
+      snapshot.assistant_message_id ??
+      completedEventAssistantMessageId(snapshot.events, runId);
+    if (expectedId) {
+      const matched = convertedById.get(expectedId);
       if (
-        message.id === reportMessageId &&
-        message.role === "assistant" &&
-        message.run_id === runId &&
-        message.status === "completed" &&
-        message.reply_to_message_id === triggerMessageId
+        matched &&
+        matched.role === "assistant" &&
+        matched.run_id === runId &&
+        matched.status === "completed"
       ) {
-        reportSequence = message.sequence;
+        return { messages: convertedMessages, targetMessage: matched };
+      }
+      // 已明确给出目标 ID 但快照未包含（如超 512KB 被裁剪或缺 parts），不得误用旧交付消息。
+      return null;
+    }
+
+    // 未显式携带 assistant_message_id 时，仅接受显式归属本 Run 且携带完整 parts 的最终助手消息。
+    for (let index = snapshot.messages.length - 1; index >= 0; index -= 1) {
+      const raw = snapshot.messages[index];
+      if (
+        raw.role === "assistant" &&
+        raw.run_id === runId &&
+        raw.status === "completed" &&
+        Array.isArray(raw.parts)
+      ) {
+        const matched = convertedById.get(raw.id);
+        if (matched) {
+          return { messages: convertedMessages, targetMessage: matched };
+        }
       }
     }
-
-    if (reportSequence !== null && triggerSequence !== null) {
-      return {
-        found: reportSequence > triggerSequence,
-        pages,
-      };
-    }
-    // 消息页从新到旧；先遇到触发消息后，更旧页面不可能再提供合法报告。
-    if (triggerSequence !== null) {
-      return { found: false, pages };
-    }
-
-    const next = page.next_before_sequence;
-    if (
-      next === null ||
-      (beforeSequence !== undefined && next >= beforeSequence)
-    ) {
-      return { found: false, pages };
-    }
-    beforeSequence = next;
+    return null;
   }
-}
 
-export async function reconcileCompletedRun(
-  sessionId: string,
-  runId: string,
-  triggerMessageId: string,
-  knownEvents: RunEvent[] = [],
-): Promise<CompletedRunReconciliation> {
-  // completed 事件携带权威消息 ID；优先复用内存事件，事件或消息任一游标耗尽都明确失败。
-  const assistantMessageId = await findCompletedAssistantMessageId(
-    sessionId,
-    runId,
-    knownEvents,
-  );
-  if (!assistantMessageId) {
-    return { kind: "not_found", reason: "completed_event" };
-  }
-  const finalMessage = await finalAssistantMessageExists(
-    sessionId,
-    runId,
-    assistantMessageId,
-    triggerMessageId,
-  );
-  return finalMessage.found
-    ? { kind: "settled", messages: finalMessage.pages }
-    : { kind: "not_found", reason: "final_message" };
-}
-
-export async function reconcileFailedRun(
-  sessionId: string,
-  runId: string,
-  triggerMessageId: string,
-  projectedReportMessageId: string | null,
-  knownEvents: RunEvent[] = [],
-): Promise<FailedRunReconciliation> {
+  // failed 终态仅当显式携带安全停止报告 ID 且快照内含完整报告消息时才直接收敛。
   const reportMessageId =
-    projectedReportMessageId ??
-    (await findFailedReportMessageId(sessionId, runId, knownEvents));
+    snapshot.report_message_id ??
+    failedEventReportMessageId(snapshot.events, runId);
   if (!reportMessageId) {
-    return { kind: "not_found", reason: "failed_event" };
+    return null;
   }
-  const reportMessage = await failedReportMessageExists(
-    sessionId,
-    runId,
-    reportMessageId,
-    triggerMessageId,
-  );
-  return reportMessage.found
-    ? { kind: "settled", messages: reportMessage.pages }
-    : { kind: "not_found", reason: "report_message" };
+  const reportMessage = convertedById.get(reportMessageId);
+  if (
+    !reportMessage ||
+    reportMessage.role !== "assistant" ||
+    reportMessage.run_id !== runId ||
+    reportMessage.status !== "completed"
+  ) {
+    return null;
+  }
+  if (
+    triggerMessageId &&
+    reportMessage.reply_to_message_id !== null &&
+    reportMessage.reply_to_message_id !== triggerMessageId
+  ) {
+    return null;
+  }
+  return { messages: convertedMessages, targetMessage: reportMessage };
 }
 
+export interface TerminalTargetMatcher {
+  assistantMessageId?: string | null;
+  reportMessageId?: string | null;
+  runId: string;
+  status: "completed" | "failed";
+  triggerMessageId?: string | null;
+}
+
+export interface BoundedTerminalFallbackResult {
+  page: ConversationMessagePage;
+  targetFound: boolean;
+}
+
+/** 校验消息集合中是否已存在当前终态 Run 的权威目标消息。 */
+export function hasTerminalTargetMessage(
+  messages: readonly ConversationMessage[],
+  matcher: TerminalTargetMatcher,
+): boolean {
+  if (matcher.status === "completed") {
+    if (matcher.assistantMessageId) {
+      return messages.some(
+        (message) =>
+          message.id === matcher.assistantMessageId &&
+          message.role === "assistant" &&
+          message.run_id === matcher.runId &&
+          message.status === "completed",
+      );
+    }
+    return messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        message.run_id === matcher.runId &&
+        message.status === "completed",
+    );
+  }
+
+  if (!matcher.reportMessageId) {
+    return false;
+  }
+  const triggerMessage = matcher.triggerMessageId
+    ? messages.find((message) => message.id === matcher.triggerMessageId)
+    : undefined;
+  return messages.some(
+    (message) =>
+      message.id === matcher.reportMessageId &&
+      message.role === "assistant" &&
+      message.run_id === matcher.runId &&
+      message.status === "completed" &&
+      (!matcher.triggerMessageId ||
+        message.reply_to_message_id === matcher.triggerMessageId) &&
+      (!triggerMessage || message.sequence > triggerMessage.sequence),
+  );
+}
+
+/**
+ * 终态单次有界兜底刷新：
+ * 仅在极端 >512KB 裁剪、旧版缺 parts 快照或页面刷新无 SSE 场景下调用，
+ * 固定发起 1 次 GET /sessions/{id}/messages?limit=20，绝不执行多页 while(true) 翻页或 /events 扫描。
+ */
+export async function fetchTerminalMessagesFallback(
+  sessionId: string,
+  matcher: TerminalTargetMatcher,
+): Promise<BoundedTerminalFallbackResult> {
+  const page = await listMessages(sessionId, undefined, 20);
+  return {
+    page,
+    targetFound: hasTerminalTargetMessage(page.items, matcher),
+  };
+}

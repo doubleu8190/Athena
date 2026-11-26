@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import io
 import json
 import sqlite3
@@ -13,25 +14,26 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from auth_support import AuthTestClient, make_auth_service
 from docx import Document
 from openpyxl import Workbook  # type: ignore[import-untyped]
+from pg_unit_harness import pg_unit_db
 from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from adapter.auth.model import UserModel
-from adapter.base import Base
 from adapter.file.repository import (
     SqlAlchemySessionFileRepository,
     pending_file_to_model,
@@ -65,7 +67,14 @@ from domain.file import (
 )
 from domain.knowledge.model import ChunkLocator, TextBlock
 from domain.knowledge.ports import ParsedDocument
-from domain.run.model import Run, RunInputFileContext, RunInputFiles, RunStatus, RunUsage
+from domain.run.model import (
+    ContextStopReason,
+    Run,
+    RunInputFileContext,
+    RunInputFiles,
+    RunStatus,
+    RunUsage,
+)
 from domain.session import Session, SessionNotFoundError, SessionScope
 from domain.tool import ToolExecutionContext, ToolOutcomeStatus
 from infrastructure.file import LocalSessionDocumentExtractor
@@ -1423,201 +1432,197 @@ def test_sqlalchemy_repository_extraction_and_object_reference_protection() -> N
     """验证 SQLAlchemy 仓储的提取字段持久化、并发保护及 is_object_key_referenced 缓存保护。"""
 
     async def scenario() -> None:
-        engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-            engine,
-            expire_on_commit=False,
-        )
-        # 预置用户与会话
-        async with factory() as session:
-            async with session.begin():
-                session.add(
-                    UserModel(
-                        id="usr_1",
-                        email="u1@example.com",
-                        password_hash="hash",
-                        status=UserStatus.ACTIVE.value,
-                        role=UserRole.MEMBER.value,
-                        created_at=NOW,
-                        updated_at=NOW,
+        async with pg_unit_db() as (_engine, factory):
+            # 预置用户与会话（PG 外键约束下先 flush UserModel 再写入 SessionModel）
+            async with factory() as session:
+                async with session.begin():
+                    session.add(
+                        UserModel(
+                            id="usr_1",
+                            email="u1@example.com",
+                            password_hash="hash",
+                            status=UserStatus.ACTIVE.value,
+                            role=UserRole.MEMBER.value,
+                            created_at=NOW,
+                            updated_at=NOW,
+                        )
                     )
-                )
-                session.add(
-                    SessionModel(
-                        id="ses_1",
-                        owner_id="usr_1",
-                        title="测试会话",
-                        created_at=NOW,
-                        updated_at=NOW,
+                    await session.flush()
+                    session.add(
+                        SessionModel(
+                            id="ses_1",
+                            owner_id="usr_1",
+                            title="测试会话",
+                            created_at=NOW,
+                            updated_at=NOW,
+                        )
                     )
-                )
 
-        repo = SqlAlchemySessionFileRepository(factory)
-        orig_key = "session-files/ab/file_db_1"
-        cache_key = "session-files-extracted/ab/file_db_1.txt"
+            repo = SqlAlchemySessionFileRepository(factory)
+            orig_key = "session-files/ab/file_db_1"
+            cache_key = "session-files-extracted/ab/file_db_1.txt"
 
-        # 写前组合一致性对称校验：publish_upload 与 pending_file_to_model 在刷库前快速拒绝非法组合
-        invalid_pending = PendingSessionFile(
-            id="file_invalid_fields",
-            filename="bad.pdf",
-            label=None,
-            mime_type="application/pdf",
-            size_bytes=10,
-            sha256="ab" * 32,
-            object_key="session-files/ab/file_invalid_fields",
-            output_index=-1,
-            created_at=NOW,
-            extraction_status=SessionFileExtractionStatus.READY,
-            extracted_text_key=None,
-            extracted_text_bytes=None,
-            extraction_error_code=None,
-        )
-        with pytest.raises(ValueError, match="session_file_extraction_fields_invalid"):
-            pending_file_to_model(
-                invalid_pending,
-                session_id="ses_1",
-                owner_id="usr_1",
-                source="upload",
-                source_call_id=None,
+            # 写前组合一致性对称校验：publish_upload 与 pending_file_to_model 快速拒绝非法组合
+            invalid_pending = PendingSessionFile(
+                id="file_invalid_fields",
+                filename="bad.pdf",
+                label=None,
+                mime_type="application/pdf",
+                size_bytes=10,
+                sha256="ab" * 32,
+                object_key="session-files/ab/file_invalid_fields",
+                output_index=-1,
+                created_at=NOW,
+                extraction_status=SessionFileExtractionStatus.READY,
+                extracted_text_key=None,
+                extracted_text_bytes=None,
+                extraction_error_code=None,
             )
-        with pytest.raises(ValueError, match="session_file_extraction_fields_invalid"):
-            await repo.publish_upload(
+            with pytest.raises(ValueError, match="session_file_extraction_fields_invalid"):
+                pending_file_to_model(
+                    invalid_pending,
+                    session_id="ses_1",
+                    owner_id="usr_1",
+                    source="upload",
+                    source_call_id=None,
+                )
+            with pytest.raises(ValueError, match="session_file_extraction_fields_invalid"):
+                await repo.publish_upload(
+                    "ses_1",
+                    "usr_1",
+                    invalid_pending,
+                    idempotency_key="idem-invalid",
+                    request_fingerprint="fp-invalid",
+                    published_at=NOW,
+                )
+
+            pending = PendingSessionFile(
+                id="file_db_1",
+                filename="spec.pdf",
+                label=None,
+                mime_type="application/pdf",
+                size_bytes=512,
+                sha256="ab" * 32,
+                object_key=orig_key,
+                output_index=-1,
+                created_at=NOW,
+                extraction_status=SessionFileExtractionStatus.NONE,
+            )
+            published = await repo.publish_upload(
                 "ses_1",
                 "usr_1",
-                invalid_pending,
-                idempotency_key="idem-invalid",
-                request_fingerprint="fp-invalid",
+                pending,
+                idempotency_key="idem-db-1",
+                request_fingerprint="fp-db-1",
                 published_at=NOW,
             )
+            assert published.extraction_status is SessionFileExtractionStatus.NONE
+            assert await repo.is_object_key_referenced(orig_key) is True
+            assert await repo.is_object_key_referenced(cache_key) is False
 
-        pending = PendingSessionFile(
-            id="file_db_1",
-            filename="spec.pdf",
-            label=None,
-            mime_type="application/pdf",
-            size_bytes=512,
-            sha256="ab" * 32,
-            object_key=orig_key,
-            output_index=-1,
-            created_at=NOW,
-            extraction_status=SessionFileExtractionStatus.NONE,
-        )
-        published = await repo.publish_upload(
-            "ses_1",
-            "usr_1",
-            pending,
-            idempotency_key="idem-db-1",
-            request_fingerprint="fp-db-1",
-            published_at=NOW,
-        )
-        assert published.extraction_status is SessionFileExtractionStatus.NONE
-        assert await repo.is_object_key_referenced(orig_key) is True
-        assert await repo.is_object_key_referenced(cache_key) is False
-
-        # 回填 ready 状态
-        updated = await repo.update_extraction(
-            "file_db_1",
-            extraction_status=SessionFileExtractionStatus.READY,
-            extracted_text_key=cache_key,
-            extracted_text_bytes=128,
-            extraction_error_code=None,
-        )
-        assert updated is not None
-        assert updated.extraction_status is SessionFileExtractionStatus.READY
-        assert updated.extracted_text_key == cache_key
-        assert updated.extracted_text_bytes == 128
-
-        # 并发再次尝试覆盖已 ready 记录 -> 保留原 ready 键不被覆盖
-        second_update = await repo.update_extraction(
-            "file_db_1",
-            extraction_status=SessionFileExtractionStatus.READY,
-            extracted_text_key="session-files-extracted/ab/other.txt",
-            extracted_text_bytes=999,
-            extraction_error_code=None,
-        )
-        assert second_update is not None
-        assert second_update.extracted_text_key == cache_key
-        assert second_update.extracted_text_bytes == 128
-
-        # 引用复核必须同时保护原件与提取缓存，未引用孤儿返回 False
-        assert await repo.is_object_key_referenced(orig_key) is True
-        assert await repo.is_object_key_referenced(cache_key) is True
-        orphan_cache_key = "session-files-extracted/cd/file_orphan.txt"
-        assert await repo.is_object_key_referenced(orphan_cache_key) is False
-
-        # 验证 MinioFileObjectStore 放行 session-files-extracted/ 并纳入离线维护扫描与清理
-        @dataclass(frozen=True, slots=True)
-        class _Listed:
-            object_name: str
-            last_modified: datetime
-
-        class _FakeMinio:
-            def __init__(self) -> None:
-                self.removed: list[str] = []
-
-            def list_objects(
-                self,
-                bucket_name: str,
-                *,
-                recursive: bool,
-                start_after: str | None = None,
-            ) -> object:
-                del bucket_name, recursive
-                items = (
-                    _Listed(orig_key, NOW.replace(day=1)),
-                    _Listed(cache_key, NOW.replace(day=1)),
-                    _Listed(orphan_cache_key, NOW.replace(day=1)),
-                )
-                return iter(
-                    item for item in items if start_after is None or item.object_name > start_after
-                )
-
-            def remove_object(self, bucket_name: str, object_name: str) -> None:
-                del bucket_name
-                self.removed.append(object_name)
-
-            def put_object(
-                self,
-                bucket_name: str,
-                object_name: str,
-                data: Any,
-                length: int,
-                *,
-                content_type: str,
-                num_parallel_uploads: int,
-            ) -> None:
-                del bucket_name, object_name, data, length, content_type, num_parallel_uploads
-
-        fake_minio = _FakeMinio()
-        minio_store = MinioFileObjectStore(
-            MinioFileStorageConfig(
-                endpoint="minio.example.test:443",
-                access_key="ak",
-                secret_key="sk",
-                bucket="athena-files-test",
-                secure=True,
-            ),
-            client=fake_minio,  # type: ignore[arg-type]
-            clock=lambda: NOW,
-        )
-        try:
-            # 确认对象存储键校验显式允许 session-files-extracted/ 前缀。
-            await minio_store.put_bytes(
-                cache_key,
-                b"ok",
-                content_type="text/plain; charset=utf-8",
+            # 回填 ready 状态
+            updated = await repo.update_extraction(
+                "file_db_1",
+                extraction_status=SessionFileExtractionStatus.READY,
+                extracted_text_key=cache_key,
+                extracted_text_bytes=128,
+                extraction_error_code=None,
             )
-            maintenance = FileObjectMaintenance(store=minio_store, references=repo)
-            result = await maintenance.run(execute=True, writers_stopped=True)
-            assert result.candidate_count == 3
-            assert result.referenced_count == 2
-            assert result.deleted_count == 1
-            assert fake_minio.removed == [orphan_cache_key]
-        finally:
-            await minio_store.aclose()
-            await engine.dispose()
+            assert updated is not None
+            assert updated.extraction_status is SessionFileExtractionStatus.READY
+            assert updated.extracted_text_key == cache_key
+            assert updated.extracted_text_bytes == 128
+
+            # 并发再次尝试覆盖已 ready 记录 -> 保留原 ready 键不被覆盖
+            second_update = await repo.update_extraction(
+                "file_db_1",
+                extraction_status=SessionFileExtractionStatus.READY,
+                extracted_text_key="session-files-extracted/ab/other.txt",
+                extracted_text_bytes=999,
+                extraction_error_code=None,
+            )
+            assert second_update is not None
+            assert second_update.extracted_text_key == cache_key
+            assert second_update.extracted_text_bytes == 128
+
+            # 引用复核必须同时保护原件与提取缓存，未引用孤儿返回 False
+            assert await repo.is_object_key_referenced(orig_key) is True
+            assert await repo.is_object_key_referenced(cache_key) is True
+            orphan_cache_key = "session-files-extracted/cd/file_orphan.txt"
+            assert await repo.is_object_key_referenced(orphan_cache_key) is False
+
+            # 验证 MinioFileObjectStore 放行 session-files-extracted/ 并纳入离线维护扫描与清理
+            @dataclass(frozen=True, slots=True)
+            class _Listed:
+                object_name: str
+                last_modified: datetime
+
+            class _FakeMinio:
+                def __init__(self) -> None:
+                    self.removed: list[str] = []
+
+                def list_objects(
+                    self,
+                    bucket_name: str,
+                    *,
+                    recursive: bool,
+                    start_after: str | None = None,
+                ) -> object:
+                    del bucket_name, recursive
+                    items = (
+                        _Listed(orig_key, NOW.replace(day=1)),
+                        _Listed(cache_key, NOW.replace(day=1)),
+                        _Listed(orphan_cache_key, NOW.replace(day=1)),
+                    )
+                    return iter(
+                        item
+                        for item in items
+                        if start_after is None or item.object_name > start_after
+                    )
+
+                def remove_object(self, bucket_name: str, object_name: str) -> None:
+                    del bucket_name
+                    self.removed.append(object_name)
+
+                def put_object(
+                    self,
+                    bucket_name: str,
+                    object_name: str,
+                    data: Any,
+                    length: int,
+                    *,
+                    content_type: str,
+                    num_parallel_uploads: int,
+                ) -> None:
+                    del bucket_name, object_name, data, length, content_type, num_parallel_uploads
+
+            fake_minio = _FakeMinio()
+            minio_store = MinioFileObjectStore(
+                MinioFileStorageConfig(
+                    endpoint="minio.example.test:443",
+                    access_key="ak",
+                    secret_key="sk",
+                    bucket="athena-files-test",
+                    secure=True,
+                ),
+                client=fake_minio,  # type: ignore[arg-type]
+                clock=lambda: NOW,
+            )
+            try:
+                # 确认对象存储键校验显式允许 session-files-extracted/ 前缀。
+                await minio_store.put_bytes(
+                    cache_key,
+                    b"ok",
+                    content_type="text/plain; charset=utf-8",
+                )
+                maintenance = FileObjectMaintenance(store=minio_store, references=repo)
+                result = await maintenance.run(execute=True, writers_stopped=True)
+                assert result.candidate_count == 3
+                assert result.referenced_count == 2
+                assert result.deleted_count == 1
+                assert fake_minio.removed == [orphan_cache_key]
+            finally:
+                await minio_store.aclose()
 
     asyncio.run(scenario())
 
@@ -2174,29 +2179,34 @@ def test_session_file_read_tool_reads_office_and_pdf_and_formats_errors(tmp_path
         assert parsed_meta[0]["extracted_text_bytes"] == f_pdf.extracted_text_bytes
         assert parsed_meta[1]["extraction_error_code"] == "document_no_extractable_text"
 
-        # 验证 SafeStopReporter.build_context_report_state 完整保留安全提取元数据
-        class _EmptyRunRepo:
-            async def list_tool_calls(self, *_: Any, **__: Any) -> None:
-                return None
+        # 验证 SafeStopReporter 安全停机报告只产出简洁系统提示，绝不回显提取正文或敏感载荷
+        captured_commands: list[Any] = []
+
+        class _CapturingRunRepo:
+            async def is_live_execution(self, *_: Any, **__: Any) -> bool:
+                return True
+
+            async def fail(self, command: Any) -> Any:
+                captured_commands.append(command)
+                return dummy_run
 
         reporter = SafeStopReporter(
-            cast(Any, _EmptyRunRepo()),
-            cast(Any, object()),
+            cast(Any, _CapturingRunRepo()),
             id_factory=lambda p: f"{p}_1",
             now=lambda: NOW,
         )
-        state = SimpleNamespace(
-            run=dummy_run,
-            budget=SimpleNamespace(remaining=0),
-            input_files=input_contexts,
-            retry_context=(),
+        await reporter.stop_for_context_safety(
+            dummy_run,
+            (),
+            ContextStopReason.HARD_WINDOW_EXCEEDED,
+            authorize=None,
+            publish_events=AsyncMock(),
         )
-        report_state = await reporter.build_context_report_state(cast(Any, state), ())
-        projected_inputs = cast(list[dict[str, Any]], report_state["input_files"])
-        assert projected_inputs[0]["extraction_status"] == "ready"
-        assert projected_inputs[0]["extracted_text_bytes"] == f_pdf.extracted_text_bytes
-        assert projected_inputs[1]["extraction_status"] == "failed"
-        assert projected_inputs[1]["extraction_error_code"] == "document_no_extractable_text"
+        assert len(captured_commands) == 1
+        assert captured_commands[0].safe_error_code == "run_context_safety_stop"
+        assert captured_commands[0].report_message is not None
+        assert captured_commands[0].report_message.metadata.provider == "system_context_safety"
+        assert "任务未标记为完成" in captured_commands[0].report_message.parts[0].text
 
     asyncio.run(scenario())
 
@@ -2294,13 +2304,22 @@ def test_alembic_migration_0038_single_head_pg_sql_and_sqlite_roundtrip(tmp_path
     assert "DROP COLUMN extracted_text_key" in down_sql
     assert "DROP COLUMN extraction_status" in down_sql
 
-    # 2. SQLite 在线升级 -> 一致性约束实测 -> 完整降级
+    # 2. 使用同步标准库 sqlite3 + Alembic Operations.context 验证升级 -> 一致性约束 -> 完整降级
+    migration_0038_path = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "versions"
+        / "20261205_0038_session_file_extraction_cache.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_20261205_0038", migration_0038_path)
+    assert spec is not None and spec.loader is not None
+    migration_0038: Any = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration_0038)
+
     db_path = tmp_path / "m3_1_migration.sqlite"
     conn = sqlite3.connect(db_path)
     conn.executescript(
         """
-        CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY);
-        INSERT INTO alembic_version VALUES ('20261204_0037');
         CREATE TABLE sessions (
             id VARCHAR(64) NOT NULL PRIMARY KEY,
             owner_id VARCHAR(128) NOT NULL,
@@ -2339,66 +2358,73 @@ def test_alembic_migration_0038_single_head_pg_sql_and_sqlite_roundtrip(tmp_path
     )
     conn.close()
 
-    sqlite_cfg = Config(str(ALEMBIC_INI))
-    sqlite_cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path}")
-    command.upgrade(sqlite_cfg, "20261205_0038")
+    sync_engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        with sync_engine.begin() as sa_conn:
+            with Operations.context(MigrationContext.configure(sa_conn)):
+                migration_0038.upgrade()
 
-    conn = sqlite3.connect(db_path)
-    conn.execute("INSERT INTO sessions VALUES ('s1', 'u1')")
-    conn.execute(
-        """
-        INSERT INTO session_files (
-            id, session_id, owner_id, source, filename, mime_type, size_bytes,
-            sha256, object_key, idempotency_key, request_fingerprint, created_at
-        ) VALUES (
-            'f1', 's1', 'u1', 'upload', 'a.pdf', 'application/pdf', 100,
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-            'session-files/aa/f1', 'k1', 'fp1', '2026-11-24 00:00:00'
+        conn = sqlite3.connect(db_path)
+        conn.execute("INSERT INTO sessions VALUES ('s1', 'u1')")
+        conn.execute(
+            """
+            INSERT INTO session_files (
+                id, session_id, owner_id, source, filename, mime_type, size_bytes,
+                sha256, object_key, idempotency_key, request_fingerprint, created_at
+            ) VALUES (
+                'f1', 's1', 'u1', 'upload', 'a.pdf', 'application/pdf', 100,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'session-files/aa/f1', 'k1', 'fp1', '2026-11-24 00:00:00'
+            )
+            """
         )
-        """
-    )
-    # 违反组合约束（ready 缺少 key/bytes）必须被拦截
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE session_files SET extraction_status = 'ready' WHERE id = 'f1'")
-    # 违反组合约束（failed 缺少 error_code）必须被拦截
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE session_files SET extraction_status = 'failed' WHERE id = 'f1'")
-    # 合法 ready 状态通过
-    conn.execute(
-        """
-        UPDATE session_files
-        SET extraction_status = 'ready',
-            extracted_text_key = 'session-files-extracted/aa/f1.txt',
-            extracted_text_bytes = 64,
-            extraction_error_code = NULL
-        WHERE id = 'f1'
-        """
-    )
-    # 合法 failed 状态通过
-    conn.execute(
-        """
-        UPDATE session_files
-        SET extraction_status = 'failed',
-            extracted_text_key = NULL,
-            extracted_text_bytes = NULL,
-            extraction_error_code = 'document_no_extractable_text'
-        WHERE id = 'f1'
-        """
-    )
-    conn.commit()
-    conn.close()
+        # 违反组合约束（ready 缺少 key/bytes）必须被拦截
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE session_files SET extraction_status = 'ready' WHERE id = 'f1'")
+        # 违反组合约束（failed 缺少 error_code）必须被拦截
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE session_files SET extraction_status = 'failed' WHERE id = 'f1'")
+        # 合法 ready 状态通过
+        conn.execute(
+            """
+            UPDATE session_files
+            SET extraction_status = 'ready',
+                extracted_text_key = 'session-files-extracted/aa/f1.txt',
+                extracted_text_bytes = 64,
+                extraction_error_code = NULL
+            WHERE id = 'f1'
+            """
+        )
+        # 合法 failed 状态通过
+        conn.execute(
+            """
+            UPDATE session_files
+            SET extraction_status = 'failed',
+                extracted_text_key = NULL,
+                extracted_text_bytes = NULL,
+                extraction_error_code = 'document_no_extractable_text'
+            WHERE id = 'f1'
+            """
+        )
+        conn.commit()
+        conn.close()
 
-    command.downgrade(sqlite_cfg, "20261204_0037")
-    conn = sqlite3.connect(db_path)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(session_files)").fetchall()}
-    assert not cols.intersection(
-        {
-            "extraction_status",
-            "extracted_text_key",
-            "extracted_text_bytes",
-            "extraction_error_code",
-        }
-    )
-    conn.close()
+        with sync_engine.begin() as sa_conn:
+            with Operations.context(MigrationContext.configure(sa_conn)):
+                migration_0038.downgrade()
+
+        conn = sqlite3.connect(db_path)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(session_files)").fetchall()}
+        assert not cols.intersection(
+            {
+                "extraction_status",
+                "extracted_text_key",
+                "extracted_text_bytes",
+                "extraction_error_code",
+            }
+        )
+        conn.close()
+    finally:
+        sync_engine.dispose()
     # 确认 sqlalchemy text 导出在无告警情况下可用
     assert str(text("SELECT 1")) == "SELECT 1"

@@ -402,8 +402,8 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
     """仓储 list_documents 应在列表为空时跳过版本查询，非空时用单次批量 SQL 装配最新版本。"""
     from typing import Any
 
+    from pg_unit_harness import create_pg_unit_db
     from sqlalchemy import event
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from adapter.auth.model import UserModel
     from adapter.knowledge.model import (
@@ -412,11 +412,10 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
         KnowledgeVersionModel,
     )
     from adapter.knowledge.repository import KnowledgeRepository
-    from adapter.models import Base
     from domain.knowledge.model import DocumentState
 
     async def scenario() -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        engine, factory = await create_pg_unit_db()
         executed_sql: list[str] = []
 
         def _record_sql(
@@ -431,9 +430,6 @@ def test_list_documents_batch_loads_latest_version_in_single_query_and_skips_whe
             executed_sql.append(statement)
 
         try:
-            async with engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
-            factory = async_sessionmaker(engine, expire_on_commit=False)
             repository = KnowledgeRepository(factory)
             service = KnowledgeService(cast(KnowledgeRepositoryPort, repository), Tokenizer())
             now = datetime(2026, 3, 1, 8, 0, tzinfo=UTC)

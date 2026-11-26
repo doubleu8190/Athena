@@ -14,9 +14,10 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base, json_column_type
+from adapter.base import Base
 
 
 class RunToolCallModel(Base):
@@ -87,10 +88,8 @@ class RunToolCallModel(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    outcome: Mapped[dict[str, object] | None] = mapped_column(json_column_type(), nullable=True)
-    safe_skill_projection: Mapped[dict[str, object] | None] = mapped_column(
-        json_column_type(), nullable=True
-    )
+    outcome: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    safe_skill_projection: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     round: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
 

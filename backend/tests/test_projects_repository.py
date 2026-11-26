@@ -8,12 +8,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import UserModel
-from adapter.models import Base
 from adapter.project.model import ProjectModel
 from adapter.project.repository import SqlAlchemyProjectRepository
 from adapter.session.model import SessionModel
@@ -43,18 +42,37 @@ def _project(
     )
 
 
+async def _seed_user(
+    session_factory: async_sessionmaker[AsyncSession],
+    user_id: str,
+) -> None:
+    """补齐真实 PostgreSQL 下 projects.owner_id -> users.id 外键依赖。"""
+    timestamp = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            if await session.get(UserModel, user_id) is None:
+                session.add(
+                    UserModel(
+                        id=user_id,
+                        email=f"{user_id}@example.com",
+                        password_hash="hash:test",
+                        display_name=None,
+                        status="active",
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                        deleted_time=None,
+                    )
+                )
+
+
 async def _make_repository() -> tuple[
     Any,
     async_sessionmaker[AsyncSession],
     SqlAlchemyProjectRepository,
 ]:
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        poolclass=StaticPool,
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
+    await _seed_user(session_factory, "user_1")
+    await _seed_user(session_factory, "user_2")
     return engine, session_factory, SqlAlchemyProjectRepository(session_factory)
 
 
@@ -231,20 +249,6 @@ def test_repository_refuses_to_delete_project_with_active_bound_session() -> Non
         engine, session_factory, repository = await _make_repository()
         try:
             timestamp = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
-            async with session_factory() as session:
-                async with session.begin():
-                    session.add(
-                        UserModel(
-                            id="user_1",
-                            email="user_1@example.com",
-                            password_hash="hash:test",
-                            display_name=None,
-                            status="active",
-                            created_at=timestamp,
-                            updated_at=timestamp,
-                            deleted_time=None,
-                        )
-                    )
             project = await repository.create(_project("project_1", "占用项目", minute=1))
             async with session_factory() as session:
                 async with session.begin():

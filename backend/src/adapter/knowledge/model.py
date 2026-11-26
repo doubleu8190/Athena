@@ -98,7 +98,6 @@ class KnowledgeDocumentModel(Base):
             text("updated_at DESC"),
             text("id DESC"),
             postgresql_where=text("deleted_time IS NULL"),
-            sqlite_where=text("deleted_time IS NULL"),
         ),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -146,7 +145,6 @@ class KnowledgeVersionModel(Base):
             "ix_knowledge_versions_source_id",
             "source_id",
             postgresql_where=text("source_id IS NOT NULL"),
-            sqlite_where=text("source_id IS NOT NULL"),
         ),
     )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

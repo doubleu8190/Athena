@@ -9,16 +9,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, delete, event, func, literal, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine.interfaces import Dialect
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from adapter.access import (
     ResourceVisibilityGrantModel,
@@ -36,7 +31,6 @@ from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository.message import SqlAlchemyMessageRepository
-from adapter.models import Base
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from adapter.run.model import RunEventModel, RunInputRequestModel, RunModel, RunToolCallModel
 from adapter.run.repository import SqlAlchemyRunRepository
@@ -191,20 +185,17 @@ class _StubAuthReader:
         return self._users.get(user_id)
 
 
-async def _create_sqlite_db(
+async def _create_pg_db(
     monkeypatch: pytest.MonkeyPatch | None = None,
 ) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
-    """初始化内存 SQLite 数据库并按需注册 PostgreSQL clock_timestamp 兼容函数。"""
+    """获取隔离 PostgreSQL 单元测试库并按需注入可控的 clock_timestamp 表达式。"""
     if monkeypatch is not None:
         monkeypatch.setattr(
             func,
             "clock_timestamp",
             lambda: literal(NOW, type_=DateTime(timezone=True)),
         )
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    return engine, async_sessionmaker(engine, expire_on_commit=False)
+    return await create_pg_unit_db()
 
 
 def _skill_manifest(slug: str, name: str) -> dict[str, object]:
@@ -830,7 +821,7 @@ def test_sql_pushdown_matrix_matches_evaluate_can_read_across_all_four_resources
     """验证四类资源表 × 11 类用户（含空集/归档祖先/停用用户）SQL 下推与领域规则完全等价。"""
 
     async def _scenario() -> None:
-        engine, factory = await _create_sqlite_db()
+        engine, factory = await _create_pg_db()
         executed_sql: list[str] = []
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
@@ -964,7 +955,7 @@ def test_access_policy_and_manageable_base_session_counts() -> None:
     """验证 AccessPolicyService 单 Session 收敛以及 _require_manageable_base 合并读写双校验。"""
 
     async def _scenario() -> None:
-        engine, raw_factory = await _create_sqlite_db()
+        engine, raw_factory = await _create_pg_db()
         try:
             await _seed_org_and_users(raw_factory)
             await _seed_all_four_resources(raw_factory)
@@ -1045,7 +1036,7 @@ def test_high_frequency_list_endpoints_single_session_pushdown() -> None:
     """验证 GET /knowledge-bases、GET /skills 与 GET /tools 均压至单 Session SQL 下推。"""
 
     async def _scenario() -> None:
-        engine, raw_factory = await _create_sqlite_db()
+        engine, raw_factory = await _create_pg_db()
         try:
             users = await _seed_org_and_users(raw_factory)
             await _seed_all_four_resources(raw_factory)
@@ -1128,7 +1119,7 @@ def test_tool_runtime_build_snapshot_reuses_snapshot_and_fixes_mcp_limit_201() -
     """验证 build_snapshot 仅加载 1 次权限快照、压缩 Session 且无权 MCP 不占 limit=201。"""
 
     async def _scenario() -> None:
-        engine, raw_factory = await _create_sqlite_db()
+        engine, raw_factory = await _create_pg_db()
         try:
             users = await _seed_org_and_users(raw_factory)
             await _seed_all_four_resources(raw_factory)
@@ -1241,7 +1232,7 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
     """验证 skip_access_check、跳过冗余 validate_search_scope，以及检索中途调岗仍实时撤权。"""
 
     async def _scenario() -> None:
-        engine, raw_factory = await _create_sqlite_db()
+        engine, raw_factory = await _create_pg_db()
         try:
             users = await _seed_org_and_users(raw_factory)
             await _seed_all_four_resources(raw_factory)
@@ -1429,7 +1420,7 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
     """验证 RunLifecycleMixin.submit/retry 同事务内仅加载 1 次用户权限快照并严格拦截越权资源。"""
 
     async def _scenario() -> None:
-        engine, factory = await _create_sqlite_db(monkeypatch)
+        engine, factory = await _create_pg_db(monkeypatch)
         executed_sql: list[str] = []
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
@@ -1445,36 +1436,33 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
             cipher = McpSecretCipher(SECRET_KEY)
             sealed = cipher.seal("prof_1", McpSecretPurpose.LLM_API_KEY, {"api_key": "sk-test"})
             async with factory() as session, session.begin():
-                session.add(
-                    ModelProfileVersionModel(
-                        id="prof_1",
-                        name="默认模型",
-                        protocol="chat_completions",
-                        base_url="https://llm.test/v1",
-                        model="gpt-4o",
-                        api_key_ciphertext=sealed.ciphertext,
-                        api_key_nonce=sealed.nonce,
-                        api_key_key_version=sealed.key_version,
-                        context_window_tokens=16384,
-                        tokenizer_encoding="cl100k_base",
-                        supports_stream=True,
-                        supports_tools=True,
-                        supports_parallel_tool_calls=True,
-                        max_output_tokens=1024,
-                        request_timeout_seconds=60,
-                        execution_timeout_seconds=300,
-                        max_concurrency=4,
-                        temperature=0.2,
-                        enabled=True,
-                        visible_to_users=True,
-                        version=1,
-                        created_at=NOW,
-                        updated_at=NOW,
-                    )
-                )
-                session.add(DefaultModelProfileModel(singleton_id=1, profile_id="prof_1"))
                 session.add_all(
                     [
+                        ModelProfileVersionModel(
+                            id="prof_1",
+                            name="默认模型",
+                            protocol="chat_completions",
+                            base_url="https://llm.test/v1",
+                            model="gpt-4o",
+                            api_key_ciphertext=sealed.ciphertext,
+                            api_key_nonce=sealed.nonce,
+                            api_key_key_version=sealed.key_version,
+                            context_window_tokens=16384,
+                            tokenizer_encoding="cl100k_base",
+                            supports_stream=True,
+                            supports_tools=True,
+                            supports_parallel_tool_calls=True,
+                            max_output_tokens=1024,
+                            request_timeout_seconds=60,
+                            execution_timeout_seconds=300,
+                            max_concurrency=4,
+                            temperature=0.2,
+                            enabled=True,
+                            visible_to_users=True,
+                            version=1,
+                            created_at=NOW,
+                            updated_at=NOW,
+                        ),
                         SystemPromptVersionModel(
                             id="sp_main",
                             kind="main",
@@ -1489,8 +1477,10 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
                         ),
                     ]
                 )
+                await session.flush()
                 session.add_all(
                     [
+                        DefaultModelProfileModel(singleton_id=1, profile_id="prof_1"),
                         SystemPromptSettingModel(
                             kind="main",
                             current_version_id="sp_main",
@@ -1499,18 +1489,16 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
                             kind="compression",
                             current_version_id="sp_comp",
                         ),
+                        SessionModel(
+                            id="sess_submit",
+                            owner_id="u_fin",
+                            title="提交会话",
+                            project_id=None,
+                            last_message_sequence=0,
+                            created_at=NOW,
+                            updated_at=NOW,
+                        ),
                     ]
-                )
-                session.add(
-                    SessionModel(
-                        id="sess_submit",
-                        owner_id="u_fin",
-                        title="提交会话",
-                        project_id=None,
-                        last_message_sequence=0,
-                        created_at=NOW,
-                        updated_at=NOW,
-                    )
                 )
 
             run_repo = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
@@ -1645,7 +1633,7 @@ def test_auth_get_active_session_executes_single_join_query() -> None:
     """验证 get_active_session 合并为单条 JOIN 查询并保持有效/过期/撤销/禁用/删除语义一致。"""
 
     async def _scenario() -> None:
-        engine, factory = await _create_sqlite_db()
+        engine, factory = await _create_pg_db()
         executed_sql: list[str] = []
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
@@ -1764,7 +1752,7 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
     """验证 RunService.get()/events() 单 Session 合并、与旧接口等价、子 Run 问答保留及回退。"""
 
     async def _scenario() -> None:
-        engine, raw_factory = await _create_sqlite_db()
+        engine, raw_factory = await _create_pg_db()
         executed_sql: list[str] = []
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
@@ -1776,16 +1764,49 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
 
         try:
             async with raw_factory() as session, session.begin():
-                session.add(
-                    UserModel(
-                        id="u_owner",
-                        email="owner@test.com",
-                        password_hash="h",
-                        status=UserStatus.ACTIVE.value,
-                        role=UserRole.MEMBER.value,
-                        created_at=NOW,
-                        updated_at=NOW,
-                    )
+                # 补齐真实 PostgreSQL 下 runs 依赖的用户、模型版本与系统提示词父表记录。
+                session.add_all(
+                    [
+                        UserModel(
+                            id="u_owner",
+                            email="owner@test.com",
+                            password_hash="h",
+                            status=UserStatus.ACTIVE.value,
+                            role=UserRole.MEMBER.value,
+                            created_at=NOW,
+                            updated_at=NOW,
+                        ),
+                        ModelProfileVersionModel(
+                            id="prof_1",
+                            name="默认模型",
+                            protocol="chat_completions",
+                            base_url="https://llm.test/v1",
+                            model="gpt-4o",
+                            context_window_tokens=16384,
+                            tokenizer_encoding="cl100k_base",
+                            supports_stream=True,
+                            supports_tools=True,
+                            supports_parallel_tool_calls=True,
+                            max_output_tokens=1024,
+                            request_timeout_seconds=60,
+                            execution_timeout_seconds=300,
+                            max_concurrency=4,
+                            enabled=True,
+                            created_at=NOW,
+                        ),
+                        SystemPromptVersionModel(
+                            id="sp_main",
+                            kind="main",
+                            content="main",
+                            created_at=NOW,
+                        ),
+                        SystemPromptVersionModel(
+                            id="sp_comp",
+                            kind="compression",
+                            content="comp",
+                            created_at=NOW,
+                        ),
+                    ]
                 )
                 await session.flush()
                 session.add_all(
@@ -1867,6 +1888,17 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             completed_at=NOW,
                             metadata_json={},
                         ),
+                        ConversationMessageModel(
+                            id="msg_trig_deleted",
+                            session_id="s_deleted",
+                            role=ConversationRole.USER.value,
+                            status=MessageStatus.COMPLETED.value,
+                            sequence=1,
+                            parts=[{"type": "text", "text": "已删会话触发消息"}],
+                            created_at=NOW,
+                            completed_at=NOW,
+                            metadata_json={},
+                        ),
                     ]
                 )
                 await session.flush()
@@ -1926,7 +1958,12 @@ def test_run_service_get_details_and_list_visible_events_single_session_and_fall
                             created_offset=1,
                         ),
                         # 3) 已删会话中的 Run（不可见）
-                        _make_run_model("run_hidden", session_id="s_deleted", created_offset=2),
+                        _make_run_model(
+                            "run_hidden",
+                            session_id="s_deleted",
+                            trigger_message_id="msg_trig_deleted",
+                            created_offset=2,
+                        ),
                     ]
                 )
                 await session.flush()
@@ -2233,7 +2270,7 @@ def test_model_profile_readonly_methods_drop_row_locks_and_enforce_auth() -> Non
     """验证只读与写接口均通过无锁 JOIN 复核管理员（不对认证表加行锁）且鉴权严格。"""
 
     async def _scenario() -> None:
-        engine, factory = await _create_sqlite_db()
+        engine, factory = await _create_pg_db()
         cipher = McpSecretCipher(SECRET_KEY)
         try:
             async with factory() as session, session.begin():
@@ -2470,7 +2507,7 @@ def test_skill_repository_write_transactions_verify_auth_once_without_row_locks(
     from domain.skill.model import SkillFormat
 
     async def _scenario() -> None:
-        engine, factory = await _create_sqlite_db(monkeypatch)
+        engine, factory = await _create_pg_db(monkeypatch)
         try:
             await _seed_org_and_users(factory)
             async with factory() as session, session.begin():
@@ -2693,7 +2730,7 @@ def test_knowledge_repository_drops_users_row_locks_in_quota_and_claim_job(
     """验证 KnowledgeRepository 配额核验与 claim_job 均不对 users 表加 FOR UPDATE/FOR SHARE。"""
 
     async def _scenario() -> None:
-        engine, factory = await _create_sqlite_db(monkeypatch)
+        engine, factory = await _create_pg_db(monkeypatch)
         try:
             await _seed_org_and_users(factory)
             async with factory() as session, session.begin():

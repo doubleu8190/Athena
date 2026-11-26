@@ -42,7 +42,6 @@ from domain.run.model import (
 )
 from domain.run.model.errors import (
     RunConflictError,
-    RunContextSafetyCommitError,
     RunError,
     RunInputResourceError,
     RunKnowledgeBaseNotFoundError,
@@ -67,7 +66,6 @@ __all__ = [
     "RunCancelRequestedPayload",
     "RunCompletedPayload",
     "RunConflictError",
-    "RunContextSafetyCommitError",
     "RunDetails",
     "RunEvent",
     "RunEventPayload",

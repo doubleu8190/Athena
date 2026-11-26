@@ -37,18 +37,15 @@ from domain.tool import (
     AdmitToolCallCommand,
     BeginToolCallBatchCommand,
     BeginToolCallBatchResult,
-    ConvergeToolBatchCommand,
     DecideToolApprovalCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
     PendingToolApproval,
-    ReserveLlmRequestCommand,
     RuntimeToolSnapshot,
     RunToolBatch,
     RunToolCallDetails,
     RunToolCallPage,
     RunToolCallRecord,
-    ToolRetryContext,
 )
 
 
@@ -92,9 +89,6 @@ class RunRepository(Protocol):
     ) -> RuntimeToolSnapshot | None:
         """有效租约下固定快照；已固定时只返回原快照。"""
 
-    async def reserve_llm_request(self, command: ReserveLlmRequestCommand) -> int | None:
-        """原子预留一次模型请求并返回 1–maximum_count 的序号。"""
-
     async def begin_tool_call_batch(
         self, command: BeginToolCallBatchCommand
     ) -> BeginToolCallBatchResult:
@@ -107,9 +101,6 @@ class RunRepository(Protocol):
     async def admit_tool_call(self, command: AdmitToolCallCommand) -> RunToolCallRecord | None:
         """以当前 Worker 和代次原子取得单调用外部执行准入。"""
 
-    async def converge_tool_batch(self, command: ConvergeToolBatchCommand) -> Run | None:
-        """停止派发、取消未执行调用并原子失败整个 Run。"""
-
     async def decide_tool_approval(self, command: DecideToolApprovalCommand) -> Run | None:
         """逐调用批准/拒绝，最后一个决定原子重新排队 Run。"""
 
@@ -119,7 +110,7 @@ class RunRepository(Protocol):
         """读取 owner 可见 Run 的安全待审批调用投影。"""
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
-        """有效执行权内幂等保存唯一结果和结束事件。"""
+        """有效执行权内保存单次工具调用结果与产物，已终结调用安全拒绝覆盖。"""
 
     async def list_tool_calls(
         self,
@@ -141,14 +132,6 @@ class RunRepository(Protocol):
     ) -> RunToolCallDetails | None:
         """读取授权调用详情，不暴露内部 Server 或异常。"""
 
-    async def list_retry_context(
-        self,
-        session_id: str,
-        owner_id: str,
-        run_id: str,
-    ) -> tuple[ToolRetryContext, ...] | None:
-        """读取当前 Run 来源 unknown 调用的安全摘要。"""
-
     async def request_input(self, command: RequestRunInputCommand) -> RunInputRequest:
         """原子保存澄清消息、调用轨迹、输入请求与 waiting 状态事件。"""
         ...
@@ -160,7 +143,13 @@ class RunRepository(Protocol):
         """校验执行租约并原子保存安全失败状态和事件。"""
 
     async def settle_cancelled(
-        self, run_id: str, worker_id: str, execution_epoch: int, settled_at: datetime
+        self,
+        run_id: str,
+        worker_id: str,
+        execution_epoch: int,
+        settled_at: datetime,
+        *,
+        llm_request_count: int | None = None,
     ) -> Run | None:
         """在取消清理完成后把当前 cancelling Run 原子收敛为 cancelled。"""
 

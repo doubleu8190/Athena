@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import io
 import sqlite3
 import zipfile
@@ -15,18 +16,21 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import event, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from pg_unit_harness import create_pg_unit_db
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access.repository import SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.models import Base
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from adapter.org.repository import SqlAlchemyOrgRepository
 from adapter.skill.repository import SqlAlchemySkillRepository, build_run_skill_snapshot
@@ -196,20 +200,12 @@ def _build_zip_package(
 
 
 class _M33Harness:
-    """端到端 SQLite + FastAPI 测试环境，覆盖超管、部门管理员与普通员工三层权限。"""
+    """端到端 PostgreSQL + FastAPI 测试环境，覆盖超管、部门管理员与普通员工三层权限。"""
 
-    def __init__(self, tmp_path: Path, *, with_object_store: bool = True) -> None:
+    def __init__(self, tmp_path: Path | None = None, *, with_object_store: bool = True) -> None:
+        del tmp_path
         self._now = NOW
-        self.db_path = tmp_path / "m3_3_skills.sqlite"
-        self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.db_path}")
-
-        @event.listens_for(self.engine.sync_engine, "connect")
-        def _enable_sqlite_fk(dbapi_connection: Any, _: Any) -> None:
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-        self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.engine, self.session_factory = asyncio.run(create_pg_unit_db())
         self.access_repo = SqlAlchemyAccessControlRepository(self.session_factory)
         self.access_policy = AccessPolicyService(self.access_repo, clock=self.clock)
         self.auth_repo = SqlAlchemyAuthRepository(self.session_factory)
@@ -257,26 +253,26 @@ class _M33Harness:
         return app
 
     async def _bootstrap(self) -> None:
-        """建表并写入组织树与 5 个典型角色账号（超管、财务主管、研发主管、财务员工、研发员工）。"""
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-
+        """写入组织树与 5 个典型角色账号（超管、财务主管、研发主管、财务员工、研发员工）。"""
         # 写入组织部门树：root -> dept_fin / dept_rd
         async with self.session_factory() as session, session.begin():
+            session.add(
+                DepartmentModel(
+                    id="dept_root",
+                    external_id="ext_root",
+                    parent_id=None,
+                    name="总部",
+                    path="/dept_root/",
+                    order_index=1,
+                    status="active",
+                    synced_at=NOW,
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+            await session.flush()
             session.add_all(
                 [
-                    DepartmentModel(
-                        id="dept_root",
-                        external_id="ext_root",
-                        parent_id=None,
-                        name="总部",
-                        path="/dept_root/",
-                        order_index=1,
-                        status="active",
-                        synced_at=NOW,
-                        created_at=NOW,
-                        updated_at=NOW,
-                    ),
                     DepartmentModel(
                         id="dept_fin",
                         external_id="ext_fin",
@@ -425,13 +421,22 @@ def test_alembic_migration_0039_single_head_pg_sql_and_sqlite_roundtrip(
     assert "DROP COLUMN featured" in down_sql
     assert "DROP COLUMN format" in down_sql
 
-    # 2. SQLite 在线迁移：构造 20261205_0038 基线 skills 表并预置 company / personal 旧数据
+    # 2. 用同步标准库 sqlite3 + Alembic Operations.context 构造基线 skills 表并验证升降级
+    migration_0039_path = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "versions"
+        / "20261206_0039_skill_dual_mode_and_featured.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_20261206_0039", migration_0039_path)
+    assert spec is not None and spec.loader is not None
+    migration_0039: Any = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration_0039)
+
     db_path = tmp_path / "m3_3_migration.sqlite"
     conn = sqlite3.connect(db_path)
     conn.executescript(
         """
-        CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY);
-        INSERT INTO alembic_version VALUES ('20261205_0038');
         CREATE TABLE users (id VARCHAR(128) NOT NULL PRIMARY KEY);
         CREATE TABLE departments (id VARCHAR(64) NOT NULL PRIMARY KEY);
         INSERT INTO users VALUES ('usr_1');
@@ -473,48 +478,55 @@ def test_alembic_migration_0039_single_head_pg_sql_and_sqlite_roundtrip(
     )
     conn.close()
 
-    sqlite_cfg = Config(str(ALEMBIC_INI))
-    sqlite_cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path}")
-    command.upgrade(sqlite_cfg, "20261206_0039")
+    sync_engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        with sync_engine.begin() as sa_conn:
+            with Operations.context(MigrationContext.configure(sa_conn)):
+                migration_0039.upgrade()
 
-    conn = sqlite3.connect(db_path)
-    rows = {
-        row[0]: (row[1], row[2], row[3])
-        for row in conn.execute(
-            "SELECT id, format, featured, starter_prompt FROM skills"
-        ).fetchall()
-    }
-    assert rows["sk_company"] == ("package", 0, None)
-    assert rows["sk_dept"] == ("package", 0, None)
-    # 历史个人技能必须自动回填为 format='markdown', featured=0
-    assert rows["sk_personal"] == ("markdown", 0, None)
+        conn = sqlite3.connect(db_path)
+        rows = {
+            row[0]: (row[1], row[2], row[3])
+            for row in conn.execute(
+                "SELECT id, format, featured, starter_prompt FROM skills"
+            ).fetchall()
+        }
+        assert rows["sk_company"] == ("package", 0, None)
+        assert rows["sk_dept"] == ("package", 0, None)
+        # 历史个人技能必须自动回填为 format='markdown', featured=0
+        assert rows["sk_personal"] == ("markdown", 0, None)
 
-    # 非法 format 值必须被 ck_skills_format 拦截
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE skills SET format = 'zip' WHERE id = 'sk_company'")
-    # 个人技能修改为 format='package' 必须被 ck_skills_personal_format_and_featured 拦截
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE skills SET format = 'package' WHERE id = 'sk_personal'")
-    # 个人技能设为 featured=1 必须被 ck_skills_personal_format_and_featured 拦截
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE skills SET featured = 1 WHERE id = 'sk_personal'")
-    # 公司/部门技能允许设为 markdown + featured=1 + starter_prompt
-    conn.execute(
-        """
-        UPDATE skills
-        SET format = 'markdown', featured = 1, starter_prompt = '请上传财务凭证'
-        WHERE id = 'sk_dept'
-        """
-    )
-    conn.commit()
-    conn.close()
+        # 非法 format 值必须被 ck_skills_format 拦截
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE skills SET format = 'zip' WHERE id = 'sk_company'")
+        # 个人技能修改为 format='package' 必须被 ck_skills_personal_format_and_featured 拦截
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE skills SET format = 'package' WHERE id = 'sk_personal'")
+        # 个人技能设为 featured=1 必须被 ck_skills_personal_format_and_featured 拦截
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE skills SET featured = 1 WHERE id = 'sk_personal'")
+        # 公司/部门技能允许设为 markdown + featured=1 + starter_prompt
+        conn.execute(
+            """
+            UPDATE skills
+            SET format = 'markdown', featured = 1, starter_prompt = '请上传财务凭证'
+            WHERE id = 'sk_dept'
+            """
+        )
+        conn.commit()
+        conn.close()
 
-    # 完整降级回滚到 20261205_0038
-    command.downgrade(sqlite_cfg, "20261205_0038")
-    conn = sqlite3.connect(db_path)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(skills)").fetchall()}
-    assert not cols.intersection({"format", "featured", "starter_prompt"})
-    conn.close()
+        # 完整降级回滚到 20261205_0038
+        with sync_engine.begin() as sa_conn:
+            with Operations.context(MigrationContext.configure(sa_conn)):
+                migration_0039.downgrade()
+
+        conn = sqlite3.connect(db_path)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(skills)").fetchall()}
+        assert not cols.intersection({"format", "featured", "starter_prompt"})
+        conn.close()
+    finally:
+        sync_engine.dispose()
     assert str(text("SELECT 1")) == "SELECT 1"
 
 
@@ -609,9 +621,10 @@ def test_super_admin_online_markdown_create_idempotency_and_slug_conflict(
         co_version = asyncio.run(harness.skill_repo.get_version(co_body["current_version_id"]))
         assert co_version is not None
         assert co_version.object_key is None
-        assert co_version.package_sha256 == hashlib.sha256(
-            str(company_payload["guide"]).encode("utf-8")
-        ).hexdigest()
+        assert (
+            co_version.package_sha256
+            == hashlib.sha256(str(company_payload["guide"]).encode("utf-8")).hexdigest()
+        )
 
         # 2) 相同 Idempotency-Key + 相同请求体（含未传 slug）精准幂等重放，仍 0 次触达 MinIO
         replayed_co = super_client.post(
@@ -1417,10 +1430,10 @@ def test_directory_projection_sorting_and_run_snapshot_execution(
         #    featured DESC -> department > company > personal -> updated_at DESC
         user_items = fin_member.get("/api/v1/skills").json()["items"]
         assert [item["id"] for item in user_items] == [
-            dept_md["id"],          # featured=True, department
-            zip_doc_only["id"],     # featured=True, company
+            dept_md["id"],  # featured=True, department
+            zip_doc_only["id"],  # featured=True, company
             zip_with_script["id"],  # featured=False, company
-            personal_md["id"],      # featured=False, personal
+            personal_md["id"],  # featured=False, personal
         ]
         by_id = {item["id"]: item for item in user_items}
         assert by_id[dept_md["id"]]["format"] == "markdown"

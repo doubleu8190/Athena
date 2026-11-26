@@ -11,21 +11,11 @@ from typing import Any, cast
 
 import pytest
 from knowledge_fakes import MemoryOriginalStore
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from pg_unit_harness import pg_unit_db
 
-from adapter.access.model import ResourceVisibilityGrantModel
 from adapter.auth.model import UserModel
-from adapter.base import Base
-from adapter.knowledge.model import (
-    KnowledgeBaseModel,
-    KnowledgeDocumentModel,
-    KnowledgeJobModel,
-    KnowledgeRequestModel,
-    KnowledgeSourceModel,
-    KnowledgeVersionModel,
-)
+from adapter.knowledge.model import KnowledgeDocumentModel
 from adapter.knowledge.repository import KnowledgeRepository
-from adapter.org.model import DepartmentModel
 from app.knowledge.service import KnowledgeService
 from domain.access import VisibilityGrantInput
 from domain.knowledge.model import Document, KnowledgeBase, OriginalStorageUnavailableError
@@ -396,33 +386,11 @@ def test_replace_request_replays_after_document_rename() -> None:
     asyncio.run(scenario())
 
 
-def test_repository_preflight_and_unified_save_document_version_sqlite_contracts() -> None:
-    """用真实 SQLite 验证无锁 preflight 与合并后的 4 个创建/替换文档事务方法契约。"""
+def test_repository_preflight_and_unified_save_document_version_postgresql_contracts() -> None:
+    """用真实 PostgreSQL 验证无锁 preflight 与合并后的 4 个创建/替换文档事务方法契约。"""
 
     async def scenario() -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        try:
-            async with engine.begin() as conn:
-                await conn.run_sync(
-                    lambda sync: Base.metadata.create_all(
-                        sync,
-                        tables=cast(
-                            Any,
-                            [
-                                UserModel.__table__,
-                                DepartmentModel.__table__,
-                                ResourceVisibilityGrantModel.__table__,
-                                KnowledgeBaseModel.__table__,
-                                KnowledgeSourceModel.__table__,
-                                KnowledgeDocumentModel.__table__,
-                                KnowledgeVersionModel.__table__,
-                                KnowledgeJobModel.__table__,
-                                KnowledgeRequestModel.__table__,
-                            ],
-                        ),
-                    )
-                )
-            sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with pg_unit_db() as (_engine, sessions):
             now = datetime(2026, 11, 20, tzinfo=UTC)
             async with sessions() as session, session.begin():
                 session.add(
@@ -601,7 +569,5 @@ def test_repository_preflight_and_unified_save_document_version_sqlite_contracts
             )
             assert rep_text_doc.pending_version_id == "kver_text_2"
             assert rep_text_ver == "kver_text_2"
-        finally:
-            await engine.dispose()
 
     asyncio.run(scenario())

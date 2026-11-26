@@ -356,11 +356,17 @@ class SqlAlchemySubagentModelChecker(SubagentModelChecker):
 
 
 def _is_slug_conflict(error: IntegrityError) -> bool:
-    """识别 PostgreSQL 与 SQLite 下 subagents.slug 部分唯一索引冲突。"""
-    message = str(error.orig or error).lower()
-    return "uq_subagents_slug_active" in message or (
-        "unique" in message and "subagents" in message and "slug" in message
+    """识别 PostgreSQL 下 subagents.slug 部分唯一索引（uq_subagents_slug_active）冲突。"""
+    orig = error.orig
+    # 优先读取 PostgreSQL 驱动原生的 constraint_name，未提供时回退匹配异常文本中的约束名。
+    constraint_name = getattr(orig, "constraint_name", None) or getattr(
+        getattr(orig, "__cause__", None),
+        "constraint_name",
+        None,
     )
+    if isinstance(constraint_name, str) and constraint_name:
+        return constraint_name.lower() == "uq_subagents_slug_active"
+    return "uq_subagents_slug_active" in str(orig or error).lower()
 
 
 __all__ = ["SqlAlchemySubagentModelChecker", "SqlAlchemySubagentRepository"]

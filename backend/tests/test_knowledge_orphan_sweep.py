@@ -240,30 +240,14 @@ def test_orphan_scan_batches_reference_lookups_and_throttles_interval_in_run_onc
 
 def test_knowledge_repository_reference_lookups_check_sources_table() -> None:
     """is_storage_key_referenced 与 find_referenced_storage_keys 仅核验来源表。"""
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from pg_unit_harness import pg_unit_db
 
     from adapter.auth.model import UserModel
-    from adapter.base import Base
     from adapter.knowledge.model import KnowledgeSourceModel
     from adapter.knowledge.repository import KnowledgeRepository
 
     async def scenario() -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        try:
-            async with engine.begin() as conn:
-                await conn.run_sync(
-                    lambda sync: Base.metadata.create_all(
-                        sync,
-                        tables=cast(
-                            Any,
-                            [
-                                UserModel.__table__,
-                                KnowledgeSourceModel.__table__,
-                            ],
-                        ),
-                    )
-                )
-            factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with pg_unit_db() as (_engine, factory):
             now = datetime.now(UTC)
             async with factory() as session, session.begin():
                 session.add(
@@ -297,7 +281,5 @@ def test_knowledge_repository_reference_lookups_check_sources_table() -> None:
             assert await repo.find_referenced_storage_keys([]) == set()
             found = await repo.find_referenced_storage_keys(["key/from/source", "key/orphan"])
             assert found == {"key/from/source"}
-        finally:
-            await engine.dispose()
 
     asyncio.run(scenario())

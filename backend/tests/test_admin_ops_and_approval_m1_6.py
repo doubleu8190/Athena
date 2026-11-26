@@ -15,14 +15,9 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
-from sqlalchemy import DateTime, event, func, literal, select
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import StaticPool
+from pg_unit_harness import create_pg_unit_db
+from sqlalchemy import DateTime, func, literal, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from adapter.access import ResourceVisibilityGrantModel, SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
@@ -32,7 +27,6 @@ from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository.message import SqlAlchemyMessageRepository
-from adapter.models import Base
 from adapter.org.model import DepartmentModel, UserDepartmentModel
 from adapter.run.model import RunModel
 from adapter.run.repository import SqlAlchemyRunRepository
@@ -163,7 +157,7 @@ class _RecordingMcpExecutor:
 
 
 class _M16Harness:
-    """共享 SQLite 异步引擎、全量仓储、服务与 FastAPI 应用的端到端测试夹具。"""
+    """共享 PostgreSQL 异步引擎、全量仓储、服务与 FastAPI 应用的端到端测试夹具。"""
 
     def __init__(
         self,
@@ -201,22 +195,13 @@ async def _create_harness(
     initial_tools: Sequence[DiscoveredMcpTool] = (),
 ) -> _M16Harness:
     clock = _MutableClock(NOW)
-    # 为 SQLite 补充带时区语义的 clock_timestamp() 兼容实现，匹配 PostgreSQL RunRepository。
+    # 注入可控时钟表达式，确保测试中推进租约与时间断言可复现。
     monkeypatch.setattr(
         func,
         "clock_timestamp",
         lambda: literal(clock(), type_=DateTime(timezone=True)),
     )
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-
-    def _configure_sqlite(dbapi_connection: Any, _record: Any) -> None:
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
-    event.listen(engine.sync_engine, "connect", _configure_sqlite)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
     cipher = McpSecretCipher(SECRET_KEY, key_version=1)
 
     auth_repo = SqlAlchemyAuthRepository(session_factory)
@@ -1756,18 +1741,30 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                 == "向 星辰科技 付款 18800 元（加急：是，探针：{payee.__class__}）"
             )
             pay_args = a_pay["formatted_arguments"]
-            # 已映射字段严格按 parameter_labels 顺序优先排列，未映射字段回退原字段名追加在后。
-            assert [item["key"] for item in pay_args[:4]] == ["amount", "payee", "urgent", "note"]
-            assert [item["label"] for item in pay_args[:4]] == [
-                "付款金额",
-                "收款方",
-                "是否加急",
-                "备注",
-            ]
-            assert pay_args[0]["value"] == "18800"
-            assert pay_args[1]["value"] == "星辰科技"
-            assert pay_args[2]["value"] == "是"
-            assert pay_args[3]["value"] == "无"
+            # 已映射字段优先排列在未映射字段之前（PostgreSQL JSONB 不保留对象键插入顺序，
+            # 因此核验前 4 项恰好为全部已映射字段且标签与格式化值完全准确，未映射字段在后）。
+            assert {item["key"] for item in pay_args[:4]} == {"amount", "payee", "urgent", "note"}
+            mapped_by_key = {item["key"]: item for item in pay_args[:4]}
+            assert mapped_by_key["amount"] == {
+                "key": "amount",
+                "label": "付款金额",
+                "value": "18800",
+            }
+            assert mapped_by_key["payee"] == {
+                "key": "payee",
+                "label": "收款方",
+                "value": "星辰科技",
+            }
+            assert mapped_by_key["urgent"] == {
+                "key": "urgent",
+                "label": "是否加急",
+                "value": "是",
+            }
+            assert mapped_by_key["note"] == {
+                "key": "note",
+                "label": "备注",
+                "value": "无",
+            }
             tail_by_key = {item["key"]: item for item in pay_args[4:]}
             assert tail_by_key["tags"] == {"key": "tags", "label": "tags", "value": "对公、月结"}
             assert tail_by_key["extra_ref"]["label"] == "extra_ref"
@@ -1799,10 +1796,16 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                 f"/api/v1/sessions/sess_member/runs/{main_run_id}"
             ).json()
             assert fallback_detail["pending_approvals"][0]["display_name"] == "发起对外付款"
-            assert (
-                fallback_detail["pending_approvals"][0]["formatted_arguments"][0]["label"]
-                == "付款金额"
-            )
+            fallback_labels = {
+                item["key"]: item["label"]
+                for item in fallback_detail["pending_approvals"][0]["formatted_arguments"][:4]
+            }
+            assert fallback_labels == {
+                "amount": "付款金额",
+                "payee": "收款方",
+                "urgent": "是否加急",
+                "note": "备注",
+            }
 
             # 5) 子智能体待审批（PendingSubagentApproval）同样返回结构化投影（REST 与 SSE）。
             async def _setup_subagent_pending_approval() -> str:

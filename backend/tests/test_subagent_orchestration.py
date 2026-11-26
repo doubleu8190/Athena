@@ -11,14 +11,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, event, func, literal, select
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from system_prompt_support import (
     TEST_COMPRESSION_PROMPT_ID,
     TEST_MAIN_PROMPT_ID,
@@ -31,7 +26,6 @@ from adapter.llm.model import ModelProfileVersionModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository.message import SqlAlchemyMessageRepository
-from adapter.models import Base
 from adapter.run.model import RunInputRequestModel, RunModel, RunToolCallModel
 from adapter.run.repository.run import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
@@ -192,15 +186,13 @@ async def _setup_db(
         "clock_timestamp",
         lambda: literal(clock_now, type_=DateTime(timezone=True)),
     )
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, factory = await create_pg_unit_db()
     repo = SqlAlchemyRunRepository(
         factory,
         SqlAlchemyMessageRepository(factory),
     )
     async with factory() as session, session.begin():
+        # 先写入父表再写入子表，满足真实 PostgreSQL 外键约束顺序。
         session.add_all(
             [
                 UserModel(
@@ -213,6 +205,46 @@ async def _setup_db(
                     created_at=NOW,
                     updated_at=NOW,
                 ),
+                SystemPromptVersionModel(
+                    id=TEST_MAIN_PROMPT_ID,
+                    kind="main",
+                    content="Main system prompt",
+                    created_at=NOW,
+                ),
+                SystemPromptVersionModel(
+                    id=TEST_COMPRESSION_PROMPT_ID,
+                    kind="compression",
+                    content="Compression prompt",
+                    created_at=NOW,
+                ),
+                ModelProfileVersionModel(
+                    id="mp_1",
+                    name="Default GPT",
+                    protocol="chat_completions",
+                    base_url="https://api.example.com/v1",
+                    model="gpt-4o",
+                    context_window_tokens=128000,
+                    max_output_tokens=4096,
+                    tokenizer_encoding="o200k_base",
+                    supports_stream=True,
+                    supports_tools=True,
+                    supports_parallel_tool_calls=True,
+                    request_timeout_seconds=60,
+                    execution_timeout_seconds=300,
+                    max_concurrency=4,
+                    enabled=True,
+                    api_key_ciphertext=b"cipher",
+                    api_key_nonce=b"nonce1234567",
+                    api_key_key_version=1,
+                    created_at=NOW,
+                ),
+            ]
+        )
+        await session.flush()
+        from adapter.llm.model.profile import DefaultModelProfileModel
+
+        session.add_all(
+            [
                 AuthSessionModel(
                     id="auth_1",
                     user_id="usr_1",
@@ -236,18 +268,6 @@ async def _setup_db(
                     created_at=NOW,
                     updated_at=NOW,
                 ),
-                SystemPromptVersionModel(
-                    id=TEST_MAIN_PROMPT_ID,
-                    kind="main",
-                    content="Main system prompt",
-                    created_at=NOW,
-                ),
-                SystemPromptVersionModel(
-                    id=TEST_COMPRESSION_PROMPT_ID,
-                    kind="compression",
-                    content="Compression prompt",
-                    created_at=NOW,
-                ),
                 SystemPromptSettingModel(
                     kind="main",
                     current_version_id=TEST_MAIN_PROMPT_ID,
@@ -255,27 +275,6 @@ async def _setup_db(
                 SystemPromptSettingModel(
                     kind="compression",
                     current_version_id=TEST_COMPRESSION_PROMPT_ID,
-                ),
-                ModelProfileVersionModel(
-                    id="mp_1",
-                    name="Default GPT",
-                    protocol="chat_completions",
-                    base_url="https://api.example.com/v1",
-                    model="gpt-4o",
-                    context_window_tokens=128000,
-                    max_output_tokens=4096,
-                    tokenizer_encoding="o200k_base",
-                    supports_stream=True,
-                    supports_tools=True,
-                    supports_parallel_tool_calls=True,
-                    request_timeout_seconds=60,
-                    execution_timeout_seconds=300,
-                    max_concurrency=4,
-                    enabled=True,
-                    api_key_ciphertext=b"cipher",
-                    api_key_nonce=b"nonce1234567",
-                    api_key_key_version=1,
-                    created_at=NOW,
                 ),
                 SubagentModel(
                     id="sub_prof_1",
@@ -307,11 +306,9 @@ async def _setup_db(
                     created_at=NOW,
                     updated_at=NOW,
                 ),
+                DefaultModelProfileModel(singleton_id=1, profile_id="mp_1"),
             ]
         )
-        from adapter.llm.model.profile import DefaultModelProfileModel
-
-        session.add(DefaultModelProfileModel(singleton_id=1, profile_id="mp_1"))
     return engine, factory, repo
 
 
@@ -1127,7 +1124,7 @@ def test_concurrent_subagent_completion_wakes_parent_once_with_partial_failures(
                 )
 
             by_id = {sl.run.id: sl for sl in sub_leases}
-            # 依次结算 2 个完成、1 个失败（SQLite 内存库无行锁，PG 下由 FOR UPDATE 串行化）。
+            # 依次结算 2 个完成、1 个失败（PostgreSQL 事务内由 FOR UPDATE 串行化父 Run 唤醒）。
             await repo.finish(_finish_cmd(by_id["sub_c_0"], "结果0"))
             # 首个完成后父 Run 仍为 waiting_for_subagents
             mid_parent = await repo.get("sess_1", "usr_1", "run_main")
@@ -2112,8 +2109,25 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
         sub_repo = SqlAlchemySubagentRepository(factory)
         try:
             lease = await _submit_main_run(repo)
-            # 为主 Run 绑定压缩策略版本，模拟真实生产/模型测试配置
+            # 为主 Run 绑定压缩策略版本，模拟真实生产/模型测试配置（PG 下需先落库压缩策略父表记录）
+            from adapter.llm.model import CompressionPolicyVersionModel
+
             async with factory() as s, s.begin():
+                s.add(
+                    CompressionPolicyVersionModel(
+                        id="cp_1",
+                        compression_model_profile_id="mp_1",
+                        trigger_ratio=0.7,
+                        trigger_tokens=80000,
+                        recent_ratio=0.2,
+                        recent_token_cap=None,
+                        summary_ratio=0.1,
+                        summary_token_cap=None,
+                        prompt_template_version="run-v2",
+                        created_at=NOW,
+                    )
+                )
+                await s.flush()
                 main_row = await s.get(RunModel, "run_main")
                 assert main_row is not None
                 main_row.compression_policy_version_id = "cp_1"
@@ -2440,7 +2454,7 @@ def test_subagent_artifact_finishes_without_delivery_message_and_parent_summariz
                     )
                 )
 
-            # 子 Run delivery_message=None 正常落库，并支持幂等重放。
+            # 子 Run delivery_message=None 正常落库，已终结调用再次提交安全返回 None 拒绝覆盖。
             finish_cmd = FinishToolCallCommand(
                 run_id=sub_run_id,
                 worker_id=sub_lease.run.worker_id or "",
@@ -2455,7 +2469,7 @@ def test_subagent_artifact_finishes_without_delivery_message_and_parent_summariz
             finished = await repo.finish_tool_call(finish_cmd)
             assert finished is not None
             replayed = await repo.finish_tool_call(finish_cmd)
-            assert replayed is not None
+            assert replayed is None
 
             # 完成子 Run 唤醒父 Run，校验父 Run 汇总结果包含该产物。
             await repo.finish(
@@ -2515,7 +2529,6 @@ def test_subagent_max_llm_requests_50_runs_without_budget_error(
     """配置 max_llm_requests=50 的子 Run 可正常通过 RunLlmBudget 并完成执行。"""
     from app.run.budget import RunLlmBudget
     from domain.llm.model.profile import ModelProfileVersion
-    from domain.tool import ToolExecutionContext
 
     async def scenario() -> None:
         engine, factory, repo = await _setup_db(monkeypatch)
@@ -2557,19 +2570,10 @@ def test_subagent_max_llm_requests_50_runs_without_budget_error(
             assert sub_lease.run.max_llm_requests == 50
 
             # 验证 RunLlmBudget 允许 50 上限且仍拒绝 51。
-            ctx = ToolExecutionContext(
-                owner_id="usr_1",
-                chat_session_id="sess_1",
-                project_id=None,
-                run_id=sub_run_id,
-                execution_epoch=sub_lease.run.execution_epoch,
-                auth_session_id="auth_1",
-                deadline_at=sub_lease.execution_deadline_at,
-            )
-            budget = RunLlmBudget(repo, ctx, used=0, maximum=50, worker_id="worker-50")
+            budget = RunLlmBudget(used=0, maximum=50)
             assert budget.maximum == 50
             with pytest.raises(ValueError, match="run_llm_request_limit_invalid"):
-                RunLlmBudget(repo, ctx, used=0, maximum=51, worker_id="worker-50")
+                RunLlmBudget(used=0, maximum=51)
 
             # 实际通过 RunExecutor 运行该子 Run，确认不触发预算校验崩溃。
             cipher = McpSecretCipher(b"k" * 32, key_version=1)

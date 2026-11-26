@@ -12,14 +12,9 @@ from typing import Any, cast
 
 import pytest
 import tiktoken
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, func, literal
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from system_prompt_support import (
     TEST_COMPRESSION_PROMPT_ID,
     TEST_MAIN_PROMPT_ID,
@@ -31,7 +26,6 @@ from adapter.llm.model import ModelProfileVersionModel
 from adapter.llm.model.profile import DefaultModelProfileModel
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.repository.message import SqlAlchemyMessageRepository
-from adapter.models import Base
 from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.run.repository.run import SqlAlchemyRunRepository
 from adapter.session.model import SessionModel
@@ -249,22 +243,20 @@ async def _setup_env(
     PreferenceService,
     _MutableClock,
 ]:
-    """初始化包含用户、会话、模型配置、系统提示词与偏好服务的内存 SQLite 测试环境。"""
+    """初始化包含用户、会话、模型配置、系统提示词与偏好服务的 PostgreSQL 测试环境。"""
     clock = _MutableClock(NOW)
     monkeypatch.setattr(
         func,
         "clock_timestamp",
         lambda: literal(NOW, type_=DateTime(timezone=True)),
     )
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, factory = await create_pg_unit_db()
 
     cipher = McpSecretCipher(b"0" * 32, key_version=1)
     encrypted = cipher.seal("mp_1", McpSecretPurpose.LLM_API_KEY, {"api_key": "sk-test-key"})
 
     async with factory() as session, session.begin():
+        # 先落库父表（用户 / 系统提示词版本 / 模型版本）再写入子表，满足 PG 外键约束。
         session.add_all(
             [
                 UserModel(
@@ -274,21 +266,6 @@ async def _setup_env(
                     display_name="Owner",
                     role=UserRole.MEMBER.value,
                     status=UserStatus.ACTIVE.value,
-                    created_at=NOW,
-                    updated_at=NOW,
-                ),
-                AuthSessionModel(
-                    id="auth_1",
-                    user_id="usr_1",
-                    token_hash="tok_hash",
-                    expires_at=NOW + timedelta(days=7),
-                    created_at=NOW,
-                ),
-                SessionModel(
-                    id="sess_1",
-                    owner_id="usr_1",
-                    title="Test Session",
-                    last_message_sequence=0,
                     created_at=NOW,
                     updated_at=NOW,
                 ),
@@ -303,14 +280,6 @@ async def _setup_env(
                     kind="compression",
                     content="Compression prompt",
                     created_at=NOW,
-                ),
-                SystemPromptSettingModel(
-                    kind="main",
-                    current_version_id=TEST_MAIN_PROMPT_ID,
-                ),
-                SystemPromptSettingModel(
-                    kind="compression",
-                    current_version_id=TEST_COMPRESSION_PROMPT_ID,
                 ),
                 ModelProfileVersionModel(
                     id="mp_1",
@@ -333,6 +302,34 @@ async def _setup_env(
                     api_key_key_version=encrypted.key_version,
                     created_at=NOW,
                 ),
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                AuthSessionModel(
+                    id="auth_1",
+                    user_id="usr_1",
+                    token_hash="tok_hash",
+                    expires_at=NOW + timedelta(days=7),
+                    created_at=NOW,
+                ),
+                SessionModel(
+                    id="sess_1",
+                    owner_id="usr_1",
+                    title="Test Session",
+                    last_message_sequence=0,
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+                SystemPromptSettingModel(
+                    kind="main",
+                    current_version_id=TEST_MAIN_PROMPT_ID,
+                ),
+                SystemPromptSettingModel(
+                    kind="compression",
+                    current_version_id=TEST_COMPRESSION_PROMPT_ID,
+                ),
                 SubagentModel(
                     id="sub_prof_1",
                     slug="researcher",
@@ -348,9 +345,9 @@ async def _setup_env(
                     created_at=NOW,
                     updated_at=NOW,
                 ),
+                DefaultModelProfileModel(singleton_id=1, profile_id="mp_1"),
             ]
         )
-        session.add(DefaultModelProfileModel(singleton_id=1, profile_id="mp_1"))
 
     run_repo = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
     profile_repo = SqlAlchemyModelProfileRepository(factory, cipher)

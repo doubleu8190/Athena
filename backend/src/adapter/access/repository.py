@@ -377,9 +377,9 @@ def build_readable_resource_clause(
     owner_id_col: SQLColumnExpression[str] | SQLColumnExpression[str | None] | None = None,
     owner_department_id_col: SQLColumnExpression[str] | SQLColumnExpression[str | None],
 ) -> ColumnElement[bool]:
-    """生成与 domain.access.evaluate_can_read 规则 100% 等价的 SQL WHERE 可读谓词。
+    """生成与 domain.access.evaluate_can_read 规则 100% 等价的 PostgreSQL WHERE 可读谓词。
 
-    兼容 PostgreSQL 与 SQLite，覆盖四类资产列名差异：
+    覆盖四类资产列名差异：
     - KnowledgeBaseModel：visibility_scope / owner_id / owner_department_id；
     - SkillModel：scope / owner_id / owner_department_id；
     - McpServerModel / SubagentModel：visibility_scope / 无 owner_id / owner_department_id。

@@ -1,38 +1,27 @@
-"""Run-scoped model request budget shared by answer and compression."""
+"""Run 级进程内模型请求预算计数器，供主回答与上下文压缩共享。"""
 
 from __future__ import annotations
 
 from domain.llm.model import LlmError
-from domain.run.ports import RunRepository
 from domain.subagent import MAX_SUBAGENT_MAX_LLM_REQUESTS
-from domain.tool import (
-    MAX_LLM_REQUESTS_PER_RUN,
-    ReserveLlmRequestCommand,
-    ToolExecutionContext,
-)
+from domain.tool import MAX_LLM_REQUESTS_PER_RUN
 
-# 主 Run 默认上限为 40，子 Run 与数据库约束允许最高 50，预算上限与之保持一致。
+# 主 Run 默认上限为 40，子 Run 与数据库 CHECK 约束允许最高 50，预算上限与之保持一致。
 _MAX_ALLOWED_LLM_REQUESTS = max(MAX_LLM_REQUESTS_PER_RUN, MAX_SUBAGENT_MAX_LLM_REQUESTS)
 
 
 class RunLlmBudget:
-    """Atomically reserve provider calls without ever refunding a failed attempt."""
+    """单租约进程内计数器：原子预留槽位且失败不退还，随状态命令持久化至 runs.llm_request_count。"""
 
     def __init__(
         self,
-        repository: RunRepository,
-        context: ToolExecutionContext,
         *,
         used: int = 0,
         maximum: int = MAX_LLM_REQUESTS_PER_RUN,
-        worker_id: str,
     ) -> None:
         if not 0 <= used <= maximum or not 1 <= maximum <= _MAX_ALLOWED_LLM_REQUESTS:
             raise ValueError("run_llm_request_limit_invalid")
-        self._repository = repository
-        self._context = context
         self._maximum = maximum
-        self._worker_id = worker_id
         self.used = used
 
     @property
@@ -45,35 +34,20 @@ class RunLlmBudget:
 
     @property
     def can_compress(self) -> bool:
-        """Keep one request available for the mandatory final-answer attempt."""
-        # 始终为最后一次“无工具最终回答”保留一个预算槽位。
+        """始终为最后一次无工具最终回答保留一个预算槽位。"""
         return self.used < self._maximum - 1
 
     @property
     def final_only(self) -> bool:
-        # 只剩最后一个槽位时，下一轮必须直接产出最终回答。
+        """只剩最后一个槽位时，下一轮必须直接产出最终回答。"""
         return self.used >= self._maximum - 1
 
-    async def reserve(self) -> int:
-        """Consume one slot and return its 1-based request number."""
-        # 先做本地检查，再由仓储原子递增数据库计数器，保证跨进程不超发。
+    def reserve(self) -> int:
+        """在进程内消耗一个槽位并返回 1-based 请求序号；失败尝试绝不退还。"""
         if self.remaining <= 0:
             raise LlmError("run_llm_request_limit_exceeded")
-        sequence = await self._repository.reserve_llm_request(
-            ReserveLlmRequestCommand(
-                run_id=self._context.run_id,
-                worker_id=self._worker_id,
-                execution_epoch=self._context.execution_epoch,
-                maximum_count=self._maximum,
-            )
-        )
-        if sequence is None:
-            raise LlmError("run_execution_lease_lost")
-        # 数据库返回的序号必须单调且不超上限，否则说明计数状态不一致。
-        if sequence <= self.used or sequence > self._maximum:
-            raise LlmError("run_llm_request_counter_invalid")
-        self.used = sequence
-        return sequence
+        self.used += 1
+        return self.used
 
 
 __all__ = ["RunLlmBudget"]

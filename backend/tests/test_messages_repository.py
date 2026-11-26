@@ -8,13 +8,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adapter.auth.model import UserModel
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
-from adapter.models import Base
 from adapter.session.model import SessionModel
 from adapter.session.repository import SqlAlchemySessionRepository
 from domain.message import (
@@ -45,10 +45,7 @@ async def _make_repository() -> tuple[
     async_sessionmaker[AsyncSession],
     SqlAlchemyMessageRepository,
 ]:
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
     return engine, session_factory, SqlAlchemyMessageRepository(session_factory)
 
 
@@ -62,6 +59,21 @@ async def _seed_session(
     timestamp = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     async with session_factory() as session:
         async with session.begin():
+            # 在真实 PostgreSQL 下补齐 sessions.owner_id -> users.id 外键父记录。
+            if await session.get(UserModel, owner_id) is None:
+                session.add(
+                    UserModel(
+                        id=owner_id,
+                        email=f"{owner_id}@example.com",
+                        password_hash="hash:test",
+                        display_name=None,
+                        status="active",
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                        deleted_time=None,
+                    )
+                )
+                await session.flush()
             session.add(
                 SessionModel(
                     id=session_id,

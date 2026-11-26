@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -11,6 +11,7 @@ from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
 from adapter.session.converter.session import session_to_domain
 from adapter.session.model.session import SessionModel
+from common.date import as_utc
 from domain.project import ProjectNotFoundError
 from domain.run import RunStatus, SessionHasActiveRunError
 from domain.session import (
@@ -33,13 +34,6 @@ _ACTIVE_RUN_STATUSES = (
 def _escape_like_pattern(value: str) -> str:
     """对 SQL LIKE 通配符 %、_ 与转义符 \\ 做安全转义。"""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _monotonic_updated_at(current: datetime, candidate: datetime) -> datetime:
-    """取锁内当前时间与候选时间的较大值，兼容 SQLite 丢失时区。"""
-    current_utc = current.replace(tzinfo=UTC) if current.tzinfo is None else current
-    candidate_utc = candidate.replace(tzinfo=UTC) if candidate.tzinfo is None else candidate
-    return max(current_utc, candidate_utc)
 
 
 class SqlAlchemySessionRepository(SessionRepository):
@@ -182,7 +176,7 @@ class SqlAlchemySessionRepository(SessionRepository):
                     row.project_id = project_id
                 if title_changed:
                     row.title = title
-                row.updated_at = _monotonic_updated_at(row.updated_at, updated_at)
+                row.updated_at = max(as_utc(row.updated_at), as_utc(updated_at))
                 await database_session.flush()
                 result = session_to_domain(row)
         return result
@@ -259,7 +253,7 @@ class SqlAlchemySessionRepository(SessionRepository):
                     if active_run_id is not None:
                         raise SessionHasActiveRunError("session_has_active_run")
                     row.deleted_time = deleted_at
-                    row.updated_at = _monotonic_updated_at(row.updated_at, deleted_at)
+                    row.updated_at = max(as_utc(row.updated_at), as_utc(deleted_at))
                     await database_session.flush()
         return True
 

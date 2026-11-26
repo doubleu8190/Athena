@@ -15,7 +15,7 @@ from alembic.config import Config
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy.ext.asyncio import create_async_engine
+from pg_unit_harness import temp_pg_schema
 
 from adapter.models import Base
 
@@ -48,7 +48,7 @@ def _load_migration_module() -> Any:
 
 
 def test_orm_metadata_matches_hotpath_indexes_and_drops_redundant_indexes() -> None:
-    """ORM 元数据应包含全部 9 个高频索引、移除 4 个冗余索引，并兼容 SQLite 建表。"""
+    """ORM 元数据应包含全部 9 个高频索引、移除 4 个冗余索引，并可在真实 PostgreSQL 完整建表。"""
     expected_present = {
         "run_input_requests": {"ix_run_input_requests_run_created"},
         "runs": {"ix_runs_session_created", "ix_runs_session_status"},
@@ -82,15 +82,36 @@ def test_orm_metadata_matches_hotpath_indexes_and_drops_redundant_indexes() -> N
     )
     assert pattern_idx.dialect_options["postgresql"]["ops"] == {"path": "varchar_pattern_ops"}
 
-    async def create_sqlite_schema() -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        try:
+    async def create_postgresql_schema() -> None:
+        # 在独立临时 Schema 下真实执行 PostgreSQL DDL 建表，校验高频索引创建与冗余索引移除。
+        async with temp_pg_schema(prefix="unit_ddl_hotpath") as (engine, schema):
             async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-        finally:
-            await engine.dispose()
+                await conn.run_sync(
+                    lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=False)
+                )
 
-    asyncio.run(create_sqlite_schema())
+                def _inspect(sync_conn: sa.Connection) -> dict[str, set[str]]:
+                    inspector = sa.inspect(sync_conn)
+                    all_tables = set(expected_present) | set(expected_absent)
+                    return {
+                        table: {
+                            idx["name"]
+                            for idx in inspector.get_indexes(table, schema=schema)
+                            if idx["name"] is not None
+                        }
+                        for table in all_tables
+                    }
+
+                pg_indexes = await conn.run_sync(_inspect)
+            for table_name, index_names in expected_present.items():
+                assert index_names.issubset(pg_indexes[table_name]), (
+                    table_name,
+                    index_names - pg_indexes[table_name],
+                )
+            for table_name, redundant_name in expected_absent.items():
+                assert redundant_name not in pg_indexes[table_name]
+
+    asyncio.run(create_postgresql_schema())
 
 
 def test_hotpath_index_migration_emits_expected_postgresql_upgrade_and_downgrade_sql() -> None:

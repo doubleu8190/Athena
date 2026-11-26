@@ -30,14 +30,9 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import DateTime, delete, event, func, literal, select
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
+from pg_unit_harness import create_pg_unit_db
+from sqlalchemy import DateTime, delete, func, literal, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from adapter.access import SqlAlchemyAccessControlRepository
 from adapter.auth.model import AuthSessionModel, UserModel
@@ -47,11 +42,10 @@ from adapter.knowledge.model import (
     KnowledgeDocumentModel,
     KnowledgeVersionModel,
 )
-from adapter.knowledge.repository import KnowledgeRepository, _visible_chunks_query
+from adapter.knowledge.repository import KnowledgeRepository
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
 from adapter.message.repository.message import SqlAlchemyMessageRepository
-from adapter.models import Base
 from adapter.org import DepartmentModel, SqlAlchemyOrgRepository, UserDepartmentModel
 from adapter.preference import SqlAlchemyPreferenceRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
@@ -93,7 +87,7 @@ from bootstrap.api import build_api_dependencies
 from common.ids import new_id
 from domain.auth import UserStatus
 from domain.file import FileObjectScanEntry
-from domain.knowledge.model import ChunkLocator, DocumentState, SearchHit
+from domain.knowledge.model import DocumentState
 from domain.knowledge.ports import OriginalStore
 from domain.llm.model import (
     LlmError,
@@ -117,6 +111,7 @@ from domain.run.model import Run, RunStatus, RunUsage
 from domain.skill import RunSkillSnapshot
 from domain.tool import McpToolSource, ToolExecutionContext, ToolOutcomeStatus
 from infrastructure.feishu import FeishuUserIdentity
+from infrastructure.knowledge.tokenizer import JiebaChineseTokenizer
 from infrastructure.security.mcp_secrets import McpSecretCipher
 from main import create_app
 
@@ -158,10 +153,13 @@ class _FakePasswordHasher:
 
 
 class _SimpleTokenizer:
-    """按空白切分检索词，支撑 SQLite 下的端到端关键词检索测试。"""
+    """使用生产中文分词器切分检索词，直接对接 PostgreSQL tsvector 全文检索。"""
+
+    def __init__(self) -> None:
+        self._inner = JiebaChineseTokenizer()
 
     def tokenize(self, text: str) -> tuple[str, ...]:
-        return tuple(part for part in text.strip().split() if part)
+        return self._inner.tokenize(text)
 
 
 class _MemoryOriginalStore(OriginalStore):
@@ -240,42 +238,6 @@ class _MemoryFileObjectStore:
 
     async def aclose(self) -> None:
         return None
-
-
-class _SqliteSearchKnowledgeRepository(KnowledgeRepository):
-    """复用真实知识库仓储与可见性过滤逻辑，仅在 SQLite 上以子串匹配模拟关键词通道。"""
-
-    async def search_keyword(
-        self,
-        owner_id: str,
-        base_ids: list[str],
-        tokens: tuple[str, ...],
-        limit: int,
-    ) -> tuple[SearchHit, ...]:
-        if not tokens:
-            return ()
-        async with self._sessions() as session:
-            rows = (await session.execute(_visible_chunks_query(owner_id, base_ids))).all()
-        matched: list[SearchHit] = []
-        for chunk, title, base_id in rows:
-            lowered = chunk.content.lower()
-            if any(token.lower() in lowered for token in tokens):
-                matched.append(
-                    SearchHit(
-                        chunk_id=chunk.id,
-                        document_id=chunk.document_id,
-                        version_id=chunk.version_id,
-                        title=title,
-                        text=chunk.content,
-                        locators=(ChunkLocator(kind="text"),),
-                        channels=("keyword",),
-                        rank=float(len(matched) + 1),
-                        chunk_ordinal=chunk.ordinal,
-                        chunk_ids=(chunk.id,),
-                        knowledge_base_id=base_id,
-                    )
-                )
-        return tuple(matched[:limit])
 
 
 class _ScriptedMcpDiscovery:
@@ -565,7 +527,13 @@ class _Phase1E2EHarness:
                     content=content,
                     locator={"kind": "text"},
                     token_count=max(1, len(content)),
-                    search_document=content,
+                    search_document=cast(
+                        str,
+                        func.to_tsvector(
+                            "simple",
+                            " ".join(JiebaChineseTokenizer().tokenize(content)) or content,
+                        ),
+                    ),
                     embedding=None,
                 )
             )
@@ -618,43 +586,22 @@ class _Phase1E2EHarness:
 
 async def _create_harness(
     monkeypatch: pytest.MonkeyPatch,
-    db_path: Path,
+    db_path: Path | None = None,
     *,
     mock_enabled: bool = True,
     feishu_client: _FakeFeishuClient | None = None,
     mcp_tools_by_url: Mapping[str, Sequence[DiscoveredMcpTool]] | None = None,
 ) -> _Phase1E2EHarness:
-    """初始化完整的第一期端到端文件 SQLite 测试夹具（支持并行工具批次的独立连接事务）。"""
+    """初始化完整的第一期端到端 PostgreSQL 测试夹具（原生支持并行行锁与全文检索）。"""
+    del db_path
     clock = _MutableClock(BASE_NOW)
-    # 在 SQLite 上提供与 PostgreSQL clock_timestamp() 对齐的时区时间表达式。
+    # 注入可控时钟，便于确定性推进创建时间与租约超时断言。
     monkeypatch.setattr(
         func,
         "clock_timestamp",
         lambda: literal(clock(), type_=DateTime(timezone=True)),
     )
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool)
-
-    def _enable_sqlite_fk(dbapi_connection: Any, _record: Any) -> None:
-        # 关闭 pysqlite 隐式事务管理，由下方 begin 钩子显式发送 BEGIN IMMEDIATE，
-        # 在 SQLite 上正确串行化并行工具批次的写事务（等价于 PostgreSQL 的 FOR UPDATE 行锁）。
-        dbapi_connection.isolation_level = None
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=5000")
-        finally:
-            cursor.close()
-
-    def _begin_sqlite_immediate(connection: Any) -> None:
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
-
-    event.listen(engine.sync_engine, "connect", _enable_sqlite_fk)
-    event.listen(engine.sync_engine, "begin", _begin_sqlite_immediate)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
     cipher = McpSecretCipher(SECRET_KEY, key_version=1)
 
     auth_repo = SqlAlchemyAuthRepository(session_factory)
@@ -687,7 +634,7 @@ async def _create_harness(
         SqlAlchemyPreferenceRepository(session_factory),
         clock=clock,
     )
-    knowledge_repo = _SqliteSearchKnowledgeRepository(session_factory)
+    knowledge_repo = KnowledgeRepository(session_factory)
     knowledge_service = KnowledgeService(
         knowledge_repo,
         _SimpleTokenizer(),

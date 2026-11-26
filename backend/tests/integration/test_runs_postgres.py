@@ -440,10 +440,10 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                 await session.flush()
                 session.add(DefaultModelProfileModel(singleton_id=1, profile_id="llmprof_run_test"))
                 await session.commit()
-                future_run_created_at = now + timedelta(days=1)
+                baseline_run_created_at = now - timedelta(seconds=10)
                 session.add(
                     RunModel(
-                        id="zz_future_clock_baseline",
+                        id="zz_baseline_clock_order",
                         session_id="ses_run_test",
                         owner_id="usr_run_test",
                         status=RunStatus.COMPLETED.value,
@@ -456,10 +456,10 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
                         prompt_template_version="run-v2",
                         event_sequence=0,
                         execution_epoch=0,
-                        queued_at=now,
-                        finished_at=future_run_created_at,
-                        created_at=future_run_created_at,
-                        updated_at=future_run_created_at,
+                        queued_at=baseline_run_created_at,
+                        finished_at=baseline_run_created_at,
+                        created_at=baseline_run_created_at,
+                        updated_at=baseline_run_created_at,
                         usage={},
                     )
                 )
@@ -501,7 +501,19 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
             assert submitted.run.status is RunStatus.QUEUED
             assert submitted.message.sequence == 2
             assert submitted.message.run_id == submitted.run.id
-            assert submitted.run.created_at > future_run_created_at
+            assert submitted.run.created_at > baseline_run_created_at
+            listed_runs = await repository.list_runs(
+                "ses_run_test",
+                "usr_run_test",
+                before_created_at=None,
+                before_id=None,
+                limit=10,
+            )
+            assert listed_runs is not None
+            assert [item.id for item in listed_runs[:2]] == [
+                submitted.run.id,
+                "zz_baseline_clock_order",
+            ]
             async with factory() as session:
                 for sequence in range(3, 12):
                     session.add(
@@ -1924,7 +1936,8 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
 
                 async def get_runtime(self, profile_id: str) -> RuntimeModelProfile | None:
                     self.calls += 1
-                    if self.calls >= 3:
+                    # 首调直接复用外层 runtime；退避后的第 2 次尝试（第 2 次查配置）返回 None。
+                    if self.calls >= 2:
                         return None
                     return await repository_profiles.get_runtime(profile_id)
 
@@ -1940,7 +1953,7 @@ def test_run_migration_preserves_legacy_ids_and_atomic_commands() -> None:
             disabled = await repository.get("ses_executor_retry", "usr_run_test", disabled_run_id)
             assert disabled is not None and disabled.status is RunStatus.FAILED
             assert disabled_provider.calls == 1
-            assert disabled_profiles.calls == 3
+            assert disabled_profiles.calls == 2
 
             unavailable_run_id = "run_profile_unavailable_at_claim"
             await repository.submit(
@@ -2266,7 +2279,7 @@ def test_tool_approval_migration_upgrades_legacy_run_tool_and_mcp_rows() -> None
                 )
                 await session.flush()
                 with pytest.raises(RunStateError, match="llm_default_profile_unavailable"):
-                    await repository._lock_default_profile_id(session)
+                    await repository._load_default_profile_row(session)
                 assert await repository._current_compression_policy_id(session) is None
 
     asyncio.run(scenario())

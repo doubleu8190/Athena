@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from secrets import token_hex
@@ -17,7 +17,6 @@ from integration.llm_fixtures import TEST_LLM_CIPHER, encrypted_llm_key_fields
 from integration.postgres_harness import isolated_postgres_schema
 from pydantic import TypeAdapter
 from redis.asyncio import Redis
-from sqlalchemy import event as db_event
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -306,48 +305,10 @@ class _RecordingRunRepository(SqlAlchemyRunRepository):
         return await super().fail(command)
 
 
-def _install_report_event_write_fault(
-    engine: AsyncEngine,
-) -> tuple[Callable[..., None], list[int]]:
-    """在 failed 事件 INSERT 前制造一次真实事务错误，事务内报告已先 flush。"""
-    failures = [0]
-
-    def before_cursor_execute(
-        connection: Any,
-        cursor: Any,
-        statement: str,
-        parameters: Any,
-        context: Any,
-        executemany: bool,
-    ) -> None:
-        """只命中安全码与报告 ID 同存的 run_events 插入，且整个测试只命中一次。"""
-        del connection, cursor, context, executemany
-        normalized_statement = " ".join(statement.upper().split())
-        parameter_text = str(parameters)
-        if (
-            failures[0] == 0
-            and normalized_statement.startswith("INSERT ")
-            and "RUN_EVENTS" in normalized_statement
-            and "run_context_safety_stop" in parameter_text
-            and "report_message_id" in parameter_text
-        ):
-            failures[0] += 1
-            raise RuntimeError("injected_context_report_event_write_failure")
-
-    db_event.listen(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
-    return before_cursor_execute, failures
-
-
-@pytest.mark.parametrize(
-    "inject_transaction_failure",
-    [False, True],
-    ids=["normal", "report-event-write-retry"],
-)
 def test_context_safety_public_run_worker_pg_redis_sse_recovery(
     monkeypatch: pytest.MonkeyPatch,
-    inject_transaction_failure: bool,
 ) -> None:
-    """安全报告事务一次失败后须稳定重放，并由 Redis/SSE 继续恢复同一终态。"""
+    """安全停机一次性落库报告与 FAILED 终态，并由 Redis/SSE 权威对账恢复同一终态。"""
     database_url = DATABASE_URL
     redis_url = REDIS_URL
     if database_url is None or redis_url is None:
@@ -356,7 +317,7 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
     async def scenario() -> None:
         async with _database(database_url) as (
             session_factory,
-            engine,
+            _engine,
             _admin_engine,
             _schema,
         ):
@@ -404,8 +365,6 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
 
             worker_task: asyncio.Task[None] | None = None
             worker: RunWorker | None = None
-            transaction_fault_hook: Callable[..., None] | None = None
-            injected_failures: list[int] = []
             try:
                 async with httpx.AsyncClient(
                     transport=httpx.ASGITransport(app=app),
@@ -487,10 +446,6 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
                         "publish_persisted",
                         drop_persisted_notification,
                     )
-                    if inject_transaction_failure:
-                        transaction_fault_hook, injected_failures = (
-                            _install_report_event_write_fault(engine)
-                        )
                     provider = _SafetyStoppingProvider()
                     executor = RunExecutor(
                         run_repository,
@@ -575,13 +530,8 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
 
                 assert len(provider.report_requests) == 0
                 assert provider.main_stream_calls == 0
-                expected_fail_calls = 2 if inject_transaction_failure else 1
-                assert len(run_repository.fail_commands) == expected_fail_calls
-                assert injected_failures == ([1] if inject_transaction_failure else [])
+                assert len(run_repository.fail_commands) == 1
                 first_fail_command = run_repository.fail_commands[0]
-                assert all(
-                    command == first_fail_command for command in run_repository.fail_commands
-                )
                 assert first_fail_command.report_message is not None
                 assert first_fail_command.report_message.id == report_message_id
                 assert first_fail_command.report_message.metadata.provider == (
@@ -669,12 +619,6 @@ def test_context_safety_public_run_worker_pg_redis_sse_recovery(
                     )
                     assert tool_call_count == 0
             finally:
-                if transaction_fault_hook is not None:
-                    db_event.remove(
-                        engine.sync_engine,
-                        "before_cursor_execute",
-                        transaction_fault_hook,
-                    )
                 if worker is not None:
                     await worker.stop()
                 if worker_task is not None:

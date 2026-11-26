@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any, cast
 
 from sqlalchemy import func, select
@@ -34,6 +34,7 @@ from adapter.run.model import (
 )
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
+from common.date import as_utc
 from common.ids import new_id
 from domain.message import (
     ConversationMessage,
@@ -167,7 +168,15 @@ class RunRepositorySupportMixin:
 
     @classmethod
     def _merge_usage(cls, current_json: dict[str, object], incoming: RunUsage) -> RunUsage:
+        """按尝试键单次幂等去重合并模型调用用量并重新汇总各维度计数。"""
         current = RunUsage.model_validate(current_json)
+        if not incoming.attempts:
+            if any(
+                value is not None
+                for value in (incoming.input_tokens, incoming.output_tokens, incoming.total_tokens)
+            ):
+                raise RunConflictError("run_usage_attempts_required")
+            return current
         by_key = {
             (
                 item.execution_epoch,
@@ -178,6 +187,7 @@ class RunRepositorySupportMixin:
             ): item
             for item in current.attempts
         }
+        changed = False
         for item in incoming.attempts:
             key = (
                 item.execution_epoch,
@@ -187,57 +197,29 @@ class RunRepositorySupportMixin:
                 item.attempt,
             )
             existing = by_key.get(key)
-            if existing is not None and existing != item:
-                raise RunConflictError("run_usage_attempt_conflict")
+            if existing is not None:
+                if existing != item:
+                    raise RunConflictError("run_usage_attempt_conflict")
+                continue
             by_key[key] = item
-        if not incoming.attempts:
-            if any(
-                value is not None
-                for value in (incoming.input_tokens, incoming.output_tokens, incoming.total_tokens)
-            ):
-                raise RunConflictError("run_usage_attempts_required")
+            changed = True
+        if not changed:
             return current
-        if not current.attempts:
-            legacy_input = current.input_tokens
-            legacy_output = current.output_tokens
-            legacy_total = current.total_tokens
-            legacy_answer = current.total_tokens
-            legacy_complete = current.complete
-        else:
-            legacy_input = current.legacy_input_tokens
-            legacy_output = current.legacy_output_tokens
-            legacy_total = current.legacy_total_tokens
-            legacy_answer = current.legacy_answer_tokens
-            legacy_complete = current.legacy_complete
         keys = sorted(
             by_key,
             key=lambda item: (item[0], item[1], item[2] or "", item[3], item[4]),
         )
-        aggregate = cls._aggregate_usage(tuple(by_key[key] for key in keys))
-        if any(value is not None for value in (legacy_input, legacy_output, legacy_total)):
-            aggregate = aggregate.model_copy(
-                update={
-                    "input_tokens": None
-                    if aggregate.input_tokens is None and legacy_input is None
-                    else (aggregate.input_tokens or 0) + (legacy_input or 0),
-                    "output_tokens": None
-                    if aggregate.output_tokens is None and legacy_output is None
-                    else (aggregate.output_tokens or 0) + (legacy_output or 0),
-                    "total_tokens": None
-                    if aggregate.total_tokens is None and legacy_total is None
-                    else (aggregate.total_tokens or 0) + (legacy_total or 0),
-                    "legacy_input_tokens": legacy_input,
-                    "legacy_output_tokens": legacy_output,
-                    "legacy_total_tokens": legacy_total,
-                    "legacy_answer_tokens": legacy_answer,
-                    "legacy_complete": legacy_complete,
-                    "answer_tokens": None
-                    if aggregate.answer_tokens is None and legacy_answer is None
-                    else (aggregate.answer_tokens or 0) + (legacy_answer or 0),
-                    "complete": aggregate.complete and legacy_complete,
-                }
-            )
-        return aggregate
+        return cls._aggregate_usage(tuple(by_key[key] for key in keys))
+
+    @staticmethod
+    def _sync_llm_request_count(row: RunModel, llm_request_count: int | None) -> None:
+        """单调递增持久化进程内已消耗的 LLM 请求次数，严格守住 DB CHECK 上限（<= 50）。"""
+        if llm_request_count is None:
+            return
+        if not 0 <= llm_request_count <= 50:
+            raise ValueError("run_llm_request_count_invalid")
+        if llm_request_count > row.llm_request_count:
+            row.llm_request_count = llm_request_count
 
     @staticmethod
     async def _has_unsettled_tool_calls(session: AsyncSession, run_id: str) -> bool:
@@ -264,33 +246,28 @@ class RunRepositorySupportMixin:
         locked_session: SessionModel,
         run: RunModel,
         settled_at: datetime,
-        *,
-        records: list[RunToolCallModel] | None = None,
     ) -> None:
         """Cancel undispatched and mark already-started calls unknown."""
-        # 由调用方持有事务与 Session→Run 锁；这里只收敛未完成调用，不提交事务。
-        if records is None:
-            # 未由调用方预先锁定时，在事务内按调用序号加行锁读取全部未完成调用，
-            # 避免与并发审批或工具执行产生状态竞争。
-            records = list(
-                (
-                    await session.scalars(
-                        select(RunToolCallModel)
-                        .where(
-                            RunToolCallModel.run_id == run.id,
-                            RunToolCallModel.status.in_(
-                                (
-                                    ToolCallStatus.PENDING_APPROVAL.value,
-                                    ToolCallStatus.APPROVED.value,
-                                    ToolCallStatus.EXECUTING.value,
-                                )
-                            ),
-                        )
-                        .order_by(RunToolCallModel.ordinal)
-                        .with_for_update()
+        # 由调用方持有事务与 Session→Run 锁；这里按调用序号加行锁收敛全部未完成调用，不提交事务。
+        records = list(
+            (
+                await session.scalars(
+                    select(RunToolCallModel)
+                    .where(
+                        RunToolCallModel.run_id == run.id,
+                        RunToolCallModel.status.in_(
+                            (
+                                ToolCallStatus.PENDING_APPROVAL.value,
+                                ToolCallStatus.APPROVED.value,
+                                ToolCallStatus.EXECUTING.value,
+                            )
+                        ),
                     )
-                ).all()
-            )
+                    .order_by(RunToolCallModel.ordinal)
+                    .with_for_update()
+                )
+            ).all()
+        )
         for record in records:
             # 幂等防线：等待行锁期间调用可能已被并发流程收敛为终态，直接跳过。
             if record.status not in {
@@ -799,112 +776,108 @@ class RunRepositorySupportMixin:
 
         return results
 
-    async def _lock_default_profile_row(self, session: AsyncSession) -> ModelProfileVersionModel:
-        profile_id = await session.scalar(
-            select(DefaultModelProfileModel.profile_id).where(
-                DefaultModelProfileModel.singleton_id == 1
-            )
-        )
-        if profile_id is None:
-            raise RunStateError("llm_default_profile_unavailable")
-        # 使用 FOR SHARE 共享锁：允许多个 Run 并发提交，同时与管理员禁用/修改互斥。
-        profile = await session.scalar(
-            select(ModelProfileVersionModel)
-            .where(
-                ModelProfileVersionModel.id == profile_id,
-                ModelProfileVersionModel.deleted_at.is_(None),
-            )
-            .with_for_update(read=True)
-        )
-        # 共享锁定默认配置指针，允许并发读取默认版本，仍与管理员切换默认配置互斥。
-        default = await session.scalar(
-            select(DefaultModelProfileModel)
-            .where(DefaultModelProfileModel.singleton_id == 1)
-            .with_for_update(read=True)
-        )
-        if default is None or default.profile_id != profile_id:
-            raise RunConflictError("llm_default_profile_changed")
-        if profile is None:
-            raise RunStateError("llm_default_profile_unavailable")
-        if not profile.enabled or not profile.supports_stream or not profile.supports_tools:
-            raise RunStateError("llm_default_profile_unavailable")
+    @staticmethod
+    def _is_usable_profile(
+        profile: ModelProfileVersionModel | None,
+        *,
+        require_key: bool = True,
+        require_visible: bool = False,
+    ) -> bool:
+        """统一校验模型版本未软删、已启用、支持流式与工具调用及必要凭据/可见性。"""
         if (
+            profile is None
+            or profile.deleted_at is not None
+            or not profile.enabled
+            or not profile.supports_stream
+            or not profile.supports_tools
+        ):
+            return False
+        if require_visible and not profile.visible_to_users:
+            return False
+        if require_key and (
             profile.api_key_ciphertext is None
             or profile.api_key_nonce is None
             or profile.api_key_key_version is None
         ):
-            raise RunStateError("llm_default_profile_unavailable")
+            return False
+        return True
+
+    @classmethod
+    def _validate_usable_profile(
+        cls,
+        profile: ModelProfileVersionModel | None,
+        *,
+        error: Exception,
+        require_key: bool = True,
+        require_visible: bool = False,
+    ) -> ModelProfileVersionModel:
+        """复核模型版本可用性，不满足条件时抛出指定领域异常。"""
+        if not cls._is_usable_profile(
+            profile,
+            require_key=require_key,
+            require_visible=require_visible,
+        ):
+            raise error
+        assert profile is not None
         return profile
 
-    async def _lock_default_profile_id(self, session: AsyncSession) -> str:
-        return (await self._lock_default_profile_row(session)).id
-
-    async def _lock_selected_profile_row(
-        self, session: AsyncSession, profile_id: str
-    ) -> ModelProfileVersionModel:
-        """在提交事务内共享锁定用户显式选择的模型版本，校验可见、启用、未删且能力完整。"""
+    async def _load_default_profile_row(self, session: AsyncSession) -> ModelProfileVersionModel:
+        """单次无锁 JOIN 读取默认模型版本并复核可用性。"""
         profile = await session.scalar(
             select(ModelProfileVersionModel)
+            .join(
+                DefaultModelProfileModel,
+                DefaultModelProfileModel.profile_id == ModelProfileVersionModel.id,
+            )
             .where(
+                DefaultModelProfileModel.singleton_id == 1,
+                ModelProfileVersionModel.deleted_at.is_(None),
+            )
+        )
+        return self._validate_usable_profile(
+            profile,
+            error=RunStateError("llm_default_profile_unavailable"),
+        )
+
+    async def _load_selected_profile_row(
+        self, session: AsyncSession, profile_id: str
+    ) -> ModelProfileVersionModel:
+        """无锁读取用户显式选择的模型版本，复核可见、启用、未删及能力/凭据完整。"""
+        profile = await session.scalar(
+            select(ModelProfileVersionModel).where(
                 ModelProfileVersionModel.id == profile_id,
                 ModelProfileVersionModel.deleted_at.is_(None),
             )
-            .with_for_update(read=True)
         )
-        if (
-            profile is None
-            or not profile.enabled
-            or not profile.visible_to_users
-            or not profile.supports_stream
-            or not profile.supports_tools
-            or profile.api_key_ciphertext is None
-            or profile.api_key_nonce is None
-            or profile.api_key_key_version is None
-        ):
-            raise RunInputResourceError("model_profile_unavailable")
-        return profile
+        return self._validate_usable_profile(
+            profile,
+            error=RunInputResourceError("model_profile_unavailable"),
+            require_visible=True,
+        )
 
-    async def _lock_selected_profile_id(self, session: AsyncSession, profile_id: str) -> str:
-        return (await self._lock_selected_profile_row(session, profile_id)).id
-
-    async def _lock_retry_profile_row(
+    async def _load_retry_profile_row(
         self, session: AsyncSession, profile_id: str
     ) -> ModelProfileVersionModel:
-        """在重试事务内共享锁定原 Run 的模型版本，复核启用、未删、能力完整且仍对用户可用。
-
-        遵循与 _lock_default_profile_id 一致的锁顺序（先模型行、再默认指针行）：
-        除常规能力与凭据校验外，要求目标模型仍满足 visible_to_users=True 或恰为当前默认模型。
-        """
+        """无锁复核原 Run 绑定的模型版本；若已隐藏仅当仍为当前默认模型时允许重试。"""
         profile = await session.scalar(
-            select(ModelProfileVersionModel)
-            .where(
+            select(ModelProfileVersionModel).where(
                 ModelProfileVersionModel.id == profile_id,
                 ModelProfileVersionModel.deleted_at.is_(None),
             )
-            .with_for_update(read=True)
         )
-        if (
-            profile is None
-            or not profile.enabled
-            or not profile.supports_stream
-            or not profile.supports_tools
-            or profile.api_key_ciphertext is None
-            or profile.api_key_nonce is None
-            or profile.api_key_key_version is None
-        ):
-            raise RunInputResourceError("model_profile_unavailable")
-        if not profile.visible_to_users:
-            default = await session.scalar(
-                select(DefaultModelProfileModel)
-                .where(DefaultModelProfileModel.singleton_id == 1)
-                .with_for_update(read=True)
+        validated = self._validate_usable_profile(
+            profile,
+            error=RunInputResourceError("model_profile_unavailable"),
+        )
+        if not validated.visible_to_users:
+            default_profile_id = await session.scalar(
+                select(DefaultModelProfileModel.profile_id).where(
+                    DefaultModelProfileModel.singleton_id == 1
+                )
             )
-            if default is None or default.profile_id != profile.id:
+            if default_profile_id != validated.id:
                 raise RunInputResourceError("model_profile_unavailable")
-        return profile
-
-    async def _lock_retry_profile_id(self, session: AsyncSession, profile_id: str) -> str:
-        return (await self._lock_retry_profile_row(session, profile_id)).id
+        return validated
 
     @staticmethod
     async def _current_compression_policy_id(session: AsyncSession) -> str | None:
@@ -916,24 +889,12 @@ class RunRepositorySupportMixin:
         )
 
     @staticmethod
-    async def _next_run_created_at(session: AsyncSession, session_id: str) -> datetime:
-        """在 Session 锁内生成严格晚于已有 Run 的创建时间。"""
+    async def _database_now(session: AsyncSession) -> datetime:
+        """读取 PostgreSQL 当前时钟并统一归约至 UTC 时区。"""
         database_now = cast(datetime | None, await session.scalar(select(func.clock_timestamp())))
-        latest_created_at = cast(
-            datetime | None,
-            await session.scalar(
-                select(func.max(RunModel.created_at)).where(RunModel.session_id == session_id)
-            ),
-        )
         if database_now is None:
             raise RuntimeError("run_database_clock_unavailable")
-        if database_now.tzinfo is None:
-            database_now = database_now.replace(tzinfo=UTC)
-        if latest_created_at is not None and latest_created_at.tzinfo is None:
-            latest_created_at = latest_created_at.replace(tzinfo=UTC)
-        if latest_created_at is None or database_now > latest_created_at:
-            return database_now
-        return latest_created_at + timedelta(microseconds=1)
+        return as_utc(database_now)
 
     async def _validate_and_merge_input_file_ids(
         self,

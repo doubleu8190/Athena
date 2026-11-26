@@ -274,8 +274,24 @@ def test_knowledge_repository_search_semantic_adds_distance_filter_for_min_score
     from adapter.knowledge.repository import KnowledgeRepository
 
     compiled_sql: list[str] = []
+    set_local_sql: list[str] = []
+
+    class _Tx:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, traceback
 
     class _Session:
+        def begin(self) -> _Tx:
+            return _Tx()
+
         async def __aenter__(self) -> Self:
             return self
 
@@ -294,6 +310,9 @@ def test_knowledge_repository_search_semantic_adds_distance_filter_for_min_score
                     compile_kwargs={"literal_binds": False},
                 )
             )
+            if compiled.startswith("SET LOCAL"):
+                set_local_sql.append(compiled)
+                return []
             compiled_sql.append(compiled)
             return []
 
@@ -303,6 +322,10 @@ def test_knowledge_repository_search_semantic_adds_distance_filter_for_min_score
         await repo.search_semantic("owner", ["base"], [0.1] * 1024, 10, "prof", min_score=0.35)
 
     asyncio.run(scenario())
+    assert set_local_sql == [
+        "SET LOCAL hnsw.iterative_scan = relaxed_order",
+        "SET LOCAL hnsw.iterative_scan = relaxed_order",
+    ]
     assert "<=>" in compiled_sql[0]
     assert "<=" not in compiled_sql[0].split("ORDER BY")[0]
     assert "<=" in compiled_sql[1].split("ORDER BY")[0]

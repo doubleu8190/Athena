@@ -7,7 +7,7 @@ import random
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import cast
 
 from sqlalchemy import (
@@ -19,7 +19,6 @@ from sqlalchemy import (
     delete,
     exists,
     func,
-    insert,
     or_,
     select,
     text,
@@ -49,6 +48,7 @@ from adapter.knowledge.model import (
     ProjectKnowledgeBaseModel,
 )
 from adapter.project.model import ProjectModel
+from common.date import as_utc
 from common.ids import new_id
 from domain.access import (
     ResourceType,
@@ -231,14 +231,6 @@ _PG_BATCH_INSERT_CHUNKS_SQL = text(
     bindparam("search_texts", type_=ARRAY(Text)),
     bindparam("embeddings", type_=ARRAY(Text)),
 )
-
-
-def _is_postgresql_session(session: object) -> bool:
-    """防御式判断当前会话是否绑定 PostgreSQL 方言，兼容单测注入的无 bind 假 Session。"""
-    bind = getattr(session, "bind", None)
-    return (
-        bind is not None and getattr(getattr(bind, "dialect", None), "name", None) == "postgresql"
-    )
 
 
 def _personal_privacy_guard(actor_id: str) -> ColumnElement[bool]:
@@ -659,71 +651,45 @@ class KnowledgeRepository:
                 .where(KnowledgeChunkModel.version_id == job.version_id)
                 .execution_options(synchronize_session=False)
             )
-            is_pg = _is_postgresql_session(session)
-            # 按每批 200 条批量写入分片，大幅缩短持有 knowledge_bases FOR UPDATE 行锁的事务时长。
+            # 按每批 200 条通过 PostgreSQL unnest 批量写入分片，
+            # 缩短持有 knowledge_bases FOR UPDATE 行锁的事务时长。
             for batch_start in range(0, len(chunks), PUBLISH_CHUNK_BATCH_SIZE):
                 batch = chunks[batch_start : batch_start + PUBLISH_CHUNK_BATCH_SIZE]
-                if is_pg:
-                    ids: list[str] = []
-                    ordinals: list[int] = []
-                    contents: list[str] = []
-                    locators: list[str] = []
-                    token_counts: list[int] = []
-                    search_texts: list[str] = []
-                    embeddings: list[str | None] = []
-                    for offset, (
-                        chunk_text,
-                        locator,
-                        token_count,
-                        search_text,
-                        vector,
-                    ) in enumerate(batch):
-                        ids.append(new_id("kchunk"))
-                        ordinals.append(batch_start + offset)
-                        contents.append(chunk_text)
-                        locators.append(
-                            json.dumps(locator, ensure_ascii=False, separators=(",", ":"))
-                        )
-                        token_counts.append(token_count)
-                        search_texts.append(search_text)
-                        embeddings.append(_format_pgvector_literal(vector))
-                    await session.execute(
-                        _PG_BATCH_INSERT_CHUNKS_SQL,
-                        {
-                            "document_id": job.document_id,
-                            "version_id": job.version_id,
-                            "ids": ids,
-                            "ordinals": ordinals,
-                            "contents": contents,
-                            "locators": locators,
-                            "token_counts": token_counts,
-                            "search_texts": search_texts,
-                            "embeddings": embeddings,
-                        },
-                    )
-                else:
-                    # 非 PostgreSQL（如 SQLite 单测）走 Core insert().values(...) 批量写入。
-                    rows_to_insert = [
-                        {
-                            "id": new_id("kchunk"),
-                            "document_id": job.document_id,
-                            "version_id": job.version_id,
-                            "ordinal": batch_start + offset,
-                            "content": chunk_text,
-                            "locator": locator,
-                            "token_count": token_count,
-                            "search_document": search_text,
-                            "embedding": vector,
-                        }
-                        for offset, (
-                            chunk_text,
-                            locator,
-                            token_count,
-                            search_text,
-                            vector,
-                        ) in enumerate(batch)
-                    ]
-                    await session.execute(insert(KnowledgeChunkModel).values(rows_to_insert))
+                ids: list[str] = []
+                ordinals: list[int] = []
+                contents: list[str] = []
+                locators: list[str] = []
+                token_counts: list[int] = []
+                search_texts: list[str] = []
+                embeddings: list[str | None] = []
+                for offset, (
+                    chunk_text,
+                    locator,
+                    token_count,
+                    search_text,
+                    vector,
+                ) in enumerate(batch):
+                    ids.append(new_id("kchunk"))
+                    ordinals.append(batch_start + offset)
+                    contents.append(chunk_text)
+                    locators.append(json.dumps(locator, ensure_ascii=False, separators=(",", ":")))
+                    token_counts.append(token_count)
+                    search_texts.append(search_text)
+                    embeddings.append(_format_pgvector_literal(vector))
+                await session.execute(
+                    _PG_BATCH_INSERT_CHUNKS_SQL,
+                    {
+                        "document_id": job.document_id,
+                        "version_id": job.version_id,
+                        "ids": ids,
+                        "ordinals": ordinals,
+                        "contents": contents,
+                        "locators": locators,
+                        "token_counts": token_counts,
+                        "search_texts": search_texts,
+                        "embeddings": embeddings,
+                    },
+                )
 
             # 1A 方案清理旧版本索引列：先借 ix_knowledge_versions_doc_created 查出同文档旧版本 ID，
             # 再按 version_id IN (...) 走 (version_id, ordinal) 唯一索引置空向量与全文索引列，
@@ -737,7 +703,7 @@ class KnowledgeRepository:
                 )
             )
             if old_version_ids:
-                empty_search_document: object = func.to_tsvector("simple", "") if is_pg else ""
+                empty_search_document = func.to_tsvector("simple", "")
                 await session.execute(
                     update(KnowledgeChunkModel)
                     .where(
@@ -2141,13 +2107,10 @@ class KnowledgeRepository:
             query = query.where(distance <= (1.0 - min_score))
         query = query.order_by(distance).limit(min(limit, 40))
         async with self._sessions() as session:
-            if _is_postgresql_session(session):
-                # 仅在 PostgreSQL 事务局部开启 pgvector HNSW 迭代扫描，
-                # 避免带权限与活动版本过滤时因默认 ef_search 截断导致近邻召回不足。
-                async with session.begin():
-                    await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
-                    rows = list(await session.execute(query))
-            else:
+            # 在 PostgreSQL 事务局部开启 pgvector HNSW 迭代扫描，
+            # 避免带权限与活动版本过滤时因默认 ef_search 截断导致近邻召回不足。
+            async with session.begin():
+                await session.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
                 rows = list(await session.execute(query))
             return tuple(
                 _search_hit_from_row(
@@ -2281,7 +2244,7 @@ def _document(
 async def _load_latest_versions(
     session: AsyncSession, document_ids: Sequence[str]
 ) -> dict[str, DocumentVersion]:
-    """用单次批量 SQL 为给定文档集合取回各自最新版本，同时兼容 PostgreSQL 与 SQLite。"""
+    """用单次批量窗口查询为给定文档集合取回各自最新版本。"""
     unique_ids = tuple(dict.fromkeys(document_ids))
     if not unique_ids:
         return {}
@@ -2495,15 +2458,13 @@ async def _next_version_time(
             KnowledgeVersionModel.document_id == document_id,
         )
     )
+    normalized_requested = as_utc(requested)
     if latest is not None:
-        # 兼容 SQLite 返回无时区时间：补齐 UTC 后再与带时区时间比较。
-        normalized_latest = latest.replace(tzinfo=UTC) if latest.tzinfo is None else latest
-        normalized_requested = (
-            requested.replace(tzinfo=UTC) if requested.tzinfo is None else requested
-        )
+        # PostgreSQL TIMESTAMPTZ 统一归约至 UTC 后再比较，确保同一文档版本时间严格递增。
+        normalized_latest = as_utc(latest)
         if normalized_latest >= normalized_requested:
             return normalized_latest + timedelta(microseconds=1)
-    return requested
+    return normalized_requested
 
 
 def _retry_delay_seconds(attempt: int, jitter_factor: float | None = None) -> float:

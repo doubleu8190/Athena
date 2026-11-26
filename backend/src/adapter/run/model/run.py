@@ -16,9 +16,10 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base, json_column_type
+from adapter.base import Base
 
 
 class RunModel(Base):
@@ -100,10 +101,6 @@ class RunModel(Base):
                 "depth = 0 AND status IN ('queued', 'running', 'waiting_for_input', "
                 "'waiting_for_approval', 'waiting_for_subagents', 'cancelling')"
             ),
-            sqlite_where=text(
-                "depth = 0 AND status IN ('queued', 'running', 'waiting_for_input', "
-                "'waiting_for_approval', 'waiting_for_subagents', 'cancelling')"
-            ),
         ),
         Index("ix_runs_claim", "status", "queued_at", "id"),
         Index("ix_runs_lease", "status", "lease_expires_at"),
@@ -128,26 +125,20 @@ class RunModel(Base):
     retry_of_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     model_config_version_id: Mapped[str] = mapped_column(String(64), nullable=False)
     # 固化创建 Run 时的非密钥模型元数据快照，严禁存放任何明文或密文 api_key。
-    model_snapshot_json: Mapped[dict[str, object] | None] = mapped_column(
-        json_column_type(), nullable=True
-    )
+    model_snapshot_json: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     main_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_prompt_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
     compression_policy_version_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    skill_snapshot: Mapped[dict[str, object] | None] = mapped_column(
-        json_column_type(), nullable=True
-    )
+    skill_snapshot: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     input_file_ids: Mapped[list[str]] = mapped_column(
-        json_column_type(),
+        JSONB,
         nullable=False,
         default=list,
         server_default=text("'[]'"),
     )
     # NULL 表示默认企业工作台范围；[] 表示显式关闭知识库检索；非空表示显式限定知识库 ID 列表。
-    knowledge_base_ids: Mapped[list[str] | None] = mapped_column(json_column_type(), nullable=True)
-    tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(
-        json_column_type(), nullable=True
-    )
+    knowledge_base_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    tool_snapshot: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     auth_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     llm_request_count: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default=text("0")
@@ -167,9 +158,7 @@ class RunModel(Base):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     safe_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     report_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    usage: Mapped[dict[str, object]] = mapped_column(
-        json_column_type(), nullable=False, default=dict
-    )
+    usage: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     # Phase 2 Subagent 编排预留字段，默认兼容主 Run（depth=0）。
     parent_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     root_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

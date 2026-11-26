@@ -57,7 +57,6 @@ from domain.run.model.entities import (
     SubmitRunCommand,
     SubmitRunResult,
 )
-from domain.run.model.errors import RunContextSafetyCommitError
 from domain.run.model.stream import (
     MAX_RUN_SSE_EVENT_BYTES,
     MAX_RUN_SSE_SNAPSHOT_BYTES,
@@ -101,7 +100,6 @@ __all__ = [
     "RunCompressionStartedPayload",
     "RunCancelRequestedPayload",
     "RunCompletedPayload",
-    "RunContextSafetyCommitError",
     "RunDetails",
     "RunEvent",
     "RunEventPayload",

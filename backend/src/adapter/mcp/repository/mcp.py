@@ -1053,11 +1053,23 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
 
     @staticmethod
     def _raise_integrity_domain_error(error: IntegrityError) -> NoReturn:
-        """把已知唯一性冲突转成固定文案，不回显驱动参数。"""
-        message = str(error.orig).lower()
-        if "uq_mcp_servers_name" in message or "mcp_servers.name" in message:
+        """按 PostgreSQL 约束名把已知唯一性冲突转成固定文案，不回显驱动参数。"""
+        orig = error.orig
+        # 优先读取驱动原生的 PostgreSQL 约束名（兼容 asyncpg __cause__.constraint_name），
+        # 未提供时退回匹配驱动异常文本中的 PostgreSQL 约束名。
+        constraint_name = getattr(orig, "constraint_name", None) or getattr(
+            getattr(orig, "__cause__", None),
+            "constraint_name",
+            None,
+        )
+        target = (
+            constraint_name.lower()
+            if isinstance(constraint_name, str) and constraint_name
+            else str(orig or error).lower()
+        )
+        if "uq_mcp_servers_name" in target:
             raise McpServerNameConflictError("mcp_server_name_conflict") from None
-        if "uq_mcp_tools" in message or "mcp_tools." in message:
+        if "uq_mcp_tools" in target:
             raise McpToolConflictError("mcp_tool_conflict") from None
         raise McpCatalogPersistenceError("mcp_catalog_persistence_failed") from None
 

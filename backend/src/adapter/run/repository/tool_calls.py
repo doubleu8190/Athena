@@ -7,13 +7,12 @@ import logging
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from adapter.file.model import SessionFileModel
 from adapter.file.repository import (
     count_published_session_files,
     pending_file_to_model,
 )
-from adapter.message.converter.message import conversation_to_domain, execution_to_domain
-from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
+from adapter.message.converter.message import execution_to_domain
+from adapter.message.model import ExecutionMessageModel
 from adapter.run.converter import (
     run_to_domain,
     tool_call_to_domain,
@@ -60,7 +59,6 @@ from domain.run.model.errors import (
 )
 from domain.skill import (
     SKILL_EXECUTE_TOOL_ID,
-    SafeSkillApprovalProjection,
     SkillExecutionArtifact,
     SkillExecutionCompletion,
     SkillExecutionStatus,
@@ -69,7 +67,6 @@ from domain.tool import (
     AdmitToolCallCommand,
     BeginToolCallBatchCommand,
     BeginToolCallBatchResult,
-    ConvergeToolBatchCommand,
     DecideToolApprovalCommand,
     FinishToolCallCommand,
     PendingToolApproval,
@@ -82,7 +79,6 @@ from domain.tool import (
     ToolCallStatus,
     ToolOutcome,
     ToolOutcomeStatus,
-    ToolRetryContext,
     bounded_outcome,
     persisted_status_for_outcome,
     protocol_status_for_outcome,
@@ -151,48 +147,12 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 ):
                     raise RunStateError("run_tool_call_message_invalid")
 
-                # 幂等重放：同一批助手消息已落库时，校验内容一致后直接返回已有批次。
+                # 同批次助手消息已存在时直接拒绝覆盖，不再做深字段重放比对。
                 existing_message = await session.get(ExecutionMessageModel, command.call_message.id)
                 if existing_message is not None:
-                    existing_records = list(
-                        (
-                            await session.scalars(
-                                select(RunToolCallModel)
-                                .where(
-                                    RunToolCallModel.run_id == row.id,
-                                    RunToolCallModel.call_message_id == command.call_message.id,
-                                )
-                                .order_by(RunToolCallModel.ordinal)
-                            )
-                        ).all()
-                    )
-                    # 调用身份、模型名、原始参数与脱敏 Skill 投影均一致才允许重放，否则按冲突拒绝。
-                    existing_call_parts = [
-                        part
-                        for part in execution_to_domain(existing_message).parts
-                        if isinstance(part, ToolCallPart)
-                    ]
-                    existing_projections = [
-                        None
-                        if record.safe_skill_projection is None
-                        else SafeSkillApprovalProjection.model_validate(
-                            record.safe_skill_projection
-                        )
-                        for record in existing_records
-                    ]
-                    if (
-                        [(r.tool_call_id, r.model_name) for r in existing_records]
-                        != [(item.tool_call_id, item.model_name) for item in command.calls]
-                        or existing_call_parts != call_parts
-                        or existing_projections
-                        != [item.safe_skill_projection for item in command.calls]
-                    ):
-                        raise RunConflictError("run_tool_batch_conflict")
-                    return BeginToolCallBatchResult(
-                        await self._batch_from_records(session, row.id, existing_records),
-                        row.status == RunStatus.WAITING_FOR_APPROVAL.value,
-                        True,
-                    )
+                    raise RunConflictError("run_tool_batch_conflict")
+
+                self._sync_llm_request_count(row, command.llm_request_count)
 
                 # 续接 Run 内已有工具调用序号，保证批次内 ordinal 单调递增。
                 ordinal = int(
@@ -352,16 +312,15 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             return await self._batch_from_records(session, run_id, records)
 
     async def admit_tool_call(self, command: AdmitToolCallCommand) -> RunToolCallRecord | None:
-        """Atomically claim one approved call under the current execution lease."""
+        """原子取得单调用执行准入；仅锁 Run 与 ToolCall 行，不锁父表 Session。"""
         async with self._session_factory() as session:
             async with session.begin():
-                session_id = await session.scalar(
-                    select(RunModel.session_id).where(RunModel.id == command.run_id)
+                # 仅锁 RunModel（不锁 SessionModel），锁序 runs -> tool_calls 与全局无环。
+                row = await session.scalar(
+                    select(RunModel).where(RunModel.id == command.run_id).with_for_update()
                 )
-                if session_id is None:
+                if row is None:
                     raise RunNotFoundError("run_not_found")
-                await self._lock_session_by_id(session, session_id)
-                row = await self._lock_run(session, session_id, command.run_id)
                 if (
                     row.worker_id != command.worker_id
                     or row.execution_epoch != command.execution_epoch
@@ -404,62 +363,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     command.admitted_at,
                 )
                 result = tool_call_to_domain(record)
-        return result
-
-    async def converge_tool_batch(self, command: ConvergeToolBatchCommand) -> Run | None:
-        """Cancel undispatched calls and fail the Run after started calls settle."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = await self._lock_worker_run(
-                    session, command.run_id, command.worker_id, command.execution_epoch
-                )
-                db_now = await session.scalar(select(func.clock_timestamp()))
-                if (
-                    row.status != RunStatus.RUNNING.value
-                    or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                ):
-                    return None
-                locked_session = await session.get(SessionModel, row.session_id)
-                if locked_session is None or locked_session.deleted_time is not None:
-                    raise SessionNotFoundError("session_not_found")
-                unsettled = list(
-                    (
-                        await session.scalars(
-                            select(RunToolCallModel)
-                            .where(
-                                RunToolCallModel.run_id == row.id,
-                                RunToolCallModel.call_message_id == command.call_message_id,
-                                RunToolCallModel.status.in_(
-                                    (
-                                        ToolCallStatus.PENDING_APPROVAL.value,
-                                        ToolCallStatus.APPROVED.value,
-                                        ToolCallStatus.EXECUTING.value,
-                                    )
-                                ),
-                            )
-                            .order_by(RunToolCallModel.ordinal)
-                            .with_for_update()
-                        )
-                    ).all()
-                )
-                await self._settle_unfinished_tool_calls(
-                    session,
-                    locked_session,
-                    row,
-                    command.failed_at,
-                    records=unsettled,
-                )
-                await self._fail_run_in_transaction(
-                    session,
-                    locked_session,
-                    row,
-                    command.safe_error_code,
-                    command.failed_at,
-                )
-                result = run_to_domain(row)
         return result
 
     async def decide_tool_approval(self, command: DecideToolApprovalCommand) -> Run | None:
@@ -657,14 +560,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             return await self._load_pending_approvals_in_session(session, run_row, session_id)
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
-        """对外入口：原子持久化工具调用结果与产物发布。"""
-        return await self._finish_tool_call_in_session(command)
-
-    async def _finish_tool_call_in_session(
-        self,
-        command: FinishToolCallCommand,
-    ) -> Run | None:
-        """在 Session/Run 既有序内完成结果、对象引用与配额提交。"""
+        """在 Session/Run 既有序内原子持久化工具调用结果、对象引用与配额提交。"""
         async with self._session_factory() as session:
             async with session.begin():
                 row = await self._lock_worker_run(
@@ -697,33 +593,11 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     pending_artifacts,
                     row,
                 )
-                if record.status != ToolCallStatus.EXECUTING.value:
-                    requested_outcome = outcome.model_dump(mode="json")
-                    if (
-                        record.outcome == requested_outcome
-                        and record.result_message_id == command.result_message.id
-                        and await self._artifact_rows_match(
-                            session,
-                            record,
-                            pending_artifacts,
-                        )
-                        and await self._skill_completion_matches(
-                            session,
-                            record,
-                            command.skill_execution_completion,
-                            pending_artifacts,
-                            outcome=outcome,
-                        )
-                        and await self._delivery_message_matches(
-                            session,
-                            command.delivery_message,
-                        )
-                    ):
-                        return run_to_domain(row)
-                    raise RunConflictError("run_tool_call_already_finished")
+                # 已非 EXECUTING 终态或租约/取消/截止时间失效时安全返回 None，绝不覆盖已终结调用。
                 db_now = await session.scalar(select(func.clock_timestamp()))
                 if (
-                    row.status != RunStatus.RUNNING.value
+                    record.status != ToolCallStatus.EXECUTING.value
+                    or row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
                     or record.execution_epoch != command.execution_epoch
                     or not self._lease_is_valid(
@@ -797,19 +671,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     ),
                     command.finished_at,
                 )
-                fail_code = (
-                    "tool_outcome_unknown"
-                    if outcome.status is ToolOutcomeStatus.UNKNOWN
-                    else command.terminate_error_code
-                )
-                if fail_code is not None and not command.defer_terminal_convergence:
-                    await self._fail_run_in_transaction(
-                        session,
-                        locked_session,
-                        row,
-                        fail_code,
-                        command.finished_at,
-                    )
                 return run_to_domain(row)
 
     async def list_tool_calls(
@@ -909,39 +770,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             output,
             artifacts,
             safe_skill_projection,
-        )
-
-    async def list_retry_context(
-        self,
-        session_id: str,
-        owner_id: str,
-        run_id: str,
-    ) -> tuple[ToolRetryContext, ...] | None:
-        """Read only safe unknown summaries from the direct source Run."""
-        async with self._session_factory() as session:
-            run = await self._get_visible_run(session, session_id, owner_id, run_id)
-            if run is None:
-                return None
-            if run.retry_of_run_id is None:
-                return ()
-            rows = (
-                await session.scalars(
-                    select(RunToolCallModel)
-                    .where(
-                        RunToolCallModel.run_id == run.retry_of_run_id,
-                        RunToolCallModel.session_id == session_id,
-                        RunToolCallModel.status == ToolCallStatus.UNKNOWN.value,
-                    )
-                    .order_by(RunToolCallModel.ordinal)
-                )
-            ).all()
-        return tuple(
-            ToolRetryContext(
-                run_id=row.run_id,
-                tool_name=row.model_name,
-                safe_error_code=row.safe_error_code or "tool_outcome_unknown",
-            )
-            for row in rows
         )
 
     @staticmethod
@@ -1091,32 +919,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             raise RunStateError("run_tool_delivery_message_invalid")
 
     @staticmethod
-    async def _delivery_message_matches(
-        session: AsyncSession,
-        message: ConversationMessageDraft | None,
-    ) -> bool:
-        """重放已终态调用时核对已提交的普通助手交付消息。"""
-        if message is None:
-            return True
-        existing = await session.get(ConversationMessageModel, message.id)
-        if existing is None:
-            return False
-        domain = conversation_to_domain(existing)
-        return (
-            domain.session_id,
-            domain.role,
-            domain.status,
-            domain.parts,
-            domain.run_id,
-        ) == (
-            message.session_id,
-            message.role,
-            message.status,
-            message.parts,
-            message.run_id,
-        )
-
-    @staticmethod
     async def _finish_skill_execution_in_transaction(
         session: AsyncSession,
         record: RunToolCallModel,
@@ -1138,13 +940,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         if skill_execution is None:
             raise RunStateError("skill_execution_record_missing")
         if skill_execution.status != SkillExecutionStatus.RUNNING.value:
-            if not RunToolCallsMixin._skill_execution_row_matches(
-                skill_execution,
-                completion,
-                artifacts,
-            ):
-                raise RunConflictError("skill_execution_completion_conflict")
-            return
+            raise RunConflictError("skill_execution_completion_conflict")
         skill_execution.status = completion.status.value
         skill_execution.log_object_key = completion.log_object_key
         skill_execution.log_truncated = completion.log_truncated
@@ -1154,106 +950,3 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         skill_execution.result_artifacts = RunToolCallsMixin._serialize_skill_artifacts(artifacts)
         skill_execution.finished_at = completion.finished_at
         await session.flush()
-
-    @staticmethod
-    def _skill_execution_row_matches(
-        row: SkillExecutionModel,
-        completion: SkillExecutionCompletion,
-        artifacts: tuple[PendingSessionFile, ...],
-    ) -> bool:
-        """比较脚本审计终态，重放不能替换日志、错误或产物集合。"""
-        return (
-            row.status,
-            row.log_object_key,
-            row.log_truncated,
-            row.log_error_code,
-            row.error_code,
-            row.cleanup_error_code,
-            row.result_artifacts,
-            row.finished_at,
-        ) == (
-            completion.status.value,
-            completion.log_object_key,
-            completion.log_truncated,
-            completion.log_error_code,
-            completion.error_code,
-            completion.cleanup_error_code,
-            RunToolCallsMixin._serialize_skill_artifacts(artifacts),
-            completion.finished_at,
-        )
-
-    @staticmethod
-    async def _skill_completion_matches(
-        session: AsyncSession,
-        record: RunToolCallModel,
-        completion: SkillExecutionCompletion | None,
-        artifacts: tuple[PendingSessionFile, ...],
-        *,
-        outcome: ToolOutcome,
-    ) -> bool:
-        """已提交工具调用重放时核对脚本审计结论，避免返回冲突版本。"""
-        if completion is None:
-            if record.tool_id != SKILL_EXECUTE_TOOL_ID:
-                return True
-            # 启动结果无法确认时没有可信 execution_id，完成路径会按调用身份
-            # 收口 running 审计后再提交 UNKNOWN；重放必须接受“无审计记录”或
-            # “审计已是终态”，但不能接受仍遗留 running 的不一致状态。
-            if outcome.status is not ToolOutcomeStatus.UNKNOWN:
-                return False
-            status = await session.scalar(
-                select(SkillExecutionModel.status).where(
-                    SkillExecutionModel.tool_call_record_id == record.id
-                )
-            )
-            return status is None or status != SkillExecutionStatus.RUNNING.value
-        row = await session.scalar(
-            select(SkillExecutionModel).where(
-                SkillExecutionModel.id == completion.execution_id,
-                SkillExecutionModel.tool_call_record_id == record.id,
-            )
-        )
-        return row is not None and RunToolCallsMixin._skill_execution_row_matches(
-            row,
-            completion,
-            artifacts,
-        )
-
-    @staticmethod
-    async def _artifact_rows_match(
-        session: AsyncSession,
-        record: RunToolCallModel,
-        artifacts: tuple[PendingSessionFile, ...],
-    ) -> bool:
-        """确认已完成调用已发布的文件 ID 和顺序与本次重放命令一致。"""
-        rows = (
-            await session.scalars(
-                select(SessionFileModel)
-                .where(SessionFileModel.source_call_id == record.id)
-                .order_by(SessionFileModel.output_index)
-            )
-        ).all()
-        return [
-            (
-                row.id,
-                row.filename,
-                row.label,
-                row.mime_type,
-                row.size_bytes,
-                row.sha256,
-                row.object_key,
-                row.output_index,
-            )
-            for row in rows
-        ] == [
-            (
-                artifact.id,
-                artifact.filename,
-                artifact.label,
-                artifact.mime_type,
-                artifact.size_bytes,
-                artifact.sha256,
-                artifact.object_key,
-                artifact.output_index,
-            )
-            for artifact in artifacts
-        ]

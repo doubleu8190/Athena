@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base, json_column_type
+from adapter.base import Base
 
 
 class ProjectModel(Base):
@@ -26,7 +27,7 @@ class ProjectModel(Base):
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     default_skill_ids: Mapped[list[str]] = mapped_column(
-        json_column_type(),
+        JSONB,
         nullable=False,
         default=list,
         server_default=text("'[]'"),

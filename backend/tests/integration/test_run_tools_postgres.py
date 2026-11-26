@@ -37,10 +37,12 @@ from adapter.session.model import SessionModel
 from adapter.skill import SqlAlchemySkillRepository
 from adapter.skill.model import SkillExecutionModel, SkillModel, SkillVersionModel
 from app.file import FileObjectMaintenance
+from app.run.budget import RunLlmBudget
 from app.skill.service import SkillService
 from domain.auth import AuthContext, User, UserRole, UserStatus
 from domain.file import FileObjectScanEntry, PendingSessionFile
 from domain.knowledge import ProjectKnowledgeLimitReachedError
+from domain.llm.model import LlmError
 from domain.message import (
     ArtifactFileRef,
     ConversationMessageDraft,
@@ -58,6 +60,7 @@ from domain.message import (
 from domain.run.model import (
     FailRunCommand,
     FinishRunCommand,
+    RecordRunUsageCommand,
     Run,
     RunLease,
     RunRequestOperation,
@@ -86,11 +89,9 @@ from domain.tool import (
     BeginToolCallBatchCommand,
     BeginToolCallBatchItem,
     BuiltinToolSource,
-    ConvergeToolBatchCommand,
     DecideToolApprovalCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
-    ReserveLlmRequestCommand,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
     RunToolCallRecord,
@@ -793,47 +794,45 @@ def test_tool_snapshot_llm_quota_begin_finish_and_query_are_atomic() -> None:
             )
             assert fixed == repeated == first_snapshot
 
+            budget = RunLlmBudget(used=lease.run.llm_request_count, maximum=40)
             for expected in range(1, 40):
-                reserved = await repository.reserve_llm_request(
-                    ReserveLlmRequestCommand(
-                        lease.run.id,
-                        lease.run.worker_id or "",
-                        lease.run.execution_epoch,
-                        40,
-                    )
+                assert budget.reserve() == expected
+            assert budget.final_only is True
+            assert budget.can_compress is False
+            assert budget.reserve() == 40
+            with pytest.raises(LlmError, match="run_llm_request_limit_exceeded"):
+                budget.reserve()
+            recorded = await repository.record_usage(
+                RecordRunUsageCommand(
+                    run_id=lease.run.id,
+                    worker_id=lease.run.worker_id or "",
+                    execution_epoch=lease.run.execution_epoch,
+                    attempt=1,
+                    input_tokens=10,
+                    output_tokens=5,
+                    total_tokens=15,
+                    complete=True,
+                    recorded_at=datetime.now(UTC),
+                    llm_request_count=budget.used,
                 )
-                assert reserved == expected
-            last_slot = await asyncio.gather(
-                repository.reserve_llm_request(
-                    ReserveLlmRequestCommand(
-                        lease.run.id,
-                        lease.run.worker_id or "",
-                        lease.run.execution_epoch,
-                        40,
-                    )
-                ),
-                repository.reserve_llm_request(
-                    ReserveLlmRequestCommand(
-                        lease.run.id,
-                        lease.run.worker_id or "",
-                        lease.run.execution_epoch,
-                        40,
-                    )
-                ),
             )
-            assert sorted(value for value in last_slot if value is not None) == [40]
-            assert last_slot.count(None) == 1
-            assert (
-                await repository.reserve_llm_request(
-                    ReserveLlmRequestCommand(
-                        lease.run.id,
-                        lease.run.worker_id or "",
-                        lease.run.execution_epoch,
-                        40,
-                    )
+            assert recorded is not None and recorded.llm_request_count == 40
+            # 单调不回退：传入更小的 llm_request_count 不得覆盖既有计数。
+            non_regressing = await repository.record_usage(
+                RecordRunUsageCommand(
+                    run_id=lease.run.id,
+                    worker_id=lease.run.worker_id or "",
+                    execution_epoch=lease.run.execution_epoch,
+                    attempt=2,
+                    input_tokens=4,
+                    output_tokens=2,
+                    total_tokens=6,
+                    complete=True,
+                    recorded_at=datetime.now(UTC),
+                    llm_request_count=12,
                 )
-                is None
             )
+            assert non_regressing is not None and non_regressing.llm_request_count == 40
 
             begun = await _begin_executing_call(
                 repository,
@@ -849,8 +848,9 @@ def test_tool_snapshot_llm_quota_begin_finish_and_query_are_atomic() -> None:
                 ordinal_label="1",
             )
             await repository.finish_tool_call(first_finish)
+            # 已终结的工具调用再次调用 finish_tool_call 安全返回 None，拒绝覆盖。
             repeated_finish = await repository.finish_tool_call(first_finish)
-            assert repeated_finish is not None
+            assert repeated_finish is None
 
             second_begun = await _begin_executing_call(
                 repository,
@@ -991,9 +991,10 @@ def test_skill_artifacts_messages_and_execution_completion_are_one_transaction()
             )
 
             completed = await repository.finish_tool_call(command)
+            # 非 EXECUTING 终态守卫：重复完成安全返回 None，既有产物、消息与审计行保持不变。
             replay = await repository.finish_tool_call(command)
 
-            assert completed is not None and replay is not None
+            assert completed is not None and replay is None
             async with factory() as session:
                 call = await session.get(RunToolCallModel, begun.id)
                 files = (
@@ -1091,37 +1092,32 @@ def test_skill_start_unknown_without_completion_settles_running_audit_by_call_id
                 code="skill_execution_start_unknown",
                 message="脚本执行记录状态无法确认。",
             )
-            finish = replace(
-                _finish_command(
-                    lease,
-                    begun,
-                    suffix="skill-start-unknown",
-                    outcome=unknown,
-                ),
-                # 对齐 executor：先提交当前工具结果，再由 converge 收敛批次/Run。
-                defer_terminal_convergence=True,
+            finish = _finish_command(
+                lease,
+                begun,
+                suffix="skill-start-unknown",
+                outcome=unknown,
             )
 
             await repository.finish_tool_call(finish)
-            # 完成回包丢失后的重放不能因没有 completion 而误判为状态冲突。
+            # 已终态调用再次提交 finish_tool_call 安全返回 None，不破坏既有终态与审计。
             replayed = await repository.finish_tool_call(finish)
 
             async with factory() as session:
                 call = await session.get(RunToolCallModel, begun.id)
                 execution = await session.get(SkillExecutionModel, execution_id)
-            assert replayed is not None
+            assert replayed is None
             assert call is not None and call.status == ToolCallStatus.UNKNOWN.value
             assert execution is not None
             assert execution.status == SkillExecutionStatus.UNKNOWN.value
             assert execution.error_code == "tool_outcome_unknown"
             assert execution.finished_at is not None
 
-            converged = await repository.converge_tool_batch(
-                ConvergeToolBatchCommand(
+            converged = await repository.fail(
+                FailRunCommand(
                     run_id=lease.run.id,
                     worker_id=lease.run.worker_id or "",
                     execution_epoch=lease.run.execution_epoch,
-                    call_message_id=begun.call_message_id,
                     safe_error_code="tool_outcome_unknown",
                     failed_at=datetime.now(UTC),
                 )
@@ -1353,7 +1349,7 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                 tool_call_id="call_unknown",
                 ordinal_label="1",
             )
-            unknown_result = await repository.finish_tool_call(
+            unknown_finished = await repository.finish_tool_call(
                 _finish_command(
                     unknown_lease,
                     unknown_call,
@@ -1364,6 +1360,17 @@ def test_every_terminal_transaction_settles_executing_calls_and_old_epoch_cannot
                         code="tool_timeout",
                         message="unknown",
                     ),
+                )
+            )
+            assert unknown_finished is not None
+            # 工具批次收尾统一通过 fail() 原子收敛 Run 终态与未完成工具调用。
+            unknown_result = await repository.fail(
+                FailRunCommand(
+                    run_id=unknown_lease.run.id,
+                    worker_id=unknown_lease.run.worker_id or "",
+                    execution_epoch=unknown_lease.run.execution_epoch,
+                    safe_error_code="tool_outcome_unknown",
+                    failed_at=datetime.now(UTC),
                 )
             )
             assert unknown_result is not None
@@ -1632,7 +1639,6 @@ def _batch_finish(
         ),
         outcome=outcome,
         finished_at=now,
-        defer_terminal_convergence=True,
     )
 
 

@@ -8,16 +8,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import (
     SqlAlchemyAuthRepository,
     SqlAlchemyAuthTransactionGuard,
 )
-from adapter.models import Base
 from domain.auth import (
     AuthSession,
     EmailAlreadyRegisteredError,
@@ -36,10 +35,7 @@ async def _make_repository() -> tuple[
     async_sessionmaker[AsyncSession],
     SqlAlchemyAuthRepository,
 ]:
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
     return engine, session_factory, SqlAlchemyAuthRepository(session_factory)
 
 

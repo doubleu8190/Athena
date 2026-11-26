@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
+from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import Interval, and_, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -37,6 +38,7 @@ from adapter.session.model import SessionModel
 from adapter.skill.repository import build_run_skill_snapshot
 from adapter.subagent.model import SubagentModel
 from adapter.system_prompt.repository import current_system_prompts
+from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.access import ResourceType, UserAccessSnapshot
 from domain.auth import UserRole
@@ -45,7 +47,6 @@ from domain.message import (
     ConversationRole,
     ExecutionMessageDraft,
     ExecutionRole,
-    MessageStatus,
     SessionNotFoundError,
     TextPart,
     ToolCallPart,
@@ -100,7 +101,6 @@ from domain.skill import (
 from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID
 from domain.tool import (
     InitializeRunToolsCommand,
-    ReserveLlmRequestCommand,
     RuntimeToolSnapshot,
     ToolCallStatus,
     ToolKind,
@@ -192,9 +192,9 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     if active is not None:
                         raise RunConflictError("run_already_active")
                     profile = (
-                        await self._lock_selected_profile_row(session, command.model_profile_id)
+                        await self._load_selected_profile_row(session, command.model_profile_id)
                         if command.model_profile_id is not None
-                        else await self._lock_default_profile_row(session)
+                        else await self._load_default_profile_row(session)
                     )
                     model_snapshot_json = self._build_model_snapshot_json(profile)
                     compression_policy_id = await self._current_compression_policy_id(session)
@@ -206,7 +206,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         command.message,
                         locked_session=locked_session,
                     )
-                    created_at = await self._next_run_created_at(session, session_id)
+                    created_at = await self._database_now(session)
                     current = now_utc()
                     row = RunModel(
                         id=command.run_id,
@@ -391,29 +391,24 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
         if not 1 <= limit <= 128:
             raise ValueError("run_claim_limit_invalid")
         async with self._session_factory() as session:
-            candidate_ids = (
-                await session.scalars(
-                    select(RunModel.id)
+            candidates = (
+                await session.execute(
+                    select(RunModel.id, RunModel.session_id)
                     .where(RunModel.status == RunStatus.QUEUED.value)
                     .order_by(RunModel.queued_at, RunModel.id)
-                    .limit(limit * 8)
+                    .limit(max(limit * 2, 4))
                 )
             ).all()
         leases: list[RunLease] = []
-        for candidate_id in candidate_ids:
+        for candidate_id, session_id in candidates:
             if len(leases) >= limit:
                 break
             async with self._session_factory() as session:
                 async with session.begin():
-                    candidate = await session.scalar(
-                        select(RunModel.session_id).where(RunModel.id == candidate_id)
-                    )
-                    if candidate is None:
-                        continue
                     locked_session = await session.scalar(
                         select(SessionModel)
                         .where(
-                            SessionModel.id == candidate,
+                            SessionModel.id == session_id,
                             SessionModel.deleted_time.is_(None),
                         )
                         .with_for_update(skip_locked=True)
@@ -431,24 +426,12 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     if row is None:
                         continue
-                    # 仅校验启用状态与能力，使用 FOR SHARE 允许并发认领，仍与管理员禁用/修改互斥。
-                    profile = await session.scalar(
-                        select(ModelProfileVersionModel)
-                        .where(ModelProfileVersionModel.id == row.model_config_version_id)
-                        .with_for_update(read=True)
+                    # 无锁复核模型启用与能力状态；执行前由 executor 再次读取最新运行时配置。
+                    profile = await session.get(
+                        ModelProfileVersionModel, row.model_config_version_id
                     )
-                    db_now = await session.scalar(select(func.clock_timestamp()))
-                    if db_now is None:
-                        raise RuntimeError("run_database_clock_unavailable")
-                    if db_now.tzinfo is None:
-                        db_now = db_now.replace(tzinfo=UTC)
-                    if (
-                        profile is None
-                        or profile.deleted_at is not None
-                        or not profile.enabled
-                        or not profile.supports_stream
-                        or not profile.supports_tools
-                    ):
+                    db_now = await self._database_now(session)
+                    if not self._is_usable_profile(profile, require_key=False):
                         row.status = RunStatus.FAILED.value
                         row.safe_error_code = "model_profile_unavailable"
                         row.finished_at = db_now
@@ -461,6 +444,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         )
                         await self._try_wake_parent_run(session, locked_session, row, db_now)
                         continue
+                    assert profile is not None
                     row.status = RunStatus.RUNNING.value
                     row.execution_epoch += 1
                     row.worker_id = worker_id
@@ -484,12 +468,8 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     leases.append(
                         RunLease(
                             run=run_to_domain(row),
-                            lease_expires_at=row.lease_expires_at.replace(tzinfo=UTC)
-                            if row.lease_expires_at.tzinfo is None
-                            else row.lease_expires_at,
-                            execution_deadline_at=row.execution_deadline_at.replace(tzinfo=UTC)
-                            if row.execution_deadline_at.tzinfo is None
-                            else row.execution_deadline_at,
+                            lease_expires_at=as_utc(row.lease_expires_at),
+                            execution_deadline_at=as_utc(row.execution_deadline_at),
                         )
                     )
         return tuple(leases)
@@ -497,29 +477,33 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
     async def heartbeat(
         self, run_id: str, worker_id: str, execution_epoch: int, *, lease_seconds: int
     ) -> Run | None:
-        """续约仍由当前 Worker 持有的有效租约（含取消清理阶段），仅锁 runs 行不锁父表 sessions。"""
+        """单条条件 UPDATE ... RETURNING 原子续约有效租约（含取消清理阶段），不锁父表 sessions。"""
         async with self._session_factory() as session:
             async with session.begin():
-                # 心跳仅更新 runs 行自身字段，不锁父表 sessions，消除与同会话文件上传及
-                # 并行 Subagent 的锁争用；单行锁与 sessions -> runs 锁序无环，不会死锁。
-                row = await session.scalar(
-                    select(RunModel).where(RunModel.id == run_id).with_for_update()
+                # 合并为单条条件 UPDATE ... RETURNING，
+                # 复用同一次 clock_timestamp() 表达式以兼容测试时钟注入。
+                now_expr: Any = func.clock_timestamp()
+                next_lease_expr: Any = now_expr + literal(
+                    timedelta(seconds=lease_seconds), type_=Interval()
                 )
-                if row is None:
-                    return None
-                db_now = await session.scalar(select(func.clock_timestamp()))
-                if (
-                    db_now is None
-                    or row.status not in {RunStatus.RUNNING.value, RunStatus.CANCELLING.value}
-                    or row.worker_id != worker_id
-                    or row.execution_epoch != execution_epoch
-                    or row.lease_expires_at is None
-                    or row.lease_expires_at <= db_now
-                ):
-                    return None
-                row.lease_expires_at = db_now + timedelta(seconds=lease_seconds)
-                row.updated_at = db_now
-                return run_to_domain(row)
+                row = await session.scalar(
+                    update(RunModel)
+                    .where(
+                        RunModel.id == run_id,
+                        RunModel.status.in_((RunStatus.RUNNING.value, RunStatus.CANCELLING.value)),
+                        RunModel.worker_id == worker_id,
+                        RunModel.execution_epoch == execution_epoch,
+                        RunModel.lease_expires_at.is_not(None),
+                        RunModel.lease_expires_at > now_expr,
+                    )
+                    .values(
+                        lease_expires_at=next_lease_expr,
+                        updated_at=now_expr,
+                    )
+                    .returning(RunModel)
+                    .execution_options(synchronize_session=False, populate_existing=True)
+                )
+                return None if row is None else run_to_domain(row)
 
     async def initialize_tools(
         self, command: InitializeRunToolsCommand
@@ -547,31 +531,6 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     row.updated_at = db_now or now_utc()
                     return snapshot
                 return RuntimeToolSnapshot.model_validate(row.tool_snapshot)
-
-    async def reserve_llm_request(self, command: ReserveLlmRequestCommand) -> int | None:
-        """在有效执行租约内原子预占一次 LLM 请求配额，仅锁 runs 行不锁父表 sessions。"""
-        if not 1 <= command.maximum_count <= 50:
-            raise ValueError("run_llm_request_limit_invalid")
-        async with self._session_factory() as session:
-            async with session.begin():
-                # 仅递增 runs.llm_request_count，单行锁保证并发配额边界原子且不争抢 sessions 锁。
-                row = await self._lock_worker_run_only(
-                    session, command.run_id, command.worker_id, command.execution_epoch
-                )
-                db_now = await session.scalar(select(func.clock_timestamp()))
-                if (
-                    row.status != RunStatus.RUNNING.value
-                    or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                    or not self._work_deadline_is_valid(row, db_now)
-                    or row.llm_request_count >= command.maximum_count
-                ):
-                    return None
-                row.llm_request_count += 1
-                row.updated_at = db_now or now_utc()
-                return row.llm_request_count
 
     async def request_input(self, command: RequestRunInputCommand) -> RunInputRequest:
         """原子保存澄清消息、执行交互、输入请求和 waiting event。"""
@@ -637,6 +596,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 session.add(request)
                 row.status = RunStatus.WAITING_FOR_INPUT.value
                 row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
+                self._sync_llm_request_count(row, command.llm_request_count)
                 row.worker_id = None
                 row.lease_expires_at = None
                 row.execution_started_at = None
@@ -718,6 +678,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     return None
                 if row.status != RunStatus.RUNNING.value:
                     return None
+                self._sync_llm_request_count(row, command.llm_request_count)
                 if await self._has_unsettled_tool_calls(session, row.id):
                     await self._fail_run_in_transaction(
                         session,
@@ -831,42 +792,14 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 )
                 report_message_id: str | None = None
                 if command.report_message is not None:
-                    report = command.report_message
-                    if (
-                        not report.id
-                        or len(report.id) > 64
-                        or report.session_id != row.session_id
-                        or report.owner_id != row.owner_id
-                        or report.run_id != row.id
-                        or report.role is not ConversationRole.ASSISTANT
-                        or report.status is not MessageStatus.COMPLETED
-                        or report.reply_to_message_id != row.trigger_message_id
-                        or report.context_turn_id != row.trigger_message_id
-                        or len(report.parts) != 1
-                        or not isinstance(report.parts[0], TextPart)
-                        or not report.parts[0].text.strip()
-                    ):
-                        raise RunStateError("run_context_report_invalid")
-                    trigger_sequence = await session.scalar(
-                        select(ConversationMessageModel.sequence).where(
-                            ConversationMessageModel.id == row.trigger_message_id,
-                            ConversationMessageModel.session_id == row.session_id,
-                        )
-                    )
-                    if trigger_sequence is None:
-                        raise RunStateError("run_context_report_trigger_invalid")
+                    # 复合外键 fk_runs_report_message_session 与 append_conversation_in_session
+                    # 保证会话归属与消息顺序一致，直接在同一事务内原子落库报告消息。
                     persisted_report = await self._message_repo.append_conversation_in_session(
                         session,
-                        report,
+                        command.report_message,
                         locked_session=locked_session,
                         managed_run_id=row.id,
                     )
-                    if (
-                        persisted_report.run_id != row.id
-                        or persisted_report.reply_to_message_id != row.trigger_message_id
-                        or persisted_report.sequence <= trigger_sequence
-                    ):
-                        raise RunStateError("run_context_report_reference_invalid")
                     report_message_id = persisted_report.id
                 row.status = RunStatus.FAILED.value
                 row.safe_error_code = command.safe_error_code
@@ -874,6 +807,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 row.updated_at = command.failed_at
                 row.report_message_id = report_message_id
                 row.usage = self._merge_usage(row.usage, command.usage).model_dump(mode="json")
+                self._sync_llm_request_count(row, command.llm_request_count)
                 self._clear_lease(row)
                 await self._close_pending_input(session, row, command.failed_at)
                 await self._append_event(
@@ -891,7 +825,13 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
         return result
 
     async def settle_cancelled(
-        self, run_id: str, worker_id: str, execution_epoch: int, settled_at: datetime
+        self,
+        run_id: str,
+        worker_id: str,
+        execution_epoch: int,
+        settled_at: datetime,
+        *,
+        llm_request_count: int | None = None,
     ) -> Run | None:
         """由持有有效租约的 Worker 确认 cancelling Run 已清理结束，原子收敛为 cancelled 终态。"""
         async with self._session_factory() as session:
@@ -916,6 +856,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                 row.status = RunStatus.CANCELLED.value
                 row.finished_at = settled_at
                 row.updated_at = settled_at
+                self._sync_llm_request_count(row, llm_request_count)
                 self._clear_lease(row)
                 await self._close_pending_input(session, row, settled_at)
                 await self._append_event(session, row, RunCancelledPayload(), settled_at)
@@ -928,28 +869,23 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
         if not 1 <= limit <= 128:
             raise ValueError("run_reclaim_limit_invalid")
         async with self._session_factory() as session:
-            candidate_ids = (
-                await session.scalars(
-                    select(RunModel.id)
+            candidates = (
+                await session.execute(
+                    select(RunModel.id, RunModel.session_id)
                     .where(
                         RunModel.status.in_([RunStatus.RUNNING.value, RunStatus.CANCELLING.value]),
                         RunModel.lease_expires_at <= func.clock_timestamp(),
                     )
                     .order_by(RunModel.lease_expires_at, RunModel.id)
-                    .limit(limit * 8)
+                    .limit(max(limit * 2, 4))
                 )
             ).all()
         reclaimed: list[Run] = []
-        for run_id in candidate_ids:
+        for run_id, session_id in candidates:
             if len(reclaimed) >= limit:
                 break
             async with self._session_factory() as session:
                 async with session.begin():
-                    session_id = await session.scalar(
-                        select(RunModel.session_id).where(RunModel.id == run_id)
-                    )
-                    if session_id is None:
-                        continue
                     locked_session = await session.scalar(
                         select(SessionModel)
                         .where(SessionModel.id == session_id)
@@ -1163,9 +1099,9 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     )
                     if active is not None:
                         raise RunConflictError("run_already_active")
-                    # 重试继承原 Run 绑定的模型版本并在同一事务内共享锁定复核其可用性，
+                    # 重试继承原 Run 绑定的模型版本并在同一事务内无锁复核其可用性，
                     # 防止失败重试静默漂移回默认模型或绕过停用/隐藏/软删除限制。
-                    profile = await self._lock_retry_profile_row(
+                    profile = await self._load_retry_profile_row(
                         session,
                         source.model_config_version_id,
                     )
@@ -1206,7 +1142,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         else tuple(source.knowledge_base_ids),
                         snapshot=access_snapshot,
                     )
-                    created_at = await self._next_run_created_at(session, session_id)
+                    created_at = await self._database_now(session)
                     row = RunModel(
                         id=new_run_id,
                         session_id=session_id,
@@ -1712,22 +1648,10 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                     if DISPATCH_SUBAGENTS_TOOL_ID in {t.tool_id for t in item.tool_snapshot.tools}:
                         raise RunStateError("subagent_nested_dispatch_forbidden")
                     model_profile_id = subagent_row.model_profile_id or row.model_config_version_id
-                    profile_row = await session.scalar(
-                        select(ModelProfileVersionModel)
-                        .where(ModelProfileVersionModel.id == model_profile_id)
-                        .with_for_update(read=True)
+                    profile_row = self._validate_usable_profile(
+                        await session.get(ModelProfileVersionModel, model_profile_id),
+                        error=RunStateError("model_profile_unavailable"),
                     )
-                    if (
-                        profile_row is None
-                        or profile_row.deleted_at is not None
-                        or not profile_row.enabled
-                        or not profile_row.supports_stream
-                        or not profile_row.supports_tools
-                        or profile_row.api_key_ciphertext is None
-                        or profile_row.api_key_nonce is None
-                        or profile_row.api_key_key_version is None
-                    ):
-                        raise RunStateError("model_profile_unavailable")
                     validated_files = await self._validate_and_merge_input_file_ids(
                         session,
                         row.session_id,
@@ -1797,7 +1721,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
                         validated_files,
                         child_skill_snapshot,
                     ) = validated_items[idx]
-                    child_created_at = await self._next_run_created_at(session, row.session_id)
+                    child_created_at = await self._database_now(session)
                     child = RunModel(
                         id=item.sub_run_id,
                         session_id=row.session_id,
@@ -1861,6 +1785,7 @@ class RunLifecycleMixin(RunRepositorySupportMixin):
 
                 # 主 Run 转入 waiting_for_subagents 并清空 worker_id 与租约，退出本轮 Executor。
                 row.status = RunStatus.WAITING_FOR_SUBAGENTS.value
+                self._sync_llm_request_count(row, command.llm_request_count)
                 self._clear_lease(row)
                 row.updated_at = command.requested_at
                 await self._append_event(

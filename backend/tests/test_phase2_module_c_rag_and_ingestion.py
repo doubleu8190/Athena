@@ -16,10 +16,10 @@ from typing import Any, Self, cast
 
 import httpx2
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from PIL import Image
 from sqlalchemy import DateTime, event, func, literal, select
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from adapter.auth.model import UserModel
 from adapter.knowledge.model import (
@@ -36,7 +36,6 @@ from adapter.knowledge.repository import (
     _select_keyword_tokens,
     _visible_chunks_query,
 )
-from adapter.models import Base
 from app.knowledge.service import KnowledgeService
 from app.knowledge.worker import (
     KnowledgeWorker,
@@ -104,8 +103,8 @@ class _PidReportingParserFactory(DocumentParserFactory):
 # ---------------------------------------------------------------------------
 
 
-def test_search_semantic_sets_hnsw_iterative_scan_only_on_postgresql_and_projects_scalars() -> None:
-    """PostgreSQL 语义检索须在显式事务内开启 hnsw.iterative_scan 且仅投影标量列；SQLite 跳过。"""
+def test_search_semantic_sets_hnsw_iterative_scan_and_projects_scalars() -> None:
+    """PostgreSQL 语义检索须始终在显式事务内开启 hnsw.iterative_scan 且仅投影标量列。"""
     pg_statements: list[str] = []
     pg_began = False
 
@@ -123,8 +122,6 @@ def test_search_semantic_sets_hnsw_iterative_scan_only_on_postgresql_and_project
             del exc_type, exc, tb
 
     class _FakePgSession:
-        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
-
         async def __aenter__(self) -> Self:
             return self
 
@@ -162,40 +159,11 @@ def test_search_semantic_sets_hnsw_iterative_scan_only_on_postgresql_and_project
                 )
             ]
 
-    sqlite_statements: list[str] = []
-
-    class _FakeSqliteSession:
-        bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
-
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> None:
-            del exc_type, exc, tb
-
-        async def execute(self, statement: Any) -> list[Any]:
-            compiled = str(
-                statement.compile(
-                    dialect=cast(Any, postgresql).dialect(),
-                    compile_kwargs={"literal_binds": False},
-                )
-            )
-            sqlite_statements.append(compiled)
-            return []
-
     async def scenario() -> tuple[SearchHit, ...]:
         pg_repo = KnowledgeRepository(cast(Any, lambda: _FakePgSession()))
-        hits = await pg_repo.search_semantic(
+        return await pg_repo.search_semantic(
             "owner", ["kb_1"], [0.1] * 1024, 10, "prof", min_score=0.35
         )
-        sqlite_repo = KnowledgeRepository(cast(Any, lambda: _FakeSqliteSession()))
-        await sqlite_repo.search_semantic("owner", ["kb_1"], [0.1] * 1024, 10, "prof")
-        return hits
 
     hits = asyncio.run(scenario())
 
@@ -213,10 +181,6 @@ def test_search_semantic_sets_hnsw_iterative_scan_only_on_postgresql_and_project
     assert hits[0].title == "差旅制度"
     assert hits[0].knowledge_base_id == "kb_1"
     assert hits[0].channels == ("semantic",)
-
-    # 非 PostgreSQL 会话不得执行 SET LOCAL hnsw.iterative_scan。
-    assert len(sqlite_statements) == 1
-    assert all("hnsw.iterative_scan" not in sql for sql in sqlite_statements)
 
 
 def test_search_keyword_get_chunk_and_visible_query_exclude_large_columns() -> None:
@@ -465,7 +429,7 @@ def test_search_parallelizes_keyword_and_semantic_branches_and_subqueries() -> N
 def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证 PostgreSQL 200 条/批 unnest 写入与 SQLite 实库 1A 旧版本索引置空且保留历史正文。"""
+    """验证 PostgreSQL 200 条/批 unnest 写入与实库 1A 旧版本索引置空且保留历史正文。"""
     now = datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
 
     # 第一部分：PostgreSQL 方言批量 unnest 与 1A UPDATE SQL 形态校验。
@@ -485,8 +449,6 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
             del exc_type, exc, tb
 
     class _FakePgPublishSession:
-        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
-
         def __init__(self) -> None:
             self._scalar_queue: list[Any] = [
                 "kb_1",
@@ -579,15 +541,15 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
     assert "knowledge_chunks.version_id IN" in update_stmts[0]
     assert "knowledge_chunks.document_id" not in update_stmts[0]
 
-    # 第二部分：SQLite 真实数据库端到端验证批量写入 + 1A 置空旧版本索引列 + get_chunk 读历史正文。
+    # 第二部分：真实 PG 端到端验证 unnest 批量写入 + 置空旧版本索引列 + get_chunk 读历史正文。
     monkeypatch.setattr(
         func,
         "clock_timestamp",
         lambda: literal(now, type_=DateTime(timezone=True)),
     )
 
-    async def verify_sqlite_e2e() -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async def verify_postgresql_e2e() -> None:
+        engine, factory = await create_pg_unit_db()
         executed_inserts: list[str] = []
 
         def _capture_sql(
@@ -603,9 +565,6 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
                 executed_inserts.append(statement)
 
         try:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session, session.begin():
                 session.add(
                     UserModel(
@@ -688,7 +647,7 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
                         content="旧版本保留正文",
                         locator={"kind": "text", "start_line": 1},
                         token_count=7,
-                        search_document="旧 版本 保留 正文",
+                        search_document=cast(str, func.to_tsvector("simple", "旧 版本 保留 正文")),
                         embedding=[0.5] * 1024,
                     )
                 )
@@ -739,8 +698,9 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
                 event.remove(engine.sync_engine, "before_cursor_execute", _capture_sql)
 
             assert published is True
-            # 250 条分片应通过 2 次批量 INSERT（200 + 50）写入，而非 250 次逐行写入。
+            # 250 条分片应通过 2 次 PG unnest 批量 INSERT（200 + 50）写入，而非逐行写入。
             assert len(executed_inserts) == 2
+            assert all("FROM unnest(" in sql for sql in executed_inserts)
 
             async with factory() as session:
                 old_row = (
@@ -775,7 +735,7 @@ def test_publish_job_batches_pg_unnest_and_clears_old_version_index_columns_1a(
         finally:
             await engine.dispose()
 
-    asyncio.run(verify_sqlite_e2e())
+    asyncio.run(verify_postgresql_e2e())
 
 
 def test_tiktoken_cursor_chunking_is_utf8_safe_and_o_n() -> None:

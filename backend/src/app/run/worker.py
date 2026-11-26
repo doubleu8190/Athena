@@ -19,7 +19,6 @@ from common.date import as_utc
 from common.ids import new_id, now_utc
 from domain.run.model import (
     FailRunCommand,
-    RunContextSafetyCommitError,
     RunLease,
     RunLeaseState,
     RunStatus,
@@ -27,6 +26,7 @@ from domain.run.model import (
 from domain.run.ports import RunEventTransport, RunRepository
 
 logger = logging.getLogger(__name__)
+_CANCEL_CLEANUP_TIMEOUT_SECONDS = 15.0
 
 
 def _is_recoverable_worker_error(error: Exception) -> bool:
@@ -153,21 +153,22 @@ class RunWorker:
         # 执行放到独立 Task，让监督循环能在执行期间继续续租和轮询状态。
         execution = asyncio.create_task(self._executor.execute(lease))
         loop = asyncio.get_running_loop()
-        # 防御性分支：没有执行截止时间的租约不允许执行（正常领取一定带 deadline）。
-        if run.execution_deadline_at is None:
-            await self._cancel_and_join(execution, lease)
-            return
-        # 将数据库的墙上时钟 deadline 转成单调时钟，避免系统时间调整影响超时判断。
-        remaining = (lease.execution_deadline_at - self._now()).total_seconds()
-        monotonic_deadline = loop.time() + max(0.0, remaining)
-        next_heartbeat = loop.time() + self._config.heartbeat_seconds
-        poll_interval = self._config.cancel_poll_seconds
         try:
+            # 防御性分支：没有执行截止时间的租约不允许执行（正常领取一定带 deadline）。
+            if run.execution_deadline_at is None:
+                await self._cancel_and_join(execution, lease)
+                return
+            # 将数据库的墙上时钟 deadline 转成单调时钟，避免系统时间调整影响超时判断。
+            remaining = (lease.execution_deadline_at - self._now()).total_seconds()
+            monotonic_deadline = loop.time() + max(0.0, remaining)
+            next_heartbeat = loop.time() + self._config.heartbeat_seconds
+            poll_interval = self._config.cancel_poll_seconds
             while not execution.done():
                 remaining = monotonic_deadline - loop.time()
                 if remaining <= 0:
                     # 超时：先取消执行并等待模型流等上游资源清理完毕。
                     await self._cancel_and_join(execution, lease)
+                    llm_request_count = self._pop_llm_request_count(lease)
                     # 清理可能耗时，期间租约可能易主，因此重读轻量租约状态后再决定终态。
                     current = await self._read_lease_state(run.session_id, run.owner_id, run.id)
                     # 记录不存在或所有权/执行轮次已变，说明已被回收，交给新 owner 处理。
@@ -179,7 +180,7 @@ class RunWorker:
                         return
                     # 用户取消优先于超时：已进入 CANCELLING 时按取消结算。
                     if current.status is RunStatus.CANCELLING:
-                        await self._settle_cancellation(lease)
+                        await self._settle_cancellation(lease, llm_request_count=llm_request_count)
                     # 仍由本 worker 持有且处于 RUNNING 时才写入超时失败态。
                     elif current.status is RunStatus.RUNNING:
                         try:
@@ -190,6 +191,7 @@ class RunWorker:
                                     execution_epoch=run.execution_epoch,
                                     safe_error_code="execution_timeout",
                                     failed_at=self._now(),
+                                    llm_request_count=llm_request_count,
                                 )
                             )
                         except Exception as error:
@@ -276,29 +278,23 @@ class RunWorker:
             # 监督循环内出现瞬态数据库等异常时同样须先清理执行任务，避免孤儿协程泄漏。
             await self._cancel_and_join(execution, lease)
             raise
+        finally:
+            # 确保任意早退或异常路径都不残留本代次的在途预算引用。
+            self._pop_llm_request_count(lease)
 
     async def _finalize_execution(self, lease: RunLease, execution: asyncio.Task[None]) -> None:
         """收敛已清理协程与取消并发，避免迟到状态提交挂起 Run。"""
-        safety_commit_failed = False
         try:
             await execution
         except asyncio.CancelledError:
             pass
-        except RunContextSafetyCommitError as error:
-            # 专用类型表示已有稳定安全收尾命令但结果不确定；禁用普通失败覆盖。
-            safety_commit_failed = True
-            logger.error(
-                "run_context_safety_commit_failed run_id=%s report_message_id=%s reason=%s",
-                lease.run.id,
-                error.report_message_id,
-                error.reason,
-            )
         except Exception as error:
             logger.error(
                 "run_execution_task_failed run_id=%s exception_type=%s",
                 lease.run.id,
                 type(error).__name__,
             )
+        llm_request_count = self._pop_llm_request_count(lease)
         try:
             current = await self._repository.get(
                 lease.run.session_id, lease.run.owner_id, lease.run.id
@@ -310,13 +306,12 @@ class RunWorker:
                 and current.execution_epoch == lease.run.execution_epoch
                 and current.status is RunStatus.CANCELLING
             ):
-                await self._settle_cancellation(lease)
+                await self._settle_cancellation(lease, llm_request_count=llm_request_count)
             elif (
                 current is not None
                 and current.worker_id == lease.run.worker_id
                 and current.execution_epoch == lease.run.execution_epoch
                 and current.status is RunStatus.RUNNING
-                and not safety_commit_failed
             ):
                 worker_id = lease.run.worker_id
                 if worker_id is not None:
@@ -327,6 +322,7 @@ class RunWorker:
                             execution_epoch=lease.run.execution_epoch,
                             safe_error_code="execution_failed",
                             failed_at=self._now(),
+                            llm_request_count=llm_request_count,
                         )
                     )
                     if failed_run is not None:
@@ -381,8 +377,15 @@ class RunWorker:
                         lease.run.id,
                     )
 
-    async def _settle_cancellation(self, lease: RunLease) -> None:
-        """尽力完成已清理执行的取消状态，竞争终态不结束 Worker。"""
+    async def _settle_cancellation(
+        self,
+        lease: RunLease,
+        *,
+        llm_request_count: int | None = None,
+    ) -> None:
+        """尽力完成已清理执行的取消状态，并回收在途 LLM 请求计数；竞争终态不结束 Worker。"""
+        if llm_request_count is None:
+            llm_request_count = self._pop_llm_request_count(lease)
         worker_id = lease.run.worker_id
         if worker_id is None:
             return
@@ -392,6 +395,7 @@ class RunWorker:
                 worker_id,
                 lease.run.execution_epoch,
                 self._now(),
+                llm_request_count=llm_request_count,
             )
             if settled is not None:
                 await self._publish_new_events(lease, settled.event_sequence)
@@ -401,6 +405,14 @@ class RunWorker:
                 lease.run.id,
                 type(error).__name__,
             )
+
+    def _pop_llm_request_count(self, lease: RunLease) -> int | None:
+        """从执行器弹出本代次已消耗的 LLM 请求计数；兼容未实现该方法的测试替身。"""
+        pop = getattr(self._executor, "pop_llm_request_count", None)
+        if not callable(pop):
+            return None
+        count = pop(lease.run.id, lease.run.execution_epoch)
+        return count if isinstance(count, int) and not isinstance(count, bool) else None
 
     async def _publish_latest_events(self, lease: RunLease) -> None:
         try:
@@ -437,55 +449,22 @@ class RunWorker:
             pass
 
     async def _cancel_and_join(self, task: asyncio.Task[None], lease: RunLease) -> None:
-        """取消流时继续续租，直到执行协程完成上游资源清理。"""
+        """取消执行协程并限时等待上游资源清理；超时交由 reclaim_expired 收敛。"""
         if not task.done():
             task.cancel()
-        loop = asyncio.get_running_loop()
-        next_heartbeat = loop.time()
-        worker_id = lease.run.worker_id
-        if worker_id is not None:
-            while not task.done():
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(task),
-                        timeout=self._config.cancel_poll_seconds,
-                    )
-                except TimeoutError:
-                    pass
-                except asyncio.CancelledError:
-                    if task.done():
-                        break
-                except Exception:
-                    # 被取消的执行任务在清理阶段抛出的异常交由下方统一记录收敛，
-                    # 避免穿透 _cancel_and_join 覆盖外层瞬态数据库异常并击穿 TaskGroup。
-                    if task.done():
-                        break
-                    raise
-                if task.done() or loop.time() < next_heartbeat:
-                    continue
-                try:
-                    heartbeat = await self._repository.heartbeat(
-                        lease.run.id,
-                        worker_id,
-                        lease.run.execution_epoch,
-                        lease_seconds=self._config.lease_seconds,
-                    )
-                except Exception as error:
-                    # 清理阶段数据库暂不可用时停止续租循环，仍继续等待被取消的执行任务完成清理。
-                    logger.warning(
-                        "run_cancel_heartbeat_failed run_id=%s exception_type=%s",
-                        lease.run.id,
-                        type(error).__name__,
-                    )
-                    break
-                if heartbeat is None:
-                    break
-                next_heartbeat = loop.time() + self._config.heartbeat_seconds
         try:
-            await task
+            await asyncio.wait_for(task, timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            # 清理超时不再阻塞 Worker 回收槽位；
+            # 若任务仍未完成或租约已失效，再由 reclaim_expired 兜底收敛。
+            logger.warning("run_execution_cleanup_timed_out run_id=%s", lease.run.id)
         except asyncio.CancelledError:
-            pass
+            # 子任务按预期取消结束时吞掉 CancelledError；若当前监督协程正在被外层取消则继续传播。
+            current_task = asyncio.current_task()
+            if not task.done() or (current_task is not None and current_task.cancelling()):
+                raise
         except Exception as error:
+            # 隔离执行任务清理阶段抛出的异常，防止覆盖外层故障或击穿 TaskGroup。
             logger.error(
                 "run_execution_cleanup_failed run_id=%s exception_type=%s",
                 lease.run.id,

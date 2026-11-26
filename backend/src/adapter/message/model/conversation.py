@@ -14,9 +14,10 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base, json_column_type
+from adapter.base import Base
 
 
 class ConversationMessageModel(Base):
@@ -84,7 +85,7 @@ class ConversationMessageModel(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    parts: Mapped[list[dict[str, object]]] = mapped_column(json_column_type(), nullable=False)
+    parts: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False)
     reply_to_message_id: Mapped[str | None] = mapped_column(
         ForeignKey("conversation_messages.id", ondelete="SET NULL"),
         nullable=True,
@@ -100,7 +101,7 @@ class ConversationMessageModel(Base):
     )
     metadata_json: Mapped[dict[str, object]] = mapped_column(
         "metadata",
-        json_column_type(),
+        JSONB,
         nullable=False,
         default=dict,
     )

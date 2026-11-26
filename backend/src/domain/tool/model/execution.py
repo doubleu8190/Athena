@@ -187,18 +187,8 @@ class InitializeRunToolsCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class ReserveLlmRequestCommand:
-    """Atomically consume one Run-level model request slot."""
-
-    run_id: str
-    worker_id: str
-    execution_epoch: int
-    maximum_count: int = MAX_LLM_REQUESTS_PER_RUN
-
-
-@dataclass(frozen=True, slots=True)
 class FinishToolCallCommand:
-    """Persist one idempotent result, optionally terminating the whole Run."""
+    """Persist one tool call result, artifacts, delivery message, and skill audit atomically."""
 
     run_id: str
     worker_id: str
@@ -210,8 +200,6 @@ class FinishToolCallCommand:
     artifacts: tuple[PendingSessionFile, ...] = ()
     delivery_message: ConversationMessageDraft | None = None
     skill_execution_completion: SkillExecutionCompletion | None = None
-    terminate_error_code: str | None = None
-    defer_terminal_convergence: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +228,7 @@ class BeginToolCallBatchCommand:
     calls: tuple[BeginToolCallBatchItem, ...]
     requested_at: datetime
     round: int = 0
+    llm_request_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,18 +267,6 @@ class AdmitToolCallCommand:
     execution_epoch: int
     record_id: str
     admitted_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class ConvergeToolBatchCommand:
-    """Cancel undispatched calls and fail a Run after batch settlement."""
-
-    run_id: str
-    worker_id: str
-    execution_epoch: int
-    call_message_id: str
-    safe_error_code: str
-    failed_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,15 +439,6 @@ class ToolExecutionResult:
     skill_execution_completion: SkillExecutionCompletion | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ToolRetryContext:
-    """Safe source-Run context for a user-confirmed whole-task retry."""
-
-    run_id: str
-    tool_name: str
-    safe_error_code: str
-
-
 def persisted_status_for_outcome(outcome: ToolOutcome) -> ToolCallStatus:
     """Map a business outcome to its persisted lifecycle state."""
     if outcome.status is ToolOutcomeStatus.OK:
@@ -542,7 +510,6 @@ __all__ = [
     "BeginToolCallBatchCommand",
     "BeginToolCallBatchItem",
     "BeginToolCallBatchResult",
-    "ConvergeToolBatchCommand",
     "DecideToolApprovalCommand",
     "FinishToolCallCommand",
     "FormattedToolArgument",
@@ -553,7 +520,6 @@ __all__ = [
     "MAX_TOOL_ARGUMENT_BYTES",
     "MAX_TOOL_CALL_ID_LENGTH",
     "MAX_TOOL_RESULT_BYTES",
-    "ReserveLlmRequestCommand",
     "PendingToolApproval",
     "RunToolCallDetails",
     "RunToolCallPage",
@@ -568,7 +534,6 @@ __all__ = [
     "ToolKind",
     "ToolOutcome",
     "ToolOutcomeStatus",
-    "ToolRetryContext",
     "bounded_outcome",
     "format_argument_value",
     "format_tool_arguments",

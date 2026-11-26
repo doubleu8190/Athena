@@ -18,13 +18,12 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from auth_support import AuthTestClient, make_auth_service
 from fastapi.testclient import TestClient
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import event
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import UserModel
-from adapter.models import Base
 from adapter.preference import SqlAlchemyPreferenceRepository
 from app.preference import PreferenceService
 from domain.preference import (
@@ -167,15 +166,12 @@ def _incrementing_id_factory() -> Any:
     return factory
 
 
-async def _make_sqlite_repository() -> tuple[
+async def _make_pg_repository() -> tuple[
     Any,
     async_sessionmaker[AsyncSession],
     SqlAlchemyPreferenceRepository,
 ]:
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
     return engine, session_factory, SqlAlchemyPreferenceRepository(session_factory)
 
 
@@ -282,7 +278,7 @@ def test_sqlalchemy_repository_profile_crud_and_context_toggle() -> None:
     """仓储应支持默认空偏好读取、upsert 更新及按开关控制上下文返回。"""
 
     async def scenario() -> None:
-        engine, session_factory, repo = await _make_sqlite_repository()
+        engine, session_factory, repo = await _make_pg_repository()
         try:
             await _seed_user(session_factory, "user_a")
             clock = MutableClock()
@@ -355,7 +351,7 @@ def test_sqlalchemy_repository_enforces_50_limit_and_locks_user_row_for_update()
     """新增显式记忆必须在事务内对 users 表执行 FOR UPDATE 行锁，并严守 50 条上限。"""
 
     async def scenario() -> None:
-        engine, session_factory, repo = await _make_sqlite_repository()
+        engine, session_factory, repo = await _make_pg_repository()
         recorded_pg_sql: list[str] = []
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
@@ -439,7 +435,7 @@ def test_sqlalchemy_repository_ordering_and_cross_user_isolation() -> None:
     """记忆列表必须按 updated_at DESC, id DESC 排序，且跨用户改删均按不存在拒绝。"""
 
     async def scenario() -> None:
-        engine, session_factory, repo = await _make_sqlite_repository()
+        engine, session_factory, repo = await _make_pg_repository()
         try:
             await _seed_user(session_factory, "user_a")
             await _seed_user(session_factory, "user_b")

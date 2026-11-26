@@ -36,7 +36,7 @@ def test_run_redis_pubsub_validates_and_delivers_typed_events() -> None:
                 assert isinstance(received, RunTextDeltaEvent)
                 assert received.run_id == run_id
                 assert received.execution_epoch == 4
-                assert received.stream_sequence == 1
+                assert received.stream_sequence == 0
                 assert received.payload.text == "redis delivery"
                 assert received.payload.round == 3
 

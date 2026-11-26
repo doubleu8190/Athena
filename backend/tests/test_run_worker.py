@@ -32,7 +32,6 @@ from domain.llm.profile_ports import ModelProfileRepository
 from domain.run.model import (
     FailRunCommand,
     Run,
-    RunContextSafetyCommitError,
     RunLease,
     RunLeaseState,
     RunStatus,
@@ -149,6 +148,7 @@ class _CleanupRepository:
 class _SlowCleanupExecutor:
     def __init__(self) -> None:
         self.started = asyncio.Event()
+        self.cancel_received = asyncio.Event()
         self.cleanup_release = asyncio.Event()
 
     async def execute(self, lease: RunLease) -> None:
@@ -156,6 +156,7 @@ class _SlowCleanupExecutor:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
+            self.cancel_received.set()
             await self.cleanup_release.wait()
             raise
 
@@ -254,49 +255,6 @@ def test_worker_continues_claiming_after_one_execution_task_raises() -> None:
     asyncio.run(scenario())
 
 
-def test_worker_finalize_preserves_running_run_after_context_safety_commit_error() -> None:
-    """专用安全收尾异常不能触发 Worker 的无报告 generic failed 兜底。"""
-
-    async def scenario() -> None:
-        lease = _lease()
-
-        class Repository:
-            def __init__(self) -> None:
-                self.fail_calls = 0
-
-            async def get(self, *args: object, **kwargs: object) -> Run:
-                return lease.run
-
-            async def fail(self, command: FailRunCommand) -> Run:
-                self.fail_calls += 1
-                return replace(lease.run, status=RunStatus.FAILED)
-
-        repository = Repository()
-        worker = RunWorker(
-            cast(RunRepository, repository),
-            cast(_RunExecutor, _FinishedExecutor()),
-            RunWorkerConfig(
-                concurrency=1,
-                lease_seconds=3,
-                heartbeat_seconds=1,
-                execution_seconds=30,
-                cancel_poll_seconds=0.05,
-                queue_poll_seconds=0.05,
-                reclaim_seconds=5,
-            ),
-        )
-
-        async def fail_with_context_safety_commit_error() -> None:
-            raise RunContextSafetyCommitError("msg-safety-report", "commit_failed")
-
-        execution = asyncio.create_task(fail_with_context_safety_commit_error())
-        await worker._finalize_execution(lease, execution)
-
-        assert repository.fail_calls == 0
-
-    asyncio.run(scenario())
-
-
 def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
     """usage 记账失租不能把原始取消改写为普通执行错误。"""
 
@@ -305,18 +263,8 @@ def test_executor_preserves_cancellation_when_usage_write_is_rejected() -> None:
         usage_attempted = asyncio.Event()
 
         class Repository:
-            def __init__(self) -> None:
-                self.llm_count = 0
-
             async def initialize_tools(self, command: Any) -> Any:
                 return command.snapshot
-
-            async def reserve_llm_request(self, command: object) -> int:
-                self.llm_count += 1
-                return self.llm_count
-
-            async def list_retry_context(self, *_args: object) -> tuple[object, ...]:
-                return ()
 
             async def get_resumable_tool_batch(self, *_args: object) -> None:
                 return None
@@ -403,18 +351,8 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
         failed = asyncio.Event()
 
         class Repository:
-            def __init__(self) -> None:
-                self.llm_count = 0
-
             async def initialize_tools(self, command: Any) -> Any:
                 return command.snapshot
-
-            async def reserve_llm_request(self, command: object) -> int:
-                self.llm_count += 1
-                return self.llm_count
-
-            async def list_retry_context(self, *_args: object) -> tuple[object, ...]:
-                return ()
 
             async def get_resumable_tool_batch(self, *_args: object) -> None:
                 return None
@@ -496,8 +434,8 @@ def test_executor_deadline_cleanup_survives_unwritable_usage_ledger() -> None:
     asyncio.run(scenario())
 
 
-def test_worker_renews_lease_until_slow_cancel_cleanup_finishes() -> None:
-    """取消流清理期间持续续租，直到 Executor 关闭后才落 cancelled。"""
+def test_worker_waits_for_cancel_cleanup_without_renewing_lease() -> None:
+    """取消清理阶段限时等待 Executor 退出而不启动续租循环，清理结束后再落 cancelled。"""
 
     async def scenario() -> None:
         repository = _CleanupRepository()
@@ -518,14 +456,51 @@ def test_worker_renews_lease_until_slow_cancel_cleanup_finishes() -> None:
         worker_task = asyncio.create_task(worker.run())
         await executor.started.wait()
         try:
-            await asyncio.wait_for(repository.fourth_heartbeat.wait(), timeout=4.5)
+            await asyncio.wait_for(executor.cancel_received.wait(), timeout=2.0)
+            await asyncio.sleep(0.15)
             assert not repository.settled
+            assert repository.heartbeats == 0
         finally:
             executor.cleanup_release.set()
             await worker.stop()
             await asyncio.wait_for(worker_task, timeout=2)
-        assert repository.heartbeats >= 2
+        assert repository.heartbeats == 0
         assert repository.settled
+
+    asyncio.run(scenario())
+
+
+def test_worker_cancel_and_join_bounds_stuck_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """清理协程长时间不返回时按限时退出并告警，不无限阻塞 Worker 槽位。"""
+    import app.run.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_CANCEL_CLEANUP_TIMEOUT_SECONDS", 0.05)
+
+    async def scenario() -> None:
+        release = asyncio.Event()
+
+        async def stuck_cleanup() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+                raise
+
+        worker = RunWorker(
+            cast(RunRepository, _CleanupRepository()),
+            cast(RunExecutor, _FinishedExecutor()),
+            RunWorkerConfig(),
+        )
+        task = asyncio.create_task(stuck_cleanup())
+        await asyncio.sleep(0)
+        with caplog.at_level("WARNING"):
+            await asyncio.wait_for(worker._cancel_and_join(task, _lease()), timeout=1.0)
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        assert any("run_execution_cleanup_timed_out" in record.message for record in caplog.records)
 
     asyncio.run(scenario())
 
@@ -708,18 +683,8 @@ def test_executor_does_not_start_provider_after_context_work_deadline() -> None:
         provider_called = False
 
         class Repository:
-            def __init__(self) -> None:
-                self.llm_count = 0
-
             async def initialize_tools(self, command: Any) -> Any:
                 return command.snapshot
-
-            async def reserve_llm_request(self, command: object) -> int:
-                self.llm_count += 1
-                return self.llm_count
-
-            async def list_retry_context(self, *_args: object) -> tuple[object, ...]:
-                return ()
 
             async def list_context_messages(self, *_args: object) -> tuple[object, ...]:
                 return ()
@@ -1226,21 +1191,20 @@ def test_worker_drive_lease_prefers_lightweight_get_lease_state_for_poll_branche
 
 def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces_scope() -> None:
     """SqlAlchemyRunRepository.get_lease_state 只投影三标量列，并严格隔离 owner 与软删会话。"""
+    from pg_unit_harness import create_pg_unit_db
     from sqlalchemy import event
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from adapter.auth.model import UserModel
     from adapter.llm.model.profile import ModelProfileVersionModel
     from adapter.message.model import ConversationMessageModel
     from adapter.message.repository import SqlAlchemyMessageRepository
-    from adapter.models import Base
     from adapter.run.model import RunModel
     from adapter.run.repository import SqlAlchemyRunRepository
     from adapter.session.model import SessionModel
     from adapter.system_prompt.model import SystemPromptVersionModel
 
     async def scenario() -> None:
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        engine, factory = await create_pg_unit_db()
         executed_sql: list[str] = []
 
         @event.listens_for(engine.sync_engine, "before_cursor_execute")
@@ -1255,9 +1219,6 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
             executed_sql.append(statement)
 
         try:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            factory = async_sessionmaker(engine, expire_on_commit=False)
             now = datetime.now(UTC)
             async with factory() as session:
                 async with session.begin():
@@ -1310,6 +1271,7 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
                             ),
                         ]
                     )
+                    await session.flush()
                     session.add(
                         SessionModel(
                             id="ses_lease",
@@ -1386,5 +1348,358 @@ def test_sqlalchemy_run_repository_get_lease_state_projects_scalars_and_enforces
             assert await repo.get_lease_state("ses_lease", "usr_lease", "run_lease_1") is None
         finally:
             await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def _runtime_profile(profile_id: str) -> RuntimeModelProfile:
+    return RuntimeModelProfile(
+        version=ModelProfileVersion(
+            id=profile_id,
+            name="worker-budget-test",
+            protocol="chat_completions",
+            base_url="https://llm.example/v1",
+            model="test",
+            has_api_key=True,
+            context_window_tokens=8192,
+            tokenizer_encoding="o200k_base",
+            supports_stream=True,
+            supports_tools=True,
+            max_output_tokens=512,
+            request_timeout_seconds=30,
+            execution_timeout_seconds=30,
+            max_concurrency=1,
+            temperature=None,
+            enabled=True,
+            created_at=datetime.now(UTC),
+        ),
+        api_key="test-secret",
+    )
+
+
+def _user_trigger_message(run: Run) -> Any:
+    from domain.message import (
+        ConversationMessage,
+        ConversationRole,
+        MessageMetadata,
+        MessageStatus,
+        TextPart,
+    )
+
+    return ConversationMessage(
+        id=run.trigger_message_id,
+        session_id=run.session_id,
+        role=ConversationRole.USER,
+        status=MessageStatus.COMPLETED,
+        sequence=1,
+        parts=(TextPart(text="hello"),),
+        reply_to_message_id=None,
+        run_id=None,
+        client_message_id=None,
+        created_at=run.created_at,
+        completed_at=run.created_at,
+        metadata=MessageMetadata(),
+    )
+
+
+def test_worker_cancelling_in_flight_llm_forwards_llm_request_count_to_settle_cancelled() -> None:
+    """在途 LLM 流式请求被取消导致 record_usage 返回 None 时，settle_cancelled 仍须落库请求计数。"""
+
+    async def scenario() -> None:
+        base_lease = _lease()
+        lease = replace(
+            base_lease,
+            run=replace(base_lease.run, llm_request_count=2),
+        )
+        stream_started = asyncio.Event()
+
+        class Repository:
+            def __init__(self) -> None:
+                self.status = RunStatus.RUNNING
+                self.settled_counts: list[int | None] = []
+
+            async def initialize_tools(self, command: Any) -> Any:
+                return command.snapshot
+
+            async def is_live_execution(self, *_args: object) -> bool:
+                return self.status is RunStatus.RUNNING
+
+            async def get_resumable_tool_batch(self, *_args: object) -> None:
+                return None
+
+            async def list_context_messages(self, *_args: object) -> tuple[object, ...]:
+                return (_user_trigger_message(lease.run),)
+
+            async def list_successfully_loaded_skill_ids(self, *_args: object) -> tuple[str, ...]:
+                return ()
+
+            async def record_usage(self, *_args: object, **_kwargs: object) -> None:
+                # 模拟生产仓储在 Run 已进入 CANCELLING 时拒绝写入 usage 并返回 None。
+                return None
+
+            async def heartbeat(self, *_args: object, **_kwargs: object) -> Run:
+                return replace(lease.run, status=self.status)
+
+            async def get_lease_state(self, *_args: object) -> RunLeaseState:
+                return RunLeaseState(
+                    status=self.status,
+                    worker_id=lease.run.worker_id,
+                    execution_epoch=lease.run.execution_epoch,
+                )
+
+            async def settle_cancelled(
+                self,
+                run_id: str,
+                worker_id: str,
+                execution_epoch: int,
+                settled_at: datetime,
+                *,
+                llm_request_count: int | None = None,
+            ) -> Run:
+                del run_id, worker_id, execution_epoch, settled_at
+                self.settled_counts.append(llm_request_count)
+                self.status = RunStatus.CANCELLED
+                return replace(
+                    lease.run,
+                    status=RunStatus.CANCELLED,
+                    llm_request_count=llm_request_count or lease.run.llm_request_count,
+                )
+
+        class Profiles:
+            async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
+                return _runtime_profile(profile_id)
+
+        class BlockingProvider:
+            @asynccontextmanager
+            async def stream(
+                self, _runtime: RuntimeModelProfile, _request: LlmRequest
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
+                async def _events() -> AsyncIterator[LlmStreamEvent]:
+                    stream_started.set()
+                    await asyncio.Event().wait()
+                    if False:
+                        yield TextDelta(0, 0, "")
+
+                yield _events()
+
+        repository = Repository()
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, Profiles()),
+            cast(LlmStreamProvider, BlockingProvider()),
+        )
+        worker = RunWorker(
+            cast(RunRepository, repository),
+            executor,
+            RunWorkerConfig(
+                concurrency=1,
+                lease_seconds=3,
+                heartbeat_seconds=1,
+                execution_seconds=30,
+                cancel_poll_seconds=0.01,
+                queue_poll_seconds=0.05,
+                reclaim_seconds=5,
+            ),
+        )
+
+        drive_task = asyncio.create_task(worker._drive_lease(lease))
+        await asyncio.wait_for(stream_started.wait(), timeout=2.0)
+        # 在途 LLM 已预占 1 次预算（2 -> 3），此时外部发起取消。
+        repository.status = RunStatus.CANCELLING
+        await asyncio.wait_for(drive_task, timeout=2.0)
+
+        assert repository.settled_counts == [3]
+        assert executor.pop_llm_request_count(lease.run.id, lease.run.execution_epoch) is None
+
+    asyncio.run(scenario())
+
+
+def test_worker_timeout_forwards_llm_request_count_to_fail_command() -> None:
+    """Worker 侧执行超时中止在途 LLM 时，FailRunCommand 须携带已预占的 llm_request_count。"""
+
+    async def scenario() -> None:
+        base_now = datetime.now(UTC)
+        deadline = base_now + timedelta(seconds=5)
+        base_lease = _lease()
+        lease = replace(
+            base_lease,
+            run=replace(
+                base_lease.run,
+                llm_request_count=1,
+                execution_deadline_at=deadline,
+            ),
+            execution_deadline_at=deadline,
+        )
+        stream_started = asyncio.Event()
+
+        class Repository:
+            def __init__(self) -> None:
+                self.fail_commands: list[FailRunCommand] = []
+
+            async def initialize_tools(self, command: Any) -> Any:
+                return command.snapshot
+
+            async def is_live_execution(self, *_args: object) -> bool:
+                return True
+
+            async def get_resumable_tool_batch(self, *_args: object) -> None:
+                return None
+
+            async def list_context_messages(self, *_args: object) -> tuple[object, ...]:
+                return (_user_trigger_message(lease.run),)
+
+            async def list_successfully_loaded_skill_ids(self, *_args: object) -> tuple[str, ...]:
+                return ()
+
+            async def record_usage(self, *_args: object, **_kwargs: object) -> None:
+                # 模拟超过 execution_deadline_at 后 record_usage 返回 None。
+                return None
+
+            async def heartbeat(self, *_args: object, **_kwargs: object) -> Run:
+                return lease.run
+
+            async def get_lease_state(self, *_args: object) -> RunLeaseState:
+                return RunLeaseState(
+                    status=RunStatus.RUNNING,
+                    worker_id=lease.run.worker_id,
+                    execution_epoch=lease.run.execution_epoch,
+                )
+
+            async def get(self, *_args: object) -> Run:
+                return replace(lease.run, status=RunStatus.FAILED)
+
+            async def fail(self, command: FailRunCommand) -> Run:
+                self.fail_commands.append(command)
+                return replace(
+                    lease.run,
+                    status=RunStatus.FAILED,
+                    safe_error_code=command.safe_error_code,
+                    llm_request_count=command.llm_request_count or lease.run.llm_request_count,
+                )
+
+        class Profiles:
+            async def get_runtime(self, profile_id: str) -> RuntimeModelProfile:
+                return _runtime_profile(profile_id)
+
+        class BlockingProvider:
+            @asynccontextmanager
+            async def stream(
+                self, _runtime: RuntimeModelProfile, _request: LlmRequest
+            ) -> AsyncGenerator[AsyncIterator[LlmStreamEvent], None]:
+                async def _events() -> AsyncIterator[LlmStreamEvent]:
+                    stream_started.set()
+                    await asyncio.Event().wait()
+                    if False:
+                        yield TextDelta(0, 0, "")
+
+                yield _events()
+
+        repository = Repository()
+        # Executor 看到的剩余时间充裕，Worker 侧仅余 80ms，确保稳定命中 Worker 超时分支。
+        executor = RunExecutor(
+            cast(RunRepository, repository),
+            cast(ModelProfileRepository, Profiles()),
+            cast(LlmStreamProvider, BlockingProvider()),
+            clock=lambda: base_now,
+        )
+        worker = RunWorker(
+            cast(RunRepository, repository),
+            executor,
+            RunWorkerConfig(
+                concurrency=1,
+                lease_seconds=3,
+                heartbeat_seconds=1,
+                execution_seconds=30,
+                cancel_poll_seconds=0.01,
+                queue_poll_seconds=0.05,
+                reclaim_seconds=5,
+            ),
+            clock=lambda: base_now + timedelta(seconds=4.92),
+        )
+
+        drive_task = asyncio.create_task(worker._drive_lease(lease))
+        await asyncio.wait_for(stream_started.wait(), timeout=2.0)
+        await asyncio.wait_for(drive_task, timeout=2.0)
+
+        assert len(repository.fail_commands) == 1
+        assert repository.fail_commands[0].safe_error_code == "execution_timeout"
+        assert repository.fail_commands[0].llm_request_count == 2
+        assert executor.pop_llm_request_count(lease.run.id, lease.run.execution_epoch) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("current_status", "expected_count"),
+    [
+        (RunStatus.RUNNING, 4),
+        (RunStatus.CANCELLING, 5),
+    ],
+)
+def test_worker_finalize_execution_forwards_llm_request_count(
+    current_status: RunStatus,
+    expected_count: int,
+) -> None:
+    """_finalize_execution 兜底失败与取消竞态均须透传并回收执行器中的在途请求计数。"""
+    from app.run.budget import RunLlmBudget
+
+    async def scenario() -> None:
+        lease = _lease()
+        fail_commands: list[FailRunCommand] = []
+        settled_counts: list[int | None] = []
+
+        class Repository:
+            async def get(self, *_args: object, **_kwargs: object) -> Run:
+                return replace(lease.run, status=current_status, event_sequence=2)
+
+            async def fail(self, command: FailRunCommand) -> Run:
+                fail_commands.append(command)
+                return replace(lease.run, status=RunStatus.FAILED, event_sequence=3)
+
+            async def settle_cancelled(
+                self,
+                run_id: str,
+                worker_id: str,
+                execution_epoch: int,
+                settled_at: datetime,
+                *,
+                llm_request_count: int | None = None,
+            ) -> Run:
+                del run_id, worker_id, execution_epoch, settled_at
+                settled_counts.append(llm_request_count)
+                return replace(lease.run, status=RunStatus.CANCELLED, event_sequence=3)
+
+        executor = RunExecutor(
+            cast(RunRepository, Repository()),
+            cast(ModelProfileRepository, object()),
+            cast(LlmStreamProvider, object()),
+        )
+        executor._register_active_budget(
+            lease.run,
+            RunLlmBudget(used=expected_count, maximum=40),
+        )
+        worker = RunWorker(
+            cast(RunRepository, Repository()),
+            executor,
+            RunWorkerConfig(),
+        )
+
+        async def finished_without_terminal() -> None:
+            return None
+
+        task = asyncio.create_task(finished_without_terminal())
+        await task
+        await worker._finalize_execution(lease, task)
+
+        if current_status is RunStatus.RUNNING:
+            assert len(fail_commands) == 1
+            assert fail_commands[0].safe_error_code == "execution_failed"
+            assert fail_commands[0].llm_request_count == expected_count
+            assert settled_counts == []
+        else:
+            assert settled_counts == [expected_count]
+            assert fail_commands == []
+        # 收敛后应已弹出，避免残留引用。
+        assert executor.pop_llm_request_count(lease.run.id, lease.run.execution_epoch) is None
 
     asyncio.run(scenario())

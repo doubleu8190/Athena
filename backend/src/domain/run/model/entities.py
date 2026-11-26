@@ -96,11 +96,6 @@ class RunUsage(BaseModel):
     attempts: tuple[RunAttemptUsage, ...] = ()
     answer_tokens: int | None = Field(default=None, ge=0)
     compression_tokens: int | None = Field(default=None, ge=0)
-    legacy_input_tokens: int | None = Field(default=None, ge=0)
-    legacy_output_tokens: int | None = Field(default=None, ge=0)
-    legacy_total_tokens: int | None = Field(default=None, ge=0)
-    legacy_answer_tokens: int | None = Field(default=None, ge=0)
-    legacy_complete: bool = False
 
 
 class RunInputFiles(BaseModel):
@@ -167,6 +162,7 @@ class RecordRunUsageCommand:
     batch_index: int = 0
     model_profile_id: str | None = None
     duration_ms: int | None = None
+    llm_request_count: int | None = None
 
 
 class _RunEventPayload(BaseModel):
@@ -521,6 +517,7 @@ class RequestRunInputCommand:
     execution_messages: tuple[ExecutionMessageDraft, ...]
     usage: RunUsage
     created_at: datetime
+    llm_request_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,6 +530,7 @@ class FinishRunCommand:
     reply_message: ConversationMessageDraft
     usage: RunUsage
     finished_at: datetime
+    llm_request_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,6 +545,7 @@ class FailRunCommand:
     report_message: ConversationMessageDraft | None = None
     usage: RunUsage = field(default_factory=RunUsage)
     context_stop_reason: ContextStopReason | None = None
+    llm_request_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,6 +667,7 @@ class BeginSubagentBatchCommand:
     items: tuple[BeginSubagentBatchItem, ...]
     requested_at: datetime
     round: int = 0
+    llm_request_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

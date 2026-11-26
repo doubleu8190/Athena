@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import AsyncExitStack
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from typing import Literal
 
 from domain.auth import Authenticator
 from domain.run.model import (
-    RunCompletedPayload,
     RunEvent,
     RunHeartbeatEvent,
     RunHeartbeatPayload,
@@ -37,8 +36,7 @@ logger = logging.getLogger(__name__)
 
 STREAM_HEARTBEAT_SECONDS = 15.0
 DATABASE_RECONCILE_SECONDS = 5.0
-AUTH_RECHECK_SECONDS = 5.0
-REDIS_RECONNECT_SECONDS = 2.0
+AUTH_RECHECK_SECONDS = 15.0
 
 # 收到终态或人工等待态权威快照后立即关闭 SSE 连接，不拉长连接等待异步收尾。
 _TERMINAL_OR_WAITING_STATUSES = frozenset(
@@ -90,14 +88,12 @@ class RunStreamService:
         *,
         last_event_id: str | None = None,
     ) -> AsyncGenerator[RunStreamEvent, None]:
-        """先订阅再读一致快照，随后按权威 epoch 与连续进度直传并辅以周期对账。"""
-        exit_stack = AsyncExitStack()
+        """先订阅再读一致快照，随后转发实时增量并辅以周期鉴权复核与 DB 权威对账。"""
         loop = asyncio.get_running_loop()
-        next_reconnect = 0.0
         last_auth_check = last_reconcile = last_heartbeat = loop.time()
         output_sequence = 0
-        transport_cursor: int | None = None
-        deltas_interrupted = False
+        sub_cm: AbstractAsyncContextManager[RunEventSubscription] | None = None
+        subscription: RunEventSubscription | None = None
 
         def next_seq() -> int:
             nonlocal output_sequence
@@ -105,14 +101,30 @@ class RunStreamService:
             output_sequence += 1
             return seq
 
+        async def close_subscription() -> None:
+            nonlocal sub_cm, subscription
+            cm = sub_cm
+            sub_cm = None
+            subscription = None
+            if cm is not None:
+                await cm.__aexit__(None, None, None)
+
         try:
-            subscription = await self._connect(exit_stack, run_id)
+            if self._transport is not None:
+                try:
+                    # 仅在 __aenter__ 成功后登记 sub_cm，防止建连取消时误调未进入 CM 的 __aexit__。
+                    candidate_cm = self._transport.subscribe(run_id)
+                    subscription = await candidate_cm.__aenter__()
+                    sub_cm = candidate_cm
+                except (RunEventTransportError, TimeoutError) as error:
+                    logger.warning(
+                        "run_stream_connect_failed exception_type=%s", type(error).__name__
+                    )
+                    subscription = None
+
             if subscription is None and self._transport is not None:
-                deltas_interrupted = True
-                next_reconnect = loop.time() + REDIS_RECONNECT_SECONDS
                 yield self._interrupted(run_id, 0, next_seq(), "redis_unavailable")
             elif last_event_id:
-                deltas_interrupted = True
                 yield self._interrupted(run_id, 0, next_seq(), "redis_reconnected")
 
             snapshot = await self._repository.get_stream_snapshot(session_id, owner_id, run_id)
@@ -134,6 +146,7 @@ class RunStreamService:
 
             while True:
                 now = loop.time()
+                # 周期复核登录会话与 Run 可见性，防止注销或软删后长连接继续消费事件。
                 if now - last_auth_check >= AUTH_RECHECK_SECONDS:
                     auth = await self._authenticator.authenticate(token)
                     if auth is None or auth.user.id != owner_id:
@@ -142,49 +155,32 @@ class RunStreamService:
                         return
                     last_auth_check = now
 
-                if subscription is None and self._transport is not None and now >= next_reconnect:
-                    subscription = await self._connect(exit_stack, run_id)
-                    next_reconnect = now + REDIS_RECONNECT_SECONDS
-                    if subscription is not None:
-                        deltas_interrupted = True
-                        yield self._interrupted(
-                            run_id, current_epoch, next_seq(), "redis_reconnected"
-                        )
-                        last_reconcile = 0.0
-
+                incoming: RunStreamEvent | None = None
                 if subscription is not None:
                     try:
                         incoming = await subscription.get(timeout=0.5)
                     except RunEventTransportError as error:
-                        # 传输故障只影响实时性：断开订阅并发送中断标记，之后靠数据库对账补齐。
+                        # Redis 故障仅降级实时通道：关闭订阅并发送中断提示，后续靠周期 DB 对账兜底。
                         logger.warning(
                             "run_stream_subscriber_failed exception_type=%s", type(error).__name__
                         )
-                        await exit_stack.aclose()
-                        exit_stack = AsyncExitStack()
-                        subscription = None
-                        deltas_interrupted = True
-                        next_reconnect = now + REDIS_RECONNECT_SECONDS
+                        await close_subscription()
                         yield self._interrupted(
                             run_id, current_epoch, next_seq(), "redis_unavailable"
                         )
-                        incoming = None
                 else:
                     await asyncio.sleep(0.25)
-                    incoming = None
 
                 if incoming is not None and incoming.run_id == run_id:
-                    # 第一步：按权威 execution_epoch 过滤实时增量与中断，不再以 1s TTL 高频查库；
-                    # 仅观察到更高执行代次跃升时向数据库复核一次存活状态。
-                    should_handle = isinstance(incoming, RunPersistedEvent)
-                    if isinstance(incoming, (RunInterruptedEvent, RunTextDeltaEvent)):
-                        should_handle = (
+                    if isinstance(incoming, RunTextDeltaEvent):
+                        # 按权威 execution_epoch 过滤文本增量；观察到更高代次跃升时向 DB 复核一次。
+                        live = (
                             incoming.execution_epoch == current_epoch
                             and current_epoch > 0
                             and last_snapshot.run.status is not RunStatus.CANCELLING
                         )
                         if (
-                            not should_handle
+                            not live
                             and incoming.execution_epoch > current_epoch
                             and incoming.execution_epoch > 0
                             and await self._repository.is_live_execution(
@@ -192,30 +188,16 @@ class RunStreamService:
                             )
                         ):
                             current_epoch = incoming.execution_epoch
-                            transport_cursor = None
-                            deltas_interrupted = False
-                            should_handle = True
-
-                    # 第二步：对同代次到达的事件统一检测 Pub/Sub 序号缺口。
-                    if should_handle and incoming.execution_epoch == current_epoch:
+                            live = True
+                        if live:
+                            yield incoming.model_copy(update={"stream_sequence": next_seq()})
+                    elif isinstance(incoming, RunInterruptedEvent):
                         if (
-                            transport_cursor is not None
-                            and incoming.stream_sequence > transport_cursor + 1
+                            incoming.execution_epoch == current_epoch
+                            and current_epoch > 0
+                            and last_snapshot.run.status is not RunStatus.CANCELLING
                         ):
-                            deltas_interrupted = True
-                            yield self._interrupted(run_id, current_epoch, next_seq(), "stream_gap")
-                        transport_cursor = incoming.stream_sequence
-
-                    # 第三步：分发中断、文本增量或持久化事件。
-                    if should_handle and isinstance(incoming, RunInterruptedEvent):
-                        deltas_interrupted = True
-                        yield incoming.model_copy(update={"stream_sequence": next_seq()})
-                    elif (
-                        should_handle
-                        and isinstance(incoming, RunTextDeltaEvent)
-                        and not deltas_interrupted
-                    ):
-                        yield incoming.model_copy(update={"stream_sequence": next_seq()})
+                            yield incoming.model_copy(update={"stream_sequence": next_seq()})
                     elif isinstance(incoming, RunPersistedEvent):
                         persisted = incoming.payload.event
                         is_child = persisted.run_id != run_id
@@ -245,6 +227,7 @@ class RunStreamService:
                     )
                     if snapshot is None:
                         return
+                    # 严格先下发已提交的持久化 run_event（含终态事件），再紧随自包含权威 snapshot。
                     for event in await self._events_through(
                         session_id, owner_id, run_id, event_cursor, snapshot.run.event_sequence
                     ):
@@ -254,11 +237,7 @@ class RunStreamService:
                         event_cursor = event.sequence
                     if self._snapshot_changed(last_snapshot, snapshot, seen_message_ids):
                         seen_message_ids.update(message.id for message in snapshot.messages)
-                        # 状态或消息投影变化时先推送权威快照，再更新本地状态。
                         yield self._snapshot_event(run_id, next_seq(), snapshot)
-                        if snapshot.run.execution_epoch != current_epoch:
-                            transport_cursor = None
-                            deltas_interrupted = False
                         current_epoch = snapshot.run.execution_epoch
                         last_snapshot = snapshot
                     last_reconcile = now
@@ -274,18 +253,7 @@ class RunStreamService:
                     )
                     last_heartbeat = now
         finally:
-            await exit_stack.aclose()
-
-    async def _connect(
-        self, exit_stack: AsyncExitStack, run_id: str
-    ) -> RunEventSubscription | None:
-        if self._transport is None:
-            return None
-        try:
-            return await exit_stack.enter_async_context(self._transport.subscribe(run_id))
-        except (RunEventTransportError, TimeoutError) as error:
-            logger.warning("run_stream_connect_failed exception_type=%s", type(error).__name__)
-            return None
+            await close_subscription()
 
     async def _events_through(
         self,
@@ -333,21 +301,7 @@ class RunStreamService:
     def _snapshot_event(
         run_id: str, sequence: int, snapshot: RunStreamSnapshot
     ) -> RunSnapshotEvent:
-        """构造权威快照帧，并在 completed 态补齐对称的 assistant_message_id。"""
-        assistant_message_id = snapshot.assistant_message_id
-        if assistant_message_id is None and snapshot.run.status is RunStatus.COMPLETED:
-            assistant_message_id = next(
-                (
-                    event.payload.assistant_message_id
-                    for event in reversed(snapshot.events)
-                    if isinstance(event.payload, RunCompletedPayload)
-                ),
-                None,
-            ) or (
-                next((m.id for m in reversed(snapshot.messages) if m.role == "assistant"), None)
-                if snapshot.run.depth == 0
-                else None
-            )
+        """构造权威快照帧，直接透传仓储在同一事务内计算的 assistant_message_id。"""
         return RunSnapshotEvent(
             run_id=run_id,
             execution_epoch=snapshot.run.execution_epoch,
@@ -356,7 +310,7 @@ class RunStreamService:
                 status=snapshot.run.status,
                 event_sequence=snapshot.run.event_sequence,
                 report_message_id=snapshot.run.report_message_id,
-                assistant_message_id=assistant_message_id,
+                assistant_message_id=snapshot.assistant_message_id,
                 messages=snapshot.messages,
                 events=snapshot.events,
                 messages_complete=snapshot.messages_complete,
@@ -383,7 +337,7 @@ class RunStreamService:
         run_id: str,
         epoch: int,
         sequence: int,
-        reason: Literal["redis_reconnected", "redis_unavailable", "stream_gap"],
+        reason: Literal["redis_reconnected", "redis_unavailable"],
     ) -> RunInterruptedEvent:
         return RunInterruptedEvent(
             run_id=run_id,

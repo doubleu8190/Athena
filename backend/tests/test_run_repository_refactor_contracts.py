@@ -9,33 +9,28 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, event, func, literal
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 
 from adapter.auth.model import UserModel
+from adapter.llm.model import ModelProfileVersionModel
+from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository.message import SqlAlchemyMessageRepository
-from adapter.models import Base
-from adapter.run.model import RunModel
+from adapter.run.model import RunModel, RunToolCallModel
 from adapter.run.repository import _shared, context_events, lifecycle, tool_calls
 from adapter.run.repository.lifecycle import RunLifecycleMixin
 from adapter.run.repository.run import SqlAlchemyRunRepository
 from adapter.run.repository.tool_calls import RunToolCallsMixin
 from adapter.session.model import SessionModel
-from adapter.skill.model import SkillExecutionModel
+from adapter.system_prompt.model import SystemPromptVersionModel
 from domain.auth import UserRole, UserStatus
-from domain.file import PendingSessionFile
-from domain.run.model import RunStatus, RunUsage
+from domain.run.model import RecordRunUsageCommand, RunStatus, RunUsage
 from domain.run.ports import RunRepository
-from domain.skill import (
-    SkillExecutionArtifact,
-    SkillExecutionCompletion,
-    SkillExecutionStatus,
-)
 from domain.tool import (
+    AdmitToolCallCommand,
     InitializeRunToolsCommand,
-    ReserveLlmRequestCommand,
     RuntimeToolSnapshot,
+    ToolCallStatus,
 )
 
 
@@ -52,12 +47,15 @@ def test_settle_cancelled_contract_and_patch_removed() -> None:
     assert "worker_id" in params
     assert "execution_epoch" in params
     assert "settled_at" in params
+    assert "llm_request_count" in params
     assert "cancelled_at" not in params
 
     # 3. 严格契约类型验证
     domain_sig = inspect.signature(RunRepository.settle_cancelled)
-    for p in ("run_id", "worker_id", "execution_epoch", "settled_at"):
+    for p in ("run_id", "worker_id", "execution_epoch", "settled_at", "llm_request_count"):
         assert sig.parameters[p].name == domain_sig.parameters[p].name
+        assert sig.parameters[p].kind == domain_sig.parameters[p].kind
+        assert sig.parameters[p].default == domain_sig.parameters[p].default
 
 
 def test_message_repository_property_and_attribute() -> None:
@@ -76,9 +74,16 @@ def test_message_repository_property_and_attribute() -> None:
 
 def test_shared_and_lifecycle_method_signatures() -> None:
     """验证生命周期及共享辅助方法的形参和命名。"""
-    # _lock_default_profile_id 存在，旧命名不存在
-    assert hasattr(SqlAlchemyRunRepository, "_lock_default_profile_id")
+    # 模型配置已改为无锁读取与统一可用性校验，3 个旧 *_id 死封装已移除
+    assert hasattr(SqlAlchemyRunRepository, "_load_default_profile_row")
+    assert hasattr(SqlAlchemyRunRepository, "_validate_usable_profile")
+    assert hasattr(SqlAlchemyRunRepository, "_database_now")
     assert not hasattr(SqlAlchemyRunRepository, "_lock_default_profile")
+    assert not hasattr(SqlAlchemyRunRepository, "_lock_default_profile_id")
+    assert not hasattr(SqlAlchemyRunRepository, "_lock_selected_profile_id")
+    assert not hasattr(SqlAlchemyRunRepository, "_lock_retry_profile_id")
+    assert not hasattr(SqlAlchemyRunRepository, "_next_run_created_at")
+    assert not hasattr(SqlAlchemyRunRepository, "reserve_llm_request")
 
     # _validate_and_merge_input_file_ids 存在，旧命名不存在
     assert hasattr(SqlAlchemyRunRepository, "_validate_and_merge_input_file_ids")
@@ -101,10 +106,10 @@ def test_shared_and_lifecycle_method_signatures() -> None:
 
 
 def test_tool_calls_structure_and_dead_constants() -> None:
-    """验证 tool_calls 方法命名、双层事务重构、静态方法挂载及死常量清理。"""
-    # 验证双层事务消除套娃：finish_tool_call 直接接入 _finish_tool_call_in_session
+    """验证 tool_calls 方法命名、双层事务重构、深比对重放清理及死常量清理。"""
+    # 验证双层事务消除套娃：finish_tool_call 直接单层落库，无多余私有包装方法
     assert hasattr(RunToolCallsMixin, "finish_tool_call")
-    assert hasattr(RunToolCallsMixin, "_finish_tool_call_in_session")
+    assert not hasattr(RunToolCallsMixin, "_finish_tool_call_in_session")
     assert not hasattr(RunToolCallsMixin, "_finish_tool_call_transaction")
     assert not hasattr(RunToolCallsMixin, "_finish_tool_call_transaction_inner")
 
@@ -112,12 +117,13 @@ def test_tool_calls_structure_and_dead_constants() -> None:
     assert hasattr(RunToolCallsMixin, "_validate_pending_artifacts")
     assert not hasattr(RunToolCallsMixin, "_validated_pending_artifacts")
 
-    # 验证 _skill_execution_row_matches 挂载为静态方法
-    assert hasattr(RunToolCallsMixin, "_skill_execution_row_matches")
-    assert isinstance(
-        inspect.getattr_static(RunToolCallsMixin, "_skill_execution_row_matches"),
-        staticmethod,
-    )
+    # 验证已删除深比对重放、converge_tool_batch 与死查询 list_retry_context
+    assert not hasattr(RunToolCallsMixin, "_skill_execution_row_matches")
+    assert not hasattr(RunToolCallsMixin, "_skill_completion_matches")
+    assert not hasattr(RunToolCallsMixin, "_delivery_message_matches")
+    assert not hasattr(RunToolCallsMixin, "_artifact_rows_match")
+    assert not hasattr(RunToolCallsMixin, "converge_tool_batch")
+    assert not hasattr(RunToolCallsMixin, "list_retry_context")
     assert not hasattr(_shared, "_skill_execution_row_matches")
 
     # 验证常量清理
@@ -143,107 +149,10 @@ def test_context_events_dead_constants() -> None:
     assert hasattr(context_events, "_STREAM_SNAPSHOT_MESSAGES")
 
 
-def test_skill_execution_row_matches_logic() -> None:
-    """验证 RunToolCallsMixin._skill_execution_row_matches 静态方法的比较逻辑。"""
-    now = datetime.now(UTC)
-    sha256_val = "a" * 64
-    completion = SkillExecutionCompletion(
-        execution_id="exec-1",
-        status=SkillExecutionStatus.SUCCEEDED,
-        log_object_key="logs/1.txt",
-        log_truncated=False,
-        log_error_code=None,
-        error_code=None,
-        cleanup_error_code=None,
-        finished_at=now,
-    )
-    artifact = PendingSessionFile(
-        id="file-1",
-        filename="report.pdf",
-        label="Report",
-        mime_type="application/pdf",
-        size_bytes=1024,
-        sha256=sha256_val,
-        object_key="files/report.pdf",
-        output_index=0,
-        created_at=now,
-    )
-    expected_artifact_json = [
-        SkillExecutionArtifact(
-            file_id="file-1",
-            filename="report.pdf",
-            label="Report",
-            mime_type="application/pdf",
-            size_bytes=1024,
-            sha256=sha256_val,
-            object_key="files/report.pdf",
-            output_index=0,
-        ).model_dump(mode="json")
-    ]
-
-    matching_row = SkillExecutionModel(
-        id="exec-1",
-        session_id="session-1",
-        run_id="run-1",
-        tool_call_record_id="tc-1",
-        skill_id="skill-1",
-        skill_version_id="ver-1",
-        script_path="main.py",
-        input_file_ids=[],
-        parameters_sha256="b" * 64,
-        python_version="3.12",
-        dependency_check=True,
-        status=SkillExecutionStatus.SUCCEEDED.value,
-        log_object_key="logs/1.txt",
-        log_truncated=False,
-        log_error_code=None,
-        error_code=None,
-        cleanup_error_code=None,
-        result_artifacts=expected_artifact_json,
-        created_at=now,
-        finished_at=now,
-    )
-
-    # 匹配测试
-    assert RunToolCallsMixin._skill_execution_row_matches(matching_row, completion, (artifact,))
-
-    # 状态不匹配
-    mismatched_status_row = SkillExecutionModel(
-        id="exec-1",
-        session_id="session-1",
-        run_id="run-1",
-        tool_call_record_id="tc-1",
-        skill_id="skill-1",
-        skill_version_id="ver-1",
-        script_path="main.py",
-        input_file_ids=[],
-        parameters_sha256="b" * 64,
-        python_version="3.12",
-        dependency_check=True,
-        status=SkillExecutionStatus.FAILED.value,
-        log_object_key="logs/1.txt",
-        log_truncated=False,
-        log_error_code=None,
-        error_code=None,
-        cleanup_error_code=None,
-        result_artifacts=expected_artifact_json,
-        created_at=now,
-        finished_at=now,
-    )
-    assert not RunToolCallsMixin._skill_execution_row_matches(
-        mismatched_status_row,
-        completion,
-        (artifact,),
-    )
-
-    # 产物不匹配
-    assert not RunToolCallsMixin._skill_execution_row_matches(matching_row, completion, ())
-
-
 def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """heartbeat / initialize_tools / reserve_llm_request 仅锁 runs 行，绝不触碰 sessions。"""
+    """heartbeat / initialize_tools / record_usage / admit_tool_call 仅锁 runs，不触碰 sessions。"""
     now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
     monkeypatch.setattr(
         func,
@@ -259,7 +168,7 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
     assert "list_visible_events" not in RunLifecycleMixin.__dict__
 
     async def scenario() -> None:
-        engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+        engine, factory = await create_pg_unit_db()
         executed_sql: list[str] = []
 
         def _capture_sql(
@@ -273,10 +182,8 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
             executed_sql.append(statement.lower())
 
         try:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            factory = async_sessionmaker(engine, expire_on_commit=False)
             repo = SqlAlchemyRunRepository(factory, SqlAlchemyMessageRepository(factory))
+            # 按真实 PostgreSQL 外键依赖顺序落库用户、模型、系统提示词、会话、消息、Run 与工具调用。
             async with factory() as session, session.begin():
                 session.add_all(
                     [
@@ -290,15 +197,78 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
                             created_at=now,
                             updated_at=now,
                         ),
-                        SessionModel(
-                            id="sess_lock",
-                            owner_id="usr_lock",
-                            title="Lock",
-                            project_id=None,
-                            last_message_sequence=1,
+                        ModelProfileVersionModel(
+                            id="prof_1",
+                            name="Lock Model",
+                            protocol="chat_completions",
+                            base_url="https://llm.example.test/v1",
+                            model="gpt-test",
+                            context_window_tokens=128000,
+                            tokenizer_encoding="cl100k_base",
+                            max_output_tokens=4096,
+                            request_timeout_seconds=30,
+                            execution_timeout_seconds=120,
+                            max_concurrency=4,
                             created_at=now,
-                            updated_at=now,
-                            deleted_time=None,
+                        ),
+                        SystemPromptVersionModel(
+                            id="main_1",
+                            kind="main",
+                            content="main prompt",
+                            created_at=now,
+                        ),
+                        SystemPromptVersionModel(
+                            id="comp_1",
+                            kind="compression",
+                            content="compression prompt",
+                            created_at=now,
+                        ),
+                    ]
+                )
+                await session.flush()
+                session.add(
+                    SessionModel(
+                        id="sess_lock",
+                        owner_id="usr_lock",
+                        title="Lock",
+                        project_id=None,
+                        last_message_sequence=2,
+                        created_at=now,
+                        updated_at=now,
+                        deleted_time=None,
+                    )
+                )
+                await session.flush()
+                session.add_all(
+                    [
+                        ConversationMessageModel(
+                            id="msg_1",
+                            session_id="sess_lock",
+                            role="user",
+                            status="completed",
+                            sequence=1,
+                            parts=[{"type": "text", "text": "hello"}],
+                            created_at=now,
+                            completed_at=now,
+                            metadata_json={},
+                        ),
+                        ExecutionMessageModel(
+                            id="exec_call_1",
+                            session_id="sess_lock",
+                            run_id="run_lock",
+                            thread_id="root:run_lock",
+                            role="assistant",
+                            sequence=2,
+                            parts=[
+                                {
+                                    "type": "tool_call",
+                                    "tool_call_id": "call_lock_1",
+                                    "name": "demo",
+                                    "arguments": {},
+                                }
+                            ],
+                            created_at=now,
+                            metadata_json={},
                         ),
                         RunModel(
                             id="run_lock",
@@ -326,6 +296,25 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
                         ),
                     ]
                 )
+                await session.flush()
+                session.add(
+                    RunToolCallModel(
+                        id="tc_lock_1",
+                        run_id="run_lock",
+                        session_id="sess_lock",
+                        tool_call_id="call_lock_1",
+                        ordinal=1,
+                        tool_id="builtin_demo",
+                        tool_kind="builtin",
+                        model_name="demo",
+                        execution_epoch=1,
+                        round=1,
+                        status=ToolCallStatus.APPROVED.value,
+                        call_message_id="exec_call_1",
+                        requires_approval=False,
+                        requested_at=now,
+                    )
+                )
 
             event.listen(engine.sync_engine, "before_cursor_execute", _capture_sql)
             try:
@@ -347,15 +336,37 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
                 assert not any("sessions" in sql for sql in executed_sql)
 
                 executed_sql.clear()
-                seq = await repo.reserve_llm_request(
-                    ReserveLlmRequestCommand(
+                recorded = await repo.record_usage(
+                    RecordRunUsageCommand(
                         run_id="run_lock",
                         worker_id="worker-1",
                         execution_epoch=1,
-                        maximum_count=10,
+                        attempt=1,
+                        input_tokens=10,
+                        output_tokens=5,
+                        total_tokens=15,
+                        complete=True,
+                        recorded_at=now,
+                        llm_request_count=3,
                     )
                 )
-                assert seq == 1
+                assert recorded is not None
+                assert recorded.llm_request_count == 3
+                assert recorded.usage.total_tokens == 15
+                assert not any("sessions" in sql for sql in executed_sql)
+
+                executed_sql.clear()
+                admitted = await repo.admit_tool_call(
+                    AdmitToolCallCommand(
+                        run_id="run_lock",
+                        worker_id="worker-1",
+                        execution_epoch=1,
+                        record_id="tc_lock_1",
+                        admitted_at=now,
+                    )
+                )
+                assert admitted is not None
+                assert admitted.status is ToolCallStatus.EXECUTING
                 assert not any("sessions" in sql for sql in executed_sql)
             finally:
                 event.remove(engine.sync_engine, "before_cursor_execute", _capture_sql)

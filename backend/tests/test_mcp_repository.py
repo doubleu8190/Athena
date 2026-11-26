@@ -1,4 +1,4 @@
-"""MCP Server 和工具快照 SQLite 原子仓储测试。"""
+"""MCP Server 和工具快照 PostgreSQL 原子仓储测试。"""
 
 from __future__ import annotations
 
@@ -9,14 +9,13 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import event, func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from pg_unit_harness import create_pg_unit_db
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.mcp.model import McpServerModel, McpToolModel
 from adapter.mcp.repository import SqlAlchemyMcpRepository
-from adapter.models import Base
 from domain.auth import AuthContext, AuthSession, User, UserRole, UserStatus
 from domain.mcp import (
     McpAuthorizationChangedError,
@@ -58,15 +57,7 @@ async def _setup() -> tuple[
     SqlAlchemyMcpRepository,
     AuthContext,
 ]:
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    event.listen(
-        engine.sync_engine,
-        "connect",
-        lambda connection, _record: connection.execute("PRAGMA foreign_keys=ON"),
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
     user = User(
         id="usr_mcp_admin",
         email="admin@example.com",

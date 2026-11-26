@@ -1,4 +1,4 @@
-"""Subagent HTTP API 与 SQLAlchemy 仓储集成测试（基于内存 SQLite）。"""
+"""Subagent HTTP API 与 SQLAlchemy 仓储集成测试（基于 PostgreSQL 单元测试底座）。"""
 
 from __future__ import annotations
 
@@ -8,13 +8,9 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import String, select
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
@@ -35,11 +31,8 @@ NOW = datetime.now(UTC)
 async def _build_subagent_app() -> tuple[
     AsyncEngine, FastAPI, async_sessionmaker[AsyncSession], str, str
 ]:
-    """初始化内存数据库、管理员与普通用户会话及 FastAPI 应用。"""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    """初始化隔离 PostgreSQL 数据库、管理员与普通用户会话及 FastAPI 应用。"""
+    engine, session_factory = await create_pg_unit_db()
 
     async with session_factory() as session:
         async with session.begin():
@@ -64,20 +57,6 @@ async def _build_subagent_app() -> tuple[
                         status=UserStatus.ACTIVE.value,
                         created_at=NOW,
                         updated_at=NOW,
-                    ),
-                    AuthSessionModel(
-                        id="sess_admin",
-                        user_id="usr_admin",
-                        token_hash="hash_admin",
-                        expires_at=NOW + timedelta(days=7),
-                        created_at=NOW,
-                    ),
-                    AuthSessionModel(
-                        id="sess_member",
-                        user_id="usr_member",
-                        token_hash="hash_member",
-                        expires_at=NOW + timedelta(days=7),
-                        created_at=NOW,
                     ),
                     ModelProfileVersionModel(
                         id="mp_active",
@@ -113,6 +92,25 @@ async def _build_subagent_app() -> tuple[
                         execution_timeout_seconds=120,
                         max_concurrency=4,
                         enabled=False,
+                        created_at=NOW,
+                    ),
+                ]
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    AuthSessionModel(
+                        id="sess_admin",
+                        user_id="usr_admin",
+                        token_hash="hash_admin",
+                        expires_at=NOW + timedelta(days=7),
+                        created_at=NOW,
+                    ),
+                    AuthSessionModel(
+                        id="sess_member",
+                        user_id="usr_member",
+                        token_hash="hash_member",
+                        expires_at=NOW + timedelta(days=7),
                         created_at=NOW,
                     ),
                 ]

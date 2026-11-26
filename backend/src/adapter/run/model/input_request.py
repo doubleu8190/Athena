@@ -42,7 +42,6 @@ class RunInputRequestModel(Base):
             "run_id",
             unique=True,
             postgresql_where=text("status = 'pending'"),
-            sqlite_where=text("status = 'pending'"),
         ),
         # 加速按 run_id 顺序拉取用户输入问答摘要的高频热路径。
         Index(

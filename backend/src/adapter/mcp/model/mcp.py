@@ -16,11 +16,10 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base, json_column_type
-
-_JSON_DOCUMENT = json_column_type()
+from adapter.base import Base
 
 
 class McpServerModel(Base):
@@ -57,7 +56,6 @@ class McpServerModel(Base):
             "name",
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
-            sqlite_where=text("deleted_at IS NULL"),
         ),
         Index("ix_mcp_servers_visibility_dept", "visibility_scope", "owner_department_id"),
     )
@@ -65,7 +63,7 @@ class McpServerModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     transport: Mapped[str] = mapped_column(String(32), nullable=False)
-    config_json: Mapped[dict[str, Any]] = mapped_column(_JSON_DOCUMENT, nullable=False)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     secrets_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     secrets_nonce: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     key_version: Mapped[int | None] = mapped_column(nullable=True)
@@ -118,13 +116,13 @@ class McpToolModel(Base):
     remote_name: Mapped[str] = mapped_column(String(256), nullable=False)
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str] = mapped_column(String(8192), nullable=False)
-    input_schema_json: Mapped[dict[str, Any]] = mapped_column(_JSON_DOCUMENT, nullable=False)
+    input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 面向业务审批人展示的中文别名、审批摘要模板与参数标签映射。
     display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approval_summary_template: Mapped[str | None] = mapped_column(String(500), nullable=True)
     parameter_labels_json: Mapped[dict[str, str]] = mapped_column(
-        _JSON_DOCUMENT,
+        JSONB,
         nullable=False,
         default=dict,
         server_default=text("'{}'"),

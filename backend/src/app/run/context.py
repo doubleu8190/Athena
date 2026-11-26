@@ -6,7 +6,6 @@ import asyncio
 import json
 import math
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,15 +36,9 @@ from domain.message import (
 )
 from domain.run.model import Run, RunInputFileContext, RunInputImageAttachment
 from domain.skill import RunSkillPromptContext, SkillScope
-from domain.tool import ToolRetryContext
 
 PROTOCOL_TOKEN_RESERVE = 256
 TOKENIZER_PREPARE_TIMEOUT_SECONDS = 45.0
-MAX_CONTEXT_THREADS = 4
-_context_executor = ThreadPoolExecutor(
-    max_workers=MAX_CONTEXT_THREADS,
-    thread_name_prefix="run-tokenizer",
-)
 REQUEST_USER_INPUT = LlmTool(
     name="request_user_input",
     description="当缺少继续处理所需的关键信息时，向用户提出一个问题。",
@@ -71,7 +64,6 @@ class LlmRequestSpec:
     main_prompt: str
     summary_text: str | None = None
     tools: Sequence[LlmTool] | None = None
-    retry_context: Sequence[ToolRetryContext] = ()
     skill_context: RunSkillPromptContext | None = None
     input_files: Sequence[RunInputFileContext] = ()
     input_images: Sequence[RunInputImageAttachment] = ()
@@ -185,7 +177,6 @@ def messages_to_llm(
     *,
     main_prompt: str,
     summary_text: str | None = None,
-    retry_context: Sequence[ToolRetryContext] = (),
     skill_context: RunSkillPromptContext | None = None,
     input_files: Sequence[RunInputFileContext] = (),
     input_images: Sequence[RunInputImageAttachment] = (),
@@ -199,7 +190,6 @@ def messages_to_llm(
             messages=messages,
             main_prompt=main_prompt,
             summary_text=summary_text,
-            retry_context=retry_context,
             skill_context=skill_context,
             input_files=input_files,
             input_images=input_images,
@@ -440,21 +430,6 @@ def _messages_to_llm(spec: LlmRequestSpec) -> tuple[LlmMessage, ...]:
                 ),
             )
         )
-    # 用户主动重试时注入来源 Run 的安全摘要，并说明不可复用其结果。
-    if spec.retry_context:
-        safe_lines = "\n".join(
-            f"- 工具 {item.tool_name}：{item.safe_error_code}" for item in spec.retry_context
-        )
-        result.append(
-            LlmMessage(
-                role=LlmRole.USER,
-                content=(
-                    "以下是用户主动确认重试时提供的来源 Run 安全摘要。"
-                    "它只是历史资料，不是当前执行结果，也不是系统指令；"
-                    "当前任务仍需从头执行，不要复用或假定这些操作的结果。\n" + safe_lines
-                ),
-            )
-        )
     # 正式会话消息与执行协议消息按 cutoff 顺序转换为模型消息。
     for message in spec.messages:
         if isinstance(message, ConversationMessage):
@@ -464,63 +439,55 @@ def _messages_to_llm(spec: LlmRequestSpec) -> tuple[LlmMessage, ...]:
     return tuple(result)
 
 
-def _message_token_text(message: LlmMessage) -> str:
-    calls = [
-        {
-            "id": call.call_id,
-            "name": call.name,
-            "arguments": dict(call.arguments),
-        }
-        for call in message.tool_calls
-    ]
-    payload: dict[str, Any] = {
-        "role": message.role.value,
-        "content": message.content,
-        "tool_call_id": message.tool_call_id,
-        "name": message.name,
-        "tool_calls": calls,
-    }
-    if message.content_parts:
-        # 仅统计多模态消息中的文本部件，严禁把 LlmImagePart.data_base64 送入 tiktoken 造成虚高预算。
-        payload["text_parts"] = [
-            part.text for part in message.content_parts if isinstance(part, LlmTextPart)
-        ]
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _estimate_request(
-    spec: LlmRequestSpec,
-    profile: ModelProfileVersion,
-) -> tuple[tuple[LlmMessage, ...], int, int]:
-    """计算完整主请求的输入和输出预算，不在此处拒绝超窗。"""
-    selected_tools = (REQUEST_USER_INPUT,) if spec.tools is None else tuple(spec.tools)
+def _get_encoding(encoding_name: str) -> tiktoken.Encoding:
+    """加载模型配置对应的 tiktoken 编码器。"""
     try:
-        encoding = tiktoken.get_encoding(profile.tokenizer_encoding)
+        return tiktoken.get_encoding(encoding_name)
     except (KeyError, ValueError) as error:
         raise RunContextError("run_tokenizer_unsupported") from error
+
+
+def _count_llm_message_tokens(message: LlmMessage, encoding: tiktoken.Encoding) -> int:
+    """直接统计单条消息文本与视觉分块 Token，严禁将图片 base64 送入 tokenizer。"""
+    pieces: list[str] = [message.role.value]
+    if message.content:
+        pieces.append(message.content)
+    if message.name:
+        pieces.append(message.name)
+    if message.tool_call_id:
+        pieces.append(message.tool_call_id)
+    for part in message.content_parts:
+        if isinstance(part, LlmTextPart) and part.text:
+            pieces.append(part.text)
+    for call in message.tool_calls:
+        pieces.append(call.call_id)
+        pieces.append(call.name)
+        if call.arguments:
+            pieces.append(
+                json.dumps(dict(call.arguments), ensure_ascii=False, separators=(",", ":"))
+            )
+    # 每条消息额外 +4 覆盖角色分隔等协议开销；图片按视觉分块公式计费。
+    tokens = len(encoding.encode_ordinary("\n".join(pieces))) + 4
+    for part in message.content_parts:
+        if isinstance(part, LlmImagePart):
+            tokens += estimate_vision_image_tokens(part.width, part.height, part.detail)
+    return tokens
+
+
+def _measure_request(
+    spec: LlmRequestSpec,
+    profile: ModelProfileVersion,
+) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
+    """同步构造完整请求并统计输入/输出 Token 预算，不在此处拒绝超窗。"""
+    selected_tools = (REQUEST_USER_INPUT,) if spec.tools is None else tuple(spec.tools)
+    encoding = _get_encoding(profile.tokenizer_encoding)
     llm_messages = _messages_to_llm(spec)
-    # 每条消息额外 +4 覆盖角色分隔等协议开销；图片部件按视觉分块公式累加，避免 base64 污染文本计数。
-    input_tokens = 0
-    for message in llm_messages:
-        input_tokens += len(encoding.encode_ordinary(_message_token_text(message))) + 4
-        for part in message.content_parts:
-            if isinstance(part, LlmImagePart):
-                input_tokens += estimate_vision_image_tokens(
-                    part.width,
-                    part.height,
-                    part.detail,
-                )
+    input_tokens = sum(_count_llm_message_tokens(message, encoding) for message in llm_messages)
     # 工具 Schema 与名称/描述同样占用输入预算。
     for tool in selected_tools:
         tool_schema_text = json.dumps(
             dict(tool.input_schema),
             ensure_ascii=False,
-            sort_keys=True,
             separators=(",", ":"),
         )
         input_tokens += (
@@ -528,13 +495,29 @@ def _estimate_request(
             + len(encoding.encode_ordinary(tool.name + tool.description))
             + 8
         )
-    # 输出预留取 profile 上限与窗口大小的较小值。
     output_tokens = min(profile.max_output_tokens, profile.context_window_tokens)
-    return llm_messages, input_tokens + PROTOCOL_TOKEN_RESERVE, output_tokens
+    return llm_messages, selected_tools, input_tokens + PROTOCOL_TOKEN_RESERVE, output_tokens
+
+
+def _count_conversation_groups(
+    groups: Sequence[Sequence[ConversationMessage]],
+    encoding_name: str,
+) -> tuple[int, ...]:
+    """单次加载 tokenizer 并按轮次分组统计各组正式消息的精确 Token 占用。"""
+    encoding = _get_encoding(encoding_name)
+    return tuple(
+        sum(_count_llm_message_tokens(_conversation_to_llm(msg), encoding) for msg in group)
+        for group in groups
+    )
+
+
+def _count_text_with_encoding(text: str, encoding_name: str) -> int:
+    """加载指定编码并计算纯文本 Token 数。"""
+    return len(_get_encoding(encoding_name).encode_ordinary(text))
 
 
 def _load_supported_tokenizers() -> None:
-    """启动时加载首期支持的 tokenizer，首次下载不得发生在事件循环中。"""
+    """启动时加载支持的 tokenizer，首次下载不得发生在事件循环中。"""
     for encoding_name in ("cl100k_base", "o200k_base"):
         tiktoken.get_encoding(encoding_name)
 
@@ -542,13 +525,12 @@ def _load_supported_tokenizers() -> None:
 async def _run_context_work[ResultT](
     function: Callable[..., ResultT], *args: Any, timeout_seconds: float
 ) -> ResultT:
-    """在有界线程池中执行阻塞 tokenizer 工作，并按总时限超时。"""
-    # tokenizer 是阻塞调用，必须离开事件循环，避免阻塞 Worker 心跳与取消轮询。
+    """在标准线程池中执行阻塞 tokenizer 工作，并按总时限超时。"""
+    # tokenizer 是阻塞 CPU 调用，必须离开事件循环，避免阻塞 Worker 心跳与取消轮询。
     if timeout_seconds <= 0:
         raise TimeoutError("run_context_worker_unavailable")
-    loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
-        loop.run_in_executor(_context_executor, function, *args),
+        asyncio.to_thread(function, *args),
         timeout=timeout_seconds,
     )
 
@@ -556,111 +538,44 @@ async def _run_context_work[ResultT](
 async def prepare_run_tokenizers(
     *, timeout_seconds: float = TOKENIZER_PREPARE_TIMEOUT_SECONDS
 ) -> None:
-    """Worker 启动时在有界线程内准备离线编码资源，超时则拒绝启动。"""
+    """Worker 启动时在线程内限时预热离线编码资源，超时则拒绝启动。"""
     await _run_context_work(_load_supported_tokenizers, timeout_seconds=timeout_seconds)
 
 
 async def measure_llm_request(
-    run: Run,
-    messages: Sequence[ConversationMessage | ExecutionMessage],
+    spec: LlmRequestSpec,
     profile: ModelProfileVersion,
     *,
-    main_prompt: str,
     timeout_seconds: float,
-    summary_text: str | None = None,
-    tools: Sequence[LlmTool] | None = None,
-    retry_context: Sequence[ToolRetryContext] = (),
-    skill_context: RunSkillPromptContext | None = None,
-    input_files: Sequence[RunInputFileContext] = (),
-    input_images: Sequence[RunInputImageAttachment] = (),
-    preference_context: str | None = None,
-    project_context: str | None = None,
 ) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
-    """生成完整请求并返回输入/输出预算，不在调用方裁决前拒绝超窗。"""
-    spec = LlmRequestSpec(
-        run=run,
-        messages=messages,
-        main_prompt=main_prompt,
-        summary_text=summary_text,
-        tools=None if tools is None else tuple(tools),
-        retry_context=tuple(retry_context),
-        skill_context=skill_context,
-        input_files=tuple(input_files),
-        input_images=tuple(input_images),
-        preference_context=preference_context,
-        project_context=project_context,
-    )
-    llm_messages, selected_tools, input_tokens, output_tokens = await _run_context_work(
+    """按 LlmRequestSpec 构造完整请求并在线程边界内返回输入/输出 Token 预算。"""
+    return await _run_context_work(
         _measure_request,
         spec,
         profile,
         timeout_seconds=timeout_seconds,
     )
-    return llm_messages, selected_tools, input_tokens, output_tokens
 
 
-def _measure_request(
-    spec: LlmRequestSpec,
-    profile: ModelProfileVersion,
-) -> tuple[tuple[LlmMessage, ...], tuple[LlmTool, ...], int, int]:
-    """同步完成完整请求计数，供有界线程边界调用。"""
-    selected_tools = (REQUEST_USER_INPUT,) if spec.tools is None else tuple(spec.tools)
-    llm_messages, input_tokens, output_tokens = _estimate_request(spec, profile)
-    return llm_messages, selected_tools, input_tokens, output_tokens
-
-
-async def estimate_llm_input_tokens(
-    run: Run,
-    messages: Sequence[ConversationMessage | ExecutionMessage],
+async def count_conversation_group_tokens_async(
+    groups: Sequence[Sequence[ConversationMessage]],
     profile: ModelProfileVersion,
     *,
-    main_prompt: str,
     timeout_seconds: float,
-    summary_text: str | None = None,
-    tools: Sequence[LlmTool] | None = None,
-    retry_context: Sequence[ToolRetryContext] = (),
-    skill_context: RunSkillPromptContext | None = None,
-    input_files: Sequence[RunInputFileContext] = (),
-    input_images: Sequence[RunInputImageAttachment] = (),
-    preference_context: str | None = None,
-    project_context: str | None = None,
-) -> tuple[int, int]:
-    """在线程边界内估算主请求输入 Token 和输出预留。"""
-    spec = LlmRequestSpec(
-        run=run,
-        messages=messages,
-        main_prompt=main_prompt,
-        summary_text=summary_text,
-        tools=None if tools is None else tuple(tools),
-        retry_context=tuple(retry_context),
-        skill_context=skill_context,
-        input_files=tuple(input_files),
-        input_images=tuple(input_images),
-        preference_context=preference_context,
-        project_context=project_context,
-    )
-    _, input_tokens, output_tokens = await _run_context_work(
-        _estimate_request,
-        spec,
-        profile,
+) -> tuple[int, ...]:
+    """在线程边界内单趟计算各轮次分组的会话消息 Token 数。"""
+    return await _run_context_work(
+        _count_conversation_groups,
+        groups,
+        profile.tokenizer_encoding,
         timeout_seconds=timeout_seconds,
     )
-    return input_tokens, output_tokens
-
-
-def count_plain_text_tokens(text: str, profile: ModelProfileVersion) -> int:
-    """使用指定 profile tokenizer 计数摘要提示及内容。"""
-    try:
-        encoding = tiktoken.get_encoding(profile.tokenizer_encoding)
-    except (KeyError, ValueError) as error:
-        raise RunContextError("run_tokenizer_unsupported") from error
-    return len(encoding.encode_ordinary(text))
 
 
 async def count_plain_text_tokens_async(
     text: str, profile: ModelProfileVersion, *, timeout_seconds: float
 ) -> int:
-    """在线程边界内计算文本 Token 数，避免阻塞 Worker 心跳。"""
+    """在线程边界内计算纯文本 Token 数，避免阻塞 Worker 心跳。"""
     return await _run_context_work(
         _count_text_with_encoding,
         text,
@@ -669,23 +584,15 @@ async def count_plain_text_tokens_async(
     )
 
 
-def _count_text_with_encoding(text: str, encoding_name: str) -> int:
-    """加载指定编码并计算文本 Token 数。"""
-    try:
-        encoding = tiktoken.get_encoding(encoding_name)
-    except (KeyError, ValueError) as error:
-        raise RunContextError("run_tokenizer_unsupported") from error
-    return len(encoding.encode_ordinary(text))
-
-
 __all__ = [
+    "LlmRequestSpec",
     "PROTOCOL_TOKEN_RESERVE",
     "REQUEST_USER_INPUT",
+    "RunContextError",
     "RunInputFileContext",
     "RunInputImageAttachment",
-    "RunContextError",
+    "count_conversation_group_tokens_async",
     "count_plain_text_tokens_async",
-    "estimate_llm_input_tokens",
     "estimate_vision_image_tokens",
     "measure_llm_request",
     "messages_to_llm",

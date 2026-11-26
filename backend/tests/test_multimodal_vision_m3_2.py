@@ -25,12 +25,12 @@ from app.file.service import SessionFileService
 from app.run.compression import ContextCompressor
 from app.run.config import RunWorkerConfig
 from app.run.context import (
+    LlmRequestSpec,
     estimate_vision_image_tokens,
     measure_llm_request,
     messages_to_llm,
 )
 from app.run.executor import RunExecutor
-from app.run.safe_stop import SafeStopReporter
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import REQUEST_USER_INPUT_DEFINITION, RunToolRuntimeService
 from bootstrap.api import build_api_dependencies
@@ -103,7 +103,6 @@ from domain.tool import (
     BeginToolCallBatchCommand,
     BeginToolCallBatchResult,
     BuiltinToolSource,
-    ConvergeToolBatchCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
     RuntimeToolDefinition,
@@ -853,23 +852,27 @@ def test_vision_token_estimation_and_base64_isolation_in_measure_llm_request() -
 
     _, _, tokens_without_img, _ = asyncio.run(
         measure_llm_request(
-            run,
-            (),
+            LlmRequestSpec(
+                run=run,
+                messages=(),
+                main_prompt="系统提示",
+                input_files=(file_ctx,),
+            ),
             profile,
-            main_prompt="系统提示",
             timeout_seconds=10.0,
-            input_files=(file_ctx,),
         )
     )
     llm_messages, _, tokens_with_img, _ = asyncio.run(
         measure_llm_request(
-            run,
-            (),
+            LlmRequestSpec(
+                run=run,
+                messages=(),
+                main_prompt="系统提示",
+                input_files=(file_ctx,),
+                input_images=(attachment,),
+            ),
             profile,
-            main_prompt="系统提示",
             timeout_seconds=10.0,
-            input_files=(file_ctx,),
-            input_images=(attachment,),
         )
     )
 
@@ -1096,14 +1099,17 @@ def test_compression_counts_vision_tokens_for_main_budget_but_sends_zero_images_
     prep_no_img = asyncio.run(
         compressor.prepare(
             lease,
-            history,
+            LlmRequestSpec(
+                run=run,
+                messages=history,
+                main_prompt="你是助手",
+                tools=(),
+                input_images=(),
+            ),
             main_runtime,
             policy,
-            main_prompt="你是助手",
             compression_prompt="请压缩历史",
             timeout_seconds=15.0,
-            tools=(),
-            input_images=(),
         )
     )
     assert not prep_no_img.compression_called
@@ -1113,14 +1119,17 @@ def test_compression_counts_vision_tokens_for_main_budget_but_sends_zero_images_
     prep_with_img = asyncio.run(
         compressor.prepare(
             lease,
-            history,
+            LlmRequestSpec(
+                run=run,
+                messages=history,
+                main_prompt="你是助手",
+                tools=(),
+                input_images=images,
+            ),
             main_runtime,
             policy,
-            main_prompt="你是助手",
             compression_prompt="请压缩历史",
             timeout_seconds=15.0,
-            tools=(),
-            input_images=images,
         )
     )
     assert prep_with_img.compression_completed
@@ -1185,12 +1194,6 @@ class _E2ERunRepository:
     async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
         return run_id == self.run.id and execution_epoch == self.run.execution_epoch
 
-    async def list_retry_context(
-        self, session_id: str, owner_id: str, run_id: str
-    ) -> tuple[Any, ...]:
-        del session_id, owner_id, run_id
-        return ()
-
     async def initialize_tools(self, command: InitializeRunToolsCommand) -> RuntimeToolSnapshot:
         self.run = replace(self.run, tool_snapshot=command.snapshot)
         return command.snapshot
@@ -1209,13 +1212,13 @@ class _E2ERunRepository:
         del run_id
         return ()
 
-    async def reserve_llm_request(self, command: Any) -> int:
-        del command
-        self.run = replace(self.run, llm_request_count=self.run.llm_request_count + 1)
-        return self.run.llm_request_count
-
     async def record_usage(self, command: RecordRunUsageCommand) -> Run:
         self.recorded_usages.append(command)
+        if command.llm_request_count is not None:
+            self.run = replace(
+                self.run,
+                llm_request_count=max(self.run.llm_request_count, command.llm_request_count),
+            )
         return self.run
 
     async def begin_tool_call_batch(
@@ -1306,10 +1309,6 @@ class _E2ERunRepository:
             )
         )
         self._next_seq += 1
-        return self.run
-
-    async def converge_tool_batch(self, command: ConvergeToolBatchCommand) -> Run:
-        del command
         return self.run
 
     async def finish(self, command: FinishRunCommand) -> Run:
@@ -1742,52 +1741,17 @@ def test_safe_stop_report_records_vision_status_and_never_persists_base64() -> N
     asyncio.run(executor.execute(lease))
 
     assert repo.fail_command is not None
+    assert repo.fail_command.safe_error_code == "run_context_safety_stop"
     assert repo.fail_command.context_stop_reason is ContextStopReason.HARD_WINDOW_EXCEEDED
     assert repo.fail_command.report_message is not None
+    assert repo.fail_command.report_message.metadata.provider == "system_context_safety"
+    assert repo.fail_command.report_message.metadata.model is None
     report_text = "".join(
         p.text for p in repo.fail_command.report_message.parts if isinstance(p, TextPart)
     )
+    assert "上下文超出安全上限，任务未标记为完成" in report_text
     assert secret_b64 not in report_text
     assert all(not req.has_image_parts() for req in provider.complete_requests)
-
-    # 进一步直接验证 SafeStopReporter.build_context_report_state 保留 vision_status 且无 base64。
-    reporter = SafeStopReporter(
-        cast(RunRepository, repo),
-        cast(LlmRuntimeTextProvider, provider),
-        id_factory=lambda prefix: f"{prefix}_safe",
-        now=lambda: NOW,
-    )
-    safe_state = SimpleNamespace(
-        run=run,
-        budget=SimpleNamespace(remaining=0),
-        input_files=(
-            RunInputFileContext(
-                file_id=f_img.id,
-                filename=f_img.filename,
-                label=None,
-                mime_type=f_img.mime_type,
-                size_bytes=f_img.size_bytes,
-                source="upload",
-                vision_status="attached",
-            ),
-            RunInputFileContext(
-                file_id="file_plain",
-                filename="plain.txt",
-                label=None,
-                mime_type="text/plain",
-                size_bytes=10,
-                source="upload",
-                vision_status=None,
-            ),
-        ),
-        retry_context=(),
-    )
-    persisted = asyncio.run(reporter.build_context_report_state(cast(Any, safe_state), (trigger,)))
-    serialized_state = json.dumps(persisted, ensure_ascii=False)
-    assert secret_b64 not in serialized_state
-    projected_inputs = cast(list[dict[str, Any]], persisted["input_files"])
-    assert projected_inputs[0]["vision_status"] == "attached"
-    assert "vision_status" not in projected_inputs[1]
 
 
 def test_bootstrap_injects_local_vision_image_normalizer(

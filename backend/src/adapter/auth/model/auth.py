@@ -48,21 +48,18 @@ class UserModel(Base):
             "email",
             unique=True,
             postgresql_where=text("email IS NOT NULL AND deleted_time IS NULL"),
-            sqlite_where=text("email IS NOT NULL AND deleted_time IS NULL"),
         ),
         Index(
             "uq_users_external_union_id",
             "external_union_id",
             unique=True,
             postgresql_where=text("external_union_id IS NOT NULL AND deleted_time IS NULL"),
-            sqlite_where=text("external_union_id IS NOT NULL AND deleted_time IS NULL"),
         ),
         Index(
             "uq_users_external_open_id",
             "external_open_id",
             unique=True,
             postgresql_where=text("external_open_id IS NOT NULL AND deleted_time IS NULL"),
-            sqlite_where=text("external_open_id IS NOT NULL AND deleted_time IS NULL"),
         ),
     )
 

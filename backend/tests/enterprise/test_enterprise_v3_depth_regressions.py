@@ -30,17 +30,16 @@ import pytest
 import tiktoken
 from mcp import Client
 from openpyxl import load_workbook  # type: ignore[import-untyped]
+from pg_unit_harness import create_pg_unit_db
 from PIL import Image
-from sqlalchemy import event, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access import SqlAlchemyAccessControlRepository
 from adapter.auth.model import UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
 from adapter.knowledge.repository import KnowledgeRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
-from adapter.models import Base
 from adapter.org.model import DepartmentModel, UserDepartmentModel
 from adapter.org.repository import SqlAlchemyOrgRepository
 from adapter.preference.repository import SqlAlchemyPreferenceRepository
@@ -269,12 +268,6 @@ class _MinimalRunRepo:
     async def is_live_execution(self, run_id: str, execution_epoch: int) -> bool:
         return run_id == self.run.id and execution_epoch == self.run.execution_epoch
 
-    async def list_retry_context(
-        self, session_id: str, owner_id: str, run_id: str
-    ) -> tuple[Any, ...]:
-        del session_id, owner_id, run_id
-        return ()
-
     async def initialize_tools(self, command: InitializeRunToolsCommand) -> RuntimeToolSnapshot:
         self.run = replace(self.run, tool_snapshot=command.snapshot)
         return command.snapshot
@@ -293,24 +286,30 @@ class _MinimalRunRepo:
         del run_id
         return ()
 
-    async def reserve_llm_request(self, command: Any) -> int:
-        del command
-        self.run = replace(self.run, llm_request_count=self.run.llm_request_count + 1)
-        return self.run.llm_request_count
-
     async def record_usage(self, command: RecordRunUsageCommand) -> Run:
-        del command
+        if command.llm_request_count is not None:
+            self.run = replace(
+                self.run,
+                llm_request_count=max(self.run.llm_request_count, command.llm_request_count),
+            )
         return self.run
 
     async def finish(self, command: FinishRunCommand) -> Run:
         self.final_command = command
-        self.run = replace(self.run, status=RunStatus.COMPLETED)
+        self.run = replace(
+            self.run,
+            status=RunStatus.COMPLETED,
+            llm_request_count=max(self.run.llm_request_count, command.llm_request_count or 0),
+        )
         return self.run
 
     async def fail(self, command: FailRunCommand) -> Run:
         self.fail_command = command
         self.run = replace(
-            self.run, status=RunStatus.FAILED, safe_error_code=command.safe_error_code
+            self.run,
+            status=RunStatus.FAILED,
+            safe_error_code=command.safe_error_code,
+            llm_request_count=max(self.run.llm_request_count, command.llm_request_count or 0),
         )
         return self.run
 
@@ -558,7 +557,7 @@ def test_regression1_six_image_truncation_corrupt_isolation_and_plan_a2_degradat
 
 
 # ---------------------------------------------------------------------------
-# 回归 2：组织调岗实时撤权 & 离职即时吊销同一 Cookie（真实 SQLite + 领域服务）
+# 回归 2：组织调岗实时撤权 & 离职即时吊销同一 Cookie（真实 PostgreSQL + 领域服务）
 # ---------------------------------------------------------------------------
 
 
@@ -654,29 +653,16 @@ class _DbToolCatalog:
         return frozenset(tool.tool_id for tool in page.items)
 
 
-async def _create_sqlite_db(db_path: Path) -> tuple[Any, async_sessionmaker[AsyncSession]]:
-    """创建启用外键约束的 SQLite 异步库并建全套表结构。"""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool)
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _on_connect(dbapi_connection: Any, _record: Any) -> None:
-        dbapi_connection.create_function("clock_timestamp", 0, lambda: NOW.isoformat())
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    return engine, async_sessionmaker(engine, expire_on_commit=False)
+async def _create_pg_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
+    """获取隔离 PostgreSQL 单元测试数据库。"""
+    return await create_pg_unit_db()
 
 
-def test_regression2_org_transfer_realtime_revocation_and_offboarding_cookie_invalidation(
-    tmp_path: Path,
-) -> None:
+def test_regression2_org_transfer_realtime_revocation_and_offboarding_cookie_invalidation() -> None:
     """回归 2：财务专员平调至 HR 后复用同一会话实时撤权/赋权，离职停用同事务吊销原 Cookie。"""
 
     async def scenario() -> None:
-        engine, session_factory = await _create_sqlite_db(tmp_path / "org_lifecycle.db")
+        engine, session_factory = await _create_pg_db()
         try:
             # 1. 初始化星辰智联 5 级组织树及超管周明远 + 财务专员沈佳禾（mock_fin_member）。
             async with session_factory() as session, session.begin():
@@ -1092,7 +1078,7 @@ def test_regression3_fifty_memory_quota_and_high_density_token_truncation_benchm
     """回归 3：真实 PreferenceRepository 验证 50 条配额上限与双编码器 1500 Token 整条裁剪。"""
 
     async def scenario() -> None:
-        engine, session_factory = await _create_sqlite_db(tmp_path / "preference_quota.db")
+        engine, session_factory = await _create_pg_db()
         try:
             async with session_factory() as session, session.begin():
                 session.add(

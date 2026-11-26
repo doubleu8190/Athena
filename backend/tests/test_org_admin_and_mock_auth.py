@@ -15,13 +15,12 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.models import Base
 from adapter.org import DepartmentModel, SqlAlchemyOrgRepository
 from app.auth import AuthService
 from app.org import (
@@ -56,12 +55,8 @@ class _FakePasswordHasher:
         return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 
-async def _make_sqlite_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return engine, session_factory
+async def _make_pg_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
+    return await create_pg_unit_db()
 
 
 def _migration_config() -> Config:
@@ -96,7 +91,7 @@ def test_production_forbids_auth_mock_mode_before_allocating_resources(
 def test_mock_mode_seeds_idempotently_and_issues_real_cookie_sessions() -> None:
     """非生产 Mock 种子幂等预置 5 个部门与 6 个典型角色账号，并签发真实 HttpOnly Cookie。"""
     now = datetime(2026, 11, 23, 10, 0, tzinfo=UTC)
-    engine, session_factory = _run(_make_sqlite_db())
+    engine, session_factory = _run(_make_pg_db())
     try:
         auth_repo = SqlAlchemyAuthRepository(session_factory)
         org_repo = SqlAlchemyOrgRepository(session_factory)
@@ -200,7 +195,7 @@ def test_mock_mode_seeds_idempotently_and_issues_real_cookie_sessions() -> None:
 def test_admin_org_api_departments_users_role_status_and_last_super_admin_protection() -> None:
     """覆盖部门查询、子部门前缀过滤、任命/撤销 dept_admin、停用吊销会话与最后超管保护。"""
     now = datetime(2026, 11, 23, 11, 0, tzinfo=UTC)
-    engine, session_factory = _run(_make_sqlite_db())
+    engine, session_factory = _run(_make_pg_db())
     try:
         auth_repo = SqlAlchemyAuthRepository(session_factory)
         org_repo = SqlAlchemyOrgRepository(session_factory)
@@ -471,7 +466,7 @@ def test_admin_org_sync_endpoint_runs_feishu_sync_and_reports_cycle_error() -> N
                 ]
             return []
 
-    engine, session_factory = _run(_make_sqlite_db())
+    engine, session_factory = _run(_make_pg_db())
     try:
         auth_repo = SqlAlchemyAuthRepository(session_factory)
         org_repo = SqlAlchemyOrgRepository(session_factory)

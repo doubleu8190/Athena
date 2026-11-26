@@ -1,4 +1,4 @@
-"""Subagent 配置 PostgreSQL / SQLite ORM 映射。"""
+"""Subagent 配置 PostgreSQL ORM 映射。"""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base, json_column_type
+from adapter.base import Base
 
 
 class SubagentModel(Base):
@@ -48,7 +49,6 @@ class SubagentModel(Base):
             "slug",
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
-            sqlite_where=text("deleted_at IS NULL"),
         ),
         Index("ix_subagents_enabled_created", "enabled", "created_at", "id"),
         Index(
@@ -66,7 +66,7 @@ class SubagentModel(Base):
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     model_profile_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     allowed_tool_ids: Mapped[list[str]] = mapped_column(
-        json_column_type(),
+        JSONB,
         nullable=False,
         default=list,
         server_default=text("'[]'"),

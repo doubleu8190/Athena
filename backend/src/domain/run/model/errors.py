@@ -17,16 +17,6 @@ class RunStateError(RunError):
     """命令不适用于 Run 当前状态。"""
 
 
-class RunContextSafetyCommitError(RunError):
-    """上下文安全收尾命令未能在有效执行权内安全持久化。"""
-
-    def __init__(self, report_message_id: str | None, reason: str) -> None:
-        """保存稳定报告引用和内部收尾原因，供 Worker 避免普通失败覆盖。"""
-        super().__init__("run_context_safety_commit_failed")
-        self.report_message_id = report_message_id
-        self.reason = reason
-
-
 class RunInputResourceError(RunError):
     """提交或澄清附带的技能/文件/模型资源已不可用或越权。"""
 
@@ -45,7 +35,6 @@ class ToolRetryConfirmationRequiredError(RunConflictError):
 
 __all__ = [
     "RunConflictError",
-    "RunContextSafetyCommitError",
     "RunError",
     "RunInputResourceError",
     "RunKnowledgeBaseNotFoundError",

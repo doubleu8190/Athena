@@ -20,9 +20,9 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, event, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from pg_unit_harness import create_pg_unit_db
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.access import ResourceVisibilityGrantModel, SqlAlchemyAccessControlRepository
 from adapter.auth.model import UserModel
@@ -32,9 +32,8 @@ from adapter.knowledge.model import (
     KnowledgeDocumentModel,
     KnowledgeVersionModel,
 )
-from adapter.knowledge.repository import KnowledgeRepository, _visible_chunks_query
+from adapter.knowledge.repository import KnowledgeRepository
 from adapter.mcp.repository import SqlAlchemyMcpRepository
-from adapter.models import Base
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from adapter.org.repository import SqlAlchemyOrgRepository
 from adapter.project.repository import SqlAlchemyProjectRepository
@@ -83,7 +82,7 @@ from domain.access import (
     evaluate_can_manage,
 )
 from domain.auth import UserRole, UserStatus
-from domain.knowledge.model import ChunkLocator, DocumentState, SearchHit
+from domain.knowledge.model import DocumentState
 from domain.knowledge.ports import OriginalStore
 from domain.llm.model import LlmError, LlmResponse, LlmToolCall
 from domain.mcp import (
@@ -208,41 +207,6 @@ class _MemoryFileObjectStore:
 
     async def aclose(self) -> None:
         return None
-
-
-class _SqliteSearchKnowledgeRepository(KnowledgeRepository):
-    """复用真实知识库仓储，仅把 PostgreSQL tsvector 关键词查询替换为 SQLite LIKE。"""
-
-    async def search_keyword(
-        self,
-        owner_id: str,
-        base_ids: list[str],
-        tokens: tuple[str, ...],
-        limit: int,
-    ) -> tuple[SearchHit, ...]:
-        if not tokens:
-            return ()
-        async with self._sessions() as session:
-            rows = (await session.execute(_visible_chunks_query(owner_id, base_ids))).all()
-        matched: list[SearchHit] = []
-        for chunk, title, base_id in rows:
-            if any(token.lower() in chunk.content.lower() for token in tokens):
-                matched.append(
-                    SearchHit(
-                        chunk_id=chunk.id,
-                        document_id=chunk.document_id,
-                        version_id=chunk.version_id,
-                        title=title,
-                        text=chunk.content,
-                        locators=(ChunkLocator(kind="text"),),
-                        channels=("keyword",),
-                        rank=float(len(matched) + 1),
-                        chunk_ordinal=chunk.ordinal,
-                        chunk_ids=(chunk.id,),
-                        knowledge_base_id=base_id,
-                    )
-                )
-        return tuple(matched[:limit])
 
 
 class _FakeMcpDiscovery:
@@ -434,22 +398,9 @@ def _import_and_enable_skill(
     return skill_id
 
 
-async def _create_sqlite_fk_db(
-    db_path: Path,
-) -> tuple[Any, async_sessionmaker[AsyncSession]]:
-    """创建开启 PRAGMA foreign_keys=ON 的 SQLite 引擎，真实校验外键重构效果。"""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool)
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
-        dbapi_connection.create_function("clock_timestamp", 0, lambda: NOW.isoformat())
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    return engine, async_sessionmaker(engine, expire_on_commit=False)
+async def _create_pg_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
+    """获取隔离 PostgreSQL 单元测试数据库，真实校验全部外键约束与全文检索。"""
+    return await create_pg_unit_db()
 
 
 async def _seed_org_and_users(session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -602,10 +553,11 @@ class _Harness:
             clock=lambda: NOW,
         )
         self.originals = _MemoryOriginalStore()
-        self.kb_repo = _SqliteSearchKnowledgeRepository(session_factory)
+        self.tokenizer = _SimpleTokenizer()
+        self.kb_repo = KnowledgeRepository(session_factory)
         self.knowledge_service = KnowledgeService(
             self.kb_repo,
-            _SimpleTokenizer(),
+            self.tokenizer,
             originals=self.originals,
             access_policy=self.access_policy,
             clock=lambda: NOW,
@@ -733,7 +685,9 @@ class _Harness:
         document_id: str,
         content: str,
     ) -> str:
-        """将文档最新版本直接置为 ready 并插入检索片段，便于在 SQLite 上端到端测试检索。"""
+        """将文档最新版本直接置为 ready 并写入真实 PostgreSQL tsvector 分片以测试端到端检索。"""
+        tokens = self.tokenizer.tokenize(content)
+        tsvector_input = " ".join(tokens) if tokens else content
         async with self.session_factory() as session, session.begin():
             doc = await session.scalar(
                 select(KnowledgeDocumentModel).where(KnowledgeDocumentModel.id == document_id)
@@ -760,7 +714,7 @@ class _Harness:
                     content=content,
                     token_count=len(content.split()),
                     locator={"kind": "text"},
-                    search_document="",
+                    search_document=cast(str, func.to_tsvector("simple", tsvector_input)),
                     embedding=None,
                 )
             )
@@ -821,8 +775,9 @@ class _Harness:
         await self.engine.dispose()
 
 
-async def _make_harness(db_path: Path) -> _Harness:
-    engine, session_factory = await _create_sqlite_fk_db(db_path)
+async def _make_harness(db_path: Path | None = None) -> _Harness:
+    del db_path
+    engine, session_factory = await _create_pg_db()
     await _seed_org_and_users(session_factory)
     return _Harness(engine, session_factory)
 
@@ -1529,7 +1484,7 @@ def test_dept_admin_delegation_fk_collaboration_and_anti_escalation(tmp_path: Pa
             fin_member = h.login_client("fin.member@acme.com")
             rd_admin = h.login_client("rd.admin@acme.com")
 
-            # --- 1. 多部门管理员协同管理同一财务部知识库（SQLite PRAGMA foreign_keys=ON 实测） ---
+            # --- 1. 多部门管理员协同管理同一财务部知识库（PostgreSQL 外键约束实测） ---
             kb_resp = fin_admin_a.post(
                 "/api/v1/knowledge-bases",
                 json={
@@ -1547,7 +1502,7 @@ def test_dept_admin_delegation_fk_collaboration_and_anti_escalation(tmp_path: Pa
             assert grants_json[0]["include_subdepartments"] is True
 
             # 管理员 B 在管理员 A 的库内新建文档 -> A 替换版本 -> B 改名与删除，
-            # 全程在 SQLite PRAGMA foreign_keys=ON 下实测单列外键已解除单人私有复合外键限制。
+            # 全程在真实 PostgreSQL 外键约束下实测单列外键已解除单人私有复合外键限制。
             upload_b = fin_admin_b.post(
                 f"/api/v1/knowledge-bases/{fin_kb_id}/documents/text",
                 headers={"Idempotency-Key": "upload-by-admin-b"},

@@ -1,21 +1,18 @@
-"""个人 Skill 的 SQLite 事务、归属、版本和 Run 快照链路测试。"""
+"""个人 Skill 的 PostgreSQL 事务、归属、版本和 Run 快照链路测试。"""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from adapter.access.model import ResourceVisibilityGrantModel
 from adapter.auth.model import AuthSessionModel, UserModel
-from adapter.base import Base
-from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
 from adapter.skill.model.skill import SkillModel, SkillVersionModel
 from adapter.skill.repository import SqlAlchemySkillRepository, build_run_skill_snapshot
 from app.skill.service import SkillService
@@ -69,51 +66,25 @@ class _AuthReader:
         return None
 
 
-def test_personal_skill_owner_crud_idempotency_and_snapshot_history(
-    tmp_path: Path,
-) -> None:
+def test_personal_skill_owner_crud_idempotency_and_snapshot_history() -> None:
     """双用户同内容隔离、幂等发布、CAS、删除和历史快照在真实 ORM 上收敛。"""
-    asyncio.run(_run_personal_skill_scenario(tmp_path))
+    asyncio.run(_run_personal_skill_scenario())
 
 
-def test_admin_package_hash_is_non_unique_but_request_key_remains_idempotent(
-    tmp_path: Path,
-) -> None:
+def test_admin_package_hash_is_non_unique_but_request_key_remains_idempotent() -> None:
     """放开内容哈希后，不同请求键可重复导入，同键仍返回原版本。"""
-    asyncio.run(_run_admin_package_hash_scenario(tmp_path))
+    asyncio.run(_run_admin_package_hash_scenario())
 
 
-def test_personal_replay_returns_current_identity_without_appending(
-    tmp_path: Path,
-) -> None:
+def test_personal_replay_returns_current_identity_without_appending() -> None:
     """旧请求键在后续发布或启停后重放，返回当前详情且不追加版本。"""
-    asyncio.run(_run_personal_replay_current_scenario(tmp_path))
+    asyncio.run(_run_personal_replay_current_scenario())
 
 
-async def _run_personal_skill_scenario(tmp_path: Path) -> None:
+async def _run_personal_skill_scenario() -> None:
     """执行完整异步场景，便于单一测试内保持清晰的事务边界。"""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'skills.db'}")
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, factory = await create_pg_unit_db()
     try:
-        async with engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync: Base.metadata.create_all(
-                    sync,
-                    tables=cast(
-                        Any,
-                        [
-                            UserModel.__table__,
-                            AuthSessionModel.__table__,
-                            DepartmentModel.__table__,
-                            UserDepartmentModel.__table__,
-                            DeptAdminScopeModel.__table__,
-                            ResourceVisibilityGrantModel.__table__,
-                            SkillModel.__table__,
-                            SkillVersionModel.__table__,
-                        ],
-                    ),
-                )
-            )
         actor_a, actor_b = await _seed_users(factory)
         repository = SqlAlchemySkillRepository(factory)
         objects = _MemoryObjects()
@@ -152,17 +123,13 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
 
         await _insert_public_skill(factory)
         public_entries = await repository.get_public_directory_entries()
-        assert [(s.id, v.id) for s, v in public_entries] == [
-            ("skill_public", "skillver_public")
-        ]
+        assert [(s.id, v.id) for s, v in public_entries] == [("skill_public", "skillver_public")]
         user_entries = await repository.get_user_directory_entries(actor_a.user.id)
         assert {(s.id, v.id) for s, v in user_entries} == {
             ("skill_public", "skillver_public"),
             (created_a.skill.id, created_a.versions[0].id),
         }
-        assert [item.id for item in await service.list_personal(actor_a)] == [
-            created_a.skill.id
-        ]
+        assert [item.id for item in await service.list_personal(actor_a)] == [created_a.skill.id]
         assert await repository.get_personal_skill(actor_b.user.id, created_a.skill.id) is None
         with pytest.raises(SkillNotFoundError):
             await service.get_personal(actor_b, created_a.skill.id)
@@ -248,9 +215,7 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
         )
         assert disabled.skill.enabled is False
         assert disabled.skill.revision == 3
-        assert created_a.skill.id not in {
-            item.id for item in await service.user_directory(actor_a)
-        }
+        assert created_a.skill.id not in {item.id for item in await service.user_directory(actor_a)}
         enabled = await service.set_personal_enabled(
             actor_a,
             created_a.skill.id,
@@ -302,30 +267,10 @@ async def _run_personal_skill_scenario(tmp_path: Path) -> None:
         await engine.dispose()
 
 
-async def _run_personal_replay_current_scenario(tmp_path: Path) -> None:
+async def _run_personal_replay_current_scenario() -> None:
     """验证个人旧请求重放跟随当前指针，但不改变历史版本或新增版本。"""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'replay-skills.db'}")
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, factory = await create_pg_unit_db()
     try:
-        async with engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync: Base.metadata.create_all(
-                    sync,
-                    tables=cast(
-                        Any,
-                        [
-                            UserModel.__table__,
-                            AuthSessionModel.__table__,
-                            DepartmentModel.__table__,
-                            UserDepartmentModel.__table__,
-                            DeptAdminScopeModel.__table__,
-                            ResourceVisibilityGrantModel.__table__,
-                            SkillModel.__table__,
-                            SkillVersionModel.__table__,
-                        ],
-                    ),
-                )
-            )
         actor, _ = await _seed_users(factory)
         repository = SqlAlchemySkillRepository(factory)
         objects = _MemoryObjects()
@@ -439,6 +384,7 @@ async def _seed_users(
                         deleted_time=None,
                     )
                 )
+                await session.flush()
                 session.add(
                     AuthSessionModel(
                         id=session_id,
@@ -533,30 +479,10 @@ async def _insert_public_skill(factory: async_sessionmaker[Any]) -> None:
             skill.current_version_id = version.id
 
 
-async def _run_admin_package_hash_scenario(tmp_path: Path) -> None:
+async def _run_admin_package_hash_scenario() -> None:
     """验证公共版本内容哈希不再作为跨请求去重约束。"""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'admin-skills.db'}")
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, factory = await create_pg_unit_db()
     try:
-        async with engine.begin() as connection:
-            await connection.run_sync(
-                lambda sync: Base.metadata.create_all(
-                    sync,
-                    tables=cast(
-                        Any,
-                        [
-                            UserModel.__table__,
-                            AuthSessionModel.__table__,
-                            DepartmentModel.__table__,
-                            UserDepartmentModel.__table__,
-                            DeptAdminScopeModel.__table__,
-                            ResourceVisibilityGrantModel.__table__,
-                            SkillModel.__table__,
-                            SkillVersionModel.__table__,
-                        ],
-                    ),
-                )
-            )
         admin = await _seed_admin(factory)
         repository = SqlAlchemySkillRepository(factory)
         manifest = SkillPackageManifest(
@@ -722,6 +648,7 @@ async def _seed_admin(factory: async_sessionmaker[Any]) -> AuthContext:
                     deleted_time=None,
                 )
             )
+            await session.flush()
             session.add(
                 AuthSessionModel(
                     id="auth_admin",

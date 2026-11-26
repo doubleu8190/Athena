@@ -8,16 +8,18 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from pg_unit_harness import create_pg_unit_db
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import UserModel
-from adapter.models import Base
+from adapter.llm.model import ModelProfileVersionModel
+from adapter.message.model import ConversationMessageModel
 from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
 from adapter.session.converter import session_to_domain
 from adapter.session.model import SessionModel
 from adapter.session.repository import SqlAlchemySessionRepository
+from adapter.system_prompt.model import SystemPromptVersionModel
 from domain.project import ProjectNotFoundError
 from domain.run import RunStatus, SessionHasActiveRunError
 from domain.session import (
@@ -35,10 +37,7 @@ async def _make_repository() -> tuple[
     async_sessionmaker[AsyncSession],
     SqlAlchemySessionRepository,
 ]:
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, session_factory = await create_pg_unit_db()
     return engine, session_factory, SqlAlchemySessionRepository(session_factory)
 
 
@@ -273,8 +272,51 @@ def test_repository_updates_binding_only_before_first_message() -> None:
             assert rebound.project_id == "project_2"
 
             # 当存在活跃 Run 时，必须拒绝变更项目归属并返回 SessionHasActiveRunError。
+            # 在 PostgreSQL 外键约束下补齐 Run 依赖的模型版本、提示词版本与触发消息记录。
             async with session_factory() as session:
                 async with session.begin():
+                    session.add_all(
+                        [
+                            ModelProfileVersionModel(
+                                id="llmprof_1",
+                                name="测试模型",
+                                protocol="chat_completions",
+                                base_url="https://llm.example.test/v1",
+                                model="gpt-test",
+                                context_window_tokens=128000,
+                                tokenizer_encoding="cl100k_base",
+                                max_output_tokens=4096,
+                                request_timeout_seconds=30,
+                                execution_timeout_seconds=120,
+                                max_concurrency=4,
+                                created_at=timestamp,
+                            ),
+                            SystemPromptVersionModel(
+                                id="sp_main",
+                                kind="main",
+                                content="main prompt",
+                                created_at=timestamp,
+                            ),
+                            SystemPromptVersionModel(
+                                id="sp_comp",
+                                kind="compression",
+                                content="compression prompt",
+                                created_at=timestamp,
+                            ),
+                            ConversationMessageModel(
+                                id="msg_1",
+                                session_id="session_1",
+                                role="user",
+                                status="completed",
+                                sequence=1,
+                                parts=[{"type": "text", "text": "hello"}],
+                                created_at=timestamp,
+                                completed_at=timestamp,
+                                metadata_json={},
+                            ),
+                        ]
+                    )
+                    await session.flush()
                     session.add(
                         RunModel(
                             id="run_active_1",
@@ -358,7 +400,7 @@ def test_repository_noop_preserves_timestamp_after_first_message() -> None:
             async with session_factory() as session:
                 row = await session.get(SessionModel, "session_1")
                 assert row is not None
-                assert row.updated_at == original.updated_at.replace(tzinfo=None)
+                assert row.updated_at == original.updated_at
         finally:
             await engine.dispose()
 

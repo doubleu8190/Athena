@@ -62,7 +62,6 @@ from domain.tool import (
     RuntimeToolDefinition,
     ToolCallStatus,
     ToolOutcomeStatus,
-    ToolRetryContext,
 )
 from infrastructure.security import Argon2PasswordHasher
 
@@ -679,17 +678,6 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                 )
                 assert old_details is not None
                 assert old_details.record.status is ToolCallStatus.UNKNOWN
-                assert await run_repository.list_retry_context(
-                    session_id,
-                    owner_id,
-                    retried.id,
-                ) == (
-                    ToolRetryContext(
-                        run_id=unknown_run_id,
-                        tool_name="mcp_probe",
-                        safe_error_code="mcp_tool_timeout",
-                    ),
-                )
             finally:
                 await client.aclose()
 

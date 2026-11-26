@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +19,7 @@ from adapter.message.model.conversation import ConversationMessageModel
 from adapter.message.model.execution import ExecutionMessageModel
 from adapter.run.model.run import RunModel
 from adapter.session.model import SessionModel
+from common.date import as_utc
 from domain.message import (
     ConversationMessage,
     ConversationMessageDraft,
@@ -66,13 +67,6 @@ def _execution_matches(
         and existing.source_message_id == draft.source_message_id
         and existing.metadata == draft.metadata
     )
-
-
-def _monotonic_updated_at(current: datetime, candidate: datetime) -> datetime:
-    """取锁内当前时间与候选时间的较大值，兼容 SQLite 丢失时区。"""
-    current_utc = current.replace(tzinfo=UTC) if current.tzinfo is None else current
-    candidate_utc = candidate.replace(tzinfo=UTC) if candidate.tzinfo is None else candidate
-    return max(current_utc, candidate_utc)
 
 
 class SqlAlchemyMessageRepository:
@@ -320,9 +314,9 @@ class SqlAlchemyMessageRepository:
 
     @staticmethod
     def _next_sequence(session: SessionModel, updated_at: datetime) -> int:
-        """在已锁定的 Session 上分配共享 sequence。"""
+        """在已锁定的 Session 上分配共享 sequence，并保持更新时间单调不回退。"""
         session.last_message_sequence += 1
-        session.updated_at = _monotonic_updated_at(session.updated_at, updated_at)
+        session.updated_at = max(as_utc(session.updated_at), as_utc(updated_at))
         return session.last_message_sequence
 
     @staticmethod

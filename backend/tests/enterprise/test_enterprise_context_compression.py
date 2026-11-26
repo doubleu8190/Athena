@@ -15,7 +15,7 @@ import yaml  # type: ignore[import-untyped]
 
 from app.preference.context import render_preference_context
 from app.run.compression import ContextCompressor, _split_recent_suffix, _turn_groups
-from app.run.context import estimate_llm_input_tokens
+from app.run.context import LlmRequestSpec, measure_llm_request
 from app.run.prompt import render_project_instructions_context
 from domain.llm.model import (
     LlmProviderError,
@@ -348,14 +348,17 @@ def test_12turn_enterprise_dialogue_triggers_compression_with_layered_project_an
             )
 
     async def scenario() -> None:
-        uncompressed_tokens, _ = await estimate_llm_input_tokens(
-            run,
-            messages,
-            main_runtime.version,
+        spec = LlmRequestSpec(
+            run=run,
+            messages=messages,
             main_prompt=TEST_MAIN_PROMPT,
-            timeout_seconds=10,
             preference_context=preference_context,
             project_context=project_context,
+        )
+        _, _, uncompressed_tokens, _ = await measure_llm_request(
+            spec,
+            main_runtime.version,
+            timeout_seconds=10,
         )
         assert uncompressed_tokens > policy.trigger_tokens
 
@@ -367,14 +370,11 @@ def test_12turn_enterprise_dialogue_triggers_compression_with_layered_project_an
         )
         prepared = await compressor.prepare(
             lease,
-            messages,
+            spec,
             main_runtime,
             policy,
-            main_prompt=TEST_MAIN_PROMPT,
             compression_prompt=TEST_COMPRESSION_PROMPT,
             timeout_seconds=10,
-            preference_context=preference_context,
-            project_context=project_context,
         )
 
         # 验证压缩真实触发、仅派发 1 次，且主请求输入 Token 显著下降。
@@ -441,18 +441,12 @@ def test_8turn_clarification_dialogue_preserves_atomic_turn_groups_during_split(
     )
 
     async def scenario() -> None:
-        base_tokens, _ = await estimate_llm_input_tokens(
-            run, (), main_runtime.version, main_prompt=TEST_MAIN_PROMPT, timeout_seconds=10
-        )
         for recent_limit in (200, 450, 750, 1100):
             remaining_groups, recent_messages = await _split_recent_suffix(
-                run,
                 list(groups),
-                main_runtime,
-                base_tokens,
+                main_runtime.version,
                 recent_limit,
                 timeout_seconds=10,
-                main_prompt=TEST_MAIN_PROMPT,
             )
             recent_seqs = {msg.sequence for msg in recent_messages}
             remaining_seqs = {msg.sequence for group in remaining_groups for msg in group}
@@ -519,10 +513,9 @@ def test_compression_provider_failure_gracefully_falls_back_without_crashing() -
         )
         prepared = await compressor.prepare(
             lease,
-            messages,
+            LlmRequestSpec(run=run, messages=messages, main_prompt=TEST_MAIN_PROMPT),
             main_runtime,
             policy,
-            main_prompt=TEST_MAIN_PROMPT,
             compression_prompt=TEST_COMPRESSION_PROMPT,
             timeout_seconds=10,
         )

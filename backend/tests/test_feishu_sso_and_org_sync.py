@@ -15,15 +15,14 @@ import pytest
 from cli.bootstrap_super_admin import bootstrap_super_admin
 from cli.sync_feishu_org import run_feishu_org_sync
 from fastapi.testclient import TestClient
+from pg_unit_harness import create_pg_unit_db, prepare_pg_unit_cli_target
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository import SqlAlchemyAuthRepository
-from adapter.models import Base
 from adapter.org import DepartmentModel, SqlAlchemyOrgRepository, UserDepartmentModel
 from api.auth import AuthCookieConfig, build_auth_router
 from app.auth import (
@@ -111,12 +110,8 @@ class _FakePasswordHasher:
         return password_hash != self.dummy_hash and password_hash == f"fake:{password}"
 
 
-async def _make_sqlite_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return engine, session_factory
+async def _make_pg_db() -> tuple[Any, async_sessionmaker[AsyncSession]]:
+    return await create_pg_unit_db()
 
 
 # ---------------------------------------------------------------------------
@@ -845,7 +840,7 @@ def test_production_feishu_without_redis_blocks_startup(
 
 
 # ---------------------------------------------------------------------------
-# 3. 飞书 SSO authorize / callback 全链路（SQLite + FastAPI TestClient）
+# 3. 飞书 SSO authorize / callback 全链路（PostgreSQL + FastAPI TestClient）
 # ---------------------------------------------------------------------------
 
 
@@ -884,7 +879,7 @@ def test_feishu_sso_authorize_callback_replay_and_disabled_revocation() -> None:
             return httpx2.Response(200, json={"code": 0, "data": current_identity})
         raise AssertionError(request.url.path)
 
-    engine, session_factory = _run(_make_sqlite_db())
+    engine, session_factory = _run(_make_pg_db())
     try:
         auth_repo = SqlAlchemyAuthRepository(session_factory)
         org_repo = SqlAlchemyOrgRepository(session_factory)
@@ -1070,7 +1065,7 @@ def test_feishu_org_sync_computes_paths_preserves_db_on_cycle_and_revokes_depart
             return list(self.users_by_dept.get(department_external_id, []))
 
     async def scenario() -> None:
-        engine, session_factory = await _make_sqlite_db()
+        engine, session_factory = await _make_pg_db()
         try:
             auth_repo = SqlAlchemyAuthRepository(session_factory)
             org_repo = SqlAlchemyOrgRepository(session_factory)
@@ -1254,18 +1249,30 @@ def test_feishu_org_sync_computes_paths_preserves_db_on_cycle_and_revokes_depart
     _run(scenario())
 
 
-def test_bootstrap_super_admin_cli_helper_works_against_sqlite_file(
-    tmp_path: Any,
+def test_bootstrap_super_admin_cli_helper_works_against_postgresql(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证 cli/bootstrap_super_admin.py 异步核心函数在真实 SQLite 库上创建与重置超管。"""
-    db_file = tmp_path / "bootstrap.db"
-    database_url = f"sqlite+aiosqlite:///{db_file}"
+    """验证 cli/bootstrap_super_admin.py 异步核心函数在隔离 PostgreSQL Schema 上创建与重置超管。"""
+    from sqlalchemy.ext.asyncio import create_async_engine as sa_create_async_engine
+
+    import infrastructure.database as db_module
 
     async def scenario() -> None:
-        engine = create_async_engine(database_url)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        await engine.dispose()
+        database_url, _schema, connect_args = await prepare_pg_unit_cli_target()
+
+        # 在测试侧防御性合并 connect_args / server_settings，并强制锁定隔离 search_path。
+        def _isolated_create_engine(url: str, **kwargs: Any) -> Any:
+            merged_connect_args = dict(kwargs.get("connect_args") or {})
+            merged_server_settings = dict(merged_connect_args.get("server_settings") or {})
+            isolated_server_settings = cast(dict[str, str], connect_args["server_settings"])
+            merged_connect_args["server_settings"] = {
+                **merged_server_settings,
+                **isolated_server_settings,
+            }
+            kwargs["connect_args"] = merged_connect_args
+            return sa_create_async_engine(url, **kwargs)
+
+        monkeypatch.setattr(db_module, "create_async_engine", _isolated_create_engine)
 
         user, created = await bootstrap_super_admin(
             email="Root@Corp.com",
@@ -1293,12 +1300,12 @@ def test_bootstrap_super_admin_cli_helper_works_against_sqlite_file(
 
 
 def test_sync_feishu_org_cli_helper_invokes_client_and_commits(
-    tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证 cli/sync_feishu_org.py 核心入口函数可完整同步并正确关闭资源。"""
-    db_file = tmp_path / "sync.db"
-    database_url = f"sqlite+aiosqlite:///{db_file}"
+    """验证 cli/sync_feishu_org.py 核心入口函数在隔离 PostgreSQL Schema 下完整同步并关闭资源。"""
+    from sqlalchemy.ext.asyncio import create_async_engine as sa_create_async_engine
+
+    import infrastructure.database as db_module
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/open-apis/auth/v3/tenant_access_token/internal":
@@ -1337,10 +1344,21 @@ def test_sync_feishu_org_cli_helper_invokes_client_and_commits(
     monkeypatch.setattr(FeishuClient, "__init__", patched_init)
 
     async def scenario() -> None:
-        engine = create_async_engine(database_url)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        await engine.dispose()
+        database_url, _schema, connect_args = await prepare_pg_unit_cli_target()
+
+        # 在测试侧防御性合并 connect_args / server_settings，并强制锁定隔离 search_path。
+        def _isolated_create_engine(url: str, **kwargs: Any) -> Any:
+            merged_connect_args = dict(kwargs.get("connect_args") or {})
+            merged_server_settings = dict(merged_connect_args.get("server_settings") or {})
+            isolated_server_settings = cast(dict[str, str], connect_args["server_settings"])
+            merged_connect_args["server_settings"] = {
+                **merged_server_settings,
+                **isolated_server_settings,
+            }
+            kwargs["connect_args"] = merged_connect_args
+            return sa_create_async_engine(url, **kwargs)
+
+        monkeypatch.setattr(db_module, "create_async_engine", _isolated_create_engine)
 
         cfg = FeishuConfig(
             app_id="cli_sync",
@@ -1378,7 +1396,7 @@ def test_feishu_sync_aborts_on_empty_departments_or_empty_employees_fuse() -> No
         async def list_department_users(self, department_external_id: str) -> list[RemoteEmployee]:
             return list(self.users_by_dept.get(department_external_id, []))
 
-    engine, session_factory = _run(_make_sqlite_db())
+    engine, session_factory = _run(_make_pg_db())
     try:
         auth_repo = SqlAlchemyAuthRepository(session_factory)
         org_repo = SqlAlchemyOrgRepository(session_factory)
@@ -1491,7 +1509,7 @@ def test_feishu_callback_sanitizes_c1_control_chars_and_overlong_display_names()
             del code
             return self._identity
 
-    engine, session_factory = _run(_make_sqlite_db())
+    engine, session_factory = _run(_make_pg_db())
     try:
         auth_repo = SqlAlchemyAuthRepository(session_factory)
         org_repo = SqlAlchemyOrgRepository(session_factory)
@@ -1630,7 +1648,7 @@ def test_list_users_active_department_subtree_excludes_archived_descendants() ->
     now = datetime(2026, 11, 23, 16, 0, tzinfo=UTC)
 
     async def scenario() -> None:
-        engine, session_factory = await _make_sqlite_db()
+        engine, session_factory = await _make_pg_db()
         try:
             org_repo = SqlAlchemyOrgRepository(session_factory)
             async with session_factory() as s, s.begin():

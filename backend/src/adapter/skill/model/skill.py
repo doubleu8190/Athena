@@ -17,9 +17,10 @@ from sqlalchemy import (
     false,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from adapter.base import Base, json_column_type
+from adapter.base import Base
 
 
 class SkillModel(Base):
@@ -52,7 +53,6 @@ class SkillModel(Base):
             "slug",
             unique=True,
             postgresql_where=text("scope = 'company'"),
-            sqlite_where=text("scope = 'company'"),
         ),
         Index(
             "uq_skills_department_slug",
@@ -60,7 +60,6 @@ class SkillModel(Base):
             "slug",
             unique=True,
             postgresql_where=text("scope = 'department' AND deleted_at IS NULL"),
-            sqlite_where=text("scope = 'department' AND deleted_at IS NULL"),
         ),
         Index(
             "uq_skills_personal_owner_slug",
@@ -68,7 +67,6 @@ class SkillModel(Base):
             "slug",
             unique=True,
             postgresql_where=text("scope = 'personal' AND deleted_at IS NULL"),
-            sqlite_where=text("scope = 'personal' AND deleted_at IS NULL"),
         ),
         Index(
             "ix_skills_owner_scope_enabled",
@@ -112,9 +110,7 @@ class SkillModel(Base):
     )
     owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     owner_department_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     current_version_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
@@ -144,8 +140,7 @@ class SkillVersionModel(Base):
     __table_args__ = (
         CheckConstraint("ordinal > 0", name="ck_skill_versions_ordinal"),
         CheckConstraint(
-            "request_operation IN "
-            "('import', 'add_version', 'personal_create', 'personal_publish')",
+            "request_operation IN ('import', 'add_version', 'personal_create', 'personal_publish')",
             name="ck_skill_versions_request_operation",
         ),
         CheckConstraint(
@@ -184,14 +179,12 @@ class SkillVersionModel(Base):
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     label: Mapped[str] = mapped_column(String(64), nullable=False)
     guide: Mapped[str] = mapped_column(Text, nullable=False)
-    manifest: Mapped[dict[str, object]] = mapped_column(json_column_type(), nullable=False)
+    manifest: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     # 纯 Markdown 技能版本走纯 DB 持久化（object_key 为 NULL），ZIP 技能包写入唯一对象键。
     object_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     package_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    dependency_requirements: Mapped[list[str]] = mapped_column(
-        json_column_type(), nullable=False, default=list
-    )
-    dependency_check: Mapped[dict[str, object]] = mapped_column(json_column_type(), nullable=False)
+    dependency_requirements: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    dependency_check: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     request_operation: Mapped[str] = mapped_column(String(16), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)

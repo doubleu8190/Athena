@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
+from pydantic import TypeAdapter
 from sqlalchemy import func, or_, select
 from sqlalchemy import text as sql_text
 
@@ -54,9 +55,6 @@ from domain.run.model import (
     SaveContextSummaryCommand,
     SubagentTaskSummary,
 )
-from domain.run.model.errors import (
-    RunConflictError,
-)
 from domain.skill import (
     SKILL_LOAD_TOOL_ID,
 )
@@ -70,6 +68,7 @@ _STREAM_SNAPSHOT_MESSAGES = 8
 _STREAM_SNAPSHOT_EVENTS = 100
 _STREAM_SNAPSHOT_BYTES = MAX_RUN_SSE_SNAPSHOT_BYTES
 _STREAM_SNAPSHOT_PREFIX_RESERVE = 128
+_RUN_EVENT_ADAPTER: TypeAdapter[RunEvent] = TypeAdapter(RunEvent)
 logger = logging.getLogger(__name__)
 
 
@@ -125,10 +124,13 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     """负责上下文消息组装、压缩摘要、用量审计与 SSE 快照查询。"""
 
     async def record_usage(self, command: RecordRunUsageCommand) -> Run | None:
-        """按执行 epoch 和调用序号幂等累加已知 usage。"""
+        """按执行 epoch 和调用序号幂等累加已知 usage；仅锁 runs 单行，不阻塞父表 sessions。"""
+        if command.attempt < 1:
+            raise ValueError("run_usage_attempt_invalid")
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._lock_worker_run(
+                # 仅锁 runs 单行并校验租约归属，避免 LLM 流期间写 usage 争抢 sessions 行锁。
+                row = await self._lock_worker_run_only(
                     session, command.run_id, command.worker_id, command.execution_epoch
                 )
                 db_now = await session.scalar(select(func.clock_timestamp()))
@@ -141,9 +143,6 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     or not self._work_deadline_is_valid(row, db_now)
                 ):
                     return None
-                if command.attempt < 1:
-                    raise ValueError("run_usage_attempt_invalid")
-                usage = RunUsage.model_validate(row.usage)
                 incoming = RunAttemptUsage(
                     execution_epoch=command.execution_epoch,
                     attempt=command.attempt,
@@ -157,24 +156,10 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     total_tokens=command.total_tokens,
                     complete=command.complete,
                 )
-                existing = next(
-                    (
-                        attempt
-                        for attempt in usage.attempts
-                        if attempt.execution_epoch == incoming.execution_epoch
-                        and attempt.purpose == incoming.purpose
-                        and attempt.operation_id == incoming.operation_id
-                        and attempt.batch_index == incoming.batch_index
-                        and attempt.attempt == incoming.attempt
-                    ),
-                    None,
+                row.usage = self._merge_usage(row.usage, RunUsage(attempts=(incoming,))).model_dump(
+                    mode="json"
                 )
-                if existing is not None and existing != incoming:
-                    raise RunConflictError("run_usage_attempt_conflict")
-                if existing is None:
-                    row.usage = self._merge_usage(
-                        row.usage, RunUsage(attempts=(incoming,))
-                    ).model_dump(mode="json")
+                self._sync_llm_request_count(row, command.llm_request_count)
                 result = run_to_domain(row)
         return result
 
@@ -366,31 +351,21 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             )
             if trigger_sequence is None:
                 return ()
-            rows: list[SessionContextSummaryModel] = []
-            offset = 0
-            while True:
-                page = (
-                    await session.scalars(
-                        select(SessionContextSummaryModel)
-                        .where(
-                            SessionContextSummaryModel.session_id == session_id,
-                            SessionContextSummaryModel.owner_id == owner_id,
-                            SessionContextSummaryModel.covered_through_sequence < trigger_sequence,
-                        )
-                        .order_by(
-                            SessionContextSummaryModel.covered_through_sequence.desc(),
-                            SessionContextSummaryModel.created_at.desc(),
-                            SessionContextSummaryModel.id.desc(),
-                        )
-                        .offset(offset)
-                        .limit(100)
-                    )
-                ).all()
-                rows.extend(page)
-                if len(page) < 100:
-                    break
-                offset += len(page)
-        return tuple(context_summary_to_domain(row) for row in rows)
+            row = await session.scalar(
+                select(SessionContextSummaryModel)
+                .where(
+                    SessionContextSummaryModel.session_id == session_id,
+                    SessionContextSummaryModel.owner_id == owner_id,
+                    SessionContextSummaryModel.covered_through_sequence < trigger_sequence,
+                )
+                .order_by(
+                    SessionContextSummaryModel.covered_through_sequence.desc(),
+                    SessionContextSummaryModel.created_at.desc(),
+                    SessionContextSummaryModel.id.desc(),
+                )
+                .limit(1)
+            )
+        return () if row is None else (context_summary_to_domain(row),)
 
     async def save_context_summary(
         self, command: SaveContextSummaryCommand
@@ -439,19 +414,6 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                 )
                 if trigger_sequence is None or command.covered_through_sequence >= trigger_sequence:
                     raise ValueError("run_context_summary_boundary_invalid")
-                if command.parent_summary_id is not None:
-                    parent = await session.scalar(
-                        select(SessionContextSummaryModel).where(
-                            SessionContextSummaryModel.id == command.parent_summary_id,
-                            SessionContextSummaryModel.session_id == row.session_id,
-                            SessionContextSummaryModel.owner_id == row.owner_id,
-                        )
-                    )
-                    if (
-                        parent is None
-                        or parent.covered_through_sequence > command.covered_through_sequence
-                    ):
-                        raise ValueError("run_context_summary_parent_invalid")
                 boundary_exists = await session.scalar(
                     select(ConversationMessageModel.id).where(
                         ConversationMessageModel.session_id == row.session_id,
@@ -530,10 +492,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                 # 步骤 1：设置可重复读隔离级别（SET TRANSACTION ISOLATION LEVEL REPEATABLE READ），
                 # 确保 Run、消息、事件与子任务视图处于同一全局一致点，
                 # 消除并发写入时的不可重复读与状态错位。
-                if session.bind is not None and session.bind.dialect.name == "postgresql":
-                    await session.execute(
-                        sql_text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                    )
+                await session.execute(sql_text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
 
                 # 步骤 2：校验租户所有权与会话软删除状态，拒绝未授权或失效数据访问。
                 row = await self._get_visible_run(session, session_id, owner_id, run_id)
@@ -632,80 +591,74 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         # 事务边界结束：数据库只读快照已完整取出，连接立即归还连接池，
         # 后续 CPU 密集的消息字节预裁剪与 512KB 快照序列化裁剪全部在事务外执行。
 
-        # 步骤 5：还原历史消息排他游标，并以 O(1) 保守上界预判 + 单次运行和消除 O(M²) 重算。
+        # 步骤 5：事务外单趟字节预算裁剪，确保完整 SSE 快照帧严格 <= 512 KiB。
+        # 先按最宽游标占位测量空消息/空事件信封字节数，再按每条消息/事件 JSON 字节累加精确控界。
         messages_before_sequence = messages[0].sequence if has_more_messages and messages else None
-        # text 与 parts 双份承载文本，按单码点 12 字节 + parts/固定字段裕量估算保守上界。
-        upper_bound_bytes = sum(
-            len(message.text) * 12
-            + len(message.id) * 6
-            + len(message.status) * 6
-            + (len(message.parts) * 512 if message.parts else 0)
-            + 512
-            for message in messages
-        )
-        if messages and upper_bound_bytes > _STREAM_SNAPSHOT_BYTES:
-            message_sizes = [
-                len(message.model_dump_json(exclude_none=True).encode("utf-8"))
-                for message in messages
-            ]
-            total_message_bytes = sum(message_sizes)
-            trim_index = 0
-            while trim_index < len(messages) and total_message_bytes > _STREAM_SNAPSHOT_BYTES:
-                removed = messages[trim_index]
-                total_message_bytes -= message_sizes[trim_index]
-                messages_before_sequence = removed.sequence + 1
-                trim_index += 1
-            if trim_index:
-                messages = messages[trim_index:]
-
-        # 步骤 6：计算状态事件首屏完整度与后续补齐游标。
         events_after_sequence = events[-1].sequence if has_more_events and events else None
         events_complete = events_after_sequence is None
 
-        # 步骤 7：在事务外模拟完整 SSE 序列化，在 512KB 硬预算内执行优雅降级裁剪：
-        # 先裁旧消息；仅剩终态关联消息时优先裁事件以尽量保留终态回复；仍超限时再裁消息。
-        protected_message_id = assistant_message_id or run.report_message_id
-        while True:
-            payload = RunSnapshotPayload(
-                status=run.status,
-                event_sequence=run.event_sequence,
-                report_message_id=run.report_message_id,
-                assistant_message_id=assistant_message_id,
-                messages=tuple(messages),
-                events=tuple(events),
-                messages_complete=messages_before_sequence is None,
-                messages_before_sequence=messages_before_sequence,
-                events_complete=events_complete,
-                events_after_sequence=events_after_sequence,
-                subagent_tasks=subagent_tasks,
-                pending_subagent_inputs=pending_subagent_inputs,
-                pending_subagent_approvals=pending_subagent_approvals,
-            )
-            encoded = (
+        envelope_bytes = (
+            len(
                 RunSnapshotEvent(
                     run_id=run.id,
                     execution_epoch=run.execution_epoch,
                     stream_sequence=9_999_999_999_999_999_999,
-                    payload=payload,
+                    payload=RunSnapshotPayload(
+                        status=run.status,
+                        event_sequence=run.event_sequence,
+                        report_message_id=run.report_message_id,
+                        assistant_message_id=assistant_message_id,
+                        messages=(),
+                        events=(),
+                        messages_complete=False,
+                        messages_before_sequence=9_999_999_999_999,
+                        events_complete=False,
+                        events_after_sequence=9_999_999_999_999,
+                        subagent_tasks=subagent_tasks,
+                        pending_subagent_inputs=pending_subagent_inputs,
+                        pending_subagent_approvals=pending_subagent_approvals,
+                    ),
                 )
                 .model_dump_json(exclude_none=True)
                 .encode("utf-8")
             )
-            if len(encoded) + _STREAM_SNAPSHOT_PREFIX_RESERVE <= _STREAM_SNAPSHOT_BYTES:
-                break
-            if messages and (
-                len(messages) > 1 or messages[0].id != protected_message_id or not events
+            + _STREAM_SNAPSHOT_PREFIX_RESERVE
+        )
+        budget = _STREAM_SNAPSHOT_BYTES - envelope_bytes
+        if budget < 0:
+            raise ValueError("run_stream_snapshot_exceeds_size_limit")
+
+        msg_sizes = [
+            len(item.model_dump_json(exclude_none=True).encode("utf-8")) + 1 for item in messages
+        ]
+        evt_sizes = [
+            len(_RUN_EVENT_ADAPTER.dump_json(item, exclude_none=True)) + 1 for item in events
+        ]
+        total_bytes = sum(msg_sizes) + sum(evt_sizes)
+        # 优先裁旧消息；仅剩终态消息仍超限时先裁尾部事件保终态回复；单条超大则留空交由前端兜底。
+        protected_message_id = assistant_message_id or run.report_message_id
+        msg_start = 0
+        evt_end = len(events)
+        while total_bytes > budget:
+            remaining_msgs = len(messages) - msg_start
+            if remaining_msgs > 1 or (
+                remaining_msgs == 1
+                and (messages[msg_start].id != protected_message_id or evt_end == 0)
             ):
-                removed = messages.pop(0)
-                messages_before_sequence = removed.sequence + 1
-            elif events:
-                events.pop()
-                events_after_sequence = events[-1].sequence if events else 0
+                messages_before_sequence = messages[msg_start].sequence + 1
+                total_bytes -= msg_sizes[msg_start]
+                msg_start += 1
+            elif evt_end > 0:
+                evt_end -= 1
+                total_bytes -= evt_sizes[evt_end]
+                events_after_sequence = events[evt_end - 1].sequence if evt_end else 0
                 events_complete = False
             else:
                 raise ValueError("run_stream_snapshot_exceeds_size_limit")
+        messages = messages[msg_start:]
+        events = events[:evt_end]
 
-        # 步骤 8：组装并返回不可变快照对象。
+        # 步骤 6：组装并返回不可变快照对象。
         return RunStreamSnapshot(
             run,
             tuple(messages),

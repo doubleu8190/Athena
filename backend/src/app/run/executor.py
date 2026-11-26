@@ -24,6 +24,7 @@ from app.run.budget import RunLlmBudget
 from app.run.compression import ContextCompressor, ContextPreparation
 from app.run.config import RunWorkerConfig
 from app.run.context import (
+    LlmRequestSpec,
     RunContextError,
     RunInputFileContext,
     RunInputImageAttachment,
@@ -31,10 +32,7 @@ from app.run.context import (
 )
 from app.run.events import publish_pending_events
 from app.run.prompt import render_project_instructions_context
-from app.run.safe_stop import (
-    SafeStopReporter,
-    system_context_report,
-)
+from app.run.safe_stop import SafeStopReporter
 from app.tool.ports import RunToolRuntime
 from app.tool.runtime import (
     MCP_TOOL_WATCHDOG_GRACE_SECONDS,
@@ -91,7 +89,6 @@ from domain.run.model import (
     RecordRunUsageCommand,
     RequestRunInputCommand,
     Run,
-    RunContextSafetyCommitError,
     RunLease,
     RunStatus,
     RunUsage,
@@ -99,7 +96,7 @@ from domain.run.model import (
 from domain.run.model.errors import RunConflictError, RunInputResourceError, RunStateError
 from domain.run.ports import RunEventTransport, RunRepository
 from domain.session import SessionRepository, SessionScope
-from domain.skill import SKILL_EXECUTE_TOOL_ID, RunSkillPromptContext, SkillExecutionStatus
+from domain.skill import SKILL_EXECUTE_TOOL_ID, SkillExecutionStatus
 from domain.subagent import SubagentRepository
 from domain.system_prompt import SystemPromptRepository
 from domain.tool import (
@@ -107,7 +104,6 @@ from domain.tool import (
     AuthorizedRunContext,
     BeginToolCallBatchCommand,
     BeginToolCallBatchItem,
-    ConvergeToolBatchCommand,
     FinishToolCallCommand,
     InitializeRunToolsCommand,
     RuntimeToolDefinition,
@@ -121,7 +117,6 @@ from domain.tool import (
     ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
-    ToolRetryContext,
     bounded_outcome,
     protocol_status_for_outcome,
 )
@@ -130,9 +125,7 @@ logger = logging.getLogger(__name__)
 MAX_MODEL_ATTEMPTS = 3
 CONTEXT_SAFETY_NUMERATOR = 9
 CONTEXT_SAFETY_DENOMINATOR = 10
-# TextDelta 帧级合批阈值：首包快推后，后续分片按字节上限或时间窗合批推送至 Redis。
-_TEXT_DELTA_BATCH_BYTES = 256
-_TEXT_DELTA_BATCH_SECONDS = 0.04
+_MAX_TRACKED_ACTIVE_BUDGETS = 1024
 
 
 class _UseFinalAnswerSlot(Exception):
@@ -151,7 +144,6 @@ class _ExecutionState:
     main_prompt: str
     compression_prompt: str
     budget: RunLlmBudget
-    retry_context: tuple[ToolRetryContext, ...]
     input_files: tuple[RunInputFileContext, ...]
     event_cursor: int
     round: int = 0
@@ -160,16 +152,6 @@ class _ExecutionState:
     input_images: tuple[RunInputImageAttachment, ...] = ()
     vision_resolved: bool = False
     vision_resolved_supports_vision: bool | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _BatchCallResult:
-    """One settled call and whether it requires stopping new dispatch."""
-
-    record_id: str
-    ordinal: int
-    stop_error_code: str | None = None
-    lease_lost: bool = False
 
 
 class RunExecutor:
@@ -212,6 +194,8 @@ class RunExecutor:
         self._preference_memory_token_budget = preference_memory_token_budget
         self._auto_title_timeout_seconds = max(0.01, float(auto_title_timeout_seconds))
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # 有界保存当前执行代次的在途预算引用，供 RunWorker 在取消或超时收敛时回收已消耗计数。
+        self._active_budgets: dict[tuple[str, int], RunLlmBudget] = {}
         self._id_factory = id_factory
         self._clock = clock
         self._sleep = sleep
@@ -233,6 +217,19 @@ class RunExecutor:
             pending = tuple(self._background_tasks)
             await asyncio.gather(*pending, return_exceptions=True)
 
+    def _register_active_budget(self, run: Run, budget: RunLlmBudget) -> None:
+        """登记本代次在途预算并按插入序限容，避免直接单测调用 execute 时无限累积。"""
+        key = (run.id, run.execution_epoch)
+        self._active_budgets.pop(key, None)
+        self._active_budgets[key] = budget
+        while len(self._active_budgets) > _MAX_TRACKED_ACTIVE_BUDGETS:
+            del self._active_budgets[next(iter(self._active_budgets))]
+
+    def pop_llm_request_count(self, run_id: str, execution_epoch: int) -> int | None:
+        """弹出指定执行代次当前已消耗的 LLM 请求计数，供 Worker 取消或超时收敛落库。"""
+        budget = self._active_budgets.pop((run_id, execution_epoch), None)
+        return None if budget is None else budget.used
+
     async def execute(self, lease: RunLease) -> None:
         """执行一次领取；终态、等待与资源清理由原子仓储命令完成。"""
         run = lease.run
@@ -240,6 +237,7 @@ class RunExecutor:
         loop_deadline = asyncio.get_running_loop().time() + max(
             0.0, (lease.execution_deadline_at - self._now()).total_seconds()
         )
+        state: _ExecutionState | None = None
         try:
             # 领取时截止时间已过：不再执行，直接走超时失败路径。
             if loop_deadline <= asyncio.get_running_loop().time():
@@ -251,18 +249,27 @@ class RunExecutor:
         except asyncio.CancelledError:
             # 取消必须原样传播，由 Worker 监督循环取消子任务并清理上游资源。
             raise
-        except RunContextSafetyCommitError:
-            # 安全收尾已有稳定报告命令；绝不能再降级为无报告普通失败。
-            raise
         except RunContextError as error:
             # 上下文类错误携带稳定错误码，直接作为安全失败原因落库。
-            await self._fail(run, str(error))
+            await self._fail(
+                run,
+                str(error),
+                llm_request_count=None if state is None else state.budget.used,
+            )
         except LlmError as error:
             # 模型/工具运行时的领域错误同样只暴露固定安全错误码。
-            await self._fail(run, error.code)
+            await self._fail(
+                run,
+                error.code,
+                llm_request_count=None if state is None else state.budget.used,
+            )
         except TimeoutError:
             # 总截止时间耗尽。
-            await self._fail(run, "execution_timeout")
+            await self._fail(
+                run,
+                "execution_timeout",
+                llm_request_count=None if state is None else state.budget.used,
+            )
         except Exception as error:
             # 未预期异常记录类型后收敛为固定错误码，避免泄露堆栈与内部信息。
             logger.error(
@@ -270,7 +277,11 @@ class RunExecutor:
                 run.id,
                 type(error).__name__,
             )
-            await self._fail(run, "execution_failed")
+            await self._fail(
+                run,
+                "execution_failed",
+                llm_request_count=None if state is None else state.budget.used,
+            )
 
     async def _prepare(self, lease: RunLease, loop_deadline: float) -> _ExecutionState:
         """Re-authorize, freeze the catalog, and create the Run request budget."""
@@ -302,35 +313,16 @@ class RunExecutor:
         snapshot = run.tool_snapshot
         if snapshot is None:
             snapshot = await self._freeze_snapshot(run, authorized)
-        # 工具执行上下文固定 owner/session/project/epoch 与总截止时间，
-        # 供工具运行时在每次外部调用前后做权限与超时约束。
-        context = ToolExecutionContext(
-            owner_id=run.owner_id,
-            chat_session_id=run.session_id,
-            project_id=None if authorized is None else authorized.project_id,
-            run_id=run.id,
-            execution_epoch=run.execution_epoch,
-            auth_session_id=run.auth_session_id or "",
-            deadline_at=lease.execution_deadline_at,
-            skill_snapshot=run.skill_snapshot,
-            knowledge_base_ids=run.knowledge_base_ids,
-        )
-        # 预算从数据库已用次数继续，跨进程重试也不会超发模型请求。
+        # 进程内预算计数器从数据库已用次数续接，随 usage 与状态流转事务原子落库。
         budget = RunLlmBudget(
-            self._repository,
-            context,
             used=run.llm_request_count,
             maximum=(
                 run.max_llm_requests
                 if run.max_llm_requests is not None
                 else self._config.llm_request_limit
             ),
-            worker_id=run.worker_id or "",
         )
-        # 用户主动重试时带上的安全摘要，只作为历史资料注入，不是当前执行结果。
-        retry_context = await self._repository.list_retry_context(
-            run.session_id, run.owner_id, run.id
-        )
+        self._register_active_budget(run, budget)
         input_files: tuple[RunInputFileContext, ...] = ()
         if run.input_files.file_ids:
             # 解析必须发生在授权成功之后；解析结果只保留安全元数据。
@@ -347,7 +339,6 @@ class RunExecutor:
             main_prompt=main_prompt,
             compression_prompt=compression_prompt,
             budget=budget,
-            retry_context=retry_context or (),
             input_files=input_files,
             event_cursor=run.event_sequence,
         )
@@ -451,6 +442,7 @@ class RunExecutor:
                     state,
                     request,
                     allow_retry=not final_only,
+                    runtime=runtime,
                 )
             except _UseFinalAnswerSlot:
                 # 最后一个预算槽位留给无工具的最终回答，回到循环重新构建请求。
@@ -611,59 +603,46 @@ class RunExecutor:
         remaining = self._remaining_seconds(state)
         if remaining <= 0:
             raise TimeoutError("run_execution_deadline")
+        spec = LlmRequestSpec(
+            run=run,
+            messages=messages,
+            main_prompt=state.main_prompt,
+            tools=business_tools,
+            skill_context=skill_context,
+            input_files=state.input_files,
+            input_images=state.input_images,
+            preference_context=preference_content,
+            project_context=project_content,
+        )
         # 子 Run 无正式会话历史，跳过历史压缩准备流程，直接走完整上下文度量。
         policy_id = None if run.depth >= 1 else run.compression_policy_version_id
+        policy = (
+            None if policy_id is None else await self._profiles.get_compression_policy(policy_id)
+        )
         prepared: ContextPreparation
-        if policy_id is not None:
-            policy = await self._profiles.get_compression_policy(policy_id)
-            if policy is None:
-                # 旧浮点策略或已不存在的引用不会被静默换算；本轮按未配置压缩继续安全判断。
-                prepared = await self._measure_complete_context(
-                    state,
-                    runtime,
-                    messages,
-                    business_tools,
-                    skill_context,
-                    preference_content,
-                    project_content,
-                    remaining,
-                    ContextStopReason.COMPRESSION_NOT_CONFIGURED,
-                )
-            else:
-                prepared = await self._compressor.prepare(
-                    state.lease,
-                    messages,
-                    runtime,
-                    policy,
-                    main_prompt=state.main_prompt,
-                    compression_prompt=state.compression_prompt,
-                    timeout_seconds=remaining,
-                    tools=business_tools,
-                    retry_context=state.retry_context,
-                    skill_context=skill_context,
-                    input_files=state.input_files,
-                    input_images=state.input_images,
-                    preference_context=preference_content,
-                    project_context=project_content,
-                    budget=state.budget,
-                    allow_compression=state.budget.can_compress,
-                )
-        else:
-            stop_hint = (
-                ContextStopReason.COMPRESSION_NOT_CONFIGURED
-                if policy_id is None
-                else ContextStopReason.COMPRESSION_BUDGET_EXHAUSTED
-            )
-            prepared = await self._measure_complete_context(
-                state,
+        if policy is not None:
+            prepared = await self._compressor.prepare(
+                state.lease,
+                spec,
                 runtime,
-                messages,
-                business_tools,
-                skill_context,
-                preference_content,
-                project_content,
-                remaining,
-                stop_hint,
+                policy,
+                compression_prompt=state.compression_prompt,
+                timeout_seconds=remaining,
+                budget=state.budget,
+                allow_compression=state.budget.can_compress,
+            )
+        else:
+            llm_messages, selected_tools, input_tokens, output_tokens = await measure_llm_request(
+                spec,
+                runtime.version,
+                timeout_seconds=remaining,
+            )
+            prepared = ContextPreparation(
+                messages=llm_messages,
+                tools=selected_tools,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                stop_reason_hint=ContextStopReason.COMPRESSION_NOT_CONFIGURED,
             )
 
         # 90% 输入线和 I+O<=W 硬窗均按业务 tools 的完整计数判断，不能先删 tools 降低占用。
@@ -683,69 +662,12 @@ class RunExecutor:
                 reason = ContextStopReason.COMPRESSION_INSUFFICIENT
             else:
                 reason = prepared.stop_reason_hint or ContextStopReason.COMPRESSION_INSUFFICIENT
-            compression_reason = (
-                prepared.stop_reason_hint
-                if prepared.stop_reason_hint is not None and prepared.stop_reason_hint is not reason
-                else None
-            )
-            await self._stop_for_context_safety(
-                state,
-                runtime,
-                messages,
-                reason,
-                skill_context=skill_context,
-                compression_stop_reason=compression_reason,
-            )
+            await self._stop_for_context_safety(state, messages, reason)
             return None
 
         # 只有安全裁决通过后才允许 final-only 移除工具；压缩消耗最后倒数槽位也一样。
         selected_tools = () if final_only or state.budget.final_only else prepared.tools
-        return ContextPreparation(
-            messages=prepared.messages,
-            tools=selected_tools,
-            input_tokens=prepared.input_tokens,
-            output_tokens=prepared.output_tokens,
-            event=prepared.event,
-            had_new_history=prepared.had_new_history,
-            compression_called=prepared.compression_called,
-            compression_completed=prepared.compression_completed,
-            stop_reason_hint=prepared.stop_reason_hint,
-        )
-
-    async def _measure_complete_context(
-        self,
-        state: _ExecutionState,
-        runtime: RuntimeModelProfile,
-        messages: tuple[ConversationMessage | ExecutionMessage, ...],
-        tools: tuple[LlmTool, ...],
-        skill_context: RunSkillPromptContext | None,
-        preference_context: str | None,
-        project_context: str | None,
-        timeout_seconds: float,
-        stop_hint: ContextStopReason,
-    ) -> ContextPreparation:
-        """测量不经过压缩的全部输入，并保留后续安全停止原因。"""
-        llm_messages, selected_tools, input_tokens, output_tokens = await measure_llm_request(
-            state.run,
-            messages,
-            runtime.version,
-            main_prompt=state.main_prompt,
-            timeout_seconds=timeout_seconds,
-            tools=tools,
-            retry_context=state.retry_context,
-            skill_context=skill_context,
-            input_files=state.input_files,
-            input_images=state.input_images,
-            preference_context=preference_context,
-            project_context=project_context,
-        )
-        return ContextPreparation(
-            messages=llm_messages,
-            tools=selected_tools,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            stop_reason_hint=stop_hint,
-        )
+        return replace(prepared, tools=selected_tools)
 
     def _available_tools(self, state: _ExecutionState) -> tuple[LlmTool, ...]:
         """Expose only definitions in the frozen snapshot for this prompt version."""
@@ -769,19 +691,15 @@ class RunExecutor:
             for item in definitions
         )
 
-    async def _publish_text_batch(self, state: _ExecutionState, pending_parts: list[str]) -> None:
-        """先清空合批缓冲再尽力推送文本增量；推送失败只记告警，不中断模型调用。"""
-        if not pending_parts:
-            return
-        batched_text = "".join(pending_parts)
-        pending_parts.clear()
-        if self._publisher is None:
+    async def _publish_text(self, state: _ExecutionState, text: str) -> None:
+        """尽力直推文本增量；推送失败只记告警，不中断模型调用。"""
+        if self._publisher is None or not text:
             return
         try:
             await self._publisher.publish_text(
                 state.run.id,
                 state.run.execution_epoch,
-                batched_text,
+                text,
                 round=state.round,
             )
         except Exception:
@@ -793,28 +711,29 @@ class RunExecutor:
         request: LlmRequest,
         *,
         allow_retry: bool,
+        runtime: RuntimeModelProfile | None = None,
     ) -> LlmResponse:
         """Reserve every provider attempt and retry only output-free transient errors."""
         run = state.run
         # 同一次执行内的所有尝试共享 operation_id，便于用量审计关联。
         operation_id = new_id("llmop")
         for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
-            # 每次尝试前重新确认租约与模型配置，执行期间配置可能被禁用。
-            if not await self._repository.is_live_execution(run.id, run.execution_epoch):
-                raise LlmError("run_execution_lease_lost")
-            attempt_runtime = await self._profiles.get_runtime(run.model_config_version_id)
+            # 首调直接复用外层已校验的 runtime 与租约；仅在退避重试前复核一次租约和配置状态。
+            if attempt > 1:
+                if not await self._repository.is_live_execution(run.id, run.execution_epoch):
+                    raise LlmError("run_execution_lease_lost")
+            attempt_runtime = (
+                runtime
+                if attempt == 1 and runtime is not None
+                else await self._profiles.get_runtime(run.model_config_version_id)
+            )
             if attempt_runtime is None:
                 raise LlmError("model_profile_unavailable")
-            # 先原子预占预算；失败不退还，防止异常重试无限消耗供应商额度。
-            await state.budget.reserve()
+            # 先在进程内预占预算槽位；失败不退还，随后随 usage 或状态命令原子落库。
+            state.budget.reserve()
             response: LlmResponse | None = None
             # 是否已向客户端产生可见输出；一旦有输出就不能安全重试。
             emitted_output = False
-            # 单次 attempt 内的同步合批缓冲：无需额外后台定时任务，避免乱序与并发竞态。
-            pending_parts: list[str] = []
-            pending_bytes = 0
-            batch_started_at = 0.0
-            first_text_published = False
             provider_error: LlmProviderError | None = None
             fatal_error: Exception | None = None
             cancelled = False
@@ -824,90 +743,28 @@ class RunExecutor:
             try:
                 async with self._provider.stream(attempt_runtime, request) as events:
                     async for event in events:
-                        # 文本增量收到即置位 emitted_output（严守已吐字禁重试契约）；
-                        # 本次 attempt 首条非空增量立即快推保证 TTFT 零额外延迟，后续增量合批推送。
+                        # 收到首片文本或工具调用分片即置位 emitted_output，严守已输出禁重试契约。
                         if isinstance(event, TextDelta):
                             emitted_output = True
-                            if self._publisher is not None and event.text:
-                                if not first_text_published:
-                                    first_text_published = True
-                                    pending_parts.append(event.text)
-                                    pending_bytes = 0
-                                    batch_started_at = 0.0
-                                    await self._publish_text_batch(state, pending_parts)
-                                else:
-                                    now_monotonic = time.monotonic()
-                                    if not pending_parts:
-                                        batch_started_at = now_monotonic
-                                    pending_parts.append(event.text)
-                                    pending_bytes += (
-                                        len(event.text)
-                                        if event.text.isascii()
-                                        else len(event.text.encode("utf-8"))
-                                    )
-                                    if (
-                                        pending_bytes >= _TEXT_DELTA_BATCH_BYTES
-                                        or (now_monotonic - batch_started_at)
-                                        >= _TEXT_DELTA_BATCH_SECONDS
-                                    ):
-                                        pending_bytes = 0
-                                        batch_started_at = 0.0
-                                        await self._publish_text_batch(state, pending_parts)
-                        # 工具调用分片同样视为已产生输出，禁止后续重试；切出文本流前先强制 flush。
+                            await self._publish_text(state, event.text)
                         elif isinstance(
                             event, (ToolCallStarted, ToolArgumentsDelta, ToolCallCompleted)
                         ):
                             emitted_output = True
-                            if pending_parts:
-                                pending_bytes = 0
-                                batch_started_at = 0.0
-                                await self._publish_text_batch(state, pending_parts)
-                        # 只有完整的 ResponseCompleted 才代表调用成功；进入完成态前强制 flush。
                         elif isinstance(event, ResponseCompleted):
-                            if pending_parts:
-                                pending_bytes = 0
-                                batch_started_at = 0.0
-                                await self._publish_text_batch(state, pending_parts)
                             response = event.response
                             usage = response.usage
-                        elif pending_parts:
-                            pending_bytes = 0
-                            batch_started_at = 0.0
-                            await self._publish_text_batch(state, pending_parts)
-                    # 流循环正常结束后冲刷尾部残留分片，避免漏推最后一批短文本。
-                    if pending_parts:
-                        pending_bytes = 0
-                        batch_started_at = 0.0
-                        await self._publish_text_batch(state, pending_parts)
                 if response is None:
                     raise LlmError("llm_incomplete")
             except asyncio.CancelledError:
-                # 取消/超时路径跳过 flush，避免 Redis 1.0s 超时拖慢取消收尾或吞掉 CancelledError。
                 cancelled = True
                 raise
             except LlmProviderError as error:
                 provider_error = error
-                # 非取消异常在返回重试/失败分支前强制 flush 已到达的文本分片。
-                if pending_parts:
-                    pending_bytes = 0
-                    batch_started_at = 0.0
-                    try:
-                        await self._publish_text_batch(state, pending_parts)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                        raise
             except Exception as error:
                 fatal_error = error
-                if pending_parts:
-                    pending_bytes = 0
-                    batch_started_at = 0.0
-                    try:
-                        await self._publish_text_batch(state, pending_parts)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                        raise
             finally:
-                # 无论成功、失败还是取消，都记录本次尝试的用量与耗时。
+                # 无论成功、失败还是取消，都记录本次尝试的用量、耗时及当前预算计数。
                 elapsed = max(0, int((time.monotonic() - started) * 1000))
                 try:
                     usage_recorded = await self._repository.record_usage(
@@ -930,6 +787,7 @@ class RunExecutor:
                             operation_id=operation_id,
                             model_profile_id=attempt_runtime.version.id,
                             duration_ms=elapsed,
+                            llm_request_count=state.budget.used,
                         )
                     )
                 except Exception as error:
@@ -1151,6 +1009,7 @@ class RunExecutor:
                 calls=tuple(items),
                 requested_at=created_at,
                 round=state.round,
+                llm_request_count=state.budget.used,
             )
         )
         await self._publish_pending_events(state)
@@ -1165,20 +1024,20 @@ class RunExecutor:
         state: _ExecutionState,
         batch: RunToolBatch,
     ) -> bool:
-        """Execute approved calls with stable admission order and bounded concurrency."""
-        # 存在结果未知的调用时必须先收敛整个批次，避免重复执行产生外部副作用。
+        """按 ordinal 顺序排入信号量并发执行已批准调用，并在收尾统一通过 fail 收敛错误批次。"""
+        # 存在结果未知的调用时必须先收敛整个批次与 Run，避免重复执行产生外部副作用。
         if any(call.record.status is ToolCallStatus.UNKNOWN for call in batch.calls):
-            converged = await self._repository.converge_tool_batch(
-                ConvergeToolBatchCommand(
+            failed = await self._repository.fail(
+                FailRunCommand(
                     run_id=state.run.id,
                     worker_id=state.run.worker_id or "",
                     execution_epoch=state.run.execution_epoch,
-                    call_message_id=batch.call_message_id,
                     safe_error_code="tool_outcome_unknown",
                     failed_at=self._now(),
+                    llm_request_count=state.budget.used,
                 )
             )
-            if converged is None:
+            if failed is None:
                 raise LlmError("run_execution_lease_lost")
             await self._publish_pending_events(state)
             return False
@@ -1186,35 +1045,20 @@ class RunExecutor:
         approved = [call for call in batch.calls if call.record.status is ToolCallStatus.APPROVED]
         if not approved:
             return True
-        # stop_dispatch 在失租或出现终止性错误时阻止继续派发新调用。
+
+        semaphore = asyncio.Semaphore(self._config.tool_concurrency)
+        # 串行化准入临界区，保证高并发下派发严格遵循 ordinal 序且 stop_dispatch 后绝不超额准入。
+        admit_lock = asyncio.Lock()
         stop_dispatch = asyncio.Event()
-        active: dict[asyncio.Task[_BatchCallResult], RunToolBatchCall] = {}
-        next_index = 0
         stop_error_code: str | None = None
         lease_lost = False
 
-        async def collect(done: set[asyncio.Task[_BatchCallResult]]) -> None:
+        async def run_one(call: RunToolBatchCall) -> None:
             nonlocal stop_error_code, lease_lost
-            for task in done:
-                result = await task
-                active.pop(task)
-                if result.lease_lost:
-                    lease_lost = True
-                    stop_dispatch.set()
-                if result.stop_error_code is not None:
-                    stop_error_code = stop_error_code or result.stop_error_code
-                    stop_dispatch.set()
-
-        try:
-            while next_index < len(approved) or active:
-                while (
-                    next_index < len(approved)
-                    and len(active) < self._config.tool_concurrency
-                    and not stop_dispatch.is_set()
-                ):
-                    call = approved[next_index]
-                    # 先原子 admit（APPROVED → EXECUTING）再创建任务，
-                    # 保证多 Worker/重试下同一调用不会被重复执行。
+            async with semaphore:
+                async with admit_lock:
+                    if stop_dispatch.is_set():
+                        return
                     admitted = await self._repository.admit_tool_call(
                         AdmitToolCallCommand(
                             run_id=state.run.id,
@@ -1225,72 +1069,49 @@ class RunExecutor:
                         )
                     )
                     if admitted is None:
-                        # 失租或状态已变：停止派发，交由上层上报。
                         lease_lost = True
                         stop_dispatch.set()
-                        break
-                    if stop_dispatch.is_set():
-                        # 停止信号在 admit 期间到达：补写“未执行”的取消结果。
-                        if not await self._finish_cancelled_admitted_call(
-                            state,
-                            call,
-                            batch.thread_id,
-                        ):
-                            lease_lost = True
-                        break
-                    # 启动执行任务并等待其真正开始，确保并发上限与 admit 顺序可控。
-                    started = asyncio.Event()
-                    task = asyncio.create_task(
-                        self._execute_admitted_call(
-                            state,
-                            call,
-                            batch.thread_id,
-                            stop_dispatch,
-                            started,
-                        )
-                    )
-                    active[task] = call
-                    next_index += 1
-                    await started.wait()
-                if not active:
-                    break
-                done, _ = await asyncio.wait(
-                    active,
-                    return_when=asyncio.FIRST_COMPLETED,
+                        return
+                call_stop_error, call_lease_lost = await self._execute_admitted_call(
+                    state,
+                    call,
+                    batch.thread_id,
+                    stop_dispatch,
                 )
-                # 收集已完成结果；出现失租/终止错误时停止派发后续调用。
-                await collect(done)
-        except asyncio.CancelledError:
-            # 取消或异常时先取消并等待所有活跃工具任务，避免遗留外部调用。
-            for task in active:
-                task.cancel()
-            await asyncio.gather(*active, return_exceptions=True)
+                if call_lease_lost:
+                    lease_lost = True
+                    stop_dispatch.set()
+                if call_stop_error is not None:
+                    stop_error_code = stop_error_code or call_stop_error
+                    stop_dispatch.set()
+
+        tasks = [asyncio.create_task(run_one(call)) for call in approved]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            # 取消或异常时先取消并等待所有活跃工具任务，避免遗留后台外部调用。
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             raise
-        except Exception:
-            for task in active:
-                task.cancel()
-            await asyncio.gather(*active, return_exceptions=True)
-            raise
-        finally:
-            if active:
-                await asyncio.gather(*active, return_exceptions=True)
 
         # 失租优先上报，由 Worker 监督循环决定是否收敛状态。
         if lease_lost:
             raise LlmError("run_execution_lease_lost")
-        # 终止性错误：收敛批次并结束本轮，不再请求模型。
+        # 终止性错误：复用 lifecycle.fail() 原子结算未执行调用、写终态事件并唤醒父 Run。
         if stop_error_code is not None:
-            converged = await self._repository.converge_tool_batch(
-                ConvergeToolBatchCommand(
+            failed = await self._repository.fail(
+                FailRunCommand(
                     run_id=state.run.id,
                     worker_id=state.run.worker_id or "",
                     execution_epoch=state.run.execution_epoch,
-                    call_message_id=batch.call_message_id,
                     safe_error_code=stop_error_code,
                     failed_at=self._now(),
+                    llm_request_count=state.budget.used,
                 )
             )
-            if converged is None:
+            if failed is None:
                 raise LlmError("run_execution_lease_lost")
             await self._publish_pending_events(state)
             return False
@@ -1298,64 +1119,14 @@ class RunExecutor:
         await self._publish_pending_events(state)
         return True
 
-    async def _finish_cancelled_admitted_call(
-        self,
-        state: _ExecutionState,
-        call: RunToolBatchCall,
-        thread_id: str,
-    ) -> bool:
-        """Close an admitted call that never reached an external request."""
-        # 已 admit 但尚未发起外部请求的调用补写“取消”终态，保证不会悬挂。
-        outcome = ToolOutcome(
-            status=ToolOutcomeStatus.CANCELLED,
-            code="tool_not_executed",
-            message="该工具调用未执行。",
-        )
-        finished_at = self._now()
-        finished = await self._repository.finish_tool_call(
-            FinishToolCallCommand(
-                run_id=state.run.id,
-                worker_id=state.run.worker_id or "",
-                execution_epoch=state.run.execution_epoch,
-                record_id=call.record.id,
-                result_message=self._tool_result_draft(
-                    state,
-                    tool_call_id=call.record.tool_call_id,
-                    outcome=outcome,
-                    created_at=finished_at,
-                    thread_id=thread_id,
-                ),
-                outcome=outcome,
-                finished_at=finished_at,
-                defer_terminal_convergence=True,
-            )
-        )
-        return finished is not None
-
     async def _execute_admitted_call(
         self,
         state: _ExecutionState,
         call: RunToolBatchCall,
         thread_id: str,
         stop_dispatch: asyncio.Event,
-        started: asyncio.Event,
-    ) -> _BatchCallResult:
-        """Run one already-admitted call and persist exactly one matching result."""
-        # 任务开始前已被叫停：不发起外部调用，直接补写取消结果。
-        if stop_dispatch.is_set():
-            started.set()
-            if not await self._finish_cancelled_admitted_call(
-                state,
-                call,
-                thread_id,
-            ):
-                return _BatchCallResult(
-                    call.record.id,
-                    call.record.ordinal,
-                    lease_lost=True,
-                )
-            return _BatchCallResult(call.record.id, call.record.ordinal)
-        started.set()
+    ) -> tuple[str | None, bool]:
+        """执行单个已准入调用并持久化唯一结果；返回 (stop_error_code, lease_lost)。"""
         # 定位冻结快照中的定义并执行单个工具；结果先按字节上限裁剪。
         definition = self._definition_for_call(state, call.record.model_name)
         result = await self._execute_tool(
@@ -1387,7 +1158,6 @@ class RunExecutor:
             None
             if not result.artifacts or state.run.depth >= 1
             else ConversationMessageDraft(
-                # 调用记录一对一决定消息 ID，完成回包不明时重放仍能核对同一条交付。
                 id=f"msg-{call.record.id}",
                 session_id=state.run.session_id,
                 owner_id=state.run.owner_id,
@@ -1435,8 +1205,6 @@ class RunExecutor:
                     artifacts=result.artifacts,
                     delivery_message=delivery_message,
                     skill_execution_completion=result.skill_execution_completion,
-                    terminate_error_code=result.terminate_run_error_code,
-                    defer_terminal_convergence=True,
                 )
             )
         except (ValueError, RunStateError) as error:
@@ -1480,30 +1248,20 @@ class RunExecutor:
                     artifacts=(),
                     delivery_message=None,
                     skill_execution_completion=quota_completion,
-                    terminate_error_code=result.terminate_run_error_code,
-                    defer_terminal_convergence=True,
                 )
             )
         if finished is None:
             stop_dispatch.set()
-            return _BatchCallResult(call.record.id, call.record.ordinal, lease_lost=True)
+            return None, True
         # 结果未知或工具要求终止 Run 时，通知调度器停止派发后续调用。
-        if (
-            outcome.status is ToolOutcomeStatus.UNKNOWN
-            or result.terminate_run_error_code is not None
-        ):
-            stop_dispatch.set()
-        return _BatchCallResult(
-            record_id=call.record.id,
-            ordinal=call.record.ordinal,
-            stop_error_code=(
-                result.terminate_run_error_code
-                if result.terminate_run_error_code is not None
-                else (
-                    "tool_outcome_unknown" if outcome.status is ToolOutcomeStatus.UNKNOWN else None
-                )
-            ),
+        stop_error = (
+            result.terminate_run_error_code
+            if result.terminate_run_error_code is not None
+            else ("tool_outcome_unknown" if outcome.status is ToolOutcomeStatus.UNKNOWN else None)
         )
+        if stop_error is not None:
+            stop_dispatch.set()
+        return stop_error, False
 
     async def _abandon_artifacts_safely(
         self,
@@ -1683,6 +1441,7 @@ class RunExecutor:
                 execution_messages=(execution_message,),
                 usage=RunUsage(),
                 created_at=created_at,
+                llm_request_count=state.budget.used,
             )
         )
         if request.run_id != run.id:
@@ -1840,6 +1599,7 @@ class RunExecutor:
                     items=tuple(batch_items),
                     requested_at=created_at,
                     round=state.round,
+                    llm_request_count=state.budget.used,
                 )
             )
         except (RunStateError, RunInputResourceError, RunConflictError) as error:
@@ -1882,6 +1642,7 @@ class RunExecutor:
                 reply_message=reply,
                 usage=RunUsage(),
                 finished_at=finished_at,
+                llm_request_count=state.budget.used,
             )
         )
         if finished is None:
@@ -2017,47 +1778,18 @@ class RunExecutor:
     async def _stop_for_context_safety(
         self,
         state: _ExecutionState,
-        runtime: RuntimeModelProfile,
         messages: tuple[ConversationMessage | ExecutionMessage, ...],
         reason: ContextStopReason,
-        *,
-        skill_context: RunSkillPromptContext | None = None,
-        compression_stop_reason: ContextStopReason | None = None,
     ) -> None:
-        """委托 SafeStopReporter 生成持久化报告并原子提交 FAILED 终态。"""
+        """委托 SafeStopReporter 生成持久化系统提示并一次性原子提交 FAILED 终态。"""
         await self._safe_stop.stop_for_context_safety(
-            state,
-            runtime,
+            state.run,
             messages,
             reason,
-            remaining_seconds=lambda: self._remaining_seconds(state),
             authorize=self._authorize if self._tool_runtime is not None else None,
             publish_events=lambda: self._publish_pending_events(state),
-            skill_context=skill_context,
-            compression_stop_reason=compression_stop_reason,
+            llm_request_count=state.budget.used,
         )
-
-    async def _context_report_state(
-        self,
-        state: _ExecutionState,
-        messages: tuple[ConversationMessage | ExecutionMessage, ...],
-        *,
-        skill_context: RunSkillPromptContext | None = None,
-        compression_stop_reason: ContextStopReason | None = None,
-    ) -> dict[str, object]:
-        return await self._safe_stop.build_context_report_state(
-            state,
-            messages,
-            skill_context=skill_context,
-            compression_stop_reason=compression_stop_reason,
-        )
-
-    @staticmethod
-    def _system_context_report(
-        reason: ContextStopReason,
-        persisted_state: dict[str, object],
-    ) -> str:
-        return system_context_report(reason, persisted_state)
 
     async def _authorize(self, run: Run) -> AuthorizedRunContext | None:
         if self._tool_runtime is None:
@@ -2113,9 +1845,7 @@ class RunExecutor:
         run: Run,
         safe_error_code: str,
         *,
-        report_message: ConversationMessageDraft | None = None,
-        usage: RunUsage | None = None,
-        context_stop_reason: ContextStopReason | None = None,
+        llm_request_count: int | None = None,
     ) -> Run | None:
         """用当前租约记录固定安全错误码。"""
         # 没有 worker 归属就无法安全写入失败态，直接返回。
@@ -2129,9 +1859,8 @@ class RunExecutor:
                     execution_epoch=run.execution_epoch,
                     safe_error_code=safe_error_code,
                     failed_at=self._now(),
-                    report_message=report_message,
-                    usage=RunUsage() if usage is None else usage,
-                    context_stop_reason=context_stop_reason,
+                    usage=RunUsage(),
+                    llm_request_count=llm_request_count,
                 )
             )
         except Exception as error:

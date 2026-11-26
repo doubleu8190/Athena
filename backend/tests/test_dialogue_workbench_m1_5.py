@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager, redirect_stdout
 from datetime import UTC, datetime, timedelta
@@ -15,14 +16,9 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
+from pg_unit_harness import create_pg_unit_db
 from sqlalchemy import DateTime, delete, func, literal, select, update
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from system_prompt_support import (
     TEST_COMPRESSION_PROMPT_ID,
     TEST_MAIN_PROMPT_ID,
@@ -42,7 +38,6 @@ from adapter.llm.model.profile import (
 )
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from adapter.message.repository.message import SqlAlchemyMessageRepository
-from adapter.models import Base
 from adapter.org.model import DepartmentModel, UserDepartmentModel
 from adapter.project.model import ProjectModel
 from adapter.project.repository import SqlAlchemyProjectRepository
@@ -62,7 +57,7 @@ from app.project.knowledge import ProjectKnowledgeService
 from app.project.service import ProjectService
 from app.run.auto_title import fallback_title_from_message, sanitize_generated_title
 from app.run.config import RunWorkerConfig
-from app.run.context import estimate_llm_input_tokens
+from app.run.context import LlmRequestSpec, measure_llm_request
 from app.run.executor import RunExecutor
 from app.run.service import RunService
 from app.session.service import SessionService
@@ -289,19 +284,17 @@ def _tool_call_response(call_id: str, name: str, arguments: dict[str, Any]) -> L
     )
 
 
-async def _create_sqlite_db(
+async def _create_pg_db(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession], McpSecretCipher]:
-    """初始化内存 SQLite 数据库并补齐 clock_timestamp 兼容函数。"""
+    """获取隔离 PostgreSQL 单元测试库并注入单调递增的可控 clock_timestamp。"""
+    tick = itertools.count()
     monkeypatch.setattr(
         func,
         "clock_timestamp",
-        lambda: literal(NOW, type_=DateTime(timezone=True)),
+        lambda: literal(NOW + timedelta(microseconds=next(tick)), type_=DateTime(timezone=True)),
     )
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    engine, factory = await create_pg_unit_db()
     cipher = McpSecretCipher(SECRET_KEY, key_version=1)
     return engine, factory, cipher
 
@@ -313,19 +306,23 @@ async def _seed_base_org_and_prompts(
     """预置超管、研发成员、财务成员、部门树、系统提示词与默认模型配置。"""
     users: dict[str, User] = {}
     async with factory() as session, session.begin():
+        # 按 PostgreSQL 外键顺序分批落库：根部门 -> 子部门/提示词版本/用户 -> 会话/成员/指针。
+        session.add(
+            DepartmentModel(
+                id="dept_root",
+                external_id="ext_root",
+                name="总公司",
+                parent_id=None,
+                path="/dept_root/",
+                order_index=0,
+                status=DepartmentStatus.ACTIVE.value,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        await session.flush()
         session.add_all(
             [
-                DepartmentModel(
-                    id="dept_root",
-                    external_id="ext_root",
-                    name="总公司",
-                    parent_id=None,
-                    path="/dept_root/",
-                    order_index=0,
-                    status=DepartmentStatus.ACTIVE.value,
-                    created_at=NOW,
-                    updated_at=NOW,
-                ),
                 DepartmentModel(
                     id="dept_rd",
                     external_id="ext_rd",
@@ -348,6 +345,18 @@ async def _seed_base_org_and_prompts(
                     created_at=NOW,
                     updated_at=NOW,
                 ),
+                SystemPromptVersionModel(
+                    id=TEST_MAIN_PROMPT_ID,
+                    kind="main",
+                    content="平台系统主提示词",
+                    created_at=NOW,
+                ),
+                SystemPromptVersionModel(
+                    id=TEST_COMPRESSION_PROMPT_ID,
+                    kind="compression",
+                    content="平台摘要压缩提示词",
+                    created_at=NOW,
+                ),
             ]
         )
         for uid, email, role, display in (
@@ -367,15 +376,6 @@ async def _seed_base_org_and_prompts(
                     updated_at=NOW,
                 )
             )
-            session.add(
-                AuthSessionModel(
-                    id=f"auth_{uid}",
-                    user_id=uid,
-                    token_hash=f"hash_{uid}",
-                    expires_at=NOW + timedelta(days=7),
-                    created_at=NOW,
-                )
-            )
             users[uid] = User(
                 id=uid,
                 email=email,
@@ -385,6 +385,17 @@ async def _seed_base_org_and_prompts(
                 status=UserStatus.ACTIVE,
                 created_at=NOW,
                 updated_at=NOW,
+            )
+        await session.flush()
+        for uid in ("usr_admin", "usr_rd", "usr_fin"):
+            session.add(
+                AuthSessionModel(
+                    id=f"auth_{uid}",
+                    user_id=uid,
+                    token_hash=f"hash_{uid}",
+                    expires_at=NOW + timedelta(days=7),
+                    created_at=NOW,
+                )
             )
         session.add_all(
             [
@@ -398,18 +409,6 @@ async def _seed_base_org_and_prompts(
                     department_id="dept_fin",
                     is_primary=True,
                 ),
-                SystemPromptVersionModel(
-                    id=TEST_MAIN_PROMPT_ID,
-                    kind="main",
-                    content="平台系统主提示词",
-                    created_at=NOW,
-                ),
-                SystemPromptVersionModel(
-                    id=TEST_COMPRESSION_PROMPT_ID,
-                    kind="compression",
-                    content="平台摘要压缩提示词",
-                    created_at=NOW,
-                ),
                 SystemPromptSettingModel(
                     kind="main",
                     current_version_id=TEST_MAIN_PROMPT_ID,
@@ -420,6 +419,7 @@ async def _seed_base_org_and_prompts(
                 ),
             ]
         )
+        await session.flush()
         await _insert_model_profile(
             session,
             cipher,
@@ -454,7 +454,7 @@ async def _insert_model_profile(
     is_default: bool = False,
     created_at: datetime = NOW,
 ) -> None:
-    """直接写入加密后的模型配置记录，兼容 SQLite 单测环境。"""
+    """直接写入加密后的模型配置记录，供单元测试夹具初始化。"""
     sealed = (
         cipher.seal(profile_id, McpSecretPurpose.LLM_API_KEY, {"api_key": "sk-secret-key"})
         if include_api_key
@@ -490,6 +490,7 @@ async def _insert_model_profile(
         )
     )
     if is_default:
+        await session.flush()
         await session.merge(DefaultModelProfileModel(singleton_id=1, profile_id=profile_id))
 
 
@@ -643,7 +644,7 @@ def test_projectless_knowledge_decoupling_cross_dept_isolation_and_explicit_mode
     """无项目对话自动检索公司+本部门库（隔离跨部门与个人库），支持显式关闭与显式子集限定。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             users = await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -924,7 +925,7 @@ def test_default_workbench_caps_shared_bases_at_20_with_deterministic_priority(
     """企业共享知识库超过 20 个时按 项目绑定库 > 部门库 > 公司库 截取前 20 个，不崩溃。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             users = await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -1033,7 +1034,7 @@ def test_run_submit_api_validates_explicit_kb_ids_fingerprint_and_model_profile(
     """Run 提交接口校验跨部门 KB 返回 404、幂等指纹区分 None 与 []、场景模型选择校验与冻结。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -1315,7 +1316,7 @@ def test_models_catalog_filters_unready_dialogue_models_and_hides_unready_defaul
     """GET /api/v1/models 过滤不支持流式、不支持工具或缺失加密凭据的模型，并隐藏不合格默认 ID。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -1399,7 +1400,7 @@ def test_run_retry_inherits_and_revalidates_model_and_kb_and_submit_replay_is_id
     """验证 retry 继承并复核场景模型与显式 KB 权限，且 submit 断网重放不受后续 KB 删除影响。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -1657,7 +1658,7 @@ def test_project_upgrade_detach_delete_session_rebind_and_escaped_search(
     """验证项目扩展字段 CRUD、detach_sessions 解绑删除、消息后会话改绑与转义搜索 q。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -1960,7 +1961,7 @@ def test_run_executor_injects_project_instructions_for_main_run_only_and_meters_
     """主 Run 注入 project.instructions 并完整计入 token 预算；子 Run 保持严格隔离不注入。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             users = await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -2092,21 +2093,25 @@ def test_run_executor_injects_project_instructions_for_main_run_only_and_meters_
             # 验证 token 度量函数将 project_context 完整计入输入 token 预算。
             runtime_profile = await profile_repo.get_runtime("llmprof_default")
             assert runtime_profile is not None
-            tokens_without, _ = await estimate_llm_input_tokens(
-                submitted.run,
-                (),
+            _, _, tokens_without, _ = await measure_llm_request(
+                LlmRequestSpec(
+                    run=submitted.run,
+                    messages=(),
+                    main_prompt="主提示词",
+                    project_context=None,
+                ),
                 runtime_profile.version,
-                main_prompt="主提示词",
                 timeout_seconds=10.0,
-                project_context=None,
             )
-            tokens_with, _ = await estimate_llm_input_tokens(
-                submitted.run,
-                (),
+            _, _, tokens_with, _ = await measure_llm_request(
+                LlmRequestSpec(
+                    run=submitted.run,
+                    messages=(),
+                    main_prompt="主提示词",
+                    project_context="项目指令内容：" + "架构规范" * 50,
+                ),
                 runtime_profile.version,
-                main_prompt="主提示词",
                 timeout_seconds=10.0,
-                project_context="项目指令内容：" + "架构规范" * 50,
             )
             assert tokens_with > tokens_without
         finally:
@@ -2142,7 +2147,7 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
     """主 Run 完成后优先用压缩模型生成 <=20 字标题；压缩模型停用回退 Run 模型；绝不覆盖手工标题。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             users = await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -2157,6 +2162,7 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
                     visible_to_users=False,
                     created_at=NOW + timedelta(seconds=1),
                 )
+                await session.flush()
                 session.add(
                     CompressionPolicyVersionModel(
                         id="cmpol_1",
@@ -2171,6 +2177,7 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
                         created_at=NOW,
                     )
                 )
+                await session.flush()
                 session.add(
                     CurrentCompressionPolicyModel(singleton_id=1, policy_version_id="cmpol_1")
                 )
@@ -2347,7 +2354,7 @@ def test_auto_title_timeout_error_fallback_and_db_error_isolation(
     """验证标题生成超时/报错时降级截取前 24 字，且标题写库异常绝不影响主 Run completed 终态。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             users = await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():
@@ -2495,7 +2502,7 @@ def test_subagent_run_never_triggers_auto_title(monkeypatch: pytest.MonkeyPatch)
     """子 Run（depth >= 1）完成时绝不触发自动标题生成。"""
 
     async def scenario() -> None:
-        engine, factory, cipher = await _create_sqlite_db(monkeypatch)
+        engine, factory, cipher = await _create_pg_db(monkeypatch)
         try:
             users = await _seed_base_org_and_prompts(factory, cipher)
             async with factory() as session, session.begin():

@@ -16,15 +16,13 @@ from bootstrap.knowledge_worker import (
     build_knowledge_worker_resources,
 )
 from bootstrap.lifecycle import close_resources_lifo
-from bootstrap.worker import (
-    compute_worker_retry_delay,
-    is_recoverable_worker_error,
-    run_with_shutdown_signals,
-)
+from bootstrap.worker import run_with_shutdown_signals
+from common.retry import compute_worker_retry_delay
+from infrastructure.database import is_recoverable_database_error
 
 logger = logging.getLogger(__name__)
 # 保留模块内别名，兼容既有单元测试直接导入 _is_recoverable_worker_error。
-_is_recoverable_worker_error = is_recoverable_worker_error
+_is_recoverable_worker_error = is_recoverable_database_error
 
 
 async def _consume(

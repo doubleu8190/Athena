@@ -25,6 +25,7 @@ from app.run.config import RunWorkerConfig
 from app.run.context import _run_context_work, prepare_run_tokenizers
 from app.run.executor import RunExecutor as _RunExecutor
 from app.run.worker import RunWorker
+from bootstrap.run_worker import RunWorkerBundle, build_run_worker_dependencies
 from domain.llm.model import LlmRequest, LlmStreamEvent, TextDelta
 from domain.llm.model.profile import ModelProfileVersion, RuntimeModelProfile
 from domain.llm.ports import LlmStreamProvider
@@ -39,6 +40,7 @@ from domain.run.model import (
     RunUsage,
 )
 from domain.run.ports import RunRepository
+from infrastructure.database import is_recoverable_database_error
 
 
 def RunExecutor(
@@ -868,6 +870,7 @@ def test_worker_isolates_transient_db_error_without_stopping_sibling_consumer(
                 reclaim_seconds=5,
             ),
             worker_id="worker-resilient",
+            is_recoverable_error=is_recoverable_database_error,
         )
         with caplog.at_level("WARNING"):
             task = asyncio.create_task(worker.run())
@@ -1094,6 +1097,7 @@ def test_worker_drive_lease_cleanup_exception_does_not_crash_sibling_consumer(
                 reclaim_seconds=5,
             ),
             worker_id="worker-cleanup-guard",
+            is_recoverable_error=is_recoverable_database_error,
         )
         with caplog.at_level("WARNING"):
             task = asyncio.create_task(worker.run())
@@ -1770,3 +1774,54 @@ def test_worker_finalize_execution_forwards_llm_request_count(
         assert executor.pop_llm_request_count(lease.run.id, lease.run.execution_epoch) is None
 
     asyncio.run(scenario())
+
+
+def test_build_run_worker_dependencies_injects_database_recoverable_predicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """组合根构造 RunWorker 时必须注入基础设施数据库瞬态故障判定函数。"""
+    import minio
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.delenv("ATHENA_REDIS_URL", raising=False)
+    monkeypatch.setenv("ATHENA_STORAGE_ENDPOINT", "minio.internal:9000")
+    monkeypatch.setenv("ATHENA_STORAGE_ACCESS_KEY", "ak")
+    monkeypatch.setenv("ATHENA_STORAGE_SECRET_KEY", "sk")
+    monkeypatch.setenv("ATHENA_STORAGE_BUCKET", "athena-test")
+    monkeypatch.setenv("ATHENA_STORAGE_SECURE", "false")
+    monkeypatch.setenv("ATHENA_EMBEDDING_BASE_URL", "http://127.0.0.1:8000/v1")
+
+    class _FakeMinio:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def bucket_exists(self, _bucket: str) -> bool:
+            return True
+
+    class _FakeDatabase:
+        session_factory = cast(Any, object())
+
+        def __init__(self, database_url: str, **_kwargs: Any) -> None:
+            del database_url
+
+        async def dispose(self) -> None:
+            return None
+
+    class _FakeProvider:
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(minio, "Minio", _FakeMinio)
+    bundle = RunWorkerBundle()
+    with (
+        patch("bootstrap.run_worker.SecretCipher.from_environment", return_value=object()),
+        patch("bootstrap.database.Database", _FakeDatabase),
+        patch("bootstrap.run_worker.OpenAIChatCompletionsAdapter", _FakeProvider),
+    ):
+        build_run_worker_dependencies(bundle, database_url="postgresql://unused")
+
+    assert bundle.worker is not None
+    assert bundle.worker._is_recoverable_error is is_recoverable_database_error
+    transient_error = OperationalError("SELECT 1", {}, Exception("connection reset by peer"))
+    assert bundle.worker._is_recoverable_error(transient_error) is True
+    assert bundle.worker._is_recoverable_error(ValueError("non_recoverable")) is False

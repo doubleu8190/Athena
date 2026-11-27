@@ -21,7 +21,6 @@ if TYPE_CHECKING:
         MIN_PASSWORD_LENGTH,
         REMEMBER_SESSION_SECONDS,
         AuthService,
-        FeishuSsoClient,
         IssuedAuthResult,
     )
     from domain.auth import (
@@ -56,7 +55,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "MIN_PASSWORD_LENGTH": ("app.auth.service", "MIN_PASSWORD_LENGTH"),
     "REMEMBER_SESSION_SECONDS": ("app.auth.service", "REMEMBER_SESSION_SECONDS"),
     "AuthService": ("app.auth.service", "AuthService"),
-    "FeishuSsoClient": ("app.auth.service", "FeishuSsoClient"),
     "IssuedAuthResult": ("app.auth.service", "IssuedAuthResult"),
     "AdminPromotionError": ("domain.auth", "AdminPromotionError"),
     "AuthProviderDisabledError": ("domain.auth", "AuthProviderDisabledError"),
@@ -80,7 +78,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
 
 
 def __getattr__(name: str) -> object:
-    """按需延迟加载认证服务与飞书适配依赖，避免导入 app.auth.guard 时连带加载 infrastructure。"""
+    """按需延迟加载认证服务与领域导出，避免导入 app.auth.guard 时连带加载认证依赖。"""
     target = _LAZY_EXPORTS.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -96,7 +94,6 @@ __all__ = [
     "AuthService",
     "DEFAULT_SESSION_SECONDS",
     "EmailAlreadyRegisteredError",
-    "FeishuSsoClient",
     "InMemoryOAuthStateStore",
     "InvalidCredentialsError",
     "InvalidCurrentPasswordError",

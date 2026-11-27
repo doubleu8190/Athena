@@ -73,10 +73,19 @@ class SsoAuthenticationError(RuntimeError):
     """第三方 SSO 认证交换失败（不包含任何敏感凭据）。"""
 
 
+class ExternalIdentityProviderError(RuntimeError):
+    """外部身份提供方（如飞书）调用、配置或协议异常基类，绝不携带敏感凭据。"""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 __all__ = [
     "AdminPromotionError",
     "AuthProviderDisabledError",
     "EmailAlreadyRegisteredError",
+    "ExternalIdentityProviderError",
     "InvalidCredentialsError",
     "InvalidCurrentPasswordError",
     "InvalidDisplayNameError",

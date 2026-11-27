@@ -42,6 +42,7 @@ from app.org.feishu_sync import _merge_remote_employees
 from bootstrap.api import build_api_dependencies
 from domain.auth import (
     AuthProvider,
+    FeishuUserIdentity,
     InvalidReturnToError,
     OAuthStateUnavailableError,
     UserRole,
@@ -60,7 +61,6 @@ from infrastructure.feishu import (
     FeishuConfigurationError,
     FeishuProtocolError,
     FeishuUpstreamError,
-    FeishuUserIdentity,
 )
 from infrastructure.security.password import Argon2PasswordHasher
 from main import create_app

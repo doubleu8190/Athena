@@ -4,6 +4,7 @@ from domain.auth.errors import (
     AdminPromotionError,
     AuthProviderDisabledError,
     EmailAlreadyRegisteredError,
+    ExternalIdentityProviderError,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
     InvalidDisplayNameError,
@@ -24,6 +25,7 @@ from domain.auth.model import (
     AuthContext,
     AuthProvider,
     AuthSession,
+    FeishuUserIdentity,
     User,
     UserRole,
     UserStatus,
@@ -32,6 +34,7 @@ from domain.auth.ports import (
     Authenticator,
     AuthRepository,
     CurrentSessionReader,
+    FeishuSsoClient,
     PasswordHasher,
 )
 
@@ -45,6 +48,9 @@ __all__ = [
     "Authenticator",
     "CurrentSessionReader",
     "EmailAlreadyRegisteredError",
+    "ExternalIdentityProviderError",
+    "FeishuSsoClient",
+    "FeishuUserIdentity",
     "InvalidCredentialsError",
     "InvalidCurrentPasswordError",
     "InvalidDisplayNameError",

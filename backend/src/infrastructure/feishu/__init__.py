@@ -12,7 +12,6 @@ from infrastructure.feishu.client import (
     FeishuError,
     FeishuProtocolError,
     FeishuUpstreamError,
-    FeishuUserIdentity,
 )
 
 __all__ = [
@@ -27,5 +26,4 @@ __all__ = [
     "FeishuError",
     "FeishuProtocolError",
     "FeishuUpstreamError",
-    "FeishuUserIdentity",
 ]

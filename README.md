@@ -125,7 +125,7 @@ flowchart TB
 
 ### 后端代码分层
 
-后端采用模块化单体与 DDD 分层架构：`api`（HTTP/SSE 路由、DTO 与前置鉴权/上传准入中间件）→ `app`（应用服务、三层权限策略与 Worker 消费逻辑）→ `domain`（纯领域实体、值对象、异常与仓储端口）← `adapter`（SQLAlchemy ORM 仓储与外部适配）/ `infrastructure`（数据库、AES-GCM 凭据加密、飞书客户端、MCP 传输与解析/远程 Embedding 驱动），由 `bootstrap` 组合根按进程统一装配，辅以 `cli`（运维 CLI）与 `common`（共享基础工具）。
+后端采用模块化单体与 DDD 分层架构：`api`（HTTP/SSE 路由、DTO 与前置鉴权/上传准入中间件）→ `app`（应用服务、三层权限策略与 Worker 消费逻辑）→ `domain`（纯领域实体、值对象、异常与必要端口）← `adapter`（SQLAlchemy ORM 仓储与外部适配）/ `infrastructure`（数据库、AES-GCM 凭据加密、飞书客户端、MCP 传输与解析/远程 Embedding 驱动），由 `bootstrap` 组合根按进程统一装配，辅以 `cli`（运维 CLI）与 `common`（共享基础工具）。
 
 ### 技术栈
 

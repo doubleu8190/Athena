@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx2
 
+from domain.auth import ExternalIdentityProviderError, FeishuSsoClient, FeishuUserIdentity
 from domain.org import FeishuDirectoryClient, RemoteDepartment, RemoteEmployee
 from infrastructure.http import (
     RetryableHttpError,
@@ -40,11 +41,10 @@ _FEISHU_TOKEN_EXPIRED_CODES = frozenset({99991663, 99991664, 99991668})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
-class FeishuError(RuntimeError):
+class FeishuError(ExternalIdentityProviderError):
     """飞书基础设施安全异常基类，绝不携带 app_secret、code 或 access_token。"""
 
     def __init__(self, code: str) -> None:
-        self.code = code
         super().__init__(code)
 
 
@@ -77,19 +77,6 @@ class FeishuProtocolError(FeishuError):
 
     def __init__(self, code: str = "feishu_response_invalid") -> None:
         super().__init__(code)
-
-
-@dataclass(frozen=True, slots=True)
-class FeishuUserIdentity:
-    """通过飞书 OAuth code 换取的脱敏用户身份信息。"""
-
-    union_id: str | None
-    open_id: str | None
-    name: str | None
-    email: str | None
-    avatar_url: str | None
-    employee_no: str | None
-    job_title: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +156,7 @@ class _CachedTenantToken:
     expires_at: float
 
 
-class FeishuClient(FeishuDirectoryClient):
+class FeishuClient(FeishuDirectoryClient, FeishuSsoClient):
     """基于标准 httpx2 客户端与公共重试器的飞书 SSO 与通讯录 REST 客户端。"""
 
     def __init__(
@@ -720,5 +707,4 @@ __all__ = [
     "FeishuError",
     "FeishuProtocolError",
     "FeishuUpstreamError",
-    "FeishuUserIdentity",
 ]

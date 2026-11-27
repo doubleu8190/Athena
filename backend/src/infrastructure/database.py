@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -11,6 +13,23 @@ from sqlalchemy.ext.asyncio import (
 
 DEFAULT_DATABASE_POOL_SIZE = 5
 DEFAULT_DATABASE_MAX_OVERFLOW = 10
+# PostgreSQL 瞬态连接中断或过载类 SQLSTATE：
+# 08* 连接异常、57P01/02/03 服务端关闭或重启、53300 连接数超限。
+_RECOVERABLE_SQLSTATES = frozenset({"57P01", "57P02", "57P03", "53300"})
+
+
+def is_recoverable_database_error(error: Exception) -> bool:
+    """判定是否为可恢复的瞬态数据库/网络连接错误，避免单次闪断打崩整个消费循环。"""
+    if isinstance(error, (OperationalError, InterfaceError, SqlAlchemyTimeoutError, OSError)):
+        return True
+    if not isinstance(error, DBAPIError):
+        return False
+    if error.connection_invalidated:
+        return True
+    sqlstate = getattr(error.orig, "sqlstate", None)
+    return isinstance(sqlstate, str) and (
+        sqlstate.startswith("08") or sqlstate in _RECOVERABLE_SQLSTATES
+    )
 
 
 def _validate_pool_configuration(
@@ -63,4 +82,5 @@ __all__ = [
     "DEFAULT_DATABASE_MAX_OVERFLOW",
     "DEFAULT_DATABASE_POOL_SIZE",
     "Database",
+    "is_recoverable_database_error",
 ]

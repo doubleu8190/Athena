@@ -72,10 +72,24 @@ class AuthContext:
     session_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class FeishuUserIdentity:
+    """通过飞书 OAuth code 换取的脱敏用户身份信息。"""
+
+    union_id: str | None
+    open_id: str | None
+    name: str | None
+    email: str | None
+    avatar_url: str | None
+    employee_no: str | None
+    job_title: str | None
+
+
 __all__ = [
     "AuthContext",
     "AuthProvider",
     "AuthSession",
+    "FeishuUserIdentity",
     "User",
     "UserRole",
     "UserStatus",

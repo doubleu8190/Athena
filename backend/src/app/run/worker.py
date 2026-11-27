@@ -11,9 +11,9 @@ from datetime import datetime
 from app.run.config import RunWorkerConfig
 from app.run.event_publisher import publish_run_events
 from app.run.executor import RunExecutor
-from bootstrap.worker import compute_worker_retry_delay, is_recoverable_worker_error
 from common.date import as_utc, utc_now
 from common.ids import new_id
+from common.retry import compute_worker_retry_delay
 from domain.run.model import (
     FailRunCommand,
     RunLease,
@@ -24,6 +24,11 @@ from domain.run.ports import RunEventTransport, RunRepository
 
 logger = logging.getLogger(__name__)
 _CANCEL_CLEANUP_TIMEOUT_SECONDS = 15.0
+
+
+def _default_is_recoverable_error(error: Exception) -> bool:
+    """默认仅判定底层系统网络/OS 异常为可恢复，具体数据库瞬态判定由 bootstrap 注入。"""
+    return isinstance(error, OSError)
 
 
 class RunWorker:
@@ -39,6 +44,7 @@ class RunWorker:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = utc_now,
         publisher: RunEventTransport | None = None,
+        is_recoverable_error: Callable[[Exception], bool] = _default_is_recoverable_error,
     ) -> None:
         """保存持久化命令、执行器及有界轮询设置。"""
         self._repository = repository
@@ -48,6 +54,8 @@ class RunWorker:
         self._sleep = sleep
         self._clock = clock
         self._publisher = publisher
+        # 通过依赖注入接收瞬态故障判定函数，保持 app 层不反向依赖 bootstrap/infrastructure。
+        self._is_recoverable_error = is_recoverable_error
         self._stop = asyncio.Event()
         self._started = False
 
@@ -87,7 +95,7 @@ class RunWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                if not is_recoverable_worker_error(error):
+                if not self._is_recoverable_error(error):
                     raise
                 # 瞬态数据库连接/网络异常仅当前 consumer 有界抖动退避（上限 30s），
                 # 避免抛出到 asyncio.TaskGroup 误杀并发在途的其他 Run。
@@ -110,7 +118,7 @@ class RunWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                if not is_recoverable_worker_error(error):
+                if not self._is_recoverable_error(error):
                     raise
                 consecutive_failures += 1
                 retry_after = compute_worker_retry_delay(consecutive_failures)

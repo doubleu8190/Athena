@@ -36,7 +36,7 @@ from bootstrap.tool import (
     build_skill_service,
 )
 from domain.file import FileObjectStore
-from infrastructure.database import Database
+from infrastructure.database import Database, is_recoverable_database_error
 from infrastructure.mcp.execution import McpToolCallClient
 from infrastructure.security.secrets import SecretCipher
 from infrastructure.storage.minio_client import MinioObjectClient
@@ -176,7 +176,14 @@ def build_run_worker_dependencies(
         subagents=core.subagent_repository,
         access_policy=core.access_policy,
     )
-    bundle.worker = RunWorker(core.run_repository, executor, config, publisher=run_transport)
+    # 注入基础设施层的数据库瞬态错误判定，避免应用层 RunWorker 直接依赖基础设施/组合根。
+    bundle.worker = RunWorker(
+        core.run_repository,
+        executor,
+        config,
+        publisher=run_transport,
+        is_recoverable_error=is_recoverable_database_error,
+    )
 
 
 __all__ = ["RunWorkerBundle", "build_run_worker_dependencies"]

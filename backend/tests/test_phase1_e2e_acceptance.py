@@ -91,7 +91,7 @@ from app.tool.manager import ToolManager
 from app.tool.runtime import RunToolRuntimeService
 from bootstrap.api import build_api_dependencies
 from common.ids import new_id
-from domain.auth import UserStatus
+from domain.auth import FeishuUserIdentity, UserStatus
 from domain.file import FileObjectScanEntry
 from domain.knowledge.model import DocumentState
 from domain.knowledge.ports import OriginalStore
@@ -116,7 +116,6 @@ from domain.org import RemoteDepartment, RemoteEmployee
 from domain.run.model import Run, RunModelSnapshot, RunStatus, RunUsage
 from domain.skill import RunSkillSnapshot
 from domain.tool import McpToolSource, ToolExecutionContext, ToolOutcomeStatus
-from infrastructure.feishu import FeishuUserIdentity
 from infrastructure.knowledge.tokenizer import JiebaChineseTokenizer
 from infrastructure.security.secrets import SecretCipher
 from main import create_app

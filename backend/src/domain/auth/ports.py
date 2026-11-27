@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from domain.auth.model import AuthContext, AuthSession, User
+from domain.auth.model import AuthContext, AuthSession, FeishuUserIdentity, User
 
 
 class PasswordHasher(Protocol):
@@ -127,9 +127,20 @@ class Authenticator(Protocol):
         """验证原始 token 并返回登录上下文。"""
 
 
+class FeishuSsoClient(Protocol):
+    """认证服务所需的飞书 SSO 最小能力端口。"""
+
+    def build_authorize_url(self, state: str) -> str:
+        """构造飞书 OAuth2 授权跳转地址。"""
+
+    async def exchange_code_for_user(self, code: str) -> FeishuUserIdentity:
+        """用一次性 OAuth code 换取飞书用户身份信息。"""
+
+
 __all__ = [
     "AuthRepository",
     "Authenticator",
     "CurrentSessionReader",
+    "FeishuSsoClient",
     "PasswordHasher",
 ]

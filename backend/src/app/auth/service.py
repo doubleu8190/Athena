@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
-from typing import TYPE_CHECKING, Protocol, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from email_validator import EmailNotValidError, validate_email
 
@@ -29,6 +29,9 @@ from domain.auth import (
     AuthProviderDisabledError,
     AuthRepository,
     AuthSession,
+    ExternalIdentityProviderError,
+    FeishuSsoClient,
+    FeishuUserIdentity,
     InvalidCredentialsError,
     InvalidCurrentPasswordError,
     InvalidDisplayNameError,
@@ -47,7 +50,6 @@ from domain.auth import (
     UserStatus,
 )
 from domain.org import OrgUserDetail, UserOrgMembership
-from infrastructure.feishu import FeishuError, FeishuUserIdentity
 
 if TYPE_CHECKING:
     from adapter.org.repository import SqlAlchemyOrgRepository
@@ -64,16 +66,6 @@ PASSWORD_OPERATION_LIMIT = 4
 DEFAULT_SESSION_SECONDS = 7 * 24 * 60 * 60
 REMEMBER_SESSION_SECONDS = 30 * 24 * 60 * 60
 _PasswordResult = TypeVar("_PasswordResult")
-
-
-class FeishuSsoClient(Protocol):
-    """认证服务所需的飞书 SSO 最小能力端口。"""
-
-    def build_authorize_url(self, state: str) -> str:
-        """构造飞书 OAuth2 授权跳转地址。"""
-
-    async def exchange_code_for_user(self, code: str) -> FeishuUserIdentity:
-        """用一次性 OAuth code 换取飞书用户身份信息。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,9 +380,9 @@ class AuthService:
         safe_return_to = validate_safe_return_to(state_payload.return_to)
 
         try:
-            identity = await self._feishu_client.exchange_code_for_user(code)
-        except FeishuError:
-            # 截断底层异常链，防止任何 code/app_secret/access_token 逸出到上层。
+            identity: FeishuUserIdentity = await self._feishu_client.exchange_code_for_user(code)
+        except ExternalIdentityProviderError:
+            # 截断底层外部身份提供方异常链，防止任何 code/app_secret/access_token 逸出到上层。
             raise SsoAuthenticationError("feishu_auth_failed") from None
 
         current = as_utc(self._clock())
@@ -607,7 +599,6 @@ class AuthService:
 __all__ = [
     "AuthService",
     "DEFAULT_SESSION_SECONDS",
-    "FeishuSsoClient",
     "IssuedAuthResult",
     "MAX_PASSWORD_LENGTH",
     "MIN_PASSWORD_LENGTH",

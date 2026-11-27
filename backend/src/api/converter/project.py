@@ -8,15 +8,7 @@ from app.project.model.result import ProjectPageResult, ProjectResult
 
 def project_to_response(project: ProjectResult) -> ProjectResponse:
     """转换单个项目响应。"""
-    return ProjectResponse(
-        id=project.id,
-        name=project.name,
-        description=project.description,
-        instructions=project.instructions,
-        default_skill_ids=list(project.default_skill_ids),
-        created_at=project.created_at,
-        updated_at=project.updated_at,
-    )
+    return ProjectResponse.model_validate(project)
 
 
 def project_list_to_response(

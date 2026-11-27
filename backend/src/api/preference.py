@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Response, status
+from fastapi import APIRouter, Path, Response, status
 
 from api.converter.preference import (
     memory_list_to_response,
@@ -19,16 +19,10 @@ from api.dto.preference import (
     UserMemoryResponse,
     UserWorkProfileResponse,
 )
+from api.errors import DomainErrorRoute
 from api.security import CurrentAuth
 from app.preference import PreferenceService
-from domain.preference import (
-    InvalidCustomInstructionsError,
-    InvalidUserMemoryContentError,
-    PreferenceError,
-    UserMemoryLimitReachedError,
-    UserMemoryNotFoundError,
-    UserMemorySource,
-)
+from domain.preference import UserMemorySource
 
 
 def build_preference_router(service: PreferenceService) -> APIRouter:
@@ -36,6 +30,7 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/me",
         tags=["preferences"],
+        route_class=DomainErrorRoute,
     )
 
     @router.get("/preferences", response_model=UserWorkProfileResponse)
@@ -50,27 +45,11 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> UserWorkProfileResponse:
         """更新当前用户个人工作背景指令与显式记忆开关。"""
-        try:
-            profile = await service.update_profile(
-                current_auth.user.id,
-                custom_instructions=request.custom_instructions,
-                memory_enabled=request.memory_enabled,
-            )
-        except InvalidCustomInstructionsError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=error.code,
-            ) from error
-        except PreferenceError as error:
-            status_code = (
-                status.HTTP_401_UNAUTHORIZED
-                if error.code == "user_not_found"
-                else status.HTTP_422_UNPROCESSABLE_CONTENT
-            )
-            raise HTTPException(
-                status_code=status_code,
-                detail=error.code,
-            ) from error
+        profile = await service.update_profile(
+            current_auth.user.id,
+            custom_instructions=request.custom_instructions,
+            memory_enabled=request.memory_enabled,
+        )
         return profile_to_response(profile)
 
     @router.get("/memories", response_model=UserMemoryListResponse)
@@ -90,32 +69,11 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> UserMemoryResponse:
         """手动新增一条显式记忆（source=manual），超 50 条上限返回 409。"""
-        try:
-            memory = await service.create_memory(
-                current_auth.user.id,
-                request.content,
-                source=UserMemorySource.MANUAL,
-            )
-        except InvalidUserMemoryContentError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=error.code,
-            ) from error
-        except UserMemoryLimitReachedError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=error.code,
-            ) from error
-        except PreferenceError as error:
-            status_code = (
-                status.HTTP_401_UNAUTHORIZED
-                if error.code == "user_not_found"
-                else status.HTTP_422_UNPROCESSABLE_CONTENT
-            )
-            raise HTTPException(
-                status_code=status_code,
-                detail=error.code,
-            ) from error
+        memory = await service.create_memory(
+            current_auth.user.id,
+            request.content,
+            source=UserMemorySource.MANUAL,
+        )
         response.headers["Location"] = f"/api/v1/me/memories/{memory.id}"
         return memory_to_response(memory)
 
@@ -126,22 +84,11 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> UserMemoryResponse:
         """修改当前用户指定显式记忆正文；跨用户或不存在返回 404。"""
-        try:
-            memory = await service.update_memory(
-                current_auth.user.id,
-                memory_id,
-                content=request.content,
-            )
-        except InvalidUserMemoryContentError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=error.code,
-            ) from error
-        except UserMemoryNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=error.code,
-            ) from error
+        memory = await service.update_memory(
+            current_auth.user.id,
+            memory_id,
+            content=request.content,
+        )
         return memory_to_response(memory)
 
     @router.delete(
@@ -154,13 +101,7 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> Response:
         """删除当前用户指定显式记忆；跨用户或不存在返回 404。"""
-        try:
-            await service.delete_memory(current_auth.user.id, memory_id)
-        except UserMemoryNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=error.code,
-            ) from error
+        await service.delete_memory(current_auth.user.id, memory_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return router

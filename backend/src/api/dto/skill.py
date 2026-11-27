@@ -12,6 +12,8 @@ from domain.skill import DependencyCheckStatus, SkillExecutionStatus
 
 
 class SkillDependencyItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     requirement: str
     package: str
     satisfied: bool
@@ -21,6 +23,8 @@ class SkillDependencyItemResponse(BaseModel):
 
 
 class SkillDependencyCheckResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     # 复用领域 DependencyCheckStatus 枚举，收紧依赖检查状态为封闭集合。
     status: DependencyCheckStatus
     python_version: str
@@ -30,6 +34,8 @@ class SkillDependencyCheckResponse(BaseModel):
 
 
 class SkillPackageResourceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     path: str
     size_bytes: int
     sha256: str
@@ -37,6 +43,8 @@ class SkillPackageResourceResponse(BaseModel):
 
 
 class SkillScriptResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     path: str
     label: str
     purpose: str
@@ -61,6 +69,8 @@ class SkillVersionResponse(BaseModel):
 
 
 class SkillSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     slug: str
     scope: Literal["company", "department", "personal"]
@@ -166,6 +176,8 @@ class SkillPersonalToggleRequest(BaseModel):
 
 
 class SkillMarkdownParseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     name: str
     description: str
     guide: str

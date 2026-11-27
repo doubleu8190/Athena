@@ -82,6 +82,8 @@ class ModelProfileUpdateRequest(BaseModel):
 class ModelProfileResponse(BaseModel):
     """不包含凭据明文的模型版本信息。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     # 与领域 ModelProfileVersion 及数据库约束对齐，收紧为封闭字面量集合。
@@ -176,6 +178,8 @@ class CompressionPolicyRequest(BaseModel):
 
 class CompressionPolicyResponse(BaseModel):
     """不含凭据的当前压缩策略安全投影。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str | None
     compression_model_profile_id: str | None

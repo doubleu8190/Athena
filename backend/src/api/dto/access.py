@@ -32,6 +32,8 @@ class VisibilityGrantRequest(BaseModel):
 class VisibilityGrantResponse(BaseModel):
     """资源响应中返回的单条可见性授权记录。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     target_type: Literal["department", "role"]
     target_id: str
@@ -41,16 +43,7 @@ class VisibilityGrantResponse(BaseModel):
 
 def grants_to_response(grants: Sequence[VisibilityGrant]) -> list[VisibilityGrantResponse]:
     """将领域授权记录序列转换为 HTTP 响应 DTO 列表。"""
-    return [
-        VisibilityGrantResponse(
-            id=grant.id,
-            target_type="department" if grant.target_type is GrantTargetType.DEPARTMENT else "role",
-            target_id=grant.target_id,
-            include_subdepartments=grant.include_subdepartments,
-            created_at=grant.created_at,
-        )
-        for grant in grants
-    ]
+    return [VisibilityGrantResponse.model_validate(grant) for grant in grants]
 
 
 __all__ = [

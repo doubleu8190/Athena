@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from api.dto.message import ArtifactFileRefResponse
 from api.dto.run import (
-    FormattedToolArgumentResponse,
     PendingSubagentApprovalResponse,
     PendingSubagentInputResponse,
-    RunAttemptUsageResponse,
     RunEventListResponse,
     RunEventResponse,
     RunInputInteractionResponse,
@@ -16,7 +14,6 @@ from api.dto.run import (
     RunModelSnapshotResponse,
     RunPendingToolApprovalResponse,
     RunResponse,
-    RunSkillEntryResponse,
     RunSkillSnapshotResponse,
     RunToolCallDetailResponse,
     RunToolCallListResponse,
@@ -24,8 +21,6 @@ from api.dto.run import (
     RunToolOutcomeResponse,
     RunUsageResponse,
     SafeSkillApprovalProjectionResponse,
-    SafeSkillInputFileResponse,
-    SkillParameterSummaryItemResponse,
     SubagentTaskResponse,
 )
 from app.run.model.result import RunDetailsResult, RunListResult
@@ -36,7 +31,6 @@ from domain.run.model import (
     RunEvent,
     RunInputRequest,
     RunStatus,
-    RunUsage,
     SubagentTaskSummary,
 )
 from domain.skill import (
@@ -50,7 +44,6 @@ from domain.tool import (
     RunToolCallDetails,
     RunToolCallPage,
     RunToolCallRecord,
-    ToolKind,
 )
 
 RETRY_WARNING = "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。"
@@ -81,76 +74,11 @@ def _is_skill_call(tool_id: str | None, model_name: str) -> bool:
     )
 
 
-def _usage_to_response(usage: RunUsage) -> RunUsageResponse:
-    return RunUsageResponse(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        total_tokens=usage.total_tokens,
-        complete=usage.complete,
-        attempts=[
-            RunAttemptUsageResponse(
-                execution_epoch=item.execution_epoch,
-                attempt=item.attempt,
-                input_tokens=item.input_tokens,
-                output_tokens=item.output_tokens,
-                total_tokens=item.total_tokens,
-                complete=item.complete,
-                purpose=item.purpose,
-                operation_id=item.operation_id,
-                batch_index=item.batch_index,
-                model_profile_id=item.model_profile_id,
-                duration_ms=item.duration_ms,
-            )
-            for item in usage.attempts
-        ],
-        answer_tokens=usage.answer_tokens,
-        compression_tokens=usage.compression_tokens,
-    )
-
-
-def _input_to_response(request: RunInputRequest) -> RunInputRequestResponse:
-    return RunInputRequestResponse(
-        id=request.id,
-        question_message_id=request.question_message_id,
-        status=request.status,
-        created_at=request.created_at,
-    )
-
-
 def safe_skill_projection_to_response(
     projection: SafeSkillApprovalProjection,
 ) -> SafeSkillApprovalProjectionResponse:
     """只序列化已冻结审批摘要，不查询当前 Skill 或原始参数。"""
-    return SafeSkillApprovalProjectionResponse(
-        call_id=projection.call_id,
-        skill_id=projection.skill_id,
-        skill_name=projection.skill_name,
-        skill_version_id=projection.skill_version_id,
-        skill_version_label=projection.skill_version_label,
-        script_label=projection.script_label,
-        purpose=projection.purpose,
-        input_files=[
-            SafeSkillInputFileResponse(
-                file_id=item.file_id,
-                filename=item.filename,
-                mime_type=item.mime_type,
-                size_bytes=item.size_bytes,
-                available=item.available,
-            )
-            for item in projection.input_files
-        ],
-        parameter_summary=[
-            SkillParameterSummaryItemResponse(
-                name=item.name,
-                label=item.label,
-                value=item.value,
-            )
-            for item in projection.parameter_summary
-        ],
-        hidden_parameter_count=projection.hidden_parameter_count,
-        can_approve=projection.can_approve,
-        unavailable_reason=projection.unavailable_reason,
-    )
+    return SafeSkillApprovalProjectionResponse.model_validate(projection)
 
 
 def run_to_response(
@@ -173,14 +101,8 @@ def run_to_response(
         context_cutoff_sequence=run.context_cutoff_sequence,
         retry_of_run_id=run.retry_of_run_id,
         model_config_version_id=run.model_config_version_id,
-        model_snapshot=RunModelSnapshotResponse(
-            id=run.model_snapshot.id,
-            name=run.model_snapshot.name,
-            model=run.model_snapshot.model,
-            scenario_label=run.model_snapshot.scenario_label,
-            supports_vision=run.model_snapshot.supports_vision,
-            version=run.model_snapshot.version,
-        ),
+        # RunModelSnapshotResponse 仅声明安全元数据字段，自动过滤 base_url 等内部字段。
+        model_snapshot=RunModelSnapshotResponse.model_validate(run.model_snapshot),
         prompt_template_version=run.prompt_template_version,
         event_sequence=run.event_sequence,
         execution_epoch=run.execution_epoch,
@@ -193,58 +115,21 @@ def run_to_response(
         safe_error_code=run.safe_error_code,
         report_message_id=run.report_message_id,
         assistant_message_id=assistant_message_id,
-        usage=_usage_to_response(run.usage),
+        usage=RunUsageResponse.model_validate(run.usage),
         skill_snapshot=(
             None
             if run.skill_snapshot is None
-            else RunSkillSnapshotResponse(
-                version=run.skill_snapshot.version,
-                skills=[
-                    RunSkillEntryResponse(
-                        skill_id=item.skill_id,
-                        slug=item.slug,
-                        scope=item.scope.value,
-                        name=item.name,
-                        description=item.description,
-                        version_id=item.version_id,
-                        version_label=item.version_label,
-                        requires_approval=item.requires_approval,
-                    )
-                    for item in run.skill_snapshot.skills
-                ],
-                selected_skill_ids=list(run.skill_snapshot.selected_skill_ids),
-            )
+            else RunSkillSnapshotResponse.model_validate(run.skill_snapshot)
         ),
         input_file_ids=run.input_files.ids,
         knowledge_base_ids=(
             None if run.knowledge_base_ids is None else list(run.knowledge_base_ids)
         ),
-        pending_input=None if pending_input is None else _input_to_response(pending_input),
+        pending_input=(
+            None if pending_input is None else RunInputRequestResponse.model_validate(pending_input)
+        ),
         pending_approvals=[
-            RunPendingToolApprovalResponse(
-                call_id=item.call_id,
-                batch_message_id=item.batch_message_id,
-                ordinal=item.ordinal,
-                model_name=item.model_name,
-                tool_kind=item.tool_kind,
-                requested_at=item.requested_at,
-                safe_skill_projection=(
-                    None
-                    if item.safe_skill_projection is None
-                    else safe_skill_projection_to_response(item.safe_skill_projection)
-                ),
-                display_name=item.display_name,
-                approval_summary=item.approval_summary,
-                formatted_arguments=[
-                    FormattedToolArgumentResponse(
-                        key=arg.key,
-                        label=arg.label,
-                        value=arg.value,
-                    )
-                    for arg in item.formatted_arguments
-                ],
-            )
-            for item in pending_approvals
+            RunPendingToolApprovalResponse.model_validate(item) for item in pending_approvals
         ],
         parent_run_id=run.parent_run_id,
         root_run_id=run.root_run_id,
@@ -253,79 +138,16 @@ def run_to_response(
         subagent_profile_id=run.subagent_profile_id,
         subagent_slug=run.subagent_slug,
         subagent_name=run.subagent_name,
-        subagent_tasks=[
-            SubagentTaskResponse(
-                sub_run_id=item.sub_run_id,
-                parent_tool_call_id=item.parent_tool_call_id,
-                subagent_profile_id=item.subagent_profile_id,
-                subagent_slug=item.subagent_slug,
-                subagent_name=item.subagent_name,
-                task_index=item.task_index,
-                task_summary=item.task_summary,
-                status=item.status,
-                safe_error_code=item.safe_error_code,
-                created_at=item.created_at,
-                first_started_at=item.first_started_at,
-                finished_at=item.finished_at,
-            )
-            for item in subagent_tasks
-        ],
+        subagent_tasks=[SubagentTaskResponse.model_validate(item) for item in subagent_tasks],
         pending_subagent_inputs=[
-            PendingSubagentInputResponse(
-                sub_run_id=item.sub_run_id,
-                subagent_slug=item.subagent_slug,
-                subagent_name=item.subagent_name,
-                task_index=item.task_index,
-                task_summary=item.task_summary,
-                input_request_id=item.input_request_id,
-                question_message_id=item.question_message_id,
-                question_text=item.question_text,
-                created_at=item.created_at,
-            )
-            for item in pending_subagent_inputs
+            PendingSubagentInputResponse.model_validate(item) for item in pending_subagent_inputs
         ],
         pending_subagent_approvals=[
-            PendingSubagentApprovalResponse(
-                sub_run_id=item.sub_run_id,
-                subagent_slug=item.subagent_slug,
-                subagent_name=item.subagent_name,
-                task_index=item.task_index,
-                task_summary=item.task_summary,
-                call_id=item.call_id,
-                batch_message_id=item.batch_message_id,
-                ordinal=item.ordinal,
-                model_name=item.model_name,
-                # 领域 PendingSubagentApproval.tool_kind 为原始字符串，在 API 边界收紧为 ToolKind。
-                tool_kind=None if item.tool_kind is None else ToolKind(item.tool_kind),
-                requested_at=item.requested_at,
-                safe_skill_projection=(
-                    None
-                    if item.safe_skill_projection is None
-                    else safe_skill_projection_to_response(item.safe_skill_projection)
-                ),
-                display_name=item.display_name,
-                approval_summary=item.approval_summary,
-                formatted_arguments=[
-                    FormattedToolArgumentResponse(
-                        key=arg.key,
-                        label=arg.label,
-                        value=arg.value,
-                    )
-                    for arg in item.formatted_arguments
-                ],
-            )
+            PendingSubagentApprovalResponse.model_validate(item)
             for item in pending_subagent_approvals
         ],
         input_interactions=[
-            RunInputInteractionResponse(
-                input_request_id=item.input_request_id,
-                status=item.status,
-                question_text=item.question_text,
-                answer_text=item.answer_text,
-                created_at=item.created_at,
-                answered_at=item.answered_at,
-            )
-            for item in run.input_interactions
+            RunInputInteractionResponse.model_validate(item) for item in run.input_interactions
         ],
         replayed=replayed,
         retry_warning=(
@@ -429,14 +251,7 @@ def tool_call_to_response(details: RunToolCallDetails) -> RunToolCallDetailRespo
             )
         ),
         artifacts=[
-            ArtifactFileRefResponse(
-                file_id=artifact.file_id,
-                filename=artifact.filename,
-                label=artifact.label,
-                mime_type=artifact.mime_type,
-                size_bytes=artifact.size_bytes,
-            )
-            for artifact in details.artifacts
+            ArtifactFileRefResponse.model_validate(artifact) for artifact in details.artifacts
         ],
         safe_skill_projection=(
             None if safe_projection is None else safe_skill_projection_to_response(safe_projection)

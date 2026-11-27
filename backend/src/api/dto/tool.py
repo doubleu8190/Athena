@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class PublicToolResponse(BaseModel):
     """普通用户可见的最小工具投影。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     tool_id: str
     model_name: str
     description: str

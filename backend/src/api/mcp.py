@@ -22,7 +22,7 @@ from api.dto.mcp import (
     StdioServerUpdateRequest,
 )
 from api.dto.tool import AdminToolListResponse
-from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
+from api.mcp_errors import SafeMcpRoute
 from api.security import AdminAuth
 from app.tool import ToolManager
 from domain.access import VisibilityScope
@@ -79,22 +79,19 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _CREATE_ADAPTER)
-        try:
-            server = await manager.register_mcp(
-                actor,
-                request.name,
-                request.to_domain_config(),
-                request.secrets,
-                visibility_scope=VisibilityScope(request.visibility_scope),
-                owner_department_id=request.owner_department_id,
-                visibility_grants=(
-                    None
-                    if request.visibility_grants is None
-                    else tuple(item.to_domain() for item in request.visibility_grants)
-                ),
-            )
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        server = await manager.register_mcp(
+            actor,
+            request.name,
+            request.to_domain_config(),
+            request.secrets,
+            visibility_scope=VisibilityScope(request.visibility_scope),
+            owner_department_id=request.owner_department_id,
+            visibility_grants=(
+                None
+                if request.visibility_grants is None
+                else tuple(item.to_domain() for item in request.visibility_grants)
+            ),
+        )
         response.headers["Location"] = f"/api/v1/admin/mcp/servers/{server.id}"
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_to_response(server)
@@ -106,12 +103,9 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> McpServerListResponse:
-        try:
-            result = await manager.list_mcp_servers(
-                actor, offset=(page - 1) * page_size, limit=page_size
-            )
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.list_mcp_servers(
+            actor, offset=(page - 1) * page_size, limit=page_size
+        )
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_page_to_response(result, page_number=page, page_size=page_size)
 
@@ -121,10 +115,7 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         server_id: Annotated[str, Path(min_length=1)],
         response: Response,
     ) -> McpServerResponse:
-        try:
-            result = await manager.get_mcp_server(actor, server_id)
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.get_mcp_server(actor, server_id)
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_to_response(result)
 
@@ -140,24 +131,21 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         response: Response,
     ) -> McpServerResponse:
         request = await _read_request_model(http_request, _UPDATE_ADAPTER)
-        try:
-            result = await manager.update_mcp(
-                actor,
-                server_id,
-                request.expected_config_version,
-                request.name,
-                request.to_domain_config(),
-                request.secrets,
-                visibility_scope=VisibilityScope(request.visibility_scope),
-                owner_department_id=request.owner_department_id,
-                visibility_grants=(
-                    None
-                    if request.visibility_grants is None
-                    else tuple(item.to_domain() for item in request.visibility_grants)
-                ),
-            )
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.update_mcp(
+            actor,
+            server_id,
+            request.expected_config_version,
+            request.name,
+            request.to_domain_config(),
+            request.secrets,
+            visibility_scope=VisibilityScope(request.visibility_scope),
+            owner_department_id=request.owner_department_id,
+            visibility_grants=(
+                None
+                if request.visibility_grants is None
+                else tuple(item.to_domain() for item in request.visibility_grants)
+            ),
+        )
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_to_response(result)
 
@@ -205,9 +193,8 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
                 rediscover=request.rediscover,
             )
         except McpConfigVersionConflictError as error:
+            # PATCH/启停/重发现沿用细粒度版本冲突码（区别于全量 PUT 的 mcp_conflict）。
             raise HTTPException(status.HTTP_409_CONFLICT, "mcp_config_version_conflict") from error
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_to_response(result)
 
@@ -233,8 +220,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
             )
         except McpConfigVersionConflictError as error:
             raise HTTPException(status.HTTP_409_CONFLICT, "mcp_config_version_conflict") from error
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_to_response(result)
 
@@ -252,8 +237,6 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
             result = await manager.rediscover_mcp(actor, server_id)
         except McpConfigVersionConflictError as error:
             raise HTTPException(status.HTTP_409_CONFLICT, "mcp_config_version_conflict") from error
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
         response.headers["Cache-Control"] = "no-store"
         return mcp_server_to_response(result)
 
@@ -266,10 +249,7 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         actor: AdminAuth,
         server_id: Annotated[str, Path(min_length=1)],
     ) -> Response:
-        try:
-            await manager.unregister_mcp(actor, server_id)
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        await manager.unregister_mcp(actor, server_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.get("/{server_id}/tools", response_model=AdminToolListResponse)
@@ -280,12 +260,9 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> AdminToolListResponse:
-        try:
-            result = await manager.list_server_tools(
-                actor, server_id, offset=(page - 1) * page_size, limit=page_size
-            )
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.list_server_tools(
+            actor, server_id, offset=(page - 1) * page_size, limit=page_size
+        )
         response.headers["Cache-Control"] = "no-store"
         return admin_tool_page_to_response(result, page_number=page, page_size=page_size)
 

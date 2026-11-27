@@ -5,12 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from domain.file import SessionFileSource
 
 
 class SessionFileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     session_id: str
     # 复用领域 SessionFileSource 枚举，收紧为封闭文件来源集合。
@@ -26,11 +28,15 @@ class SessionFileResponse(BaseModel):
 
 
 class SessionFileListResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     items: list[SessionFileResponse]
     next_after_file_id: str | None
 
 
 class SessionFileContentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     file: SessionFileResponse
     source_kind: Literal["raw_text", "extracted_document"]
     offset: int

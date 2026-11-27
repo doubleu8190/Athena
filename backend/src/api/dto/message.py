@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from domain.message import ConversationRole, MessageStatus, ToolResultStatus
 
@@ -13,12 +13,16 @@ from domain.message import ConversationRole, MessageStatus, ToolResultStatus
 class TextPartResponse(BaseModel):
     """文本内容块。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     type: Literal["text"]
     text: str
 
 
 class FileRefPartResponse(BaseModel):
     """文件引用内容块。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     type: Literal["file_ref"]
     file_id: str
@@ -30,6 +34,8 @@ class FileRefPartResponse(BaseModel):
 class ToolCallPartResponse(BaseModel):
     """工具调用内容块。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     type: Literal["tool_call"]
     tool_call_id: str
     name: str
@@ -38,6 +44,8 @@ class ToolCallPartResponse(BaseModel):
 
 class ArtifactFileRefResponse(BaseModel):
     """一个已发布会话产物的用户态引用。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     file_id: str
     filename: str
@@ -48,6 +56,8 @@ class ArtifactFileRefResponse(BaseModel):
 
 class ToolResultPartResponse(BaseModel):
     """工具结果内容块。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     type: Literal["tool_result"]
     tool_call_id: str
@@ -66,6 +76,8 @@ type MessagePartResponse = Annotated[
 class ConversationMessageResponse(BaseModel):
     """一条公开会话消息。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     session_id: str
     # 复用领域 ConversationRole 与 MessageStatus 枚举，收紧消息角色与生命周期状态。
@@ -81,6 +93,8 @@ class ConversationMessageResponse(BaseModel):
 
 class ConversationMessageListResponse(BaseModel):
     """会话消息分页响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     items: list[ConversationMessageResponse]
     next_before_sequence: int | None

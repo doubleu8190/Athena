@@ -1246,7 +1246,9 @@ class RunRepositorySupportMixin:
                         batch_message_id=call_row.call_message_id,
                         ordinal=call_row.ordinal,
                         model_name=call_row.model_name,
-                        tool_kind=call_row.tool_kind,
+                        tool_kind=(
+                            None if call_row.tool_kind is None else ToolKind(call_row.tool_kind)
+                        ),
                         requested_at=call_row.requested_at or sub_run.updated_at,
                         safe_skill_projection=skill_proj,
                         display_name=display_name,

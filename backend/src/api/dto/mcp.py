@@ -115,11 +115,15 @@ class McpServerEnabledRequest(BaseModel):
 class McpHttpConfigResponse(BaseModel):
     """Streamable HTTP 类型 MCP Server 的安全连接配置响应。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     url: str
 
 
 class McpStdioConfigResponse(BaseModel):
     """Stdio 类型 MCP Server 的安全连接配置响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     command: str
     args: list[str]
@@ -128,6 +132,8 @@ class McpStdioConfigResponse(BaseModel):
 
 class McpSecretMetadataResponse(BaseModel):
     """MCP Server 单条脱敏秘密元数据响应（仅暴露名称与是否已配置，不含明文）。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     name: str
     has_value: bool

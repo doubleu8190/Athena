@@ -14,33 +14,16 @@ from domain.org import OrgUserDetail, UserDepartmentSummary
 
 def department_summary_to_dto(item: UserDepartmentSummary) -> UserDepartmentItem:
     """转换单条部门摘要投影。"""
-    return UserDepartmentItem(
-        id=item.id,
-        name=item.name,
-        path=item.path,
-        is_primary=item.is_primary,
-    )
+    return UserDepartmentItem.model_validate(item)
 
 
 def user_result_to_response(user: UserResult) -> UserResponse:
-    """转换安全用户响应。"""
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        display_name=user.display_name,
-        created_at=user.created_at,
-        role=user.role,
-        auth_provider=user.auth_provider,
-        employee_no=user.employee_no,
-        job_title=user.job_title,
-        avatar_url=user.avatar_url,
-        departments=[department_summary_to_dto(dept) for dept in user.departments],
-        managed_department_ids=list(user.managed_department_ids),
-    )
+    """转换安全用户响应（Pydantic 仅投影 DTO 显式声明字段，自动忽略敏感属性）。"""
+    return UserResponse.model_validate(user)
 
 
 def mock_users_to_response(items: tuple[OrgUserDetail, ...]) -> MockUserListResponse:
-    """转换非生产 Mock 账号清单响应。"""
+    """转换非生产 Mock 账号清单响应（需从 detail.user 展平用户字段）。"""
     return MockUserListResponse(
         items=[
             MockUserResponse(

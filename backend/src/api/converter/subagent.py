@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, cast
 
-from api.dto.access import grants_to_response
 from api.dto.subagent import (
     AvailableToolGroupResponse,
-    AvailableToolItemResponse,
     SubagentAvailableToolsResponse,
     SubagentCreateRequest,
     SubagentListResponse,
@@ -109,36 +106,12 @@ def update_request_to_command(request: SubagentUpdateRequest) -> UpdateSubagentC
 
 def subagent_to_response(profile: SubagentProfile) -> SubagentResponse:
     """将领域 Subagent 实体转换为 HTTP 响应。"""
-    scope = cast(Literal["company", "department"], profile.visibility_scope.value)
-    return SubagentResponse(
-        id=profile.id,
-        slug=profile.slug,
-        name=profile.name,
-        description=profile.description,
-        system_prompt=profile.system_prompt,
-        model_profile_id=profile.model_profile_id,
-        allowed_tool_ids=list(profile.allowed_tool_ids),
-        enabled=profile.enabled,
-        visibility_scope=scope,
-        owner_department_id=profile.owner_department_id,
-        visibility_grants=grants_to_response(profile.visibility_grants),
-        max_llm_requests=profile.max_llm_requests,
-        timeout_seconds=profile.timeout_seconds,
-        version=profile.version,
-        created_by=profile.created_by,
-        created_at=profile.created_at,
-        updated_at=profile.updated_at,
-    )
+    return SubagentResponse.model_validate(profile)
 
 
 def subagent_page_to_response(page: SubagentPage) -> SubagentListResponse:
     """将领域 Subagent 分页对象转换为 HTTP 列表响应。"""
-    return SubagentListResponse(
-        items=[subagent_to_response(item) for item in page.items],
-        total=page.total,
-        offset=page.offset,
-        limit=page.limit,
-    )
+    return SubagentListResponse.model_validate(page)
 
 
 def available_tools_to_response(
@@ -146,25 +119,7 @@ def available_tools_to_response(
 ) -> SubagentAvailableToolsResponse:
     """将分组工具目录转换为 HTTP 响应。"""
     return SubagentAvailableToolsResponse(
-        groups=[
-            AvailableToolGroupResponse(
-                group_key=group.group_key,
-                label=group.label,
-                items=[
-                    AvailableToolItemResponse(
-                        tool_id=item.tool_id,
-                        name=item.name,
-                        description=item.description,
-                        source_type=item.source_type,
-                        requires_approval=item.requires_approval,
-                        server_id=item.server_id,
-                        server_name=item.server_name,
-                    )
-                    for item in group.items
-                ],
-            )
-            for group in groups
-        ]
+        groups=[AvailableToolGroupResponse.model_validate(group) for group in groups]
     )
 
 

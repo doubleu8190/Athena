@@ -14,6 +14,8 @@ from domain.org import DepartmentStatus
 class DepartmentResponse(BaseModel):
     """部门节点信息。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     external_id: str
     parent_id: str | None
@@ -34,6 +36,8 @@ class DepartmentListResponse(BaseModel):
 
 class DeptAdminScopeResponse(BaseModel):
     """部门管理员已授权管辖范围项。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     department_id: str
     department_name: str
@@ -98,6 +102,8 @@ class UpdateUserStatusRequest(BaseModel):
 
 class FeishuSyncResponse(BaseModel):
     """手动触发飞书通讯录同步结果。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     departments_upserted: int
     departments_archived: int

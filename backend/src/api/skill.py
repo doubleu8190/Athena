@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
 
 from fastapi import (
     APIRouter,
@@ -46,20 +46,15 @@ from api.dto.skill import (
     SkillVersionListResponse,
     SkillVersionResponse,
 )
+from api.errors import DomainErrorRoute, domain_error_to_http
 from api.security import AdminAuth, CurrentAuth, SkillManagerAuth
-from api.upload import UploadTooLargeError, staged_upload
+from api.upload import staged_upload
 from app.skill import SkillService
-from app.skill.personal import PersonalSkillError
-from app.skill.service import SkillAuthorizationError, SkillUserAuthorizationError
 from common.unset import UNSET, UnsetType
 from domain.access import VisibilityGrantInput
-from domain.file import FileStorageError
 from domain.skill import (
     MAX_PACKAGE_ZIP_BYTES,
     MAX_PERSONAL_MARKDOWN_BYTES,
-    SkillConflictError,
-    SkillDependencyUnsatisfiedError,
-    SkillNotFoundError,
     SkillPackageError,
     SkillScope,
 )
@@ -81,19 +76,40 @@ def _parse_form_visibility_grants(raw: str | None) -> tuple[VisibilityGrantInput
     return tuple(item.to_domain() for item in items)
 
 
+def _raise_safe_value_error(error: ValueError, *, mode: Literal["personal", "package"]) -> NoReturn:
+    """优先使用统一领域映射，其余裸 ValueError 仅返回白名单安全错误码。"""
+    if (mapped := domain_error_to_http(error)) is not None:
+        raise mapped from error
+    if mode == "package":
+        raise HTTPException(422, "skill_package_invalid") from error
+    value = str(error)
+    code = (
+        value
+        if value.replace("_", "").isalnum() and value.isascii()
+        else "skill_personal_content_invalid"
+    )
+    raise HTTPException(422, code) from error
+
+
+def _raise_storage_os_error(error: OSError) -> NoReturn:
+    """优先映射继承自 OSError 的领域权限异常，其余文件落盘/读取故障转 503。"""
+    if (mapped := domain_error_to_http(error)) is not None:
+        raise mapped from error
+    raise HTTPException(503, "file_storage_unavailable") from error
+
+
 def build_skill_user_router(service: SkillService) -> APIRouter:
     """创建登录用户可见的启用 Skill 目录。"""
-    router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
+    router = APIRouter(
+        prefix="/api/v1/skills",
+        tags=["skills"],
+        route_class=DomainErrorRoute,
+    )
 
     @router.get("", response_model=SkillDirectoryResponse)
     async def list_skills(actor: CurrentAuth) -> SkillDirectoryResponse:
         """返回当前仍可用的启用目录，不暴露管理员版本正文。"""
-        try:
-            return directory_to_response(await service.user_directory(actor))
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except SkillPackageError as error:
-            raise _skill_package_http_error(error) from error
+        return directory_to_response(await service.user_directory(actor))
 
     return router
 
@@ -103,6 +119,7 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/me",
         tags=["personal-skills"],
+        route_class=DomainErrorRoute,
     )
 
     @router.get("/skills", response_model=SkillPersonalListResponse)
@@ -126,25 +143,24 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
             async with staged_upload(
                 file,
                 maximum_bytes=MAX_PERSONAL_MARKDOWN_BYTES,
+                too_large_code="skill_markdown_too_large",
             ) as path:
                 draft = await service.parse_personal_document(
                     file.filename or "",
                     path,
                 )
                 return personal_draft_to_response(draft)
-        except UploadTooLargeError as error:
-            raise HTTPException(413, "skill_markdown_too_large") from error
-        except PersonalSkillError as error:
-            raise _personal_validation_error(error) from error
         except ValueError as error:
+            if (mapped := domain_error_to_http(error)) is not None:
+                raise mapped from error
             code = (
                 "skill_markdown_empty"
                 if str(error) == "upload_empty"
-                else ("personal_skill_file_invalid")
+                else "personal_skill_file_invalid"
             )
             raise HTTPException(422, code) from error
         except OSError as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+            _raise_storage_os_error(error)
 
     @router.post(
         "/skills",
@@ -169,16 +185,8 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
                 idempotency_key=idempotency_key,
             )
             return admin_details_to_response(details)
-        except SkillUserAuthorizationError as error:
-            raise _user_authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except (PersonalSkillError, ValueError) as error:
-            raise _personal_validation_error(error) from error
-        except FileStorageError as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+        except ValueError as error:
+            _raise_safe_value_error(error, mode="personal")
 
     @router.get("/skills/{skill_id}", response_model=SkillAdminDetailsResponse)
     async def get_personal_skill(
@@ -186,12 +194,7 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillAdminDetailsResponse:
         """返回本人个人 Skill 及当前版本正文。"""
-        try:
-            return admin_details_to_response(await service.get_personal(actor, skill_id))
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
+        return admin_details_to_response(await service.get_personal(actor, skill_id))
 
     @router.post(
         "/skills/{skill_id}/versions",
@@ -219,16 +222,8 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
                 idempotency_key=idempotency_key,
             )
             return admin_details_to_response(details)
-        except SkillUserAuthorizationError as error:
-            raise _user_authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except (PersonalSkillError, ValueError) as error:
-            raise _personal_validation_error(error) from error
-        except FileStorageError as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+        except ValueError as error:
+            _raise_safe_value_error(error, mode="personal")
 
     @router.patch("/skills/{skill_id}", response_model=SkillAdminDetailsResponse)
     async def set_personal_skill_enabled(
@@ -245,14 +240,8 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
                 expected_revision=request.expected_revision,
             )
             return admin_details_to_response(details)
-        except SkillUserAuthorizationError as error:
-            raise _user_authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
         except ValueError as error:
-            raise HTTPException(422, _safe_code(error)) from error
+            _raise_safe_value_error(error, mode="package")
 
     @router.delete(
         "/skills/{skill_id}",
@@ -271,14 +260,8 @@ def build_skill_personal_router(service: SkillService) -> APIRouter:
                 skill_id,
                 expected_revision=expected_revision,
             )
-        except SkillUserAuthorizationError as error:
-            raise _user_authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
         except ValueError as error:
-            raise HTTPException(422, _safe_code(error)) from error
+            _raise_safe_value_error(error, mode="package")
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return router
@@ -289,15 +272,13 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/admin",
         tags=["skill-admin"],
+        route_class=DomainErrorRoute,
     )
 
     @router.get("/skills", response_model=SkillAdminListResponse)
     async def list_skills(actor: SkillManagerAuth) -> SkillAdminListResponse:
         """读取当前管理员可维护的公司级或管辖部门级 Skill。"""
-        try:
-            return admin_list_to_response(await service.list_admin(actor))
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
+        return admin_list_to_response(await service.list_admin(actor))
 
     @router.post(
         "/skills/import",
@@ -321,6 +302,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             async with staged_upload(
                 package,
                 maximum_bytes=MAX_PACKAGE_ZIP_BYTES,
+                too_large_code="skill_zip_too_large",
             ) as path:
                 details = await service.import_package(
                     actor,
@@ -331,16 +313,10 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                     visibility_grants=parsed_grants,
                 )
                 return admin_details_to_response(details)
-        except UploadTooLargeError as error:
-            raise HTTPException(413, "skill_zip_too_large") from error
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except (SkillPackageError, ValueError) as error:
-            raise HTTPException(422, _package_error_detail(error)) from error
-        except (FileStorageError, OSError) as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+        except ValueError as error:
+            _raise_safe_value_error(error, mode="package")
+        except OSError as error:
+            _raise_storage_os_error(error)
 
     @router.post(
         "/skills/parse-markdown",
@@ -358,6 +334,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             async with staged_upload(
                 file,
                 maximum_bytes=MAX_PERSONAL_MARKDOWN_BYTES,
+                too_large_code="skill_markdown_too_large",
             ) as path:
                 draft = await service.parse_admin_markdown(
                     actor,
@@ -365,13 +342,9 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                     path,
                 )
                 return personal_draft_to_response(draft)
-        except UploadTooLargeError as error:
-            raise HTTPException(413, "skill_markdown_too_large") from error
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except PersonalSkillError as error:
-            raise _personal_validation_error(error) from error
         except ValueError as error:
+            if (mapped := domain_error_to_http(error)) is not None:
+                raise mapped from error
             code = (
                 "skill_markdown_empty"
                 if str(error) == "upload_empty"
@@ -379,7 +352,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             )
             raise HTTPException(422, code) from error
         except OSError as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+            _raise_storage_os_error(error)
 
     @router.post(
         "/skills/markdown",
@@ -416,18 +389,10 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                 starter_prompt=request.starter_prompt,
             )
             return admin_details_to_response(details)
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except SkillPackageError as error:
-            raise _skill_package_http_error(error) from error
-        except (PersonalSkillError, ValueError) as error:
-            raise _personal_validation_error(error) from error
-        except (FileStorageError, OSError) as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+        except ValueError as error:
+            _raise_safe_value_error(error, mode="personal")
+        except OSError as error:
+            _raise_storage_os_error(error)
 
     @router.get("/skills/{skill_id}", response_model=SkillAdminDetailsResponse)
     async def get_skill(
@@ -435,12 +400,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         skill_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillAdminDetailsResponse:
         """读取管理详情、完整指南、资源清单与最近 100 个版本。"""
-        try:
-            return admin_details_to_response(await service.get_admin(actor, skill_id))
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
+        return admin_details_to_response(await service.get_admin(actor, skill_id))
 
     @router.post(
         "/skills/{skill_id}/versions",
@@ -462,6 +422,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
             async with staged_upload(
                 package,
                 maximum_bytes=MAX_PACKAGE_ZIP_BYTES,
+                too_large_code="skill_zip_too_large",
             ) as path:
                 return version_to_response(
                     await service.add_version(
@@ -472,18 +433,10 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                         label=label,
                     )
                 )
-        except UploadTooLargeError as error:
-            raise HTTPException(413, "skill_zip_too_large") from error
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except (SkillPackageError, ValueError) as error:
-            raise HTTPException(422, _package_error_detail(error)) from error
-        except (FileStorageError, OSError) as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+        except ValueError as error:
+            _raise_safe_value_error(error, mode="package")
+        except OSError as error:
+            _raise_storage_os_error(error)
 
     @router.post(
         "/skills/{skill_id}/versions/markdown",
@@ -513,18 +466,10 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
                 activate=request.activate,
             )
             return admin_details_to_response(details)
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except SkillPackageError as error:
-            raise _skill_package_http_error(error) from error
-        except (PersonalSkillError, ValueError) as error:
-            raise _personal_validation_error(error) from error
-        except (FileStorageError, OSError) as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+        except ValueError as error:
+            _raise_safe_value_error(error, mode="personal")
+        except OSError as error:
+            _raise_storage_os_error(error)
 
     @router.get(
         "/skills/{skill_id}/versions",
@@ -537,23 +482,18 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> SkillVersionListResponse:
         """分页读取不可变历史版本。"""
-        try:
-            value = await service.list_versions(
-                actor,
-                skill_id,
-                page=page,
-                page_size=page_size,
-            )
-            return version_page_to_response(
-                value.items,
-                total=value.total,
-                page=page,
-                page_size=page_size,
-            )
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
+        value = await service.list_versions(
+            actor,
+            skill_id,
+            page=page,
+            page_size=page_size,
+        )
+        return version_page_to_response(
+            value.items,
+            total=value.total,
+            page=page,
+            page_size=page_size,
+        )
 
     @router.get(
         "/skills/{skill_id}/versions/{version_id}",
@@ -565,12 +505,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         version_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillVersionResponse:
         """读取指定历史版本完整正文。"""
-        try:
-            return version_to_response(await service.get_version(actor, skill_id, version_id))
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
+        return version_to_response(await service.get_version(actor, skill_id, version_id))
 
     @router.patch("/skills/{skill_id}", response_model=SkillAdminDetailsResponse)
     async def configure_skill(
@@ -588,34 +523,23 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         starter_prompt_value: str | None | UnsetType = (
             request.starter_prompt if "starter_prompt" in request.model_fields_set else UNSET
         )
-        try:
-            grants = (
-                None
-                if request.visibility_grants is None
-                else tuple(item.to_domain() for item in request.visibility_grants)
-            )
-            await service.configure(
-                actor,
-                skill_id,
-                expected_revision=request.expected_revision,
-                enabled=request.enabled,
-                current_version_id=request.current_version_id,
-                script_requires_approval=request.script_requires_approval,
-                visibility_grants=grants,
-                featured=featured_value,
-                starter_prompt=starter_prompt_value,
-            )
-            return admin_details_to_response(await service.get_admin(actor, skill_id))
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except SkillDependencyUnsatisfiedError as error:
-            raise HTTPException(422, error.code) from error
-        except SkillPackageError as error:
-            raise _skill_package_http_error(error) from error
+        grants = (
+            None
+            if request.visibility_grants is None
+            else tuple(item.to_domain() for item in request.visibility_grants)
+        )
+        await service.configure(
+            actor,
+            skill_id,
+            expected_revision=request.expected_revision,
+            enabled=request.enabled,
+            current_version_id=request.current_version_id,
+            script_requires_approval=request.script_requires_approval,
+            visibility_grants=grants,
+            featured=featured_value,
+            starter_prompt=starter_prompt_value,
+        )
+        return admin_details_to_response(await service.get_admin(actor, skill_id))
 
     @router.delete(
         "/skills/{skill_id}",
@@ -628,20 +552,11 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         expected_revision: Annotated[int, Query(ge=1)],
     ) -> Response:
         """软删除部门级 Skill 并同事务清理关联的可见性授权。"""
-        try:
-            await service.delete_admin(
-                actor,
-                skill_id,
-                expected_revision=expected_revision,
-            )
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except SkillConflictError as error:
-            raise HTTPException(409, error.code) from error
-        except SkillPackageError as error:
-            raise _skill_package_http_error(error) from error
+        await service.delete_admin(
+            actor,
+            skill_id,
+            expected_revision=expected_revision,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.get(
@@ -653,12 +568,7 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         call_id: Annotated[str, Path(min_length=1, max_length=128)],
     ) -> SkillExecutionResponse:
         """读取脚本解释器、错误和日志可用性等排查摘要。"""
-        try:
-            return execution_to_response(await service.admin_execution(actor, call_id))
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
+        return execution_to_response(await service.admin_execution(actor, call_id))
 
     @router.get(
         "/skill-executions/{call_id}/log",
@@ -679,12 +589,8 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         """管理员下载最多 5 MiB 原始日志，普通用户路由不暴露正文。"""
         try:
             content = await service.admin_log(actor, call_id)
-        except SkillAuthorizationError as error:
-            raise _authorization_error(error) from error
-        except SkillNotFoundError as error:
-            raise HTTPException(404, error.code) from error
-        except (FileStorageError, OSError) as error:
-            raise HTTPException(503, "file_storage_unavailable") from error
+        except OSError as error:
+            _raise_storage_os_error(error)
         return Response(
             content=content,
             media_type="text/plain; charset=utf-8",
@@ -695,67 +601,6 @@ def build_skill_admin_router(service: SkillService) -> APIRouter:
         )
 
     return router
-
-
-def _authorization_error(error: SkillAuthorizationError) -> HTTPException:
-    """把事务前后的管理员复核失败统一映射为 403。"""
-    return HTTPException(status_code=403, detail=error.args[0] if error.args else "admin_required")
-
-
-def _user_authorization_error(error: SkillUserAuthorizationError) -> HTTPException:
-    """把个人写事务中的登录失效统一映射为 401。"""
-    return HTTPException(
-        status_code=401,
-        detail=error.args[0] if error.args else "not_authenticated",
-    )
-
-
-def _personal_validation_error(error: Exception) -> HTTPException:
-    """只向个人 Skill 客户端返回白名单形式的稳定校验码。"""
-    explicit = getattr(error, "code", None)
-    if isinstance(explicit, str):
-        code = explicit
-    else:
-        value = str(error)
-        code = (
-            value
-            if value.replace("_", "").isalnum() and value.isascii()
-            else ("skill_personal_content_invalid")
-        )
-    field = getattr(error, "field", None)
-    if (
-        isinstance(field, str)
-        and 0 < len(field) <= 128
-        and all(character.isprintable() for character in field)
-    ):
-        # 保留稳定错误码供前端映射，同时提供安全的表单字段定位；
-        # 原始 Markdown、YAML 值和异常文本都不能进入响应。
-        return HTTPException(
-            status_code=422,
-            detail={"code": code, "field": field},
-        )
-    return HTTPException(status_code=422, detail=code)
-
-
-def _safe_code(error: Exception) -> str:
-    """只向外返回领域稳定错误码，不回显原始异常文本。"""
-    value = getattr(error, "code", None)
-    return value if isinstance(value, str) else "skill_package_invalid"
-
-
-def _skill_package_http_error(error: SkillPackageError) -> HTTPException:
-    """将 Skill 依赖环境不可用映射为 503，其余包与依赖配置错误映射为 422。"""
-    if error.code == "skill_dependency_environment_unavailable":
-        return HTTPException(status_code=503, detail=error.code)
-    return HTTPException(status_code=422, detail=_package_error_detail(error))
-
-
-def _package_error_detail(error: Exception) -> str | dict[str, str]:
-    """为可定位的包成员返回安全路径，其余错误保持原字符串 detail。"""
-    code = _safe_code(error)
-    if not isinstance(error, SkillPackageError) or error.member_path is None:
-        return code
-    return {"code": code, "member_path": error.member_path}
 
 
 __all__ = [

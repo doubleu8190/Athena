@@ -21,7 +21,7 @@ from api.dto.tool import (
     ToolApprovalPolicyRequest,
     ToolBatchApprovalRequest,
 )
-from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
+from api.mcp_errors import SafeMcpRoute
 from api.security import AdminAuth, CurrentAuth
 from app.tool import ToolManager
 from common.unset import UNSET
@@ -55,13 +55,11 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         page: Annotated[int, Query(ge=1)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> PublicToolListResponse:
+        del response
         _ensure_pagination_query(request)
-        try:
-            result = await manager.list_public_tools(
-                actor, offset=(page - 1) * page_size, limit=page_size
-            )
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.list_public_tools(
+            actor, offset=(page - 1) * page_size, limit=page_size
+        )
         return public_tool_page_to_response(result, page_number=page, page_size=page_size)
 
     @router.get("/api/v1/tools/{tool_id}", response_model=PublicToolResponse)
@@ -71,10 +69,7 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         tool_id: Annotated[str, Path(min_length=1)],
     ) -> PublicToolResponse:
         _no_query(request)
-        try:
-            result = await manager.get_public_tool(actor, tool_id)
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.get_public_tool(actor, tool_id)
         return public_tool_to_response(result)
 
     @router.get("/api/v1/admin/tools", response_model=AdminToolListResponse)
@@ -87,12 +82,9 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
     ) -> AdminToolListResponse:
         _ensure_pagination_query(request)
         response.headers["Cache-Control"] = "no-store"
-        try:
-            result = await manager.list_admin_tools(
-                actor, offset=(page - 1) * page_size, limit=page_size
-            )
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.list_admin_tools(
+            actor, offset=(page - 1) * page_size, limit=page_size
+        )
         return admin_tool_page_to_response(result, page_number=page, page_size=page_size)
 
     @router.get("/api/v1/admin/tools/{tool_id}", response_model=AdminToolResponse)
@@ -104,10 +96,7 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
     ) -> AdminToolResponse:
         _no_query(request)
         response.headers["Cache-Control"] = "no-store"
-        try:
-            result = await manager.get_admin_tool(actor, tool_id)
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        result = await manager.get_admin_tool(actor, tool_id)
         return admin_tool_to_response(result)
 
     # 静态路径 batch-approval 必须注册在动态路径 /{tool_id} 之前，避免被路径参数吞掉。
@@ -127,9 +116,8 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
                 actor, request.tool_ids, request.requires_approval
             )
         except McpServerNotFoundError as error:
+            # 批量工具审批缺失工具时沿用 mcp_tool_not_found（区别于通用 resource_not_found）。
             raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp_tool_not_found") from error
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
         return AdminToolBatchApprovalResponse(
             updated_count=len(items),
             items=[admin_tool_to_response(item) for item in items],
@@ -152,27 +140,24 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
             raise HTTPException(422, "mcp_request_invalid")
         if "requires_approval" in fields_set and request.requires_approval is None:
             raise HTTPException(422, "mcp_request_invalid")
-        try:
-            # 统一走局部元信息更新通道，避免仅改审批开关时的冗余路由分叉。
-            patch = ToolMetadataPatch(
-                requires_approval=(
-                    UNSET
-                    if "requires_approval" not in fields_set
-                    else cast(bool, request.requires_approval)
-                ),
-                display_name=(UNSET if "display_name" not in fields_set else request.display_name),
-                approval_summary_template=(
-                    UNSET
-                    if "approval_summary_template" not in fields_set
-                    else request.approval_summary_template
-                ),
-                parameter_labels=(
-                    UNSET if "parameter_labels" not in fields_set else request.parameter_labels
-                ),
-            )
-            result = await manager.update_tool_metadata(actor, tool_id, patch)
-        except Exception as error:
-            raise mcp_error_to_http(error) from error
+        # 统一走局部元信息更新通道，避免仅改审批开关时的冗余路由分叉。
+        patch = ToolMetadataPatch(
+            requires_approval=(
+                UNSET
+                if "requires_approval" not in fields_set
+                else cast(bool, request.requires_approval)
+            ),
+            display_name=(UNSET if "display_name" not in fields_set else request.display_name),
+            approval_summary_template=(
+                UNSET
+                if "approval_summary_template" not in fields_set
+                else request.approval_summary_template
+            ),
+            parameter_labels=(
+                UNSET if "parameter_labels" not in fields_set else request.parameter_labels
+            ),
+        )
+        result = await manager.update_tool_metadata(actor, tool_id, patch)
         return admin_tool_to_response(result)
 
     return router

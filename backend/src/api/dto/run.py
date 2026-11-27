@@ -46,6 +46,8 @@ class RunToolApprovalRequest(BaseModel):
 
 
 class SafeSkillInputFileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     file_id: str
     filename: str
     mime_type: str | None
@@ -54,12 +56,16 @@ class SafeSkillInputFileResponse(BaseModel):
 
 
 class SkillParameterSummaryItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     name: str
     label: str
     value: str
 
 
 class SafeSkillApprovalProjectionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     call_id: str
     skill_id: str
     skill_name: str
@@ -77,6 +83,8 @@ class SafeSkillApprovalProjectionResponse(BaseModel):
 class FormattedToolArgumentResponse(BaseModel):
     """面向业务用户的待审批工具参数可读键值项。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     key: str
     label: str
     value: str
@@ -84,6 +92,8 @@ class FormattedToolArgumentResponse(BaseModel):
 
 class RunModelSnapshotResponse(BaseModel):
     """Run 创建时固化的安全模型元数据只读投影，严禁暴露供应商地址与凭据信息。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     name: str
@@ -94,6 +104,8 @@ class RunModelSnapshotResponse(BaseModel):
 
 
 class RunPendingToolApprovalResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     call_id: str
     batch_message_id: str
     ordinal: int
@@ -108,6 +120,8 @@ class RunPendingToolApprovalResponse(BaseModel):
 
 
 class RunAttemptUsageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     execution_epoch: int
     attempt: int
     input_tokens: int | None
@@ -123,6 +137,8 @@ class RunAttemptUsageResponse(BaseModel):
 
 
 class RunUsageResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     input_tokens: int | None
     output_tokens: int | None
     total_tokens: int | None
@@ -133,6 +149,8 @@ class RunUsageResponse(BaseModel):
 
 
 class RunInputRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     question_message_id: str
     # 复用领域 InputRequestStatus 枚举，收紧输入请求状态。
@@ -141,6 +159,8 @@ class RunInputRequestResponse(BaseModel):
 
 
 class RunInputInteractionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     input_request_id: str
     status: InputRequestStatus
     question_text: str
@@ -150,6 +170,8 @@ class RunInputInteractionResponse(BaseModel):
 
 
 class RunSkillEntryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     skill_id: str
     slug: str
     # 与 SkillSummaryResponse.scope 及领域 SkillScope 保持一致。
@@ -162,12 +184,16 @@ class RunSkillEntryResponse(BaseModel):
 
 
 class RunSkillSnapshotResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     version: int
     skills: list[RunSkillEntryResponse]
     selected_skill_ids: list[str]
 
 
 class SubagentTaskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     sub_run_id: str
     parent_tool_call_id: str
     subagent_profile_id: str | None
@@ -184,6 +210,8 @@ class SubagentTaskResponse(BaseModel):
 
 
 class PendingSubagentInputResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     sub_run_id: str
     subagent_slug: str
     subagent_name: str
@@ -196,6 +224,8 @@ class PendingSubagentInputResponse(BaseModel):
 
 
 class PendingSubagentApprovalResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     sub_run_id: str
     subagent_slug: str
     subagent_name: str

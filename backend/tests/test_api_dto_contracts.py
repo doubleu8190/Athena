@@ -358,7 +358,7 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
                 batch_message_id="sub_msg_1",
                 ordinal=1,
                 model_name="mcp__demo",
-                tool_kind="mcp",
+                tool_kind=ToolKind.MCP,
                 requested_at=NOW,
             ),
             PendingSubagentApproval(
@@ -549,4 +549,18 @@ def test_tightened_response_dtos_reject_unknown_enum_values() -> None:
                 "created_at": NOW,
                 "completed_at": NOW,
             }
+        )
+
+    # 领域 PendingSubagentApproval.tool_kind 已收紧为 ToolKind | None，非法值在领域层即被拒绝。
+    with pytest.raises(ValidationError):
+        PendingSubagentApproval(
+            sub_run_id="sub_1",
+            subagent_slug="researcher",
+            subagent_name="研究员",
+            call_id="sub_call_bad",
+            batch_message_id="sub_msg_1",
+            ordinal=1,
+            model_name="mcp__demo",
+            tool_kind="unknown_kind",  # type: ignore[arg-type]
+            requested_at=NOW,
         )

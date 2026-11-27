@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from enum import StrEnum
-from typing import Any, BinaryIO, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, ClassVar, NoReturn, Protocol, TypeVar, cast
 
+from common.date import utc_now
 from infrastructure.storage.config import ObjectStorageConfig, ObjectStorageConfigError
 from infrastructure.storage.http import build_minio_http_pool
 
@@ -321,9 +324,153 @@ class MinioObjectClient:
             await asyncio.to_thread(pool.clear)
 
 
+class MinioStoreAdapterBase:
+    """单桶 MinIO 领域包装层共享基类：统一配置冲突校验、所有权、启停与异常映射。
+
+    共享注入 ``object_client`` 时 ``_owns_client = False``，由组合根在所有包装层关闭后
+    统一释放底层池与线程池；独占自建时 ``_owns_client = True``，由当前包装层回收。
+    """
+
+    _domain_error_type: ClassVar[type[Exception]]
+    _error_factories: ClassVar[Mapping[StorageErrorKind, Callable[[], Exception]]]
+    _default_error_type: ClassVar[type[Exception]]
+    _logger: ClassVar[logging.Logger]
+    _error_prefix: ClassVar[str]
+    _client_name: ClassVar[str]
+    _log_domain_errors: ClassVar[bool] = False
+    _log_operation: ClassVar[bool] = False
+    _require_config: ClassVar[bool] = False
+    _max_workers: ClassVar[int] = SHARED_EXECUTOR_MAX_WORKERS
+    _http_pool_maxsize: ClassVar[int] = SHARED_HTTP_POOL_MAXSIZE
+    _http_pool_block: ClassVar[bool] = False
+    _auto_start_injected_client: ClassVar[bool] = False
+
+    def __init__(
+        self,
+        config: ObjectStorageConfig | None = None,
+        *,
+        client: _MinioClient | None = None,
+        object_client: MinioObjectClient | None = None,
+        environ: Mapping[str, str] | None = None,
+        clock: Callable[[], datetime] = utc_now,
+    ) -> None:
+        if client is not None and object_client is not None:
+            raise ValueError(f"{self._error_prefix}_client_conflict")
+        if object_client is not None:
+            if (
+                config is not None
+                and object_client.config is not None
+                and config != object_client.config
+            ):
+                raise ValueError(f"{self._error_prefix}_config_conflict")
+            self.object_client, self._owns_client = object_client, False
+        else:
+            if self._require_config and config is None:
+                raise self._map_error_kind(StorageErrorKind.CONFIGURATION_INVALID)
+            self.object_client = MinioObjectClient(
+                config,
+                sdk_client=client,
+                environ=environ,
+                max_workers=self._max_workers,
+                http_pool_maxsize=self._http_pool_maxsize,
+                http_pool_block=self._http_pool_block,
+                name=self._client_name,
+                auto_start_injected_client=self._auto_start_injected_client,
+            )
+            self._owns_client = True
+        self._closed, self._clock = False, clock
+
+    @property
+    def _executor(self) -> _StorageExecutor:
+        return self.object_client._executor
+
+    @property
+    def _started(self) -> bool:
+        return not self._closed and self.object_client.started
+
+    @property
+    def _client(self) -> _MinioClient | None:
+        return self.object_client._client
+
+    @property
+    def _http_pool(self) -> Any | None:
+        return self.object_client._http_pool
+
+    @_http_pool.setter
+    def _http_pool(self, pool: Any | None) -> None:
+        self.object_client._http_pool = pool
+
+    @property
+    def _close_task(self) -> asyncio.Task[None] | None:
+        return self.object_client._close_task
+
+    async def start(self) -> None:
+        """构建底层 SDK 客户端并探测目标桶；失败时立即回收已建资源并映射领域异常。"""
+        if self._closed:
+            raise self._default_error_type()
+        try:
+            # 保留 _build_client 回调钩子以兼容单测注入。
+            await self.object_client.start(client_builder=self._build_client)
+        except BaseException as error:
+            await self.aclose()
+            if isinstance(error, self._domain_error_type):
+                raise
+            if isinstance(error, Exception):
+                self._raise_mapped(error, operation="bucket_check")
+            raise
+
+    async def aclose(self) -> None:
+        """关闭本包装层；独占底层客户端时释放池与线程池，共享实例由组合根统一回收。"""
+        self._closed = True
+        if self._owns_client:
+            await self.object_client.aclose()
+
+    def _build_client(self) -> tuple[_MinioClient, Any]:
+        try:
+            return self.object_client.build_sdk_client()
+        except MinioClientError as error:
+            raise self._map_build_client_error(error.kind) from None
+
+    async def _call(self, call: Callable[[], _ResultT], *, operation: str = "") -> _ResultT:
+        if self._closed:
+            raise self._default_error_type()
+        try:
+            return await self.object_client.run(call)
+        except Exception as error:
+            if isinstance(error, self._domain_error_type) and not self._log_domain_errors:
+                raise
+            self._raise_mapped(error, operation=operation)
+
+    def _raise_mapped(self, error: Exception, *, operation: str = "") -> NoReturn:
+        mapped = (
+            error
+            if isinstance(error, self._domain_error_type)
+            else self._map_error_kind(classify_storage_error(error))
+        )
+        op_part = f" operation={operation}" if self._log_operation else ""
+        self._logger.warning(
+            "%s_operation_failed%s code=%s exception_type=%s",
+            self._error_prefix,
+            op_part,
+            getattr(mapped, "code", str(mapped)),
+            type(error).__name__,
+        )
+        if mapped is error:
+            raise error
+        raise mapped from None
+
+    def _map_error_kind(self, kind: StorageErrorKind) -> Exception:
+        factory = self._error_factories.get(kind)
+        return factory() if factory is not None else self._default_error_type()
+
+    def _map_build_client_error(self, kind: StorageErrorKind) -> Exception:
+        return self._map_error_kind(kind)
+
+
 __all__ = [
     "MinioClientError",
     "MinioObjectClient",
+    "MinioStoreAdapterBase",
     "SHARED_EXECUTOR_MAX_WORKERS",
     "SHARED_HTTP_POOL_MAXSIZE",
     "StorageErrorKind",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
 
 from api.converter.project import project_list_to_response, project_to_response
 from api.dto.project import (
@@ -13,20 +13,9 @@ from api.dto.project import (
     ProjectResponse,
     ProjectUpdateRequest,
 )
+from api.errors import DomainErrorRoute
 from api.security import CurrentAuth
-from app.project import (
-    InvalidProjectInputError,
-    InvalidProjectNameError,
-    ProjectHasSessionsError,
-    ProjectNotFoundError,
-    ProjectService,
-)
-from domain.run.model.errors import SessionHasActiveRunError
-
-PROJECT_NOT_FOUND = "project_not_found"
-PROJECT_NAME_INVALID = "project_name_invalid"
-PROJECT_HAS_SESSIONS = "project_has_sessions"
-SESSION_HAS_ACTIVE_RUN = "session_has_active_run"
+from app.project import ProjectService
 
 
 def build_project_router(service: ProjectService) -> APIRouter:
@@ -34,6 +23,7 @@ def build_project_router(service: ProjectService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/projects",
         tags=["projects"],
+        route_class=DomainErrorRoute,
     )
 
     @router.post(
@@ -47,24 +37,13 @@ def build_project_router(service: ProjectService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> ProjectResponse:
         """创建项目。"""
-        try:
-            project = await service.create(
-                current_auth.user.id,
-                request.name,
-                description=request.description,
-                instructions=request.instructions,
-                default_skill_ids=request.default_skill_ids,
-            )
-        except InvalidProjectNameError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=PROJECT_NAME_INVALID,
-            ) from error
-        except InvalidProjectInputError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(error),
-            ) from error
+        project = await service.create(
+            current_auth.user.id,
+            request.name,
+            description=request.description,
+            instructions=request.instructions,
+            default_skill_ids=request.default_skill_ids,
+        )
         response.headers["Location"] = f"/api/v1/projects/{project.id}"
         return project_to_response(project)
 
@@ -92,13 +71,7 @@ def build_project_router(service: ProjectService) -> APIRouter:
         project_id: Annotated[str, Path(min_length=1, max_length=64)],
     ) -> ProjectResponse:
         """查询单个未删除项目。"""
-        try:
-            project = await service.get(current_auth.user.id, project_id)
-        except ProjectNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=PROJECT_NOT_FOUND,
-            ) from error
+        project = await service.get(current_auth.user.id, project_id)
         return project_to_response(project)
 
     @router.patch("/{project_id}", response_model=ProjectResponse)
@@ -109,34 +82,18 @@ def build_project_router(service: ProjectService) -> APIRouter:
     ) -> ProjectResponse:
         """局部更新未删除项目的名称、简介、背景指令或默认技能。"""
         supplied_fields = request.model_fields_set
-        try:
-            project = await service.update(
-                current_auth.user.id,
-                project_id,
-                update_name="name" in supplied_fields,
-                name=request.name,
-                update_description="description" in supplied_fields,
-                description=request.description,
-                update_instructions="instructions" in supplied_fields,
-                instructions=request.instructions,
-                update_default_skills="default_skill_ids" in supplied_fields,
-                default_skill_ids=request.default_skill_ids,
-            )
-        except InvalidProjectNameError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=PROJECT_NAME_INVALID,
-            ) from error
-        except InvalidProjectInputError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(error),
-            ) from error
-        except ProjectNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=PROJECT_NOT_FOUND,
-            ) from error
+        project = await service.update(
+            current_auth.user.id,
+            project_id,
+            update_name="name" in supplied_fields,
+            name=request.name,
+            update_description="description" in supplied_fields,
+            description=request.description,
+            update_instructions="instructions" in supplied_fields,
+            instructions=request.instructions,
+            update_default_skills="default_skill_ids" in supplied_fields,
+            default_skill_ids=request.default_skill_ids,
+        )
         return project_to_response(project)
 
     @router.delete(
@@ -150,27 +107,11 @@ def build_project_router(service: ProjectService) -> APIRouter:
         detach_sessions: bool = False,
     ) -> Response:
         """软删除项目；detach_sessions=True 时先解绑无活跃 Run 的关联会话。"""
-        try:
-            await service.delete(
-                current_auth.user.id,
-                project_id,
-                detach_sessions=detach_sessions,
-            )
-        except ProjectHasSessionsError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=PROJECT_HAS_SESSIONS,
-            ) from error
-        except SessionHasActiveRunError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=SESSION_HAS_ACTIVE_RUN,
-            ) from error
-        except ProjectNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=PROJECT_NOT_FOUND,
-            ) from error
+        await service.delete(
+            current_auth.user.id,
+            project_id,
+            detach_sessions=detach_sessions,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return router

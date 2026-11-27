@@ -39,6 +39,8 @@ class UpdateCurrentUserRequest(BaseModel):
 class UserDepartmentItem(BaseModel):
     """用户所属部门摘要。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     path: str
@@ -47,6 +49,8 @@ class UserDepartmentItem(BaseModel):
 
 class UserResponse(BaseModel):
     """可安全返回给当前用户的账号与组织身份字段。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: str
     email: str | None

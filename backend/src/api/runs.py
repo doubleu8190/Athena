@@ -29,19 +29,11 @@ from api.dto.run import (
     RunToolCallDetailResponse,
     RunToolCallListResponse,
 )
+from api.errors import DomainErrorRoute
 from api.security import DEFAULT_COOKIE_NAME, CurrentAuth
-from app.run.service import InvalidRunInputError, RunService
+from app.run.service import RunService
 from app.run.stream import RunStreamService
 from domain.run.model import MAX_RUN_SSE_EVENT_BYTES, MAX_RUN_SSE_SNAPSHOT_BYTES
-from domain.run.model.errors import (
-    RunConflictError,
-    RunInputResourceError,
-    RunKnowledgeBaseNotFoundError,
-    RunNotFoundError,
-    RunStateError,
-    ToolRetryConfirmationRequiredError,
-)
-from domain.session import SessionNotFoundError
 from domain.tool import MAX_TOOL_CALL_ID_LENGTH, ToolApprovalDecision
 
 
@@ -56,24 +48,6 @@ class _RunEventSourceResponse(StreamingResponse):
         await super().stream_response(bounded_send)
 
 
-def _not_found(error: Exception) -> HTTPException:
-    if isinstance(error, RunKnowledgeBaseNotFoundError):
-        detail = "knowledge_base_not_found"
-    elif isinstance(error, RunNotFoundError):
-        detail = "run_not_found"
-    else:
-        detail = "session_not_found"
-    return HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=detail,
-    )
-
-
-def _conflict(error: Exception) -> HTTPException:
-    detail = str(error) or "run_conflict"
-    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
-
-
 def build_run_router(
     service: RunService, stream_service: RunStreamService | None = None
 ) -> APIRouter:
@@ -81,6 +55,7 @@ def build_run_router(
     router = APIRouter(
         prefix="/api/v1/sessions/{session_id}/runs",
         tags=["runs"],
+        route_class=DomainErrorRoute,
     )
 
     @router.post("", response_model=RunResponse, status_code=status.HTTP_201_CREATED)
@@ -91,33 +66,19 @@ def build_run_router(
         response: Response,
     ) -> RunResponse:
         """原子提交一条文本任务。"""
-        try:
-            result = await service.submit(
-                session_id,
-                current_auth.user.id,
-                request.request_id,
-                request.text,
-                skill_ids=tuple(request.skill_ids),
-                input_file_ids=tuple(request.input_file_ids),
-                knowledge_base_ids=(
-                    None
-                    if request.knowledge_base_ids is None
-                    else tuple(request.knowledge_base_ids)
-                ),
-                model_profile_id=request.model_profile_id,
-                auth_session_id=current_auth.session_id,
-            )
-        except RunKnowledgeBaseNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="knowledge_base_not_found",
-            ) from error
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
-        except (RunConflictError, RunStateError) as error:
-            raise _conflict(error) from error
-        except (InvalidRunInputError, RunInputResourceError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        result = await service.submit(
+            session_id,
+            current_auth.user.id,
+            request.request_id,
+            request.text,
+            skill_ids=tuple(request.skill_ids),
+            input_file_ids=tuple(request.input_file_ids),
+            knowledge_base_ids=(
+                None if request.knowledge_base_ids is None else tuple(request.knowledge_base_ids)
+            ),
+            model_profile_id=request.model_profile_id,
+            auth_session_id=current_auth.session_id,
+        )
         response.headers["Location"] = f"/api/v1/sessions/{session_id}/runs/{result.run.id}"
         return run_to_response(result.run, replayed=result.replayed)
 
@@ -129,14 +90,9 @@ def build_run_router(
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
     ) -> RunListResponse:
         """游标分页读取当前用户可见的 Run。"""
-        try:
-            return run_list_to_response(
-                await service.list(session_id, current_auth.user.id, cursor=cursor, limit=limit)
-            )
-        except SessionNotFoundError as error:
-            raise _not_found(error) from error
-        except (InvalidRunInputError, RunInputResourceError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        return run_list_to_response(
+            await service.list(session_id, current_auth.user.id, cursor=cursor, limit=limit)
+        )
 
     @router.get("/{run_id}", response_model=RunResponse)
     async def get_run(
@@ -145,12 +101,7 @@ def build_run_router(
         current_auth: CurrentAuth,
     ) -> RunResponse:
         """读取 Run 状态和当前待回答请求。"""
-        try:
-            return run_details_to_response(
-                await service.get(session_id, current_auth.user.id, run_id)
-            )
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
+        return run_details_to_response(await service.get(session_id, current_auth.user.id, run_id))
 
     @router.post("/{run_id}/cancel", response_model=RunResponse)
     async def cancel_run(
@@ -159,12 +110,7 @@ def build_run_router(
         current_auth: CurrentAuth,
     ) -> RunResponse:
         """请求取消并返回当前状态；重复取消幂等。"""
-        try:
-            return run_to_response(await service.cancel(session_id, current_auth.user.id, run_id))
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
-        except (RunConflictError, RunStateError) as error:
-            raise _conflict(error) from error
+        return run_to_response(await service.cancel(session_id, current_auth.user.id, run_id))
 
     @router.post("/{run_id}/retry", response_model=RunResponse)
     async def retry_run(
@@ -174,28 +120,16 @@ def build_run_router(
         current_auth: CurrentAuth,
     ) -> RunResponse:
         """仅为最新失败 Run 创建从头执行的新尝试；可能重复已成功操作。"""
-        try:
-            return run_to_response(
-                await service.retry(
-                    session_id,
-                    current_auth.user.id,
-                    run_id,
-                    request.request_id,
-                    confirm_unknown=request.confirm_unknown,
-                    auth_session_id=current_auth.session_id,
-                )
+        return run_to_response(
+            await service.retry(
+                session_id,
+                current_auth.user.id,
+                run_id,
+                request.request_id,
+                confirm_unknown=request.confirm_unknown,
+                auth_session_id=current_auth.session_id,
             )
-        except (RunNotFoundError, SessionNotFoundError, RunKnowledgeBaseNotFoundError) as error:
-            raise _not_found(error) from error
-        except ToolRetryConfirmationRequiredError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="tool_retry_confirmation_required",
-            ) from error
-        except (RunConflictError, RunStateError) as error:
-            raise _conflict(error) from error
-        except (InvalidRunInputError, RunInputResourceError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        )
 
     @router.post(
         "/{run_id}/input-requests/{input_request_id}/answer",
@@ -209,24 +143,17 @@ def build_run_router(
         current_auth: CurrentAuth,
     ) -> RunResponse:
         """回答指定输入请求；命令幂等键与输入请求 ID 分开传递。"""
-        try:
-            run = await service.answer(
-                session_id,
-                current_auth.user.id,
-                run_id,
-                input_request_id,
-                request.request_id,
-                request.text,
-                input_file_ids=tuple(request.input_file_ids),
-                auth_session_id=current_auth.session_id,
-            )
-            return run_to_response(run)
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
-        except (RunConflictError, RunStateError) as error:
-            raise _conflict(error) from error
-        except (InvalidRunInputError, RunInputResourceError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        run = await service.answer(
+            session_id,
+            current_auth.user.id,
+            run_id,
+            input_request_id,
+            request.request_id,
+            request.text,
+            input_file_ids=tuple(request.input_file_ids),
+            auth_session_id=current_auth.session_id,
+        )
+        return run_to_response(run)
 
     @router.get("/{run_id}/events", response_model=RunEventListResponse)
     async def list_run_events(
@@ -237,19 +164,14 @@ def build_run_router(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> RunEventListResponse:
         """按 Run 内事件序号正序读取一页。"""
-        try:
-            events = await service.events(
-                session_id,
-                current_auth.user.id,
-                run_id,
-                after_sequence=after_sequence,
-                limit=limit,
-            )
-            return events_to_response(events, limit)
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
-        except InvalidRunInputError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        events = await service.events(
+            session_id,
+            current_auth.user.id,
+            run_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+        return events_to_response(events, limit)
 
     @router.get("/{run_id}/tool-calls", response_model=RunToolCallListResponse)
     async def list_tool_calls(
@@ -260,20 +182,15 @@ def build_run_router(
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> RunToolCallListResponse:
         """Cursor through ordinal-ordered tool calls without visible arguments."""
-        try:
-            return tool_calls_to_response(
-                await service.list_tool_calls(
-                    session_id,
-                    current_auth.user.id,
-                    run_id,
-                    after_ordinal=after_ordinal,
-                    limit=limit,
-                )
+        return tool_calls_to_response(
+            await service.list_tool_calls(
+                session_id,
+                current_auth.user.id,
+                run_id,
+                after_ordinal=after_ordinal,
+                limit=limit,
             )
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
-        except InvalidRunInputError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        )
 
     @router.get(
         "/{run_id}/tool-calls/{call_id}",
@@ -286,19 +203,14 @@ def build_run_router(
         current_auth: CurrentAuth,
     ) -> RunToolCallDetailResponse:
         """Read bounded call arguments and normalized result after authorization."""
-        try:
-            return tool_call_to_response(
-                await service.get_tool_call(
-                    session_id,
-                    current_auth.user.id,
-                    run_id,
-                    call_id,
-                )
+        return tool_call_to_response(
+            await service.get_tool_call(
+                session_id,
+                current_auth.user.id,
+                run_id,
+                call_id,
             )
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
-        except InvalidRunInputError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        )
 
     @router.post(
         "/{run_id}/tool-calls/{call_id}/approval",
@@ -312,23 +224,16 @@ def build_run_router(
         current_auth: CurrentAuth,
     ) -> RunResponse:
         """Approve or reject one persisted call without resubmitting arguments."""
-        try:
-            details = await service.decide_tool_approval(
-                session_id,
-                current_auth.user.id,
-                run_id,
-                call_id,
-                request.request_id,
-                ToolApprovalDecision(request.decision),
-                auth_session_id=current_auth.session_id,
-            )
-            return run_details_to_response(details)
-        except (RunNotFoundError, SessionNotFoundError) as error:
-            raise _not_found(error) from error
-        except (RunConflictError, RunStateError) as error:
-            raise _conflict(error) from error
-        except InvalidRunInputError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        details = await service.decide_tool_approval(
+            session_id,
+            current_auth.user.id,
+            run_id,
+            call_id,
+            request.request_id,
+            ToolApprovalDecision(request.decision),
+            auth_session_id=current_auth.session_id,
+        )
+        return run_details_to_response(details)
 
     if stream_service is not None:
 

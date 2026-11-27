@@ -29,11 +29,11 @@ from api.dto.file import (
     SessionFileListResponse,
     SessionFileResponse,
 )
+from api.errors import DomainErrorRoute, domain_error_to_http
 from api.security import CurrentAuth
-from api.upload import UploadTooLargeError, staged_upload
-from app.file import FileInputError, SessionFileService
-from domain.file import MAX_SESSION_FILE_BYTES, SessionFile, TextFileReadError
-from domain.session import SessionNotFoundError
+from api.upload import staged_upload
+from app.file import SessionFileService
+from domain.file import MAX_SESSION_FILE_BYTES, SessionFile
 
 # 内联预览严格白名单：仅放行安全位图，彻底禁止 HTML / SVG / PDF / JS 等可触发脚本执行的格式。
 _SAFE_INLINE_PREVIEW_MIME_TYPES: frozenset[str] = frozenset(
@@ -103,6 +103,7 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/sessions/{session_id}/files",
         tags=["session-files"],
+        route_class=DomainErrorRoute,
     )
 
     @router.post("", response_model=SessionFileResponse, status_code=status.HTTP_201_CREATED)
@@ -124,6 +125,7 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
             async with staged_upload(
                 file,
                 maximum_bytes=MAX_SESSION_FILE_BYTES,
+                too_large_code="document_file_too_large",
             ) as path:
                 result = await service.upload(
                     session_id,
@@ -134,22 +136,17 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
                     path=path,
                 )
                 return session_file_to_response(result)
-        except UploadTooLargeError as error:
-            raise HTTPException(413, "document_file_too_large") from error
-        except SessionNotFoundError as error:
-            raise HTTPException(404, "session_not_found") from error
-        except FileInputError as error:
-            if error.code == "idempotency_conflict":
-                raise HTTPException(409, error.code) from error
-            raise HTTPException(422, error.code) from error
         except ValueError as error:
+            # 优先交给统一映射处理领域子类（UploadTooLargeError / FileInputError），再兜底裸异常。
+            if (mapped := domain_error_to_http(error)) is not None:
+                raise mapped from error
             code = str(error)
-            if code == "session_file_quota_exceeded":
-                raise HTTPException(409, code) from error
-            if code == "idempotency_conflict":
+            if code in {"session_file_quota_exceeded", "idempotency_conflict"}:
                 raise HTTPException(409, code) from error
             raise HTTPException(422, "file_upload_invalid") from error
         except OSError as error:
+            if (mapped := domain_error_to_http(error)) is not None:
+                raise mapped from error
             raise HTTPException(503, "file_storage_unavailable") from error
 
     @router.get("", response_model=SessionFileListResponse)
@@ -168,9 +165,9 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
                 limit=limit,
             )
             return session_file_page_to_response(page)
-        except SessionNotFoundError as error:
-            raise HTTPException(404, "session_not_found") from error
         except ValueError as error:
+            if (mapped := domain_error_to_http(error)) is not None:
+                raise mapped from error
             raise HTTPException(422, str(error)) from error
 
     @router.get("/{file_id}", response_model=SessionFileResponse)
@@ -180,12 +177,9 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> SessionFileResponse:
         """实时校验会话归属后读取安全元数据。"""
-        try:
-            return session_file_to_response(
-                await service.get(session_id, current_auth.user.id, file_id)
-            )
-        except FileInputError as error:
-            raise HTTPException(404, error.code) from error
+        return session_file_to_response(
+            await service.get(session_id, current_auth.user.id, file_id)
+        )
 
     @router.get(
         "/{file_id}/download",
@@ -207,11 +201,7 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> StreamingResponse:
         """实时鉴权后流式下载，强制 attachment 并禁止 MIME 嗅探。"""
-        try:
-            file = await service.get(session_id, current_auth.user.id, file_id)
-        except FileInputError as error:
-            raise HTTPException(404, error.code) from error
-
+        file = await service.get(session_id, current_auth.user.id, file_id)
         return await _build_file_streaming_response(
             service,
             file,
@@ -238,18 +228,13 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> StreamingResponse:
         """实时鉴权后仅允许安全位图格式以 inline + 沙箱 CSP 流式预览。"""
-        try:
-            file = await service.get(session_id, current_auth.user.id, file_id)
-        except FileInputError as error:
-            raise HTTPException(404, error.code) from error
-
+        file = await service.get(session_id, current_auth.user.id, file_id)
         # 仅允许 PNG / JPEG / WEBP 安全位图内联预览，阻断 HTML / SVG / PDF / JS 同源风险。
         if file.mime_type not in _SAFE_INLINE_PREVIEW_MIME_TYPES:
             raise HTTPException(
                 status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
                 "file_preview_unsupported",
             )
-
         return await _build_file_streaming_response(
             service,
             file,
@@ -267,26 +252,13 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
         limit_bytes: Annotated[int, Query(ge=1, le=65536)] = 65536,
     ) -> SessionFileContentResponse:
         """实时鉴权后按字节偏移分页返回纯文本原件或 PDF / Office 提取文本缓存。"""
-        try:
-            text_slice = await service.read_text(
-                session_id,
-                current_auth.user.id,
-                file_id,
-                offset=offset,
-                limit_bytes=limit_bytes,
-            )
-        except FileInputError as error:
-            if error.code == "session_file_not_found":
-                raise HTTPException(404, error.code) from error
-            raise HTTPException(422, error.code) from error
-        except TextFileReadError as error:
-            if error.code == "file_not_text":
-                raise HTTPException(
-                    status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                    error.code,
-                ) from error
-            raise HTTPException(422, error.code) from error
-
+        text_slice = await service.read_text(
+            session_id,
+            current_auth.user.id,
+            file_id,
+            offset=offset,
+            limit_bytes=limit_bytes,
+        )
         response.headers["Cache-Control"] = "private, no-store"
         return session_file_text_slice_to_response(text_slice)
 

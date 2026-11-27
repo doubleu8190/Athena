@@ -28,6 +28,8 @@ class SessionUpdateRequest(BaseModel):
 class SessionResponse(BaseModel):
     """公开会话字段。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     title: str | None
     project_id: str | None

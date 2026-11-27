@@ -104,6 +104,7 @@ async def staged_upload(
     upload: UploadFile,
     *,
     maximum_bytes: int,
+    too_large_code: str = "upload_too_large",
 ) -> AsyncIterator[Path]:
     """边读边计数并通过工作线程落盘到临时文件，在所有退出与取消路径安全删除。"""
     state = _StagedUploadState()
@@ -115,7 +116,7 @@ async def staged_upload(
         while chunk := await upload.read(128 * 1024):
             size += len(chunk)
             if size > maximum_bytes:
-                raise UploadTooLargeError("upload_too_large")
+                raise UploadTooLargeError(too_large_code)
             await asyncio.to_thread(_write_chunk, state, chunk)
         if size == 0:
             raise ValueError("upload_empty")

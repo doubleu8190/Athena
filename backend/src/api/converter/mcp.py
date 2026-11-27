@@ -22,14 +22,10 @@ def mcp_server_to_response(server: McpServer) -> McpServerResponse:
     config: McpHttpConfigResponse | McpStdioConfigResponse
     if isinstance(server.config, StreamableHttpConfig):
         transport = "streamable_http"
-        config = McpHttpConfigResponse(url=server.config.url)
+        config = McpHttpConfigResponse.model_validate(server.config)
     elif isinstance(server.config, StdioConfig):
         transport = "stdio"
-        config = McpStdioConfigResponse(
-            command=server.config.command,
-            args=list(server.config.args),
-            cwd=server.config.cwd,
-        )
+        config = McpStdioConfigResponse.model_validate(server.config)
     else:
         raise ValueError("mcp_config_invalid")
     scope = cast(Literal["company", "department"], server.visibility_scope.value)
@@ -39,8 +35,7 @@ def mcp_server_to_response(server: McpServer) -> McpServerResponse:
         transport=transport,
         config=config,
         secrets=[
-            McpSecretMetadataResponse(name=entry.name, has_value=entry.has_value)
-            for entry in server.secret_metadata
+            McpSecretMetadataResponse.model_validate(entry) for entry in server.secret_metadata
         ],
         config_version=server.config_version,
         enabled=server.enabled,

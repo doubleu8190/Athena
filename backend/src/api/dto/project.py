@@ -32,6 +32,8 @@ class ProjectUpdateRequest(BaseModel):
 class ProjectResponse(BaseModel):
     """公开项目字段。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     description: str | None

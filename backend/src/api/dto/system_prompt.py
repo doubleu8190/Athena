@@ -15,6 +15,8 @@ from domain.system_prompt import (
 class SystemPromptCurrentResponse(BaseModel):
     """当前正文、版本及操作来源。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     kind: SystemPromptKind
     content: str
@@ -26,6 +28,8 @@ class SystemPromptCurrentResponse(BaseModel):
 class SystemPromptVersionSummary(BaseModel):
     """历史列表中的版本元数据，不携带完整正文。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     kind: SystemPromptKind
     created_by: str | None
@@ -35,6 +39,8 @@ class SystemPromptVersionSummary(BaseModel):
 
 class SystemPromptVersionListResponse(BaseModel):
     """稳定倒序的版本分页。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     items: list[SystemPromptVersionSummary]
     page: int

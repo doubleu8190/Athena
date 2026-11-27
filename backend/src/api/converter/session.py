@@ -8,13 +8,7 @@ from app.session.model.result import SessionPageResult, SessionResult
 
 def session_to_response(session: SessionResult) -> SessionResponse:
     """转换单个会话响应。"""
-    return SessionResponse(
-        id=session.id,
-        title=session.title,
-        project_id=session.project_id,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-    )
+    return SessionResponse.model_validate(session)
 
 
 def session_list_to_response(

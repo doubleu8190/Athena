@@ -20,6 +20,8 @@ class UpdateUserWorkProfileRequest(BaseModel):
 class UserWorkProfileResponse(BaseModel):
     """个人工作偏好响应。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     custom_instructions: str
     memory_enabled: bool
     updated_at: datetime | None
@@ -44,6 +46,8 @@ class UpdateUserMemoryRequest(BaseModel):
 class UserMemoryResponse(BaseModel):
     """单条显式记忆响应。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     content: str
     source: Literal["manual", "chat_explicit"]
@@ -53,6 +57,8 @@ class UserMemoryResponse(BaseModel):
 
 class UserMemoryListResponse(BaseModel):
     """当前用户全部显式记忆列表及配额响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     items: list[UserMemoryResponse]
     total: int

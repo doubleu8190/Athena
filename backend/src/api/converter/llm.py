@@ -1,5 +1,7 @@
 """模型版本安全投影到 HTTP DTO 的转换。"""
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 
 from api.dto.llm import (
@@ -13,32 +15,8 @@ from domain.llm.model.profile import ModelProfileVersion
 
 
 def model_profile_to_response(value: ModelProfileVersion) -> ModelProfileResponse:
-    """转换不含密钥明文的模型版本。"""
-    return ModelProfileResponse(
-        id=value.id,
-        name=value.name,
-        protocol=value.protocol,
-        base_url=value.base_url,
-        model=value.model,
-        context_window_tokens=value.context_window_tokens,
-        tokenizer_encoding=value.tokenizer_encoding,
-        supports_stream=value.supports_stream,
-        supports_tools=value.supports_tools,
-        supports_parallel_tool_calls=value.supports_parallel_tool_calls,
-        max_output_tokens=value.max_output_tokens,
-        request_timeout_seconds=value.request_timeout_seconds,
-        execution_timeout_seconds=value.execution_timeout_seconds,
-        max_concurrency=value.max_concurrency,
-        temperature=value.temperature,
-        enabled=value.enabled,
-        visible_to_users=value.visible_to_users,
-        scenario_label=value.scenario_label,
-        scenario_description=value.scenario_description,
-        supports_vision=value.supports_vision,
-        version=value.version,
-        created_at=value.created_at,
-        updated_at=value.updated_at,
-    )
+    """转换不含密钥明文的模型版本（按 DTO 字段白名单投影）。"""
+    return ModelProfileResponse.model_validate(value)
 
 
 def user_model_catalog_to_response(
@@ -65,18 +43,18 @@ def user_model_catalog_to_response(
 def compression_policy_to_response(
     value: CompressionPolicyVersion | None,
 ) -> CompressionPolicyResponse:
-    """转换当前压缩策略，不暴露凭据或摘要正文。"""
+    """转换当前压缩策略，不暴露凭据或摘要正文；未配置时各字段显式为 None。"""
+    if value is not None:
+        return CompressionPolicyResponse.model_validate(value)
     return CompressionPolicyResponse(
-        id=None if value is None else value.id,
-        compression_model_profile_id=(
-            None if value is None else value.compression_model_profile_id
-        ),
-        trigger_tokens=None if value is None else value.trigger_tokens,
-        recent_ratio=None if value is None else value.recent_ratio,
-        recent_token_cap=None if value is None else value.recent_token_cap,
-        summary_ratio=None if value is None else value.summary_ratio,
-        summary_token_cap=None if value is None else value.summary_token_cap,
-        created_at=None if value is None else value.created_at,
+        id=None,
+        compression_model_profile_id=None,
+        trigger_tokens=None,
+        recent_ratio=None,
+        recent_token_cap=None,
+        summary_ratio=None,
+        summary_token_cap=None,
+        created_at=None,
     )
 
 

@@ -11,14 +11,18 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Any, NoReturn, TypeVar
 
 from common.date import as_utc, utc_now
 from domain.file import FileObjectScanEntry, FileObjectStore, FileStorageError
 from infrastructure.storage import minio_client as _mc
 from infrastructure.storage.config import ObjectStorageConfig, ObjectStorageConfigError
-from infrastructure.storage.minio_client import MinioObjectClient, StorageErrorKind
+from infrastructure.storage.minio_client import (
+    MinioObjectClient,
+    MinioStoreAdapterBase,
+    StorageErrorKind,
+)
 
 logger = logging.getLogger(__name__)
 # 文件与技能域仅允许操作下列业务前缀，与同桶内 knowledge/ 严格隔离。
@@ -37,19 +41,20 @@ _ORPHAN_KEY = re.compile(
     r"skill-logs/[0-9a-f]{2}/[0-9a-f]{64}/[A-Za-z0-9_-]{1,128}\.log|"
     r"skills/[0-9a-f]{2}/[0-9a-f]{64}/[A-Za-z0-9_-]{1,128}\.zip)$"
 )
-_ResultT = TypeVar("_ResultT")
 _LIST_PAGE_SIZE, MAX_CONCURRENT_RANGE_STREAMS = 1000, 8
 _EXECUTOR_MAX_WORKERS, _HTTP_POOL_MAXSIZE = (
     _mc.SHARED_EXECUTOR_MAX_WORKERS,
     _mc.SHARED_HTTP_POOL_MAXSIZE,
 )
-_FILE_ERROR_CODES = {
-    StorageErrorKind.NOT_FOUND: "file_storage_not_found",
-    StorageErrorKind.ACCESS_DENIED: "file_storage_access_denied",
-    StorageErrorKind.BUCKET_MISSING: "file_storage_bucket_missing",
-    StorageErrorKind.SDK_MISSING: "file_storage_sdk_missing",
-    StorageErrorKind.CONFIGURATION_INVALID: "file_storage_configuration_invalid",
-    StorageErrorKind.NOT_STARTED: "file_storage_not_started",
+_FILE_ERROR_FACTORIES: dict[StorageErrorKind, Callable[[], Exception]] = {
+    StorageErrorKind.NOT_FOUND: partial(FileStorageError, "file_storage_not_found"),
+    StorageErrorKind.ACCESS_DENIED: partial(FileStorageError, "file_storage_access_denied"),
+    StorageErrorKind.BUCKET_MISSING: partial(FileStorageError, "file_storage_bucket_missing"),
+    StorageErrorKind.SDK_MISSING: partial(FileStorageError, "file_storage_sdk_missing"),
+    StorageErrorKind.CONFIGURATION_INVALID: partial(
+        FileStorageError, "file_storage_configuration_invalid"
+    ),
+    StorageErrorKind.NOT_STARTED: partial(FileStorageError, "file_storage_not_started"),
 }
 
 
@@ -73,8 +78,16 @@ class MinioFileStorageConfig(ObjectStorageConfig):
         return cls(b.endpoint, b.access_key, b.secret_key, b.bucket, b.secure)
 
 
-class MinioFileObjectStore(FileObjectStore):
-    """不可变对象写入、范围读取和幂等孤立对象删除；底层委托 MinioObjectClient。"""
+class MinioFileObjectStore(MinioStoreAdapterBase, FileObjectStore):
+    """不可变对象写入、范围读取和幂等孤立对象删除；共享生命周期骨架由基类统一管理。"""
+
+    _domain_error_type = FileStorageError
+    _error_factories = _FILE_ERROR_FACTORIES
+    _default_error_type = FileStorageError
+    _logger = logger
+    _error_prefix = "file_storage"
+    _client_name = "athena-file-minio"
+    _auto_start_injected_client = True
 
     def __init__(
         self,
@@ -85,26 +98,13 @@ class MinioFileObjectStore(FileObjectStore):
         environ: Mapping[str, str] | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
-        if client is not None and object_client is not None:
-            raise ValueError("file_storage_client_conflict")
-        if object_client is not None:
-            if (
-                config is not None
-                and object_client.config is not None
-                and config != object_client.config
-            ):
-                raise ValueError("file_storage_config_conflict")
-            self.object_client, self._owns_client = object_client, False
-        else:
-            self.object_client = MinioObjectClient(
-                config,
-                sdk_client=client,
-                environ=environ,
-                name="athena-file-minio",
-                auto_start_injected_client=True,
-            )
-            self._owns_client = True
-        self._closed, self._clock = False, clock
+        super().__init__(
+            config,
+            client=client,
+            object_client=object_client,
+            environ=environ,
+            clock=clock,
+        )
         self._range_stream_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RANGE_STREAMS)
 
     @classmethod
@@ -118,31 +118,6 @@ class MinioFileObjectStore(FileObjectStore):
             None if deferred else MinioFileStorageConfig.from_environment(),
             environ=os.environ if deferred else None,
         )
-
-    @property
-    def _executor(self) -> _mc._StorageExecutor:
-        return self.object_client._executor
-
-    @property
-    def _started(self) -> bool:
-        return not self._closed and self.object_client.started
-
-    @property
-    def _client(self) -> _mc._MinioClient | None:
-        return self.object_client._client
-
-    async def start(self) -> None:
-        if self._closed:
-            raise FileStorageError()
-        try:
-            await self.object_client.start()
-        except BaseException as error:
-            await self.aclose()
-            if isinstance(error, FileStorageError):
-                raise
-            if isinstance(error, Exception):
-                self._raise_mapped(error)
-            raise
 
     async def put_file(self, key: str, path: Path, *, content_type: str) -> None:
         _validate_key(key)
@@ -273,37 +248,6 @@ class MinioFileObjectStore(FileObjectStore):
             raise
         except Exception as error:
             self._raise_mapped(error)
-
-    async def aclose(self) -> None:
-        """关闭本包装层；独占底层客户端时释放池与线程池，共享实例由组合根统一回收。"""
-        self._closed = True
-        if self._owns_client:
-            await self.object_client.aclose()
-
-    def _build_client(self) -> tuple[_mc._MinioClient, Any]:
-        try:
-            return self.object_client.build_sdk_client()
-        except _mc.MinioClientError as error:
-            raise FileStorageError(
-                _FILE_ERROR_CODES.get(error.kind, "file_storage_unavailable")
-            ) from None
-
-    async def _call(self, call: Callable[[], _ResultT]) -> _ResultT:
-        if self._closed:
-            raise FileStorageError()
-        try:
-            return await self.object_client.run(call)
-        except FileStorageError:
-            raise
-        except Exception as error:
-            self._raise_mapped(error)
-
-    def _raise_mapped(self, error: Exception) -> NoReturn:
-        code = _FILE_ERROR_CODES.get(_mc.classify_storage_error(error), "file_storage_unavailable")
-        logger.warning(
-            "file_storage_operation_failed code=%s exception_type=%s", code, type(error).__name__
-        )
-        raise FileStorageError(code) from None
 
 
 def _validate_key(key: str) -> None:

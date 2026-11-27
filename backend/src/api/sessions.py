@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
 
 from api.converter.session import session_list_to_response, session_to_response
 from api.dto.session import (
@@ -13,30 +13,9 @@ from api.dto.session import (
     SessionResponse,
     SessionUpdateRequest,
 )
+from api.errors import DomainErrorRoute
 from api.security import CurrentAuth
-from app.session import (
-    InvalidSessionFilterError,
-    InvalidSessionTitleError,
-    InvalidSessionUpdateError,
-    ProjectNotFoundError,
-    SessionNotFoundError,
-    SessionService,
-)
-from domain.run.model.errors import SessionHasActiveRunError
-
-SESSION_NOT_FOUND = "session_not_found"
-SESSION_TITLE_INVALID = "session_title_invalid"
-SESSION_UPDATE_INVALID = "session_update_invalid"
-SESSION_FILTER_INVALID = "invalid_session_filter"
-PROJECT_NOT_FOUND = "project_not_found"
-
-
-def _session_not_found(error: Exception) -> HTTPException:
-    """生成统一的不存在响应，避免泄漏跨用户资源。"""
-    return HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=SESSION_NOT_FOUND,
-    )
+from app.session import SessionService
 
 
 def build_session_router(service: SessionService) -> APIRouter:
@@ -44,6 +23,7 @@ def build_session_router(service: SessionService) -> APIRouter:
     router = APIRouter(
         prefix="/api/v1/sessions",
         tags=["sessions"],
+        route_class=DomainErrorRoute,
     )
 
     @router.post(
@@ -57,22 +37,11 @@ def build_session_router(service: SessionService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> SessionResponse:
         """创建可绑定项目或未绑定项目的会话。"""
-        try:
-            session = await service.create(
-                current_auth.user.id,
-                title=request.title,
-                project_id=request.project_id,
-            )
-        except InvalidSessionTitleError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=SESSION_TITLE_INVALID,
-            ) from error
-        except ProjectNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=PROJECT_NOT_FOUND,
-            ) from error
+        session = await service.create(
+            current_auth.user.id,
+            title=request.title,
+            project_id=request.project_id,
+        )
         response.headers["Location"] = f"/api/v1/sessions/{session.id}"
         return session_to_response(session)
 
@@ -86,20 +55,14 @@ def build_session_router(service: SessionService) -> APIRouter:
         q: Annotated[str | None, Query(max_length=120)] = None,
     ) -> SessionListResponse:
         """分页查询当前用户的未删除会话，支持按标题关键字搜索。"""
-        try:
-            result = await service.list(
-                current_auth.user.id,
-                page=page,
-                page_size=page_size,
-                project_id=project_id,
-                unbound=unbound,
-                q=q,
-            )
-        except InvalidSessionFilterError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=SESSION_FILTER_INVALID,
-            ) from error
+        result = await service.list(
+            current_auth.user.id,
+            page=page,
+            page_size=page_size,
+            project_id=project_id,
+            unbound=unbound,
+            q=q,
+        )
         return session_list_to_response(
             result,
             page_number=page,
@@ -112,10 +75,7 @@ def build_session_router(service: SessionService) -> APIRouter:
         session_id: Annotated[str, Path(min_length=1, max_length=64)],
     ) -> SessionResponse:
         """查询单个未删除会话。"""
-        try:
-            session = await service.get(current_auth.user.id, session_id)
-        except SessionNotFoundError as error:
-            raise _session_not_found(error) from error
+        session = await service.get(current_auth.user.id, session_id)
         return session_to_response(session)
 
     @router.patch("/{session_id}", response_model=SessionResponse)
@@ -126,37 +86,14 @@ def build_session_router(service: SessionService) -> APIRouter:
     ) -> SessionResponse:
         """修改会话标题或首条消息前的项目绑定。"""
         supplied_fields = request.model_fields_set
-        try:
-            session = await service.update(
-                current_auth.user.id,
-                session_id,
-                update_title="title" in supplied_fields,
-                title=request.title,
-                update_project="project_id" in supplied_fields,
-                project_id=request.project_id,
-            )
-        except InvalidSessionUpdateError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=SESSION_UPDATE_INVALID,
-            ) from error
-        except InvalidSessionTitleError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=SESSION_TITLE_INVALID,
-            ) from error
-        except ProjectNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=PROJECT_NOT_FOUND,
-            ) from error
-        except SessionHasActiveRunError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="session_has_active_run",
-            ) from error
-        except SessionNotFoundError as error:
-            raise _session_not_found(error) from error
+        session = await service.update(
+            current_auth.user.id,
+            session_id,
+            update_title="title" in supplied_fields,
+            title=request.title,
+            update_project="project_id" in supplied_fields,
+            project_id=request.project_id,
+        )
         return session_to_response(session)
 
     @router.delete(
@@ -169,15 +106,7 @@ def build_session_router(service: SessionService) -> APIRouter:
         session_id: Annotated[str, Path(min_length=1, max_length=64)],
     ) -> Response:
         """软删除会话；同一用户重复删除保持幂等。"""
-        try:
-            await service.delete(current_auth.user.id, session_id)
-        except SessionHasActiveRunError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="session_has_active_run",
-            ) from error
-        except SessionNotFoundError as error:
-            raise _session_not_found(error) from error
+        await service.delete(current_auth.user.id, session_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return router

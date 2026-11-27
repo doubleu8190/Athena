@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from api.dto.access import grants_to_response
 from api.dto.skill import (
     SkillAdminDetailsResponse,
     SkillAdminListResponse,
     SkillDependencyCheckResponse,
-    SkillDependencyItemResponse,
     SkillDirectoryResponse,
     SkillExecutionResponse,
     SkillMarkdownParseResponse,
@@ -24,62 +22,22 @@ from domain.skill import (
     DependencyCheck,
     Skill,
     SkillExecutionRecord,
-    SkillFormat,
     SkillVersion,
 )
 
 
 def dependency_check_to_response(check: DependencyCheck) -> SkillDependencyCheckResponse:
     """转换依赖检查及目标解释器指纹。"""
-    return SkillDependencyCheckResponse(
-        status=check.status,
-        python_version=check.python_version,
-        python_implementation=check.python_implementation,
-        checked_at=check.checked_at,
-        items=[
-            SkillDependencyItemResponse(
-                requirement=item.requirement,
-                package=item.package,
-                satisfied=item.satisfied,
-                installed_version=item.installed_version,
-                detail_code=item.detail_code,
-                marker_applies=item.marker_applies,
-            )
-            for item in check.items
-        ],
-    )
+    return SkillDependencyCheckResponse.model_validate(check)
 
 
 def skill_to_response(skill: Skill) -> SkillSummaryResponse:
-    """转换公开或列表所需的 Skill 摘要。"""
-    return SkillSummaryResponse(
-        id=skill.id,
-        slug=skill.slug,
-        scope=skill.scope.value,
-        name=skill.name,
-        description=skill.description,
-        current_version_id=skill.current_version_id,
-        current_version_label=skill.current_version_label,
-        enabled=skill.enabled,
-        script_requires_approval=skill.script_requires_approval,
-        revision=skill.revision,
-        updated_at=skill.updated_at,
-        dependency_check=(
-            None
-            if skill.dependency_check is None
-            else dependency_check_to_response(skill.dependency_check)
-        ),
-        owner_department_id=skill.owner_department_id,
-        visibility_grants=grants_to_response(skill.visibility_grants),
-        format="markdown" if skill.format is SkillFormat.MARKDOWN else "package",
-        has_scripts=skill.has_scripts,
-        featured=skill.featured,
-        starter_prompt=skill.starter_prompt,
-    )
+    """转换公开或列表所需的 Skill 摘要（按 DTO 字段白名单投影，不暴露宿主路径或对象键）。"""
+    return SkillSummaryResponse.model_validate(skill)
 
 
 def version_to_response(version: SkillVersion) -> SkillVersionResponse:
-    """转换管理员版本正文、资源清单和依赖检查。"""
+    """转换管理员版本正文、资源清单和依赖检查（需从 manifest 展平元数据）。"""
     return SkillVersionResponse(
         id=version.id,
         skill_id=version.skill_id,
@@ -91,23 +49,9 @@ def version_to_response(version: SkillVersion) -> SkillVersionResponse:
         guide=version.manifest.guide,
         dependencies=list(version.dependency_requirements),
         dependency_check=dependency_check_to_response(version.dependency_check),
-        scripts=[
-            SkillScriptResponse(
-                path=item.path,
-                label=item.label,
-                purpose=item.purpose,
-                parameters=item.parameters,
-            )
-            for item in version.manifest.scripts
-        ],
+        scripts=[SkillScriptResponse.model_validate(item) for item in version.manifest.scripts],
         files=[
-            SkillPackageResourceResponse(
-                path=item.path,
-                size_bytes=item.size_bytes,
-                sha256=item.sha256,
-                text=item.text,
-            )
-            for item in version.manifest.files
+            SkillPackageResourceResponse.model_validate(item) for item in version.manifest.files
         ],
         package_sha256=version.package_sha256,
         created_at=version.created_at,
@@ -147,11 +91,7 @@ def personal_list_to_response(items: tuple[Skill, ...]) -> SkillPersonalListResp
 
 def personal_draft_to_response(draft: PersonalSkillDraft) -> SkillMarkdownParseResponse:
     """转换 Markdown 解析结果，不落库也不生成版本。"""
-    return SkillMarkdownParseResponse(
-        name=draft.name,
-        description=draft.description,
-        guide=draft.guide,
-    )
+    return SkillMarkdownParseResponse.model_validate(draft)
 
 
 def version_page_to_response(

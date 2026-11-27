@@ -2,68 +2,29 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from api.dto.file import (
     SessionFileContentResponse,
     SessionFileListResponse,
     SessionFileResponse,
 )
-from domain.file import (
-    SessionFile,
-    SessionFileExtractionStatus,
-    SessionFilePage,
-    SessionFileTextSlice,
-)
-
-_EXTRACTION_STATUS_LITERAL: dict[
-    SessionFileExtractionStatus,
-    Literal["none", "ready", "failed"],
-] = {
-    SessionFileExtractionStatus.NONE: "none",
-    SessionFileExtractionStatus.READY: "ready",
-    SessionFileExtractionStatus.FAILED: "failed",
-}
+from domain.file import SessionFile, SessionFilePage, SessionFileTextSlice
 
 
 def session_file_to_response(file: SessionFile) -> SessionFileResponse:
-    """只投影授权文件元数据，不返回对象键或摘要。"""
-    return SessionFileResponse(
-        id=file.id,
-        session_id=file.session_id,
-        source=file.source,
-        filename=file.filename,
-        label=file.label,
-        mime_type=file.mime_type,
-        size_bytes=file.size_bytes,
-        extraction_status=_EXTRACTION_STATUS_LITERAL[file.extraction_status],
-        extracted_text_bytes=file.extracted_text_bytes,
-        extraction_error_code=file.extraction_error_code,
-        created_at=file.created_at,
-    )
+    """只投影授权文件元数据，自动忽略 owner_id、object_key 与 sha256 等内部字段。"""
+    return SessionFileResponse.model_validate(file)
 
 
 def session_file_page_to_response(page: SessionFilePage) -> SessionFileListResponse:
     """转换稳定游标分页。"""
-    return SessionFileListResponse(
-        items=[session_file_to_response(item) for item in page.items],
-        next_after_file_id=page.next_after_file_id,
-    )
+    return SessionFileListResponse.model_validate(page)
 
 
 def session_file_text_slice_to_response(
     text_slice: SessionFileTextSlice,
 ) -> SessionFileContentResponse:
     """转换会话文件分页文本预览响应。"""
-    return SessionFileContentResponse(
-        file=session_file_to_response(text_slice.file),
-        source_kind=text_slice.source_kind,
-        offset=text_slice.offset,
-        next_offset=text_slice.next_offset,
-        content=text_slice.content,
-        eof=text_slice.eof,
-        truncated=text_slice.truncated,
-    )
+    return SessionFileContentResponse.model_validate(text_slice)
 
 
 __all__ = [

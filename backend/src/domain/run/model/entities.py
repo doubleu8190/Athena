@@ -19,6 +19,7 @@ from domain.tool import (
     RuntimeToolSnapshot,
     ToolApprovalDecision,
     ToolCallStatus,
+    ToolKind,
 )
 
 
@@ -602,7 +603,8 @@ class PendingSubagentApproval(BaseModel):
     batch_message_id: str
     ordinal: int
     model_name: str
-    tool_kind: str | None = None
+    # 收紧为 ToolKind | None，与 PendingToolApproval 保持一致并让 API 边界直接透传。
+    tool_kind: ToolKind | None = None
     requested_at: datetime
     safe_skill_projection: SafeSkillApprovalProjection | None = None
     display_name: str | None = None

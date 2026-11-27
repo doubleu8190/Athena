@@ -13,6 +13,8 @@ from api.dto.access import VisibilityGrantRequest, VisibilityGrantResponse
 class SubagentResponse(BaseModel):
     """Subagent 配置响应投影。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     slug: str
     name: str
@@ -34,6 +36,8 @@ class SubagentResponse(BaseModel):
 
 class SubagentListResponse(BaseModel):
     """Subagent 分页列表响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     items: list[SubagentResponse]
     total: int
@@ -90,6 +94,8 @@ class SubagentEnabledRequest(BaseModel):
 class AvailableToolItemResponse(BaseModel):
     """可选工具条目响应。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     tool_id: str
     name: str
     description: str
@@ -101,6 +107,8 @@ class AvailableToolItemResponse(BaseModel):
 
 class AvailableToolGroupResponse(BaseModel):
     """按来源分组的可选工具目录响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
 
     group_key: str
     label: str

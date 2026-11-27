@@ -12,29 +12,13 @@ from domain.tool import AdminToolDefinition, PublicToolDefinition, ToolPage
 
 
 def public_tool_to_response(tool: PublicToolDefinition) -> PublicToolResponse:
-    """显式映射公共字段，避免透传领域对象。"""
-    return PublicToolResponse(
-        tool_id=tool.tool_id,
-        model_name=tool.model_name,
-        description=tool.description,
-        input_schema=dict(tool.input_schema),
-    )
+    """按 DTO 白名单投影公共字段，同时将只读映射转为独立 dict。"""
+    return PublicToolResponse.model_validate(tool)
 
 
 def admin_tool_to_response(tool: AdminToolDefinition) -> AdminToolResponse:
-    """显式映射管理员工具来源与业务审批展示字段。"""
-    return AdminToolResponse(
-        tool_id=tool.tool_id,
-        model_name=tool.model_name,
-        description=tool.description,
-        input_schema=dict(tool.input_schema),
-        server_id=tool.server_id,
-        remote_name=tool.remote_name,
-        requires_approval=tool.requires_approval,
-        display_name=tool.display_name,
-        approval_summary_template=tool.approval_summary_template,
-        parameter_labels=dict(tool.parameter_labels),
-    )
+    """按 DTO 白名单投影管理员工具来源与业务审批展示字段。"""
+    return AdminToolResponse.model_validate(tool)
 
 
 def public_tool_page_to_response(

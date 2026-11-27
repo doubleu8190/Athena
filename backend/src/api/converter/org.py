@@ -16,18 +16,7 @@ from domain.org import Department, FeishuSyncSummary, OrgUserDetail, OrgUserPage
 
 def department_to_response(department: Department) -> DepartmentResponse:
     """转换单条部门响应。"""
-    return DepartmentResponse(
-        id=department.id,
-        external_id=department.external_id,
-        parent_id=department.parent_id,
-        name=department.name,
-        path=department.path,
-        order_index=department.order_index,
-        status=department.status,
-        synced_at=department.synced_at,
-        created_at=department.created_at,
-        updated_at=department.updated_at,
-    )
+    return DepartmentResponse.model_validate(department)
 
 
 def department_list_to_response(departments: tuple[Department, ...]) -> DepartmentListResponse:
@@ -38,7 +27,7 @@ def department_list_to_response(departments: tuple[Department, ...]) -> Departme
 
 
 def org_user_to_response(detail: OrgUserDetail) -> OrgUserResponse:
-    """转换单个组织用户详情响应。"""
+    """转换单个组织用户详情响应（需将 detail.user 展平并排除密码哈希）。"""
     user = detail.user
     return OrgUserResponse(
         id=user.id,
@@ -55,13 +44,7 @@ def org_user_to_response(detail: OrgUserDetail) -> OrgUserResponse:
         updated_at=user.updated_at,
         departments=[department_summary_to_dto(item) for item in detail.departments],
         managed_departments=[
-            DeptAdminScopeResponse(
-                department_id=scope.department_id,
-                department_name=scope.department_name,
-                department_path=scope.department_path,
-                include_subdepartments=scope.include_subdepartments,
-            )
-            for scope in detail.managed_departments
+            DeptAdminScopeResponse.model_validate(scope) for scope in detail.managed_departments
         ],
         managed_department_ids=list(detail.managed_department_ids),
     )
@@ -79,14 +62,7 @@ def org_user_page_to_response(page: OrgUserPage) -> OrgUserListResponse:
 
 def feishu_sync_summary_to_response(summary: FeishuSyncSummary) -> FeishuSyncResponse:
     """转换飞书同步统计结果响应。"""
-    return FeishuSyncResponse(
-        departments_upserted=summary.departments_upserted,
-        departments_archived=summary.departments_archived,
-        users_upserted=summary.users_upserted,
-        users_disabled=summary.users_disabled,
-        sessions_revoked=summary.sessions_revoked,
-        synced_at=summary.synced_at,
-    )
+    return FeishuSyncResponse.model_validate(summary)
 
 
 __all__ = [

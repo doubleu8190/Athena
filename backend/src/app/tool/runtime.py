@@ -7,10 +7,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from functools import lru_cache
-from typing import Any, cast
-
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
+from typing import TYPE_CHECKING, Any, cast
 
 from app.access import AccessPolicyService
 from app.file.service import FileInputError, SessionFileService
@@ -29,6 +26,7 @@ from app.skill.tooling import summarize_parameters
 from app.tool.ports import RunToolRuntime
 from common.date import as_utc, utc_now
 from common.json import utf8_size
+from common.json_schema import compile_draft202012_validator, format_validation_path
 from domain.access import ResourceAccessTarget, ResourceType, UserAccessSnapshot, VisibilityScope
 from domain.auth.ports import CurrentSessionReader
 from domain.file import (
@@ -58,7 +56,7 @@ from domain.preference import (
 )
 from domain.project import ProjectNotFoundError
 from domain.run import Run, RunInputFileContext, RunInputImageAttachment
-from domain.session import SessionRepository, SessionScope
+from domain.session import SessionScope
 from domain.skill import (
     SESSION_FILE_LIST_TOOL_ID,
     SESSION_FILE_READ_TOOL_ID,
@@ -73,7 +71,7 @@ from domain.skill import (
     SkillNotFoundError,
     SkillPackageError,
 )
-from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID, SubagentProfile, SubagentRepository
+from domain.subagent import DISPATCH_SUBAGENTS_TOOL_ID, SubagentProfile
 from domain.tool import (
     MAX_TOOL_ARGUMENT_BYTES,
     AuthorizedRunContext,
@@ -88,6 +86,10 @@ from domain.tool import (
     ToolOutcomeStatus,
     bounded_outcome,
 )
+
+if TYPE_CHECKING:
+    from adapter.session.repository import SqlAlchemySessionRepository
+    from adapter.subagent.repository import SqlAlchemySubagentRepository
 
 REQUEST_USER_INPUT_ID = "builtin_request_user_input"
 KNOWLEDGE_SEARCH_ID = "builtin_knowledge_search"
@@ -395,7 +397,7 @@ class RunToolRuntimeService(RunToolRuntime):
         self,
         *,
         auth: CurrentSessionReader,
-        sessions: SessionRepository,
+        sessions: SqlAlchemySessionRepository,
         mcp_catalog: McpToolRuntimeReader,
         mcp_executor: McpToolExecutor,
         knowledge: KnowledgeService | None,
@@ -404,7 +406,7 @@ class RunToolRuntimeService(RunToolRuntime):
         skills: SkillService | None = None,
         session_files: SessionFileService | None = None,
         skill_execution: SkillExecutionService | None = None,
-        subagents: SubagentRepository | None = None,
+        subagents: SqlAlchemySubagentRepository | None = None,
         access_policy: AccessPolicyService,
         clock: Any = utc_now,
     ) -> None:
@@ -1628,23 +1630,13 @@ def _bounded_integer(
     return value
 
 
-@lru_cache(maxsize=512)
-def _compiled_validator(schema_json: str) -> Draft202012Validator:
-    """缓存已校验的 JSON Schema 编译结果，避免每次工具调用重复执行 check_schema。"""
-    schema = json.loads(schema_json)
-    if _contains_external_ref(schema):
-        raise ValueError("tool_schema_external_ref")
-    Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(schema)
-
-
 def _validate_arguments(schema: Mapping[str, Any], arguments: Mapping[str, Any]) -> str | None:
     """Validate an object locally and reject any external schema reference."""
     if not isinstance(arguments, dict):
         return "工具参数必须是 JSON 对象。"
     try:
         schema_json = json.dumps(dict(schema), ensure_ascii=False, sort_keys=True)
-        validator = _compiled_validator(schema_json)
+        validator = compile_draft202012_validator(schema_json)
         error = next(iter(validator.iter_errors(dict(arguments))), None)
     except ValueError as error:
         if str(error) == "tool_schema_external_ref":
@@ -1654,22 +1646,8 @@ def _validate_arguments(schema: Mapping[str, Any], arguments: Mapping[str, Any])
         return "工具参数的 Schema 无法安全校验。"
     if error is None:
         return None
-    path = ".".join(str(item) for item in error.absolute_path)
+    path = format_validation_path(error)
     return f"工具参数不符合 Schema：{path or 'root'}"
-
-
-def _contains_external_ref(value: object) -> bool:
-    if isinstance(value, Mapping):
-        ref = value.get("$ref")
-        if isinstance(ref, str) and not ref.startswith("#"):
-            return True
-        dynamic_ref = value.get("$dynamicRef")
-        if isinstance(dynamic_ref, str) and not dynamic_ref.startswith("#"):
-            return True
-        return any(_contains_external_ref(item) for item in value.values())
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return any(_contains_external_ref(item) for item in value)
-    return False
 
 
 __all__ = [

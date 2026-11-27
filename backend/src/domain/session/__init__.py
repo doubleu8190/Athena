@@ -9,7 +9,6 @@ from domain.session.model import (
     SessionPage,
     SessionScope,
 )
-from domain.session.ports import SessionRepository
 
 __all__ = [
     "InvalidSessionFilterError",
@@ -18,6 +17,5 @@ __all__ = [
     "Session",
     "SessionNotFoundError",
     "SessionPage",
-    "SessionRepository",
     "SessionScope",
 ]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
@@ -13,6 +12,7 @@ from app.run.context import prepare_run_tokenizers
 from bootstrap.config import LoggingSettings
 from bootstrap.lifecycle import close_resources_lifo
 from bootstrap.run_worker import RunWorkerBundle, build_run_worker_dependencies
+from bootstrap.worker import run_with_shutdown_signals
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +117,7 @@ async def run_worker_process(
 
 async def _main() -> None:
     """安装进程信号并运行独立 Worker 生命周期。"""
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for signal_name in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(signal_name, stop_event.set)
-    await run_worker_process(stop_event=stop_event)
+    await run_with_shutdown_signals(lambda stop_event: run_worker_process(stop_event=stop_event))
 
 
 if __name__ == "__main__":

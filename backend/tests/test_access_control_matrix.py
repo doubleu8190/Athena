@@ -615,8 +615,8 @@ class _Harness:
             self.subagent_repo,
             self.auth_repo,
             access_policy=self.access_policy,
-            model_checker=_AlwaysValidModelChecker(),
-            tool_catalog=_SimpleToolCatalog(self.mcp_repo),
+            model_checker=_AlwaysValidModelChecker(),  # type: ignore[arg-type]
+            tool_catalog=_SimpleToolCatalog(self.mcp_repo),  # type: ignore[arg-type]
             clock=lambda: NOW,
         )
         self.mcp_executor = _FakeMcpExecutor()

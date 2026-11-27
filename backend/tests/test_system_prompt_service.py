@@ -214,7 +214,7 @@ def test_service_rechecks_current_admin_before_each_operation() -> None:
     """认证上下文携带管理员角色但当前账号降权时，所有操作都被拒绝。"""
     repository = _Repository()
     reader = _AuthReader(_user(UserRole.MEMBER))
-    service = SystemPromptService(repository, reader, clock=lambda: NOW)
+    service = SystemPromptService(repository, reader, clock=lambda: NOW)  # type: ignore[arg-type]
 
     operations = (
         service.get_current(_actor(), SystemPromptKind.MAIN),
@@ -252,7 +252,11 @@ def test_service_rechecks_current_admin_before_each_operation() -> None:
 def test_service_rejects_blank_and_oversized_content(content: str) -> None:
     """全空白与超限正文在进入仓储前被拒绝。"""
     repository = _Repository()
-    service = SystemPromptService(repository, _AuthReader(_user()), clock=lambda: NOW)
+    service = SystemPromptService(
+        repository,  # type: ignore[arg-type]
+        _AuthReader(_user()),
+        clock=lambda: NOW,
+    )
 
     with pytest.raises(SystemPromptError):
         asyncio.run(
@@ -269,7 +273,11 @@ def test_service_rejects_blank_and_oversized_content(content: str) -> None:
 def test_service_preserves_exact_content_and_uses_business_clock() -> None:
     """合法正文的换行与首尾空白原样传递，CAS 基线和业务时钟保持精确。"""
     repository = _Repository()
-    service = SystemPromptService(repository, _AuthReader(_user()), clock=lambda: NOW)
+    service = SystemPromptService(
+        repository,  # type: ignore[arg-type]
+        _AuthReader(_user()),
+        clock=lambda: NOW,
+    )
     content = "  第一行\n\n第二行  "
 
     result = asyncio.run(
@@ -296,7 +304,7 @@ def test_service_distinguishes_missing_current_and_missing_version() -> None:
     """当前配置缺失映射为 unavailable，历史版本缺失映射为 not found。"""
     repository = _Repository()
     repository.current[SystemPromptKind.MAIN] = None  # type: ignore[assignment]
-    service = SystemPromptService(repository, _AuthReader(_user()), clock=lambda: NOW)
+    service = SystemPromptService(repository, _AuthReader(_user()), clock=lambda: NOW)  # type: ignore[arg-type]
 
     with pytest.raises(SystemPromptUnavailableError):
         asyncio.run(service.get_current(_actor(), SystemPromptKind.MAIN))
@@ -324,7 +332,7 @@ def test_admin_api_contract_permission_validation_and_error_mapping() -> None:
     repository = _Repository()
     admin_user = _user()
     reader = _AuthReader(admin_user)
-    service = SystemPromptService(repository, reader, clock=lambda: NOW)
+    service = SystemPromptService(repository, reader, clock=lambda: NOW)  # type: ignore[arg-type]
     app = FastAPI()
     app.state.authenticator = _Authenticator()
     app.state.auth_cookie_name = "athena_session"

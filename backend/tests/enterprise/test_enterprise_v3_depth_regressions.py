@@ -827,8 +827,8 @@ def test_regression2_org_transfer_realtime_revocation_and_offboarding_cookie_inv
                 SqlAlchemySubagentRepository(session_factory),
                 auth_repo,
                 access_policy=access_policy,
-                model_checker=_AlwaysValidModelChecker(),
-                tool_catalog=_DbToolCatalog(mcp_repo),
+                model_checker=_AlwaysValidModelChecker(),  # type: ignore[arg-type]
+                tool_catalog=_DbToolCatalog(mcp_repo),  # type: ignore[arg-type]
                 clock=lambda: NOW,
             )
 

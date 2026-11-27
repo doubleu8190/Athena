@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime
 
-from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
-from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
-
 from app.run.config import RunWorkerConfig
 from app.run.events import publish_pending_events
 from app.run.executor import RunExecutor
+from bootstrap.worker import compute_worker_retry_delay, is_recoverable_worker_error
 from common.date import as_utc, utc_now
 from common.ids import new_id
 from domain.run.model import (
@@ -27,20 +24,6 @@ from domain.run.ports import RunEventTransport, RunRepository
 
 logger = logging.getLogger(__name__)
 _CANCEL_CLEANUP_TIMEOUT_SECONDS = 15.0
-
-
-def _is_recoverable_worker_error(error: Exception) -> bool:
-    """判定是否为可恢复的瞬态数据库/网络连接错误，避免单次闪断打崩整个 TaskGroup。"""
-    if isinstance(error, (OperationalError, InterfaceError, SqlAlchemyTimeoutError, OSError)):
-        return True
-    if not isinstance(error, DBAPIError):
-        return False
-    if error.connection_invalidated:
-        return True
-    sqlstate = getattr(error.orig, "sqlstate", None)
-    return isinstance(sqlstate, str) and (
-        sqlstate.startswith("08") or sqlstate in {"57P01", "57P02", "57P03", "53300"}
-    )
 
 
 class RunWorker:
@@ -104,13 +87,12 @@ class RunWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                if not _is_recoverable_worker_error(error):
+                if not is_recoverable_worker_error(error):
                     raise
                 # 瞬态数据库连接/网络异常仅当前 consumer 有界抖动退避（上限 30s），
                 # 避免抛出到 asyncio.TaskGroup 误杀并发在途的其他 Run。
                 consecutive_failures += 1
-                ceiling = min(30.0, 0.5 * (2 ** min(consecutive_failures - 1, 6)))
-                retry_after = random.uniform(0.0, ceiling)
+                retry_after = compute_worker_retry_delay(consecutive_failures)
                 logger.warning(
                     "run_worker_database_retry worker_id=%s error_type=%s retry_after=%.2f",
                     worker_id,
@@ -128,11 +110,10 @@ class RunWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                if not _is_recoverable_worker_error(error):
+                if not is_recoverable_worker_error(error):
                     raise
                 consecutive_failures += 1
-                ceiling = min(30.0, 0.5 * (2 ** min(consecutive_failures - 1, 6)))
-                retry_after = random.uniform(0.0, ceiling)
+                retry_after = compute_worker_retry_delay(consecutive_failures)
                 logger.warning(
                     "run_worker_drive_database_retry worker_id=%s run_id=%s "
                     "error_type=%s retry_after=%.2f",

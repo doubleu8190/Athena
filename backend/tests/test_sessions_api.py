@@ -171,12 +171,12 @@ def _build_services() -> tuple[
     session_repository = InMemorySessionRepository(project_repository)
     project_repository.session_repository = session_repository
     project_service = ProjectService(
-        project_repository,
+        project_repository,  # type: ignore[arg-type]
         id_factory=incrementing_factory("project_"),
         clock=IncrementingClock(datetime(2026, 1, 1, tzinfo=UTC)),
     )
     session_service = SessionService(
-        session_repository,
+        session_repository,  # type: ignore[arg-type]
         id_factory=incrementing_factory("session_"),
         clock=IncrementingClock(datetime(2026, 1, 1, 1, tzinfo=UTC)),
     )
@@ -278,9 +278,9 @@ def test_default_session_ids_use_prefixed_uuid4_hex() -> None:
     project_repository = InMemoryProjectRepository()
     session_repository = InMemorySessionRepository(project_repository)
     project_repository.session_repository = session_repository
-    project_service = ProjectService(project_repository)
+    project_service = ProjectService(project_repository)  # type: ignore[arg-type]
     session_service = SessionService(
-        session_repository,
+        session_repository,  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
     )
     auth_service = make_auth_service()

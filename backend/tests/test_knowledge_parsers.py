@@ -535,6 +535,30 @@ def test_validate_office_archive_enforces_content_types_size_limit(tmp_path: Any
         LocalDocumentParser().validate_file(oversized.name, oversized)
 
 
+@pytest.mark.parametrize(
+    "unsafe_name",
+    [
+        "../word/document.xml",
+        "/word/document.xml",
+        "\\word\\document.xml",
+        "word//document.xml",
+        "word/./document.xml",
+    ],
+)
+def test_validate_office_archive_rejects_unsafe_member_paths(
+    tmp_path: Any,
+    unsafe_name: str,
+) -> None:
+    """包含路径穿越或非法分隔符的 Office 成员路径必须在校验阶段被拒绝。"""
+    path = tmp_path / "unsafe.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", b"<Types/>")
+        archive.writestr("word/document.xml", b"<root/>")
+        archive.writestr(unsafe_name, b"payload")
+    with pytest.raises(ValueError, match="knowledge_office_archive_invalid"):
+        LocalDocumentParser().validate_file(path.name, path)
+
+
 def test_xlsx_without_embedded_media_skips_full_dom_reload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

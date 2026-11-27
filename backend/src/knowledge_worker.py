@@ -4,14 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
-import signal
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
-
-from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
-from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
 from app.knowledge.worker import KnowledgeWorker
 from bootstrap.config import LoggingSettings
@@ -21,8 +16,15 @@ from bootstrap.knowledge_worker import (
     build_knowledge_worker_resources,
 )
 from bootstrap.lifecycle import close_resources_lifo
+from bootstrap.worker import (
+    compute_worker_retry_delay,
+    is_recoverable_worker_error,
+    run_with_shutdown_signals,
+)
 
 logger = logging.getLogger(__name__)
+# 保留模块内别名，兼容既有单元测试直接导入 _is_recoverable_worker_error。
+_is_recoverable_worker_error = is_recoverable_worker_error
 
 
 async def _consume(
@@ -40,8 +42,7 @@ async def _consume(
             if not _is_recoverable_worker_error(error):
                 raise
             consecutive_failures += 1
-            ceiling = min(30.0, 0.5 * (2 ** min(consecutive_failures - 1, 6)))
-            retry_after = random.uniform(0.0, ceiling)
+            retry_after = compute_worker_retry_delay(consecutive_failures)
             logger.warning(
                 "knowledge_worker_database_retry error_type=%s retry_after=%.2f",
                 type(error).__name__,
@@ -52,20 +53,6 @@ async def _consume(
         consecutive_failures = 0
         if not claimed:
             await sleep(1)
-
-
-def _is_recoverable_worker_error(error: Exception) -> bool:
-    """只重试数据库连接中断、数据库暂不可用和系统级连接错误。"""
-    if isinstance(error, (OperationalError, InterfaceError, SqlAlchemyTimeoutError, OSError)):
-        return True
-    if not isinstance(error, DBAPIError):
-        return False
-    if error.connection_invalidated:
-        return True
-    sqlstate = getattr(error.orig, "sqlstate", None)
-    return isinstance(sqlstate, str) and (
-        sqlstate.startswith("08") or sqlstate in {"57P01", "57P02", "57P03", "53300"}
-    )
 
 
 async def _run_consumers(worker: KnowledgeWorker, concurrency: int) -> None:
@@ -168,22 +155,7 @@ async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
 
 async def _main() -> None:
     """安装 SIGINT/SIGTERM 信号处理并运行 Knowledge Worker 生命周期。"""
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    installed_signals: list[signal.Signals] = []
-    for signal_name in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(signal_name, stop_event.set)
-        except NotImplementedError:
-            continue
-        installed_signals.append(signal_name)
-    try:
-        await run_worker(stop_event=stop_event)
-    finally:
-        # 退出前解绑信号处理器，避免复用事件循环时回调残留。
-        for signal_name in installed_signals:
-            with suppress(NotImplementedError):
-                loop.remove_signal_handler(signal_name)
+    await run_with_shutdown_signals(lambda stop_event: run_worker(stop_event=stop_event))
 
 
 def main() -> None:

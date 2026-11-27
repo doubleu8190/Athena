@@ -6,7 +6,6 @@ from domain.project import (
     ProjectHasSessionsError,
     ProjectNotFoundError,
     ProjectPage,
-    ProjectRepository,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "ProjectHasSessionsError",
     "ProjectNotFoundError",
     "ProjectPage",
-    "ProjectRepository",
 ]

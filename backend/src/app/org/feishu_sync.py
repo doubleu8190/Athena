@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from common.date import as_utc, utc_now
 from common.ids import new_id
@@ -12,11 +13,13 @@ from domain.org import (
     DepartmentCycleError,
     FeishuDirectoryClient,
     FeishuSyncSummary,
-    OrgRepository,
     OrgSyncValidationError,
     RemoteDepartment,
     RemoteEmployee,
 )
+
+if TYPE_CHECKING:
+    from adapter.org.repository import SqlAlchemyOrgRepository
 
 MAX_DEPARTMENT_DEPTH = 64
 
@@ -150,7 +153,7 @@ class FeishuOrgSyncService:
     def __init__(
         self,
         feishu_client: FeishuDirectoryClient,
-        org_repository: OrgRepository,
+        org_repository: SqlAlchemyOrgRepository,
         *,
         clock: Callable[[], datetime] = utc_now,
         department_id_factory: Callable[[], str] | None = None,

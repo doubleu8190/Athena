@@ -360,9 +360,9 @@ def test_service_authorization_and_external_checks() -> None:
         )
         catalog = DefaultSubagentToolCatalog(_StubMcpRepo((mcp_tool,)))  # type: ignore[arg-type]
         service = SubagentService(
-            repo,
+            repo,  # type: ignore[arg-type]
             _StubAuthReader(actor.user),
-            model_checker=_StubModelChecker({"mp_enabled"}),
+            model_checker=_StubModelChecker({"mp_enabled"}),  # type: ignore[arg-type]
             tool_catalog=catalog,
             id_factory=lambda prefix: f"{prefix}_001",
             clock=lambda: NOW,
@@ -371,7 +371,7 @@ def test_service_authorization_and_external_checks() -> None:
 
         # 非管理员 / 失效会话拦截
         non_admin_service = SubagentService(
-            repo,
+            repo,  # type: ignore[arg-type]
             _StubAuthReader(_actor(UserRole.MEMBER).user),
             access_policy=make_test_access_policy(default_role=UserRole.MEMBER),
         )
@@ -379,7 +379,7 @@ def test_service_authorization_and_external_checks() -> None:
             await non_admin_service.list_subagents(actor)
 
         expired_service = SubagentService(
-            repo,
+            repo,  # type: ignore[arg-type]
             _StubAuthReader(None),
             access_policy=make_test_access_policy(),
         )

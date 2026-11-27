@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from email_validator import EmailNotValidError, validate_email
 
@@ -46,8 +46,11 @@ from domain.auth import (
     UserRole,
     UserStatus,
 )
-from domain.org import OrgRepository, OrgUserDetail, UserOrgMembership
+from domain.org import OrgUserDetail, UserOrgMembership
 from infrastructure.feishu import FeishuError, FeishuUserIdentity
+
+if TYPE_CHECKING:
+    from adapter.org.repository import SqlAlchemyOrgRepository
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +184,7 @@ class AuthService:
         repository: AuthRepository,
         password_hasher: PasswordHasher,
         *,
-        org_reader: OrgRepository | None = None,
+        org_reader: SqlAlchemyOrgRepository | None = None,
         feishu_client: FeishuSsoClient | None = None,
         oauth_state_store: OAuthStateStore | None = None,
         mock_enabled: bool = False,

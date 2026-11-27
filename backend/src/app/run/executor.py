@@ -8,6 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -78,7 +79,6 @@ from domain.message import (
     ToolResultPart,
 )
 from domain.preference import DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET
-from domain.project import ProjectRepository
 from domain.run.model import (
     DISPATCH_SUBAGENTS_TOOL_ID,
     BeginSubagentBatchCommand,
@@ -95,10 +95,8 @@ from domain.run.model import (
 )
 from domain.run.model.errors import RunConflictError, RunInputResourceError, RunStateError
 from domain.run.ports import RunEventTransport, RunRepository
-from domain.session import SessionRepository, SessionScope
+from domain.session import SessionScope
 from domain.skill import SKILL_EXECUTE_TOOL_ID, SkillExecutionStatus
-from domain.subagent import SubagentRepository
-from domain.system_prompt import SystemPromptRepository
 from domain.tool import (
     AdmitToolCallCommand,
     AuthorizedRunContext,
@@ -120,6 +118,12 @@ from domain.tool import (
     bounded_outcome,
     protocol_status_for_outcome,
 )
+
+if TYPE_CHECKING:
+    from adapter.project.repository import SqlAlchemyProjectRepository
+    from adapter.session.repository import SqlAlchemySessionRepository
+    from adapter.subagent.repository import SqlAlchemySubagentRepository
+    from adapter.system_prompt.repository import SqlAlchemySystemPromptRepository
 
 logger = logging.getLogger(__name__)
 MAX_MODEL_ATTEMPTS = 3
@@ -163,15 +167,15 @@ class RunExecutor:
         profiles: ModelProfileRepository,
         provider: LlmStreamProvider,
         *,
-        system_prompts: SystemPromptRepository,
+        system_prompts: SqlAlchemySystemPromptRepository,
         tool_runtime: RunToolRuntime | None = None,
         publisher: RunEventTransport | None = None,
         config: RunWorkerConfig | None = None,
         preferences: PreferenceService | None = None,
         preference_memory_token_budget: int = DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET,
-        projects: ProjectRepository | None = None,
-        sessions: SessionRepository | None = None,
-        subagents: SubagentRepository | None = None,
+        projects: SqlAlchemyProjectRepository | None = None,
+        sessions: SqlAlchemySessionRepository | None = None,
+        subagents: SqlAlchemySubagentRepository | None = None,
         access_policy: AccessPolicyService | None = None,
         auto_title_timeout_seconds: float = AUTO_TITLE_TIMEOUT_SECONDS,
         id_factory: Callable[[str], str] = new_id,

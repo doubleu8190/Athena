@@ -5,6 +5,7 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Callable, Sequence
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from common.date import as_utc, utc_now
 from common.ids import new_id
@@ -14,8 +15,10 @@ from domain.project import (
     Project,
     ProjectNotFoundError,
     ProjectPage,
-    ProjectRepository,
 )
+
+if TYPE_CHECKING:
+    from adapter.project.repository import SqlAlchemyProjectRepository
 
 MAX_PROJECT_NAME_LENGTH = 120
 MAX_PROJECT_DESCRIPTION_LENGTH = 500
@@ -113,7 +116,7 @@ class ProjectService:
 
     def __init__(
         self,
-        repository: ProjectRepository,
+        repository: SqlAlchemyProjectRepository,
         *,
         id_factory: Callable[[], str] = _default_id_factory,
         clock: Callable[[], datetime] = utc_now,

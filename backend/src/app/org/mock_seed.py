@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from common.date import as_utc, utc_now
 from domain.auth import AuthProvider, User, UserRole, UserStatus
@@ -11,8 +12,10 @@ from domain.org import (
     MockDepartmentSeed,
     MockDeptAdminScopeSeed,
     MockUserDepartmentSeed,
-    OrgRepository,
 )
+
+if TYPE_CHECKING:
+    from adapter.org.repository import SqlAlchemyOrgRepository
 
 MOCK_DEPT_ROOT_ID = "dept_mock_root"
 MOCK_DEPT_RD_ID = "dept_mock_rd"
@@ -175,7 +178,7 @@ def build_mock_seed_data(
 
 
 async def seed_mock_organization(
-    org_repository: OrgRepository,
+    org_repository: SqlAlchemyOrgRepository,
     *,
     clock: Callable[[], datetime] = utc_now,
 ) -> None:

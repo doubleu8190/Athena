@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from app.access import AccessPolicyService
 from app.auth.guard import require_session_roles
@@ -24,13 +25,10 @@ from domain.subagent import (
     CreateSubagentCommand,
     SubagentAdminRequiredError,
     SubagentInvalidSessionError,
-    SubagentModelChecker,
     SubagentModelUnavailableError,
     SubagentNotFoundError,
     SubagentPage,
     SubagentProfile,
-    SubagentRepository,
-    SubagentToolCatalog,
     SubagentUpdatePatch,
     SubagentValidationError,
     UpdateSubagentCommand,
@@ -44,6 +42,13 @@ from domain.subagent import (
     validate_subagent_timeout_seconds,
 )
 
+if TYPE_CHECKING:
+    from adapter.subagent.repository import (
+        SqlAlchemySubagentModelChecker,
+        SqlAlchemySubagentRepository,
+    )
+    from app.subagent.tool_catalog import DefaultSubagentToolCatalog
+
 MAX_SUBAGENT_PAGE_LIMIT = 100
 
 
@@ -52,12 +57,12 @@ class SubagentService:
 
     def __init__(
         self,
-        repository: SubagentRepository,
+        repository: SqlAlchemySubagentRepository,
         auth_reader: CurrentSessionReader,
         *,
         access_policy: AccessPolicyService,
-        model_checker: SubagentModelChecker | None = None,
-        tool_catalog: SubagentToolCatalog | None = None,
+        model_checker: SqlAlchemySubagentModelChecker | None = None,
+        tool_catalog: DefaultSubagentToolCatalog | None = None,
         id_factory: Callable[[str], str] = new_id,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:

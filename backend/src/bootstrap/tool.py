@@ -52,8 +52,6 @@ from domain.knowledge.ports import (
     OriginalStore,
 )
 from domain.mcp import McpSecretError, McpToolExecutor, McpToolRuntimeReader
-from domain.session import SessionRepository
-from domain.subagent import SubagentRepository
 from infrastructure.embedding import OpenAICompatibleEmbeddingConfig
 from infrastructure.file import LocalSessionDocumentExtractor, LocalVisionImageNormalizer
 from infrastructure.mcp.execution import McpToolCallClient
@@ -339,7 +337,7 @@ def build_mcp_executor(
 def build_run_tool_runtime(
     *,
     auth: CurrentSessionReader,
-    sessions: SessionRepository,
+    sessions: SqlAlchemySessionRepository,
     mcp_catalog: McpToolRuntimeReader,
     mcp_executor: McpToolExecutor,
     query_services: QueryServiceBundle,
@@ -347,7 +345,7 @@ def build_run_tool_runtime(
     skills: SkillService | None = None,
     session_files: SessionFileService | None = None,
     skill_execution: SkillExecutionService | None = None,
-    subagents: SubagentRepository | None = None,
+    subagents: SqlAlchemySubagentRepository | None = None,
     access_policy: AccessPolicyService,
 ) -> RunToolRuntimeService:
     """绑定查询服务、轻量偏好服务、统一权限引擎与 MCP 端口到 Run 工具运行时。"""

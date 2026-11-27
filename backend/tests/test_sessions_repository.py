@@ -16,9 +16,8 @@ from adapter.llm.model import ModelProfileVersionModel
 from adapter.message.model import ConversationMessageModel
 from adapter.project.model import ProjectModel
 from adapter.run.model import RunModel
-from adapter.session.converter import session_to_domain
 from adapter.session.model import SessionModel
-from adapter.session.repository import SqlAlchemySessionRepository
+from adapter.session.repository import SqlAlchemySessionRepository, session_to_domain
 from adapter.system_prompt.model import SystemPromptVersionModel
 from domain.project import ProjectNotFoundError
 from domain.run import RunStatus, SessionHasActiveRunError

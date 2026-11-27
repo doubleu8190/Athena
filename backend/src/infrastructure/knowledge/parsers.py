@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path, PurePath
 from typing import Any
 
+from common.office_archive import OfficeArchiveError, validate_office_archive
 from domain.knowledge.model import ChunkLocator, TextBlock
 from domain.knowledge.ports import (
     DocumentFileValidator,
@@ -125,45 +126,32 @@ class LocalDocumentParser(DocumentParser, DocumentFileValidator):
 
     @staticmethod
     def _validate_office_archive(path: Path, suffix: str) -> None:
+        required_marker = {
+            ".docx": "word/document.xml",
+            ".xlsx": "xl/workbook.xml",
+            ".pptx": "ppt/presentation.xml",
+        }.get(suffix)
+        if required_marker is None:
+            raise ValueError("knowledge_file_signature_invalid")
+        error_code_map = {
+            "bad_zip": "knowledge_office_archive_invalid",
+            "unsafe_member_path": "knowledge_office_archive_invalid",
+            "member_limit": "knowledge_archive_member_limit",
+            "expanded_size_limit": "knowledge_archive_expanded_size_limit",
+            "encrypted": "knowledge_archive_encrypted",
+            "macro_unsupported": "knowledge_office_macro_unsupported",
+            "signature_invalid": "knowledge_file_signature_invalid",
+        }
         try:
-            with zipfile.ZipFile(path) as archive:
-                members = archive.infolist()
-                if len(members) > 10_000:
-                    raise ValueError("knowledge_archive_member_limit")
-                if sum(member.file_size for member in members) > 200 * 1024 * 1024:
-                    raise ValueError("knowledge_archive_expanded_size_limit")
-                if any(member.flag_bits & 0x1 for member in members):
-                    raise ValueError("knowledge_archive_encrypted")
-                names = {member.filename.lower() for member in members}
-                if any(
-                    "vbaproject" in name or name.endswith((".xlsm", ".docm", ".pptm"))
-                    for name in names
-                ):
-                    raise ValueError("knowledge_office_macro_unsupported")
-                for member in members:
-                    if member.filename.lower() != "[content_types].xml":
-                        continue
-                    # 对 [Content_Types].xml 实施声明大小与实际解压流双边界检查，
-                    # 防范伪造 ZIP 头炸弹。
-                    if member.file_size > _MAX_CONTENT_TYPES_BYTES:
-                        raise ValueError("knowledge_archive_expanded_size_limit")
-                    with archive.open(member) as stream:
-                        raw = stream.read(_MAX_CONTENT_TYPES_BYTES + 1)
-                    if len(raw) > _MAX_CONTENT_TYPES_BYTES:
-                        raise ValueError("knowledge_archive_expanded_size_limit")
-                    if "macroenabled" in raw.decode("utf-8", "ignore").lower():
-                        raise ValueError("knowledge_office_macro_unsupported")
-                if "[content_types].xml" not in names:
-                    raise ValueError("knowledge_file_signature_invalid")
-                required_members = {
-                    ".docx": {"word/document.xml"},
-                    ".xlsx": {"xl/workbook.xml"},
-                    ".pptx": {"ppt/presentation.xml"},
-                }.get(suffix, set())
-                if not required_members.issubset(names):
-                    raise ValueError("knowledge_file_signature_invalid")
-        except zipfile.BadZipFile as error:
-            raise ValueError("knowledge_office_archive_invalid") from error
+            validate_office_archive(
+                path,
+                required_marker=required_marker,
+                check_limits_and_macros=True,
+                case_insensitive_markers=True,
+                max_content_types_bytes=_MAX_CONTENT_TYPES_BYTES,
+            )
+        except OfficeArchiveError as error:
+            raise ValueError(error_code_map[error.code]) from error
 
     def _parse(self, filename: str, content: bytes) -> ParsedDocument:
         suffix = PurePath(filename).suffix.lower()

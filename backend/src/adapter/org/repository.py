@@ -12,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from adapter.auth.converter import user_to_domain
 from adapter.auth.model import AuthSessionModel, UserModel
 from adapter.auth.repository.transaction_guard import verify_active_session_user
-from adapter.org.converter import department_to_domain
 from adapter.org.model import DepartmentModel, DeptAdminScopeModel, UserDepartmentModel
+from common.date import as_utc
 from domain.auth import AuthContext, AuthProvider, User, UserRole, UserStatus
 from domain.org import (
     Department,
@@ -28,7 +28,6 @@ from domain.org import (
     MockDeptAdminScopeSeed,
     MockUserDepartmentSeed,
     OrgAuthorizationError,
-    OrgRepository,
     OrgSyncValidationError,
     OrgUserDetail,
     OrgUserNotFoundError,
@@ -38,6 +37,23 @@ from domain.org import (
     UserDepartmentSummary,
     UserOrgMembership,
 )
+
+
+def department_to_domain(row: DepartmentModel) -> Department:
+    """把部门 ORM 行转换为领域 Department。"""
+    return Department(
+        id=row.id,
+        external_id=row.external_id,
+        parent_id=row.parent_id,
+        name=row.name,
+        path=row.path,
+        order_index=row.order_index,
+        status=DepartmentStatus(row.status),
+        synced_at=as_utc(row.synced_at) if row.synced_at is not None else None,
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+    )
+
 
 MAX_DEPARTMENT_PATH_LENGTH = 2048
 MAX_EMAIL_LENGTH = 320
@@ -64,7 +80,7 @@ def _normalize_optional_email(email: str | None) -> str | None:
     return normalized if len(normalized) <= MAX_EMAIL_LENGTH else None
 
 
-class SqlAlchemyOrgRepository(OrgRepository):
+class SqlAlchemyOrgRepository:
     """基于 async SQLAlchemy 维护部门树、成员归属、分权范围及通讯录原子同步。"""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -865,4 +881,4 @@ class SqlAlchemyOrgRepository(OrgRepository):
         )
 
 
-__all__ = ["SqlAlchemyOrgRepository"]
+__all__ = ["SqlAlchemyOrgRepository", "department_to_domain"]

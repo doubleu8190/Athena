@@ -2652,7 +2652,7 @@ def test_subagent_max_llm_requests_50_runs_without_budget_error(
                 repo,
                 profiles,
                 provider,  # type: ignore[arg-type]
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 config=RunWorkerConfig(),
                 clock=lambda: NOW,
             )

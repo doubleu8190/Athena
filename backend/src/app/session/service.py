@@ -5,6 +5,7 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from common.date import as_utc, utc_now
 from common.ids import new_id
@@ -16,9 +17,11 @@ from domain.session import (
     Session,
     SessionNotFoundError,
     SessionPage,
-    SessionRepository,
     SessionScope,
 )
+
+if TYPE_CHECKING:
+    from adapter.session.repository import SqlAlchemySessionRepository
 
 MAX_SESSION_TITLE_LENGTH = 120
 MAX_SESSION_ID_LENGTH = 64
@@ -89,7 +92,7 @@ class SessionService:
 
     def __init__(
         self,
-        repository: SessionRepository,
+        repository: SqlAlchemySessionRepository,
         *,
         id_factory: Callable[[], str] = _default_id_factory,
         clock: Callable[[], datetime] = utc_now,

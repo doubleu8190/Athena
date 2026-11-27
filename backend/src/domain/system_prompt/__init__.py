@@ -19,7 +19,6 @@ from domain.system_prompt.model import (
     SystemPromptVersion,
     SystemPromptVersionPage,
 )
-from domain.system_prompt.ports import SystemPromptRepository
 
 __all__ = [
     "MAX_SYSTEM_PROMPT_CONTENT_CHARACTERS",
@@ -32,7 +31,6 @@ __all__ = [
     "SystemPromptError",
     "SystemPromptKind",
     "SystemPromptNotFoundError",
-    "SystemPromptRepository",
     "SystemPromptUnavailableError",
     "SystemPromptVersion",
     "SystemPromptVersionPage",

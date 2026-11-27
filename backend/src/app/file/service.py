@@ -12,7 +12,6 @@ import shutil
 import tempfile
 import threading
 import unicodedata
-import zipfile
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +21,11 @@ from typing import Literal, NoReturn
 from common.async_utils import run_thread_shielded
 from common.date import utc_now
 from common.ids import new_id
+from common.office_archive import (
+    OfficeArchiveError,
+    validate_office_archive,
+    validate_zip_member_path,
+)
 from domain.file import (
     EXTRACTABLE_DOCUMENT_EXTENSIONS,
     MAX_SESSION_DOCUMENT_EXTRACT_BYTES,
@@ -177,73 +181,25 @@ def _validate_office_archive(
     required_marker: str,
     cancellation: threading.Event | None,
 ) -> None:
-    """用标准库读取中央目录，先校验成员路径再核对 Office marker。
-
-    参数:
-        path: 待检查的 Office ZIP 文件。
-        required_marker: xlsx、docx 或 pptx 对应格式的根 marker。
-        cancellation: 调用方取消时设置的线程停止事件。
-
-    返回:
-        无返回值。
-
-    异常:
-        文件不是可读取 ZIP、成员路径不安全或缺少 marker 时抛出
-        ``FileInputError``；检查线程被取消时抛出内部取消异常。
-    """
+    """用统一 Office ZIP 校验器先检查成员路径与取消信号，再核对 Office marker。"""
     try:
-        with zipfile.ZipFile(path, "r") as archive:
-            members = archive.infolist()
-            _raise_if_cancelled(cancellation)
-            names: list[str] = []
-            # 标准库会一次载入中央目录；路径检查完成前不读取任何成员正文，
-            # 也不把 marker 命中提前为跳过危险成员的捷径。
-            for member in members:
-                _raise_if_cancelled(cancellation)
-                name = member.orig_filename
-                _validate_zip_member_path(name)
-                names.append(name)
-                _raise_if_cancelled(cancellation)
-    except _FileInspectionCancelled:
-        raise
-    except (
-        EOFError,
-        OSError,
-        RuntimeError,
-        ValueError,
-        zipfile.BadZipFile,
-        zipfile.LargeZipFile,
-    ) as error:
+        validate_office_archive(
+            path,
+            required_marker=required_marker,
+            cancellation=cancellation,
+            on_cancelled=lambda: _raise_if_cancelled(cancellation),
+            member_path_validator=_validate_zip_member_path,
+        )
+    except OfficeArchiveError as error:
         raise FileInputError("file_content_mismatch") from error
-    if "[Content_Types].xml" not in names or required_marker not in names:
-        raise FileInputError("file_content_mismatch")
 
 
 def _validate_zip_member_path(name: str) -> None:
-    """拒绝控制字符、绝对路径、反斜杠、空段和目录穿越。
-
-    参数:
-        name: ``ZipInfo.orig_filename`` 返回的原始成员名。
-
-    返回:
-        无返回值；路径安全时直接结束。
-
-    异常:
-        成员名不安全时抛出 ``FileInputError("file_content_mismatch")``。
-    """
-    trimmed = name[:-1] if name.endswith("/") else name
-    parts = trimmed.split("/")
-    if (
-        not trimmed
-        or "\x00" in name
-        or _CONTROL.search(name)
-        or name.startswith("/")
-        or "\\" in name
-        or (len(name) >= 2 and name[1] == ":")
-        or "//" in name
-        or any(part in {"", ".", ".."} for part in parts)
-    ):
-        raise FileInputError("file_content_mismatch")
+    """委托公共成员路径安全校验，并保持既有的 FileInputError 异常契约与测试钩子。"""
+    try:
+        validate_zip_member_path(name)
+    except OfficeArchiveError as error:
+        raise FileInputError("file_content_mismatch") from error
 
 
 def sha256_file(

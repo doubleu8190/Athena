@@ -693,7 +693,7 @@ def test_run_executor_injects_preferences_respects_toggle_budget_and_subagent_is
                 run_repo,
                 profile_repo,
                 provider_a,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=runtime,
                 preferences=pref_service,
                 config=RunWorkerConfig(),
@@ -722,7 +722,7 @@ def test_run_executor_injects_preferences_respects_toggle_budget_and_subagent_is
                 run_repo,
                 profile_repo,
                 provider_b,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=runtime,
                 preferences=pref_service,
                 preference_memory_token_budget=one_entry_budget,
@@ -752,7 +752,7 @@ def test_run_executor_injects_preferences_respects_toggle_budget_and_subagent_is
                 run_repo,
                 profile_repo,
                 provider_c,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=runtime,
                 preferences=pref_service,
                 config=RunWorkerConfig(),
@@ -841,7 +841,7 @@ def test_run_executor_injects_preferences_respects_toggle_budget_and_subagent_is
                 run_repo,
                 profile_repo,
                 provider_d,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=runtime,
                 preferences=pref_service,
                 config=RunWorkerConfig(),
@@ -889,7 +889,7 @@ def test_run_executor_runs_save_user_memory_without_approval_and_handles_quota_e
                 run_repo,
                 profile_repo,
                 provider_ok,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=runtime,
                 preferences=pref_service,
                 config=RunWorkerConfig(),
@@ -927,7 +927,7 @@ def test_run_executor_runs_save_user_memory_without_approval_and_handles_quota_e
                 run_repo,
                 profile_repo,
                 provider_full,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=runtime,
                 preferences=pref_service,
                 config=RunWorkerConfig(),

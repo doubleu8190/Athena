@@ -130,7 +130,7 @@ def _project(
 def test_create_returns_201_location_and_normalized_name() -> None:
     repository = InMemoryProjectRepository()
     service = ProjectService(
-        repository,
+        repository,  # type: ignore[arg-type]
         id_factory=lambda: "project_fixed",
         clock=lambda: datetime(2026, 2, 1, 8, 30, tzinfo=UTC),
     )
@@ -154,11 +154,11 @@ def test_create_returns_201_location_and_normalized_name() -> None:
 
 def test_default_project_ids_are_distributed_unique_proj_ids() -> None:
     first_service = ProjectService(
-        InMemoryProjectRepository(),
+        InMemoryProjectRepository(),  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 2, 1, 8, 30, tzinfo=UTC),
     )
     second_service = ProjectService(
-        InMemoryProjectRepository(),
+        InMemoryProjectRepository(),  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 2, 1, 8, 30, tzinfo=UTC),
     )
 
@@ -193,7 +193,7 @@ def test_default_project_ids_are_distributed_unique_proj_ids() -> None:
 def test_invalid_project_names_return_422(name: str) -> None:
     repository = InMemoryProjectRepository()
     service = ProjectService(
-        repository,
+        repository,  # type: ignore[arg-type]
         id_factory=lambda: "project_invalid",
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -209,7 +209,7 @@ def test_invalid_project_names_return_422(name: str) -> None:
 def test_create_rejects_extra_fields() -> None:
     repository = InMemoryProjectRepository()
     service = ProjectService(
-        repository,
+        repository,  # type: ignore[arg-type]
         id_factory=lambda: "project_extra",
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -231,7 +231,7 @@ def test_create_rejects_extra_fields() -> None:
 def test_duplicate_names_create_distinct_projects() -> None:
     repository = InMemoryProjectRepository()
     service = ProjectService(
-        repository,
+        repository,  # type: ignore[arg-type]
         id_factory=_sequence_id_factory("project_1", "project_2"),
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -250,7 +250,7 @@ def test_duplicate_names_create_distinct_projects() -> None:
 def test_projects_are_isolated_by_authenticated_user() -> None:
     repository = InMemoryProjectRepository()
     service = ProjectService(
-        repository,
+        repository,  # type: ignore[arg-type]
         id_factory=_sequence_id_factory("project_user_1", "project_user_2"),
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -307,7 +307,7 @@ def test_projects_are_isolated_by_authenticated_user() -> None:
 
 def test_project_routes_return_401_without_authentication() -> None:
     service = ProjectService(
-        InMemoryProjectRepository(),
+        InMemoryProjectRepository(),  # type: ignore[arg-type]
         id_factory=lambda: "project_fixed",
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -324,7 +324,7 @@ def test_project_routes_return_401_without_authentication() -> None:
 
 def test_revoked_session_cookie_returns_401() -> None:
     service = ProjectService(
-        InMemoryProjectRepository(),
+        InMemoryProjectRepository(),  # type: ignore[arg-type]
         id_factory=lambda: "project_fixed",
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -349,7 +349,7 @@ def test_legacy_principal_environment_and_user_header_do_not_authenticate(
 ) -> None:
     monkeypatch.setenv("ATHENA_CURRENT_USER_ID", "user_1")
     service = ProjectService(
-        InMemoryProjectRepository(),
+        InMemoryProjectRepository(),  # type: ignore[arg-type]
         id_factory=lambda: "project_fixed",
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -371,7 +371,7 @@ def test_legacy_principal_environment_and_user_header_do_not_authenticate(
 
 def test_cross_origin_project_write_is_rejected() -> None:
     service = ProjectService(
-        InMemoryProjectRepository(),
+        InMemoryProjectRepository(),  # type: ignore[arg-type]
         id_factory=lambda: "project_fixed",
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -396,7 +396,7 @@ def test_list_returns_active_projects_in_updated_order_with_pagination() -> None
             _project("project_deleted", "已删除", minute=3, deleted=True),
         )
     )
-    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))  # type: ignore[arg-type]
 
     with _client(service) as client:
         first_page = client.get("/api/v1/projects", params={"page": 1, "page_size": 2})
@@ -442,7 +442,7 @@ def test_list_returns_active_projects_in_updated_order_with_pagination() -> None
 )
 def test_list_rejects_invalid_pagination(params: dict[str, int]) -> None:
     service = ProjectService(
-        InMemoryProjectRepository(),
+        InMemoryProjectRepository(),  # type: ignore[arg-type]
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )
 
@@ -459,7 +459,7 @@ def test_get_returns_project_or_404_with_consistent_detail() -> None:
             _project("project_deleted", "已删除", minute=2, deleted=True),
         )
     )
-    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))  # type: ignore[arg-type]
 
     with _client(service) as client:
         found = client.get("/api/v1/projects/project_active")
@@ -478,7 +478,7 @@ def test_rename_updates_name_and_updated_at_only() -> None:
     original = _project("project_1", "旧名称", minute=1)
     repository = InMemoryProjectRepository((original,))
     clock = MutableClock(original.updated_at)
-    service = ProjectService(repository, clock=clock)
+    service = ProjectService(repository, clock=clock)  # type: ignore[arg-type]
     clock.advance(minutes=5)
 
     with _client(service) as client:
@@ -500,7 +500,7 @@ def test_rename_missing_or_deleted_project_returns_404() -> None:
     repository = InMemoryProjectRepository(
         (_project("project_deleted", "已删除", minute=1, deleted=True),)
     )
-    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))  # type: ignore[arg-type]
 
     with _client(service) as client:
         missing = client.patch("/api/v1/projects/project_missing", json={"name": "新名称"})
@@ -519,7 +519,7 @@ def test_delete_is_soft_and_idempotent() -> None:
     original = _project("project_1", "待删除项目", minute=1)
     repository = InMemoryProjectRepository((original,))
     clock = MutableClock(original.updated_at)
-    service = ProjectService(repository, clock=clock)
+    service = ProjectService(repository, clock=clock)  # type: ignore[arg-type]
     clock.advance(minutes=3)
 
     with _client(service) as client:
@@ -548,7 +548,7 @@ def test_delete_is_soft_and_idempotent() -> None:
 def test_rename_rejects_invalid_name_without_changing_project(name: str) -> None:
     original = _project("project_1", "旧名称", minute=1)
     repository = InMemoryProjectRepository((original,))
-    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    service = ProjectService(repository, clock=lambda: datetime(2026, 2, 1, tzinfo=UTC))  # type: ignore[arg-type]
 
     with _client(service) as client:
         response = client.patch(
@@ -577,7 +577,7 @@ def test_database_failures_return_503_without_leaking_details(
     payload: dict[str, str] | None,
 ) -> None:
     service = ProjectService(
-        FailingProjectRepository(),
+        FailingProjectRepository(),  # type: ignore[arg-type]
         id_factory=lambda: "project_fixed",
         clock=lambda: datetime(2026, 2, 1, tzinfo=UTC),
     )

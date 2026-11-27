@@ -409,3 +409,64 @@ exit 0
     build_text = build_log.read_text(encoding="utf-8")
     assert f"ENV_INSTALL_KNOWLEDGE={expected_env_value}" in build_text
     assert "Dockerfile.backend-base" not in build_text
+
+
+def test_docker_up_unsets_host_athena_install_knowledge_when_omitted_in_test_env(
+    tmp_path: Path,
+) -> None:
+    """docker/test.env 省略 ATHENA_INSTALL_KNOWLEDGE 时，宿主 shell 残留值不得泄漏到构建参数。"""
+    _write_test_project(tmp_path)
+    config_path = tmp_path / "docker/test.env"
+    lines = [
+        line
+        for line in config_path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("ATHENA_INSTALL_KNOWLEDGE=")
+    ]
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    build_log = tmp_path / "docker-build.log"
+    bin_directory = tmp_path / "bin"
+    bin_directory.mkdir()
+    docker_stub = bin_directory / "docker"
+    docker_stub.write_text(
+        f"""#!/usr/bin/env bash
+set -eu
+if [[ "$1" == "info" ]]; then
+  exit 0
+fi
+printf 'ARGV=%s ENV_INSTALL_KNOWLEDGE=%s\\n' \
+  "$*" "${{ATHENA_INSTALL_KNOWLEDGE-}}" >> {str(build_log)!r}
+case "$*" in
+  *"port frontend 80"*) printf '127.0.0.1:19080\\n' ;;
+  *" ps "*|*" ps"*) printf 'Up (healthy)\\n' ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    docker_stub.chmod(0o755)
+    curl_stub = bin_directory / "curl"
+    curl_stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    curl_stub.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{bin_directory}:{environment['PATH']}",
+            "HOME": str(tmp_path),
+            "ATHENA_INSTALL_KNOWLEDGE": "true",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(tmp_path / "scripts/test-docker.sh"), "up"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    build_text = build_log.read_text(encoding="utf-8")
+    assert "ENV_INSTALL_KNOWLEDGE=true" not in build_text
+    assert "ENV_INSTALL_KNOWLEDGE=\n" in build_text
+    assert "INSTALL_KNOWLEDGE=false" in result.stdout

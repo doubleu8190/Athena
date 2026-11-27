@@ -116,7 +116,7 @@ def RunExecutor(
         repository,
         profiles,
         provider,
-        system_prompts=FakeSystemPromptRepository(),
+        system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
         **kwargs,
     )
 
@@ -1418,7 +1418,7 @@ def test_executor_uses_the_main_prompt_content_bound_to_the_run() -> None:
             cast(RunRepository, repository),
             cast(ModelProfileRepository, _Profiles()),
             cast(LlmStreamProvider, provider),
-            system_prompts=FakeSystemPromptRepository(main_content=custom_prompt),
+            system_prompts=FakeSystemPromptRepository(main_content=custom_prompt),  # type: ignore[arg-type]
         )
 
         await executor.execute(lease)
@@ -1468,7 +1468,7 @@ def test_oversized_bound_main_prompt_is_rejected_without_truncation() -> None:
             cast(RunRepository, repository),
             cast(ModelProfileRepository, _Profiles()),
             cast(LlmStreamProvider, provider),
-            system_prompts=FakeSystemPromptRepository(main_content=oversized_prompt),
+            system_prompts=FakeSystemPromptRepository(main_content=oversized_prompt),  # type: ignore[arg-type]
         )
 
         await executor.execute(lease)

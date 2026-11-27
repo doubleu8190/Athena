@@ -52,7 +52,7 @@ def RunExecutor(
         repository,
         profiles,
         provider,
-        system_prompts=FakeSystemPromptRepository(),
+        system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
         **kwargs,
     )
 

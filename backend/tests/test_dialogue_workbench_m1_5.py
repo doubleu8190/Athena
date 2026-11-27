@@ -2015,7 +2015,7 @@ def test_run_executor_injects_project_instructions_for_main_run_only_and_meters_
                 run_repo,
                 profile_repo,
                 provider,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 projects=projects_repo,
                 sessions=sessions_repo,
@@ -2213,7 +2213,7 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
                 run_repo,
                 profile_repo,
                 provider,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 sessions=sessions_repo,
             )
@@ -2256,7 +2256,7 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
                 run_repo,
                 profile_repo,
                 provider_race,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 sessions=sessions_repo,
             )
@@ -2293,7 +2293,7 @@ def test_auto_title_generation_compression_model_priority_and_manual_title_prote
                 run_repo,
                 profile_repo,
                 provider_skip,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 sessions=sessions_repo,
             )
@@ -2374,7 +2374,7 @@ def test_auto_title_timeout_error_fallback_and_db_error_isolation(
                 run_repo,
                 profile_repo,
                 provider_timeout,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 sessions=sessions_repo,
                 auto_title_timeout_seconds=0.05,
@@ -2411,7 +2411,7 @@ def test_auto_title_timeout_error_fallback_and_db_error_isolation(
                 run_repo,
                 profile_repo,
                 provider_err,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 sessions=sessions_repo,
             )
@@ -2445,7 +2445,7 @@ def test_auto_title_timeout_error_fallback_and_db_error_isolation(
                 run_repo,
                 profile_repo,
                 provider_db_fail,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 sessions=failing_sessions,
             )
@@ -2539,7 +2539,7 @@ def test_subagent_run_never_triggers_auto_title(monkeypatch: pytest.MonkeyPatch)
                 run_repo,
                 profile_repo,
                 provider,
-                system_prompts=FakeSystemPromptRepository(),
+                system_prompts=FakeSystemPromptRepository(),  # type: ignore[arg-type]
                 tool_runtime=tool_runtime,
                 sessions=sessions_repo,
                 subagents=subagents_repo,

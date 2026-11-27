@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from app.auth.guard import require_session_roles
 from app.org.feishu_sync import FeishuOrgSyncService
@@ -15,10 +16,12 @@ from domain.org import (
     FeishuNotEnabledError,
     FeishuSyncSummary,
     OrgAuthorizationError,
-    OrgRepository,
     OrgUserDetail,
     OrgUserPage,
 )
+
+if TYPE_CHECKING:
+    from adapter.org.repository import SqlAlchemyOrgRepository
 
 
 class OrgService:
@@ -26,7 +29,7 @@ class OrgService:
 
     def __init__(
         self,
-        repository: OrgRepository,
+        repository: SqlAlchemyOrgRepository,
         auth_reader: CurrentSessionReader,
         *,
         feishu_sync_service: FeishuOrgSyncService | None = None,

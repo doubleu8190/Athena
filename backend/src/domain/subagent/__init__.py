@@ -40,11 +40,6 @@ from domain.subagent.model import (
     validate_subagent_system_prompt,
     validate_subagent_timeout_seconds,
 )
-from domain.subagent.ports import (
-    SubagentModelChecker,
-    SubagentRepository,
-    SubagentToolCatalog,
-)
 
 __all__ = [
     "AvailableToolGroup",
@@ -64,15 +59,12 @@ __all__ = [
     "SubagentAdminRequiredError",
     "SubagentError",
     "SubagentInvalidSessionError",
-    "SubagentModelChecker",
     "SubagentModelUnavailableError",
     "SubagentNotFoundError",
     "SubagentPage",
     "SubagentProfile",
-    "SubagentRepository",
     "SubagentSlugConflictError",
     "SubagentSlugReservedError",
-    "SubagentToolCatalog",
     "SubagentToolForbiddenError",
     "SubagentUpdatePatch",
     "SubagentValidationError",

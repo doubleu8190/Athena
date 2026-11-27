@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from app.auth.guard import require_session_roles
 from common.date import utc_now
@@ -14,11 +15,13 @@ from domain.system_prompt import (
     SystemPromptError,
     SystemPromptKind,
     SystemPromptNotFoundError,
-    SystemPromptRepository,
     SystemPromptUnavailableError,
     SystemPromptVersion,
     SystemPromptVersionPage,
 )
+
+if TYPE_CHECKING:
+    from adapter.system_prompt.repository import SqlAlchemySystemPromptRepository
 
 MAX_SYSTEM_PROMPT_PAGE_SIZE = 100
 
@@ -28,7 +31,7 @@ class SystemPromptService:
 
     def __init__(
         self,
-        repository: SystemPromptRepository,
+        repository: SqlAlchemySystemPromptRepository,
         auth_reader: CurrentSessionReader,
         *,
         clock: Callable[[], datetime] = utc_now,

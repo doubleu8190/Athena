@@ -88,8 +88,9 @@ ensure_env_file() {
 
 load_test_environment() {
   ensure_env_file
-  # 防止宿主 shell 残留的 ATHENA_EMBEDDING_BASE_URL 隐式绕过校验或造成与 docker/test.env 不一致。
+  # 防止宿主 shell 残留的 ATHENA_EMBEDDING_BASE_URL 与 ATHENA_INSTALL_KNOWLEDGE 隐式绕过校验或污染镜像构建参数。
   unset ATHENA_EMBEDDING_BASE_URL
+  unset ATHENA_INSTALL_KNOWLEDGE
   # helper 只从 secrets/ 构造凭据；container 模式改用测试库、测试桶和 Docker
   # 宿主机网关，连接字符串中的用户名、密码和库名均逐段百分号编码。
   ATHENA_TEST_ENV_TARGET=container

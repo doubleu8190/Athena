@@ -8,7 +8,6 @@ from domain.project.model import (
     ProjectNotFoundError,
     ProjectPage,
 )
-from domain.project.ports import ProjectRepository
 
 __all__ = [
     "InvalidProjectInputError",
@@ -17,5 +16,4 @@ __all__ = [
     "ProjectHasSessionsError",
     "ProjectNotFoundError",
     "ProjectPage",
-    "ProjectRepository",
 ]

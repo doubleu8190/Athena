@@ -9,11 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from adapter.auth.repository.transaction_guard import verify_active_session_user
-from adapter.system_prompt.converter import system_prompt_version_to_domain
 from adapter.system_prompt.model import (
     SystemPromptSettingModel,
     SystemPromptVersionModel,
 )
+from common.date import as_utc
 from common.ids import new_id
 from domain.auth import AuthContext, UserRole
 from domain.system_prompt import (
@@ -22,11 +22,23 @@ from domain.system_prompt import (
     SystemPromptConflictError,
     SystemPromptKind,
     SystemPromptNotFoundError,
-    SystemPromptRepository,
     SystemPromptUnavailableError,
     SystemPromptVersion,
     SystemPromptVersionPage,
 )
+
+
+def system_prompt_version_to_domain(row: SystemPromptVersionModel) -> SystemPromptVersion:
+    """把数据库行投影为带时区时间的不可变提示词版本。"""
+    created_at = as_utc(row.created_at)
+    return SystemPromptVersion(
+        id=row.id,
+        kind=SystemPromptKind(row.kind),
+        content=row.content,
+        created_by=row.created_by,
+        created_at=created_at,
+        restored_from_version_id=row.restored_from_version_id,
+    )
 
 
 async def current_system_prompts(
@@ -71,7 +83,7 @@ async def current_system_prompts(
     )
 
 
-class SqlAlchemySystemPromptRepository(SystemPromptRepository):
+class SqlAlchemySystemPromptRepository:
     """在 PostgreSQL 事务内比较并切换每类唯一当前指针。"""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:

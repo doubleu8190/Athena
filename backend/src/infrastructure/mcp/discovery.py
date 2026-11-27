@@ -10,14 +10,13 @@ from collections.abc import Callable, Mapping
 from typing import Any, Protocol, cast
 
 import anyio
-from jsonschema import validators  # type: ignore[import-untyped]
-from jsonschema.validators import Draft202012Validator  # type: ignore[import-untyped]
 from mcp import Client, types
 from mcp.client import Transport
 from mcp.shared.inbound import find_invalid_x_mcp_header
 from mcp.types import Tool
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
+from common.json_schema import check_json_schema, ensure_object_root_schema
 from domain.mcp import (
     DiscoveredMcpTool,
     McpConnectionInput,
@@ -256,31 +255,17 @@ def _safe_log_name(value: object) -> str:
 
 def _validate_tool_schema(schema: Mapping[str, Any]) -> None:
     """验证完整 JSON Schema 结构及大小，并要求根 schema 描述 object。"""
-    if schema.get("type", "object") != "object":
-        raise McpDiscoveryResultError("mcp_discovery_tool_invalid")
     try:
+        ensure_object_root_schema(schema)
         encoded_schema = json.dumps(
             dict(schema),
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
         ).encode("utf-8")
-    except Exception:
-        raise McpDiscoveryResultError("mcp_discovery_tool_invalid") from None
-    if len(encoded_schema) > 256 * 1024:
-        raise McpDiscoveryResultError("mcp_discovery_tool_invalid")
-    declared_draft = schema.get("$schema")
-    if declared_draft is not None and not isinstance(declared_draft, str):
-        raise McpDiscoveryResultError("mcp_discovery_tool_invalid")
-    try:
-        validator = (
-            Draft202012Validator
-            if declared_draft is None
-            else validators.validator_for(schema, default=None)
-        )
-        if validator is None:
-            raise ValueError
-        validator.check_schema(schema)
+        if len(encoded_schema) > 256 * 1024:
+            raise ValueError("schema_too_large")
+        check_json_schema(schema, allow_declared_draft=True)
     except Exception:
         raise McpDiscoveryResultError("mcp_discovery_tool_invalid") from None
 

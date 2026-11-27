@@ -69,14 +69,13 @@ from domain.knowledge.ports import (
     OriginalStore,
 )
 from domain.mcp import McpSecretError
-from domain.org import OrgRepository
 from infrastructure.database import Database
 from infrastructure.embedding import OpenAICompatibleEmbeddingConfig
 from infrastructure.feishu import FeishuClient, FeishuConfig
 from infrastructure.knowledge.parsers import LocalDocumentParser
 from infrastructure.mcp.discovery import McpDiscoveryClient
 from infrastructure.security.password import Argon2PasswordHasher
-from infrastructure.security.secrets import SecretCipher
+from infrastructure.security.secrets import SecretCipher, SecretCipherError
 from infrastructure.storage.minio_client import MinioObjectClient
 
 logger = logging.getLogger(__name__)
@@ -108,7 +107,7 @@ class ApiDependencies:
     session_file_service: SessionFileService | None
     subagent_service: SubagentService | None = None
     org_service: OrgService | None = None
-    org_repository: OrgRepository | None = None
+    org_repository: SqlAlchemyOrgRepository | None = None
     feishu_client: FeishuClient | None = None
     auth_mock_enabled: bool = False
     redis_client: Redis | None = None
@@ -254,11 +253,11 @@ def build_api_dependencies(
         # LLM 加密密钥未配置时仍允许非 MCP 功能启动；模型调用会安全地保持不可用。
         try:
             secret_cipher = SecretCipher.from_environment()
-        except McpSecretError:
+        except SecretCipherError:
             secret_cipher = None
 
     database: Database | None = None
-    org_repository: OrgRepository | None = None
+    org_repository: SqlAlchemyOrgRepository | None = None
     feishu_client: FeishuClient | None = None
     knowledge_repository: KnowledgeRepositoryPort | None = None
     knowledge_originals: OriginalStore | None = None

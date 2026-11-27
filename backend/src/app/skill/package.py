@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import stat
 import unicodedata
@@ -12,11 +13,15 @@ from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
-from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
-from referencing import Registry
 from referencing.exceptions import Unresolvable
 
+from common.json_schema import (
+    check_json_schema,
+    compile_draft202012_validator,
+    ensure_object_root_schema,
+    format_validation_path,
+)
 from domain.skill import (
     MAX_GUIDE_CHARACTERS,
     MAX_PACKAGE_FILE_BYTES,
@@ -195,11 +200,10 @@ def validate_parameter_schema(schema: dict[str, Any], value: Any) -> str | None:
     """用 Draft 2020-12 验证一次调用参数，根 Schema 保持对象语义。"""
     effective_schema = _checked_parameter_schema(schema)
     try:
+        schema_json = json.dumps(effective_schema, ensure_ascii=False, sort_keys=True)
+        validator = compile_draft202012_validator(schema_json, reject_external_ref=False)
         errors = sorted(
-            Draft202012Validator(
-                effective_schema,
-                registry=Registry(),
-            ).iter_errors(value),
+            validator.iter_errors(value),
             key=lambda item: list(item.absolute_path),
         )
     except Unresolvable as error:
@@ -207,7 +211,7 @@ def validate_parameter_schema(schema: dict[str, Any], value: Any) -> str | None:
     if not errors:
         return None
     validation_error = errors[0]
-    path = ".".join(str(item) for item in validation_error.absolute_path)
+    path = format_validation_path(validation_error)
     return f"{path}: {validation_error.message}" if path else validation_error.message
 
 
@@ -215,12 +219,10 @@ def _checked_parameter_schema(schema: Any) -> dict[str, Any]:
     """校验标准 Schema 结构，并为省略 type 的根补对象语义副本。"""
     if not isinstance(schema, dict):
         raise SkillPackageError("skill_parameter_schema_invalid")
-    if schema.get("type", "object") != "object":
-        raise SkillPackageError("skill_parameter_schema_invalid")
-    effective_schema = schema if "type" in schema else {**schema, "type": "object"}
     try:
-        Draft202012Validator.check_schema(effective_schema)
-    except SchemaError as error:
+        effective_schema = ensure_object_root_schema(schema)
+        check_json_schema(effective_schema)
+    except (ValueError, SchemaError) as error:
         raise SkillPackageError("skill_parameter_schema_invalid") from error
     return effective_schema
 

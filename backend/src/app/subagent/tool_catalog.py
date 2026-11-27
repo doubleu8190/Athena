@@ -16,7 +16,6 @@ from domain.subagent import (
     DISPATCH_SUBAGENTS_TOOL_ID,
     AvailableToolGroup,
     AvailableToolItem,
-    SubagentToolCatalog,
 )
 from domain.tool import AdminToolDefinition
 
@@ -33,7 +32,7 @@ _BUILTIN_DEFINITIONS = (
 _MCP_PAGE_BATCH_SIZE = 100
 
 
-class DefaultSubagentToolCatalog(SubagentToolCatalog):
+class DefaultSubagentToolCatalog:
     """聚合内置可用工具与已注册 MCP 工具，明确排除嵌套调度工具。"""
 
     def __init__(self, mcp_repository: McpServerRepository | None = None) -> None:

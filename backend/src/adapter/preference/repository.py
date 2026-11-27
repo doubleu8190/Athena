@@ -8,8 +8,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.auth.model import UserModel
-from adapter.preference.converter import memory_to_domain, profile_to_domain
 from adapter.preference.model import UserMemoryModel, UserWorkProfileModel
+from common.date import as_utc
 from domain.preference import (
     PreferenceContext,
     PreferenceError,
@@ -17,8 +17,31 @@ from domain.preference import (
     UserMemory,
     UserMemoryDisabledError,
     UserMemoryLimitReachedError,
+    UserMemorySource,
     UserWorkProfile,
 )
+
+
+def profile_to_domain(row: UserWorkProfileModel) -> UserWorkProfile:
+    """将用户工作偏好 ORM 行转换为不可变领域实体。"""
+    return UserWorkProfile(
+        user_id=row.user_id,
+        custom_instructions=row.custom_instructions,
+        memory_enabled=row.memory_enabled,
+        updated_at=as_utc(row.updated_at),
+    )
+
+
+def memory_to_domain(row: UserMemoryModel) -> UserMemory:
+    """将显式记忆 ORM 行转换为不可变领域实体。"""
+    return UserMemory(
+        id=row.id,
+        user_id=row.user_id,
+        content=row.content,
+        source=UserMemorySource(row.source),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+    )
 
 
 class SqlAlchemyPreferenceRepository(PreferenceRepository):

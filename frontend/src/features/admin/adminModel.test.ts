@@ -4,13 +4,18 @@ import { makeMcpServer, makeModelProfile } from "../../test/adminFixtures";
 import {
   compressionPolicyBudgets,
   defaultModelProfileForm,
+  extractToolSchemaParamNames,
   mcpServerForm,
+  modelProfileForm,
   subagentForm,
   validateCompressionPolicyForm,
   validateMcpServerForm,
+  validateMcpServerPatchForm,
+  validateModelProfileEditForm,
   validateModelProfileForm,
   validateSubagentForm,
   validateSystemPromptContent,
+  validateToolMetadataForm,
   type McpServerFormValues,
   type SubagentFormValues,
   type SubagentProfile,
@@ -27,6 +32,9 @@ function validSubagentFormValues(): SubagentFormValues {
     enabled: true,
     max_llm_requests: "",
     timeout_seconds: "",
+    visibility_scope: "company",
+    owner_department_id: "",
+    visibility_grants: [],
   };
 }
 
@@ -176,6 +184,10 @@ describe("管理表单纯校验", () => {
       secrets: [],
       transport: "streamable_http",
       url: "https://mcp.example/mcp",
+      visibility_scope: "company",
+      owner_department_id: "",
+      visibility_grants: [],
+      rediscover: false,
     };
     const reserved = validateMcpServerForm({
       ...baseFormula,
@@ -253,8 +265,10 @@ describe("管理表单纯校验", () => {
     expect(form.secrets).toEqual([
       {
         existing: true,
+        hasValue: true,
         id: "existing-0-Authorization",
         name: "Authorization",
+        originalName: "Authorization",
         value: "",
       },
     ]);
@@ -432,5 +446,91 @@ describe("管理表单纯校验", () => {
 
     form.allowed_tool_ids.push("tool_3");
     expect(profile.allowed_tool_ids).toEqual(["tool_1", "tool_2"]);
+  });
+
+  it("模型编辑校验支持留空 api_key 保留原密文与可选场景字段归空", () => {
+    const profile = makeModelProfile({
+      id: "model-edit",
+      name: "日常模型",
+      scenario_label: "日常办公",
+      scenario_description: "处理常规问答",
+      supports_vision: true,
+      visible_to_users: false,
+      version: 4,
+    });
+    const form = modelProfileForm(profile);
+    expect(form.api_key).toBe("");
+    form.scenario_label = "   ";
+    form.scenario_description = "";
+    form.visible_to_users = true;
+
+    const editWithoutKey = validateModelProfileEditForm(form, profile.version);
+    expect(editWithoutKey.input).toMatchObject({
+      expected_version: 4,
+      scenario_label: null,
+      scenario_description: null,
+      supports_vision: true,
+      visible_to_users: true,
+    });
+    expect(editWithoutKey.input).not.toHaveProperty("api_key");
+
+    form.api_key = "new-secret-key";
+    const editWithKey = validateModelProfileEditForm(form, profile.version);
+    expect(editWithKey.input?.api_key).toBe("new-secret-key");
+  });
+
+  it("MCP 局部更新校验正确区分保留、更新、删除与同名替换凭据", () => {
+    const server = makeMcpServer({
+      id: "mcp-patch",
+      name: "测试网关",
+      secrets: [
+        { has_value: true, name: "Authorization" },
+        { has_value: true, name: "X-Legacy" },
+      ],
+    });
+    const form = mcpServerForm(server);
+    // 保留 Authorization，删除 X-Legacy，并新增 X-Trace
+    form.secrets = [
+      form.secrets[0],
+      {
+        id: "new-1",
+        name: "X-Trace",
+        value: "trace-123",
+        existing: false,
+      },
+    ];
+    form.rediscover = true;
+
+    const patch = validateMcpServerPatchForm(form, server, server.config_version);
+    expect(patch.hasChanges).toBe(true);
+    expect(patch.input).toEqual({
+      expected_config_version: 1,
+      secrets_upsert: { "X-Trace": "trace-123" },
+      secrets_remove: ["X-Legacy"],
+      rediscover: true,
+    });
+  });
+
+  it("工具展示校验支持提取 Schema 参数与空值归一化", () => {
+    expect(
+      extractToolSchemaParamNames({
+        type: "object",
+        properties: { payee: { type: "string" }, amount: { type: "number" } },
+      }),
+    ).toEqual(["payee", "amount"]);
+
+    const validated = validateToolMetadataForm({
+      display_name: "  ",
+      approval_summary_template: "向 {payee} 付款 {amount}",
+      parameter_labels: [
+        { id: "1", key: "payee", label: "收款人" },
+        { id: "2", key: "", label: "" },
+      ],
+    });
+    expect(validated.input).toEqual({
+      display_name: null,
+      approval_summary_template: "向 {payee} 付款 {amount}",
+      parameter_labels: { payee: "收款人" },
+    });
   });
 });

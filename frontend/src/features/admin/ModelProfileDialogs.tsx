@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import {
   Button,
@@ -9,7 +9,7 @@ import {
   CONFIRM_COPY_CLASS,
   FIELD_CLASS,
   FIELD_INPUT_CLASS,
-  FIELD_SELECT_CLASS,
+  FIELD_TEXTAREA_CLASS,
   FORM_GRID_2_CLASS,
   FORM_GRID_3_CLASS,
   FORM_STACK_CLASS,
@@ -18,24 +18,39 @@ import {
   MODAL_WIDTH_XL,
   NOTICE_BRAND_CLASS,
   NOTICE_WARNING_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
 import { FieldError } from "../../shared/ui/FieldError";
 import { Modal } from "../../shared/ui/Modal";
-import { adminErrorMessage } from "./errorMessages";
+import {
+  adminErrorMessage,
+  isModelProfileVersionConflict,
+} from "./errorMessages";
 import {
   useCreateModelProfileMutation,
+  useDeleteModelProfileMutation,
   useSetModelProfileEnabledMutation,
   useUpdateCompressionPolicyMutation,
+  useUpdateModelProfileMutation,
 } from "./hooks";
 import {
   compressionPolicyFormBudgets,
   compressionPolicyForm,
   CONTEXT_WINDOW_TOKEN_LIMIT_MAX,
   defaultModelProfileForm,
+  modelProfileForm,
   OUTPUT_TOKEN_LIMIT_MAX,
+  SCENARIO_DESCRIPTION_MAX_LENGTH,
+  SCENARIO_LABEL_MAX_LENGTH,
   TOKENIZER_ENCODINGS,
   validateCompressionPolicyForm,
+  validateModelProfileEditForm,
   validateModelProfileForm,
   type CompressionPolicy,
   type CompressionPolicyField,
@@ -47,39 +62,76 @@ import {
 } from "./model";
 import { formatTokenCount } from "./display";
 
-interface ModelProfileCreateDialogProps {
+interface ModelProfileFormDialogProps {
   onClose: () => void;
-  onCreated: () => void;
+  onCreated?: () => void;
+  onRefreshProfiles?: () => Promise<unknown>;
   open: boolean;
+  profile?: ModelProfile | null;
 }
 
-export function ModelProfileCreateDialog({
+function ModelProfileFormDialog({
   onClose,
   onCreated,
+  onRefreshProfiles,
   open,
-}: ModelProfileCreateDialogProps) {
+  profile,
+}: ModelProfileFormDialogProps) {
+  const editing = Boolean(profile);
   const formId = useId();
-  const [values, setValues] = useState<ModelProfileFormValues>(
-    defaultModelProfileForm,
+  const [values, setValues] = useState<ModelProfileFormValues>(() =>
+    profile ? modelProfileForm(profile) : defaultModelProfileForm(),
   );
   const [errors, setErrors] = useState<
     FieldErrors<ModelProfileField>
   >({});
   const [requestError, setRequestError] = useState<string | null>(null);
-  const mutation = useCreateModelProfileMutation();
-  const { reset: resetMutation } = mutation;
+  const [versionConflict, setVersionConflict] = useState(false);
+  const [loadedVersionKey, setLoadedVersionKey] = useState<string | null>(
+    null,
+  );
+  const submitLock = useRef(false);
+  const createMutation = useCreateModelProfileMutation();
+  const updateMutation = useUpdateModelProfileMutation(profile?.id ?? "");
+  const { reset: resetCreateMutation } = createMutation;
+  const { reset: resetUpdateMutation } = updateMutation;
+  const pending = createMutation.isPending || updateMutation.isPending;
 
   useEffect(() => {
-    if (open) {
+    if (!open) {
+      setLoadedVersionKey(null);
+      submitLock.current = false;
+      return;
+    }
+    setErrors({});
+    setRequestError(null);
+    setVersionConflict(false);
+    resetCreateMutation();
+    resetUpdateMutation();
+    submitLock.current = false;
+    if (!profile) {
       setValues(defaultModelProfileForm());
+      setLoadedVersionKey("create");
+    }
+  }, [open, profile, resetCreateMutation, resetUpdateMutation]);
+
+  useEffect(() => {
+    if (!open || !profile) {
+      return;
+    }
+    const nextKey = `${profile.id}:${profile.version}`;
+    if (loadedVersionKey !== nextKey) {
+      // 按 id + version 同步最新配置，避免编辑期间后台刷新覆盖未保存草稿。
+      setValues(modelProfileForm(profile));
+      setLoadedVersionKey(nextKey);
       setErrors({});
       setRequestError(null);
-      resetMutation();
+      setVersionConflict(false);
     }
-  }, [open, resetMutation]);
+  }, [loadedVersionKey, open, profile]);
 
   const close = () => {
-    if (!mutation.isPending) {
+    if (!pending) {
       onClose();
     }
   };
@@ -105,19 +157,57 @@ export function ModelProfileCreateDialog({
     setRequestError(null);
   };
 
+  const handleRefreshLatest = async () => {
+    setRequestError(null);
+    setVersionConflict(false);
+    setLoadedVersionKey(null);
+    if (onRefreshProfiles) {
+      await onRefreshProfiles();
+    }
+  };
+
   const handleSubmit = async () => {
+    if (submitLock.current || pending) {
+      return;
+    }
+    if (editing && profile) {
+      const result = validateModelProfileEditForm(values, profile.version);
+      setErrors(result.errors);
+      if (!result.input) {
+        return;
+      }
+      submitLock.current = true;
+      setRequestError(null);
+      setVersionConflict(false);
+      try {
+        await updateMutation.mutateAsync(result.input);
+        onClose();
+      } catch (failure) {
+        if (isModelProfileVersionConflict(failure)) {
+          setVersionConflict(true);
+        }
+        setRequestError(adminErrorMessage(failure));
+      } finally {
+        submitLock.current = false;
+      }
+      return;
+    }
+
     const result = validateModelProfileForm(values);
     setErrors(result.errors);
     if (!result.input) {
       return;
     }
+    submitLock.current = true;
     setRequestError(null);
     try {
-      await mutation.mutateAsync(result.input);
-      onCreated();
+      await createMutation.mutateAsync(result.input);
+      onCreated?.();
       onClose();
     } catch (failure) {
       setRequestError(adminErrorMessage(failure));
+    } finally {
+      submitLock.current = false;
     }
   };
 
@@ -125,12 +215,16 @@ export function ModelProfileCreateDialog({
 
   return (
     <Modal
-      closeDisabled={mutation.isPending}
-      description="模型版本创建后不可编辑或删除；新版本可用于默认模型或上下文压缩。"
+      closeDisabled={pending}
+      description={
+        editing
+          ? "局部编辑模型配置与场景展示信息；API Key 留空将保留后端原加密凭据。"
+          : "配置模型端点、能力边界、场景展示信息与用户可见策略。"
+      }
       footer={
         <>
           <Button
-            disabled={mutation.isPending}
+            disabled={pending}
             onClick={close}
             type="button"
             variant="outline"
@@ -138,19 +232,25 @@ export function ModelProfileCreateDialog({
             取消
           </Button>
           <Button
-            disabled={mutation.isPending}
+            disabled={pending}
             form={formId}
             type="submit"
             variant="primary"
           >
-            {mutation.isPending ? "正在创建版本…" : "创建不可变版本"}
+            {pending
+              ? editing
+                ? "正在保存修改…"
+                : "正在创建版本…"
+              : editing
+                ? "保存修改"
+                : "创建模型版本"}
           </Button>
         </>
       }
       onClose={close}
       open={open}
       panelClassName={MODAL_WIDTH_LG}
-      title="创建模型版本"
+      title={editing ? "编辑模型配置" : "创建模型版本"}
     >
       <form
         className={FORM_STACK_CLASS}
@@ -163,7 +263,7 @@ export function ModelProfileCreateDialog({
       >
         <fieldset
           className={cn(FORM_STACK_CLASS, "m-0 border-0 p-0")}
-          disabled={mutation.isPending}
+          disabled={pending}
         >
           {/* 双列网格内使用独立字段容器包裹 label、input 与错误提示，防止报错节点挤占网格列并保持无障碍标签纯净 */}
           <div className={FORM_GRID_2_CLASS}>
@@ -237,7 +337,11 @@ export function ModelProfileCreateDialog({
           />
 
           <label className={FIELD_CLASS} htmlFor={fieldId("api_key")}>
-            <span>API Key</span>
+            <span>
+              {editing
+                ? "API Key（可选，留空保留原加密凭据）"
+                : "API Key"}
+            </span>
             <input
               aria-describedby={
                 errors.api_key
@@ -251,17 +355,106 @@ export function ModelProfileCreateDialog({
               onChange={(event) =>
                 update("api_key", event.target.value)
               }
+              placeholder={editing ? "留空保留原加密凭据" : undefined}
               spellCheck={false}
               type="password"
               value={values.api_key}
             />
             <small id={fieldId("api_key-help")}>
-              API Key 会加密保存，创建后不会再次显示。
+              {editing
+                ? "留空不提交该字段，后端将保留原加密凭据；输入新值则覆盖更新。"
+                : "API Key 会加密保存，创建后不会再次显示。"}
             </small>
           </label>
           <FieldError
             error={errors.api_key}
             id={fieldId("api_key-error")}
+          />
+
+          <div className={FORM_GRID_2_CLASS}>
+            <div className={FIELD_CLASS}>
+              <label htmlFor={fieldId("scenario_label")}>
+                场景标签（可选）
+              </label>
+              <input
+                aria-describedby={
+                  errors.scenario_label
+                    ? fieldId("scenario-label-error")
+                    : undefined
+                }
+                aria-invalid={Boolean(errors.scenario_label)}
+                autoComplete="off"
+                className={FIELD_INPUT_CLASS}
+                id={fieldId("scenario_label")}
+                maxLength={SCENARIO_LABEL_MAX_LENGTH}
+                onChange={(event) =>
+                  update("scenario_label", event.target.value)
+                }
+                placeholder="例如：日常办公、深度思考"
+                value={values.scenario_label}
+              />
+              <FieldError
+                error={errors.scenario_label}
+                id={fieldId("scenario-label-error")}
+              />
+            </div>
+
+            <div className={FIELD_CLASS}>
+              <label htmlFor={fieldId("tokenizer")}>Tokenizer 编码</label>
+              <Select
+                // 显式传入 disabled，避免外层 fieldset disabled 时 Radix Select 触发器状态不同步。
+                disabled={pending}
+                onValueChange={(value) =>
+                  update(
+                    "tokenizer_encoding",
+                    value as ModelProfileFormValues["tokenizer_encoding"],
+                  )
+                }
+                value={values.tokenizer_encoding}
+              >
+                <SelectTrigger
+                  aria-label="Tokenizer 编码"
+                  id={fieldId("tokenizer")}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {TOKENIZER_ENCODINGS.map((encoding) => (
+                    <SelectItem key={encoding} value={encoding}>
+                      {encoding}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <label
+            className={FIELD_CLASS}
+            htmlFor={fieldId("scenario_description")}
+          >
+            <span>场景说明（可选）</span>
+            <textarea
+              aria-describedby={
+                errors.scenario_description
+                  ? fieldId("scenario-description-error")
+                  : undefined
+              }
+              aria-invalid={Boolean(errors.scenario_description)}
+              className={FIELD_TEXTAREA_CLASS}
+              id={fieldId("scenario_description")}
+              maxLength={SCENARIO_DESCRIPTION_MAX_LENGTH}
+              onChange={(event) =>
+                update("scenario_description", event.target.value)
+              }
+              placeholder="简述该模型的适用场景，对普通用户展示在模型选择器中（留空则不显示）"
+              rows={2}
+              value={values.scenario_description}
+            />
+          </label>
+          <FieldError
+            error={errors.scenario_description}
+            id={fieldId("scenario-description-error")}
           />
 
           <div className={FORM_GRID_2_CLASS}>
@@ -309,27 +502,6 @@ export function ModelProfileCreateDialog({
             id={fieldId("tokens-error")}
           />
 
-          <label className={FIELD_CLASS} htmlFor={fieldId("tokenizer")}>
-            <span>Tokenizer 编码</span>
-            <select
-              className={FIELD_SELECT_CLASS}
-              id={fieldId("tokenizer")}
-              onChange={(event) =>
-                update(
-                  "tokenizer_encoding",
-                  event.target.value as ModelProfileFormValues["tokenizer_encoding"],
-                )
-              }
-              value={values.tokenizer_encoding}
-            >
-              {TOKENIZER_ENCODINGS.map((encoding) => (
-                <option key={encoding} value={encoding}>
-                  {encoding}
-                </option>
-              ))}
-            </select>
-          </label>
-
           <div className={CHECK_GRID_CLASS}>
             <label className={CHECKBOX_LABEL_CLASS}>
               <input
@@ -367,6 +539,28 @@ export function ModelProfileCreateDialog({
                 type="checkbox"
               />
               <span>支持并行工具调用</span>
+            </label>
+            <label className={CHECKBOX_LABEL_CLASS}>
+              <input
+                checked={values.supports_vision}
+                className={CHECKBOX_INPUT_CLASS}
+                onChange={(event) =>
+                  update("supports_vision", event.target.checked)
+                }
+                type="checkbox"
+              />
+              <span>支持识图 / 多模态</span>
+            </label>
+            <label className={CHECKBOX_LABEL_CLASS}>
+              <input
+                checked={values.visible_to_users}
+                className={CHECKBOX_INPUT_CLASS}
+                onChange={(event) =>
+                  update("visible_to_users", event.target.checked)
+                }
+                type="checkbox"
+              />
+              <span>对普通用户可见</span>
             </label>
           </div>
           <FieldError
@@ -465,17 +659,159 @@ export function ModelProfileCreateDialog({
           />
         </fieldset>
 
-        {mutation.isPending ? (
+        {editing && profile ? (
+          <p className="text-xs leading-[1.65] text-text-tertiary">
+            本次提交的 expected_version：{profile.version}
+          </p>
+        ) : null}
+        {pending ? (
           <p className={NOTICE_BRAND_CLASS} role="status">
-            正在创建不可变模型版本…
+            {editing ? "正在保存模型配置…" : "正在创建模型版本…"}
           </p>
         ) : null}
         {requestError ? (
-          <InlineAlert size="compact" variant="danger">
+          <InlineAlert
+            action={
+              versionConflict ? (
+                <button
+                  className={TEXT_BUTTON_CLASS}
+                  onClick={() => void handleRefreshLatest()}
+                  type="button"
+                >
+                  刷新最新配置
+                </button>
+              ) : undefined
+            }
+            size="compact"
+            variant="danger"
+          >
             {requestError}
           </InlineAlert>
         ) : null}
       </form>
+    </Modal>
+  );
+}
+
+interface ModelProfileCreateDialogProps {
+  onClose: () => void;
+  onCreated: () => void;
+  open: boolean;
+}
+
+export function ModelProfileCreateDialog({
+  onClose,
+  onCreated,
+  open,
+}: ModelProfileCreateDialogProps) {
+  return (
+    <ModelProfileFormDialog
+      onClose={onClose}
+      onCreated={onCreated}
+      open={open}
+    />
+  );
+}
+
+interface ModelProfileEditDialogProps {
+  onClose: () => void;
+  onRefreshProfiles: () => Promise<unknown>;
+  open: boolean;
+  profile: ModelProfile;
+}
+
+export function ModelProfileEditDialog({
+  onClose,
+  onRefreshProfiles,
+  open,
+  profile,
+}: ModelProfileEditDialogProps) {
+  return (
+    <ModelProfileFormDialog
+      onClose={onClose}
+      onRefreshProfiles={onRefreshProfiles}
+      open={open}
+      profile={profile}
+    />
+  );
+}
+
+interface DeleteModelProfileDialogProps {
+  onClose: () => void;
+  open: boolean;
+  profile: ModelProfile;
+}
+
+export function DeleteModelProfileDialog({
+  onClose,
+  open,
+  profile,
+}: DeleteModelProfileDialogProps) {
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const mutation = useDeleteModelProfileMutation();
+  const { reset: resetMutation } = mutation;
+
+  useEffect(() => {
+    if (open) {
+      setRequestError(null);
+      resetMutation();
+    }
+  }, [open, profile.id, resetMutation]);
+
+  const close = () => {
+    if (!mutation.isPending) {
+      onClose();
+    }
+  };
+
+  const handleDelete = async () => {
+    setRequestError(null);
+    try {
+      await mutation.mutateAsync(profile.id);
+      onClose();
+    } catch (failure) {
+      setRequestError(adminErrorMessage(failure));
+    }
+  };
+
+  return (
+    <Modal
+      closeDisabled={mutation.isPending}
+      description="删除后该模型配置将从管理目录与用户模型列表中移除，历史运行记录不受影响。"
+      footer={
+        <>
+          <Button
+            disabled={mutation.isPending}
+            onClick={close}
+            type="button"
+            variant="outline"
+          >
+            取消
+          </Button>
+          <Button
+            disabled={mutation.isPending}
+            onClick={() => void handleDelete()}
+            type="button"
+            variant="danger"
+          >
+            {mutation.isPending ? "正在删除…" : "确认删除"}
+          </Button>
+        </>
+      }
+      onClose={close}
+      open={open}
+      title={`删除模型「${profile.name}」`}
+    >
+      <p className={CONFIRM_COPY_CLASS}>
+        确认删除模型配置 <code>{profile.model}</code>（v{profile.version}）吗？若该模型正被默认模型、压缩策略或活跃子智能体引用，后端将拒绝删除。
+      </p>
+      {requestError ? (
+        <div className="mt-3">
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        </div>
+      ) : null}
     </Modal>
   );
 }
@@ -698,40 +1034,37 @@ export function CompressionPolicyDialog({
             当前没有已启用的模型版本，不能保存压缩策略。
           </p>
         ) : null}
-        <label
-          className={FIELD_CLASS}
-          htmlFor={`${formId}-compression-model`}
-        >
-          <span>压缩模型</span>
-          <select
-            aria-describedby={
-              errors.compression_model_profile_id
-                ? `${formId}-compression-model-error`
-                : undefined
-            }
-            aria-invalid={Boolean(
-              errors.compression_model_profile_id,
-            )}
-            className={FIELD_SELECT_CLASS}
+        <div className={FIELD_CLASS}>
+          <label htmlFor={`${formId}-compression-model`}>压缩模型</label>
+          <Select
             disabled={mutation.isPending}
-            id={`${formId}-compression-model`}
-            onChange={(event) =>
-              update(
-                "compression_model_profile_id",
-                event.target.value,
-              )
+            onValueChange={(value) =>
+              update("compression_model_profile_id", value)
             }
             value={values.compression_model_profile_id}
           >
-            <option value="">请选择已启用模型</option>
-            {enabledProfiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.name} · {profile.model}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger
+              aria-describedby={
+                errors.compression_model_profile_id
+                  ? `${formId}-compression-model-error`
+                  : undefined
+              }
+              aria-label="压缩模型"
+              error={Boolean(errors.compression_model_profile_id)}
+              id={`${formId}-compression-model`}
+            >
+              <SelectValue placeholder="请选择已启用模型" />
+            </SelectTrigger>
+            <SelectContent>
+              {enabledProfiles.map((profile) => (
+                <SelectItem key={profile.id} value={profile.id}>
+                  {profile.name} · {profile.model}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <small>只列出当前 enabled=true 的模型版本。</small>
-        </label>
+        </div>
         <FieldError
           error={errors.compression_model_profile_id}
           id={`${formId}-compression-model-error`}

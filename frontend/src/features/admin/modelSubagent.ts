@@ -1,8 +1,11 @@
 import type { ApiSchemas } from "../../shared/api/client";
+import { normalizeVisibilityGrants } from "../access/visibilityGrants";
+import type { VisibilityGrantInput } from "../knowledge/model";
 import { parseInteger, unicodeLength, type FieldErrors } from "./modelShared";
 
 // 直连 OpenAPI Subagent 管理与可用工具目录契约。
 export type SubagentProfile = ApiSchemas["SubagentResponse"];
+export type SubagentVisibilityScope = SubagentProfile["visibility_scope"];
 export type SubagentListResponse = ApiSchemas["SubagentListResponse"];
 export type SubagentCreateInput = ApiSchemas["SubagentCreateRequest"];
 export type SubagentUpdateInput = ApiSchemas["SubagentUpdateRequest"];
@@ -22,6 +25,9 @@ export interface SubagentFormValues {
   enabled: boolean;
   max_llm_requests: string;
   timeout_seconds: string;
+  visibility_scope: SubagentVisibilityScope;
+  owner_department_id: string;
+  visibility_grants: VisibilityGrantInput[];
 }
 
 export type SubagentField =
@@ -32,7 +38,8 @@ export type SubagentField =
   | "model_profile_id"
   | "allowed_tool_ids"
   | "max_llm_requests"
-  | "timeout_seconds";
+  | "timeout_seconds"
+  | "owner_department_id";
 
 export const SUBAGENT_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]$/;
 export const MAX_SUBAGENT_NAME_LENGTH = 100;
@@ -74,7 +81,7 @@ function hasDisallowedSubagentControlCharacter(
   return false;
 }
 
-/** 构造新建或编辑 Subagent 表单初始值（深拷贝工具白名单数组）。 */
+/** 构造新建或编辑 Subagent 表单初始值（深拷贝工具白名单与可见性授权数组）。 */
 export function subagentForm(profile?: SubagentProfile): SubagentFormValues {
   if (!profile) {
     return {
@@ -87,8 +94,12 @@ export function subagentForm(profile?: SubagentProfile): SubagentFormValues {
       enabled: true,
       max_llm_requests: "",
       timeout_seconds: "",
+      visibility_scope: "company",
+      owner_department_id: "",
+      visibility_grants: [],
     };
   }
+  const ownerDeptId = profile.owner_department_id ?? "";
   return {
     slug: profile.slug,
     name: profile.name,
@@ -101,6 +112,12 @@ export function subagentForm(profile?: SubagentProfile): SubagentFormValues {
       profile.max_llm_requests === null ? "" : String(profile.max_llm_requests),
     timeout_seconds:
       profile.timeout_seconds === null ? "" : String(profile.timeout_seconds),
+    visibility_scope: profile.visibility_scope,
+    owner_department_id: ownerDeptId,
+    visibility_grants:
+      profile.visibility_scope === "department" && ownerDeptId
+        ? normalizeVisibilityGrants(ownerDeptId, profile.visibility_grants, true)
+        : [],
   };
 }
 
@@ -186,9 +203,31 @@ export function validateSubagentForm(values: SubagentFormValues): {
     }
   }
 
+  const trimmedOwnerDeptId = values.owner_department_id.trim();
+  if (values.visibility_scope === "department" && !trimmedOwnerDeptId) {
+    errors.owner_department_id = "请选择部门共享子智能体的归属部门。";
+  }
+
   if (Object.keys(errors).length > 0) {
     return { errors, createInput: null };
   }
+
+  const visibilityPayload =
+    values.visibility_scope === "department"
+      ? {
+          visibility_scope: "department" as const,
+          owner_department_id: trimmedOwnerDeptId,
+          visibility_grants: normalizeVisibilityGrants(
+            trimmedOwnerDeptId,
+            values.visibility_grants,
+            true,
+          ),
+        }
+      : {
+          visibility_scope: "company" as const,
+          owner_department_id: null,
+          visibility_grants: [] as VisibilityGrantInput[],
+        };
 
   return {
     errors,
@@ -203,6 +242,7 @@ export function validateSubagentForm(values: SubagentFormValues): {
       enabled: values.enabled,
       max_llm_requests: maxLlmRequests,
       timeout_seconds: timeoutSeconds,
+      ...visibilityPayload,
     },
   };
 }

@@ -209,6 +209,9 @@ describe("管理子智能体页", () => {
         enabled: true,
         max_llm_requests: null,
         timeout_seconds: null,
+        visibility_scope: "company",
+        owner_department_id: null,
+        visibility_grants: [],
       });
     });
 
@@ -573,5 +576,372 @@ describe("管理子智能体页", () => {
       "li",
     ) as HTMLElement;
     expect(within(row).getByText("全公司")).toBeInTheDocument();
+  });
+
+  it("支持选择具体绑定模型、拦截已停用模型选项，并支持切回跟随系统默认提交 null", async () => {
+    const MODEL_B = makeModelProfile({
+      id: "model-2",
+      name: "推理模型",
+      model: "o3-mini",
+      enabled: true,
+    });
+    const MODEL_DISABLED = makeModelProfile({
+      id: "model-disabled",
+      name: "已停用旧模型",
+      model: "gpt-3.5",
+      enabled: false,
+    });
+    const createdSubagent = makeSubagent({
+      id: "subagent-model",
+      slug: "reasoning_helper",
+      name: "推理助手",
+      model_profile_id: MODEL_B.id,
+      version: 1,
+    });
+
+    let currentItems: SubagentProfile[] = [];
+    let createdPayload: Record<string, unknown> | null = null;
+    let patchedPayload: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/llm/model-profiles") {
+          return jsonResponse({
+            items: [MODEL_A, MODEL_B, MODEL_DISABLED],
+            default_profile_id: MODEL_A.id,
+          });
+        }
+        if (url.pathname === "/api/v1/admin/subagents/available-tools") {
+          return jsonResponse(AVAILABLE_TOOLS);
+        }
+        if (
+          url.pathname === "/api/v1/admin/subagents" &&
+          method === "GET"
+        ) {
+          return jsonResponse({
+            items: currentItems,
+            total: currentItems.length,
+            offset: 0,
+            limit: 10,
+          });
+        }
+        if (
+          url.pathname === "/api/v1/admin/subagents" &&
+          method === "POST"
+        ) {
+          createdPayload = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          currentItems = [createdSubagent];
+          return jsonResponse(createdSubagent, 201);
+        }
+        if (
+          url.pathname === `/api/v1/admin/subagents/${createdSubagent.id}` &&
+          method === "GET"
+        ) {
+          return jsonResponse(createdSubagent);
+        }
+        if (
+          url.pathname === `/api/v1/admin/subagents/${createdSubagent.id}` &&
+          method === "PATCH"
+        ) {
+          patchedPayload = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          const updated = makeSubagent({
+            ...createdSubagent,
+            model_profile_id: null,
+            version: 2,
+          });
+          currentItems = [updated];
+          return jsonResponse(updated);
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/subagents");
+
+    await user.click(
+      await screen.findByRole("button", { name: "新建子智能体" }),
+    );
+    const createDialog = await screen.findByRole("dialog", {
+      name: "新建子智能体",
+    });
+
+    await user.type(
+      within(createDialog).getByLabelText("Slug 标识"),
+      "reasoning_helper",
+    );
+    await user.type(within(createDialog).getByLabelText("显示名称"), "推理助手");
+    await user.type(
+      within(createDialog).getByLabelText("能力描述"),
+      "处理复杂推理任务。",
+    );
+    await user.type(
+      within(createDialog).getByLabelText("System Prompt"),
+      "你是一名推理助手。",
+    );
+
+    const createModelTrigger = within(createDialog).getByRole("combobox", {
+      name: "绑定模型",
+    });
+    await waitFor(() => expect(createModelTrigger).not.toBeDisabled());
+    expect(createModelTrigger).toHaveTextContent("跟随系统默认");
+
+    await user.click(createModelTrigger);
+    const disabledOption = screen.getByRole("option", {
+      name: /已停用旧模型.*（已停用）/,
+    });
+    expect(disabledOption).toHaveAttribute("aria-disabled", "true");
+    await user.click(disabledOption);
+    // 已停用选项不可被选中，列表仍保持打开或未选中该项。
+    expect(createModelTrigger).toHaveTextContent("跟随系统默认");
+
+    await user.click(
+      screen.getByRole("option", { name: new RegExp(MODEL_B.name) }),
+    );
+    expect(createModelTrigger).toHaveTextContent(MODEL_B.name);
+
+    await user.click(
+      within(createDialog).getByRole("button", { name: "创建子智能体" }),
+    );
+    await waitFor(() => {
+      expect(createdPayload).toMatchObject({
+        model_profile_id: MODEL_B.id,
+      });
+    });
+
+    // 编辑已绑定具体模型的子智能体，切回“跟随系统默认”后应提交 model_profile_id: null。
+    await user.click(
+      await screen.findByRole("button", { name: "编辑子智能体：推理助手" }),
+    );
+    const editDialog = await screen.findByRole("dialog", {
+      name: "编辑子智能体",
+    });
+    const editModelTrigger = within(editDialog).getByRole("combobox", {
+      name: "绑定模型",
+    });
+    await waitFor(() => {
+      expect(editModelTrigger).not.toBeDisabled();
+      expect(editModelTrigger).toHaveTextContent(MODEL_B.name);
+    });
+
+    await user.click(editModelTrigger);
+    await user.click(screen.getByRole("option", { name: "跟随系统默认" }));
+    expect(editModelTrigger).toHaveTextContent("跟随系统默认");
+
+    await user.click(
+      within(editDialog).getByRole("button", { name: "保存修改" }),
+    );
+    await waitFor(() => {
+      expect(patchedPayload).toMatchObject({
+        model_profile_id: null,
+      });
+    });
+  });
+
+  it("支持配置部门共享可见范围、附加授权并映射展示部门中文名", async () => {
+    let currentItems: SubagentProfile[] = [];
+    let createdPayload: Record<string, unknown> | null = null;
+    let patchedPayload: Record<string, unknown> | null = null;
+    const deptSubagent = makeSubagent({
+      id: "subagent-dept",
+      slug: "fin_auditor",
+      name: "财务审计助手",
+      visibility_scope: "department",
+      owner_department_id: "dept-fin",
+      visibility_grants: [
+        {
+          id: "grant-1",
+          target_type: "department",
+          target_id: "dept-fin",
+          include_subdepartments: true,
+          created_at: "2026-11-20T00:00:00Z",
+        },
+      ],
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/org/departments") {
+          return jsonResponse({
+            items: [
+              {
+                id: "dept-fin",
+                name: "财务部",
+                parent_id: null,
+                status: "active",
+                path_ids: ["dept-fin"],
+              },
+              {
+                id: "dept-rd",
+                name: "研发中心",
+                parent_id: null,
+                status: "active",
+                path_ids: ["dept-rd"],
+              },
+            ],
+          });
+        }
+        if (url.pathname === "/api/v1/admin/llm/model-profiles") {
+          return jsonResponse({
+            items: [MODEL_A],
+            default_profile_id: MODEL_A.id,
+          });
+        }
+        if (url.pathname === "/api/v1/admin/subagents/available-tools") {
+          return jsonResponse(AVAILABLE_TOOLS);
+        }
+        if (url.pathname === "/api/v1/admin/subagents" && method === "GET") {
+          return jsonResponse({
+            items: currentItems,
+            total: currentItems.length,
+            offset: 0,
+            limit: 10,
+          });
+        }
+        if (url.pathname === "/api/v1/admin/subagents" && method === "POST") {
+          createdPayload = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          currentItems = [deptSubagent];
+          return jsonResponse(deptSubagent, 201);
+        }
+        if (
+          url.pathname === `/api/v1/admin/subagents/${deptSubagent.id}` &&
+          method === "GET"
+        ) {
+          return jsonResponse(deptSubagent);
+        }
+        if (
+          url.pathname === `/api/v1/admin/subagents/${deptSubagent.id}` &&
+          method === "PATCH"
+        ) {
+          patchedPayload = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          const updated = makeSubagent({
+            ...deptSubagent,
+            visibility_scope: "company",
+            owner_department_id: null,
+            visibility_grants: [],
+            version: 2,
+          });
+          currentItems = [updated];
+          return jsonResponse(updated);
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/subagents");
+
+    await user.click(
+      await screen.findByRole("button", { name: "新建子智能体" }),
+    );
+    const createDialog = await screen.findByRole("dialog", {
+      name: "新建子智能体",
+    });
+
+    await user.type(
+      within(createDialog).getByLabelText("Slug 标识"),
+      "fin_auditor",
+    );
+    await user.type(
+      within(createDialog).getByLabelText("显示名称"),
+      "财务审计助手",
+    );
+    await user.type(
+      within(createDialog).getByLabelText("能力描述"),
+      "财务凭证审计。",
+    );
+    await user.type(
+      within(createDialog).getByLabelText("System Prompt"),
+      "你是财务审计专家。",
+    );
+
+    await user.click(
+      within(createDialog).getByRole("combobox", { name: "可见范围" }),
+    );
+    await user.click(screen.getByRole("option", { name: "部门共享" }));
+
+    const deptCombo = await within(createDialog).findByRole("combobox", {
+      name: "归属部门",
+    });
+    await user.click(deptCombo);
+    await user.click(screen.getByRole("option", { name: "财务部" }));
+
+    expect(
+      await within(createDialog).findByText("归属部门（默认）"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(createDialog).getByRole("button", { name: "创建子智能体" }),
+    );
+    await waitFor(() => {
+      expect(createdPayload).toMatchObject({
+        visibility_scope: "department",
+        owner_department_id: "dept-fin",
+        visibility_grants: [
+          {
+            target_type: "department",
+            target_id: "dept-fin",
+            include_subdepartments: true,
+          },
+        ],
+      });
+    });
+
+    const card = (await screen.findByText("财务审计助手")).closest(
+      "li",
+    ) as HTMLElement;
+    expect(await within(card).findByText("财务部")).toBeInTheDocument();
+
+    // 编辑并切换回全公司可见
+    await user.click(
+      within(card).getByRole("button", { name: "编辑子智能体：财务审计助手" }),
+    );
+    const editDialog = await screen.findByRole("dialog", {
+      name: "编辑子智能体",
+    });
+    await waitFor(() => {
+      expect(within(editDialog).getByLabelText("显示名称")).toHaveValue(
+        "财务审计助手",
+      );
+    });
+    await user.click(
+      within(editDialog).getByRole("combobox", { name: "可见范围" }),
+    );
+    await user.click(screen.getByRole("option", { name: "全公司" }));
+
+    await user.click(
+      within(editDialog).getByRole("button", { name: "保存修改" }),
+    );
+    await waitFor(() => {
+      expect(patchedPayload).toMatchObject({
+        visibility_scope: "company",
+        owner_department_id: null,
+        visibility_grants: [],
+      });
+    });
   });
 });

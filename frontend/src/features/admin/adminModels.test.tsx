@@ -382,7 +382,7 @@ describe("管理模型页", () => {
     );
     await user.click(
       within(dialog).getByRole("button", {
-        name: "创建不可变版本",
+        name: "创建模型版本",
       }),
     );
 
@@ -453,8 +453,11 @@ describe("管理模型页", () => {
     ).toHaveLength(3);
     expect(screen.getByText("当前默认")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /编辑模型|删除模型/ }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: `编辑配置：${PRIMARY.name}` }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: `删除模型：${PRIMARY.name}` }),
+    ).toBeInTheDocument();
 
     const noToolsCard = screen
       .getByRole("heading", { name: NO_TOOLS.name })
@@ -599,8 +602,22 @@ describe("管理模型页", () => {
       "http://llm.example/v1",
     );
     const apiKey = within(dialog).getByLabelText(/^API Key/);
+    await user.type(
+      within(dialog).getByLabelText("场景标签（可选）"),
+      "专业审核",
+    );
+    await user.type(
+      within(dialog).getByLabelText("场景说明（可选）"),
+      "用于多模态文档核验。",
+    );
     await user.click(
       within(dialog).getByRole("checkbox", { name: "支持工具调用" }),
+    );
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "支持识图 / 多模态" }),
+    );
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "对普通用户可见" }),
     );
     expect(
       within(dialog).getByRole("checkbox", {
@@ -609,7 +626,7 @@ describe("管理模型页", () => {
     ).toBeDisabled();
     await user.click(
       within(dialog).getByRole("button", {
-        name: "创建不可变版本",
+        name: "创建模型版本",
       }),
     );
 
@@ -644,7 +661,7 @@ describe("管理模型页", () => {
     await user.type(context, "100");
     await user.click(
       within(dialog).getByRole("button", {
-        name: "创建不可变版本",
+        name: "创建模型版本",
       }),
     );
     expect(
@@ -657,7 +674,7 @@ describe("管理模型页", () => {
     await user.type(context, "128000");
     await user.click(
       within(dialog).getByRole("button", {
-        name: "创建不可变版本",
+        name: "创建模型版本",
       }),
     );
 
@@ -678,8 +695,12 @@ describe("管理模型页", () => {
       api_key: "test-key",
       model: "atlas-review",
       name: "审核模型",
+      scenario_label: "专业审核",
+      scenario_description: "用于多模态文档核验。",
       supports_parallel_tool_calls: false,
       supports_tools: true,
+      supports_vision: true,
+      visible_to_users: false,
     });
   });
 
@@ -743,18 +764,20 @@ describe("管理模型页", () => {
     const dialog = screen.getByRole("dialog", {
       name: "配置上下文压缩",
     });
-    const modelSelect = within(dialog).getByLabelText(/^压缩模型/);
+    const modelSelect = within(dialog).getByRole("combobox", {
+      name: "压缩模型",
+    });
+    await user.click(modelSelect);
+    const primaryOption = screen.getByRole("option", {
+      name: new RegExp(PRIMARY.name),
+    });
+    expect(primaryOption).toBeInTheDocument();
     expect(
-      within(modelSelect).getByRole("option", {
-        name: new RegExp(PRIMARY.name),
-      }),
-    ).toBeInTheDocument();
-    expect(
-      within(modelSelect).queryByRole("option", {
+      screen.queryByRole("option", {
         name: new RegExp(DISABLED.name),
       }),
     ).not.toBeInTheDocument();
-    await user.selectOptions(modelSelect, PRIMARY.id);
+    await user.click(primaryOption);
 
     const triggerTokens = within(dialog).getByLabelText("触发 Token");
     const recent = within(dialog).getByLabelText("近期原文比例");
@@ -903,5 +926,203 @@ describe("管理模型页", () => {
     expect(within(card).getByText("综合办公")).toBeInTheDocument();
     expect(within(card).getByText("仅内部使用")).toBeInTheDocument();
     expect(within(card).getByText("识图")).toBeInTheDocument();
+  });
+
+  it("支持局部编辑模型配置：留空 API Key 保留原密文并处理 409 版本冲突", async () => {
+    let profile = makeModelProfile({
+      id: "model-editable",
+      name: "日常模型",
+      scenario_label: "日常办公",
+      scenario_description: "旧场景说明",
+      supports_vision: false,
+      visible_to_users: true,
+      version: 1,
+    });
+    let listCalls = 0;
+    let patchCalls = 0;
+    const patchBodies: Array<Record<string, unknown>> = [];
+
+    vi.stubGlobal(
+      "fetch",
+      baseFetch((url, init) => {
+        if (
+          url.pathname === "/api/v1/admin/llm/model-profiles" &&
+          (!init?.method || init.method === "GET")
+        ) {
+          listCalls += 1;
+          if (listCalls >= 2 && patchCalls === 1) {
+            profile = {
+              ...profile,
+              name: "日常模型 v2",
+              version: 2,
+            };
+          }
+          return jsonResponse({
+            default_profile_id: profile.id,
+            items: [profile],
+          });
+        }
+        if (
+          url.pathname ===
+            `/api/v1/admin/llm/model-profiles/${profile.id}` &&
+          init?.method === "PATCH"
+        ) {
+          patchCalls += 1;
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          patchBodies.push(body);
+          if (patchCalls === 1) {
+            return jsonResponse(
+              { detail: "model_profile_version_conflict" },
+              409,
+            );
+          }
+          profile = {
+            ...profile,
+            scenario_label: (body.scenario_label as string | null) ?? null,
+            scenario_description:
+              (body.scenario_description as string | null) ?? null,
+            supports_vision: Boolean(body.supports_vision),
+            visible_to_users: Boolean(body.visible_to_users),
+            version: 3,
+          };
+          return jsonResponse(profile);
+        }
+        if (url.pathname === "/api/v1/admin/llm/compression-policy") {
+          return jsonResponse(makeCompressionPolicy());
+        }
+        return null;
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/models");
+
+    await user.click(
+      await screen.findByRole("button", { name: "编辑配置：日常模型" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "编辑模型配置" });
+    expect(within(dialog).getByLabelText(/^API Key/)).toHaveValue("");
+    expect(
+      within(dialog).getByText("本次提交的 expected_version：1"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "保存修改" }),
+    );
+    expect(
+      await within(dialog).findByText(
+        "模型配置已被其他管理员修改，请刷新最新配置后重试。",
+      ),
+    ).toBeInTheDocument();
+    expect(patchBodies[0]).not.toHaveProperty("api_key");
+    expect(patchBodies[0].expected_version).toBe(1);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "刷新最新配置" }),
+    );
+    await waitFor(() => {
+      expect(within(dialog).getByLabelText("版本名称")).toHaveValue(
+        "日常模型 v2",
+      );
+      expect(
+        within(dialog).getByText("本次提交的 expected_version：2"),
+      ).toBeInTheDocument();
+    });
+
+    const labelInput = within(dialog).getByLabelText("场景标签（可选）");
+    await user.clear(labelInput);
+    await user.type(labelInput, "新版办公");
+    const descInput = within(dialog).getByLabelText("场景说明（可选）");
+    await user.clear(descInput);
+    await user.click(
+      within(dialog).getByRole("checkbox", { name: "支持识图 / 多模态" }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "保存修改" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "编辑模型配置" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(patchBodies[1]).toMatchObject({
+      expected_version: 2,
+      scenario_label: "新版办公",
+      scenario_description: null,
+      supports_vision: true,
+    });
+    expect(patchBodies[1]).not.toHaveProperty("api_key");
+    expect(await screen.findByText("新版办公")).toBeInTheDocument();
+  });
+
+  it("支持删除模型并展示 409 强引用冲突中文提示", async () => {
+    const deletable = makeModelProfile({
+      id: "model-deletable",
+      name: "待清理模型",
+      model: "atlas-old",
+    });
+    let profiles = [PRIMARY, deletable];
+    let deleteCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      baseFetch((url, init) => {
+        if (
+          url.pathname === "/api/v1/admin/llm/model-profiles" &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return jsonResponse({
+            default_profile_id: PRIMARY.id,
+            items: profiles,
+          });
+        }
+        if (
+          url.pathname ===
+            `/api/v1/admin/llm/model-profiles/${deletable.id}` &&
+          init?.method === "DELETE"
+        ) {
+          deleteCalls += 1;
+          if (deleteCalls === 1) {
+            return jsonResponse(
+              { detail: "model_profile_in_use_by_subagent" },
+              409,
+            );
+          }
+          profiles = [PRIMARY];
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === "/api/v1/admin/llm/compression-policy") {
+          return jsonResponse(makeCompressionPolicy());
+        }
+        return null;
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/models");
+
+    await user.click(
+      await screen.findByRole("button", { name: `删除模型：${deletable.name}` }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: `删除模型「${deletable.name}」`,
+    });
+    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
+    expect(
+      await within(dialog).findByText(
+        "该模型仍被子智能体绑定，请先解除绑定后再删除。",
+      ),
+    ).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: `删除模型「${deletable.name}」` }),
+      ).not.toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("heading", { name: deletable.name }),
+    ).not.toBeInTheDocument();
   });
 });

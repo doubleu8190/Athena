@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
@@ -32,8 +32,10 @@ import {
 import { EmptyState } from "../../shared/ui/EmptyState";
 import {
   CompressionPolicyDialog,
+  DeleteModelProfileDialog,
   DisableDefaultModelDialog,
   ModelProfileCreateDialog,
+  ModelProfileEditDialog,
 } from "./ModelProfileDialogs";
 import { AdminPagination, lastPageNumber } from "./AdminPagination";
 import {
@@ -81,11 +83,18 @@ export function AdminModelsPage() {
   const enabledMutation = useSetModelProfileEnabledMutation();
   const defaultMutation = useSetDefaultModelProfileMutation();
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [modelPage, setModelPage] = useState(1);
   const [compressionOpen, setCompressionOpen] = useState(false);
   const [disableTarget, setDisableTarget] =
     useState<ModelProfile | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const editingProfile =
+    profiles.data?.items.find((item) => item.id === editingProfileId) ?? null;
+  const deleteTarget =
+    profiles.data?.items.find((item) => item.id === deleteTargetId) ?? null;
 
   // 默认版本始终置顶；其余版本在前端按创建时间倒序，后端继续返回完整列表。
   const sortedProfiles = profiles.data
@@ -345,7 +354,23 @@ export function AdminModelsPage() {
                       </div>
                     </dl>
 
-                    <footer className={ADMIN_CARD_ACTIONS_CLASS}>
+                    <footer className={cn(ADMIN_CARD_ACTIONS_CLASS, "flex-wrap")}>
+                      <Button
+                        aria-label={`编辑配置：${profile.name}`}
+                        disabled={actionPending}
+                        onClick={() => setEditingProfileId(profile.id)}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        <Pencil
+                          aria-hidden="true"
+                          focusable="false"
+                          size={14}
+                          strokeWidth={1.7}
+                        />
+                        编辑配置
+                      </Button>
                       <Button
                         disabled={actionPending}
                         onClick={() => void handleEnabledChange(profile)}
@@ -385,6 +410,22 @@ export function AdminModelsPage() {
                             : "设为默认"}
                         </Button>
                       )}
+                      <Button
+                        aria-label={`删除模型：${profile.name}`}
+                        disabled={actionPending}
+                        onClick={() => setDeleteTargetId(profile.id)}
+                        size="sm"
+                        type="button"
+                        variant="danger-outline"
+                      >
+                        <Trash2
+                          aria-hidden="true"
+                          focusable="false"
+                          size={14}
+                          strokeWidth={1.7}
+                        />
+                        删除
+                      </Button>
                     </footer>
                   </li>
                 );
@@ -551,6 +592,21 @@ export function AdminModelsPage() {
         }}
         open={createOpen}
       />
+      {editingProfile ? (
+        <ModelProfileEditDialog
+          onClose={() => setEditingProfileId(null)}
+          onRefreshProfiles={() => profiles.refetch()}
+          open
+          profile={editingProfile}
+        />
+      ) : null}
+      {deleteTarget ? (
+        <DeleteModelProfileDialog
+          onClose={() => setDeleteTargetId(null)}
+          open
+          profile={deleteTarget}
+        />
+      ) : null}
       {disableTarget ? (
         <DisableDefaultModelDialog
           onClose={() => setDisableTarget(null)}

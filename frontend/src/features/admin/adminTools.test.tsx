@@ -98,8 +98,11 @@ describe("管理工具页", () => {
       }),
     ).toHaveAttribute("aria-checked", "false");
     expect(
-      screen.queryByRole("button", { name: /批量/ }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "批量开启审批" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "批量关闭审批" }),
+    ).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: "下一页" }));
     expect(await screen.findByText(TOOL_B.model_name)).toBeInTheDocument();
@@ -360,5 +363,182 @@ describe("管理工具页", () => {
 
     expect(await screen.findByText("文档检索工具")).toBeInTheDocument();
     expect(screen.getByText(TOOL_A.model_name)).toBeInTheDocument();
+  });
+
+  it("支持编辑工具业务展示元信息，一键带入 Schema 参数与占位符", async () => {
+    let tool = makeAdminTool({
+      approval_summary_template: null,
+      display_name: null,
+      input_schema: {
+        type: "object",
+        properties: {
+          payee: { type: "string" },
+          amount: { type: "number" },
+        },
+      },
+      model_name: "mcp__11111111111111111111111111111111",
+      parameter_labels: {},
+      remote_name: "pay_invoice",
+      tool_id: "tool-pay",
+    });
+    let patchedBody: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/tools" && method === "GET") {
+          return jsonResponse(listResponse([tool], 1, 20, 1));
+        }
+        if (
+          url.pathname === `/api/v1/admin/tools/${tool.tool_id}` &&
+          method === "PATCH"
+        ) {
+          patchedBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          tool = {
+            ...tool,
+            display_name: (patchedBody.display_name as string | null) ?? null,
+            approval_summary_template:
+              (patchedBody.approval_summary_template as string | null) ?? null,
+            parameter_labels:
+              (patchedBody.parameter_labels as Record<string, string>) ?? {},
+          };
+          return jsonResponse(tool);
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/tools");
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: `编辑业务展示：${tool.model_name}`,
+      }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "编辑工具业务展示" });
+
+    await user.type(
+      within(dialog).getByLabelText("中文展示名（可选）"),
+      "发起付款",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "{payee}" }));
+    await user.click(within(dialog).getByRole("button", { name: "{amount}" }));
+    expect(
+      within(dialog).getByLabelText("审批摘要模板（可选）"),
+    ).toHaveValue("{payee} {amount}");
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "一键带入 Schema 参数" }),
+    );
+    expect(within(dialog).getByLabelText("参数键名 1")).toHaveValue("payee");
+    expect(within(dialog).getByLabelText("参数键名 2")).toHaveValue("amount");
+    await user.type(within(dialog).getByLabelText("中文标签 1"), "收款人");
+    await user.type(within(dialog).getByLabelText("中文标签 2"), "付款金额");
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "保存业务展示" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "编辑工具业务展示" }),
+      ).not.toBeInTheDocument();
+    });
+
+    expect(patchedBody).toEqual({
+      display_name: "发起付款",
+      approval_summary_template: "{payee} {amount}",
+      parameter_labels: {
+        payee: "收款人",
+        amount: "付款金额",
+      },
+    });
+    expect(await screen.findByText("发起付款")).toBeInTheDocument();
+    expect(
+      screen.getByText("payee: 收款人、amount: 付款金额"),
+    ).toBeInTheDocument();
+  });
+
+  it("支持全选当前页与批量开启审批，提交期间锁定控件并刷新目录", async () => {
+    const batchGate = deferred<Response>();
+    let toolsList = [TOOL_A, TOOL_B];
+    let batchBody: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/tools" && method === "GET") {
+          return jsonResponse(listResponse(toolsList, 1, 20, 2));
+        }
+        if (
+          url.pathname === "/api/v1/admin/tools/batch-approval" &&
+          method === "PATCH"
+        ) {
+          batchBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          const response = await batchGate.promise;
+          return response;
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/tools");
+
+    await screen.findByText(TOOL_A.model_name);
+    const selectAll = screen.getByRole("checkbox", { name: "全选当前页工具" });
+    await user.click(selectAll);
+    expect(screen.getByText("已选 2 项")).toBeInTheDocument();
+
+    const batchEnableBtn = screen.getByRole("button", { name: "批量开启审批" });
+    expect(batchEnableBtn).toBeEnabled();
+    await user.click(batchEnableBtn);
+
+    expect(
+      await screen.findByText(/正在批量保存工具审批策略/),
+    ).toBeInTheDocument();
+    expect(batchEnableBtn).toBeDisabled();
+    expect(
+      screen.getByRole("switch", { name: `${TOOL_A.model_name} 需要审批` }),
+    ).toBeDisabled();
+
+    const updatedItems = [
+      { ...TOOL_A, requires_approval: true },
+      { ...TOOL_B, requires_approval: true },
+    ];
+    toolsList = updatedItems;
+    batchGate.resolve(
+      jsonResponse({
+        items: updatedItems,
+        updated_count: 2,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("已选 0 项")).toBeInTheDocument();
+      expect(
+        screen.getByRole("switch", { name: `${TOOL_A.model_name} 需要审批` }),
+      ).toHaveAttribute("aria-checked", "true");
+    });
+    expect(batchBody).toEqual({
+      requires_approval: true,
+      tool_ids: [TOOL_A.tool_id, TOOL_B.tool_id],
+    });
   });
 });

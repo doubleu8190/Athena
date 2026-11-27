@@ -11,9 +11,12 @@ import {
   isAuthIdentityCurrent,
 } from "../../shared/api/client";
 import {
+  batchUpdateAdminToolApproval,
   createMcpServer,
   createModelProfile,
   createSubagent,
+  deleteMcpServer,
+  deleteModelProfile,
   deleteSubagent,
   getCompressionPolicy,
   getMcpServer,
@@ -27,25 +30,36 @@ import {
   listSubagentAvailableTools,
   listSubagents,
   listSystemPromptVersions,
+  patchMcpServer,
+  rediscoverMcpServer,
   restoreSystemPrompt,
   saveSystemPrompt,
   setDefaultModelProfile,
+  setMcpServerEnabled,
   setModelProfileEnabled,
   setSubagentEnabled,
+  updateAdminToolMetadata,
   updateCompressionPolicy,
   updateMcpServer,
+  updateModelProfile,
   updateSubagent,
   updateToolApprovalPolicy,
 } from "./api";
 import type {
   AdminPageQuery,
   AdminTool,
+  AdminToolBatchApprovalInput,
   AdminToolListResponse,
+  AdminToolUpdateInput,
   CompressionPolicyInput,
+  McpServer,
+  McpServerEnabledInput,
+  McpServerPatchInput,
   McpServerUpdateInput,
   McpServerWriteInput,
   ModelProfile,
   ModelProfileCreateInput,
+  ModelProfileUpdateInput,
   SubagentCreateInput,
   SubagentUpdateInput,
   SystemPromptKind,
@@ -187,6 +201,54 @@ export function useCreateModelProfileMutation() {
   });
 }
 
+export function useUpdateModelProfileMutation(profileId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ModelProfileUpdateInput) =>
+      updateModelProfile(profileId, input),
+    onSuccess: async (profile) => {
+      queryClient.setQueryData<{
+        items: ModelProfile[];
+        default_profile_id: string | null;
+      }>(adminKeys.modelProfiles(), (current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) =>
+                item.id === profile.id ? profile : item,
+              ),
+            }
+          : current,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: adminKeys.modelProfiles(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: adminKeys.compressionPolicy(),
+        }),
+      ]);
+    },
+  });
+}
+
+export function useDeleteModelProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (profileId: string) => deleteModelProfile(profileId),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: adminKeys.modelProfiles(),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: adminKeys.compressionPolicy(),
+        }),
+      ]);
+    },
+  });
+}
+
 export function useSetModelProfileEnabledMutation() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -276,25 +338,29 @@ export function useMcpServer(
   });
 }
 
+async function syncMcpCatalogCaches(
+  queryClient: ReturnType<typeof useQueryClient>,
+  server: McpServer,
+) {
+  queryClient.setQueryData(adminKeys.mcpServer(server.id), server);
+  // Server 变更（新建、编辑、启停、重发现）会同步影响工具目录与可选工具列表。
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: adminKeys.mcpServersAll(),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: adminKeys.toolsAll(),
+    }),
+  ]);
+}
+
 export function useCreateMcpServerMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: McpServerWriteInput) =>
       createMcpServer(input),
     onSuccess: async (server) => {
-      queryClient.setQueryData(
-        adminKeys.mcpServer(server.id),
-        server,
-      );
-      // 创建会真实发现工具，Server 目录与工具目录必须一起失效。
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: adminKeys.mcpServersAll(),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: adminKeys.toolsAll(),
-        }),
-      ]);
+      await syncMcpCatalogCaches(queryClient, server);
     },
   });
 }
@@ -305,11 +371,56 @@ export function useUpdateMcpServerMutation(serverId: string) {
     mutationFn: (input: McpServerUpdateInput) =>
       updateMcpServer(serverId, input),
     onSuccess: async (server) => {
-      queryClient.setQueryData(
-        adminKeys.mcpServer(server.id),
-        server,
-      );
-      // 完整替换会重新发现工具，不能只刷新 Server 详情。
+      await syncMcpCatalogCaches(queryClient, server);
+    },
+  });
+}
+
+export function usePatchMcpServerMutation(serverId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: McpServerPatchInput) =>
+      patchMcpServer(serverId, input),
+    onSuccess: async (server) => {
+      await syncMcpCatalogCaches(queryClient, server);
+    },
+  });
+}
+
+export function useSetMcpServerEnabledMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      input,
+      serverId,
+    }: {
+      serverId: string;
+      input: McpServerEnabledInput;
+    }) => setMcpServerEnabled(serverId, input),
+    onSuccess: async (server) => {
+      await syncMcpCatalogCaches(queryClient, server);
+    },
+  });
+}
+
+export function useRediscoverMcpServerMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (serverId: string) => rediscoverMcpServer(serverId),
+    onSuccess: async (server) => {
+      await syncMcpCatalogCaches(queryClient, server);
+    },
+  });
+}
+
+export function useDeleteMcpServerMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (serverId: string) => deleteMcpServer(serverId),
+    onSuccess: async (_data, serverId) => {
+      queryClient.removeQueries({
+        queryKey: adminKeys.mcpServer(serverId),
+      });
       await Promise.all([
         queryClient.invalidateQueries({
           queryKey: adminKeys.mcpServersAll(),
@@ -458,6 +569,85 @@ export function useUpdateToolApprovalForRow(): {
       });
     },
   };
+}
+
+export function useUpdateAdminToolMetadataMutation(toolId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      identityEpoch,
+      input,
+    }: {
+      identityEpoch: number;
+      input: AdminToolUpdateInput;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        throw authIdentityChangedError();
+      }
+      return updateAdminToolMetadata(toolId, input);
+    },
+    onSuccess: async (updated, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        return;
+      }
+      queryClient.setQueriesData<AdminToolListResponse>(
+        { queryKey: adminKeys.toolsAll() },
+        (current) =>
+          current
+            ? {
+                ...current,
+                items: current.items.map((tool) =>
+                  tool.tool_id === updated.tool_id ? updated : tool,
+                ),
+              }
+            : current,
+      );
+      await queryClient.invalidateQueries({
+        queryKey: adminKeys.toolsAll(),
+      });
+    },
+  });
+}
+
+export function useBatchUpdateToolApprovalMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      identityEpoch,
+      input,
+    }: {
+      identityEpoch: number;
+      input: AdminToolBatchApprovalInput;
+    }) => {
+      if (!isAuthIdentityCurrent(identityEpoch)) {
+        throw authIdentityChangedError();
+      }
+      return batchUpdateAdminToolApproval(input);
+    },
+    onSuccess: async (result, variables) => {
+      if (!isAuthIdentityCurrent(variables.identityEpoch)) {
+        return;
+      }
+      const updatedById = new Map(
+        result.items.map((item) => [item.tool_id, item]),
+      );
+      queryClient.setQueriesData<AdminToolListResponse>(
+        { queryKey: adminKeys.toolsAll() },
+        (current) =>
+          current
+            ? {
+                ...current,
+                items: current.items.map(
+                  (tool) => updatedById.get(tool.tool_id) ?? tool,
+                ),
+              }
+            : current,
+      );
+      await queryClient.invalidateQueries({
+        queryKey: adminKeys.toolsAll(),
+      });
+    },
+  });
 }
 
 // ---------------- Subagent 管理 Hooks ----------------

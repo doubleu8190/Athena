@@ -10,18 +10,29 @@ import {
   CHECKBOX_LABEL_CLASS,
   FIELD_CLASS,
   FIELD_INPUT_CLASS,
-  FIELD_SELECT_CLASS,
   FIELD_TEXTAREA_CLASS,
   FORM_GRID_2_CLASS,
   FORM_STACK_CLASS,
   InlineAlert,
   MODAL_WIDTH_XL,
   PAGE_LOADING_CLASS,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
 import { FieldError } from "../../shared/ui/FieldError";
 import { Modal } from "../../shared/ui/Modal";
+import {
+  defaultOwnerGrant,
+  normalizeVisibilityGrants,
+} from "../access/visibilityGrants";
+import { useAuth } from "../auth/AuthProvider";
+import { isSuperAdmin } from "../auth/model";
+import { AdminVisibilityFields } from "./AdminVisibilityFields";
 import {
   adminErrorMessage,
   isSubagentSlugConflict,
@@ -46,6 +57,9 @@ import {
   type SubagentFormValues,
 } from "./model";
 
+// Radix SelectItem 不允许空字符串 value，使用哨兵值映射“跟随系统默认”对应的空字符串状态。
+const SYSTEM_DEFAULT_MODEL_VALUE = "__system_default__";
+
 interface SubagentDialogProps {
   onClose: () => void;
   open: boolean;
@@ -57,6 +71,8 @@ export function SubagentDialog({
   open,
   subagentId,
 }: SubagentDialogProps) {
+  const { user } = useAuth();
+  const superAdmin = isSuperAdmin(user);
   const formId = useId();
   const editing = Boolean(subagentId);
   const detail = useSubagent(open && editing ? (subagentId ?? null) : null);
@@ -75,6 +91,7 @@ export function SubagentDialog({
   const [requestError, setRequestError] = useState<string | null>(null);
   const [versionConflict, setVersionConflict] = useState(false);
   const [loadedVersionKey, setLoadedVersionKey] = useState<string | null>(null);
+  const [grantsEditorResetKey, setGrantsEditorResetKey] = useState(0);
   const submitLock = useRef(false);
 
   const pending = createMutation.isPending || updateMutation.isPending;
@@ -93,6 +110,7 @@ export function SubagentDialog({
     submitLock.current = false;
     if (!editing) {
       setValues(subagentForm());
+      setGrantsEditorResetKey((prev) => prev + 1);
     }
   }, [editing, open, resetCreateMutation, resetUpdateMutation]);
 
@@ -105,10 +123,75 @@ export function SubagentDialog({
     if (loadedVersionKey !== nextKey) {
       setValues(subagentForm(detail.data));
       setLoadedVersionKey(nextKey);
+      setGrantsEditorResetKey((prev) => prev + 1);
       setVersionConflict(false);
       setRequestError(null);
     }
   }, [detail.data, editing, loadedVersionKey, open]);
+
+  const handleScopeChange = (nextScope: "company" | "department") => {
+    setValues((current) => {
+      if (nextScope === "company") {
+        return {
+          ...current,
+          visibility_scope: "company",
+          visibility_grants: [],
+        };
+      }
+      const trimmedDept = current.owner_department_id.trim();
+      const baseProfile = detail.data;
+      const grants =
+        editing &&
+        baseProfile?.visibility_scope === "department" &&
+        trimmedDept &&
+        trimmedDept === (baseProfile.owner_department_id ?? "")
+          ? normalizeVisibilityGrants(
+              trimmedDept,
+              baseProfile.visibility_grants,
+              superAdmin,
+            )
+          : trimmedDept
+            ? [defaultOwnerGrant(trimmedDept, superAdmin)]
+            : [];
+      return {
+        ...current,
+        visibility_scope: "department",
+        visibility_grants: grants,
+      };
+    });
+    setErrors((prev) => ({ ...prev, owner_department_id: undefined }));
+    setRequestError(null);
+  };
+
+  const handleDepartmentChange = (nextDeptId: string) => {
+    const trimmed = nextDeptId.trim();
+    const baseProfile = detail.data;
+    setValues((current) => {
+      const restoredOriginal =
+        editing &&
+        baseProfile?.visibility_scope === "department" &&
+        trimmed === (baseProfile.owner_department_id ?? "");
+      if (restoredOriginal) {
+        setGrantsEditorResetKey((prev) => prev + 1);
+      }
+      return {
+        ...current,
+        owner_department_id: nextDeptId,
+        visibility_grants:
+          restoredOriginal && baseProfile
+            ? normalizeVisibilityGrants(
+                trimmed,
+                baseProfile.visibility_grants,
+                superAdmin,
+              )
+            : trimmed
+              ? [defaultOwnerGrant(trimmed, superAdmin)]
+              : [],
+      };
+    });
+    setErrors((prev) => ({ ...prev, owner_department_id: undefined }));
+    setRequestError(null);
+  };
 
   const toggleTool = (toolId: string) => {
     setValues((current) => {
@@ -162,6 +245,9 @@ export function SubagentDialog({
             allowed_tool_ids: createInput.allowed_tool_ids,
             max_llm_requests: createInput.max_llm_requests,
             timeout_seconds: createInput.timeout_seconds,
+            visibility_scope: createInput.visibility_scope,
+            owner_department_id: createInput.owner_department_id,
+            visibility_grants: createInput.visibility_grants,
           },
         });
       } else {
@@ -367,31 +453,38 @@ export function SubagentDialog({
 
           <div className={FIELD_CLASS}>
             <label htmlFor={`${formId}-model`}>绑定模型</label>
-            <select
-              className={FIELD_SELECT_CLASS}
+            <Select
               disabled={pending || models.isPending}
-              id={`${formId}-model`}
-              onChange={(event) =>
+              onValueChange={(nextValue) =>
                 setValues((current) => ({
                   ...current,
-                  model_profile_id: event.target.value,
+                  // 将哨兵值还原为空字符串，提交时由模型校验层转为 model_profile_id: null。
+                  model_profile_id:
+                    nextValue === SYSTEM_DEFAULT_MODEL_VALUE ? "" : nextValue,
                 }))
               }
-              value={values.model_profile_id}
+              value={values.model_profile_id || SYSTEM_DEFAULT_MODEL_VALUE}
             >
-              <option value="">跟随系统默认</option>
-              {modelOptions.map((model) => (
-                <option
-                  disabled={!model.enabled}
-                  key={model.id}
-                  value={model.id}
-                >
-                  {model.name} · {model.model}
-                  {model.id === defaultModelId ? "（系统默认）" : ""}
-                  {!model.enabled ? "（已停用）" : ""}
-                </option>
-              ))}
-            </select>
+              <SelectTrigger aria-label="绑定模型" id={`${formId}-model`}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SYSTEM_DEFAULT_MODEL_VALUE}>
+                  跟随系统默认
+                </SelectItem>
+                {modelOptions.map((model) => (
+                  <SelectItem
+                    disabled={!model.enabled}
+                    key={model.id}
+                    value={model.id}
+                  >
+                    {model.name} · {model.model}
+                    {model.id === defaultModelId ? "（系统默认）" : ""}
+                    {!model.enabled ? "（已停用）" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <div className={FIELD_CLASS}>
@@ -422,6 +515,26 @@ export function SubagentDialog({
               id={`${formId}-prompt-error`}
             />
           </div>
+
+          <AdminVisibilityFields
+            disabled={pending}
+            formId={formId}
+            grantsEditorResetKey={grantsEditorResetKey}
+            onDepartmentChange={handleDepartmentChange}
+            onGrantsChange={(nextGrants) =>
+              setValues((current) => ({
+                ...current,
+                visibility_grants: nextGrants,
+              }))
+            }
+            onScopeChange={handleScopeChange}
+            open={open}
+            ownerDepartmentError={errors.owner_department_id}
+            ownerDepartmentId={values.owner_department_id}
+            resourceLabel="子智能体"
+            visibilityGrants={values.visibility_grants}
+            visibilityScope={values.visibility_scope}
+          />
 
           <fieldset
             aria-describedby={`${formId}-tools-hint ${formId}-tools-count ${formId}-tools-error`}

@@ -44,10 +44,6 @@ export const FIELD_CLASS =
 
 export const FIELD_INPUT_CLASS = `${CONTROL_BASE_CLASS} min-h-10 px-3`;
 
-export const FIELD_SELECT_CLASS = `${CONTROL_BASE_CLASS} min-h-10 cursor-pointer px-3 accent-brand-hover`;
-
-export const COMPACT_SELECT_CLASS = `${CONTROL_BASE_CLASS} min-h-[38px] w-auto cursor-pointer px-2.5 accent-brand-hover`;
-
 export const FIELD_TEXTAREA_CLASS = `${CONTROL_BASE_CLASS} resize-y px-3 py-2.5 leading-[1.65]`;
 
 export const CHECKBOX_LABEL_CLASS =

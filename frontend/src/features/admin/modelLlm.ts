@@ -12,6 +12,8 @@ import {
 export const MODEL_PROFILE_NAME_MAX_LENGTH = 120;
 export const MODEL_BASE_URL_MAX_LENGTH = DEFAULT_HTTPS_URL_MAX_LENGTH;
 export const MODEL_NAME_MAX_LENGTH = 200;
+export const SCENARIO_LABEL_MAX_LENGTH = 64;
+export const SCENARIO_DESCRIPTION_MAX_LENGTH = 255;
 export const API_KEY_MAX_LENGTH = 16_384;
 export const CONTEXT_WINDOW_TOKEN_LIMIT_MAX = 1_048_576;
 export const OUTPUT_TOKEN_LIMIT_MAX = 1_000_000;
@@ -28,6 +30,7 @@ export const TOKENIZER_ENCODINGS: readonly TokenizerEncoding[] = [
 
 export type ModelProfileListResponse = ApiSchemas["ModelProfileListResponse"];
 export type ModelProfileCreateInput = ApiSchemas["ModelProfileCreateRequest"];
+export type ModelProfileUpdateInput = ApiSchemas["ModelProfileUpdateRequest"];
 export type CompressionPolicy = ApiSchemas["CompressionPolicyResponse"];
 export type CompressionPolicyInput = ApiSchemas["CompressionPolicyRequest"];
 
@@ -41,6 +44,10 @@ export interface ModelProfileFormValues {
   supports_stream: boolean;
   supports_tools: boolean;
   supports_parallel_tool_calls: boolean;
+  supports_vision: boolean;
+  visible_to_users: boolean;
+  scenario_label: string;
+  scenario_description: string;
   max_output_tokens: string;
   request_timeout_seconds: string;
   execution_timeout_seconds: string;
@@ -75,12 +82,34 @@ export interface CompressionPolicyBudgets {
   summary: number | null;
 }
 
-/** 校验模型配置表单，合法时组装创建入参。 */
-export function validateModelProfileForm(
+interface ValidatedModelProfileCommon {
+  name: string;
+  base_url: string;
+  model: string;
+  api_key: string;
+  context_window_tokens: number;
+  tokenizer_encoding: TokenizerEncoding;
+  supports_stream: boolean;
+  supports_tools: boolean;
+  supports_parallel_tool_calls: boolean;
+  supports_vision: boolean;
+  visible_to_users: boolean;
+  scenario_label: string | null;
+  scenario_description: string | null;
+  max_output_tokens: number;
+  request_timeout_seconds: number;
+  execution_timeout_seconds: number;
+  max_concurrency: number;
+  temperature: number | null;
+}
+
+/** 统一校验模型配置表单（创建必填 API Key；编辑留空保留原加密凭据）。 */
+function validateModelProfileFields(
   values: ModelProfileFormValues,
+  requireApiKey: boolean,
 ): {
   errors: FieldErrors<ModelProfileField>;
-  input: ModelProfileCreateInput | null;
+  validated: ValidatedModelProfileCommon | null;
 } {
   const errors: FieldErrors<ModelProfileField> = {};
   const name = values.name.trim();
@@ -99,6 +128,8 @@ export function validateModelProfileForm(
   const temperature = values.temperature.trim()
     ? Number(values.temperature)
     : null;
+  const scenarioLabel = values.scenario_label.trim();
+  const scenarioDescription = values.scenario_description.trim();
 
   if (
     !name ||
@@ -118,11 +149,30 @@ export function validateModelProfileForm(
   ) {
     errors.model = "模型标识需为 1–200 个字符。";
   }
-  const apiKeyPayloadBytes = new TextEncoder().encode(
-    JSON.stringify({ api_key: apiKey }),
-  ).length;
-  if (!apiKey || apiKey.includes("\0") || apiKeyPayloadBytes > API_KEY_MAX_LENGTH) {
-    errors.api_key = "API Key 不能为空、不能包含 NUL 字符，且加密内容不能超过 16 KiB。";
+  if (requireApiKey || apiKey.length > 0) {
+    const apiKeyPayloadBytes = new TextEncoder().encode(
+      JSON.stringify({ api_key: apiKey }),
+    ).length;
+    if (
+      !apiKey ||
+      apiKey.includes("\0") ||
+      apiKeyPayloadBytes > API_KEY_MAX_LENGTH
+    ) {
+      errors.api_key =
+        "API Key 不能为空、不能包含 NUL 字符，且加密内容不能超过 16 KiB。";
+    }
+  }
+  if (
+    CONTROL_CHARACTER_PATTERN.test(values.scenario_label) ||
+    unicodeLength(scenarioLabel) > SCENARIO_LABEL_MAX_LENGTH
+  ) {
+    errors.scenario_label = `场景标签不能包含控制字符，且不超过 ${SCENARIO_LABEL_MAX_LENGTH} 个字符。`;
+  }
+  if (
+    CONTROL_CHARACTER_PATTERN.test(values.scenario_description) ||
+    unicodeLength(scenarioDescription) > SCENARIO_DESCRIPTION_MAX_LENGTH
+  ) {
+    errors.scenario_description = `场景说明不能包含控制字符，且不超过 ${SCENARIO_DESCRIPTION_MAX_LENGTH} 个字符。`;
   }
   if (
     contextTokens === null ||
@@ -177,11 +227,11 @@ export function validateModelProfileForm(
   }
 
   if (Object.keys(errors).length > 0) {
-    return { errors, input: null };
+    return { errors, validated: null };
   }
   return {
     errors,
-    input: {
+    validated: {
       name,
       base_url: baseUrl,
       model,
@@ -191,13 +241,53 @@ export function validateModelProfileForm(
       supports_stream: values.supports_stream,
       supports_tools: values.supports_tools,
       supports_parallel_tool_calls:
-        values.supports_tools &&
-        values.supports_parallel_tool_calls,
+        values.supports_tools && values.supports_parallel_tool_calls,
+      supports_vision: values.supports_vision,
+      visible_to_users: values.visible_to_users,
+      scenario_label: scenarioLabel || null,
+      scenario_description: scenarioDescription || null,
       max_output_tokens: maxOutputTokens as number,
       request_timeout_seconds: requestTimeout as number,
       execution_timeout_seconds: executionTimeout as number,
       max_concurrency: maxConcurrency as number,
       temperature,
+    },
+  };
+}
+
+/** 校验模型配置表单，合法时组装创建入参。 */
+export function validateModelProfileForm(
+  values: ModelProfileFormValues,
+): {
+  errors: FieldErrors<ModelProfileField>;
+  input: ModelProfileCreateInput | null;
+} {
+  const { errors, validated } = validateModelProfileFields(values, true);
+  if (!validated) {
+    return { errors, input: null };
+  }
+  return { errors, input: validated };
+}
+
+/** 校验编辑模型配置表单；api_key 留空时不传该字段以保留后端原加密凭据。 */
+export function validateModelProfileEditForm(
+  values: ModelProfileFormValues,
+  expectedVersion: number,
+): {
+  errors: FieldErrors<ModelProfileField>;
+  input: ModelProfileUpdateInput | null;
+} {
+  const { errors, validated } = validateModelProfileFields(values, false);
+  if (!validated) {
+    return { errors, input: null };
+  }
+  const { api_key, ...rest } = validated;
+  return {
+    errors,
+    input: {
+      ...rest,
+      expected_version: expectedVersion,
+      ...(api_key ? { api_key } : {}),
     },
   };
 }
@@ -318,11 +408,42 @@ export function defaultModelProfileForm(): ModelProfileFormValues {
     supports_stream: true,
     supports_tools: true,
     supports_parallel_tool_calls: false,
+    supports_vision: false,
+    visible_to_users: true,
+    scenario_label: "",
+    scenario_description: "",
     max_output_tokens: "8192",
     request_timeout_seconds: "120",
     execution_timeout_seconds: "300",
     max_concurrency: "4",
     temperature: "",
+  };
+}
+
+/** 将现有模型配置映射为编辑表单初始值（API Key 不回显，留空保留原加密凭据）。 */
+export function modelProfileForm(
+  profile: ModelProfile,
+): ModelProfileFormValues {
+  return {
+    name: profile.name,
+    base_url: profile.base_url,
+    model: profile.model,
+    api_key: "",
+    context_window_tokens: String(profile.context_window_tokens),
+    tokenizer_encoding: profile.tokenizer_encoding,
+    supports_stream: profile.supports_stream,
+    supports_tools: profile.supports_tools,
+    supports_parallel_tool_calls: profile.supports_parallel_tool_calls,
+    supports_vision: profile.supports_vision,
+    visible_to_users: profile.visible_to_users,
+    scenario_label: profile.scenario_label ?? "",
+    scenario_description: profile.scenario_description ?? "",
+    max_output_tokens: String(profile.max_output_tokens),
+    request_timeout_seconds: String(profile.request_timeout_seconds),
+    execution_timeout_seconds: String(profile.execution_timeout_seconds),
+    max_concurrency: String(profile.max_concurrency),
+    temperature:
+      profile.temperature === null ? "" : String(profile.temperature),
   };
 }
 

@@ -34,7 +34,7 @@ const SERVER = makeMcpServer({
 });
 
 describe("管理 MCP 页", () => {
-  it("展示真实分页、配置、秘密状态和发现时间，不提供伪重发现按钮", async () => {
+  it("展示真实分页、配置、秘密状态和发现时间，并提供启停、重发现与删除入口", async () => {
     const second = makeMcpServer({
       config: {
         args: ["--stdio"],
@@ -97,7 +97,16 @@ describe("管理 MCP 页", () => {
       screen.getByText("第 1 页 · 共 11 项"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /重新发现/ }),
+      screen.getByRole("button", { name: `重新发现工具：${SERVER.name}` }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: `停用 MCP Server：${SERVER.name}` }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: `删除 MCP Server：${SERVER.name}` }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/后端未提供“重新发现”接口/),
     ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "下一页" }));
@@ -295,15 +304,18 @@ describe("管理 MCP 页", () => {
     );
     expect(JSON.parse(String(postCall?.[1]?.body))).toEqual({
       name: SERVER.name,
+      owner_department_id: null,
       secrets: { Authorization: "Bearer plain-input" },
       transport: "streamable_http",
       url: "https://mcp.example/mcp",
+      visibility_grants: [],
+      visibility_scope: "company",
     });
   });
 
-  it("编辑明确完整替换秘密，409 后载入最新配置并清空旧草稿", async () => {
+  it("编辑支持保密局部更新（留空保留原值、增删改凭据与 rediscover），409 后刷新版本并重载", async () => {
     let detailCalls = 0;
-    let updateCalls = 0;
+    let patchCalls = 0;
     let updated = SERVER;
     const detailRefreshGate = deferred<Response>();
     const concurrentServer = makeMcpServer({
@@ -324,9 +336,7 @@ describe("管理 MCP 页", () => {
           url.pathname === "/api/v1/admin/mcp/servers" &&
           (!init?.method || init.method === "GET")
         ) {
-          return jsonResponse(
-            listResponse([updated], 1, 10, 1),
-          );
+          return jsonResponse(listResponse([updated], 1, 10, 1));
         }
         if (
           url.pathname === "/api/v1/admin/mcp/servers/mcp-1" &&
@@ -340,11 +350,14 @@ describe("管理 MCP 页", () => {
         }
         if (
           url.pathname === "/api/v1/admin/mcp/servers/mcp-1" &&
-          init?.method === "PUT"
+          init?.method === "PATCH"
         ) {
-          updateCalls += 1;
-          if (updateCalls === 1) {
-            return jsonResponse({ detail: "mcp_conflict" }, 409);
+          patchCalls += 1;
+          if (patchCalls === 1) {
+            return jsonResponse(
+              { detail: "mcp_config_version_conflict" },
+              409,
+            );
           }
           updated = {
             ...concurrentServer,
@@ -374,36 +387,34 @@ describe("管理 MCP 页", () => {
     });
     expect(
       await within(dialog).findByText(
-        /编辑是完整替换：必须重新输入全部秘密/,
+        "秘密值（已加密保存，留空保留原值）",
       ),
     ).toBeInTheDocument();
     expect(
       within(dialog).getByLabelText("秘密名称 1"),
     ).toHaveValue("Authorization");
-    const secretValue = within(dialog).getByLabelText("重新输入秘密值");
+    const secretValue = within(dialog).getByLabelText(
+      "秘密值（已加密保存，留空保留原值）",
+    );
     expect(secretValue).toHaveValue("");
 
+    // 修改名称不填秘密值，并勾选保存后重新发现工具，应保留原秘密不纳入 upsert/remove
+    const nameInput = within(dialog).getByLabelText("Server 名称");
+    await user.clear(nameInput);
+    await user.type(nameInput, "新名称服务");
     await user.click(
-      within(dialog).getByRole("button", {
-        name: "完整替换并发现工具",
+      within(dialog).getByRole("checkbox", {
+        name: "保存后重新发现工具（rediscover）",
       }),
     );
-    expect(
-      within(dialog).getByText(
-        "已有秘密必须重新输入值，或显式移除该行。",
-      ),
-    ).toBeInTheDocument();
-    expect(updateCalls).toBe(0);
-
-    await user.type(secretValue, "replacement-secret");
     await user.click(
       within(dialog).getByRole("button", {
-        name: "完整替换并发现工具",
+        name: "保存修改",
       }),
     );
 
     const submitButton = within(dialog).getByRole("button", {
-      name: "完整替换并发现工具",
+      name: "保存修改",
     });
     expect(
       await within(dialog).findByText(
@@ -411,59 +422,38 @@ describe("管理 MCP 页", () => {
       ),
     ).toBeInTheDocument();
     expect(submitButton).toBeDisabled();
-    expect(secretValue).toBeDisabled();
-    expect(
-      within(dialog).getByRole("radio", {
-        name: "Streamable HTTP",
-      }),
-    ).toBeDisabled();
     await user.click(submitButton);
-    expect(updateCalls).toBe(1);
+    expect(patchCalls).toBe(1);
 
-    detailRefreshGate.resolve(
-      jsonResponse(concurrentServer),
-    );
+    detailRefreshGate.resolve(jsonResponse(concurrentServer));
     expect(
       await within(dialog).findByText(
-        /已载入最新配置，旧草稿未保存，请重新输入秘密后提交/,
+        /配置已被并发修改。已载入最新配置与版本号/,
       ),
     ).toBeInTheDocument();
     expect(submitButton).toBeEnabled();
     expect(within(dialog).getByLabelText("Server 名称")).toHaveValue(
       concurrentServer.name,
     );
-    expect(within(dialog).getByLabelText(/^HTTPS MCP URL/)).toHaveValue(
-      "https://mcp-concurrent.example/mcp",
-    );
     expect(within(dialog).getByLabelText("秘密名称 1")).toHaveValue(
       "X-Concurrent-Token",
     );
-    const refreshedSecretValue = within(dialog).getByLabelText(
-      "重新输入秘密值",
-    );
-    expect(refreshedSecretValue).toHaveValue("");
-    expect(
-      within(dialog).queryByDisplayValue("replacement-secret"),
-    ).not.toBeInTheDocument();
-    expect(
-      within(dialog).queryByDisplayValue("Authorization"),
-    ).not.toBeInTheDocument();
     expect(detailCalls).toBe(2);
 
-    await user.click(submitButton);
-    expect(
-      within(dialog).getByText(
-        "已有秘密必须重新输入值，或显式移除该行。",
-      ),
-    ).toBeInTheDocument();
-    expect(updateCalls).toBe(1);
-
-    await user.type(refreshedSecretValue, "latest-concurrent-secret");
+    // 留空既有秘密 X-Concurrent-Token，新增 X-New-Secret 并开启 rediscover 提交
     await user.click(
-      within(dialog).getByRole("button", {
-        name: "完整替换并发现工具",
-      }),
+      within(dialog).getByRole("button", { name: "添加秘密" }),
     );
+    await user.type(
+      within(dialog).getByLabelText("秘密名称 2"),
+      "X-New-Secret",
+    );
+    await user.type(
+      within(dialog).getByLabelText("秘密值"),
+      "new-token-value",
+    );
+    await user.click(submitButton);
+
     await waitFor(() => {
       expect(
         screen.queryByRole("dialog", {
@@ -471,23 +461,22 @@ describe("管理 MCP 页", () => {
         }),
       ).not.toBeInTheDocument();
     });
-    const puts = fetchMock.mock.calls.filter(
+    const patches = fetchMock.mock.calls.filter(
       ([input, init]) =>
         requestUrl(input).pathname ===
           "/api/v1/admin/mcp/servers/mcp-1" &&
-        init?.method === "PUT",
+        init?.method === "PATCH",
     );
-    expect(puts).toHaveLength(2);
-    expect(JSON.parse(String(puts[0][1]?.body))).toMatchObject({
+    expect(patches).toHaveLength(2);
+    expect(JSON.parse(String(patches[0][1]?.body))).toEqual({
       expected_config_version: 1,
-      secrets: { Authorization: "replacement-secret" },
+      name: "新名称服务",
+      rediscover: true,
     });
-    expect(JSON.parse(String(puts[1][1]?.body))).toMatchObject({
-      name: concurrentServer.name,
+    expect(JSON.parse(String(patches[1][1]?.body))).toEqual({
       expected_config_version: 2,
-      secrets: { "X-Concurrent-Token": "latest-concurrent-secret" },
-      transport: "streamable_http",
-      url: "https://mcp-concurrent.example/mcp",
+      rediscover: true,
+      secrets_upsert: { "X-New-Secret": "new-token-value" },
     });
   });
 
@@ -529,10 +518,13 @@ describe("管理 MCP 页", () => {
         }
         if (
           url.pathname === "/api/v1/admin/mcp/servers/mcp-1" &&
-          init?.method === "PUT"
+          init?.method === "PATCH"
         ) {
           updateCalls += 1;
-          return jsonResponse({ detail: "mcp_conflict" }, 409);
+          return jsonResponse(
+            { detail: "mcp_config_version_conflict" },
+            409,
+          );
         }
         throw new Error(
           `Unexpected request: ${init?.method ?? "GET"} ${url}`,
@@ -554,12 +546,12 @@ describe("管理 MCP 页", () => {
       name: "编辑 MCP Server",
     });
     const secretValue = await within(dialog).findByLabelText(
-      "重新输入秘密值",
+      "秘密值（已加密保存，留空保留原值）",
     );
     await user.type(secretValue, "replacement-secret");
     await user.click(
       within(dialog).getByRole("button", {
-        name: "完整替换并发现工具",
+        name: "保存修改",
       }),
     );
 
@@ -570,7 +562,7 @@ describe("管理 MCP 页", () => {
     ).toBeInTheDocument();
     expect(
       within(dialog).getByRole("button", {
-        name: "完整替换并发现工具",
+        name: "保存修改",
       }),
     ).toBeDisabled();
     expect(secretValue).toBeDisabled();
@@ -600,11 +592,11 @@ describe("管理 MCP 页", () => {
     ).toBeInTheDocument();
     expect(
       within(dialog).getByRole("button", {
-        name: "完整替换并发现工具",
+        name: "保存修改",
       }),
     ).toBeEnabled();
     expect(
-      within(dialog).getByLabelText("重新输入秘密值"),
+      within(dialog).getByLabelText("秘密值（已加密保存，留空保留原值）"),
     ).toHaveValue("");
   });
 
@@ -728,40 +720,247 @@ describe("管理 MCP 页", () => {
       command: "/usr/local/bin/mcp",
       cwd: "/srv/mcp",
       name: "本地工具桥",
+      owner_department_id: null,
       secrets: {},
       transport: "stdio",
+      visibility_grants: [],
+      visibility_scope: "company",
     });
   });
 
-  it("兼容展示 MCP Server 一期可见范围标签与归属部门标识", async () => {
-    const deptServer = makeMcpServer({
+  it("部门共享 Server 映射部门中文名，并支持启停、重发现与删除确认", async () => {
+    let deptServer = makeMcpServer({
       id: "mcp-dept",
       name: "研发部代码网关",
       owner_department_id: "dept-rd",
       visibility_scope: "department",
+      config_version: 2,
+      enabled: true,
     });
+    let deleted = false;
+    const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = requestUrl(input);
+        const method = init?.method ?? "GET";
         if (url.pathname.endsWith("/auth/me")) {
           return jsonResponse(TEST_ADMIN);
         }
+        if (url.pathname === "/api/v1/admin/org/departments") {
+          return jsonResponse({
+            items: [
+              {
+                id: "dept-rd",
+                name: "研发中心",
+                parent_id: null,
+                status: "active",
+                path_ids: ["dept-rd"],
+              },
+              {
+                id: "dept-fin",
+                name: "财务部",
+                parent_id: null,
+                status: "active",
+                path_ids: ["dept-fin"],
+              },
+            ],
+          });
+        }
         if (
           url.pathname === "/api/v1/admin/mcp/servers" &&
-          (!init?.method || init.method === "GET")
+          method === "GET"
         ) {
-          return jsonResponse(listResponse([deptServer], 1, 10, 1));
+          return jsonResponse(
+            listResponse(deleted ? [] : [deptServer], 1, 10, deleted ? 0 : 1),
+          );
         }
-        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+        if (
+          url.pathname === `/api/v1/admin/mcp/servers/${deptServer.id}/enabled` &&
+          method === "PUT"
+        ) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            enabled: boolean;
+            expected_config_version: number;
+          };
+          calls.push({ method, path: url.pathname, body });
+          deptServer = {
+            ...deptServer,
+            enabled: body.enabled,
+            config_version: 3,
+          };
+          return jsonResponse(deptServer);
+        }
+        if (
+          url.pathname ===
+            `/api/v1/admin/mcp/servers/${deptServer.id}/rediscover` &&
+          method === "POST"
+        ) {
+          calls.push({ method, path: url.pathname });
+          deptServer = {
+            ...deptServer,
+            tools_discovered_at: "2026-11-20T05:00:00Z",
+          };
+          return jsonResponse(deptServer);
+        }
+        if (
+          url.pathname === `/api/v1/admin/mcp/servers/${deptServer.id}` &&
+          method === "DELETE"
+        ) {
+          calls.push({ method, path: url.pathname });
+          deleted = true;
+          return new Response(null, { status: 204 });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
       }),
     );
+    const user = userEvent.setup();
 
     renderApp("/admin/mcp");
 
     const card = (
       await screen.findByRole("heading", { name: "研发部代码网关" })
     ).closest("li") as HTMLElement;
-    expect(within(card).getByText("dept-rd")).toBeInTheDocument();
+    expect(await within(card).findByText("研发中心")).toBeInTheDocument();
+
+    await user.click(
+      within(card).getByRole("button", {
+        name: "停用 MCP Server：研发部代码网关",
+      }),
+    );
+    expect(await within(card).findByText("已停用")).toBeInTheDocument();
+    expect(calls[0]).toEqual({
+      method: "PUT",
+      path: `/api/v1/admin/mcp/servers/${deptServer.id}/enabled`,
+      body: { enabled: false, expected_config_version: 2 },
+    });
+
+    await user.click(
+      within(card).getByRole("button", {
+        name: "重新发现工具：研发部代码网关",
+      }),
+    );
+    await waitFor(() => {
+      expect(calls[1]).toEqual({
+        method: "POST",
+        path: `/api/v1/admin/mcp/servers/${deptServer.id}/rediscover`,
+      });
+    });
+
+    await user.click(
+      within(card).getByRole("button", {
+        name: "删除 MCP Server：研发部代码网关",
+      }),
+    );
+    const confirmDialog = await screen.findByRole("dialog", {
+      name: "删除 MCP Server「研发部代码网关」",
+    });
+    await user.click(
+      within(confirmDialog).getByRole("button", { name: "确认删除" }),
+    );
+    expect(await screen.findByText("还没有 MCP Server")).toBeInTheDocument();
+  });
+
+  it("创建 MCP Server 支持配置部门共享与附加跨部门授权", async () => {
+    let createdBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/org/departments") {
+          return jsonResponse({
+            items: [
+              {
+                id: "dept-rd",
+                name: "研发中心",
+                parent_id: null,
+                status: "active",
+                path_ids: ["dept-rd"],
+              },
+              {
+                id: "dept-fin",
+                name: "财务部",
+                parent_id: null,
+                status: "active",
+                path_ids: ["dept-fin"],
+              },
+            ],
+          });
+        }
+        if (url.pathname === "/api/v1/admin/mcp/servers" && method === "GET") {
+          return jsonResponse(listResponse([], 1, 10, 0));
+        }
+        if (url.pathname === "/api/v1/admin/mcp/servers" && method === "POST") {
+          createdBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          return jsonResponse(
+            makeMcpServer({
+              id: "mcp-dept-created",
+              name: "财务网关",
+              owner_department_id: "dept-fin",
+              visibility_scope: "department",
+            }),
+            201,
+          );
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/mcp");
+
+    await screen.findByRole("heading", { name: "还没有 MCP Server" });
+    await user.click(screen.getByRole("button", { name: "新建 MCP Server" }));
+    const dialog = screen.getByRole("dialog", { name: "新建 MCP Server" });
+
+    await user.type(within(dialog).getByLabelText("Server 名称"), "财务网关");
+    await user.type(
+      within(dialog).getByLabelText(/^HTTPS MCP URL/),
+      "https://fin.example/mcp",
+    );
+
+    await user.click(
+      within(dialog).getByRole("combobox", { name: "可见范围" }),
+    );
+    await user.click(screen.getByRole("option", { name: "部门共享" }));
+
+    const deptCombo = await within(dialog).findByRole("combobox", {
+      name: "归属部门",
+    });
+    await user.click(deptCombo);
+    await user.click(screen.getByRole("option", { name: "财务部" }));
+
+    expect(
+      await within(dialog).findByText("归属部门（默认）"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "创建并发现工具" }),
+    );
+    await waitFor(() => {
+      expect(createdBody).toEqual({
+        name: "财务网关",
+        transport: "streamable_http",
+        url: "https://fin.example/mcp",
+        secrets: {},
+        visibility_scope: "department",
+        owner_department_id: "dept-fin",
+        visibility_grants: [
+          {
+            target_type: "department",
+            target_id: "dept-fin",
+            include_subdepartments: true,
+          },
+        ],
+      });
+    });
   });
 });

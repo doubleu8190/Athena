@@ -31,10 +31,14 @@ import {
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { Modal } from "../../shared/ui/Modal";
+import { useAuth } from "../auth/AuthProvider";
+import { isSuperAdmin } from "../auth/model";
 import { AdminPagination, lastPageNumber } from "./AdminPagination";
+import { resolveAdminDepartmentName } from "./AdminVisibilityFields";
 import { SubagentDialog } from "./SubagentDialog";
 import { adminErrorMessage } from "./errorMessages";
 import {
+  useAdminOrgDepartments,
   useDeleteSubagentMutation,
   useModelProfiles,
   useSetSubagentEnabledMutation,
@@ -45,10 +49,21 @@ import type { SubagentProfile } from "./model";
 const PAGE_SIZE = 10;
 
 export function AdminSubagentsPage() {
+  const { user } = useAuth();
+  const superAdmin = isSuperAdmin(user);
   const [searchParams, setSearchParams] = useSearchParams();
   const page = parsePage(searchParams.get("page"));
   const subagents = useSubagents({ page, pageSize: PAGE_SIZE });
   const models = useModelProfiles();
+  const hasDepartmentSubagent =
+    subagents.data?.items.some(
+      (item) => item.visibility_scope === "department",
+    ) ?? false;
+  // 仅当列表包含部门共享子智能体时按需读取部门目录映射中文名称。
+  const departmentsQuery = useAdminOrgDepartments(
+    superAdmin && hasDepartmentSubagent,
+    false,
+  );
   const toggleEnabled = useSetSubagentEnabledMutation();
   const deleteMutation = useDeleteSubagentMutation();
 
@@ -217,7 +232,11 @@ export function AdminSubagentsPage() {
                         <VisibilityBadge
                           departmentName={
                             subagent.visibility_scope === "department"
-                              ? subagent.owner_department_id
+                              ? resolveAdminDepartmentName(
+                                  user,
+                                  departmentsQuery.data?.items,
+                                  subagent.owner_department_id,
+                                )
                               : null
                           }
                           scope={subagent.visibility_scope}

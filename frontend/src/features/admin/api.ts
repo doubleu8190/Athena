@@ -9,16 +9,22 @@ import {
 import type {
   AdminPageQuery,
   AdminTool,
+  AdminToolBatchApprovalInput,
+  AdminToolBatchApprovalResponse,
   AdminToolListResponse,
+  AdminToolUpdateInput,
   CompressionPolicy,
   CompressionPolicyInput,
   McpServer,
+  McpServerEnabledInput,
   McpServerListResponse,
+  McpServerPatchInput,
   McpServerUpdateInput,
   McpServerWriteInput,
   ModelProfile,
   ModelProfileCreateInput,
   ModelProfileListResponse,
+  ModelProfileUpdateInput,
   OrgDepartmentListResponse,
   SubagentAvailableToolsResponse,
   SubagentCreateInput,
@@ -39,6 +45,22 @@ export function createModelProfile(
 ): Promise<ModelProfile> {
   return apiPost("/api/v1/admin/llm/model-profiles", {
     body: input,
+  });
+}
+
+export function updateModelProfile(
+  profileId: string,
+  input: ModelProfileUpdateInput,
+): Promise<ModelProfile> {
+  return apiPatch("/api/v1/admin/llm/model-profiles/{profile_id}", {
+    body: input,
+    params: { path: { profile_id: profileId } },
+  });
+}
+
+export function deleteModelProfile(profileId: string): Promise<void> {
+  return apiDelete("/api/v1/admin/llm/model-profiles/{profile_id}", {
+    params: { path: { profile_id: profileId } },
   });
 }
 
@@ -117,6 +139,38 @@ export function updateMcpServer(
   });
 }
 
+export function patchMcpServer(
+  serverId: string,
+  input: McpServerPatchInput,
+): Promise<McpServer> {
+  return apiPatch("/api/v1/admin/mcp/servers/{server_id}", {
+    body: input,
+    params: { path: { server_id: serverId } },
+  });
+}
+
+export function setMcpServerEnabled(
+  serverId: string,
+  input: McpServerEnabledInput,
+): Promise<McpServer> {
+  return apiPut("/api/v1/admin/mcp/servers/{server_id}/enabled", {
+    body: input,
+    params: { path: { server_id: serverId } },
+  });
+}
+
+export function rediscoverMcpServer(serverId: string): Promise<McpServer> {
+  return apiPost("/api/v1/admin/mcp/servers/{server_id}/rediscover", {
+    params: { path: { server_id: serverId } },
+  });
+}
+
+export function deleteMcpServer(serverId: string): Promise<void> {
+  return apiDelete("/api/v1/admin/mcp/servers/{server_id}", {
+    params: { path: { server_id: serverId } },
+  });
+}
+
 export function listAdminTools(
   query: AdminPageQuery,
 ): Promise<AdminToolListResponse> {
@@ -132,6 +186,24 @@ export function updateToolApprovalPolicy(
   return apiPatch("/api/v1/admin/tools/{tool_id}", {
     body: { requires_approval: requiresApproval },
     params: { path: { tool_id: toolId } },
+  });
+}
+
+export function updateAdminToolMetadata(
+  toolId: string,
+  input: AdminToolUpdateInput,
+): Promise<AdminTool> {
+  return apiPatch("/api/v1/admin/tools/{tool_id}", {
+    body: input,
+    params: { path: { tool_id: toolId } },
+  });
+}
+
+export function batchUpdateAdminToolApproval(
+  input: AdminToolBatchApprovalInput,
+): Promise<AdminToolBatchApprovalResponse> {
+  return apiPatch("/api/v1/admin/tools/batch-approval", {
+    body: input,
   });
 }
 

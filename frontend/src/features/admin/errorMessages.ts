@@ -26,15 +26,21 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
     "上下文压缩策略不符合后端约束，请检查比例与模型状态。",
   mcp_request_invalid:
     "MCP 配置不合法，请检查 transport、地址、命令、参数和秘密名称。",
+  mcp_config_invalid:
+    "MCP 配置未发生变化或参数不合法，请核对后重试。",
   mcp_conflict:
     "MCP Server 名称或配置版本发生冲突，请刷新后重新提交。",
   mcp_config_version_conflict:
     "MCP Server 配置已被其他管理员修改，请刷新最新配置后重试。",
+  mcp_server_not_found: "目标 MCP Server 不存在或已被删除。",
   mcp_tool_not_found: "目标 MCP 工具不存在或已被移除。",
   visibility_scope_invalid: "可见范围无效，请重新选择。",
+  visibility_scope_unsupported: "当前资源不支持所选可见范围，请重新选择。",
   owner_department_id_required: "部门共享资源必须指定归属部门。",
   owner_department_required: "部门共享资源必须指定归属部门。",
+  owner_department_not_allowed: "全公司可见资源不允许指定归属部门。",
   visibility_grants_invalid: "可见性授权配置无效，请检查部门或角色设置。",
+  visibility_grants_not_allowed: "全公司可见资源不允许配置附加授权。",
   mcp_discovery_failed:
     "服务端连接 MCP Server 或发现工具失败，配置未保存。",
   mcp_discovery_timeout:
@@ -43,6 +49,8 @@ const ADMIN_ERROR_COPY: Record<string, string> = {
     "MCP 目录存储或秘密服务暂时不可用，请稍后重试。",
   mcp_query_invalid: "分页参数无效。",
   mcp_tool_policy_invalid: "工具审批策略参数无效。",
+  mcp_tool_metadata_invalid:
+    "工具展示元信息不符合规范，请检查名称长度、摘要模板或参数标签。",
   system_prompt_invalid:
     "系统提示词不能全部为空白，也不能超过 100,000 个字符。",
   system_prompt_version_conflict:
@@ -85,7 +93,16 @@ export function isMcpConflict(error: unknown): boolean {
   return (
     error instanceof ApiError &&
     error.status === 409 &&
-    error.detail === "mcp_conflict"
+    (error.detail === "mcp_conflict" ||
+      error.detail === "mcp_config_version_conflict")
+  );
+}
+
+export function isModelProfileVersionConflict(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    error.detail === "model_profile_version_conflict"
   );
 }
 

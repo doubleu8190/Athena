@@ -2,6 +2,8 @@ import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import {
+  CHECKBOX_INPUT_CLASS,
+  CHECKBOX_LABEL_CLASS,
   Button,
   EMPTY_INLINE_CLASS,
   FIELD_CLASS,
@@ -13,22 +15,26 @@ import {
   InlineAlert,
   MODAL_WIDTH_XL,
   NOTICE_BRAND_CLASS,
-  NOTICE_WARNING_CLASS,
   PAGE_LOADING_CLASS,
   TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
 import { FieldError } from "../../shared/ui/FieldError";
 import { Modal } from "../../shared/ui/Modal";
+import { defaultOwnerGrant, normalizeVisibilityGrants } from "../access/visibilityGrants";
+import { useAuth } from "../auth/AuthProvider";
+import { isSuperAdmin } from "../auth/model";
+import { AdminVisibilityFields } from "./AdminVisibilityFields";
 import { adminErrorMessage, isMcpConflict } from "./errorMessages";
 import {
   useCreateMcpServerMutation,
   useMcpServer,
-  useUpdateMcpServerMutation,
+  usePatchMcpServerMutation,
 } from "./hooks";
 import {
   mcpServerForm,
   validateMcpServerForm,
+  validateMcpServerPatchForm,
   type FieldErrors,
   type McpSecretRow,
   type McpServerField,
@@ -44,6 +50,7 @@ function newSecretRow(): McpSecretRow {
     name: "",
     value: "",
     existing: false,
+    hasValue: false,
   };
 }
 
@@ -58,47 +65,45 @@ export function McpServerDialog({
   open,
   serverId,
 }: McpServerDialogProps) {
+  const { user } = useAuth();
+  const superAdmin = isSuperAdmin(user);
   const formId = useId();
   const editing = Boolean(serverId);
   const detail = useMcpServer(serverId, open && editing);
   const createMutation = useCreateMcpServerMutation();
-  const updateMutation = useUpdateMcpServerMutation(serverId ?? "");
+  const patchMutation = usePatchMcpServerMutation(serverId ?? "");
   const { reset: resetCreateMutation } = createMutation;
-  const { reset: resetUpdateMutation } = updateMutation;
-  const [values, setValues] = useState<McpServerFormValues>(
-    mcpServerForm,
-  );
-  const [errors, setErrors] = useState<FieldErrors<McpServerField>>(
-    {},
-  );
+  const { reset: resetPatchMutation } = patchMutation;
+  const [values, setValues] = useState<McpServerFormValues>(mcpServerForm);
+  const [errors, setErrors] = useState<FieldErrors<McpServerField>>({});
   const [requestError, setRequestError] = useState<string | null>(null);
-  const [configVersion, setConfigVersion] = useState<number | null>(
-    null,
-  );
-  const [loadedIdentity, setLoadedIdentity] = useState<string | null>(
-    null,
-  );
+  const [configVersion, setConfigVersion] = useState<number | null>(null);
+  const [loadedIdentity, setLoadedIdentity] = useState<string | null>(null);
+  const [grantsEditorResetKey, setGrantsEditorResetKey] = useState(0);
+  const rediscoverTouchedRef = useRef(false);
   const submitLock = useRef(false);
-  const pending =
-    createMutation.isPending || updateMutation.isPending;
+  const pending = createMutation.isPending || patchMutation.isPending;
 
   useEffect(() => {
     if (!open) {
       setLoadedIdentity(null);
+      rediscoverTouchedRef.current = false;
       submitLock.current = false;
       return;
     }
     setErrors({});
     setRequestError(null);
     resetCreateMutation();
-    resetUpdateMutation();
+    resetPatchMutation();
+    rediscoverTouchedRef.current = false;
     submitLock.current = false;
     if (!serverId) {
       setValues(mcpServerForm());
       setConfigVersion(null);
       setLoadedIdentity("create");
+      setGrantsEditorResetKey((prev) => prev + 1);
     }
-  }, [open, resetCreateMutation, resetUpdateMutation, serverId]);
+  }, [open, resetCreateMutation, resetPatchMutation, serverId]);
 
   useEffect(() => {
     if (
@@ -111,10 +116,12 @@ export function McpServerDialog({
     ) {
       return;
     }
-    // 首次打开编辑时以最新详情初始化；409 刷新只更新版本号，不覆盖用户已输入的秘密。
+    // 首次打开编辑时以最新详情初始化；409 刷新仅在冲突处理分支显式覆盖表单与版本号。
     setValues(mcpServerForm(detail.data));
     setConfigVersion(detail.data.config_version);
     setLoadedIdentity(serverId);
+    setGrantsEditorResetKey((prev) => prev + 1);
+    rediscoverTouchedRef.current = false;
   }, [
     detail.data,
     detail.isFetchedAfterMount,
@@ -134,7 +141,19 @@ export function McpServerDialog({
     field: Field,
     value: McpServerFormValues[Field],
   ) => {
-    setValues((current) => ({ ...current, [field]: value }));
+    const affectsDiscovery =
+      editing &&
+      (field === "url" ||
+        field === "command" ||
+        field === "cwd" ||
+        field === "argsText");
+    setValues((current) => ({
+      ...current,
+      [field]: value,
+      ...(affectsDiscovery && !rediscoverTouchedRef.current
+        ? { rediscover: true }
+        : {}),
+    }));
     setErrors((current) => ({ ...current, [field]: undefined }));
     setRequestError(null);
   };
@@ -148,6 +167,7 @@ export function McpServerDialog({
       secrets: current.secrets.map((row) =>
         row.id === rowId ? { ...row, ...patch } : row,
       ),
+      ...(editing && !rediscoverTouchedRef.current ? { rediscover: true } : {}),
     }));
     setErrors((current) => ({ ...current, secrets: undefined }));
     setRequestError(null);
@@ -157,8 +177,72 @@ export function McpServerDialog({
     setValues((current) => ({
       ...current,
       secrets: current.secrets.filter((row) => row.id !== rowId),
+      ...(editing && !rediscoverTouchedRef.current ? { rediscover: true } : {}),
     }));
     setErrors((current) => ({ ...current, secrets: undefined }));
+    setRequestError(null);
+  };
+
+  const handleScopeChange = (nextScope: "company" | "department") => {
+    setValues((current) => {
+      if (nextScope === "company") {
+        return {
+          ...current,
+          visibility_scope: "company",
+          visibility_grants: [],
+        };
+      }
+      const trimmedDept = current.owner_department_id.trim();
+      const baseServer = detail.data;
+      const grants =
+        editing &&
+        baseServer?.visibility_scope === "department" &&
+        trimmedDept &&
+        trimmedDept === (baseServer.owner_department_id ?? "")
+          ? normalizeVisibilityGrants(
+              trimmedDept,
+              baseServer.visibility_grants,
+              superAdmin,
+            )
+          : trimmedDept
+            ? [defaultOwnerGrant(trimmedDept, superAdmin)]
+            : [];
+      return {
+        ...current,
+        visibility_scope: "department",
+        visibility_grants: grants,
+      };
+    });
+    setErrors((current) => ({ ...current, owner_department_id: undefined }));
+    setRequestError(null);
+  };
+
+  const handleDepartmentChange = (nextDeptId: string) => {
+    const trimmed = nextDeptId.trim();
+    const baseServer = detail.data;
+    setValues((current) => {
+      const restoredOriginal =
+        editing &&
+        baseServer?.visibility_scope === "department" &&
+        trimmed === (baseServer.owner_department_id ?? "");
+      if (restoredOriginal) {
+        setGrantsEditorResetKey((prev) => prev + 1);
+      }
+      return {
+        ...current,
+        owner_department_id: nextDeptId,
+        visibility_grants: restoredOriginal && baseServer
+          ? normalizeVisibilityGrants(
+              trimmed,
+              baseServer.visibility_grants,
+              superAdmin,
+            )
+          : trimmed
+            ? [defaultOwnerGrant(trimmed, superAdmin)]
+            : [],
+      };
+    });
+    setErrors((current) => ({ ...current, owner_department_id: undefined }));
     setRequestError(null);
   };
 
@@ -166,62 +250,82 @@ export function McpServerDialog({
     if (submitLock.current || pending) {
       return;
     }
-    const result = validateMcpServerForm(values);
-    setErrors(result.errors);
-    if (!result.input) {
-      return;
-    }
-    if (editing && configVersion === null) {
-      setRequestError(
-        "尚未读取到最新 config_version，不能提交完整替换。",
-      );
-      return;
-    }
 
-    submitLock.current = true;
-    setRequestError(null);
-    try {
-      if (editing) {
-        await updateMutation.mutateAsync({
-          expected_config_version: configVersion as number,
-          server: result.input,
-        });
-      } else {
-        await createMutation.mutateAsync(result.input);
+    if (editing) {
+      if (configVersion === null || !detail.data) {
+        setRequestError("尚未读取到最新 config_version，不能提交修改。");
+        return;
       }
-      onClose();
-    } catch (failure) {
-      if (editing && isMcpConflict(failure)) {
-        // 409 表示其他管理员已保存新版本；旧草稿不能与新版本号组合提交。
-        setConfigVersion(null);
-        setRequestError(
-          "配置已被并发修改，正在读取最新详情；读取完成前不能提交。",
-        );
-        try {
-          const refreshed = await detail.refetch();
-          if (refreshed.isSuccess && refreshed.data) {
-            // 以服务端最新详情替换整份草稿；秘密只保留脱敏名称，值全部清空。
-            setValues(mcpServerForm(refreshed.data));
-            setConfigVersion(refreshed.data.config_version);
-            setErrors({});
-            setRequestError(
-              `配置已被并发修改。已载入最新配置，旧草稿未保存，请重新输入秘密后提交。（${refreshed.data.name} · config_version ${refreshed.data.config_version}）`,
-            );
-          } else {
+      const patchResult = validateMcpServerPatchForm(
+        values,
+        detail.data,
+        configVersion,
+      );
+      setErrors(patchResult.errors);
+      if (Object.keys(patchResult.errors).length > 0) {
+        return;
+      }
+      if (!patchResult.hasChanges || !patchResult.input) {
+        onClose();
+        return;
+      }
+
+      submitLock.current = true;
+      setRequestError(null);
+      try {
+        await patchMutation.mutateAsync(patchResult.input);
+        onClose();
+      } catch (failure) {
+        if (isMcpConflict(failure)) {
+          // 409 表示其他管理员已保存新版本；禁止沿用旧版本号提交。
+          setConfigVersion(null);
+          setRequestError(
+            "配置已被并发修改，正在读取最新详情；读取完成前不能提交。",
+          );
+          try {
+            const refreshed = await detail.refetch();
+            if (refreshed.isSuccess && refreshed.data) {
+              setValues(mcpServerForm(refreshed.data));
+              setConfigVersion(refreshed.data.config_version);
+              setGrantsEditorResetKey((prev) => prev + 1);
+              rediscoverTouchedRef.current = false;
+              setErrors({});
+              setRequestError(
+                `配置已被并发修改。已载入最新配置与版本号，旧草稿未保存，请核对后重新提交。（${refreshed.data.name} · config_version ${refreshed.data.config_version}）`,
+              );
+            } else {
+              setConfigVersion(null);
+              setRequestError(
+                "配置已被并发修改，且暂时无法读取最新详情。请关闭后重新打开编辑。",
+              );
+            }
+          } catch {
             setConfigVersion(null);
             setRequestError(
               "配置已被并发修改，且暂时无法读取最新详情。请关闭后重新打开编辑。",
             );
           }
-        } catch {
-          setConfigVersion(null);
-          setRequestError(
-            "配置已被并发修改，且暂时无法读取最新详情。请关闭后重新打开编辑。",
-          );
+        } else {
+          setRequestError(adminErrorMessage(failure));
         }
-      } else {
-        setRequestError(adminErrorMessage(failure));
+      } finally {
+        submitLock.current = false;
       }
+      return;
+    }
+
+    const createResult = validateMcpServerForm(values);
+    setErrors(createResult.errors);
+    if (!createResult.input) {
+      return;
+    }
+    submitLock.current = true;
+    setRequestError(null);
+    try {
+      await createMutation.mutateAsync(createResult.input);
+      onClose();
+    } catch (failure) {
+      setRequestError(adminErrorMessage(failure));
     } finally {
       submitLock.current = false;
     }
@@ -233,15 +337,14 @@ export function McpServerDialog({
     loadedIdentity === serverId ||
     (detail.isSuccess && detail.isFetchedAfterMount);
   const versionReady = !editing || configVersion !== null;
-  const editReady =
-    (!editing || loadedIdentity === serverId) && versionReady;
+  const editReady = (!editing || loadedIdentity === serverId) && versionReady;
 
   return (
     <Modal
       closeDisabled={pending}
       description={
         editing
-          ? "保存会以当前 config_version 完整替换配置，并重新连接、发现工具。"
+          ? "支持保密局部更新：既有加密凭据留空即保留原值，可按需勾选保存后重新发现工具。"
           : "创建时后端会真实连接 MCP Server 并发现工具，连接成功后才写入目录。"
       }
       footer={
@@ -261,9 +364,13 @@ export function McpServerDialog({
             variant="primary"
           >
             {pending
-              ? "正在连接并发现工具…"
+              ? editing
+                ? values.rediscover
+                  ? "正在保存并重发现工具…"
+                  : "正在保存修改…"
+                : "正在连接并发现工具…"
               : editing
-                ? "完整替换并发现工具"
+                ? "保存修改"
                 : "创建并发现工具"}
           </Button>
         </>
@@ -309,12 +416,6 @@ export function McpServerDialog({
             className={cn(FORM_STACK_CLASS, "m-0 border-0 p-0")}
             disabled={pending || !editReady}
           >
-            {editing ? (
-              <p className={cn(NOTICE_WARNING_CLASS, "font-semibold")}>
-                编辑是完整替换：必须重新输入全部秘密。未重新输入或显式移除的旧秘密会被删除。
-              </p>
-            ) : null}
-
             <label className={FIELD_CLASS} htmlFor={fieldId("name")}>
               <span>Server 名称</span>
               <input
@@ -332,10 +433,7 @@ export function McpServerDialog({
                 value={values.name}
               />
             </label>
-            <FieldError
-              error={errors.name}
-              id={fieldId("name-error")}
-            />
+            <FieldError error={errors.name} id={fieldId("name-error")} />
 
             <fieldset className="m-0 border-0 p-0">
               <legend className="mb-[7px] text-xs font-semibold text-text-primary">
@@ -346,7 +444,7 @@ export function McpServerDialog({
                   <input
                     checked={values.transport === "streamable_http"}
                     className="peer sr-only"
-                    disabled={pending}
+                    disabled={pending || editing}
                     name={`${formId}-transport`}
                     onChange={() => update("transport", "streamable_http")}
                     type="radio"
@@ -359,7 +457,7 @@ export function McpServerDialog({
                   <input
                     checked={values.transport === "stdio"}
                     className="peer sr-only"
-                    disabled={pending}
+                    disabled={pending || editing}
                     name={`${formId}-transport`}
                     onChange={() => update("transport", "stdio")}
                     type="radio"
@@ -369,6 +467,11 @@ export function McpServerDialog({
                   </span>
                 </label>
               </div>
+              {editing ? (
+                <small className="mt-1 block text-xs text-text-tertiary">
+                  编辑模式下不可切换传输协议；如需更改协议请新建 MCP Server。
+                </small>
+              ) : null}
             </fieldset>
 
             {values.transport === "streamable_http" ? (
@@ -394,10 +497,7 @@ export function McpServerDialog({
                     只允许 HTTPS，且不能包含账号、查询参数或 URL 片段。
                   </small>
                 </label>
-                <FieldError
-                  error={errors.url}
-                  id={fieldId("url-error")}
-                />
+                <FieldError error={errors.url} id={fieldId("url-error")} />
               </>
             ) : (
               <>
@@ -409,9 +509,7 @@ export function McpServerDialog({
                     className={FIELD_INPUT_CLASS}
                     disabled={pending}
                     id={fieldId("command")}
-                    onChange={(event) =>
-                      update("command", event.target.value)
-                    }
+                    onChange={(event) => update("command", event.target.value)}
                     placeholder="/usr/local/bin/mcp-server"
                     value={values.command}
                   />
@@ -433,10 +531,7 @@ export function McpServerDialog({
                     value={values.cwd}
                   />
                 </label>
-                <FieldError
-                  error={errors.cwd}
-                  id={fieldId("cwd-error")}
-                />
+                <FieldError error={errors.cwd} id={fieldId("cwd-error")} />
                 <label className={FIELD_CLASS} htmlFor={fieldId("args")}>
                   <span>参数（每行一个，不使用 shell 引号）</span>
                   <textarea
@@ -444,9 +539,7 @@ export function McpServerDialog({
                     className={FIELD_TEXTAREA_CLASS}
                     disabled={pending}
                     id={fieldId("args")}
-                    onChange={(event) =>
-                      update("argsText", event.target.value)
-                    }
+                    onChange={(event) => update("argsText", event.target.value)}
                     rows={4}
                     value={values.argsText}
                   />
@@ -457,6 +550,26 @@ export function McpServerDialog({
                 />
               </>
             )}
+
+            <AdminVisibilityFields
+              disabled={pending || !editReady}
+              formId={formId}
+              grantsEditorResetKey={grantsEditorResetKey}
+              onDepartmentChange={handleDepartmentChange}
+              onGrantsChange={(nextGrants) =>
+                setValues((current) => ({
+                  ...current,
+                  visibility_grants: nextGrants,
+                }))
+              }
+              onScopeChange={handleScopeChange}
+              open={open}
+              ownerDepartmentError={errors.owner_department_id}
+              ownerDepartmentId={values.owner_department_id}
+              resourceLabel="MCP Server"
+              visibilityGrants={values.visibility_grants}
+              visibilityScope={values.visibility_scope}
+            />
 
             <section
               aria-labelledby={fieldId("secrets-title")}
@@ -472,8 +585,8 @@ export function McpServerDialog({
                   </h3>
                   <p className="mt-[3px] text-xs text-text-tertiary">
                     {values.transport === "streamable_http"
-                      ? "名称作为 HTTPS header，值只提交给后端。"
-                      : "名称作为子进程环境变量，值只提交给后端。"}
+                      ? "名称作为 HTTPS header，值只提交给后端加密存储。"
+                      : "名称作为子进程环境变量，值只提交给后端加密存储。"}
                   </p>
                 </div>
                 <Button
@@ -511,14 +624,17 @@ export function McpServerDialog({
                       key={row.id}
                     >
                       <label
-                        className={cn(FIELD_CLASS, "col-start-1 sm:col-start-auto")}
+                        className={cn(
+                          FIELD_CLASS,
+                          "col-start-1 sm:col-start-auto",
+                        )}
                         htmlFor={`${row.id}-name`}
                       >
                         <span>秘密名称 {index + 1}</span>
                         <input
                           autoComplete="off"
                           className={FIELD_INPUT_CLASS}
-                          disabled={pending}
+                          disabled={pending || row.existing}
                           id={`${row.id}-name`}
                           onChange={(event) =>
                             updateSecret(row.id, {
@@ -537,7 +653,9 @@ export function McpServerDialog({
                         htmlFor={`${row.id}-value`}
                       >
                         <span>
-                          {row.existing ? "重新输入秘密值" : "秘密值"}
+                          {row.existing && row.hasValue !== false
+                            ? "秘密值（已加密保存，留空保留原值）"
+                            : "秘密值"}
                         </span>
                         <input
                           autoComplete="new-password"
@@ -548,6 +666,11 @@ export function McpServerDialog({
                             updateSecret(row.id, {
                               value: event.target.value,
                             })
+                          }
+                          placeholder={
+                            row.existing && row.hasValue !== false
+                              ? "留空保留原值"
+                              : undefined
                           }
                           type="password"
                           value={row.value}
@@ -581,6 +704,25 @@ export function McpServerDialog({
                 id={fieldId("secrets-error")}
               />
             </section>
+
+            {editing ? (
+              <label className={CHECKBOX_LABEL_CLASS}>
+                <input
+                  checked={values.rediscover}
+                  className={CHECKBOX_INPUT_CLASS}
+                  disabled={pending}
+                  onChange={(event) => {
+                    rediscoverTouchedRef.current = true;
+                    setValues((current) => ({
+                      ...current,
+                      rediscover: event.target.checked,
+                    }));
+                  }}
+                  type="checkbox"
+                />
+                <span>保存后重新发现工具（rediscover）</span>
+              </label>
+            ) : null}
           </fieldset>
 
           {editing && configVersion !== null ? (
@@ -596,7 +738,9 @@ export function McpServerDialog({
               )}
               role="status"
             >
-              正在连接 MCP Server 并发现工具。后端完成前不会显示连接成功；配置结果以服务端响应为准。
+              {editing && !values.rediscover
+                ? "正在保存 MCP Server 配置…"
+                : "正在连接 MCP Server 并发现工具。后端完成前不会显示连接成功；配置结果以服务端响应为准。"}
             </p>
           ) : null}
           {requestError ? (

@@ -272,7 +272,7 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
 
     from pydantic import ValidationError
 
-    from app.run.config import RunWorkerConfig
+    from app.run.config import RunWorkerConfig, worker_config_from_environment
     from bootstrap import config as bootstrap_config
     from bootstrap.config import (
         AuthSettings,
@@ -282,13 +282,12 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
         LoggingSettings,
         McpSettings,
         RedisSettings,
-        RunWorkerSettings,
         is_production_env,
     )
 
     assert not hasattr(bootstrap_config, "AthenaSettings")
+    assert not hasattr(bootstrap_config, "RunWorkerSettings")
     assert not hasattr(RunWorkerConfig(), "claim_batch_size")
-    assert not hasattr(RunWorkerSettings(), "claim_batch_size")
 
     env = {
         "ATHENA_ENV": "PRODUCTION",
@@ -318,7 +317,7 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
     mcp = McpSettings.from_environment(env)
     knowledge = KnowledgeSettings.from_environment(env)
     files = FileSkillSettings.from_environment(env)
-    run_worker = RunWorkerSettings.from_environment(env)
+    run_worker = worker_config_from_environment(env)
     logging_settings = LoggingSettings.from_environment(env)
 
     assert is_production_env(env) is True
@@ -339,9 +338,21 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
     assert not hasattr(files, "files_enabled")
     assert files.python_executable == Path("/usr/bin/python3")
     assert files.temp_root == Path("/tmp/athena-skills")
-    assert run_worker.to_config().llm_request_limit == 25
-    assert run_worker.to_config().tool_timeout_seconds == pytest.approx(45.5)
+    assert run_worker.llm_request_limit == 25
+    assert run_worker.tool_timeout_seconds == pytest.approx(45.5)
     assert logging_settings.level == "WARNING"
+
+    # 空串环境变量回退到安全默认值，不再抛 ValueError。
+    blank_poll_config = worker_config_from_environment(
+        {
+            "ATHENA_RUN_CANCEL_POLL_SECONDS": "",
+            "ATHENA_RUN_QUEUE_POLL_SECONDS": "   ",
+            "ATHENA_RUN_RECLAIM_SECONDS": "",
+        }
+    )
+    assert blank_poll_config.cancel_poll_seconds == pytest.approx(1.0)
+    assert blank_poll_config.queue_poll_seconds == pytest.approx(1.0)
+    assert blank_poll_config.reclaim_seconds == pytest.approx(5.0)
 
     with pytest.raises(ValidationError):
         database.pool_size = 99
@@ -356,9 +367,9 @@ def test_settings_classes_load_typed_frozen_snapshots_and_preserve_error_codes()
     with pytest.raises(ValueError, match="knowledge_worker_concurrency_invalid"):
         KnowledgeSettings.from_environment({"ATHENA_KNOWLEDGE_WORKER_CONCURRENCY": "abc"})
     with pytest.raises(ValueError, match="ATHENA_RUN_LLM_REQUEST_LIMIT_invalid"):
-        RunWorkerSettings.from_environment({"ATHENA_RUN_LLM_REQUEST_LIMIT": "99"})
+        worker_config_from_environment({"ATHENA_RUN_LLM_REQUEST_LIMIT": "99"})
     with pytest.raises(ValueError, match="run_worker_config_invalid"):
-        RunWorkerSettings.from_environment(
+        worker_config_from_environment(
             {
                 "ATHENA_RUN_LEASE_SECONDS": "10",
                 "ATHENA_RUN_HEARTBEAT_SECONDS": "10",

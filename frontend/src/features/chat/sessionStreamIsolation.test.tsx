@@ -17,7 +17,7 @@ import {
 import { jsonResponse, renderApp } from "../../test/testUtils";
 import { FilePreviewDialog } from "../files/FilePreviewDialog";
 import * as fileHooks from "../files/hooks";
-import * as modelHooks from "../models/hooks";
+import * as modelHooks from "../models";
 import * as projectHooks from "../projects/hooks";
 import * as skillHooks from "../skills/hooks";
 import { ChatHeader } from "./ChatHeader";

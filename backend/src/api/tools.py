@@ -6,12 +6,6 @@ from typing import Annotated, cast
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 
-from api.converter.tool import (
-    admin_tool_page_to_response,
-    admin_tool_to_response,
-    public_tool_page_to_response,
-    public_tool_to_response,
-)
 from api.dto.tool import (
     AdminToolBatchApprovalResponse,
     AdminToolListResponse,
@@ -21,7 +15,7 @@ from api.dto.tool import (
     ToolApprovalPolicyRequest,
     ToolBatchApprovalRequest,
 )
-from api.mcp_errors import SafeMcpRoute
+from api.errors import SafeMcpRoute
 from api.security import AdminAuth, CurrentAuth
 from app.tool import ToolManager
 from common.unset import UNSET
@@ -60,7 +54,12 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         result = await manager.list_public_tools(
             actor, offset=(page - 1) * page_size, limit=page_size
         )
-        return public_tool_page_to_response(result, page_number=page, page_size=page_size)
+        return PublicToolListResponse(
+            items=[PublicToolResponse.model_validate(item) for item in result.items],
+            total=result.total,
+            page=page,
+            page_size=page_size,
+        )
 
     @router.get("/api/v1/tools/{tool_id}", response_model=PublicToolResponse)
     async def get_public_tool(
@@ -70,7 +69,7 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
     ) -> PublicToolResponse:
         _no_query(request)
         result = await manager.get_public_tool(actor, tool_id)
-        return public_tool_to_response(result)
+        return PublicToolResponse.model_validate(result)
 
     @router.get("/api/v1/admin/tools", response_model=AdminToolListResponse)
     async def list_admin_tools(
@@ -85,7 +84,12 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         result = await manager.list_admin_tools(
             actor, offset=(page - 1) * page_size, limit=page_size
         )
-        return admin_tool_page_to_response(result, page_number=page, page_size=page_size)
+        return AdminToolListResponse(
+            items=[AdminToolResponse.model_validate(item) for item in result.items],
+            total=result.total,
+            page=page,
+            page_size=page_size,
+        )
 
     @router.get("/api/v1/admin/tools/{tool_id}", response_model=AdminToolResponse)
     async def get_admin_tool(
@@ -97,7 +101,7 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
         _no_query(request)
         response.headers["Cache-Control"] = "no-store"
         result = await manager.get_admin_tool(actor, tool_id)
-        return admin_tool_to_response(result)
+        return AdminToolResponse.model_validate(result)
 
     # 静态路径 batch-approval 必须注册在动态路径 /{tool_id} 之前，避免被路径参数吞掉。
     @router.patch(
@@ -120,7 +124,7 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "mcp_tool_not_found") from error
         return AdminToolBatchApprovalResponse(
             updated_count=len(items),
-            items=[admin_tool_to_response(item) for item in items],
+            items=[AdminToolResponse.model_validate(item) for item in items],
         )
 
     @router.patch(
@@ -158,7 +162,7 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
             ),
         )
         result = await manager.update_tool_metadata(actor, tool_id, patch)
-        return admin_tool_to_response(result)
+        return AdminToolResponse.model_validate(result)
 
     return router
 

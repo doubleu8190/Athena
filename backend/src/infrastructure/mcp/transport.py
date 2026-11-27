@@ -43,8 +43,6 @@ def build_controlled_mcp_transport(
                 cwd=config.cwd,
                 env=connection.secrets,
                 base_environment=stdio_base_environment,
-                maximum_line_bytes=maximum_response_bytes,
-                maximum_total_bytes=maximum_response_bytes,
             ),
         )
     raise ValueError("mcp_transport_unsupported")

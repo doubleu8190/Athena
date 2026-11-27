@@ -1,3 +1,4 @@
+import { Pencil, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -17,18 +18,18 @@ import {
   ADMIN_TITLE_LINE_CLASS,
   Badge,
   Button,
+  InlineAlert,
   PAGE_DESC_CLASS,
   PAGE_HEADING_CLASS,
   PAGE_HEADING_COPY_CLASS,
   PAGE_LOADING_CLASS,
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
+  TEXT_BUTTON_CLASS,
   VisibilityBadge,
   cn,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import {
   AdminPagination,
   lastPageNumber,
@@ -89,7 +90,7 @@ export function AdminMcpPage() {
           type="button"
           variant="primary"
         >
-          <Icon name="plus" size={14} />
+          <Plus aria-hidden="true" focusable="false" size={14} strokeWidth={1.7} />
           新建 MCP Server
         </Button>
       </header>
@@ -99,10 +100,21 @@ export function AdminMcpPage() {
           正在读取 MCP Server…
         </div>
       ) : servers.isError ? (
-        <ErrorBanner
-          message={adminErrorMessage(servers.error)}
-          onRetry={() => void servers.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void servers.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {adminErrorMessage(servers.error)}
+        </InlineAlert>
       ) : servers.data.items.length === 0 && page === 1 ? (
         <EmptyState
           action={
@@ -171,7 +183,12 @@ export function AdminMcpPage() {
                     type="button"
                     variant="outline"
                   >
-                    <Icon name="edit" size={14} />
+                    <Pencil
+                      aria-hidden="true"
+                      focusable="false"
+                      size={14}
+                      strokeWidth={1.7}
+                    />
                     编辑
                   </Button>
                 </div>

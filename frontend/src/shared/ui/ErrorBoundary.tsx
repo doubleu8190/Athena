@@ -1,3 +1,4 @@
+import { ShieldCheck } from "lucide-react";
 import {
   Component,
   type ErrorInfo,
@@ -6,7 +7,6 @@ import {
 
 import { Brand } from "./Brand";
 import { Button } from "./Button";
-import { Icon } from "./Icons";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -51,7 +51,12 @@ export class ErrorBoundary extends Component<
             aria-hidden="true"
             className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-xl border border-danger-border bg-danger-bg text-danger"
           >
-            <Icon name="shield" size={22} />
+            <ShieldCheck
+              aria-hidden="true"
+              focusable="false"
+              size={22}
+              strokeWidth={1.7}
+            />
           </span>
           <h1
             className="text-2xl font-semibold tracking-tight text-text-primary sm:text-[26px]"

@@ -38,10 +38,11 @@ from bootstrap.config import (
     FileSkillSettings,
     KnowledgeSettings,
     McpSettings,
+    is_production_env,
 )
 from bootstrap.database import build_database
 from bootstrap.knowledge import (
-    validate_knowledge_embedding_configuration,
+    knowledge_embedding_config,
     validate_knowledge_storage_configuration,
 )
 from bootstrap.lifecycle import close_resources_lifo
@@ -50,7 +51,6 @@ from bootstrap.redis import (
     build_oauth_state_store,
     build_redis_client,
     build_run_transport,
-    is_production_environment,
     validate_auth_rate_limit_configuration,
     validate_feishu_state_store_configuration,
 )
@@ -75,8 +75,8 @@ from infrastructure.embedding import OpenAICompatibleEmbeddingConfig
 from infrastructure.feishu import FeishuClient, FeishuConfig
 from infrastructure.knowledge.parsers import LocalDocumentParser
 from infrastructure.mcp.discovery import McpDiscoveryClient
-from infrastructure.security.mcp_secrets import McpSecretCipher
 from infrastructure.security.password import Argon2PasswordHasher
+from infrastructure.security.secrets import SecretCipher
 from infrastructure.storage.minio_client import MinioObjectClient
 
 logger = logging.getLogger(__name__)
@@ -186,7 +186,7 @@ def build_api_dependencies(
     """
     auth_settings = AuthSettings.from_environment()
     # 强制生产安全护栏：生产环境严禁开启本地 Mock 快捷登录，在分配任何连接池前立即阻断启动。
-    if is_production_environment() and auth_settings.mock_enabled:
+    if is_production_env() and auth_settings.mock_enabled:
         raise RuntimeError("auth_mock_forbidden_in_production")
 
     feishu_config: FeishuConfig | None = None
@@ -194,7 +194,7 @@ def build_api_dependencies(
         # 生产环境开启飞书 SSO 必须提供 Redis 一次性 state 存储，并校验凭据与 HTTPS 配置。
         validate_feishu_state_store_configuration()
         feishu_config = FeishuConfig.from_environment(
-            is_production=is_production_environment(),
+            is_production=is_production_env(),
         )
 
     database_url = DatabaseSettings.url_from_environment()
@@ -229,21 +229,21 @@ def build_api_dependencies(
     # 在创建数据库连接池之前执行前置 Fail-Fast 校验，防止对象存储或 Embedding 配置非法时
     # 已建库导致连接池等资源遗留；同时仅解析一次并在后续装配中复用。
     knowledge_storage_config: MinioStorageConfig | None = None
-    knowledge_embedding_config: OpenAICompatibleEmbeddingConfig | None = None
+    embedding_config: OpenAICompatibleEmbeddingConfig | None = None
     file_storage_config: MinioFileStorageConfig | None = None
     if knowledge_owned:
         knowledge_storage_config = validate_knowledge_storage_configuration()
-        knowledge_embedding_config = validate_knowledge_embedding_configuration()
+        embedding_config = knowledge_embedding_config()
     elif needs_file_storage:
         file_storage_config = MinioFileStorageConfig.from_environment()
 
     # LLM 配置由管理员持久化；部署环境只提供加密主密钥，不提供模型凭据。
-    secret_cipher: McpSecretCipher | None = None
+    secret_cipher: SecretCipher | None = None
     mcp_discovery: McpDiscoveryClient | None = None
     needs_mcp_repo = mcp_use_case is None or subagent_use_case is None
     if database_url and needs_mcp_repo:
         # 在创建数据库连接池前验证 MCP 密钥，防止失败组装遗留资源。
-        secret_cipher = McpSecretCipher.from_environment()
+        secret_cipher = SecretCipher.from_environment()
         if mcp_use_case is None:
             mcp_settings = McpSettings.from_environment()
             mcp_discovery = McpDiscoveryClient(
@@ -253,7 +253,7 @@ def build_api_dependencies(
     if database_url and model_profile_use_case is None and secret_cipher is None:
         # LLM 加密密钥未配置时仍允许非 MCP 功能启动；模型调用会安全地保持不可用。
         try:
-            secret_cipher = McpSecretCipher.from_environment()
+            secret_cipher = SecretCipher.from_environment()
         except McpSecretError:
             secret_cipher = None
 
@@ -361,7 +361,7 @@ def build_api_dependencies(
             access_policy=core.access_policy,
             object_client=shared_storage_client,
             semantic_min_score=knowledge_settings.semantic_min_score,
-            embedding_config=knowledge_embedding_config,
+            embedding_config=embedding_config,
             storage_config=knowledge_storage_config,
         )
         knowledge_use_case = query_services.knowledge

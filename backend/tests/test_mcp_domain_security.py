@@ -16,7 +16,7 @@ from domain.mcp import (
     parse_server_config,
 )
 from domain.tool import MAX_TOOL_DESCRIPTION_LENGTH, ToolDefinition
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 
 def test_server_config_requires_exact_transport_fields() -> None:
@@ -129,7 +129,7 @@ def test_tool_definition_cleans_description_and_rejects_unicode_controls_in_remo
 
 
 def test_mcp_secret_cipher_round_trip_nonce_and_aad_binding() -> None:
-    cipher = McpSecretCipher(bytes(range(32)), key_version=3)
+    cipher = SecretCipher(bytes(range(32)), key_version=3)
     values = {"Authorization": "Bearer very-secret-value"}
     sealed = cipher.seal("mcp_server_1", McpSecretPurpose.HTTP_HEADERS, values)
     another = cipher.seal("mcp_server_1", McpSecretPurpose.HTTP_HEADERS, values)
@@ -195,8 +195,31 @@ def test_mcp_secret_cipher_environment_is_fail_closed(monkeypatch: pytest.Monkey
     monkeypatch.delenv("ATHENA_MCP_SECRET_KEY", raising=False)
     monkeypatch.delenv("ATHENA_MCP_SECRET_KEY_VERSION", raising=False)
     with pytest.raises(McpSecretError, match="mcp_secret_key_missing"):
-        McpSecretCipher.from_environment()
+        SecretCipher.from_environment()
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY", base64.b64encode(b"x" * 32).decode())
     monkeypatch.setenv("ATHENA_MCP_SECRET_KEY_VERSION", "0")
     with pytest.raises(McpSecretError, match="mcp_secret_key_invalid"):
-        McpSecretCipher.from_environment()
+        SecretCipher.from_environment()
+
+
+def test_secret_cipher_preserves_legacy_aad_and_purpose_values() -> None:
+    """通用 SecretCipher 与历史 athena:mcp-secret AAD 格式及用途枚举值 100% 兼容。"""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from infrastructure.security.secrets import SecretCipherError, SecretPurpose
+
+    key = bytes(range(32))
+    cipher = SecretCipher(key, key_version=2)
+    assert SecretPurpose.HTTP_HEADERS.value == "http_headers"
+    assert SecretPurpose.STDIO_ENVIRONMENT.value == "stdio_environment"
+    assert SecretPurpose.LLM_API_KEY.value == "llm_api_key"
+    assert McpSecretError is SecretCipherError
+    assert McpSecretPurpose is SecretPurpose
+
+    # 模拟历史密文：使用旧格式 AAD 加密后应可由 SecretCipher.open 正常解密。
+    nonce = b"123456789012"
+    legacy_aad = b"athena:mcp-secret:llmprof_1:llm_api_key:2"
+    ciphertext = AESGCM(key).encrypt(nonce, b'{"api_key":"sk-legacy"}', legacy_aad)
+    assert cipher.open("llmprof_1", SecretPurpose.LLM_API_KEY, ciphertext, nonce, 2) == {
+        "api_key": "sk-legacy"
+    }

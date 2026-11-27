@@ -1,11 +1,28 @@
 import { Loader2 } from "lucide-react";
-import { Navigate, Outlet, useLocation } from "react-router-dom";
+import { Link, Navigate, Outlet, useLocation } from "react-router-dom";
 
-import { AccessDeniedPage } from "../../pages/PlaceholderPages";
-import { Brand, Button, InlineAlert } from "../../shared/ui";
+import { Brand, Button, EmptyState, InlineAlert } from "../../shared/ui";
 import { useAuth } from "./AuthProvider";
 import { canManageSkills, isSuperAdmin } from "./model";
 import { getSafeReturnTo } from "./returnTo";
+
+/** 无对应管理权限时的统一兜底提示页。 */
+export function AccessDeniedPage() {
+  return (
+    <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-6 py-12">
+      <EmptyState
+        action={
+          <Button asChild size="sm" variant="secondary">
+            <Link to="/chat">返回对话工作台</Link>
+          </Button>
+        }
+        description="当前页面仅对具备对应管理权限的企业管理员开放，你仍可正常使用工作台的其他功能。"
+        icon="shield"
+        title="当前账号没有管理员权限"
+      />
+    </div>
+  );
+}
 
 function AuthLoadingScreen() {
   return (

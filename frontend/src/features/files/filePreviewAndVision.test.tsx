@@ -28,7 +28,7 @@ import {
 import { jsonResponse, renderApp, createTestQueryClient } from "../../test/testUtils";
 import { TooltipProvider } from "../../shared/ui";
 import { isImageAttachmentFile } from "../chat/ComposerAttachmentBar";
-import type { UserModelItem, UserModelListResponse } from "../models/model";
+import type { UserModelItem, UserModelListResponse } from "../models";
 import {
   extractionErrorSummary,
   fileErrorMessage,

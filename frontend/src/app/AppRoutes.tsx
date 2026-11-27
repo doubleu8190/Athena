@@ -5,6 +5,7 @@ import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { useAuth } from "../features/auth/AuthProvider";
 import { LoginPage } from "../features/auth/LoginPage";
 import {
+  AccessDeniedPage,
   ProtectedRoute,
   PublicOnlyRoute,
   SkillAdminRoute,
@@ -13,7 +14,6 @@ import {
 import { canManageSkills, isSuperAdmin } from "../features/auth/model";
 import { DraftChatPage } from "../features/chat/DraftChatPage";
 import { SessionChatPage } from "../features/chat/SessionChatPage";
-import { AccessDeniedPage } from "../pages/PlaceholderPages";
 import { AppShell } from "./AppShell";
 
 // 非首屏路由页面按路由级代码分割懒加载，减小首屏主包体积同时保留认证与聊天主链路即开即用。

@@ -42,11 +42,6 @@ def knowledge_embedding_config() -> OpenAICompatibleEmbeddingConfig:
     )
 
 
-def validate_knowledge_embedding_configuration() -> OpenAICompatibleEmbeddingConfig:
-    """在创建数据库或对象存储连接前快速校验远程 Embedding 配置并返回复用对象。"""
-    return knowledge_embedding_config()
-
-
 def build_knowledge_models(
     *,
     embedding_config: OpenAICompatibleEmbeddingConfig | None = None,
@@ -89,6 +84,5 @@ __all__ = [
     "build_knowledge_models",
     "build_knowledge_original_store",
     "knowledge_embedding_config",
-    "validate_knowledge_embedding_configuration",
     "validate_knowledge_storage_configuration",
 ]

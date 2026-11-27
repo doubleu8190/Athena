@@ -75,7 +75,7 @@ Athena v2 是面向企业内部使用的多用户 AI 智能工作台，采用 **
   - 管理写操作（LLM/MCP/组织/Skill/Subagent/系统提示词）在目标写事务内复用无锁单条 `JOIN` 复核函数 `verify_active_session_user` 校验有效会话与当前角色，消除对 `users`/`auth_sessions` 表的跨域行锁争用；仅认证仓储自身改密/改显示名在修改 `users` 行时继续使用 `SqlAlchemyAuthTransactionGuard` 锁定自身行。
 - **有界数据库连接池**：`Database` 维护单套有界业务 `AsyncEngine`（`ATHENA_DATABASE_POOL_SIZE`、`ATHENA_DATABASE_MAX_OVERFLOW`）；长耗时 LLM 网络请求、MCP 工具调用、脚本执行与文档解析均在事务之外执行，严禁持锁跨越外部 I/O。
 - **服务端可信身份与权限边界**：所有资源归属（`owner_id`）与权限快照均由服务端认证上下文解析，绝不信任客户端或模型提交的用户/部门/知识库标识；跨租户/跨部门越权遵循安全 403/404 约定。
-- **数据库迁移单主干**：Alembic 保持单一线性 head（当前为 `20261208_0041`），所有结构与索引变更均需同步维护 ORM 元数据与迁移脚本。
+- **数据库迁移单主干**：Alembic 保持单一线性 head（当前为 `0001_initial_schema`），所有结构与索引变更均需同步维护 ORM 元数据与迁移脚本。
 
 ## 5. 前端工作台现状
 

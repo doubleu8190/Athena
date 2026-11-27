@@ -6,11 +6,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Response, status
 
-from api.converter.preference import (
-    memory_list_to_response,
-    memory_to_response,
-    profile_to_response,
-)
 from api.dto.preference import (
     CreateUserMemoryRequest,
     UpdateUserMemoryRequest,
@@ -37,7 +32,7 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
     async def get_preferences(current_auth: CurrentAuth) -> UserWorkProfileResponse:
         """读取当前用户个人工作偏好（无记录时返回默认空指令与开启状态）。"""
         profile = await service.get_profile(current_auth.user.id)
-        return profile_to_response(profile)
+        return UserWorkProfileResponse.model_validate(profile)
 
     @router.put("/preferences", response_model=UserWorkProfileResponse)
     async def update_preferences(
@@ -50,13 +45,13 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
             custom_instructions=request.custom_instructions,
             memory_enabled=request.memory_enabled,
         )
-        return profile_to_response(profile)
+        return UserWorkProfileResponse.model_validate(profile)
 
     @router.get("/memories", response_model=UserMemoryListResponse)
     async def list_memories(current_auth: CurrentAuth) -> UserMemoryListResponse:
         """按最近更新时间倒序返回当前用户全部显式记忆与配额上限。"""
         memory_list = await service.list_memories(current_auth.user.id)
-        return memory_list_to_response(memory_list)
+        return UserMemoryListResponse.model_validate(memory_list)
 
     @router.post(
         "/memories",
@@ -75,7 +70,7 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
             source=UserMemorySource.MANUAL,
         )
         response.headers["Location"] = f"/api/v1/me/memories/{memory.id}"
-        return memory_to_response(memory)
+        return UserMemoryResponse.model_validate(memory)
 
     @router.patch("/memories/{memory_id}", response_model=UserMemoryResponse)
     async def update_memory(
@@ -89,7 +84,7 @@ def build_preference_router(service: PreferenceService) -> APIRouter:
             memory_id,
             content=request.content,
         )
-        return memory_to_response(memory)
+        return UserMemoryResponse.model_validate(memory)
 
     @router.delete(
         "/memories/{memory_id}",

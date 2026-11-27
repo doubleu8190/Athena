@@ -451,6 +451,28 @@ def test_personal_database_transport_failures_return_database_unavailable(
 
 
 @pytest.mark.parametrize(
+    "local_io_error",
+    (
+        FileNotFoundError("/var/missing.md"),
+        PermissionError("/var/secret"),
+        IsADirectoryError("/var/dir"),
+    ),
+)
+def test_local_file_os_error_on_database_route_is_not_masked_as_database_unavailable(
+    local_io_error: OSError,
+) -> None:
+    """本地文件 I/O 类 OSError 不得在数据库路由上被误报为 503 database_unavailable。"""
+    service = _FailingPersonalService(local_io_error)
+    client, _ = _client(service)
+    no_raise_client = TestClient(cast(Any, client.app), raise_server_exceptions=False)
+
+    response = no_raise_client.get("/api/v1/skills")
+
+    assert response.status_code == 500
+    assert response.status_code != 503
+
+
+@pytest.mark.parametrize(
     ("path", "payload", "idempotency_key"),
     (
         (

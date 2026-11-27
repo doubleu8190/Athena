@@ -64,7 +64,7 @@ from domain.tool import (
     validate_parameter_labels,
     validate_tool_display_name,
 )
-from infrastructure.security.mcp_secrets import McpSecretCipher, SealedMcpSecrets
+from infrastructure.security.secrets import SealedSecrets, SecretCipher
 
 
 class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
@@ -73,7 +73,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        secret_cipher: McpSecretCipher,
+        secret_cipher: SecretCipher,
         *,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
@@ -849,7 +849,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
         if user is None or user.role is not UserRole.SUPER_ADMIN:
             raise McpAuthorizationChangedError("mcp_authorization_changed")
 
-    def _seal(self, server: McpServerWrite) -> SealedMcpSecrets | None:
+    def _seal(self, server: McpServerWrite) -> SealedSecrets | None:
         return (
             self._secret_cipher.seal(server.id, server.secret_purpose, server.secrets)
             if server.secrets

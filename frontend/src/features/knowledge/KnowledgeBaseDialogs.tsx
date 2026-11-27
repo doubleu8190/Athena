@@ -10,10 +10,10 @@ import {
   FIELD_INPUT_CLASS,
   FIELD_SELECT_CLASS,
   FORM_STACK_CLASS,
+  InlineAlert,
   VisibilityBadge,
   type VisibilityScope,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
 import {
   VisibilityGrantsEditor,
@@ -584,7 +584,11 @@ export function NewKnowledgeBaseDialog({
           />
         ) : null}
 
-        {requestError ? <ErrorBanner message={requestError} /> : null}
+        {requestError ? (
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        ) : null}
       </form>
     </Modal>
   );
@@ -965,7 +969,11 @@ export function EditKnowledgeBaseDialog({
           />
         ) : null}
 
-        {requestError ? <ErrorBanner message={requestError} /> : null}
+        {requestError ? (
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        ) : null}
       </form>
     </Modal>
   );
@@ -1065,7 +1073,11 @@ export function DeleteKnowledgeBaseDialog({
         />
         <span>我已确认要删除这个知识库</span>
       </label>
-      {requestError ? <ErrorBanner message={requestError} /> : null}
+      {requestError ? (
+        <InlineAlert size="compact" variant="danger">
+          {requestError}
+        </InlineAlert>
+      ) : null}
     </Modal>
   );
 }

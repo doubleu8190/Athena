@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from app.access import AccessPolicyService
+from app.auth.guard import require_session_roles
 from common.date import utc_now
 from common.ids import new_id
 from common.unset import UnsetType
@@ -279,11 +280,11 @@ class SubagentService:
         subagent_id: str,
         enabled: bool,
     ) -> SubagentProfile:
-        """复核管理员权限后切换 Subagent 启停状态。"""
-        await self._authorize(actor)
+        """切换 Subagent 启停状态（由仓储写事务内复核超管会话与权限，避免二次查库）。"""
         _validate_subagent_id(subagent_id)
         if type(enabled) is not bool:
             raise SubagentValidationError("subagent_enabled_invalid")
+        # 纯 DB 写路径直接由仓储事务内 verify_active_session_user 复核，避免二次查库。
         return await self._repository.set_enabled(
             actor,
             subagent_id,
@@ -292,9 +293,9 @@ class SubagentService:
         )
 
     async def delete_subagent(self, actor: AuthContext, subagent_id: str) -> None:
-        """复核管理员权限后执行幂等软删除。"""
-        await self._authorize(actor)
+        """执行幂等软删除（由仓储写事务内复核超管会话与权限，避免二次查库）。"""
         _validate_subagent_id(subagent_id)
+        # 纯 DB 写路径直接由仓储事务内 verify_active_session_user 复核，避免二次查库。
         await self._repository.soft_delete(
             actor,
             subagent_id,
@@ -313,15 +314,14 @@ class SubagentService:
 
     async def _authorize(self, actor: AuthContext) -> None:
         """每次操作前通过当前会话读取器复核管理员身份。"""
-        user = await self._auth_reader.get_current_session_user(
-            actor.user.id,
-            actor.session_id,
+        await require_session_roles(
+            self._auth_reader,
+            actor,
+            frozenset({UserRole.SUPER_ADMIN}),
             self._clock(),
+            invalid_session_error=SubagentInvalidSessionError,
+            forbidden_error=SubagentAdminRequiredError,
         )
-        if user is None:
-            raise SubagentInvalidSessionError()
-        if user.role is not UserRole.SUPER_ADMIN:
-            raise SubagentAdminRequiredError()
 
     async def _validate_external_references(
         self,

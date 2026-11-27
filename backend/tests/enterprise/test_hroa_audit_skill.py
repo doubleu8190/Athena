@@ -96,8 +96,6 @@ def test_sk5_end_to_end_with_real_hr_ops_mcp_and_unknown_department_failure(
             ),
             cwd=str(HROA_DIR),
             base_environment={"PATH": os.defpath},
-            maximum_line_bytes=2 * 1024 * 1024,
-            maximum_total_bytes=2 * 1024 * 1024,
         )
         async with Client(
             transport,

@@ -42,8 +42,7 @@ from domain.llm.model.profile_errors import (
     ModelProfileNotFoundError,
 )
 from domain.llm.profile_ports import ModelProfileRepository
-from domain.mcp import McpSecretError, McpSecretPurpose
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher, SecretCipherError, SecretPurpose
 
 
 class SqlAlchemyModelProfileRepository(ModelProfileRepository):
@@ -52,7 +51,7 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        secret_cipher: McpSecretCipher | None,
+        secret_cipher: SecretCipher | None,
         *,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
@@ -73,9 +72,9 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                 # 先完成凭据信封加密再构造非空 ORM 行，确保库内不存在空密文半成品记录。
                 try:
                     sealed = self._secret_cipher.seal(
-                        profile_id, McpSecretPurpose.LLM_API_KEY, {"api_key": value.api_key}
+                        profile_id, SecretPurpose.LLM_API_KEY, {"api_key": value.api_key}
                     )
-                except McpSecretError:
+                except SecretCipherError:
                     raise ModelProfileError("llm_model_credential_invalid") from None
                 row = ModelProfileVersionModel(
                     id=profile_id,
@@ -361,10 +360,10 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
                     try:
                         sealed = self._secret_cipher.seal(
                             row.id,
-                            McpSecretPurpose.LLM_API_KEY,
+                            SecretPurpose.LLM_API_KEY,
                             {"api_key": patch.api_key},
                         )
-                    except McpSecretError:
+                    except SecretCipherError:
                         raise ModelProfileError("llm_model_credential_invalid") from None
                     row.api_key_ciphertext = sealed.ciphertext
                     row.api_key_nonce = sealed.nonce
@@ -606,12 +605,12 @@ class SqlAlchemyModelProfileRepository(ModelProfileRepository):
         try:
             secrets = self._secret_cipher.open(
                 row.id,
-                McpSecretPurpose.LLM_API_KEY,
+                SecretPurpose.LLM_API_KEY,
                 row.api_key_ciphertext,
                 row.api_key_nonce,
                 row.api_key_key_version,
             )
-        except McpSecretError:
+        except SecretCipherError:
             return None
         api_key = secrets.get("api_key")
         if not api_key:

@@ -13,6 +13,7 @@ import {
   ADMIN_SECTION_HEADING_CLASS,
   ADMIN_TITLE_LINE_CLASS,
   Badge,
+  InlineAlert,
   NOTICE_BRAND_CLASS,
   PAGE_DESC_CLASS,
   PAGE_HEADING_CLASS,
@@ -21,10 +22,10 @@ import {
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
   Switch,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import {
   AdminPagination,
   lastPageNumber,
@@ -79,10 +80,21 @@ export function AdminToolsPage() {
           正在读取 MCP 工具目录…
         </div>
       ) : tools.isError ? (
-        <ErrorBanner
-          message={adminErrorMessage(tools.error)}
-          onRetry={() => void tools.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void tools.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {adminErrorMessage(tools.error)}
+        </InlineAlert>
       ) : tools.data.items.length === 0 && page === 1 ? (
         <EmptyState
           description="工具只会由后端在 MCP Server 创建或完整替换并成功发现后注册。当前没有可管理的工具。"
@@ -105,9 +117,9 @@ export function AdminToolsPage() {
 
           {policy.error ? (
             <div className="mb-4">
-              <ErrorBanner
-                message={`审批策略保存失败，界面已恢复服务端原状态。${adminErrorMessage(policy.error)}`}
-              />
+              <InlineAlert size="compact" variant="danger">
+                {`审批策略保存失败，界面已恢复服务端原状态。${adminErrorMessage(policy.error)}`}
+              </InlineAlert>
             </div>
           ) : policy.isPending ? (
             <p className={cn(NOTICE_BRAND_CLASS, "mb-3")} role="status">

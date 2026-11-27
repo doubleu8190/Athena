@@ -1,3 +1,4 @@
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -17,18 +18,18 @@ import {
   ADMIN_TITLE_LINE_CLASS,
   Badge,
   Button,
+  InlineAlert,
   PAGE_DESC_CLASS,
   PAGE_HEADING_CLASS,
   PAGE_HEADING_COPY_CLASS,
   PAGE_LOADING_CLASS,
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
+  TEXT_BUTTON_CLASS,
   VisibilityBadge,
   cn,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import { AdminPagination, lastPageNumber } from "./AdminPagination";
 import { SubagentDialog } from "./SubagentDialog";
@@ -125,22 +126,37 @@ export function AdminSubagentsPage() {
           type="button"
           variant="primary"
         >
-          <Icon name="plus" size={14} />
+          <Plus aria-hidden="true" focusable="false" size={14} strokeWidth={1.7} />
           新建子智能体
         </Button>
       </header>
 
-      {actionError ? <ErrorBanner message={actionError} /> : null}
+      {actionError ? (
+        <InlineAlert size="compact" variant="danger">
+          {actionError}
+        </InlineAlert>
+      ) : null}
 
       {subagents.isPending ? (
         <div className={PAGE_LOADING_CLASS} role="status">
           正在读取子智能体配置…
         </div>
       ) : subagents.isError ? (
-        <ErrorBanner
-          message={adminErrorMessage(subagents.error)}
-          onRetry={() => void subagents.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void subagents.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {adminErrorMessage(subagents.error)}
+        </InlineAlert>
       ) : subagents.data.items.length === 0 && page === 1 ? (
         <EmptyState
           action={
@@ -271,7 +287,12 @@ export function AdminSubagentsPage() {
                       type="button"
                       variant="outline"
                     >
-                      <Icon name="edit" size={14} />
+                      <Pencil
+                        aria-hidden="true"
+                        focusable="false"
+                        size={14}
+                        strokeWidth={1.7}
+                      />
                       编辑
                     </Button>
                     <Button
@@ -281,7 +302,12 @@ export function AdminSubagentsPage() {
                       type="button"
                       variant="danger-outline"
                     >
-                      <Icon name="trash" size={14} />
+                      <Trash2
+                        aria-hidden="true"
+                        focusable="false"
+                        size={14}
+                        strokeWidth={1.7}
+                      />
                       删除
                     </Button>
                   </div>

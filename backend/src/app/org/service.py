@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
+from app.auth.guard import require_session_roles
 from app.org.feishu_sync import FeishuOrgSyncService
 from common.date import as_utc, utc_now
 from domain.auth import AuthContext, CurrentSessionReader, UserRole, UserStatus
@@ -80,8 +81,8 @@ class OrgService:
         role: UserRole,
         managed_departments: tuple[DeptAdminScopeInput, ...] = (),
     ) -> OrgUserDetail:
-        """设置用户角色及部门管理范围，在写事务内再次锁定复核超管与最后超管保护。"""
-        await self._authorize_super_admin(actor)
+        """设置用户角色及部门管理范围，在写事务内锁定复核超管与最后超管保护。"""
+        # 纯 DB 写路径直接由仓储写事务内 _require_super_admin_in_tx 复核，避免重复查库。
         return await self._repository.update_user_role(
             actor,
             user_id,
@@ -98,7 +99,7 @@ class OrgService:
         status: UserStatus,
     ) -> OrgUserDetail:
         """启用或停用用户；停用时同事务吊销其全部活跃会话并保护最后一位活跃超管。"""
-        await self._authorize_super_admin(actor)
+        # 纯 DB 写路径直接由仓储写事务内 _require_super_admin_in_tx 复核，避免重复查库。
         return await self._repository.update_user_status(
             actor,
             user_id,
@@ -115,13 +116,14 @@ class OrgService:
 
     async def _authorize_super_admin(self, actor: AuthContext) -> None:
         """每次进入服务操作前从数据库重新校验会话有效性与 super_admin 角色。"""
-        current = await self._auth_reader.get_current_session_user(
-            actor.user.id,
-            actor.session_id,
+        await require_session_roles(
+            self._auth_reader,
+            actor,
+            frozenset({UserRole.SUPER_ADMIN}),
             as_utc(self._clock()),
+            invalid_session_error=lambda: OrgAuthorizationError("admin_required"),
+            forbidden_error=lambda: OrgAuthorizationError("admin_required"),
         )
-        if current is None or current.role is not UserRole.SUPER_ADMIN:
-            raise OrgAuthorizationError("admin_required")
 
 
 __all__ = ["OrgService"]

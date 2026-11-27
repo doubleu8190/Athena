@@ -1,7 +1,7 @@
+import { Download } from "lucide-react";
 import { useState } from "react";
 
 import { buttonVariants, TEXT_BUTTON_CLASS } from "../../shared/ui";
-import { Icon } from "../../shared/ui/Icons";
 import { downloadKnowledgeSource } from "./api";
 import { knowledgeErrorMessage } from "./errorMessages";
 
@@ -63,7 +63,14 @@ export function KnowledgeSourceButton({
         onClick={() => void handleDownload()}
         type="button"
       >
-        {!compact ? <Icon name="download" size={14} /> : null}
+        {!compact ? (
+          <Download
+            aria-hidden="true"
+            focusable="false"
+            size={14}
+            strokeWidth={1.7}
+          />
+        ) : null}
         {pending ? "正在准备下载…" : "下载来源"}
       </button>
       {error ? (

@@ -23,11 +23,12 @@ from api.dto.run import (
     SafeSkillApprovalProjectionResponse,
     SubagentTaskResponse,
 )
-from app.run.results import RunDetailsResult, RunListResult
+from app.run.results import RunListResult
 from domain.run.model import (
     PendingSubagentApproval,
     PendingSubagentInput,
     Run,
+    RunDetails,
     RunEvent,
     RunInputRequest,
     RunStatus,
@@ -158,7 +159,7 @@ def run_to_response(
     )
 
 
-def run_details_to_response(details: RunDetailsResult) -> RunResponse:
+def run_details_to_response(details: RunDetails) -> RunResponse:
     return run_to_response(
         details.run,
         pending_input=details.pending_input,

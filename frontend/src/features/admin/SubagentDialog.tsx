@@ -1,3 +1,4 @@
+import { ShieldCheck } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { getAuthIdentityEpoch } from "../../shared/api/client";
@@ -13,13 +14,13 @@ import {
   FIELD_TEXTAREA_CLASS,
   FORM_GRID_2_CLASS,
   FORM_STACK_CLASS,
+  InlineAlert,
   MODAL_WIDTH_XL,
   PAGE_LOADING_CLASS,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { FieldError } from "../../shared/ui/FieldError";
-import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import {
   adminErrorMessage,
@@ -236,10 +237,21 @@ export function SubagentDialog({
           正在读取子智能体配置…
         </div>
       ) : editing && detail.isError ? (
-        <ErrorBanner
-          message={adminErrorMessage(detail.error)}
-          onRetry={() => void detail.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void detail.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {adminErrorMessage(detail.error)}
+        </InlineAlert>
       ) : (
         <form
           className={FORM_STACK_CLASS}
@@ -248,20 +260,28 @@ export function SubagentDialog({
           onSubmit={(event) => void handleSubmit(event)}
         >
           {requestError ? (
-            <ErrorBanner
-              message={requestError}
-              onRetry={
-                versionConflict
-                  ? () => {
+            <InlineAlert
+              action={
+                versionConflict ? (
+                  <button
+                    className={TEXT_BUTTON_CLASS}
+                    onClick={() => {
                       setRequestError(null);
                       setVersionConflict(false);
                       setLoadedVersionKey(null);
                       void detail.refetch();
-                    }
-                  : undefined
+                    }}
+                    type="button"
+                  >
+                    重新加载最新配置
+                  </button>
+                ) : undefined
               }
-              retryLabel={versionConflict ? "重新加载最新配置" : undefined}
-            />
+              size="compact"
+              variant="danger"
+            >
+              {requestError}
+            </InlineAlert>
           ) : null}
 
           <div className={FORM_GRID_2_CLASS}>
@@ -415,7 +435,12 @@ export function SubagentDialog({
               className="text-xs leading-[1.65] text-text-tertiary [overflow-wrap:anywhere] [&>svg]:mr-1 [&>svg]:inline-block [&>svg]:align-[-2px]"
               id={`${formId}-tools-hint`}
             >
-              <Icon name="shield" size={13} />{" "}
+              <ShieldCheck
+                aria-hidden="true"
+                focusable="false"
+                size={13}
+                strokeWidth={1.7}
+              />{" "}
               最多可选择 {MAX_SUBAGENT_ALLOWED_TOOLS} 项。
               系统已自动禁止子智能体嵌套调度（<code>dispatch_subagents</code>{" "}
               不会出现在可选目录中）。
@@ -441,10 +466,21 @@ export function SubagentDialog({
                 正在读取可选工具目录…
               </p>
             ) : availableTools.isError ? (
-              <ErrorBanner
-                message={adminErrorMessage(availableTools.error)}
-                onRetry={() => void availableTools.refetch()}
-              />
+              <InlineAlert
+                action={
+                  <button
+                    className={TEXT_BUTTON_CLASS}
+                    onClick={() => void availableTools.refetch()}
+                    type="button"
+                  >
+                    重试
+                  </button>
+                }
+                size="compact"
+                variant="danger"
+              >
+                {adminErrorMessage(availableTools.error)}
+              </InlineAlert>
             ) : availableTools.data.groups.length === 0 ? (
               <p className={ADMIN_MUTED_CLASS}>当前没有可授予的工具。</p>
             ) : (

@@ -604,11 +604,6 @@ def test_real_stdio_execution_uses_new_process_and_reaps_group(tmp_path: Path) -
                 cwd=connection.config.cwd,
                 env=connection.secrets,
                 base_environment=base_environment,
-                maximum_line_bytes=2 * 1024 * 1024,
-                maximum_total_bytes=2 * 1024 * 1024,
-                grace_seconds=0.1,
-                term_seconds=0.3,
-                kill_seconds=0.3,
             )
 
         def client_factory(transport: Any, deadline_seconds: float) -> _ObservedClient:

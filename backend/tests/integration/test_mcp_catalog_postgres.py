@@ -26,7 +26,7 @@ from domain.mcp import (
     StreamableHttpConfig,
 )
 from domain.tool import ToolDefinition
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 pytestmark = [
@@ -110,7 +110,7 @@ def test_mcp_migration_constraints_versions_and_auth_atomicity() -> None:
             actor = AuthContext(user=user, session_id=auth_session.id)
             repository = SqlAlchemyMcpRepository(
                 session_factory,
-                McpSecretCipher(bytes(range(32)), 2),
+                SecretCipher(bytes(range(32)), 2),
                 clock=lambda: now,
             )
 

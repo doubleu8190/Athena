@@ -31,7 +31,7 @@ from api.dto.mcp import (
     StdioServerCreateRequest,
     StdioServerUpdateRequest,
 )
-from api.mcp_errors import mcp_error_to_http
+from api.errors import domain_error_to_http
 from api.security import get_current_auth
 from app.tool import ToolManager
 from bootstrap.config import env_csv_set
@@ -137,7 +137,6 @@ def test_update_requires_secrets_but_empty_map_is_valid() -> None:
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_detail"),
     [
-        (ValueError("sentinel-secret"), 422, "mcp_request_invalid"),
         (McpConfigVersionConflictError("sentinel-secret"), 409, "mcp_conflict"),
         (McpDiscoveryError("sentinel-secret"), 502, "mcp_discovery_failed"),
         (McpDiscoveryTimeoutError("sentinel-secret"), 504, "mcp_discovery_timeout"),
@@ -147,7 +146,8 @@ def test_update_requires_secrets_but_empty_map_is_valid() -> None:
 def test_mcp_error_mapping_uses_only_fixed_codes(
     error: Exception, expected_status: int, expected_detail: str
 ) -> None:
-    response = mcp_error_to_http(error)
+    response = domain_error_to_http(error)
+    assert response is not None
     assert response.status_code == expected_status
     assert response.detail == expected_detail
     assert "sentinel-secret" not in str(response.detail)

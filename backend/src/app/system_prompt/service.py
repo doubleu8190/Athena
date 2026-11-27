@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 
+from app.auth.guard import require_session_roles
 from common.date import utc_now
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
 from domain.system_prompt import (
@@ -116,13 +117,14 @@ class SystemPromptService:
 
     async def _authorize(self, actor: AuthContext) -> None:
         """通过当前登录会话和数据库角色复核管理员权限。"""
-        user = await self._auth_reader.get_current_session_user(
-            actor.user.id,
-            actor.session_id,
+        await require_session_roles(
+            self._auth_reader,
+            actor,
+            frozenset({UserRole.SUPER_ADMIN}),
             self._clock(),
+            invalid_session_error=SystemPromptAuthorizationError,
+            forbidden_error=SystemPromptAuthorizationError,
         )
-        if user is None or user.role is not UserRole.SUPER_ADMIN:
-            raise SystemPromptAuthorizationError()
 
 
 def _validate_content(content: str) -> None:

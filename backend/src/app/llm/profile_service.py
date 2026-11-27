@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 
+from app.auth.guard import require_session_roles
 from common.date import utc_now
 from common.unset import UNSET
 from domain.auth import AuthContext, CurrentSessionReader, UserRole
@@ -89,15 +90,13 @@ class ModelProfileService:
     async def set_enabled(
         self, actor: AuthContext, profile_id: str, enabled: bool
     ) -> ModelProfileVersion:
-        """启用或停用指定模型版本。"""
-        await self._authorize(actor)
+        """启用或停用指定模型版本（由仓储写事务内复核超管会话，避免重复查库）。"""
         return await self._repository.set_enabled(actor, profile_id, enabled)
 
     async def update(
         self, actor: AuthContext, profile_id: str, patch: ModelProfileUpdateInput
     ) -> ModelProfileVersion:
-        """复核管理员权限后局部更新模型配置；不传 api_key 或传 None 时保留原加密凭据。"""
-        await self._authorize(actor)
+        """局部更新模型配置；不传 api_key 或传 None 时保留原加密凭据。"""
         if not profile_id or len(profile_id) > 64:
             raise ModelProfileError()
         if not patch.has_updates():
@@ -108,26 +107,29 @@ class ModelProfileService:
             raise ModelProfileError()
         if patch.api_key is not UNSET and patch.api_key is not None:
             validate_model_profile_api_key(patch.api_key)
+        # 纯 DB 写路径直接由仓储事务内 verify_active_session_user 复核，避免二次查库。
         return await self._repository.update(actor, profile_id, patch)
 
     async def delete(self, actor: AuthContext, profile_id: str) -> None:
-        """复核管理员权限后软删除闲置模型配置，受默认/压缩策略/子智能体强引用保护。"""
-        await self._authorize(actor)
+        """软删除闲置模型配置，受默认/压缩策略/子智能体强引用保护。"""
         if not profile_id or len(profile_id) > 64:
             raise ModelProfileError()
+        # 纯 DB 写路径直接由仓储事务内 verify_active_session_user 复核，避免二次查库。
         await self._repository.delete(actor, profile_id)
 
     async def set_default(self, actor: AuthContext, profile_id: str) -> ModelProfileVersion:
-        """将默认配置指向支持流式和工具调用的版本。"""
-        await self._authorize(actor)
+        """将默认配置指向支持流式和工具调用的版本（由仓储写事务内复核超管会话）。"""
         return await self._repository.set_default(actor, profile_id)
 
     async def _authorize(self, actor: AuthContext) -> None:
-        user = await self._auth_reader.get_current_session_user(
-            actor.user.id, actor.session_id, self._clock()
+        await require_session_roles(
+            self._auth_reader,
+            actor,
+            frozenset({UserRole.SUPER_ADMIN}),
+            self._clock(),
+            invalid_session_error=ModelProfileAuthorizationError,
+            forbidden_error=ModelProfileAuthorizationError,
         )
-        if user is None or user.role is not UserRole.SUPER_ADMIN:
-            raise ModelProfileAuthorizationError()
 
 
 def _validate_and_normalize_input(value: ModelProfileInput) -> ModelProfileInput:

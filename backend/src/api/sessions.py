@@ -6,7 +6,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Response, status
 
-from api.converter.session import session_list_to_response, session_to_response
 from api.dto.session import (
     SessionCreateRequest,
     SessionListResponse,
@@ -43,7 +42,7 @@ def build_session_router(service: SessionService) -> APIRouter:
             project_id=request.project_id,
         )
         response.headers["Location"] = f"/api/v1/sessions/{session.id}"
-        return session_to_response(session)
+        return SessionResponse.model_validate(session)
 
     @router.get("", response_model=SessionListResponse)
     async def list_sessions(
@@ -63,9 +62,11 @@ def build_session_router(service: SessionService) -> APIRouter:
             unbound=unbound,
             q=q,
         )
-        return session_list_to_response(
-            result,
-            page_number=page,
+        # 按 DTO 字段白名单投影会话分页，自动屏蔽 owner_id 与 deleted_time 等内部属性。
+        return SessionListResponse(
+            items=[SessionResponse.model_validate(session) for session in result.items],
+            total=result.total,
+            page=page,
             page_size=page_size,
         )
 
@@ -76,7 +77,7 @@ def build_session_router(service: SessionService) -> APIRouter:
     ) -> SessionResponse:
         """查询单个未删除会话。"""
         session = await service.get(current_auth.user.id, session_id)
-        return session_to_response(session)
+        return SessionResponse.model_validate(session)
 
     @router.patch("/{session_id}", response_model=SessionResponse)
     async def update_session(
@@ -94,7 +95,7 @@ def build_session_router(service: SessionService) -> APIRouter:
             update_project="project_id" in supplied_fields,
             project_id=request.project_id,
         )
-        return session_to_response(session)
+        return SessionResponse.model_validate(session)
 
     @router.delete(
         "/{session_id}",

@@ -98,7 +98,7 @@ from domain.tool import (
     ToolCallStatus,
     ToolKind,
 )
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
 
@@ -527,7 +527,7 @@ def test_executor_dispatch_subagents_releases_lease_and_rejects_mixed_calls(
                     )
                 ]
             )
-            cipher = McpSecretCipher(b"0" * 32, key_version=1)
+            cipher = SecretCipher(b"0" * 32, key_version=1)
             executor = RunExecutor(
                 repo,
                 SqlAlchemyModelProfileRepository(factory, cipher),
@@ -2229,7 +2229,7 @@ def test_subagent_skips_compression_policy_and_avoids_trigger_missing(
                     ),
                 ]
             )
-            cipher = McpSecretCipher(b"0" * 32, key_version=1)
+            cipher = SecretCipher(b"0" * 32, key_version=1)
             executor = RunExecutor(
                 repo,
                 SqlAlchemyModelProfileRepository(factory, cipher),
@@ -2605,7 +2605,7 @@ def test_subagent_max_llm_requests_50_runs_without_budget_error(
                 RunLlmBudget(used=0, maximum=51)
 
             # 实际通过 RunExecutor 运行该子 Run，确认不触发预算校验崩溃。
-            cipher = McpSecretCipher(b"k" * 32, key_version=1)
+            cipher = SecretCipher(b"k" * 32, key_version=1)
             profiles = SqlAlchemyModelProfileRepository(factory, cipher)
 
             async def _get_runtime(profile_id: str) -> RuntimeModelProfile | None:

@@ -230,8 +230,6 @@ def test_payroll_stdio_mcp_skill_and_excel_end_to_end(tmp_path: Path) -> None:
             (str(MCP_SERVER_PATH),),
             cwd=str(MCP_SERVER_DIRECTORY),
             base_environment={"PATH": os.defpath},
-            maximum_line_bytes=2 * 1024 * 1024,
-            maximum_total_bytes=2 * 1024 * 1024,
         )
         async with Client(
             transport,

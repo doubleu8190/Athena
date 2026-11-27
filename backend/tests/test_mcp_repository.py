@@ -27,7 +27,7 @@ from domain.mcp import (
     StdioConfig,
 )
 from domain.tool import ToolDefinition, ToolMetadataPatch
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 _NOW = datetime(2026, 1, 2, tzinfo=UTC)
 
@@ -104,7 +104,7 @@ async def _setup() -> tuple[
     actor = AuthContext(user=user, session_id=auth_session.id)
     repository = SqlAlchemyMcpRepository(
         session_factory,
-        McpSecretCipher(bytes(range(32)), key_version=1),
+        SecretCipher(bytes(range(32)), key_version=1),
         clock=lambda: _NOW,
     )
     return engine, session_factory, repository, actor

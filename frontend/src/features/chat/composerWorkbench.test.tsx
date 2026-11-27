@@ -21,7 +21,7 @@ import {
 } from "../../test/fixtures";
 import { jsonResponse, renderApp } from "../../test/testUtils";
 import type { KnowledgeBase } from "../knowledge/model";
-import type { UserModelItem, UserModelListResponse } from "../models/model";
+import type { UserModelItem, UserModelListResponse } from "../models";
 
 const OFFICE_MODEL: UserModelItem = {
   id: "llm-office",

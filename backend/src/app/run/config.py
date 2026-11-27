@@ -80,26 +80,20 @@ def worker_config_from_environment(
     source = os.environ if environ is None else environ
     lease_seconds = _positive_int(source, "ATHENA_RUN_LEASE_SECONDS", 30, 3600)
     heartbeat_seconds = _positive_int(source, "ATHENA_RUN_HEARTBEAT_SECONDS", 5, 3599)
+    # tool_argument_bytes / tool_result_bytes / tool_cleanup_seconds / tool_batch_limit
+    # 属于安全预算默认常量，统一沿用 RunWorkerConfig 默认值而不暴露为日常环境变量。
     return RunWorkerConfig(
         concurrency=_positive_int(source, "ATHENA_RUN_WORKER_CONCURRENCY", 4, 64),
         lease_seconds=lease_seconds,
         heartbeat_seconds=heartbeat_seconds,
         execution_seconds=_positive_int(source, "ATHENA_RUN_EXECUTION_SECONDS", 300, 86_400),
-        cancel_poll_seconds=float(source.get("ATHENA_RUN_CANCEL_POLL_SECONDS", "1")),
-        queue_poll_seconds=float(source.get("ATHENA_RUN_QUEUE_POLL_SECONDS", "1")),
-        reclaim_seconds=float(source.get("ATHENA_RUN_RECLAIM_SECONDS", "5")),
+        cancel_poll_seconds=_positive_float(source, "ATHENA_RUN_CANCEL_POLL_SECONDS", 1.0, 3600.0),
+        queue_poll_seconds=_positive_float(source, "ATHENA_RUN_QUEUE_POLL_SECONDS", 1.0, 3600.0),
+        reclaim_seconds=_positive_float(source, "ATHENA_RUN_RECLAIM_SECONDS", 5.0, 3600.0),
         llm_request_limit=_positive_int(source, "ATHENA_RUN_LLM_REQUEST_LIMIT", 40, 40),
         tool_timeout_seconds=_positive_float(
             source, "ATHENA_RUN_TOOL_TIMEOUT_SECONDS", 30.0, 300.0
         ),
-        tool_argument_bytes=_positive_int(
-            source, "ATHENA_RUN_TOOL_ARGUMENT_BYTES", 64 * 1024, 64 * 1024
-        ),
-        tool_result_bytes=_positive_int(
-            source, "ATHENA_RUN_TOOL_RESULT_BYTES", 64 * 1024, 64 * 1024
-        ),
-        tool_cleanup_seconds=_positive_float(source, "ATHENA_RUN_TOOL_CLEANUP_SECONDS", 10.0, 10.0),
-        tool_batch_limit=_positive_int(source, "ATHENA_RUN_TOOL_BATCH_LIMIT", 8, 8),
         tool_concurrency=_positive_int(source, "ATHENA_RUN_TOOL_CONCURRENCY", 4, 8),
     )
 

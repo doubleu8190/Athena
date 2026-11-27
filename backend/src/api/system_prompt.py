@@ -6,10 +6,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query
 
-from api.converter.system_prompt import (
-    system_prompt_page_to_response,
-    system_prompt_to_response,
-)
 from api.dto.system_prompt import (
     SystemPromptCurrentResponse,
     SystemPromptRestoreRequest,
@@ -41,7 +37,7 @@ def build_system_prompt_admin_router(service: SystemPromptService) -> APIRouter:
     ) -> SystemPromptCurrentResponse:
         """读取指定类别当前生效正文。"""
         value = await service.get_current(actor, kind)
-        return system_prompt_to_response(value)
+        return SystemPromptCurrentResponse.model_validate(value)
 
     @router.get(
         "/{kind}/versions",
@@ -60,7 +56,8 @@ def build_system_prompt_admin_router(service: SystemPromptService) -> APIRouter:
             page=page,
             page_size=page_size,
         )
-        return system_prompt_page_to_response(value)
+        # 历史分页摘要 DTO 未声明正文字段，model_validate 自动忽略正文投影。
+        return SystemPromptVersionListResponse.model_validate(value)
 
     @router.get(
         "/{kind}/versions/{version_id}",
@@ -88,7 +85,7 @@ def build_system_prompt_admin_router(service: SystemPromptService) -> APIRouter:
             content=request.content,
             expected_current_version_id=request.expected_current_version_id,
         )
-        return system_prompt_to_response(value)
+        return SystemPromptCurrentResponse.model_validate(value)
 
     @router.post("/{kind}/restore", response_model=SystemPromptCurrentResponse)
     async def restore_version(
@@ -103,7 +100,7 @@ def build_system_prompt_admin_router(service: SystemPromptService) -> APIRouter:
             source_version_id=request.source_version_id,
             expected_current_version_id=request.expected_current_version_id,
         )
-        return system_prompt_to_response(value)
+        return SystemPromptCurrentResponse.model_validate(value)
 
     return router
 

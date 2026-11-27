@@ -8,8 +8,7 @@ import os
 
 from adapter.org import SqlAlchemyOrgRepository
 from app.org import FeishuOrgSyncService
-from bootstrap.config import env_flag
-from bootstrap.redis import is_production_environment
+from bootstrap.config import env_flag, is_production_env
 from domain.org import FeishuSyncSummary, OrgError
 from infrastructure.database import Database
 from infrastructure.feishu import FeishuClient, FeishuConfig, FeishuError
@@ -44,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.exit(1, "feishu_not_enabled\n")
 
     try:
-        config = FeishuConfig.from_environment(is_production=is_production_environment())
+        config = FeishuConfig.from_environment(is_production=is_production_env())
         summary = asyncio.run(run_feishu_org_sync(database_url=database_url, config=config))
     except (FeishuError, OrgError) as error:
         parser.exit(1, f"{error.code}\n")

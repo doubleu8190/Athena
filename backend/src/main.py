@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -80,12 +81,13 @@ async def _handle_database_unavailable(request: Request, _error: Exception) -> J
 
 
 async def _handle_os_error(request: Request, error: Exception) -> JSONResponse:
-    """只把数据库路由的传输层 OSError 映射为服务不可用。
+    """只把数据库路由的底层网络/连接类 OSError 映射为服务不可用。
 
-    当前数据库支持认证、项目和 Session（含消息读取）路由。未来加入文件或
-    外部网络路由时，必须同步收窄此路径集合，不能让全局 OSError 处理器吞掉
-    其他依赖的传输故障。
+    避免本地文件 I/O 类 OSError（如 FileNotFoundError、PermissionError、IsADirectoryError）
+    被误报为 database_unavailable。
     """
+    if not isinstance(error, (ConnectionError, TimeoutError, socket.gaierror)):
+        raise error
     if not any(
         request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
         for prefix in _DATABASE_BACKED_ROUTE_PREFIXES

@@ -104,7 +104,7 @@ from domain.tool import (
     ToolKind,
     ToolOutcomeStatus,
 )
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 NOW = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
 SECRET_KEY = bytes(range(32))
@@ -1043,7 +1043,7 @@ def test_high_frequency_list_endpoints_single_session_pushdown() -> None:
             users = await _seed_org_and_users(raw_factory)
             await _seed_all_four_resources(raw_factory)
             counting_factory = _CountingSessionFactory(raw_factory)
-            cipher = McpSecretCipher(SECRET_KEY)
+            cipher = SecretCipher(SECRET_KEY)
 
             access_policy = AccessPolicyService(
                 SqlAlchemyAccessControlRepository(cast(Any, counting_factory))
@@ -1166,7 +1166,7 @@ def test_tool_runtime_build_snapshot_reuses_snapshot_and_fixes_mcp_limit_201() -
                     )
 
             counting_factory = _CountingSessionFactory(raw_factory)
-            cipher = McpSecretCipher(SECRET_KEY)
+            cipher = SecretCipher(SECRET_KEY)
             access_policy = AccessPolicyService(
                 SqlAlchemyAccessControlRepository(cast(Any, counting_factory))
             )
@@ -1342,7 +1342,7 @@ def test_knowledge_search_skip_access_check_and_mid_search_transfer_revocation()
             runtime = RunToolRuntimeService(
                 auth=_StubAuthReader(users),
                 sessions=SqlAlchemySessionRepository(raw_factory),
-                mcp_catalog=SqlAlchemyMcpRepository(raw_factory, McpSecretCipher(SECRET_KEY)),
+                mcp_catalog=SqlAlchemyMcpRepository(raw_factory, SecretCipher(SECRET_KEY)),
                 mcp_executor=_NoopMcpExecutor(),
                 knowledge=kb_service,
                 project_knowledge=None,
@@ -1421,7 +1421,7 @@ def test_run_submit_and_retry_reuse_single_access_snapshot_in_transaction(
         try:
             await _seed_org_and_users(factory)
             await _seed_all_four_resources(factory)
-            cipher = McpSecretCipher(SECRET_KEY)
+            cipher = SecretCipher(SECRET_KEY)
             sealed = cipher.seal("prof_1", McpSecretPurpose.LLM_API_KEY, {"api_key": "sk-test"})
             async with factory() as session, session.begin():
                 session.add_all(
@@ -2312,7 +2312,7 @@ def test_model_profile_readonly_methods_drop_row_locks_and_enforce_auth() -> Non
 
     async def _scenario() -> None:
         engine, factory = await _create_pg_db()
-        cipher = McpSecretCipher(SECRET_KEY)
+        cipher = SecretCipher(SECRET_KEY)
         try:
             async with factory() as session, session.begin():
                 session.add_all(

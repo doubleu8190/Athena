@@ -55,10 +55,15 @@ export {
   DropdownMenuTrigger,
   type DropdownMenuItemProps,
 } from "./DropdownMenu";
-export { EmptyState, type EmptyStateProps } from "./EmptyState";
+export {
+  EmptyState,
+  type EmptyStateIconName,
+  type EmptyStateProps,
+} from "./EmptyState";
 export {
   InlineAlert,
   type InlineAlertProps,
+  type InlineAlertSize,
   type InlineAlertVariant,
 } from "./InlineAlert";
 export { Input, type InputProps } from "./Input";

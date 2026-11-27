@@ -77,7 +77,7 @@ from domain.tool import (
     ToolExecutionContext,
     ToolKind,
 )
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 from main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -154,7 +154,7 @@ class _M16Harness:
         engine: AsyncEngine,
         session_factory: async_sessionmaker[AsyncSession],
         clock: _MutableClock,
-        cipher: McpSecretCipher,
+        cipher: SecretCipher,
         discovery: _ScriptedDiscovery,
         mcp_executor: _RecordingMcpExecutor,
         profile_repo: SqlAlchemyModelProfileRepository,
@@ -193,7 +193,7 @@ async def _create_harness(
         lambda: literal(clock(), type_=DateTime(timezone=True)),
     )
     engine, session_factory = await create_pg_unit_db()
-    cipher = McpSecretCipher(SECRET_KEY, key_version=1)
+    cipher = SecretCipher(SECRET_KEY, key_version=1)
 
     auth_repo = SqlAlchemyAuthRepository(session_factory)
     auth_service = AuthService(

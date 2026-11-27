@@ -57,8 +57,6 @@ async def _hroa_client(profile: str, state_file: Path) -> AsyncIterator[Client]:
         ),
         cwd=str(HROA_DIR),
         base_environment={"PATH": os.defpath},
-        maximum_line_bytes=2 * 1024 * 1024,
-        maximum_total_bytes=2 * 1024 * 1024,
     )
     async with Client(
         transport,

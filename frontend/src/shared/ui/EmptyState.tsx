@@ -1,13 +1,43 @@
+import {
+  BookText,
+  Folder,
+  History,
+  MessageCircle,
+  Search,
+  Settings,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkle,
+  Upload,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
-import { Icon, type IconName } from "./Icons";
 import { cn } from "./utils";
+
+// EmptyState 仅内部维护空状态常用图标映射，避免依赖已淘汰的全局 Icons 壳组件。
+const EMPTY_STATE_ICONS = {
+  book: BookText,
+  chat: MessageCircle,
+  folder: Folder,
+  history: History,
+  search: Search,
+  settings: Settings,
+  shield: ShieldCheck,
+  sliders: SlidersHorizontal,
+  spark: Sparkle,
+  tools: Wrench,
+  upload: Upload,
+} as const satisfies Record<string, LucideIcon>;
+
+export type EmptyStateIconName = keyof typeof EMPTY_STATE_ICONS;
 
 export interface EmptyStateProps {
   action?: ReactNode;
   compact?: boolean;
   description: string;
-  icon?: IconName;
+  icon?: EmptyStateIconName;
   title: string;
   className?: string;
 }
@@ -23,6 +53,7 @@ export function EmptyState({
   icon = "spark",
   title,
 }: EmptyStateProps) {
+  const IconComponent = EMPTY_STATE_ICONS[icon];
   return (
     <section
       aria-label={title}
@@ -39,7 +70,12 @@ export function EmptyState({
           compact ? "h-10 w-10" : "h-12 w-12",
         )}
       >
-        <Icon name={icon} size={compact ? 18 : 22} />
+        <IconComponent
+          aria-hidden="true"
+          focusable="false"
+          size={compact ? 18 : 22}
+          strokeWidth={1.7}
+        />
       </span>
 
       <div className="flex max-w-md flex-col items-center gap-1.5">

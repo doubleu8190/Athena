@@ -11,18 +11,17 @@ from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.redis_transport import RedisRunTransport
 from adapter.run.repository import SqlAlchemyRunRepository
 from adapter.skill.execution import PythonScriptExecutor
-from app.run import RunExecutor, RunWorker
+from app.run import RunExecutor, RunWorker, worker_config_from_environment
 from app.skill import SkillPackageCache, SkillService
 from app.skill.execution_service import SkillExecutionService
 from bootstrap.config import (
     DatabaseSettings,
     FileSkillSettings,
     KnowledgeSettings,
-    RunWorkerSettings,
 )
 from bootstrap.database import build_database
 from bootstrap.knowledge import (
-    validate_knowledge_embedding_configuration,
+    knowledge_embedding_config,
     validate_knowledge_storage_configuration,
 )
 from bootstrap.redis import build_run_transport
@@ -39,7 +38,7 @@ from bootstrap.tool import (
 from domain.file import FileObjectStore
 from infrastructure.database import Database
 from infrastructure.mcp.execution import McpToolCallClient
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 from infrastructure.storage.minio_client import MinioObjectClient
 
 
@@ -76,13 +75,13 @@ def build_run_worker_dependencies(
         raise RuntimeError("run_worker_database_required")
     # 在创建数据库连接池与共享对象存储客户端之前，前置校验全部必填配置（Fail-Fast），
     # 防止配置缺失或非法时遗留连接池或线程池资源。
-    config = RunWorkerSettings.from_environment().to_config()
+    config = worker_config_from_environment()
     # MCP 凭据解封与 API 使用同一密钥；缺失或损坏时拒绝启动，不能静默禁用工具。
-    secret_cipher = McpSecretCipher.from_environment()
+    secret_cipher = SecretCipher.from_environment()
     file_settings = FileSkillSettings.from_environment()
     knowledge_settings = KnowledgeSettings.from_environment()
     storage_config = validate_knowledge_storage_configuration()
-    embedding_config = validate_knowledge_embedding_configuration()
+    embedding_config = knowledge_embedding_config()
 
     database = build_database(configured_url)
     bundle.database = database

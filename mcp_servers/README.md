@@ -42,7 +42,7 @@ docker compose --env-file docker/test.env \
   up -d backend-api backend-worker
 ```
 
-使用只读挂载后，宿主机修改 `mcp_servers/` 源码会即时反映到容器内 `/app/mcp_servers`（无需重建后端镜像），但新增或修改目标 Server 前仍需确认其依赖已包含在 `athena-backend-base:latest` 镜像内。注册前可在运行中的容器内检查文件与解释器：
+使用只读挂载后，宿主机修改 `mcp_servers/` 源码会即时反映到容器内 `/app/mcp_servers`（无需重建后端镜像），但新增或修改目标 Server 前仍需确认其依赖已包含在 `athena-backend:latest` 镜像内。注册前可在运行中的容器内检查文件与解释器：
 
 ```sh
 docker compose --env-file docker/test.env \

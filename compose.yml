@@ -21,7 +21,6 @@ x-backend-environment: &backend-environment
   # 生成命令: python -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())'
   ATHENA_MCP_SECRET_KEY: ${ATHENA_MCP_SECRET_KEY:-}
   ATHENA_MCP_SECRET_KEY_VERSION: ${ATHENA_MCP_SECRET_KEY_VERSION:-1}
-  ATHENA_MCP_ALLOWED_PRIVATE_HOSTS: ${ATHENA_MCP_ALLOWED_PRIVATE_HOSTS:-}
   ATHENA_MCP_STDIO_BASE_ENV_NAMES: ${ATHENA_MCP_STDIO_BASE_ENV_NAMES:-}
 
   # 运行环境标识：production 模式下强制要求配置 ATHENA_REDIS_URL 驱动分布式认证限流
@@ -43,7 +42,8 @@ x-backend-environment: &backend-environment
   # 非生产本地 Mock 组织与快捷登录开关（ATHENA_ENV=production 时开启将强制拒绝启动）
   ATHENA_AUTH_MOCK_ENABLED: ${ATHENA_AUTH_MOCK_ENABLED:-false}
 
-  # 技能脚本运行时可写目录
+  # 技能脚本运行时解释器与可写目录
+  ATHENA_SKILL_PYTHON_EXECUTABLE: ${ATHENA_SKILL_PYTHON_EXECUTABLE:-}
   ATHENA_SKILL_TEMP_ROOT: ${ATHENA_SKILL_TEMP_ROOT:-/app/var/skill-executions}
 
   # 统一对象存储（必填：私有 MinIO / S3，单桶按业务前缀隔离 knowledge/、session-files/、skills/ 等）
@@ -51,6 +51,7 @@ x-backend-environment: &backend-environment
   ATHENA_STORAGE_ACCESS_KEY: ${ATHENA_STORAGE_ACCESS_KEY:-}
   ATHENA_STORAGE_SECRET_KEY: ${ATHENA_STORAGE_SECRET_KEY:-}
   ATHENA_STORAGE_BUCKET: ${ATHENA_STORAGE_BUCKET:-}
+  # 对象存储 TLS 开关：本地容器测试可为 false，生产环境（S3 / HTTPS MinIO）必须显式设为 true
   ATHENA_STORAGE_SECURE: ${ATHENA_STORAGE_SECURE:-false}
 
   # 知识库检索与远程 OpenAI 兼容 Embedding 服务（必填，无状态化，不加载本地权重）
@@ -93,6 +94,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
+      args:
+        INSTALL_KNOWLEDGE: "${ATHENA_INSTALL_KNOWLEDGE:-false}"
     image: athena-backend:latest
     container_name: athena-backend-api
     command: ["api"]
@@ -127,6 +130,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
+      args:
+        INSTALL_KNOWLEDGE: "${ATHENA_INSTALL_KNOWLEDGE:-false}"
     image: athena-backend:latest
     container_name: athena-backend-worker
     command: ["worker"]
@@ -142,12 +147,7 @@ services:
       ATHENA_RUN_CANCEL_POLL_SECONDS: ${ATHENA_RUN_CANCEL_POLL_SECONDS:-1}
       ATHENA_RUN_QUEUE_POLL_SECONDS: ${ATHENA_RUN_QUEUE_POLL_SECONDS:-1}
       ATHENA_RUN_RECLAIM_SECONDS: ${ATHENA_RUN_RECLAIM_SECONDS:-5}
-      ATHENA_RUN_LLM_REQUEST_LIMIT: ${ATHENA_RUN_LLM_REQUEST_LIMIT:-40}
       ATHENA_RUN_TOOL_TIMEOUT_SECONDS: ${ATHENA_RUN_TOOL_TIMEOUT_SECONDS:-30.0}
-      ATHENA_RUN_TOOL_ARGUMENT_BYTES: ${ATHENA_RUN_TOOL_ARGUMENT_BYTES:-65536}
-      ATHENA_RUN_TOOL_RESULT_BYTES: ${ATHENA_RUN_TOOL_RESULT_BYTES:-65536}
-      ATHENA_RUN_TOOL_CLEANUP_SECONDS: ${ATHENA_RUN_TOOL_CLEANUP_SECONDS:-10.0}
-      ATHENA_RUN_TOOL_BATCH_LIMIT: ${ATHENA_RUN_TOOL_BATCH_LIMIT:-8}
       ATHENA_RUN_TOOL_CONCURRENCY: ${ATHENA_RUN_TOOL_CONCURRENCY:-4}
     volumes:
       - athena-var:/app/var
@@ -166,6 +166,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
+      args:
+        INSTALL_KNOWLEDGE: "${ATHENA_INSTALL_KNOWLEDGE:-false}"
     image: athena-backend:latest
     container_name: athena-backend-knowledge-worker
     command: ["knowledge-worker"]
@@ -194,6 +196,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
+      args:
+        INSTALL_KNOWLEDGE: "${ATHENA_INSTALL_KNOWLEDGE:-false}"
     image: athena-backend:latest
     command: ["migrate"]
     extra_hosts:

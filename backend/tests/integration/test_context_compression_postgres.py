@@ -49,7 +49,7 @@ from domain.run.model import (
 )
 from domain.run.model.errors import RunStateError
 from domain.system_prompt import INITIAL_SYSTEM_PROMPT_IDS
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 _MODEL_SNAPSHOT: dict[str, object] = {
@@ -858,7 +858,7 @@ def test_compression_policy_enforces_non_null_token_caps_and_omits_legacy_column
 
             repository = SqlAlchemyModelProfileRepository(
                 factory,
-                McpSecretCipher(bytes(range(32))),
+                SecretCipher(bytes(range(32))),
             )
             assert await repository.get_current_compression_policy() is None
 

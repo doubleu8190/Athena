@@ -1,7 +1,7 @@
 # 知识库设计（待确认）
 
 状态：Root 设计草案，部分决策已确认。原件存储已按
-[MinIO 设计与实施方案](knowledge-minio-design.md)收敛；本文中“本地磁盘”旧约定
+[知识库运维手册](knowledge-base-operations.md)收敛；本文中“本地磁盘”旧约定
 不再适用。
 
 历史实施计划文档已归档清理；当前生产接口与运维约定以源码、[`docs/phase1-enterprise-backend-api-contract.md`](phase1-enterprise-backend-api-contract.md) 与 [`docs/knowledge-base-operations.md`](knowledge-base-operations.md) 为准。
@@ -93,7 +93,7 @@ OCR 建议覆盖扫描 PDF、图片及 Office 内嵌图片；PDF 按页判断是
 桶、对象键或物理路径，并通过鉴权下载接口读取；数据库只保存存储键及文件元数据。
 API、知识库 worker 和需要知识查询的 Run worker 必须使用同一桶与凭据配置。
 本地仅保留上传暂存、解析临时文件和 OCR/模型缓存。私有桶预建、权限、TLS、
-超时/重试及切换边界见 [MinIO 设计与实施方案](knowledge-minio-design.md)。
+超时/重试及切换边界见 [知识库运维手册](knowledge-base-operations.md)。
 
 建议初始限制：单文件 20 MiB、PDF 500 页、单次导入 20 份、单用户并发处理 2 份；
 单用户存储与索引总量另设可配置硬上限。以上为待确认的产品默认值，不是性能承诺。

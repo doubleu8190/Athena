@@ -1,3 +1,4 @@
+import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import {
@@ -9,15 +10,15 @@ import {
   FORM_STACK_CLASS,
   ICON_BUTTON_CLASS,
   ICON_BUTTON_DANGER_CLASS,
+  InlineAlert,
   MODAL_WIDTH_XL,
   NOTICE_BRAND_CLASS,
   NOTICE_WARNING_CLASS,
   PAGE_LOADING_CLASS,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { FieldError } from "../../shared/ui/FieldError";
-import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import { adminErrorMessage, isMcpConflict } from "./errorMessages";
 import {
@@ -274,10 +275,21 @@ export function McpServerDialog({
     >
       {editing && !editFormAvailable ? (
         detail.isError ? (
-          <ErrorBanner
-            message={adminErrorMessage(detail.error)}
-            onRetry={() => void detail.refetch()}
-          />
+          <InlineAlert
+            action={
+              <button
+                className={TEXT_BUTTON_CLASS}
+                onClick={() => void detail.refetch()}
+                type="button"
+              >
+                重试
+              </button>
+            }
+            size="compact"
+            variant="danger"
+          >
+            {adminErrorMessage(detail.error)}
+          </InlineAlert>
         ) : (
           <div className={PAGE_LOADING_CLASS} role="status">
             正在读取 Server 最新详情…
@@ -477,7 +489,12 @@ export function McpServerDialog({
                   type="button"
                   variant="outline"
                 >
-                  <Icon name="plus" size={13} />
+                  <Plus
+                    aria-hidden="true"
+                    focusable="false"
+                    size={13}
+                    strokeWidth={1.7}
+                  />
                   添加秘密
                 </Button>
               </header>
@@ -548,7 +565,12 @@ export function McpServerDialog({
                         title="移除秘密"
                         type="button"
                       >
-                        <Icon name="trash" size={15} />
+                        <Trash2
+                          aria-hidden="true"
+                          focusable="false"
+                          size={15}
+                          strokeWidth={1.7}
+                        />
                       </button>
                     </div>
                   ))}
@@ -577,7 +599,11 @@ export function McpServerDialog({
               正在连接 MCP Server 并发现工具。后端完成前不会显示连接成功；配置结果以服务端响应为准。
             </p>
           ) : null}
-          {requestError ? <ErrorBanner message={requestError} /> : null}
+          {requestError ? (
+            <InlineAlert size="compact" variant="danger">
+              {requestError}
+            </InlineAlert>
+          ) : null}
         </form>
       )}
     </Modal>

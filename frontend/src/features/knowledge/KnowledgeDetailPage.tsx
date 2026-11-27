@@ -1,3 +1,13 @@
+import {
+  BookText,
+  ChevronRight,
+  History,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
@@ -8,6 +18,7 @@ import {
   Button,
   ICON_BUTTON_CLASS,
   ICON_BUTTON_DANGER_CLASS,
+  InlineAlert,
   LIST_FOOTER_CLASS,
   PAGE_LOADING_CLASS,
   PAGE_NAV_BUTTON_CLASS,
@@ -18,8 +29,6 @@ import {
   cn,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { useAuth } from "../auth/AuthProvider";
 import { resolveUserDepartmentName } from "../auth/model";
 import {
@@ -98,7 +107,12 @@ function DocumentRow({
           aria-hidden="true"
           className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-brand-border bg-brand-subtle text-brand-hover"
         >
-          <Icon name="book" size={16} />
+          <BookText
+            aria-hidden="true"
+            focusable="false"
+            size={16}
+            strokeWidth={1.7}
+          />
         </span>
         <div className="flex min-w-0 flex-col gap-[3px]">
           <strong className="truncate text-sm font-semibold text-text-primary">
@@ -183,7 +197,12 @@ function DocumentRow({
               title="重命名文档"
               type="button"
             >
-              <Icon name="edit" size={15} />
+              <Pencil
+                aria-hidden="true"
+                focusable="false"
+                size={15}
+                strokeWidth={1.7}
+              />
             </button>
             <button
               aria-label={`添加新版本：${document.title}`}
@@ -197,7 +216,12 @@ function DocumentRow({
               }
               type="button"
             >
-              <Icon name="upload" size={15} />
+              <Upload
+                aria-hidden="true"
+                focusable="false"
+                size={15}
+                strokeWidth={1.7}
+              />
             </button>
           </>
         ) : null}
@@ -208,7 +232,12 @@ function DocumentRow({
           title="版本历史"
           type="button"
         >
-          <Icon name="history" size={15} />
+          <History
+            aria-hidden="true"
+            focusable="false"
+            size={15}
+            strokeWidth={1.7}
+          />
         </button>
         {canManage ? (
           <button
@@ -218,7 +247,12 @@ function DocumentRow({
             title="删除文档"
             type="button"
           >
-            <Icon name="trash" size={15} />
+            <Trash2
+              aria-hidden="true"
+              focusable="false"
+              size={15}
+              strokeWidth={1.7}
+            />
           </button>
         ) : null}
       </div>
@@ -317,10 +351,21 @@ export function KnowledgeDetailPage() {
           title={notFound ? "知识库不存在或不可访问" : "知识库加载失败"}
         />
         {!notFound ? (
-          <ErrorBanner
-            message={knowledgeErrorMessage(base.error)}
-            onRetry={() => void base.refetch()}
-          />
+          <InlineAlert
+            action={
+              <button
+                className={TEXT_BUTTON_CLASS}
+                onClick={() => void base.refetch()}
+                type="button"
+              >
+                重试
+              </button>
+            }
+            size="compact"
+            variant="danger"
+          >
+            {knowledgeErrorMessage(base.error)}
+          </InlineAlert>
         ) : null}
       </div>
     );
@@ -366,7 +411,12 @@ export function KnowledgeDetailPage() {
               type="button"
               variant="outline"
             >
-              <Icon name="search" size={14} />
+              <Search
+                aria-hidden="true"
+                focusable="false"
+                size={14}
+                strokeWidth={1.7}
+              />
               检索测试
             </Button>
             {canManage ? (
@@ -376,7 +426,12 @@ export function KnowledgeDetailPage() {
                   type="button"
                   variant="outline"
                 >
-                  <Icon name="edit" size={14} />
+                  <Pencil
+                    aria-hidden="true"
+                    focusable="false"
+                    size={14}
+                    strokeWidth={1.7}
+                  />
                   编辑
                 </Button>
                 <Button
@@ -384,7 +439,12 @@ export function KnowledgeDetailPage() {
                   type="button"
                   variant="primary"
                 >
-                  <Icon name="plus" size={14} />
+                  <Plus
+                    aria-hidden="true"
+                    focusable="false"
+                    size={14}
+                    strokeWidth={1.7}
+                  />
                   添加资料
                 </Button>
               </>
@@ -408,7 +468,12 @@ export function KnowledgeDetailPage() {
             type="button"
             variant="danger-outline"
           >
-            <Icon name="trash" size={14} />
+            <Trash2
+              aria-hidden="true"
+              focusable="false"
+              size={14}
+              strokeWidth={1.7}
+            />
             删除知识库
           </Button>
         ) : null}
@@ -419,10 +484,21 @@ export function KnowledgeDetailPage() {
           正在加载文档…
         </div>
       ) : documents.isError ? (
-        <ErrorBanner
-          message={knowledgeErrorMessage(documents.error)}
-          onRetry={() => void documents.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void documents.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {knowledgeErrorMessage(documents.error)}
+        </InlineAlert>
       ) : documents.data.items.length === 0 && page === 1 ? (
         <EmptyState
           action={
@@ -432,7 +508,12 @@ export function KnowledgeDetailPage() {
                 type="button"
                 variant="primary"
               >
-                <Icon name="plus" size={14} />
+                <Plus
+                  aria-hidden="true"
+                  focusable="false"
+                  size={14}
+                  strokeWidth={1.7}
+                />
                 添加资料
               </Button>
             ) : undefined
@@ -489,7 +570,12 @@ export function KnowledgeDetailPage() {
                 onClick={() => goToPage(page - 1)}
                 type="button"
               >
-                <Icon name="chevron" size={13} />
+                <ChevronRight
+                  aria-hidden="true"
+                  focusable="false"
+                  size={13}
+                  strokeWidth={1.7}
+                />
               </button>
               <span className="text-xs text-text-secondary">第 {page} 页</span>
               <button
@@ -499,7 +585,12 @@ export function KnowledgeDetailPage() {
                 onClick={() => goToPage(page + 1)}
                 type="button"
               >
-                <Icon name="chevron" size={13} />
+                <ChevronRight
+                  aria-hidden="true"
+                  focusable="false"
+                  size={13}
+                  strokeWidth={1.7}
+                />
               </button>
             </nav>
           </footer>

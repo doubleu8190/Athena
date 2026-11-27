@@ -19,11 +19,11 @@ import {
   cn,
   toast,
 } from "../../shared/ui";
-import { useUserModels } from "../models/hooks";
 import {
   resolveEffectiveUserModel,
+  useUserModels,
   userModelDisplayLabel,
-} from "../models/model";
+} from "../models";
 
 export interface ModelSelectorPopoverProps {
   disabled?: boolean;

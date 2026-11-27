@@ -5,12 +5,13 @@ import {
   COMPACT_SELECT_CLASS,
   FIELD_CLASS,
   FIELD_TEXTAREA_CLASS,
+  InlineAlert,
   MODAL_WIDTH_XL,
   NOTICE_BRAND_CLASS,
   NOTICE_WARNING_CLASS,
+  TEXT_BUTTON_CLASS,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
 import {
   formatChannels,
@@ -100,10 +101,21 @@ function ChunkDetailDialog({
           正在加载来源片段…
         </p>
       ) : chunk.isError ? (
-        <ErrorBanner
-          message={knowledgeErrorMessage(chunk.error)}
-          onRetry={() => void chunk.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void chunk.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {knowledgeErrorMessage(chunk.error)}
+        </InlineAlert>
       ) : (
         <article>
           <h3 className="text-[15px] font-semibold text-text-primary [overflow-wrap:anywhere]">
@@ -237,7 +249,9 @@ export function KnowledgeSearchDialog({
       </form>
 
       {search.isError ? (
-        <ErrorBanner message={knowledgeErrorMessage(search.error)} />
+        <InlineAlert size="compact" variant="danger">
+          {knowledgeErrorMessage(search.error)}
+        </InlineAlert>
       ) : null}
 
       {search.isSuccess ? (

@@ -1,3 +1,4 @@
+import { Plus } from "lucide-react";
 import { useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
@@ -17,6 +18,7 @@ import {
   ADMIN_TITLE_LINE_CLASS,
   Badge,
   Button,
+  InlineAlert,
   NOTICE_WARNING_CLASS,
   PAGE_DESC_CLASS,
   PAGE_HEADING_CLASS,
@@ -24,11 +26,10 @@ import {
   PAGE_LOADING_CLASS,
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import {
   CompressionPolicyDialog,
   DisableDefaultModelDialog,
@@ -160,21 +161,31 @@ export function AdminModelsPage() {
           type="button"
           variant="primary"
         >
-          <Icon name="plus" size={14} />
+          <Plus aria-hidden="true" focusable="false" size={14} strokeWidth={1.7} />
           创建模型版本
         </Button>
       </header>
 
       {actionError ? (
         <div className="mb-4">
-          <ErrorBanner
-            message={actionError}
-            onRetry={() => {
-              setActionError(null);
-              void profiles.refetch();
-            }}
-            retryLabel="刷新模型版本"
-          />
+          <InlineAlert
+            action={
+              <button
+                className={TEXT_BUTTON_CLASS}
+                onClick={() => {
+                  setActionError(null);
+                  void profiles.refetch();
+                }}
+                type="button"
+              >
+                刷新模型版本
+              </button>
+            }
+            size="compact"
+            variant="danger"
+          >
+            {actionError}
+          </InlineAlert>
         </div>
       ) : null}
 
@@ -198,10 +209,21 @@ export function AdminModelsPage() {
             正在读取模型版本…
           </div>
         ) : profiles.isError ? (
-          <ErrorBanner
-            message={adminErrorMessage(profiles.error)}
-            onRetry={() => void profiles.refetch()}
-          />
+          <InlineAlert
+            action={
+              <button
+                className={TEXT_BUTTON_CLASS}
+                onClick={() => void profiles.refetch()}
+                type="button"
+              >
+                重试
+              </button>
+            }
+            size="compact"
+            variant="danger"
+          >
+            {adminErrorMessage(profiles.error)}
+          </InlineAlert>
         ) : profiles.data.items.length === 0 ? (
           <EmptyState
             action={
@@ -394,10 +416,21 @@ export function AdminModelsPage() {
             正在读取压缩策略…
           </div>
         ) : policy.isError ? (
-          <ErrorBanner
-            message={adminErrorMessage(policy.error)}
-            onRetry={() => void policy.refetch()}
-          />
+          <InlineAlert
+            action={
+              <button
+                className={TEXT_BUTTON_CLASS}
+                onClick={() => void policy.refetch()}
+                type="button"
+              >
+                重试
+              </button>
+            }
+            size="compact"
+            variant="danger"
+          >
+            {adminErrorMessage(policy.error)}
+          </InlineAlert>
         ) : policy.data.id === null ? (
           <EmptyState
             action={

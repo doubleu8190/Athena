@@ -111,16 +111,13 @@ Skills/文件迁移链顺序为：
 .venv/bin/alembic -c backend/alembic.ini upgrade head
 ```
 
-确认唯一 head 为 `20261122_0023` 后，启动全部 API 实例和新版 Worker。不要用旧版
+确认唯一 head 为 `0001_initial_schema` 后，启动全部 API 实例和新版 Worker。不要用旧版
 Worker 处理已升级数据库中的新工具调用。旧 Run 迁移后技能快照为空，系统不会把它
 事后绑定到当前 Skill 目录。
 
-已在隔离 schema 中验证完整升级到唯一 head `0023`，再只执行
-`0023 -> 0022 -> 0023`：降级窗口内旧两表存在且游标初值为零，重升后两表消失。此次
-验证未应用到现有业务 dev 数据库，也不要求 test 根 `public` 执行 downgrade/migrate。
+已在隔离 schema 中验证完整升级到唯一 head `0001_initial_schema`（历史增量迁移已合并为基线脚本）。
 生产回滚不要直接执行全链 downgrade：
-`0018` 的 downgrade 会删除 Skill、文件元数据和执行审计表，MinIO 对象不会随之
-删除；`0023` 的 downgrade 只恢复旧维护表结构，不回填业务数据或历史 owner。旧版
+`0001_initial_schema` 的 downgrade 会删除全量业务表，MinIO 对象不会随之删除。旧版
 在线 GC 代码已从当前应用删除，不能仅靠重升/降级恢复旧写路径。需要回滚时恢复已演练的
 数据库备份，并保持对应 MinIO 对象不删除。
 

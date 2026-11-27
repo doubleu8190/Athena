@@ -259,9 +259,15 @@ printf '%s\\n' "$*" >> {str(curl_log)!r}
 
 
 def test_production_dockerfile_excludes_mock_mcp_servers_and_mounts_readonly() -> None:
-    """生产后端镜像不得打包 mcp_servers/，测试叠加编排仅对 API 与 Worker 只读挂载。"""
+    """生产后端镜像不得打包 mcp_servers/，合并后单 Dockerfile 直接基于 python:3.12-slim。"""
+    assert not (PROJECT_ROOT / "docker" / "Dockerfile.backend-base").exists()
     dockerfile_text = (PROJECT_ROOT / "docker" / "Dockerfile.backend").read_text(encoding="utf-8")
+    assert "FROM python:3.12-slim" in dockerfile_text
+    assert "ARG INSTALL_KNOWLEDGE=false" in dockerfile_text
     assert "COPY mcp_servers/" not in dockerfile_text
+
+    compose_text = (PROJECT_ROOT / "compose.yml").read_text(encoding="utf-8")
+    assert 'INSTALL_KNOWLEDGE: "${ATHENA_INSTALL_KNOWLEDGE:-false}"' in compose_text
 
     override_path = PROJECT_ROOT / "docker" / "compose.test-mcp.override.yml"
     assert override_path.is_file()
@@ -336,18 +342,18 @@ exit 0
 
 
 @pytest.mark.parametrize(
-    ("install_flag", "expected_build_arg"),
+    ("install_flag", "expected_env_value"),
     (
-        ("false", "INSTALL_KNOWLEDGE=false"),
-        ("true", "INSTALL_KNOWLEDGE=true"),
+        ("false", "false"),
+        ("true", "true"),
     ),
 )
-def test_build_base_image_only_follows_athena_install_knowledge(
+def test_docker_up_passes_athena_install_knowledge_to_compose_build(
     tmp_path: Path,
     install_flag: str,
-    expected_build_arg: str,
+    expected_env_value: str,
 ) -> None:
-    """build-base 仅根据 ATHENA_INSTALL_KNOWLEDGE=true 决定是否安装重量级本地 OCR 依赖。"""
+    """test-docker.sh up 直接通过 docker compose build 透传 ATHENA_INSTALL_KNOWLEDGE。"""
     _write_test_project(tmp_path)
     config_path = tmp_path / "docker/test.env"
     lines = [
@@ -368,22 +374,31 @@ set -eu
 if [[ "$1" == "info" ]]; then
   exit 0
 fi
-printf '%s\\n' "$*" >> {str(build_log)!r}
+printf 'ARGV=%s ENV_INSTALL_KNOWLEDGE=%s\\n' \
+  "$*" "${{ATHENA_INSTALL_KNOWLEDGE-}}" >> {str(build_log)!r}
+case "$*" in
+  *"port frontend 80"*) printf '127.0.0.1:19080\\n' ;;
+  *" ps "*|*" ps"*) printf 'Up (healthy)\\n' ;;
+esac
 exit 0
 """,
         encoding="utf-8",
     )
     docker_stub.chmod(0o755)
+    curl_stub = bin_directory / "curl"
+    curl_stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    curl_stub.chmod(0o755)
 
     environment = os.environ.copy()
     environment.update(
         {
             "PATH": f"{bin_directory}:{environment['PATH']}",
             "HOME": str(tmp_path),
+            "ATHENA_INSTALL_KNOWLEDGE": "wrong-host-value",
         }
     )
     result = subprocess.run(
-        ["bash", str(tmp_path / "scripts/test-docker.sh"), "build-base"],
+        ["bash", str(tmp_path / "scripts/test-docker.sh"), "up"],
         cwd=tmp_path,
         env=environment,
         text=True,
@@ -391,4 +406,6 @@ exit 0
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert f"--build-arg {expected_build_arg}" in build_log.read_text(encoding="utf-8")
+    build_text = build_log.read_text(encoding="utf-8")
+    assert f"ENV_INSTALL_KNOWLEDGE={expected_env_value}" in build_text
+    assert "Dockerfile.backend-base" not in build_text

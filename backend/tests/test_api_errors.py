@@ -7,9 +7,8 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from api.errors import DomainErrorRoute, domain_error_to_http
+from api.errors import DomainErrorRoute, SafeMcpRoute, domain_error_to_http
 from api.knowledge import _KnowledgeErrorRoute
-from api.mcp_errors import SafeMcpRoute, mcp_error_to_http
 from api.upload import UploadTooLargeError
 from app.file import FileInputError
 from app.knowledge.service import (
@@ -400,12 +399,6 @@ def test_safe_mcp_route_masks_validation_errors_and_reuses_domain_mapping() -> N
         assert value_resp.status_code == 422
         assert value_resp.json() == {"detail": "mcp_request_invalid"}
         assert "credentials" not in value_resp.text
-
-    # 兼容直接调用 mcp_error_to_http 的辅助函数语义。
-    assert mcp_error_to_http(McpDiscoveryTimeoutError()).status_code == 504
-    assert mcp_error_to_http(ValueError("bad")).detail == "mcp_request_invalid"
-    with pytest.raises(RuntimeError, match="unhandled"):
-        mcp_error_to_http(RuntimeError("unhandled"))
 
 
 def test_knowledge_error_route_maps_exact_lookup_error_but_not_key_or_index_error() -> None:

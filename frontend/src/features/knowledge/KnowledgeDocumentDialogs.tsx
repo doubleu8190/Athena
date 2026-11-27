@@ -10,13 +10,14 @@ import {
   FIELD_CLASS,
   FIELD_INPUT_CLASS,
   FORM_STACK_CLASS,
+  InlineAlert,
   MODAL_WIDTH_2XL,
   MODAL_WIDTH_XL,
   MarkdownSplitEditor,
   NOTICE_BRAND_CLASS,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { Modal } from "../../shared/ui/Modal";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
@@ -440,7 +441,11 @@ export function KnowledgeIngestDialog({
             正在向后端提交资料，请勿重复操作。
           </p>
         ) : null}
-        {requestError ? <ErrorBanner message={requestError} /> : null}
+        {requestError ? (
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        ) : null}
       </form>
     </Modal>
   );
@@ -562,7 +567,11 @@ export function RenameKnowledgeDocumentDialog({
             {validationError}
           </p>
         ) : null}
-        {requestError ? <ErrorBanner message={requestError} /> : null}
+        {requestError ? (
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        ) : null}
       </form>
     </Modal>
   );
@@ -659,7 +668,11 @@ export function DeleteKnowledgeDocumentDialog({
         />
         <span>我已确认要删除这个文档</span>
       </label>
-      {requestError ? <ErrorBanner message={requestError} /> : null}
+      {requestError ? (
+        <InlineAlert size="compact" variant="danger">
+          {requestError}
+        </InlineAlert>
+      ) : null}
     </Modal>
   );
 }
@@ -785,10 +798,21 @@ export function VersionHistoryDialog({
           正在读取版本…
         </p>
       ) : versions.isError ? (
-        <ErrorBanner
-          message={knowledgeErrorMessage(versions.error)}
-          onRetry={() => void versions.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void versions.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {knowledgeErrorMessage(versions.error)}
+        </InlineAlert>
       ) : versions.data.length === 0 ? (
         <EmptyState
           compact
@@ -821,7 +845,9 @@ export function VersionHistoryDialog({
         </p>
       ) : null}
       {retryMutation.isError ? (
-        <ErrorBanner message={knowledgeErrorMessage(retryMutation.error)} />
+        <InlineAlert size="compact" variant="danger">
+          {knowledgeErrorMessage(retryMutation.error)}
+        </InlineAlert>
       ) : null}
     </Modal>
   );

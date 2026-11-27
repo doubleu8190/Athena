@@ -1,3 +1,13 @@
+import {
+  Eye,
+  EyeOff,
+  Pencil,
+  Plus,
+  ShieldCheck,
+  Sparkle,
+  Trash2,
+  User,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -12,14 +22,13 @@ import {
   PAGE_LOADING_CLASS,
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
+  TEXT_BUTTON_CLASS,
   Tabs,
   TabsList,
   TabsTrigger,
   cn,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import { useAuth } from "../auth/AuthProvider";
 import { resolveUserDepartmentName } from "../auth/model";
@@ -189,7 +198,7 @@ export function PersonalSkillsPage() {
           type="button"
           variant="primary"
         >
-          <Icon name="plus" size={14} />
+          <Plus aria-hidden="true" focusable="false" size={14} strokeWidth={1.7} />
           新建个人技能
         </Button>
       </header>
@@ -197,11 +206,21 @@ export function PersonalSkillsPage() {
       <Tabs onValueChange={handleViewChange} value={view} variant="underline">
         <TabsList aria-label="技能库视图">
           <TabsTrigger ref={availableTabRef} value="available">
-            <Icon name="spark" size={15} />
+            <Sparkle
+              aria-hidden="true"
+              focusable="false"
+              size={15}
+              strokeWidth={1.7}
+            />
             可用技能
           </TabsTrigger>
           <TabsTrigger ref={mineTabRef} value="mine">
-            <Icon name="user" size={15} />
+            <User
+              aria-hidden="true"
+              focusable="false"
+              size={15}
+              strokeWidth={1.7}
+            />
             我的技能
           </TabsTrigger>
         </TabsList>
@@ -328,11 +347,21 @@ function SkillsLibraryView({
         </InlineAlert>
       ) : null}
       {actionError ? (
-        <ErrorBanner
-          message={actionError}
-          onRetry={() => void activeSkills.refetch()}
-          retryLabel="刷新列表"
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void activeSkills.refetch()}
+              type="button"
+            >
+              刷新列表
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {actionError}
+        </InlineAlert>
       ) : null}
 
       {activeSkills.isPending ? (
@@ -340,16 +369,32 @@ function SkillsLibraryView({
           {view === "mine" ? "正在读取我的技能…" : "正在读取可用技能…"}
         </div>
       ) : activeSkills.isError ? (
-        <ErrorBanner
-          message={skillErrorMessage(activeSkills.error)}
-          onRetry={() => void activeSkills.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void activeSkills.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {skillErrorMessage(activeSkills.error)}
+        </InlineAlert>
       ) : view === "available" ? (
         activeSkills.data.length === 0 ? (
           <EmptyState
             action={
               <Button onClick={openCreateEditor} type="button" variant="primary">
-                <Icon name="plus" size={14} />
+                <Plus
+                  aria-hidden="true"
+                  focusable="false"
+                  size={14}
+                  strokeWidth={1.7}
+                />
                 创建个人技能
               </Button>
             }
@@ -388,7 +433,12 @@ function SkillsLibraryView({
               </div>
             </header>
             <p className="-mt-0.5 mb-3 flex items-start gap-[7px] text-xs leading-[1.65] text-text-tertiary [&>svg]:mt-px [&>svg]:shrink-0 [&>svg]:text-brand-hover">
-              <Icon name="shield" size={15} />
+              <ShieldCheck
+                aria-hidden="true"
+                focusable="false"
+                size={15}
+                strokeWidth={1.7}
+              />
               这里展示全公司技能、所属部门共享技能与你已启用的个人技能；可用只表示后续对话可以按任务使用。
             </p>
             {filteredAvailableSkills.length === 0 ? (
@@ -428,7 +478,12 @@ function SkillsLibraryView({
         <EmptyState
           action={
             <Button onClick={openCreateEditor} type="button" variant="primary">
-              <Icon name="plus" size={14} />
+              <Plus
+                aria-hidden="true"
+                focusable="false"
+                size={14}
+                strokeWidth={1.7}
+              />
               新建第一个个人技能
             </Button>
           }
@@ -501,7 +556,12 @@ function SkillsLibraryView({
                       type="button"
                       variant="outline"
                     >
-                      <Icon name="edit" size={14} />
+                      <Pencil
+                        aria-hidden="true"
+                        focusable="false"
+                        size={14}
+                        strokeWidth={1.7}
+                      />
                       编辑
                     </Button>
                     <Button
@@ -512,10 +572,21 @@ function SkillsLibraryView({
                       type="button"
                       variant="outline"
                     >
-                      <Icon
-                        name={skill.enabled ? "eye-off" : "eye"}
-                        size={14}
-                      />
+                      {skill.enabled ? (
+                        <EyeOff
+                          aria-hidden="true"
+                          focusable="false"
+                          size={14}
+                          strokeWidth={1.7}
+                        />
+                      ) : (
+                        <Eye
+                          aria-hidden="true"
+                          focusable="false"
+                          size={14}
+                          strokeWidth={1.7}
+                        />
+                      )}
                       {toggling
                         ? "正在更新…"
                         : skill.enabled
@@ -532,7 +603,12 @@ function SkillsLibraryView({
                       type="button"
                       variant="danger-outline"
                     >
-                      <Icon name="trash" size={14} />
+                      <Trash2
+                        aria-hidden="true"
+                        focusable="false"
+                        size={14}
+                        strokeWidth={1.7}
+                      />
                       删除
                     </Button>
                   </div>
@@ -583,20 +659,35 @@ function SkillsLibraryView({
         title={deleteTarget ? `删除「${deleteTarget.name}」？` : "删除个人技能？"}
       >
         <div className="flex items-start gap-2.5 text-[13px] leading-[1.7] text-text-secondary [&>svg]:mt-0.5 [&>svg]:shrink-0 [&>svg]:text-danger">
-          <Icon name="shield" size={18} />
+          <ShieldCheck
+            aria-hidden="true"
+            focusable="false"
+            size={18}
+            strokeWidth={1.7}
+          />
           <p>
             后续对话将不再使用该技能，进行中的任务和历史记录不受影响。删除后，当前技能目录会立即刷新。
           </p>
         </div>
         {deleteError ? (
-          <ErrorBanner
-            message={deleteError}
-            onRetry={() => {
-              void activeSkills.refetch();
-              setDeleteTarget(null);
-            }}
-            retryLabel="刷新列表"
-          />
+          <InlineAlert
+            action={
+              <button
+                className={TEXT_BUTTON_CLASS}
+                onClick={() => {
+                  void activeSkills.refetch();
+                  setDeleteTarget(null);
+                }}
+                type="button"
+              >
+                刷新列表
+              </button>
+            }
+            size="compact"
+            variant="danger"
+          >
+            {deleteError}
+          </InlineAlert>
         ) : null}
       </Modal>
     </>

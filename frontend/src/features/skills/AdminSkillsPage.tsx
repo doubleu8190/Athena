@@ -1,4 +1,4 @@
-import { FilePenLine, Sparkles } from "lucide-react";
+import { Eye, FilePenLine, Sparkles, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { formatDateTime } from "../../shared/lib/format";
@@ -15,17 +15,17 @@ import {
   ADMIN_TITLE_LINE_CLASS,
   Badge,
   Button,
+  InlineAlert,
   PAGE_DESC_CLASS,
   PAGE_HEADING_CLASS,
   PAGE_HEADING_COPY_CLASS,
   PAGE_LOADING_CLASS,
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { useAuth } from "../auth/AuthProvider";
 import {
   isDeptAdmin,
@@ -76,7 +76,12 @@ export function AdminSkillsPage() {
             type="button"
             variant="outline"
           >
-            <Icon name="upload" size={14} />
+            <Upload
+              aria-hidden="true"
+              focusable="false"
+              size={14}
+              strokeWidth={1.7}
+            />
             导入技能 ZIP
           </Button>
           <Button
@@ -95,10 +100,21 @@ export function AdminSkillsPage() {
           正在读取技能目录…
         </div>
       ) : skills.isError ? (
-        <ErrorBanner
-          message={skillErrorMessage(skills.error)}
-          onRetry={() => void skills.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void skills.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {skillErrorMessage(skills.error)}
+        </InlineAlert>
       ) : skills.data.length === 0 ? (
         <EmptyState
           action={
@@ -209,7 +225,12 @@ export function AdminSkillsPage() {
                       type="button"
                       variant="outline"
                     >
-                      <Icon name="eye" size={14} />
+                      <Eye
+                        aria-hidden="true"
+                        focusable="false"
+                        size={14}
+                        strokeWidth={1.7}
+                      />
                       查看版本与指南
                     </Button>
                   </div>

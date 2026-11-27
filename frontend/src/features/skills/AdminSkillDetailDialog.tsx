@@ -1,4 +1,4 @@
-import { FilePenLine, Sparkles } from "lucide-react";
+import { FilePenLine, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { formatBytes, formatDateTime } from "../../shared/lib/format";
@@ -25,11 +25,10 @@ import {
   SelectTrigger,
   SelectValue,
   Switch,
+  TEXT_BUTTON_CLASS,
   cn,
   toast,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { MarkdownContent } from "../../shared/ui/MarkdownContent";
 import { Modal } from "../../shared/ui/Modal";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
@@ -398,7 +397,12 @@ function VersionUpload({
         type="button"
         variant="outline"
       >
-        <Icon name="upload" size={14} />
+        <Upload
+          aria-hidden="true"
+          focusable="false"
+          size={14}
+          strokeWidth={1.7}
+        />
         {mutation.isPending ? "正在检查并上传…" : "上传新版本"}
       </Button>
       {notice ? (
@@ -414,7 +418,9 @@ function VersionUpload({
       ) : null}
       {error ? (
         <div className="col-span-full min-w-0">
-          <ErrorBanner message={error} />
+          <InlineAlert size="compact" variant="danger">
+            {error}
+          </InlineAlert>
         </div>
       ) : null}
     </section>
@@ -812,7 +818,12 @@ export function AdminSkillDetailDialog({
               type="button"
               variant="danger-outline"
             >
-              <Icon name="trash" size={14} />
+              <Trash2
+                aria-hidden="true"
+                focusable="false"
+                size={14}
+                strokeWidth={1.7}
+              />
               删除部门技能
             </Button>
           ) : null}
@@ -851,10 +862,21 @@ export function AdminSkillDetailDialog({
           正在读取技能版本与检查结果…
         </div>
       ) : detail.isError && !detail.data ? (
-        <ErrorBanner
-          message={skillErrorMessage(detail.error)}
-          onRetry={() => void detail.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void detail.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {skillErrorMessage(detail.error)}
+        </InlineAlert>
       ) : detail.data && form ? (
         <div className="flex min-w-0 flex-col gap-[18px]">
           <section
@@ -1157,24 +1179,48 @@ export function AdminSkillDetailDialog({
             {currentVersionOutsideKnownList &&
             currentVersionDetail.isError ? (
               <div className="mt-3">
-                <ErrorBanner
-                  message="当前版本详情加载失败，暂时不能保存或预览该版本。"
-                  onRetry={() => void currentVersionDetail.refetch()}
-                />
+                <InlineAlert
+                  action={
+                    <button
+                      className={TEXT_BUTTON_CLASS}
+                      onClick={() => void currentVersionDetail.refetch()}
+                      type="button"
+                    >
+                      重试
+                    </button>
+                  }
+                  size="compact"
+                  variant="danger"
+                >
+                  当前版本详情加载失败，暂时不能保存或预览该版本。
+                </InlineAlert>
               </div>
             ) : null}
             {selectedVersionNeedsDetail &&
             selectedVersionDetail.isError ? (
               <div className="mt-3">
-                <ErrorBanner
-                  message="所选版本详情加载失败，暂时不能保存或预览该版本。"
-                  onRetry={() => void selectedVersionDetail.refetch()}
-                />
+                <InlineAlert
+                  action={
+                    <button
+                      className={TEXT_BUTTON_CLASS}
+                      onClick={() => void selectedVersionDetail.refetch()}
+                      type="button"
+                    >
+                      重试
+                    </button>
+                  }
+                  size="compact"
+                  variant="danger"
+                >
+                  所选版本详情加载失败，暂时不能保存或预览该版本。
+                </InlineAlert>
               </div>
             ) : null}
             {requestError ? (
               <div className="mt-3">
-                <ErrorBanner message={requestError} />
+                <InlineAlert size="compact" variant="danger">
+                  {requestError}
+                </InlineAlert>
               </div>
             ) : null}
             {notice ? (
@@ -1299,10 +1345,21 @@ export function AdminSkillDetailDialog({
                     正在读取不可变版本历史…
                   </p>
                 ) : versionPage.isError ? (
-                  <ErrorBanner
-                    message="版本历史分页加载失败；已保留服务端详情中的版本。"
-                    onRetry={() => void versionPage.refetch()}
-                  />
+                  <InlineAlert
+                    action={
+                      <button
+                        className={TEXT_BUTTON_CLASS}
+                        onClick={() => void versionPage.refetch()}
+                        type="button"
+                      >
+                        重试
+                      </button>
+                    }
+                    size="compact"
+                    variant="danger"
+                  >
+                    版本历史分页加载失败；已保留服务端详情中的版本。
+                  </InlineAlert>
                 ) : versions.length === 0 ? (
                   <p className={ADMIN_MUTED_CLASS}>该技能尚无不可变版本。</p>
                 ) : null}

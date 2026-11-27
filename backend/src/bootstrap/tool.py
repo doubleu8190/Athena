@@ -57,7 +57,7 @@ from domain.subagent import SubagentRepository
 from infrastructure.embedding import OpenAICompatibleEmbeddingConfig
 from infrastructure.file import LocalSessionDocumentExtractor, LocalVisionImageNormalizer
 from infrastructure.mcp.execution import McpToolCallClient
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 from infrastructure.storage.minio_client import (
     SHARED_EXECUTOR_MAX_WORKERS,
     SHARED_HTTP_POOL_MAXSIZE,
@@ -89,7 +89,7 @@ class CorePersistenceBundle:
 def build_core_persistence(
     sessions: async_sessionmaker[AsyncSession],
     *,
-    secret_cipher: McpSecretCipher | None,
+    secret_cipher: SecretCipher | None,
     include_mcp: bool = True,
     project_service: ProjectService | None = None,
     preference_service: PreferenceService | None = None,
@@ -97,10 +97,10 @@ def build_core_persistence(
         SqlAlchemyAuthRepository
     ),
     mcp_repository_factory: Callable[
-        [async_sessionmaker[AsyncSession], McpSecretCipher], Any
+        [async_sessionmaker[AsyncSession], SecretCipher], Any
     ] = SqlAlchemyMcpRepository,
     model_profile_repository_factory: Callable[
-        [async_sessionmaker[AsyncSession], McpSecretCipher | None], Any
+        [async_sessionmaker[AsyncSession], SecretCipher | None], Any
     ] = SqlAlchemyModelProfileRepository,
     message_repository_factory: Callable[[async_sessionmaker[AsyncSession]], Any] = (
         SqlAlchemyMessageRepository

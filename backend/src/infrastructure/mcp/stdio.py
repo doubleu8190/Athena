@@ -11,12 +11,6 @@ from typing import Any, cast
 
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-DEFAULT_STDIO_MAX_LINE_BYTES = 2 * 1024 * 1024
-DEFAULT_STDIO_MAX_TOTAL_BYTES = 2 * 1024 * 1024
-DEFAULT_STDIO_GRACE_SECONDS = 1.0
-DEFAULT_STDIO_TERM_SECONDS = 1.0
-DEFAULT_STDIO_KILL_SECONDS = 1.0
-
 
 class McpStdioConfigurationError(ValueError):
     """stdio MCP 启动配置无效。"""
@@ -33,13 +27,8 @@ class McpStdioTransport:
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
         base_environment: Mapping[str, str] | None = None,
-        maximum_line_bytes: int = DEFAULT_STDIO_MAX_LINE_BYTES,
-        maximum_total_bytes: int = DEFAULT_STDIO_MAX_TOTAL_BYTES,
-        grace_seconds: float = DEFAULT_STDIO_GRACE_SECONDS,
-        term_seconds: float = DEFAULT_STDIO_TERM_SECONDS,
-        kill_seconds: float = DEFAULT_STDIO_KILL_SECONDS,
     ) -> None:
-        """校验启动参数和环境白名单；限额与超时关键字保留兼容签名。"""
+        """校验启动参数与环境白名单。"""
         executable = Path(command)
         if (
             not executable.is_absolute()
@@ -59,10 +48,6 @@ class McpStdioTransport:
             raise McpStdioConfigurationError("mcp_stdio_argument_invalid")
         if any(not key or "=" in key or "\x00" in key for key in environment):
             raise McpStdioConfigurationError("mcp_stdio_environment_invalid")
-        if maximum_line_bytes < 1 or maximum_total_bytes < 1:
-            raise ValueError("mcp_stdio_limit_invalid")
-        if min(grace_seconds, term_seconds, kill_seconds) < 0:
-            raise ValueError("mcp_stdio_timeout_invalid")
         self._command = command
         self._args = tuple(args)
         self._cwd = cwd
@@ -100,8 +85,6 @@ class McpStdioTransport:
 
 
 __all__ = [
-    "DEFAULT_STDIO_MAX_LINE_BYTES",
-    "DEFAULT_STDIO_MAX_TOTAL_BYTES",
     "McpStdioConfigurationError",
     "McpStdioTransport",
 ]

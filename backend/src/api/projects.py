@@ -6,7 +6,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Response, status
 
-from api.converter.project import project_list_to_response, project_to_response
 from api.dto.project import (
     ProjectCreateRequest,
     ProjectListResponse,
@@ -45,7 +44,7 @@ def build_project_router(service: ProjectService) -> APIRouter:
             default_skill_ids=request.default_skill_ids,
         )
         response.headers["Location"] = f"/api/v1/projects/{project.id}"
-        return project_to_response(project)
+        return ProjectResponse.model_validate(project)
 
     @router.get("", response_model=ProjectListResponse)
     async def list_projects(
@@ -59,9 +58,11 @@ def build_project_router(service: ProjectService) -> APIRouter:
             page=page,
             page_size=page_size,
         )
-        return project_list_to_response(
-            result,
-            page_number=page,
+        # 按 DTO 字段白名单投影项目列表，自动屏蔽 owner_id 与 deleted_time 等内部属性。
+        return ProjectListResponse(
+            items=[ProjectResponse.model_validate(project) for project in result.items],
+            total=result.total,
+            page=page,
             page_size=page_size,
         )
 
@@ -72,7 +73,7 @@ def build_project_router(service: ProjectService) -> APIRouter:
     ) -> ProjectResponse:
         """查询单个未删除项目。"""
         project = await service.get(current_auth.user.id, project_id)
-        return project_to_response(project)
+        return ProjectResponse.model_validate(project)
 
     @router.patch("/{project_id}", response_model=ProjectResponse)
     async def update_project(
@@ -94,7 +95,7 @@ def build_project_router(service: ProjectService) -> APIRouter:
             update_default_skills="default_skill_ids" in supplied_fields,
             default_skill_ids=request.default_skill_ids,
         )
-        return project_to_response(project)
+        return ProjectResponse.model_validate(project)
 
     @router.delete(
         "/{project_id}",

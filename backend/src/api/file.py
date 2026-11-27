@@ -19,11 +19,6 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 
-from api.converter.file import (
-    session_file_page_to_response,
-    session_file_text_slice_to_response,
-    session_file_to_response,
-)
 from api.dto.file import (
     SessionFileContentResponse,
     SessionFileListResponse,
@@ -135,7 +130,7 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
                     declared_mime=file.content_type,
                     path=path,
                 )
-                return session_file_to_response(result)
+                return SessionFileResponse.model_validate(result)
         except ValueError as error:
             # 优先交给统一映射处理领域子类（UploadTooLargeError / FileInputError），再兜底裸异常。
             if (mapped := domain_error_to_http(error)) is not None:
@@ -164,7 +159,7 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
                 after_file_id=after_file_id,
                 limit=limit,
             )
-            return session_file_page_to_response(page)
+            return SessionFileListResponse.model_validate(page)
         except ValueError as error:
             if (mapped := domain_error_to_http(error)) is not None:
                 raise mapped from error
@@ -177,7 +172,7 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
         current_auth: CurrentAuth,
     ) -> SessionFileResponse:
         """实时校验会话归属后读取安全元数据。"""
-        return session_file_to_response(
+        return SessionFileResponse.model_validate(
             await service.get(session_id, current_auth.user.id, file_id)
         )
 
@@ -260,7 +255,7 @@ def build_session_file_router(service: SessionFileService) -> APIRouter:
             limit_bytes=limit_bytes,
         )
         response.headers["Cache-Control"] = "private, no-store"
-        return session_file_text_slice_to_response(text_slice)
+        return SessionFileContentResponse.model_validate(text_slice)
 
     return router
 

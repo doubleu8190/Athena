@@ -42,7 +42,7 @@ from browser.contract import (
 )
 from domain.mcp import McpSecretPurpose
 from infrastructure.security import Argon2PasswordHasher
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _PYTHON = _REPOSITORY_ROOT / ".venv" / "bin" / "python"
@@ -190,7 +190,7 @@ async def _seed_accounts_and_model(
                 )
             )
             if model_source == "scripted":
-                cipher = McpSecretCipher.from_environment()
+                cipher = SecretCipher.from_environment()
                 profile_id = "mdl_e2e_scripted"
                 sealed = cipher.seal(
                     profile_id,

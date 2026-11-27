@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from app.access import AccessPolicyService
+from app.auth.guard import require_session_roles
 from common.date import utc_now
 from common.ids import new_id
 from common.unset import UNSET
@@ -618,15 +619,15 @@ class ToolManager:
 
     async def _authorize(self, actor: AuthContext, *, admin: bool) -> None:
         """按可信 user/session ID 读取当前状态后再触碰目录资源。"""
-        current = await self._auth.get_current_session_user(
-            actor.user.id,
-            actor.session_id,
+        allowed_roles = frozenset({UserRole.SUPER_ADMIN}) if admin else frozenset(UserRole)
+        await require_session_roles(
+            self._auth,
+            actor,
+            allowed_roles,
             self._clock(),
+            invalid_session_error=lambda: McpInvalidSessionError("mcp_session_invalid"),
+            forbidden_error=lambda: McpAdminRequiredError("mcp_admin_required"),
         )
-        if current is None:
-            raise McpInvalidSessionError("mcp_session_invalid")
-        if admin and current.role is not UserRole.SUPER_ADMIN:
-            raise McpAdminRequiredError("mcp_admin_required")
 
     def _map_tools(
         self, server_id: str, discovered: Sequence[DiscoveredMcpTool]

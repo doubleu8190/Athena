@@ -9,10 +9,13 @@ from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 
+from common.secrets import MAX_SECRET_BYTES, SecretPurpose
 from domain.access import VisibilityGrant, VisibilityGrantInput, VisibilityScope
 from domain.mcp.model.config import McpServerConfig, StdioConfig, StreamableHttpConfig
 
-MAX_MCP_SECRET_BYTES = 16 * 1024
+# 保留 MCP 侧兼容别名，实际定义收敛到 common.secrets，避免 domain 反向依赖 infrastructure。
+MAX_MCP_SECRET_BYTES = MAX_SECRET_BYTES
+McpSecretPurpose = SecretPurpose
 _SECRET_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}")
 
 
@@ -21,14 +24,6 @@ class McpTransport(StrEnum):
 
     STREAMABLE_HTTP = "streamable_http"
     STDIO = "stdio"
-
-
-class McpSecretPurpose(StrEnum):
-    """秘密集合绑定的服务用途。"""
-
-    HTTP_HEADERS = "http_headers"
-    STDIO_ENVIRONMENT = "stdio_environment"
-    LLM_API_KEY = "llm_api_key"
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,14 +9,10 @@ import pytest
 from pydantic import ValidationError
 
 from api.converter.auth import user_to_response
-from api.converter.file import session_file_to_response
 from api.converter.knowledge import knowledge_version_to_response
 from api.converter.llm import model_profile_to_response
 from api.converter.mcp import mcp_server_to_response
-from api.converter.message import conversation_message_to_response
-from api.converter.project import project_to_response
 from api.converter.run import run_to_response, tool_call_to_response
-from api.converter.session import session_to_response
 from api.converter.skill import dependency_check_to_response, execution_to_response
 from api.dto.file import SessionFileResponse
 from api.dto.knowledge import KnowledgeImportResponse
@@ -28,6 +24,8 @@ from api.dto.mcp import (
     McpStdioConfigResponse,
 )
 from api.dto.message import ConversationMessageResponse
+from api.dto.project import ProjectResponse
+from api.dto.session import SessionResponse
 from api.dto.skill import SkillDependencyCheckResponse
 from domain.access import VisibilityScope
 from domain.auth import AuthProvider, User, UserRole, UserStatus
@@ -183,7 +181,7 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
         extraction_status=SessionFileExtractionStatus.READY,
         extracted_text_bytes=512,
     )
-    file_json = json.loads(session_file_to_response(session_file).model_dump_json())
+    file_json = json.loads(SessionFileResponse.model_validate(session_file).model_dump_json())
     assert file_json["source"] == "artifact"
     assert file_json["extraction_status"] == "ready"
 
@@ -426,7 +424,7 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
     assert call_json["tool_kind"] == "builtin"
     assert call_json["outcome"]["status"] == "ok"
 
-    message_dto = conversation_message_to_response(
+    message_dto = ConversationMessageResponse.model_validate(
         ConversationMessage(
             id="msg_2",
             session_id="sess_1",
@@ -485,7 +483,7 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
     assert "external_open_id" not in user_json
 
     project_json = json.loads(
-        project_to_response(
+        ProjectResponse.model_validate(
             Project(
                 id="proj_1",
                 owner_id="usr_1",
@@ -500,7 +498,7 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
     assert "deleted_time" not in project_json
 
     session_json = json.loads(
-        session_to_response(
+        SessionResponse.model_validate(
             Session(
                 id="sess_1",
                 owner_id="usr_1",

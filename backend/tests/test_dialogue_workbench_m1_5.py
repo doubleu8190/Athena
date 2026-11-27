@@ -90,7 +90,7 @@ from domain.tool import (
     ToolExecutionContext,
     ToolOutcomeStatus,
 )
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 from main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -275,7 +275,7 @@ def _tool_call_response(call_id: str, name: str, arguments: dict[str, Any]) -> L
 
 async def _create_pg_db(
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession], McpSecretCipher]:
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession], SecretCipher]:
     """获取隔离 PostgreSQL 单元测试库并注入单调递增的可控 clock_timestamp。"""
     tick = itertools.count()
     monkeypatch.setattr(
@@ -284,13 +284,13 @@ async def _create_pg_db(
         lambda: literal(NOW + timedelta(microseconds=next(tick)), type_=DateTime(timezone=True)),
     )
     engine, factory = await create_pg_unit_db()
-    cipher = McpSecretCipher(SECRET_KEY, key_version=1)
+    cipher = SecretCipher(SECRET_KEY, key_version=1)
     return engine, factory, cipher
 
 
 async def _seed_base_org_and_prompts(
     factory: async_sessionmaker[AsyncSession],
-    cipher: McpSecretCipher,
+    cipher: SecretCipher,
 ) -> dict[str, User]:
     """预置超管、研发成员、财务成员、部门树、系统提示词与默认模型配置。"""
     users: dict[str, User] = {}
@@ -426,7 +426,7 @@ async def _seed_base_org_and_prompts(
 
 async def _insert_model_profile(
     session: AsyncSession,
-    cipher: McpSecretCipher,
+    cipher: SecretCipher,
     *,
     profile_id: str,
     name: str,

@@ -128,7 +128,7 @@ from domain.system_prompt import SystemPromptKind, SystemPromptVersion
 from domain.tool import InitializeRunToolsCommand, RuntimeToolSnapshot
 from infrastructure.file import LocalVisionImageNormalizer
 from infrastructure.mcp.stdio import McpStdioTransport
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DATASET_ROOT = REPO_ROOT / "datasets" / "enterprise_hroa"
@@ -796,7 +796,7 @@ def test_regression2_org_transfer_realtime_revocation_and_offboarding_cookie_inv
             )
             mcp_repo = SqlAlchemyMcpRepository(
                 session_factory,
-                McpSecretCipher(b"k" * 32),
+                SecretCipher(b"k" * 32),
                 clock=lambda: NOW,
             )
             tool_manager = ToolManager(
@@ -1241,8 +1241,6 @@ async def _hroa_stdio_client(profile: str, state_file: Path) -> AsyncIterator[Cl
         ),
         cwd=str(HROA_DIR),
         base_environment={"PATH": os.defpath},
-        maximum_line_bytes=2 * 1024 * 1024,
-        maximum_total_bytes=2 * 1024 * 1024,
     )
     async with Client(transport, mode="auto", read_timeout_seconds=10, cache=None) as client:
         yield client

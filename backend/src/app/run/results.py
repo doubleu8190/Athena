@@ -4,27 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from domain.run.model import (
-    PendingSubagentApproval,
-    PendingSubagentInput,
-    Run,
-    RunInputRequest,
-    SubagentTaskSummary,
-)
-from domain.tool import PendingToolApproval
-
-
-@dataclass(frozen=True, slots=True)
-class RunDetailsResult:
-    """Run 当前状态及可能存在的待回答请求。"""
-
-    run: Run
-    pending_input: RunInputRequest | None
-    pending_approvals: tuple[PendingToolApproval, ...] = ()
-    subagent_tasks: tuple[SubagentTaskSummary, ...] = ()
-    pending_subagent_inputs: tuple[PendingSubagentInput, ...] = ()
-    pending_subagent_approvals: tuple[PendingSubagentApproval, ...] = ()
-    assistant_message_id: str | None = None
+from domain.run.model import Run
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,4 +15,4 @@ class RunListResult:
     next_cursor: str | None
 
 
-__all__ = ["RunDetailsResult", "RunListResult"]
+__all__ = ["RunListResult"]

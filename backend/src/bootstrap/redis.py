@@ -26,11 +26,6 @@ class AuthRateLimiters:
     change_password: RateLimiter
 
 
-def is_production_environment() -> bool:
-    """判断当前是否处于 ATHENA_ENV=production 生产运行环境。"""
-    return is_production_env()
-
-
 def build_redis_client(*, redis_url: str | None = None) -> Redis | None:
     """按统一 RedisSettings 创建共享异步 Redis 客户端；未配置时返回 None。"""
     configured_url = redis_url if redis_url is not None else RedisSettings.from_environment().url
@@ -102,7 +97,6 @@ __all__ = [
     "build_oauth_state_store",
     "build_redis_client",
     "build_run_transport",
-    "is_production_environment",
     "validate_auth_rate_limit_configuration",
     "validate_feishu_state_store_configuration",
 ]

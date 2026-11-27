@@ -1,5 +1,6 @@
+import { ChevronRight } from "lucide-react";
+
 import { ICON_BUTTON_CLASS, cn } from "../../shared/ui";
-import { Icon } from "../../shared/ui/Icons";
 
 export function lastPageNumber(total: number, pageSize: number): number {
   return Math.max(
@@ -45,7 +46,12 @@ export function AdminPagination({
           onClick={() => onPageChange(page - 1)}
           type="button"
         >
-          <Icon name="chevron" size={14} />
+          <ChevronRight
+            aria-hidden="true"
+            focusable="false"
+            size={14}
+            strokeWidth={1.7}
+          />
         </button>
         <button
           aria-label="下一页"
@@ -54,7 +60,12 @@ export function AdminPagination({
           onClick={() => onPageChange(page + 1)}
           type="button"
         >
-          <Icon name="chevron" size={14} />
+          <ChevronRight
+            aria-hidden="true"
+            focusable="false"
+            size={14}
+            strokeWidth={1.7}
+          />
         </button>
       </div>
     </nav>

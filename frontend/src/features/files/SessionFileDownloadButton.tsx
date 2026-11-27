@@ -1,8 +1,8 @@
+import { Download } from "lucide-react";
 import { useState } from "react";
 
 import { saveDownloadedBlob } from "../knowledge/KnowledgeSourceButton";
 import { buttonVariants, TEXT_BUTTON_CLASS } from "../../shared/ui";
-import { Icon } from "../../shared/ui/Icons";
 import { downloadSessionFile } from "./api";
 import { fileErrorMessage } from "./errorMessages";
 
@@ -53,7 +53,14 @@ export function SessionFileDownloadButton({
         onClick={() => void handleDownload()}
         type="button"
       >
-        {!compact ? <Icon name="download" size={14} /> : null}
+        {!compact ? (
+          <Download
+            aria-hidden="true"
+            focusable="false"
+            size={14}
+            strokeWidth={1.7}
+          />
+        ) : null}
         {pending ? "正在准备…" : label}
       </button>
       {error ? (

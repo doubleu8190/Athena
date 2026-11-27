@@ -1,3 +1,4 @@
+import { X } from "lucide-react";
 import {
   createContext,
   useContext,
@@ -18,7 +19,6 @@ import {
   DialogDescription,
   DialogTitle,
 } from "./Dialog";
-import { Icon } from "./Icons";
 import { cn } from "./utils";
 
 export interface ModalProps extends PropsWithChildren {
@@ -258,7 +258,7 @@ export function Modal({
               disabled={closeDisabled}
               type="button"
             >
-              <Icon name="close" size={17} />
+              <X aria-hidden="true" focusable="false" size={17} strokeWidth={1.7} />
             </button>
           </DialogClose>
         </header>

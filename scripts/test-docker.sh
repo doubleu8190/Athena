@@ -5,13 +5,10 @@
 # 业务功能：
 #   一键管理基于 Docker 容器化的 Athena 全栈测试环境（frontend、API、Run Worker、Knowledge Worker）。
 #   自动检测并拉起底层外部中间件依赖（PostgreSQL, Redis, MinIO），执行数据库迁移并健康探活。
-#   采用 Base Image 架构：自动检查/构建 athena-backend-base:latest 固化第三方依赖，
-#   使后续每次业务代码变更重构均可达到秒级构建。
+#   后端使用单 Dockerfile 分层缓存（docker/Dockerfile.backend），直接通过 docker compose build 构建。
 #
 # 支持命令：
-#   up          (默认) 一键拉起依赖、检查/构建 Base 镜像、执行迁移、启动业务容器并执行健康检查
-#               选项: --build-base 强制重新构建 athena-backend-base 基础依赖镜像
-#   build-base  单独执行构建 athena-backend-base:latest 基础依赖镜像
+#   up          (默认) 一键拉起依赖、构建业务镜像、执行迁移、启动业务容器并执行健康检查
 #   down        停止 Athena 业务测试容器；添加 --all 可一并停止底层依赖中间件
 #   status      查看当前测试环境各容器运行状态与健康度
 #   logs        追踪查看 Athena 测试业务容器日志（支持透传参数如 -f 或指定服务名）
@@ -54,9 +51,7 @@ usage() {
   scripts/test-docker.sh [命令] [选项]
 
 命令列表:
-  up          一键拉起依赖、检查/构建 Base 镜像、执行迁移并启动测试业务容器 (默认命令)
-              选项: --build-base 强制重新构建 athena-backend-base 基础依赖镜像
-  build-base  单独构建 athena-backend-base:latest 基础依赖镜像
+  up          一键拉起依赖、构建业务镜像、执行迁移并启动测试业务容器 (默认命令)
   down        停止并移除测试业务容器
               选项: --all 同时停止外部基础设施容器 (PostgreSQL, Redis, MinIO)
   status      查看测试业务容器与基础设施容器的运行状态
@@ -64,9 +59,7 @@ usage() {
   -h, --help  显示本帮助说明
 
 示例:
-  scripts/test-docker.sh                 # 一键启动完整测试环境 (自动按需预构建 Base)
-  scripts/test-docker.sh up --build-base # 强制重新构建 Base 依赖镜像并启动
-  scripts/test-docker.sh build-base      # 单独预构建 Base 镜像
+  scripts/test-docker.sh                 # 一键启动完整测试环境
   scripts/test-docker.sh down            # 仅停止业务测试容器
   scripts/test-docker.sh down --all      # 停止所有容器（包括基础设施）
   scripts/test-docker.sh logs -f         # 实时跟踪业务容器日志
@@ -137,7 +130,7 @@ prepare_compose_environment() {
 
   local derived_keys=(
     ATHENA_DATABASE_URL ATHENA_TEST_DATABASE_URL ATHENA_REDIS_URL
-    ATHENA_MCP_SECRET_KEY
+    ATHENA_INSTALL_KNOWLEDGE ATHENA_MCP_SECRET_KEY
     ATHENA_STORAGE_ENDPOINT ATHENA_STORAGE_ACCESS_KEY
     ATHENA_STORAGE_SECRET_KEY ATHENA_STORAGE_BUCKET ATHENA_STORAGE_SECURE
     ATHENA_TEST_MINIO_ENDPOINT ATHENA_TEST_MINIO_ACCESS_KEY
@@ -166,37 +159,7 @@ dependency_compose() {
     --env-file /dev/null -f "$DEPS_COMPOSE_FILE" "$@"
 }
 
-# 3. 构建/检查后端基础依赖镜像 (athena-backend-base:latest)
-build_base_image() {
-  info "正在构建后端基础依赖镜像 athena-backend-base:latest..."
-  local install_knowledge="false"
-  # 仅根据 ATHENA_INSTALL_KNOWLEDGE=true 决定是否安装重量级本地 OCR 依赖（PaddlePaddle + PaddleOCR）。
-  if grep -E '^ATHENA_INSTALL_KNOWLEDGE=true' "$TEST_ENV_FILE" >/dev/null 2>&1; then
-    install_knowledge="true"
-  fi
-  info "Base 镜像构建参数: INSTALL_KNOWLEDGE=${install_knowledge}"
-  docker build \
-    -f docker/Dockerfile.backend-base \
-    --build-arg INSTALL_KNOWLEDGE="$install_knowledge" \
-    -t athena-backend-base:latest .
-  success "基础依赖镜像 athena-backend-base:latest 构建完成！"
-}
-
-ensure_base_image() {
-  local force_rebuild="${1:-false}"
-  if [[ "$force_rebuild" == true ]] || ! docker image inspect athena-backend-base:latest >/dev/null 2>&1; then
-    if [[ "$force_rebuild" == true ]]; then
-      info "收到强制重新构建 Base 镜像参数 (--build-base)..."
-    else
-      info "本地未检测到 athena-backend-base:latest 镜像，正在执行首次一键预构建..."
-    fi
-    build_base_image
-  else
-    info "检测到已存在 athena-backend-base:latest 基础依赖镜像，直接复用秒级构建业务镜像。"
-  fi
-}
-
-# 4. 检查并自动拉起外部基础设施依赖 (compose.test.yml)
+# 3. 检查并自动拉起外部基础设施依赖 (compose.test.yml)
 ensure_dependencies() {
   info "检查外部测试基础设施状态 (PostgreSQL, Redis, MinIO)..."
   # 拉起外部依赖容器
@@ -248,14 +211,9 @@ cmd_up() {
   check_docker
   load_test_environment
 
-  local force_build_base=false
-  while (($#)); do
-    case "$1" in
-      --build-base) force_build_base=true ;;
-      *) fail "up 命令不支持的参数: $1" ;;
-    esac
-    shift
-  done
+  if (($#)); then
+    fail "up 命令不支持的参数: $1"
+  fi
 
   # 知识库与文件能力已默认无条件装配，拉起镜像与容器前必须确认远程 Embedding 地址已填写。
   local embedding_base_url="${ATHENA_EMBEDDING_BASE_URL:-}"
@@ -263,14 +221,13 @@ cmd_up() {
     fail "缺少必填配置 ATHENA_EMBEDDING_BASE_URL：请在 docker/test.env 中填写可从容器访问的远程 OpenAI 兼容 Embedding 地址（例如 http://host.docker.internal:11434/v1 或外部兼容服务地址）。"
   fi
 
-  ensure_base_image "$force_build_base"
   ensure_dependencies
 
   # 必须先基于最新源码构建后端镜像，再执行 Alembic 迁移：
   # 若本机已存在旧版 athena-backend:latest，直接 run backend-migration 会复用旧镜像，
   # 导致新增迁移脚本被跳过；同时显式指定 migration profile 以避免部分 Docker Compose 版本
   # 在 build 阶段报 no such service: backend-migration。
-  info "构建最新后端镜像以包含最新数据库迁移脚本 (athena-backend:latest)..."
+  info "构建最新后端镜像 (athena-backend:latest, INSTALL_KNOWLEDGE=${ATHENA_INSTALL_KNOWLEDGE:-false})..."
   business_compose --profile migration build backend-migration
 
   info "执行测试数据库结构自动迁移 (Alembic migration)..."
@@ -307,7 +264,6 @@ cmd_up() {
     info "常用运维命令说明:"
     info "  查看业务容器实时日志: scripts/test-docker.sh logs"
     info "  查看测试环境容器状态: scripts/test-docker.sh status"
-    info "  重新构建 Base 依赖:   scripts/test-docker.sh up --build-base"
     info "  停止 Athena 业务容器: scripts/test-docker.sh down"
     info "  停止全部容器(含依赖): scripts/test-docker.sh down --all"
     printf '\n'
@@ -371,11 +327,6 @@ fi
 case "$COMMAND" in
   up)
     cmd_up "$@"
-    ;;
-  build-base)
-    check_docker
-    load_test_environment
-    build_base_image
     ;;
   down)
     cmd_down "$@"

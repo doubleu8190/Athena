@@ -133,7 +133,7 @@
 | --- | --- |
 | domain | `backend/src/domain/auth/model/entity.py` 增加窗口；`backend/src/domain/auth/ports.py` 增加原子续期端口及类型化结果 |
 | adapter | `backend/src/adapter/auth/model/auth.py`、`converter/auth.py`、`repository/auth.py` 保存窗口并实现锁内续期；显式实现对应接口 |
-| app | `backend/src/app/auth/service.py` 签发窗口、编排续期；`backend/src/app/auth/model/result.py` 按需增加续期结果 |
+| app | `backend/src/app/auth/service.py` 签发窗口、编排续期并返回结果 |
 | api | `backend/src/api/auth.py` 增加端点并复用 Cookie 配置；`backend/src/api/dto/auth.py` 增加响应类型 |
 | migration | 在 `backend/migrations/versions/` 增加迁移及历史数据预检 |
 | tests | 扩展现有 auth service/API/repository 测试和 `backend/tests/integration/test_auth_postgres.py` |

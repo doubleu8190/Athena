@@ -12,7 +12,6 @@ import {
   NOTICE_WARNING_CLASS,
   VisibilityBadge,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { Modal } from "../../shared/ui/Modal";
 import { WorkspaceFilePicker } from "../../shared/ui/WorkspaceFilePicker";
 import { useAdminOrgDepartments } from "../admin/hooks";
@@ -365,7 +364,11 @@ export function SkillPackageDialog({
             {validationError}
           </p>
         ) : null}
-        {requestError ? <ErrorBanner message={requestError} /> : null}
+        {requestError ? (
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        ) : null}
       </form>
     </Modal>
   );

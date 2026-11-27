@@ -1,17 +1,18 @@
 # ==============================================================================
-# Athena v2 后端业务应用镜像 Dockerfile (athena-backend:latest)
+# Athena v2 后端统一构建镜像 Dockerfile (athena-backend:latest)
 # ==============================================================================
 # 架构考量：
-#   基于独立预构的基础依赖镜像 athena-backend-base:latest，实现第三方依赖与业务源码解耦。
-#   由于所有第三方依赖在 Base 镜像中已全部安装就绪，本镜像仅拷贝业务源码、Alembic 迁移脚本
-#   并执行耗时约 0.1 秒的 --no-deps 元数据注册，日常业务代码修改重新构建均可在 1 秒内完成！
+#   使用单镜像分层缓存（先基于 pyproject.toml 安装第三方依赖，再拷贝业务源码并执行
+#   --no-deps 元数据注册），日常修改业务源码可命中依赖缓存实现快速增量构建，
+#   同时彻底消除双 Dockerfile 与手动预构建基础镜像的维护负担。
 # ==============================================================================
 
-FROM athena-backend-base:latest
+FROM python:3.12-slim
 
+# 容器内应用基础工作目录
 WORKDIR /app
 
-# 设置 Python 运行时应用环境变量：
+# 设置 Python 运行时核心环境变量：
 # 1. PYTHONUNBUFFERED=1：保证日志实时输出到标准输出，便于容器日志收集与分析
 # 2. PYTHONDONTWRITEBYTECODE=1：避免写入 .pyc 文件以减小容器层体积与开销
 # 3. PYTHONPATH=/app/backend/src：将应用源码目录加入模块导入路径，确保各领域层模块被正确加载
@@ -19,7 +20,37 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/backend/src
 
-# 步骤 1：拷贝业务源码与项目说明文件（测试/演示用 mcp_servers/ 不打入生产镜像）
+# 镜像加速参数：默认配置清华大学 PyPI 镜像源以大幅加速国内依赖拉取
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+
+# 构建参数：是否安装重量级知识库可选依赖（如 PaddleOCR 与 PaddlePaddle）
+ARG INSTALL_KNOWLEDGE=false
+
+# 步骤 1：安装编译与运行基础系统工具
+# curl 用于容器探活；ca-certificates 用于 TLS 证书校验；build-essential 提供编译工具
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        build-essential; \
+    rm -rf /var/lib/apt/lists/*
+
+# 步骤 2：仅拷贝 pyproject.toml 并使用 Python 3.12 内置 tomllib 解析生成 requirements.txt
+COPY pyproject.toml ./
+RUN python3 -c 'import os, tomllib; cfg = tomllib.load(open("pyproject.toml", "rb")); deps = list(cfg.get("project", {}).get("dependencies", [])); (deps.extend(cfg.get("project", {}).get("optional-dependencies", {}).get("knowledge", [])) if os.getenv("INSTALL_KNOWLEDGE") == "true" else None); open("/tmp/requirements.txt", "w").write("\n".join(deps) + "\n")'
+
+# 步骤 3：结合 BuildKit 缓存加速预装全量第三方依赖包，随后清理编译工具保持镜像精简
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel && \
+    pip install -r /tmp/requirements.txt && \
+    rm -f /tmp/requirements.txt && \
+    apt-mark manual curl ca-certificates && \
+    apt-get purge -y --auto-remove build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# 步骤 4：拷贝业务源码与项目说明文件（测试/演示用 mcp_servers/ 不打入生产镜像）
 COPY README.md ./
 COPY backend/ ./backend/
 
@@ -28,10 +59,10 @@ COPY backend/ ./backend/
 COPY backend/alembic.ini ./alembic.ini
 RUN sed -i 's|%(here)s/|%(here)s/backend/|g' ./alembic.ini
 
-# 步骤 2：仅安装项目本身包元数据（依赖已在 Base 镜像中就绪，--no-deps 安装耗时仅约 0.1 秒）
+# 步骤 5：仅安装项目本身包元数据（依赖已在前述层就绪，--no-deps 耗时仅约 0.1 秒）
 RUN pip install --no-deps .
 
-# 步骤 3：拷贝通用容器入口调度脚本并赋予可执行权限
+# 步骤 6：拷贝通用容器入口调度脚本并赋予可执行权限
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

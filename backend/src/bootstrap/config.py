@@ -11,8 +11,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from app.run.config import RunWorkerConfig, worker_config_from_environment
-
 DEFAULT_DATABASE_POOL_SIZE_SETTING = 5
 DEFAULT_DATABASE_MAX_OVERFLOW_SETTING = 10
 DEFAULT_KNOWLEDGE_SEMANTIC_MIN_SCORE = 0.35
@@ -288,73 +286,6 @@ class FileSkillSettings(BaseModel):
         )
 
 
-class RunWorkerSettings(BaseModel):
-    """Run Worker 并发、租约、轮询与工具执行边界设置。"""
-
-    model_config = ConfigDict(frozen=True)
-
-    concurrency: int = 4
-    lease_seconds: int = 30
-    heartbeat_seconds: int = 5
-    execution_seconds: int = 300
-    cancel_poll_seconds: float = 1.0
-    queue_poll_seconds: float = 1.0
-    reclaim_seconds: float = 5.0
-    llm_request_limit: int = 40
-    tool_timeout_seconds: float = 30.0
-    tool_argument_bytes: int = 64 * 1024
-    tool_result_bytes: int = 64 * 1024
-    tool_cleanup_seconds: float = 10.0
-    tool_batch_limit: int = 8
-    tool_concurrency: int = 4
-
-    @model_validator(mode="after")
-    def _validate_run_worker_invariants(self) -> RunWorkerSettings:
-        # 复用领域侧 RunWorkerConfig 校验不变量，保证错误码 run_worker_config_invalid 单源一致。
-        self.to_config()
-        return self
-
-    def to_config(self) -> RunWorkerConfig:
-        """转换为应用层消费的不可变 RunWorkerConfig 值对象。"""
-        return RunWorkerConfig(
-            concurrency=self.concurrency,
-            lease_seconds=self.lease_seconds,
-            heartbeat_seconds=self.heartbeat_seconds,
-            execution_seconds=self.execution_seconds,
-            cancel_poll_seconds=self.cancel_poll_seconds,
-            queue_poll_seconds=self.queue_poll_seconds,
-            reclaim_seconds=self.reclaim_seconds,
-            llm_request_limit=self.llm_request_limit,
-            tool_timeout_seconds=self.tool_timeout_seconds,
-            tool_argument_bytes=self.tool_argument_bytes,
-            tool_result_bytes=self.tool_result_bytes,
-            tool_cleanup_seconds=self.tool_cleanup_seconds,
-            tool_batch_limit=self.tool_batch_limit,
-            tool_concurrency=self.tool_concurrency,
-        )
-
-    @classmethod
-    def from_environment(cls, environ: Mapping[str, str] | None = None) -> RunWorkerSettings:
-        # 通过 app.run.config.worker_config_from_environment 单源解析并保留全部既有错误码。
-        config = worker_config_from_environment(environ)
-        return cls(
-            concurrency=config.concurrency,
-            lease_seconds=config.lease_seconds,
-            heartbeat_seconds=config.heartbeat_seconds,
-            execution_seconds=config.execution_seconds,
-            cancel_poll_seconds=config.cancel_poll_seconds,
-            queue_poll_seconds=config.queue_poll_seconds,
-            reclaim_seconds=config.reclaim_seconds,
-            llm_request_limit=config.llm_request_limit,
-            tool_timeout_seconds=config.tool_timeout_seconds,
-            tool_argument_bytes=config.tool_argument_bytes,
-            tool_result_bytes=config.tool_result_bytes,
-            tool_cleanup_seconds=config.tool_cleanup_seconds,
-            tool_batch_limit=config.tool_batch_limit,
-            tool_concurrency=config.tool_concurrency,
-        )
-
-
 class LoggingSettings(BaseModel):
     """进程日志级别设置（统一读取 ATHENA_LOG_LEVEL，默认 INFO）。"""
 
@@ -386,7 +317,6 @@ __all__ = [
     "LoggingSettings",
     "McpSettings",
     "RedisSettings",
-    "RunWorkerSettings",
     "env_csv_set",
     "env_flag",
     "env_float",

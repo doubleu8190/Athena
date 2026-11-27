@@ -1,9 +1,9 @@
 """为 PostgreSQL 集成测试生成与生产格式一致的 LLM 凭据密文。"""
 
 from domain.mcp import McpSecretPurpose
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
-TEST_LLM_CIPHER = McpSecretCipher(bytes(range(32)))
+TEST_LLM_CIPHER = SecretCipher(bytes(range(32)))
 
 
 def encrypted_llm_key_fields(profile_id: str, api_key: str = "test-secret") -> dict[str, object]:

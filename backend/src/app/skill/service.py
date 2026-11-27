@@ -13,6 +13,7 @@ from io import BytesIO
 from pathlib import Path
 
 from app.access import AccessPolicyService
+from app.auth.guard import require_session_roles
 from app.skill.dependency import DependencyChecker
 from app.skill.package import (
     SkillPackageValidator,
@@ -1390,14 +1391,14 @@ class SkillService:
         allowed_roles: frozenset[UserRole],
     ) -> User:
         """校验当前登录会话仍有效且具备允许的管理角色。"""
-        user = await self._auth_reader.get_current_session_user(
-            actor.user.id,
-            actor.session_id,
+        return await require_session_roles(
+            self._auth_reader,
+            actor,
+            allowed_roles,
             self._clock(),
+            invalid_session_error=lambda: SkillAuthorizationError("admin_required"),
+            forbidden_error=lambda: SkillAuthorizationError("admin_required"),
         )
-        if user is None or user.role not in allowed_roles:
-            raise SkillAuthorizationError("admin_required")
-        return user
 
     async def _authorize_admin(self, actor: AuthContext) -> None:
         await self._authorize_roles(actor, frozenset({UserRole.SUPER_ADMIN}))

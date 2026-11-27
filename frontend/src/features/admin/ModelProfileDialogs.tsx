@@ -13,13 +13,13 @@ import {
   FORM_GRID_2_CLASS,
   FORM_GRID_3_CLASS,
   FORM_STACK_CLASS,
+  InlineAlert,
   MODAL_WIDTH_LG,
   MODAL_WIDTH_XL,
   NOTICE_BRAND_CLASS,
   NOTICE_WARNING_CLASS,
   cn,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
 import { FieldError } from "../../shared/ui/FieldError";
 import { Modal } from "../../shared/ui/Modal";
 import { adminErrorMessage } from "./errorMessages";
@@ -470,7 +470,11 @@ export function ModelProfileCreateDialog({
             正在创建不可变模型版本…
           </p>
         ) : null}
-        {requestError ? <ErrorBanner message={requestError} /> : null}
+        {requestError ? (
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        ) : null}
       </form>
     </Modal>
   );
@@ -560,7 +564,11 @@ export function DisableDefaultModelDialog({
         />
         <span>我了解新 Run 可能失败，并确认停用该版本</span>
       </label>
-      {requestError ? <ErrorBanner message={requestError} /> : null}
+      {requestError ? (
+        <InlineAlert size="compact" variant="danger">
+          {requestError}
+        </InlineAlert>
+      ) : null}
     </Modal>
   );
 }
@@ -852,7 +860,11 @@ export function CompressionPolicyDialog({
             正在保存上下文压缩策略…
           </p>
         ) : null}
-        {requestError ? <ErrorBanner message={requestError} /> : null}
+        {requestError ? (
+          <InlineAlert size="compact" variant="danger">
+            {requestError}
+          </InlineAlert>
+        ) : null}
       </form>
     </Modal>
   );

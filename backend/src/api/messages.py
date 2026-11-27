@@ -6,7 +6,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Query
 
-from api.converter.message import conversation_page_to_response
 from api.dto.message import ConversationMessageListResponse
 from api.errors import DomainErrorRoute
 from api.security import CurrentAuth
@@ -38,7 +37,8 @@ def build_message_router(service: MessageService) -> APIRouter:
             before_sequence=before_sequence,
             limit=limit,
         )
-        return conversation_page_to_response(page)
+        # 按 DTO 字段白名单投影会话消息分页，自动过滤内部 metadata 属性。
+        return ConversationMessageListResponse.model_validate(page)
 
     return router
 

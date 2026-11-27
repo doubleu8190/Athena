@@ -1,3 +1,4 @@
+import { Eye, History, RefreshCw, ShieldCheck, Sparkle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useBlocker } from "react-router-dom";
 
@@ -19,6 +20,7 @@ import {
   EMPTY_INLINE_CLASS,
   FIELD_CLASS,
   FIELD_TEXTAREA_CLASS,
+  InlineAlert,
   MODAL_WIDTH_MD,
   NOTICE_WARNING_CLASS,
   PAGE_DESC_CLASS,
@@ -27,10 +29,9 @@ import {
   PAGE_LOADING_CLASS,
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import { useAuth } from "../auth/AuthProvider";
 import { isSuperAdmin } from "../auth/model";
@@ -676,10 +677,21 @@ export function AdminSystemPromptsPage() {
           )}
           role={notice.kind === "error" ? "alert" : "status"}
         >
-          <Icon
-            name={notice.kind === "error" ? "shield" : "spark"}
-            size={16}
-          />
+          {notice.kind === "error" ? (
+            <ShieldCheck
+              aria-hidden="true"
+              focusable="false"
+              size={16}
+              strokeWidth={1.7}
+            />
+          ) : (
+            <Sparkle
+              aria-hidden="true"
+              focusable="false"
+              size={16}
+              strokeWidth={1.7}
+            />
+          )}
           <div className="flex min-w-0 flex-1 flex-col items-start gap-2">
             <span className="[overflow-wrap:anywhere]">{notice.text}</span>
             {notice.action === "verify-restore" ? (
@@ -690,7 +702,12 @@ export function AdminSystemPromptsPage() {
                 type="button"
                 variant="outline"
               >
-                <Icon name="refresh" size={14} />
+                <RefreshCw
+                  aria-hidden="true"
+                  focusable="false"
+                  size={14}
+                  strokeWidth={1.7}
+                />
                 {verificationPending
                   ? "正在重新读取…"
                   : "重新读取当前版本与历史"}
@@ -710,11 +727,21 @@ export function AdminSystemPromptsPage() {
             正在读取{activeDefinition?.label}系统提示词…
           </div>
         ) : current.isError && !current.data ? (
-          <ErrorBanner
-            message={adminErrorMessage(current.error)}
-            onRetry={() => void current.refetch()}
-            retryLabel="重新读取"
-          />
+          <InlineAlert
+            action={
+              <button
+                className={TEXT_BUTTON_CLASS}
+                onClick={() => void current.refetch()}
+                type="button"
+              >
+                重新读取
+              </button>
+            }
+            size="compact"
+            variant="danger"
+          >
+            {adminErrorMessage(current.error)}
+          </InlineAlert>
         ) : editor ? (
           <div className="grid min-w-0 grid-cols-1 items-start gap-[18px] lg:grid-cols-[minmax(0,1.45fr)_minmax(300px,0.8fr)]">
             <section
@@ -735,11 +762,21 @@ export function AdminSystemPromptsPage() {
 
               {current.isError ? (
                 <div className="mb-4">
-                  <ErrorBanner
-                    message={`后台复核当前版本失败。${adminErrorMessage(current.error)}`}
-                    onRetry={() => void current.refetch()}
-                    retryLabel="重新读取"
-                  />
+                  <InlineAlert
+                    action={
+                      <button
+                        className={TEXT_BUTTON_CLASS}
+                        onClick={() => void current.refetch()}
+                        type="button"
+                      >
+                        重新读取
+                      </button>
+                    }
+                    size="compact"
+                    variant="danger"
+                  >
+                    {`后台复核当前版本失败。${adminErrorMessage(current.error)}`}
+                  </InlineAlert>
                 </div>
               ) : null}
 
@@ -857,7 +894,12 @@ export function AdminSystemPromptsPage() {
                       type="button"
                       variant="outline"
                     >
-                      <Icon name="refresh" size={14} />
+                      <RefreshCw
+                        aria-hidden="true"
+                        focusable="false"
+                        size={14}
+                        strokeWidth={1.7}
+                      />
                       重新加载服务端版本
                     </Button>
                   </div>
@@ -922,11 +964,21 @@ export function AdminSystemPromptsPage() {
                   正在读取版本历史…
                 </div>
               ) : history.isError ? (
-                <ErrorBanner
-                  message={adminErrorMessage(history.error)}
-                  onRetry={() => void history.refetch()}
-                  retryLabel="重新读取历史"
-                />
+                <InlineAlert
+                  action={
+                    <button
+                      className={TEXT_BUTTON_CLASS}
+                      onClick={() => void history.refetch()}
+                      type="button"
+                    >
+                      重新读取历史
+                    </button>
+                  }
+                  size="compact"
+                  variant="danger"
+                >
+                  {adminErrorMessage(history.error)}
+                </InlineAlert>
               ) : history.data.items.length === 0 ? (
                 <p className={EMPTY_INLINE_CLASS}>后端尚未返回任何历史版本。</p>
               ) : (
@@ -984,7 +1036,12 @@ export function AdminSystemPromptsPage() {
                             type="button"
                             variant="outline"
                           >
-                            <Icon name="eye" size={14} />
+                            <Eye
+                              aria-hidden="true"
+                              focusable="false"
+                              size={14}
+                              strokeWidth={1.7}
+                            />
                             {selectedVersionId === version.id
                               ? "收起正文"
                               : "查看正文"}
@@ -1001,11 +1058,21 @@ export function AdminSystemPromptsPage() {
                           正在读取历史正文…
                         </div>
                       ) : selectedVersion.isError ? (
-                        <ErrorBanner
-                          message={adminErrorMessage(selectedVersion.error)}
-                          onRetry={() => void selectedVersion.refetch()}
-                          retryLabel="重新读取正文"
-                        />
+                        <InlineAlert
+                          action={
+                            <button
+                              className={TEXT_BUTTON_CLASS}
+                              onClick={() => void selectedVersion.refetch()}
+                              type="button"
+                            >
+                              重新读取正文
+                            </button>
+                          }
+                          size="compact"
+                          variant="danger"
+                        >
+                          {adminErrorMessage(selectedVersion.error)}
+                        </InlineAlert>
                       ) : selectedVersion.data ? (
                         <>
                           <header className="flex flex-col items-start justify-between gap-3 border-b border-border-subtle px-3 py-[11px] sm:flex-row sm:items-center">
@@ -1033,7 +1100,12 @@ export function AdminSystemPromptsPage() {
                               type="button"
                               variant="outline"
                             >
-                              <Icon name="history" size={14} />
+                              <History
+                                aria-hidden="true"
+                                focusable="false"
+                                size={14}
+                                strokeWidth={1.7}
+                              />
                               {selectedVersion.data.id === current.data?.id
                                 ? "当前生效版本"
                                 : "恢复此版本"}

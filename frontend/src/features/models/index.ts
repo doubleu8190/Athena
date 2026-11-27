@@ -1,8 +1,33 @@
-import type { ApiSchemas } from "../../shared/api/client";
+import { useQuery } from "@tanstack/react-query";
+
+import { apiGet, type ApiSchemas } from "../../shared/api/client";
 
 // 直连 OpenAPI 用户侧模型目录契约。
 export type UserModelItem = ApiSchemas["UserModelCatalogItemResponse"];
 export type UserModelListResponse = ApiSchemas["UserModelCatalogResponse"];
+
+export const modelKeys = {
+  all: ["models"] as const,
+  catalog: () => ["models", "catalog"] as const,
+};
+
+export function listUserModels(): Promise<UserModelListResponse> {
+  return apiGet("/api/v1/models");
+}
+
+/**
+ * 读取面向普通用户的场景化模型目录（GET /api/v1/models）。
+ * 目录失败时不做重试以免拖慢输入器，界面侧优雅降级为“默认模型”。
+ */
+export function useUserModels(enabled = true) {
+  return useQuery({
+    enabled,
+    queryFn: listUserModels,
+    queryKey: modelKeys.catalog(),
+    retry: false,
+    staleTime: 60_000,
+  });
+}
 
 /**
  * 计算面向普通用户的场景化模型展示名：

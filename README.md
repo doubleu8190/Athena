@@ -150,7 +150,7 @@ Athena_v2/
 ├── .github/workflows/          # GitHub Actions CI 工作流 (ci.yml)
 ├── backend/
 │   ├── alembic.ini             # Alembic 迁移配置
-│   ├── migrations/             # PostgreSQL 数据库迁移脚本（当前唯一 head: 20261209_0042）
+│   ├── migrations/             # PostgreSQL 数据库迁移脚本（当前唯一 head: 0001_initial_schema）
 │   ├── src/                    # 后端源码（模块化单体）
 │   │   ├── api/                # HTTP/SSE 路由、DTO、转换器与前置鉴权/上传中间件
 │   │   ├── app/                # 应用服务（auth/org/access/preference/run/llm/tool/skill/knowledge/subagent）
@@ -198,7 +198,6 @@ scripts/bootstrap-test-secrets.py --fresh  # 仅全新环境；已有旧数据�
 
 # 2. scripts/test-docker.sh 常用命令
 scripts/test-docker.sh                     # 默认 up：拉起依赖、构建镜像、迁移并启动全栈
-scripts/test-docker.sh up --build-base     # 强制重建后端基础依赖镜像并启动
 scripts/test-docker.sh status              # 查看业务与基础设施容器状态
 scripts/test-docker.sh logs                # 实时跟踪业务容器日志
 scripts/test-docker.sh down --all          # 停止业务与基础设施容器（保留 data/ 持久化数据）
@@ -311,7 +310,7 @@ printf '%s\n' '<至少12位强密码>' | .venv/bin/python -m cli.bootstrap_super
 # 2. Mypy 严格类型检查
 .venv/bin/python -m mypy --strict backend/src
 
-# 3. 核验 Alembic 单一迁移 head（20261209_0042）
+# 3. 核验 Alembic 单一迁移 head（0001_initial_schema）
 .venv/bin/alembic -c backend/alembic.ini heads
 
 # 4. 运行第一期端到端验收测试剧本
@@ -386,19 +385,17 @@ npm run build
 参考 [`compose.yml`](compose.yml) 与 [`.env.example`](.env.example)，复制 `.env.example` 为 `.env.prod`（`chmod 600 .env.prod`）并填写外部 PostgreSQL、Redis、统一单桶对象存储（`ATHENA_STORAGE_*`）、远程 OpenAI 兼容 Embedding 服务（`ATHENA_EMBEDDING_BASE_URL`）及强随机主密钥。生产环境务必设置 `ATHENA_ENV=production`、`ATHENA_COOKIE_SECURE=true`、`ATHENA_AUTH_MOCK_ENABLED=false` 并配置规范公网 `ATHENA_PUBLIC_ORIGIN`。
 
 ```bash
-# 1. 预构建后端基础依赖镜像（如需启用重量级本地扫描件/图片 OCR，加 --build-arg INSTALL_KNOWLEDGE=true）
-docker build -f docker/Dockerfile.backend-base -t athena-backend-base:latest .
-
-# 2. 执行数据库迁移
+# 1. 构建后端镜像并执行数据库迁移（如需启用重量级本地扫描件/图片 OCR，在 .env.prod 设置 ATHENA_INSTALL_KNOWLEDGE=true）
+docker compose --env-file .env.prod build
 docker compose --env-file .env.prod run --rm backend-migration
 
-# 3. 启动生产全栈服务（默认一并启动 frontend、backend-api、backend-worker 与 backend-knowledge-worker）
+# 2. 启动生产全栈服务（默认一并启动 frontend、backend-api、backend-worker 与 backend-knowledge-worker）
 docker compose --env-file .env.prod up -d
 
-# 4. 初始化本地应急 super_admin 账号（开放自助注册已下线）
+# 3. 初始化本地应急 super_admin 账号（开放自助注册已下线）
 printf '%s\n' '<至少12位强密码>' | docker compose --env-file .env.prod run --rm -T backend-api \
   python -m cli.bootstrap_super_admin --email admin@example.com --password-stdin --display-name "系统超管"
 
-# 5. 若启用飞书原生 SSO，执行首次通讯录组织树同步
+# 4. 若启用飞书原生 SSO，执行首次通讯录组织树同步
 docker compose --env-file .env.prod run --rm backend-api python -m cli.sync_feishu_org
 ```

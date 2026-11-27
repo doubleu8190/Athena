@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, st
 from pydantic import TypeAdapter, ValidationError
 
 from api.converter.mcp import mcp_server_page_to_response, mcp_server_to_response
-from api.converter.tool import admin_tool_page_to_response
 from api.dto.mcp import (
     HttpServerCreateRequest,
     HttpServerUpdateRequest,
@@ -21,8 +20,8 @@ from api.dto.mcp import (
     StdioServerCreateRequest,
     StdioServerUpdateRequest,
 )
-from api.dto.tool import AdminToolListResponse
-from api.mcp_errors import SafeMcpRoute
+from api.dto.tool import AdminToolListResponse, AdminToolResponse
+from api.errors import SafeMcpRoute
 from api.security import AdminAuth
 from app.tool import ToolManager
 from domain.access import VisibilityScope
@@ -264,7 +263,12 @@ def build_mcp_router(manager: ToolManager) -> APIRouter:
             actor, server_id, offset=(page - 1) * page_size, limit=page_size
         )
         response.headers["Cache-Control"] = "no-store"
-        return admin_tool_page_to_response(result, page_number=page, page_size=page_size)
+        return AdminToolListResponse(
+            items=[AdminToolResponse.model_validate(item) for item in result.items],
+            total=result.total,
+            page=page,
+            page_size=page_size,
+        )
 
     return router
 

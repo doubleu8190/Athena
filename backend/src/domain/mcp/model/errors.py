@@ -1,5 +1,7 @@
 """MCP 目录业务异常；异常文本只使用固定安全代码。"""
 
+from common.secrets import SecretCipherError
+
 
 class McpServerNameConflictError(ValueError):
     """MCP Server 全局名称已被占用。"""
@@ -17,8 +19,8 @@ class McpAuthorizationChangedError(PermissionError):
     """写事务复核时发现用户、管理员角色或会话状态已变化。"""
 
 
-class McpSecretError(RuntimeError):
-    """秘密封装、密钥配置或解封失败。"""
+# 保留 MCP 侧兼容别名，使 api.errors 与既有 MCP 测试对同一底层异常保持兼容。
+McpSecretError = SecretCipherError
 
 
 class McpToolConflictError(ValueError):

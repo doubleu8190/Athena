@@ -1,7 +1,7 @@
+import { Upload, X } from "lucide-react";
 import { useRef, type RefObject } from "react";
 
 import { formatBytes } from "../lib/format";
-import { Icon } from "./Icons";
 import { cn } from "./utils";
 
 interface WorkspaceFilePickerProps {
@@ -81,7 +81,12 @@ export function WorkspaceFilePicker({
             onClick={() => resolvedInputRef.current?.click()}
             type="button"
           >
-            <Icon name="upload" size={14} />
+            <Upload
+              aria-hidden="true"
+              focusable="false"
+              size={14}
+              strokeWidth={1.7}
+            />
             {triggerLabel}
           </button>
         ) : (
@@ -90,7 +95,12 @@ export function WorkspaceFilePicker({
             className="inline-flex min-h-[30px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-brand-border bg-brand-subtle px-2.5 text-xs font-semibold whitespace-nowrap text-brand transition-colors hover:bg-active aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
             htmlFor={id}
           >
-            <Icon name="upload" size={14} />
+            <Upload
+              aria-hidden="true"
+              focusable="false"
+              size={14}
+              strokeWidth={1.7}
+            />
             {triggerLabel}
           </label>
         )}
@@ -115,7 +125,7 @@ export function WorkspaceFilePicker({
             onClick={clearFile}
             type="button"
           >
-            <Icon name="close" size={13} />
+            <X aria-hidden="true" focusable="false" size={13} strokeWidth={1.7} />
           </button>
         ) : null}
       </div>

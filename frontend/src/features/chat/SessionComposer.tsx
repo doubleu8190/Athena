@@ -61,11 +61,11 @@ import {
   type SessionFile,
 } from "../files/model";
 import { SessionFileDownloadButton } from "../files/SessionFileDownloadButton";
-import { useUserModels } from "../models/hooks";
 import {
   resolveEffectiveUserModel,
+  useUserModels,
   userModelDisplayLabel,
-} from "../models/model";
+} from "../models";
 import { usePublicSkills } from "../skills/hooks";
 import { SkillCatalogPicker } from "../skills/SkillCatalogPicker";
 import {

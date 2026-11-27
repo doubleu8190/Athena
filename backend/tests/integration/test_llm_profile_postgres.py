@@ -30,7 +30,7 @@ from domain.llm.model.profile_errors import (
     ModelProfileNotFoundError,
 )
 from domain.mcp import McpSecretError, McpSecretPurpose
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 DATABASE_URL = os.getenv("ATHENA_TEST_DATABASE_URL")
 pytestmark = [
@@ -97,7 +97,7 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                 ),
                 session_id="auth_llm_admin",
             )
-            secret_cipher = McpSecretCipher(bytes(range(32)))
+            secret_cipher = SecretCipher(bytes(range(32)))
             repository = SqlAlchemyModelProfileRepository(factory, secret_cipher)
             value = ModelProfileInput(
                 name="Integration model",
@@ -205,11 +205,11 @@ def test_model_profile_migration_admin_and_runtime_credentials(
                     llm_sealed.key_version,
                 )
             other_key_repository = SqlAlchemyModelProfileRepository(
-                factory, McpSecretCipher(bytes(reversed(range(32))))
+                factory, SecretCipher(bytes(reversed(range(32))))
             )
             assert await other_key_repository.get_runtime(created.id) is None
             other_version_repository = SqlAlchemyModelProfileRepository(
-                factory, McpSecretCipher(bytes(range(32)), key_version=2)
+                factory, SecretCipher(bytes(range(32)), key_version=2)
             )
             assert await other_version_repository.get_runtime(created.id) is None
             await repository.set_enabled(actor, created.id, False)

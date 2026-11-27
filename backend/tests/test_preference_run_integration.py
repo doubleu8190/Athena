@@ -83,7 +83,7 @@ from domain.tool import (
     ToolExecutionContext,
     ToolOutcomeStatus,
 )
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 NOW = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
 
@@ -252,7 +252,7 @@ async def _setup_env(
     )
     engine, factory = await create_pg_unit_db()
 
-    cipher = McpSecretCipher(b"0" * 32, key_version=1)
+    cipher = SecretCipher(b"0" * 32, key_version=1)
     encrypted = cipher.seal("mp_1", McpSecretPurpose.LLM_API_KEY, {"api_key": "sk-test-key"})
 
     async with factory() as session, session.begin():

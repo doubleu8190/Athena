@@ -443,7 +443,7 @@ def test_run_worker_bootstrap_and_shutdown_closes_mcp_executor_and_shares_skill_
             return svc
 
         with (
-            patch("bootstrap.run_worker.McpSecretCipher.from_environment", return_value=object()),
+            patch("bootstrap.run_worker.SecretCipher.from_environment", return_value=object()),
             patch("bootstrap.database.Database", FakeDatabase),
             patch("bootstrap.run_worker.build_mcp_executor", return_value=FakeMcpExecutor()),
             patch(
@@ -489,7 +489,7 @@ def test_run_worker_bootstrap_and_shutdown_closes_mcp_executor_and_shares_skill_
 
         with (
             patch("run_worker.prepare_run_tokenizers", _async_noop),
-            patch("bootstrap.run_worker.McpSecretCipher.from_environment", return_value=object()),
+            patch("bootstrap.run_worker.SecretCipher.from_environment", return_value=object()),
             patch("bootstrap.database.Database", FakeDatabase),
             patch("bootstrap.run_worker.build_mcp_executor", return_value=FakeMcpExecutor()),
             patch(

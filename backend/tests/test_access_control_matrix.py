@@ -112,7 +112,7 @@ from domain.tool import (
     ToolOutcomeStatus,
 )
 from infrastructure.knowledge.parsers import LocalDocumentParser
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "backend" / "alembic.ini"
@@ -575,7 +575,7 @@ class _Harness:
         )
         self.mcp_repo = SqlAlchemyMcpRepository(
             session_factory,
-            McpSecretCipher(b"k" * 32),
+            SecretCipher(b"k" * 32),
             clock=lambda: NOW,
         )
         self.mcp_discovery = _FakeMcpDiscovery(

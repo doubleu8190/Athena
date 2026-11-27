@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from adapter.llm import OpenAIChatCompletionsAdapter
 from adapter.llm.repository import SqlAlchemyModelProfileRepository
 from domain.llm.model import LlmMessage, LlmRequest, LlmRole
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 
 pytestmark = [
     pytest.mark.llm_live,
@@ -35,7 +35,7 @@ def test_admin_configured_profile_returns_completed_output() -> None:
         try:
             repository = SqlAlchemyModelProfileRepository(
                 async_sessionmaker(engine, expire_on_commit=False),
-                McpSecretCipher.from_environment(),
+                SecretCipher.from_environment(),
             )
             runtime = await repository.get_runtime(profile_id)
             if runtime is None:

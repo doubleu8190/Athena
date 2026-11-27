@@ -113,7 +113,7 @@ from domain.skill import RunSkillSnapshot
 from domain.tool import McpToolSource, ToolExecutionContext, ToolOutcomeStatus
 from infrastructure.feishu import FeishuUserIdentity
 from infrastructure.knowledge.tokenizer import JiebaChineseTokenizer
-from infrastructure.security.mcp_secrets import McpSecretCipher
+from infrastructure.security.secrets import SecretCipher
 from main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -396,7 +396,7 @@ class _Phase1E2EHarness:
         engine: AsyncEngine,
         session_factory: async_sessionmaker[AsyncSession],
         clock: _MutableClock,
-        cipher: McpSecretCipher,
+        cipher: SecretCipher,
         auth_repo: SqlAlchemyAuthRepository,
         org_repo: SqlAlchemyOrgRepository,
         access_policy: AccessPolicyService,
@@ -591,7 +591,7 @@ async def _create_harness(
         lambda: literal(clock(), type_=DateTime(timezone=True)),
     )
     engine, session_factory = await create_pg_unit_db()
-    cipher = McpSecretCipher(SECRET_KEY, key_version=1)
+    cipher = SecretCipher(SECRET_KEY, key_version=1)
 
     auth_repo = SqlAlchemyAuthRepository(session_factory)
     org_repo = SqlAlchemyOrgRepository(session_factory)

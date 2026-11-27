@@ -1,3 +1,4 @@
+import { RefreshCw, Sparkle } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { newRequestId } from "../../shared/lib/requestId";
@@ -6,13 +7,13 @@ import {
   FIELD_CLASS,
   FIELD_INPUT_CLASS,
   FIELD_TEXTAREA_CLASS,
+  InlineAlert,
   MODAL_WIDTH_2XL,
   MarkdownSplitEditor,
   NOTICE_BRAND_CLASS,
+  TEXT_BUTTON_CLASS,
   cn,
 } from "../../shared/ui";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { Modal } from "../../shared/ui/Modal";
 import {
   isSkillRevisionConflict,
@@ -310,10 +311,21 @@ export function PersonalSkillEditorDialog({
           正在读取技能最新内容…
         </div>
       ) : detailUnavailable ? (
-        <ErrorBanner
-          message={skillErrorMessage(detail.error)}
-          onRetry={() => void detail.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void detail.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {skillErrorMessage(detail.error)}
+        </InlineAlert>
       ) : (
         <form
           className="flex min-w-0 flex-col gap-[15px]"
@@ -428,7 +440,12 @@ export function PersonalSkillEditorDialog({
               className="flex items-start gap-1.5 text-xs leading-[1.55] text-brand-hover [&>svg]:mt-px [&>svg]:shrink-0"
               role="status"
             >
-              <Icon name="spark" size={14} />
+              <Sparkle
+                aria-hidden="true"
+                focusable="false"
+                size={14}
+                strokeWidth={1.7}
+              />
               {importedMessage}
             </p>
           ) : null}
@@ -524,7 +541,12 @@ export function PersonalSkillEditorDialog({
             )}
             role="note"
           >
-            <Icon name="spark" size={16} />
+            <Sparkle
+              aria-hidden="true"
+              focusable="false"
+              size={16}
+              strokeWidth={1.7}
+            />
             <p>
               保存后会创建不可变版本并立即启用。已开始的任务继续使用原版本，新任务使用最新版本。
             </p>
@@ -532,7 +554,9 @@ export function PersonalSkillEditorDialog({
 
           {requestError ? (
             <div className="flex flex-col items-start gap-2">
-              <ErrorBanner message={requestError} />
+              <InlineAlert size="compact" variant="danger">
+                {requestError}
+              </InlineAlert>
               {revisionConflict ? (
                 <Button
                   onClick={() => void refreshLatest()}
@@ -540,7 +564,12 @@ export function PersonalSkillEditorDialog({
                   type="button"
                   variant="outline"
                 >
-                  <Icon name="refresh" size={14} />
+                  <RefreshCw
+                    aria-hidden="true"
+                    focusable="false"
+                    size={14}
+                    strokeWidth={1.7}
+                  />
                   刷新最新内容
                 </Button>
               ) : null}

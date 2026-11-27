@@ -9,7 +9,7 @@ import unicodedata
 from collections.abc import Callable
 from datetime import datetime
 
-from app.run.results import RunDetailsResult, RunListResult
+from app.run.results import RunListResult
 from common.date import as_utc, utc_now
 from common.ids import new_id
 from domain.message import (
@@ -26,6 +26,7 @@ from domain.message import (
 from domain.run.model import (
     AnswerRunCommand,
     Run,
+    RunDetails,
     RunEvent,
     RunInputFiles,
     RunStatus,
@@ -404,20 +405,12 @@ class RunService:
             raise RunNotFoundError("run_not_found")
         return result
 
-    async def get(self, session_id: str, owner_id: str, run_id: str) -> RunDetailsResult:
+    async def get(self, session_id: str, owner_id: str, run_id: str) -> RunDetails:
         """单会话聚合读取 Run 详情及待交互/待审批/子任务视图。"""
         details = await self._repository.get_details(session_id, owner_id, run_id)
         if details is None:
             raise RunNotFoundError("run_not_found")
-        return RunDetailsResult(
-            details.run,
-            details.pending_input,
-            details.pending_approvals,
-            subagent_tasks=details.subagent_tasks,
-            pending_subagent_inputs=details.pending_subagent_inputs,
-            pending_subagent_approvals=details.pending_subagent_approvals,
-            assistant_message_id=details.assistant_message_id,
-        )
+        return details
 
     async def decide_tool_approval(
         self,
@@ -429,7 +422,7 @@ class RunService:
         decision: ToolApprovalDecision,
         *,
         auth_session_id: str | None = None,
-    ) -> RunDetailsResult:
+    ) -> RunDetails:
         """Apply one owner-scoped tool approval decision with an idempotency key."""
         request_id = _validate_request_id(request_id)
         if not call_id or len(call_id) > MAX_TOOL_CALL_ID_LENGTH:
@@ -465,7 +458,7 @@ class RunService:
             if result.status is RunStatus.WAITING_FOR_APPROVAL
             else ()
         )
-        return RunDetailsResult(result, None, pending_approvals)
+        return RunDetails(result, None, pending_approvals)
 
     async def list(
         self, session_id: str, owner_id: str, *, cursor: str | None, limit: int

@@ -603,7 +603,7 @@ def test_worker_entry_propagates_fatal_task_error_and_closes_resources(
 
         with (
             patch("run_worker.prepare_run_tokenizers", _async_noop),
-            patch("bootstrap.run_worker.McpSecretCipher.from_environment", return_value=object()),
+            patch("bootstrap.run_worker.SecretCipher.from_environment", return_value=object()),
             patch("bootstrap.database.Database", FakeDatabase),
             patch("bootstrap.run_worker.SqlAlchemyModelProfileRepository", lambda *_: object()),
             patch("bootstrap.run_worker.SqlAlchemyMessageRepository", lambda _: object()),

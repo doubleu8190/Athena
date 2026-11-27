@@ -1,3 +1,4 @@
+import { ArrowRight, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -6,6 +7,7 @@ import { parsePage } from "../../shared/lib/pagination";
 import {
   Badge,
   Button,
+  InlineAlert,
   LIST_FOOTER_CLASS,
   PAGE_DESC_CLASS,
   PAGE_HEADING_CLASS,
@@ -14,6 +16,7 @@ import {
   PAGE_NAV_BUTTON_CLASS,
   PAGE_SHELL_CLASS,
   PAGE_TITLE_CLASS,
+  TEXT_BUTTON_CLASS,
   Tabs,
   TabsList,
   TabsTrigger,
@@ -22,8 +25,6 @@ import {
   type VisibilityScope,
 } from "../../shared/ui";
 import { EmptyState } from "../../shared/ui/EmptyState";
-import { ErrorBanner } from "../../shared/ui/ErrorBanner";
-import { Icon } from "../../shared/ui/Icons";
 import { useAuth } from "../auth/AuthProvider";
 import { resolveUserDepartmentName } from "../auth/model";
 import {
@@ -141,7 +142,7 @@ export function KnowledgePage() {
           type="button"
           variant="primary"
         >
-          <Icon name="plus" size={14} />
+          <Plus aria-hidden="true" focusable="false" size={14} strokeWidth={1.7} />
           新建知识库
         </Button>
       </header>
@@ -167,10 +168,21 @@ export function KnowledgePage() {
           正在加载知识库…
         </div>
       ) : bases.isError ? (
-        <ErrorBanner
-          message={knowledgeErrorMessage(bases.error)}
-          onRetry={() => void bases.refetch()}
-        />
+        <InlineAlert
+          action={
+            <button
+              className={TEXT_BUTTON_CLASS}
+              onClick={() => void bases.refetch()}
+              type="button"
+            >
+              重试
+            </button>
+          }
+          size="compact"
+          variant="danger"
+        >
+          {knowledgeErrorMessage(bases.error)}
+        </InlineAlert>
       ) : bases.data.items.length === 0 && page === 1 ? (
         <EmptyState
           action={
@@ -180,7 +192,12 @@ export function KnowledgePage() {
                 type="button"
                 variant="primary"
               >
-                <Icon name="plus" size={14} />
+                <Plus
+                  aria-hidden="true"
+                  focusable="false"
+                  size={14}
+                  strokeWidth={1.7}
+                />
                 新建知识库
               </Button>
             ) : (
@@ -263,7 +280,12 @@ export function KnowledgePage() {
                       <strong className="min-w-0 truncate text-lg font-semibold tracking-[-0.02em]">
                         {base.name}
                       </strong>
-                      <Icon name="arrow-right" size={16} />
+                      <ArrowRight
+                        aria-hidden="true"
+                        focusable="false"
+                        size={16}
+                        strokeWidth={1.7}
+                      />
                     </Link>
                     <p className="mt-2 line-clamp-3 text-sm leading-[1.65] text-text-secondary">
                       {base.description || "未填写说明"}
@@ -288,7 +310,12 @@ export function KnowledgePage() {
                         type="button"
                         variant="outline"
                       >
-                        <Icon name="edit" size={14} />
+                        <Pencil
+                          aria-hidden="true"
+                          focusable="false"
+                          size={14}
+                          strokeWidth={1.7}
+                        />
                         编辑
                       </Button>
                       <Button
@@ -298,7 +325,12 @@ export function KnowledgePage() {
                         type="button"
                         variant="danger-outline"
                       >
-                        <Icon name="trash" size={14} />
+                        <Trash2
+                          aria-hidden="true"
+                          focusable="false"
+                          size={14}
+                          strokeWidth={1.7}
+                        />
                         删除
                       </Button>
                     </div>
@@ -328,7 +360,12 @@ export function KnowledgePage() {
                 onClick={() => goToPage(page - 1)}
                 type="button"
               >
-                <Icon name="chevron" size={13} />
+                <ChevronRight
+                  aria-hidden="true"
+                  focusable="false"
+                  size={13}
+                  strokeWidth={1.7}
+                />
               </button>
               <span className="text-xs text-text-secondary">第 {page} 页</span>
               <button
@@ -338,7 +375,12 @@ export function KnowledgePage() {
                 onClick={() => goToPage(page + 1)}
                 type="button"
               >
-                <Icon name="chevron" size={13} />
+                <ChevronRight
+                  aria-hidden="true"
+                  focusable="false"
+                  size={13}
+                  strokeWidth={1.7}
+                />
               </button>
             </nav>
           </footer>

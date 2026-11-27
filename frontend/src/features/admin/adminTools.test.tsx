@@ -409,6 +409,8 @@ describe("管理工具页", () => {
               (patchedBody.approval_summary_template as string | null) ?? null,
             parameter_labels:
               (patchedBody.parameter_labels as Record<string, string>) ?? {},
+            result_labels:
+              (patchedBody.result_labels as Record<string, string>) ?? {},
           };
           return jsonResponse(tool);
         }
@@ -460,10 +462,128 @@ describe("管理工具页", () => {
         payee: "收款人",
         amount: "付款金额",
       },
+      result_labels: {},
     });
     expect(await screen.findByText("发起付款")).toBeInTheDocument();
     expect(
       screen.getByText("payee: 收款人、amount: 付款金额"),
+    ).toBeInTheDocument();
+  });
+
+  it("支持可展示结果字段（result_labels）回显、校验、提交与工具卡片展示", async () => {
+    let tool = makeAdminTool({
+      display_name: "查询报销单",
+      model_name: "mcp__22222222222222222222222222222222",
+      parameter_labels: { request_no: "报销单号" },
+      remote_name: "get_expense",
+      result_labels: { approval_status: "审批状态" },
+      tool_id: "tool-expense-query",
+    });
+    let patchedBody: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        const method = init?.method ?? "GET";
+        if (url.pathname.endsWith("/auth/me")) {
+          return jsonResponse(TEST_ADMIN);
+        }
+        if (url.pathname === "/api/v1/admin/tools" && method === "GET") {
+          return jsonResponse(listResponse([tool], 1, 20, 1));
+        }
+        if (
+          url.pathname === `/api/v1/admin/tools/${tool.tool_id}` &&
+          method === "PATCH"
+        ) {
+          patchedBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+            string,
+            unknown
+          >;
+          tool = {
+            ...tool,
+            result_labels:
+              (patchedBody.result_labels as Record<string, string>) ?? {},
+          };
+          return jsonResponse(tool);
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    renderApp("/admin/tools");
+
+    expect(
+      await screen.findByText("approval_status: 审批状态"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: `编辑业务展示：${tool.model_name}`,
+      }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "编辑工具业务展示" });
+
+    // 验证出参白名单回显及说明文案
+    expect(
+      within(dialog).getByText(/仅已配置字段会向普通用户展示/),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/默认隐藏全部原始出参/),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("结果字段键名 1")).toHaveValue(
+      "approval_status",
+    );
+    expect(within(dialog).getByLabelText("结果中文标签 1")).toHaveValue(
+      "审批状态",
+    );
+
+    // 新增重复键名应触发前端校验拦截而不发请求
+    await user.click(
+      within(dialog).getByRole("button", { name: "添加结果字段" }),
+    );
+    await user.type(
+      within(dialog).getByLabelText("结果字段键名 2"),
+      "approval_status",
+    );
+    await user.type(within(dialog).getByLabelText("结果中文标签 2"), "重复状态");
+    await user.click(
+      within(dialog).getByRole("button", { name: "保存业务展示" }),
+    );
+    expect(
+      within(dialog).getByText(/可展示结果字段键名「approval_status」重复/),
+    ).toBeInTheDocument();
+    expect(patchedBody).toBeNull();
+
+    // 修正为合法键名后提交
+    const keyInput2 = within(dialog).getByLabelText("结果字段键名 2");
+    const labelInput2 = within(dialog).getByLabelText("结果中文标签 2");
+    await user.clear(keyInput2);
+    await user.type(keyInput2, "total_amount");
+    await user.clear(labelInput2);
+    await user.type(labelInput2, "报销总额");
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "保存业务展示" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "编辑工具业务展示" }),
+      ).not.toBeInTheDocument();
+    });
+
+    expect(patchedBody).toEqual({
+      display_name: "查询报销单",
+      approval_summary_template: null,
+      parameter_labels: { request_no: "报销单号" },
+      result_labels: {
+        approval_status: "审批状态",
+        total_amount: "报销总额",
+      },
+    });
+    expect(
+      await screen.findByText("approval_status: 审批状态、total_amount: 报销总额"),
     ).toBeInTheDocument();
   });
 

@@ -140,9 +140,12 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             assert before_alpha.model_name.startswith("mcp__")
             assert before_alpha.requires_approval is False
             updated_alpha = await repository.update_tool_metadata(
-                actor, before_alpha.tool_id, ToolMetadataPatch(requires_approval=True)
+                actor,
+                before_alpha.tool_id,
+                ToolMetadataPatch(requires_approval=True, result_labels={"order_no": "单据号"}),
             )
             assert updated_alpha.requires_approval is True
+            assert updated_alpha.result_labels == {"order_no": "单据号"}
             with pytest.raises(McpServerNotFoundError):
                 await repository.update_tool_metadata(
                     actor, "tool_missing", ToolMetadataPatch(requires_approval=True)
@@ -150,6 +153,8 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             public_tools = await repository.list_readable_public(actor.user.id, offset=0, limit=10)
             assert not hasattr(public_tools.items[0], "server_id")
             assert not hasattr(public_tools.items[0], "remote_name")
+            assert not hasattr(public_tools.items[0], "input_schema")
+            assert not hasattr(public_tools.items[0], "model_name")
             server_tools = await repository.list_server_admin("mcp_1", offset=0, limit=10)
             assert server_tools.total == 2
             assert (await repository.get_public_tool(before_alpha.tool_id)) == next(
@@ -195,6 +200,11 @@ def test_repository_atomically_creates_replaces_and_deletes_server_tools() -> No
             )
             assert after_alpha.description == "Changed"
             assert after_alpha.requires_approval is True
+            assert after_alpha.result_labels == {"order_no": "单据号"}
+            cleared_alpha = await repository.update_tool_metadata(
+                actor, after_alpha.tool_id, ToolMetadataPatch(result_labels=None)
+            )
+            assert cleared_alpha.result_labels == {}
             assert after_beta.tool_id.startswith("tool_")
             assert after_beta.model_name == f"mcp__{after_beta.tool_id.removeprefix('tool_')}"
             assert after_beta.requires_approval is False

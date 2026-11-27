@@ -62,6 +62,7 @@ from domain.tool import (
     ToolPage,
     validate_approval_summary_template,
     validate_parameter_labels,
+    validate_result_labels,
     validate_tool_display_name,
 )
 from infrastructure.security.secrets import SealedSecrets, SecretCipher
@@ -379,6 +380,9 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             if patch.parameter_labels is UNSET
             else validate_parameter_labels(patch.parameter_labels)
         )
+        normalized_result_labels = (
+            UNSET if patch.result_labels is UNSET else validate_result_labels(patch.result_labels)
+        )
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -402,6 +406,8 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
                         row.approval_summary_template = normalized_template
                     if normalized_labels is not UNSET:
                         row.parameter_labels_json = normalized_labels
+                    if normalized_result_labels is not UNSET:
+                        row.result_labels_json = normalized_result_labels
                     await session.flush()
                     return tool_to_admin(row)
         except SQLAlchemyError:
@@ -524,6 +530,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             display_name=tool.display_name,
             approval_summary_template=tool.approval_summary_template,
             parameter_labels=dict(tool.parameter_labels_json or {}),
+            result_labels=dict(tool.result_labels_json or {}),
         )
 
     async def get_call_target(
@@ -930,6 +937,7 @@ class SqlAlchemyMcpRepository(McpServerRepository, McpToolRuntimeReader):
             display_name=None,
             approval_summary_template=None,
             parameter_labels_json={},
+            result_labels_json={},
             created_at=created_at,
         )
 

@@ -160,6 +160,7 @@ def build_tools_router(manager: ToolManager) -> APIRouter:
             parameter_labels=(
                 UNSET if "parameter_labels" not in fields_set else request.parameter_labels
             ),
+            result_labels=(UNSET if "result_labels" not in fields_set else request.result_labels),
         )
         result = await manager.update_tool_metadata(actor, tool_id, patch)
         return AdminToolResponse.model_validate(result)

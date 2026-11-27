@@ -513,7 +513,7 @@ describe("自包含终态快照解析与内联收敛", () => {
           model_name: "mcp__kb_search",
           ordinal: 2,
           requested_at: "2026-11-10T03:00:04Z",
-          // 模拟 exclude_none=True 省略 tool_kind / safe_skill_projection / display_name / approval_summary
+          // 模拟 exclude_none=True 省略 tool_kind / safe_skill_projection / display_name / approval_summary / hidden_argument_count
           sub_run_id: "sub-run-2",
           subagent_name: "制度顾问",
           subagent_slug: "policy-advisor",
@@ -583,6 +583,7 @@ describe("自包含终态快照解析与内联收敛", () => {
       call_id: "call-skill-1",
       display_name: null,
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "skill__run_script",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:03Z",
@@ -638,6 +639,7 @@ describe("自包含终态快照解析与内联收敛", () => {
       formatted_arguments: [
         { key: "query", label: "查询词", value: "差旅标准" },
       ],
+      hidden_argument_count: 0,
       model_name: "mcp__kb_search",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:04Z",
@@ -652,6 +654,30 @@ describe("自包含终态快照解析与内联收敛", () => {
     expect(
       Object.values(mcpApproval).every((field) => field !== undefined),
     ).toBe(true);
+
+    // 显式携带 hidden_argument_count 时精确保留数值
+    const withHiddenCount = parseSnapshotPayload({
+      event_sequence: 5,
+      events: [],
+      messages: [],
+      pending_subagent_approvals: [
+        {
+          batch_message_id: "msg-batch-3",
+          call_id: "call-mcp-2",
+          hidden_argument_count: 4,
+          model_name: "mcp__erp_create",
+          ordinal: 1,
+          requested_at: "2026-11-10T03:00:05Z",
+          sub_run_id: "sub-run-3",
+          subagent_name: "ERP 助手",
+          subagent_slug: "erp-helper",
+        },
+      ],
+      status: "waiting_for_subagents",
+    });
+    expect(
+      withHiddenCount?.pending_subagent_approvals?.[0]?.hidden_argument_count,
+    ).toBe(4);
   });
 
   it("completed 自包含快照支持按 assistant_message_id 或同 Run 完成助手消息直接收敛（含 file_ref）", () => {

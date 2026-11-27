@@ -38,12 +38,11 @@ def server_to_domain(
 
 
 def tool_to_public(row: McpToolModel) -> PublicToolDefinition:
-    """生成不含 MCP 来源映射的公共工具投影。"""
+    """生成不含模型路由名、入参 Schema 与来源映射的公共最小工具投影。"""
     return PublicToolDefinition(
         tool_id=row.id,
-        model_name=row.model_name,
+        display_name=row.display_name,
         description=row.description,
-        input_schema=row.input_schema_json,
     )
 
 
@@ -60,6 +59,7 @@ def tool_to_admin(row: McpToolModel) -> AdminToolDefinition:
         display_name=row.display_name,
         approval_summary_template=row.approval_summary_template,
         parameter_labels=dict(row.parameter_labels_json or {}),
+        result_labels=dict(row.result_labels_json or {}),
     )
 
 

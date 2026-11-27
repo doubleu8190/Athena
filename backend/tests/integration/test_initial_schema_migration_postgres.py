@@ -189,16 +189,22 @@ async def _capture_schema_snapshot(engine: AsyncEngine, schema: str) -> _SchemaS
 
 
 def test_alembic_single_baseline_head_and_offline_sql() -> None:
-    """验证 Alembic 仅存唯一基线 revision，且离线 upgrade/downgrade SQL 均可无错渲染。"""
+    """验证 Alembic 仅存线性迁移链与唯一 head，且离线 upgrade/downgrade SQL 均可无错渲染。"""
     versions_dir = BACKEND_DIR / "migrations" / "versions"
     migration_files = sorted(path.name for path in versions_dir.glob("*.py"))
-    assert migration_files == ["0001_initial_schema.py"]
+    assert migration_files == [
+        "0001_initial_schema.py",
+        "0002_add_mcp_tool_result_labels.py",
+    ]
 
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
-    assert script.get_heads() == [_BASELINE_REVISION]
-    revision = script.get_revision(_BASELINE_REVISION)
-    assert revision is not None
-    assert revision.down_revision is None
+    assert script.get_heads() == ["0002_add_mcp_tool_result_labels"]
+    baseline_rev = script.get_revision(_BASELINE_REVISION)
+    assert baseline_rev is not None
+    assert baseline_rev.down_revision is None
+    head_rev = script.get_revision("0002_add_mcp_tool_result_labels")
+    assert head_rev is not None
+    assert head_rev.down_revision == _BASELINE_REVISION
 
     # 离线模式验证 upgrade head --sql 与 downgrade base --sql，防止仅在线才能跑通的隐蔽依赖。
     upgrade_buffer = io.StringIO()
@@ -224,7 +230,7 @@ def test_alembic_single_baseline_head_and_offline_sql() -> None:
         "sqlalchemy.url",
         "postgresql+asyncpg://offline:offline@localhost/athena",
     )
-    command.downgrade(downgrade_cfg, f"{_BASELINE_REVISION}:base", sql=True)
+    command.downgrade(downgrade_cfg, "0002_add_mcp_tool_result_labels:base", sql=True)
     downgrade_sql = downgrade_buffer.getvalue()
     assert "DROP TABLE runs" in downgrade_sql
     assert "DROP TABLE users" in downgrade_sql
@@ -248,7 +254,9 @@ def test_initial_schema_migration_roundtrip_and_seeds() -> None:
                     version_rows = (
                         await conn.execute(text("SELECT version_num FROM alembic_version"))
                     ).all()
-                    assert [str(row[0]) for row in version_rows] == [_BASELINE_REVISION]
+                    assert [str(row[0]) for row in version_rows] == [
+                        "0002_add_mcp_tool_result_labels"
+                    ]
 
                     table_rows = (
                         await conn.execute(

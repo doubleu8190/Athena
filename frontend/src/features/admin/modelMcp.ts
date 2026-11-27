@@ -566,12 +566,14 @@ export interface ToolMetadataFormValues {
   display_name: string;
   approval_summary_template: string;
   parameter_labels: ToolParameterLabelRow[];
+  result_labels: ToolParameterLabelRow[];
 }
 
 export type ToolMetadataField =
   | "display_name"
   | "approval_summary_template"
-  | "parameter_labels";
+  | "parameter_labels"
+  | "result_labels";
 
 function hasDisallowedTemplateControlCharacter(value: string): boolean {
   for (const ch of value) {
@@ -605,18 +607,76 @@ export function extractToolSchemaParamNames(
   return Object.keys(properties as Record<string, unknown>);
 }
 
+function mapToolLabelRows(
+  labels: Record<string, string> | null | undefined,
+  prefix: string,
+): ToolParameterLabelRow[] {
+  return Object.entries(labels ?? {}).map(([key, label], index) => ({
+    id: `${prefix}-${index}-${key}`,
+    key,
+    label,
+  }));
+}
+
+function validateToolLabelMap(
+  rows: ToolParameterLabelRow[],
+  subject: string,
+): { error?: string; labels: Record<string, string> } {
+  const labels: Record<string, string> = {};
+  const nonEmptyRows = rows.filter(
+    (row) => row.key.trim() || row.label.trim(),
+  );
+  if (nonEmptyRows.length > TOOL_PARAMETER_LABELS_MAX_COUNT) {
+    return {
+      error: `${subject}最多配置 ${TOOL_PARAMETER_LABELS_MAX_COUNT} 项。`,
+      labels,
+    };
+  }
+  for (const row of nonEmptyRows) {
+    if (
+      CONTROL_CHARACTER_PATTERN.test(row.key) ||
+      CONTROL_CHARACTER_PATTERN.test(row.label)
+    ) {
+      return {
+        error: `${subject}键名和中文标签不能包含控制字符。`,
+        labels,
+      };
+    }
+    const key = row.key.trim();
+    const label = row.label.trim();
+    if (!key || !label) {
+      return {
+        error: `${subject}键名与中文标签均不能为空。`,
+        labels,
+      };
+    }
+    if (
+      unicodeLength(key) > TOOL_PARAMETER_LABEL_KEY_MAX_LENGTH ||
+      unicodeLength(label) > TOOL_PARAMETER_LABEL_VALUE_MAX_LENGTH
+    ) {
+      return {
+        error: `${subject}键名不超过 ${TOOL_PARAMETER_LABEL_KEY_MAX_LENGTH} 字符，中文标签不超过 ${TOOL_PARAMETER_LABEL_VALUE_MAX_LENGTH} 字符。`,
+        labels,
+      };
+    }
+    if (key in labels) {
+      return {
+        error: `${subject}键名「${key}」重复，请去重后再保存。`,
+        labels,
+      };
+    }
+    labels[key] = label;
+  }
+  return { labels };
+}
+
 /** 构造工具业务展示表单初始值。 */
 export function toolMetadataForm(tool: AdminTool): ToolMetadataFormValues {
   return {
     display_name: tool.display_name ?? "",
     approval_summary_template: tool.approval_summary_template ?? "",
-    parameter_labels: Object.entries(tool.parameter_labels ?? {}).map(
-      ([key, label], index) => ({
-        id: `param-${index}-${key}`,
-        key,
-        label,
-      }),
-    ),
+    parameter_labels: mapToolLabelRows(tool.parameter_labels, "param"),
+    result_labels: mapToolLabelRows(tool.result_labels, "result"),
   };
 }
 
@@ -629,7 +689,9 @@ export function validateToolMetadataForm(values: ToolMetadataFormValues): {
 
   if (CONTROL_CHARACTER_PATTERN.test(values.display_name)) {
     errors.display_name = "中文展示名不能包含控制字符。";
-  } else if (unicodeLength(values.display_name.trim()) > TOOL_DISPLAY_NAME_MAX_LENGTH) {
+  } else if (
+    unicodeLength(values.display_name.trim()) > TOOL_DISPLAY_NAME_MAX_LENGTH
+  ) {
     errors.display_name = `中文展示名不能超过 ${TOOL_DISPLAY_NAME_MAX_LENGTH} 个字符。`;
   }
 
@@ -643,40 +705,21 @@ export function validateToolMetadataForm(values: ToolMetadataFormValues): {
     errors.approval_summary_template = `审批摘要模板不能超过 ${APPROVAL_SUMMARY_TEMPLATE_MAX_LENGTH} 个字符。`;
   }
 
-  const parameterLabels: Record<string, string> = {};
-  const nonEmptyRows = values.parameter_labels.filter(
-    (row) => row.key.trim() || row.label.trim(),
+  // 入参白名单与出参白名单共用对称键名/标签校验规则（最多 50 项，键名 ≤ 128，标签 ≤ 120，禁控制字符与重复键）。
+  const paramValidation = validateToolLabelMap(
+    values.parameter_labels,
+    "参数中文标签",
   );
-  if (nonEmptyRows.length > TOOL_PARAMETER_LABELS_MAX_COUNT) {
-    errors.parameter_labels = `参数中文标签最多配置 ${TOOL_PARAMETER_LABELS_MAX_COUNT} 项。`;
-  } else {
-    for (const row of nonEmptyRows) {
-      if (
-        CONTROL_CHARACTER_PATTERN.test(row.key) ||
-        CONTROL_CHARACTER_PATTERN.test(row.label)
-      ) {
-        errors.parameter_labels = "参数键名和中文标签不能包含控制字符。";
-        break;
-      }
-      const key = row.key.trim();
-      const label = row.label.trim();
-      if (!key || !label) {
-        errors.parameter_labels = "参数键名与中文标签均不能为空。";
-        break;
-      }
-      if (
-        unicodeLength(key) > TOOL_PARAMETER_LABEL_KEY_MAX_LENGTH ||
-        unicodeLength(label) > TOOL_PARAMETER_LABEL_VALUE_MAX_LENGTH
-      ) {
-        errors.parameter_labels = `参数键名不超过 ${TOOL_PARAMETER_LABEL_KEY_MAX_LENGTH} 字符，中文标签不超过 ${TOOL_PARAMETER_LABEL_VALUE_MAX_LENGTH} 字符。`;
-        break;
-      }
-      if (key in parameterLabels) {
-        errors.parameter_labels = `参数键名「${key}」重复，请去重后再保存。`;
-        break;
-      }
-      parameterLabels[key] = label;
-    }
+  if (paramValidation.error) {
+    errors.parameter_labels = paramValidation.error;
+  }
+
+  const resultValidation = validateToolLabelMap(
+    values.result_labels,
+    "可展示结果字段",
+  );
+  if (resultValidation.error) {
+    errors.result_labels = resultValidation.error;
   }
 
   if (Object.keys(errors).length > 0) {
@@ -689,7 +732,8 @@ export function validateToolMetadataForm(values: ToolMetadataFormValues): {
       display_name: values.display_name.trim() || null,
       approval_summary_template:
         values.approval_summary_template.trim() || null,
-      parameter_labels: parameterLabels,
+      parameter_labels: paramValidation.labels,
+      result_labels: resultValidation.labels,
     },
   };
 }

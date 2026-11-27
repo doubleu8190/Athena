@@ -154,10 +154,9 @@ class FakeTools:
             "remote",
         )
         self.public = PublicToolDefinition(
-            "tool_00000000000040008000000000000000",
-            "mcp__00000000000040008000000000000000",
-            "d",
-            {},
+            tool_id="tool_00000000000040008000000000000000",
+            display_name="工具展示名",
+            description="d",
         )
 
     async def list_readable_public(
@@ -355,3 +354,26 @@ def test_only_admin_can_update_approval_policy_with_a_real_bool() -> None:
     )
     assert result.requires_approval is True
     assert servers.policy_calls == [("tool_x", True)]
+
+    with pytest.raises(ValueError, match="mcp_tool_metadata_invalid"):
+        _run(
+            manager.update_tool_metadata(
+                admin_actor,
+                "tool_x",
+                ToolMetadataPatch(result_labels={"bad\nkey": "标签"}),
+            )
+        )
+    _run(
+        manager.update_tool_metadata(
+            admin_actor,
+            "tool_x",
+            ToolMetadataPatch(result_labels={"order_no": "单据号"}),
+        )
+    )
+    _run(
+        manager.update_tool_metadata(
+            admin_actor,
+            "tool_x",
+            ToolMetadataPatch(result_labels=None),
+        )
+    )

@@ -700,6 +700,7 @@ describe("安全技能审批与多文件交付", () => {
       call_id: "call-skill",
       display_name: null,
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "skill_execute",
       ordinal: 1,
       requested_at: "2026-11-12T03:00:00Z",
@@ -747,11 +748,9 @@ describe("安全技能审批与多文件交付", () => {
     });
     const detail = {
       ...makeToolCallDetail(call),
-      arguments: {
-        internal_path: "/host/private",
-        password: "secret",
-      },
       artifacts,
+      formatted_arguments: [],
+      hidden_argument_count: 2,
       safe_skill_projection: PROJECTION,
     };
     installFetch({
@@ -897,6 +896,7 @@ describe("安全技能审批与多文件交付", () => {
           call_id: "call-missing-projection",
           display_name: null,
           formatted_arguments: [],
+          hidden_argument_count: 0,
           model_name: "skill_execute",
           ordinal: 1,
           requested_at: "2026-11-12T03:00:00Z",
@@ -917,10 +917,8 @@ describe("安全技能审批与多文件交付", () => {
           tool_call_id: "protocol-missing-projection",
           tool_id: "builtin_skill_execute",
         }),
-        arguments: {
-          internal_path: "/host/private",
-          password: "secret",
-        },
+        formatted_arguments: [],
+        hidden_argument_count: 2,
       }),
     });
 
@@ -987,16 +985,12 @@ describe("安全技能审批与多文件交付", () => {
           ordinal: calls.findIndex((call) => call.id === callId) + 1,
           tool_call_id: `protocol-${callId}`,
         }),
-        arguments: {
-          internal_path: "/host/private",
-          password: "secret",
-        },
+        formatted_arguments: [],
+        hidden_argument_count: 2,
         outcome: {
-          cleanup_error_code: null,
-          code: "skill_executed",
-          data: { internal_log: "private skill output" },
-          message: "ok",
+          formatted_results: [],
           status: "ok",
+          summary: "ok",
           truncated: false,
         },
       }),
@@ -1015,7 +1009,7 @@ describe("安全技能审批与多文件交付", () => {
     const stepList = within(progress).getByRole("list", {
       name: "工具调用步骤",
     });
-    for (const label of ["加载技能说明", "读取技能资料", "执行技能脚本"]) {
+    for (const label of ["加载技能指南", "读取技能资源", "执行技能脚本"]) {
       await user.click(
         await within(stepList).findByRole("button", {
           name: new RegExp(label),

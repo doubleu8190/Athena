@@ -126,7 +126,7 @@ def test_isolated_postgres_schema_lifecycle_and_exception_cleanup(
                 pool_size=1,
             ) as db:
                 assert db.schema.startswith("athena_unit_")
-                assert db.head_revision() == "0001_initial_schema"
+                assert db.head_revision() == "0002_add_mcp_tool_result_labels"
                 await db.upgrade_to("head")
                 await db.downgrade_to("base")
                 raise RuntimeError("boom")

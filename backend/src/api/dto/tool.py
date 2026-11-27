@@ -8,7 +8,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class PublicToolResponse(BaseModel):
-    """普通用户可见的最小工具投影。"""
+    """普通用户可见的最小工具投影，彻底收口 model_name 与入参 Schema。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    tool_id: str
+    display_name: str | None
+    description: str
+
+
+class AdminToolResponse(BaseModel):
+    """管理员可见的工具来源与业务审批展示元信息投影。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -16,17 +26,13 @@ class PublicToolResponse(BaseModel):
     model_name: str
     description: str
     input_schema: dict[str, Any]
-
-
-class AdminToolResponse(PublicToolResponse):
-    """管理员可见的工具来源与业务审批展示元信息投影。"""
-
     server_id: str
     remote_name: str
     requires_approval: bool
     display_name: str | None
     approval_summary_template: str | None
     parameter_labels: dict[str, str]
+    result_labels: dict[str, str]
 
 
 class ToolApprovalPolicyRequest(BaseModel):
@@ -38,6 +44,7 @@ class ToolApprovalPolicyRequest(BaseModel):
     display_name: str | None = None
     approval_summary_template: str | None = None
     parameter_labels: dict[str, str] | None = None
+    result_labels: dict[str, str] | None = None
 
 
 class ToolBatchApprovalRequest(BaseModel):

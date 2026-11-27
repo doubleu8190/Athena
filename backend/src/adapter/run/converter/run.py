@@ -173,7 +173,11 @@ def event_payload_to_json(payload: RunEventPayload) -> dict[str, Any]:
     return payload.model_dump(mode="json", exclude_none=True)
 
 
-def tool_call_to_domain(row: RunToolCallModel) -> RunToolCallRecord:
+def tool_call_to_domain(
+    row: RunToolCallModel,
+    *,
+    display_name: str | None = None,
+) -> RunToolCallRecord:
     """Restore one call record with typed outcome JSON."""
     return RunToolCallRecord(
         id=row.id,
@@ -205,6 +209,7 @@ def tool_call_to_domain(row: RunToolCallModel) -> RunToolCallRecord:
             if row.safe_skill_projection is None
             else SafeSkillApprovalProjection.model_validate(row.safe_skill_projection)
         ),
+        display_name=display_name,
     )
 
 

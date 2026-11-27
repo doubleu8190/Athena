@@ -858,9 +858,19 @@ def test_unknown_retry_confirmation_tool_call_projection_and_warning() -> None:
         assert first_page.status_code == 200
         assert first_page.json()["next_after_ordinal"] == 1
         assert second_page.json()["items"][0]["status"] == "unknown"
+        assert second_page.json()["items"][0]["display_name"] is None
         assert unknown_detail.status_code == 200
-        assert unknown_detail.json()["arguments"] == {"query": "value-2"}
-        assert unknown_detail.json()["outcome"]["code"] == "tool_timeout"
+        detail_json = unknown_detail.json()
+        assert "arguments" not in detail_json
+        assert detail_json["formatted_arguments"] == []
+        assert detail_json["hidden_argument_count"] == 1
+        assert detail_json["outcome"]["status"] == "unknown"
+        assert detail_json["outcome"]["summary"] == "业务工具执行结果未知，请先核实外部系统状态。"
+        assert detail_json["outcome"]["formatted_results"] == []
+        assert "code" not in detail_json["outcome"]
+        assert "message" not in detail_json["outcome"]
+        assert "data" not in detail_json["outcome"]
+        assert "value-2" not in unknown_detail.text
         assert "server_id" not in unknown_detail.text
         assert unconfirmed.status_code == 409
         assert unconfirmed.json() == {"detail": "tool_retry_confirmation_required"}

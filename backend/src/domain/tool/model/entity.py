@@ -48,8 +48,8 @@ def validate_approval_summary_template(value: str | None) -> str | None:
     return normalized
 
 
-def validate_parameter_labels(value: Mapping[str, str] | None) -> dict[str, str]:
-    """校验参数中文标签映射：显式 None 清空为 {}，最多 50 项，键值均禁止控制字符。"""
+def _validate_labels_mapping(value: Mapping[str, str] | None) -> dict[str, str]:
+    """校验参数/结果中文白名单标签映射：显式 None 清空为 {}，最多 50 项，键值均禁止控制字符。"""
     if value is None:
         return {}
     if not isinstance(value, Mapping):
@@ -78,6 +78,16 @@ def validate_parameter_labels(value: Mapping[str, str] | None) -> dict[str, str]
     return normalized
 
 
+def validate_parameter_labels(value: Mapping[str, str] | None) -> dict[str, str]:
+    """校验入参中文标签白名单映射：显式 None 清空为 {}，最多 50 项，键值均禁止控制字符。"""
+    return _validate_labels_mapping(value)
+
+
+def validate_result_labels(value: Mapping[str, str] | None) -> dict[str, str]:
+    """校验出参中文标签白名单映射：显式 None 清空为 {}，最多 50 项，键值均禁止控制字符。"""
+    return _validate_labels_mapping(value)
+
+
 @dataclass(frozen=True, slots=True)
 class ToolMetadataPatch:
     """管理员对单个 MCP 工具审批开关与业务展示元信息的局部更新补丁。"""
@@ -86,6 +96,7 @@ class ToolMetadataPatch:
     display_name: str | None | UnsetType = UNSET
     approval_summary_template: str | None | UnsetType = UNSET
     parameter_labels: Mapping[str, str] | None | UnsetType = UNSET
+    result_labels: Mapping[str, str] | None | UnsetType = UNSET
 
     def has_updates(self) -> bool:
         """判断是否至少提供一个更新字段。"""
@@ -96,6 +107,7 @@ class ToolMetadataPatch:
                 self.display_name,
                 self.approval_summary_template,
                 self.parameter_labels,
+                self.result_labels,
             )
         )
 
@@ -159,24 +171,28 @@ class ToolDefinition:
 
 @dataclass(frozen=True, slots=True)
 class PublicToolDefinition:
-    """普通调用方可见的工具描述，不含远端或 Server 来源字段。"""
+    """普通调用方可见的最小工具描述，彻底收口 model_name、input_schema 与来源映射。"""
+
+    tool_id: str
+    display_name: str | None = None
+    description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AdminToolDefinition:
+    """管理员可见的工具目录来源映射与审批展示元信息，不含连接配置或秘密。"""
 
     tool_id: str
     model_name: str
     description: str
     input_schema: Mapping[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class AdminToolDefinition(PublicToolDefinition):
-    """管理员可见的工具目录来源映射与审批展示元信息，不含连接配置或秘密。"""
-
     server_id: str
     remote_name: str
     requires_approval: bool = False
     display_name: str | None = None
     approval_summary_template: str | None = None
     parameter_labels: Mapping[str, str] = field(default_factory=dict)
+    result_labels: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,5 +218,6 @@ __all__ = [
     "ToolPage",
     "validate_approval_summary_template",
     "validate_parameter_labels",
+    "validate_result_labels",
     "validate_tool_display_name",
 ]

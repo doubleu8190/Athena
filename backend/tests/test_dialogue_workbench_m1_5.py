@@ -2784,14 +2784,14 @@ def test_subagent_run_never_triggers_auto_title(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_alembic_single_head_and_m1_5_offline_sql(monkeypatch: pytest.MonkeyPatch) -> None:
-    """校验 Alembic 唯一 head 为 0001_initial_schema，且离线 SQL 完整覆盖 M1.5 列并可逆。"""
+    """校验 Alembic 唯一 head 且离线 SQL 完整覆盖 M1.5 列并可逆。"""
     monkeypatch.setenv("ATHENA_DATABASE_URL", "postgresql+asyncpg://u:p@localhost/athena_test")
     config = Config(str(ALEMBIC_INI))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["0001_initial_schema"]
-    revision = script.get_revision("0001_initial_schema")
+    assert script.get_heads() == ["0002_add_mcp_tool_result_labels"]
+    revision = script.get_revision("0002_add_mcp_tool_result_labels")
     assert revision is not None
-    assert revision.down_revision is None
+    assert revision.down_revision == "0001_initial_schema"
 
     upgrade_buf = StringIO()
     with redirect_stdout(upgrade_buf):
@@ -2809,7 +2809,7 @@ def test_alembic_single_head_and_m1_5_offline_sql(monkeypatch: pytest.MonkeyPatc
 
     downgrade_buf = StringIO()
     with redirect_stdout(downgrade_buf):
-        command.downgrade(config, "0001_initial_schema:base", sql=True)
+        command.downgrade(config, "0002_add_mcp_tool_result_labels:base", sql=True)
     downgrade_sql = downgrade_buf.getvalue()
     assert "DROP TABLE llm_model_profile_versions" in downgrade_sql
     assert "DROP TABLE runs" in downgrade_sql

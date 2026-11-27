@@ -47,6 +47,7 @@ from domain.tool import (
     ToolPage,
     validate_approval_summary_template,
     validate_parameter_labels,
+    validate_result_labels,
     validate_tool_display_name,
 )
 
@@ -482,7 +483,7 @@ class ToolManager:
     async def update_tool_metadata(
         self, actor: AuthContext, tool_id: str, patch: ToolMetadataPatch
     ) -> AdminToolDefinition:
-        """仅允许管理员局部更新工具审批开关、中文展示名、审批摘要模板和参数标签映射。"""
+        """仅允许管理员局部更新工具审批开关、中文展示名、审批摘要模板和入/出参标签映射。"""
         await self._authorize(actor, admin=True)
         if not tool_id or len(tool_id) > 64 or not patch.has_updates():
             raise ValueError("mcp_tool_policy_invalid")
@@ -494,6 +495,8 @@ class ToolManager:
             validate_approval_summary_template(patch.approval_summary_template)
         if patch.parameter_labels is not UNSET:
             validate_parameter_labels(patch.parameter_labels)
+        if patch.result_labels is not UNSET:
+            validate_result_labels(patch.result_labels)
         return await self._servers.update_tool_metadata(actor, tool_id, patch)
 
     async def batch_update_tool_approval(

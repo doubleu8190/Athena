@@ -2897,10 +2897,10 @@ def test_alembic_initial_schema_contains_access_grants_and_fks() -> None:
     )
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0001_initial_schema"]
-    revision = script.get_revision("0001_initial_schema")
+    assert heads == ["0002_add_mcp_tool_result_labels"]
+    revision = script.get_revision("0002_add_mcp_tool_result_labels")
     assert revision is not None
-    assert revision.down_revision is None
+    assert revision.down_revision == "0001_initial_schema"
 
     up_buf = StringIO()
     with redirect_stdout(up_buf):
@@ -2926,6 +2926,6 @@ def test_alembic_initial_schema_contains_access_grants_and_fks() -> None:
 
     down_buf = StringIO()
     with redirect_stdout(down_buf):
-        command.downgrade(config, "0001_initial_schema:base", sql=True)
+        command.downgrade(config, "0002_add_mcp_tool_result_labels:base", sql=True)
     down_sql = down_buf.getvalue()
     assert "DROP TABLE resource_visibility_grants" in down_sql

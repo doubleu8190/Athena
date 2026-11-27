@@ -75,6 +75,7 @@ interface ToolFixture {
   parameter_labels: Record<string, string>;
   remote_name: string;
   requires_approval: boolean;
+  result_labels: Record<string, string>;
   server_id: string;
   tool_id: string;
 }
@@ -187,6 +188,7 @@ export async function installAdminFixtures(
         parameter_labels: { query: "检索关键词" },
         remote_name: "knowledge_search",
         requires_approval: false,
+        result_labels: {},
         server_id: "mcp-e2e",
         tool_id: "tool-e2e",
       },

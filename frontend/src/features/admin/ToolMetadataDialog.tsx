@@ -1,5 +1,12 @@
 import { Plus, Sparkles, Trash2 } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { getAuthIdentityEpoch } from "../../shared/api/client";
 import {
@@ -33,15 +40,170 @@ import {
   type ToolParameterLabelRow,
 } from "./model";
 
-let parameterRowSeq = 0;
+let labelRowSeq = 0;
 
-function newParameterLabelRow(key = "", label = ""): ToolParameterLabelRow {
-  parameterRowSeq += 1;
+function newToolLabelRow(
+  prefix: string,
+  key = "",
+  label = "",
+): ToolParameterLabelRow {
+  labelRowSeq += 1;
   return {
-    id: `tool-param-${parameterRowSeq}`,
+    id: `${prefix}-${labelRowSeq}`,
     key,
     label,
   };
+}
+
+interface ToolLabelEditorSectionProps {
+  addLabel: string;
+  description: string;
+  emptyText: string;
+  error?: string;
+  errorId: string;
+  extraAction?: ReactNode;
+  keyLabelPrefix: string;
+  keyPlaceholder: string;
+  labelPrefix: string;
+  labelPlaceholder: string;
+  onAdd: () => void;
+  onChangeRow: (rowId: string, patch: { key?: string; label?: string }) => void;
+  onRemoveRow: (rowId: string) => void;
+  pending: boolean;
+  removeTitle: string;
+  rows: ToolParameterLabelRow[];
+  title: string;
+  titleId: string;
+}
+
+/** 复用于入参白名单（parameter_labels）与出参白名单（result_labels）的键值标签行编辑器。 */
+function ToolLabelEditorSection({
+  addLabel,
+  description,
+  emptyText,
+  error,
+  errorId,
+  extraAction,
+  keyLabelPrefix,
+  keyPlaceholder,
+  labelPrefix,
+  labelPlaceholder,
+  onAdd,
+  onChangeRow,
+  onRemoveRow,
+  pending,
+  removeTitle,
+  rows,
+  title,
+  titleId,
+}: ToolLabelEditorSectionProps) {
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="rounded-[10px] border border-border-default bg-subtle p-[13px]"
+    >
+      <header className="mb-2.5 flex flex-col items-start justify-between gap-2.5 sm:flex-row sm:items-center">
+        <div>
+          <h3 className="text-xs font-bold text-text-primary" id={titleId}>
+            {title}
+          </h3>
+          <p className="mt-[3px] text-xs text-text-tertiary">{description}</p>
+        </div>
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+          {extraAction}
+          <Button
+            disabled={pending}
+            onClick={onAdd}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Plus
+              aria-hidden="true"
+              focusable="false"
+              size={13}
+              strokeWidth={1.7}
+            />
+            {addLabel}
+          </Button>
+        </div>
+      </header>
+
+      {rows.length === 0 ? (
+        <p className={EMPTY_INLINE_CLASS}>{emptyText}</p>
+      ) : (
+        <div className="flex flex-col gap-[9px]">
+          {rows.map((row, index) => (
+            <div
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 rounded-[9px] border border-border-default bg-canvas p-2.5 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_auto] sm:items-end"
+              key={row.id}
+            >
+              <label
+                className={cn(FIELD_CLASS, "col-start-1 sm:col-start-auto")}
+                htmlFor={`${row.id}-key`}
+              >
+                <span>
+                  {keyLabelPrefix} {index + 1}
+                </span>
+                <input
+                  autoComplete="off"
+                  className={FIELD_INPUT_CLASS}
+                  id={`${row.id}-key`}
+                  onChange={(event) =>
+                    onChangeRow(row.id, { key: event.target.value })
+                  }
+                  placeholder={keyPlaceholder}
+                  spellCheck={false}
+                  value={row.key}
+                />
+              </label>
+              <label
+                className={cn(
+                  FIELD_CLASS,
+                  "col-start-1 row-start-2 sm:col-start-auto sm:row-start-auto",
+                )}
+                htmlFor={`${row.id}-label`}
+              >
+                <span>
+                  {labelPrefix} {index + 1}
+                </span>
+                <input
+                  autoComplete="off"
+                  className={FIELD_INPUT_CLASS}
+                  id={`${row.id}-label`}
+                  onChange={(event) =>
+                    onChangeRow(row.id, { label: event.target.value })
+                  }
+                  placeholder={labelPlaceholder}
+                  value={row.label}
+                />
+              </label>
+              <button
+                aria-label={`${removeTitle} ${row.key || index + 1}`}
+                className={cn(
+                  ICON_BUTTON_CLASS,
+                  ICON_BUTTON_DANGER_CLASS,
+                  "col-start-2 row-start-1 mt-[30px] sm:col-start-auto sm:row-start-auto sm:mt-0 sm:mb-[4.5px]",
+                )}
+                disabled={pending}
+                onClick={() => onRemoveRow(row.id)}
+                title={removeTitle}
+                type="button"
+              >
+                <Trash2
+                  aria-hidden="true"
+                  focusable="false"
+                  size={15}
+                  strokeWidth={1.7}
+                />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <FieldError error={error} id={errorId} />
+    </section>
+  );
 }
 
 export interface ToolMetadataDialogProps {
@@ -102,10 +264,49 @@ export function ToolMetadataDialog({
       ...current,
       parameter_labels: [
         ...current.parameter_labels,
-        ...missingSchemaParams.map((name) => newParameterLabelRow(name, "")),
+        ...missingSchemaParams.map((name) =>
+          newToolLabelRow("tool-param", name, ""),
+        ),
       ],
     }));
     setErrors((current) => ({ ...current, parameter_labels: undefined }));
+    setRequestError(null);
+  };
+
+  const addLabelRow = (field: "parameter_labels" | "result_labels") => {
+    const prefix = field === "parameter_labels" ? "tool-param" : "tool-result";
+    setValues((current) => ({
+      ...current,
+      [field]: [...current[field], newToolLabelRow(prefix)],
+    }));
+    setErrors((current) => ({ ...current, [field]: undefined }));
+    setRequestError(null);
+  };
+
+  const updateLabelRow = (
+    field: "parameter_labels" | "result_labels",
+    rowId: string,
+    patch: { key?: string; label?: string },
+  ) => {
+    setValues((current) => ({
+      ...current,
+      [field]: current[field].map((item) =>
+        item.id === rowId ? { ...item, ...patch } : item,
+      ),
+    }));
+    setErrors((current) => ({ ...current, [field]: undefined }));
+    setRequestError(null);
+  };
+
+  const removeLabelRow = (
+    field: "parameter_labels" | "result_labels",
+    rowId: string,
+  ) => {
+    setValues((current) => ({
+      ...current,
+      [field]: current[field].filter((item) => item.id !== rowId),
+    }));
+    setErrors((current) => ({ ...current, [field]: undefined }));
     setRequestError(null);
   };
 
@@ -290,184 +491,68 @@ export function ToolMetadataDialog({
             id={fieldId("summary-template-error")}
           />
 
-          <section
-            aria-labelledby={fieldId("param-labels-title")}
-            className="rounded-[10px] border border-border-default bg-subtle p-[13px]"
-          >
-            <header className="mb-2.5 flex flex-col items-start justify-between gap-2.5 sm:flex-row sm:items-center">
-              <div>
-                <h3
-                  className="text-xs font-bold text-text-primary"
-                  id={fieldId("param-labels-title")}
-                >
-                  参数中文标签
-                </h3>
-                <p className="mt-[3px] text-xs text-text-tertiary">
-                  将工具入参键名映射为审批卡片中的中文标签。
-                </p>
-              </div>
-              <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-                {schemaParamNames.length > 0 ? (
-                  <Button
-                    disabled={pending || missingSchemaParams.length === 0}
-                    onClick={handleImportSchemaParams}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    <Sparkles
-                      aria-hidden="true"
-                      focusable="false"
-                      size={13}
-                      strokeWidth={1.7}
-                    />
-                    一键带入 Schema 参数
-                  </Button>
-                ) : null}
+          <ToolLabelEditorSection
+            addLabel="添加参数"
+            description="将工具入参键名映射为审批卡片与步骤详情中的中文标签，并同时作为普通用户的入参展示白名单；仅已配置字段会向普通用户展示，未配置参数将自动隐藏。"
+            emptyText="暂未配置参数中文标签。可点击“添加参数”或从 Schema 一键带入。"
+            error={errors.parameter_labels}
+            errorId={fieldId("param-labels-error")}
+            extraAction={
+              schemaParamNames.length > 0 ? (
                 <Button
-                  disabled={pending}
-                  onClick={() =>
-                    setValues((current) => ({
-                      ...current,
-                      parameter_labels: [
-                        ...current.parameter_labels,
-                        newParameterLabelRow(),
-                      ],
-                    }))
-                  }
+                  disabled={pending || missingSchemaParams.length === 0}
+                  onClick={handleImportSchemaParams}
                   size="sm"
                   type="button"
                   variant="outline"
                 >
-                  <Plus
+                  <Sparkles
                     aria-hidden="true"
                     focusable="false"
                     size={13}
                     strokeWidth={1.7}
                   />
-                  添加参数
+                  一键带入 Schema 参数
                 </Button>
-              </div>
-            </header>
+              ) : null
+            }
+            keyLabelPrefix="参数键名"
+            keyPlaceholder="例如：payee"
+            labelPrefix="中文标签"
+            labelPlaceholder="例如：收款人"
+            onAdd={() => addLabelRow("parameter_labels")}
+            onChangeRow={(rowId, patch) =>
+              updateLabelRow("parameter_labels", rowId, patch)
+            }
+            onRemoveRow={(rowId) => removeLabelRow("parameter_labels", rowId)}
+            pending={pending}
+            removeTitle="移除参数"
+            rows={values.parameter_labels}
+            title="参数中文标签"
+            titleId={fieldId("param-labels-title")}
+          />
 
-            {values.parameter_labels.length === 0 ? (
-              <p className={EMPTY_INLINE_CLASS}>
-                暂未配置参数中文标签。可点击“添加参数”或从 Schema 一键带入。
-              </p>
-            ) : (
-              <div className="flex flex-col gap-[9px]">
-                {values.parameter_labels.map((row, index) => (
-                  <div
-                    className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 rounded-[9px] border border-border-default bg-canvas p-2.5 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_auto] sm:items-end"
-                    key={row.id}
-                  >
-                    <label
-                      className={cn(
-                        FIELD_CLASS,
-                        "col-start-1 sm:col-start-auto",
-                      )}
-                      htmlFor={`${row.id}-key`}
-                    >
-                      <span>参数键名 {index + 1}</span>
-                      <input
-                        autoComplete="off"
-                        className={FIELD_INPUT_CLASS}
-                        id={`${row.id}-key`}
-                        onChange={(event) => {
-                          const nextKey = event.target.value;
-                          setValues((current) => ({
-                            ...current,
-                            parameter_labels: current.parameter_labels.map(
-                              (item) =>
-                                item.id === row.id
-                                  ? { ...item, key: nextKey }
-                                  : item,
-                            ),
-                          }));
-                          setErrors((current) => ({
-                            ...current,
-                            parameter_labels: undefined,
-                          }));
-                          setRequestError(null);
-                        }}
-                        placeholder="例如：payee"
-                        spellCheck={false}
-                        value={row.key}
-                      />
-                    </label>
-                    <label
-                      className={cn(
-                        FIELD_CLASS,
-                        "col-start-1 row-start-2 sm:col-start-auto sm:row-start-auto",
-                      )}
-                      htmlFor={`${row.id}-label`}
-                    >
-                      <span>中文标签 {index + 1}</span>
-                      <input
-                        autoComplete="off"
-                        className={FIELD_INPUT_CLASS}
-                        id={`${row.id}-label`}
-                        onChange={(event) => {
-                          const nextLabel = event.target.value;
-                          setValues((current) => ({
-                            ...current,
-                            parameter_labels: current.parameter_labels.map(
-                              (item) =>
-                                item.id === row.id
-                                  ? { ...item, label: nextLabel }
-                                  : item,
-                            ),
-                          }));
-                          setErrors((current) => ({
-                            ...current,
-                            parameter_labels: undefined,
-                          }));
-                          setRequestError(null);
-                        }}
-                        placeholder="例如：收款人"
-                        value={row.label}
-                      />
-                    </label>
-                    <button
-                      aria-label={`移除参数 ${row.key || index + 1}`}
-                      className={cn(
-                        ICON_BUTTON_CLASS,
-                        ICON_BUTTON_DANGER_CLASS,
-                        "col-start-2 row-start-1 mt-[30px] sm:col-start-auto sm:row-start-auto sm:mt-0 sm:mb-[4.5px]",
-                      )}
-                      disabled={pending}
-                      onClick={() => {
-                        setValues((current) => ({
-                          ...current,
-                          parameter_labels: current.parameter_labels.filter(
-                            (item) => item.id !== row.id,
-                          ),
-                        }));
-                        setErrors((current) => ({
-                          ...current,
-                          parameter_labels: undefined,
-                        }));
-                        setRequestError(null);
-                      }}
-                      title="移除参数"
-                      type="button"
-                    >
-                      <Trash2
-                        aria-hidden="true"
-                        focusable="false"
-                        size={15}
-                        strokeWidth={1.7}
-                      />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <FieldError
-              error={errors.parameter_labels}
-              id={fieldId("param-labels-error")}
-            />
-          </section>
+          <ToolLabelEditorSection
+            addLabel="添加结果字段"
+            description="默认隐藏全部原始出参；仅已配置字段会从工具返回的结构化结果中按白名单向普通用户展示。"
+            emptyText="暂未配置可展示结果字段，默认隐藏全部原始出参。可点击“添加结果字段”配置出参白名单。"
+            error={errors.result_labels}
+            errorId={fieldId("result-labels-error")}
+            keyLabelPrefix="结果字段键名"
+            keyPlaceholder="例如：order_no"
+            labelPrefix="结果中文标签"
+            labelPlaceholder="例如：审批单号"
+            onAdd={() => addLabelRow("result_labels")}
+            onChangeRow={(rowId, patch) =>
+              updateLabelRow("result_labels", rowId, patch)
+            }
+            onRemoveRow={(rowId) => removeLabelRow("result_labels", rowId)}
+            pending={pending}
+            removeTitle="移除结果字段"
+            rows={values.result_labels}
+            title="可展示结果字段（出参白名单）"
+            titleId={fieldId("result-labels-title")}
+          />
         </fieldset>
 
         {pending ? (

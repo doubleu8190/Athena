@@ -2059,12 +2059,15 @@ def test_e2e_5_mcp_secret_patch_toggle_rediscover_batch_approval_and_business_ca
             assert card["display_name"] == "提交费用报销单"
             assert card["approval_summary"] == "为 财务员工 提交 1280 元报销单（科目：差旅费）"
             formatted_args = card["formatted_arguments"]
-            # 已映射字段优先展示中文标签，未映射字段 cost_center 优雅回退原字段名。
+            # 严格白名单模式：仅展示已映射中文标签字段，未映射字段 cost_center 计入隐藏计数不透出。
             labels_by_key = {item["key"]: (item["label"], item["value"]) for item in formatted_args}
-            assert labels_by_key["applicant"] == ("申请人", "财务员工")
-            assert labels_by_key["amount"] == ("报销金额", "1280")
-            assert labels_by_key["category"] == ("费用科目", "差旅费")
-            assert labels_by_key["cost_center"] == ("cost_center", "CC-2026")
+            assert labels_by_key == {
+                "applicant": ("申请人", "财务员工"),
+                "amount": ("报销金额", "1280"),
+                "category": ("费用科目", "差旅费"),
+            }
+            assert card["hidden_argument_count"] == 1
+            assert "cost_center" not in run_detail.text
 
             # 6. 停用 MCP Server 后工具即刻从用户目录与新 Run 快照下线。
             disable_resp = super_client.put(
@@ -2103,10 +2106,10 @@ def test_e2e_6_alembic_full_migration_chain_and_phase1_downgrade_sql() -> None:
 
     script_dir = ScriptDirectory.from_config(config)
     heads = script_dir.get_heads()
-    assert heads == ["0001_initial_schema"]
-    revision = script_dir.get_revision("0001_initial_schema")
+    assert heads == ["0002_add_mcp_tool_result_labels"]
+    revision = script_dir.get_revision("0002_add_mcp_tool_result_labels")
     assert revision is not None
-    assert revision.down_revision is None
+    assert revision.down_revision == "0001_initial_schema"
 
     upgrade_buffer = StringIO()
     with redirect_stdout(upgrade_buffer):
@@ -2127,13 +2130,14 @@ def test_e2e_6_alembic_full_migration_chain_and_phase1_downgrade_sql() -> None:
         "uq_mcp_servers_name_active",
         "model_snapshot_json",
         "parameter_labels_json",
+        "result_labels_json",
     )
     for token in required_tokens:
         assert token in upgrade_sql, f"base->head 离线迁移 SQL 缺少关键对象: {token}"
 
     full_downgrade_buffer = StringIO()
     with redirect_stdout(full_downgrade_buffer):
-        command.downgrade(config, "0001_initial_schema:base", sql=True)
+        command.downgrade(config, "0002_add_mcp_tool_result_labels:base", sql=True)
     full_downgrade_sql = full_downgrade_buffer.getvalue()
     assert "DROP TABLE user_work_profiles" in full_downgrade_sql
     assert "DROP TABLE departments" in full_downgrade_sql

@@ -280,6 +280,7 @@ function parsePendingSubagentApproval(value: unknown): PendingSubagentApproval |
     approval_summary: str(value, "approval_summary"),
     display_name: str(value, "display_name"),
     formatted_arguments: parseFilteredArray(value.formatted_arguments, parseFormattedToolArgument),
+    hidden_argument_count: numOr(value, "hidden_argument_count", 0),
     ordinal,
     safe_skill_projection: value.safe_skill_projection != null
       ? parseSafeSkillApprovalProjection(value.safe_skill_projection)

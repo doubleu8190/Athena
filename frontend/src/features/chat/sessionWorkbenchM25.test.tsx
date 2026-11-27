@@ -23,11 +23,12 @@ import { jsonResponse, renderApp } from "../../test/testUtils";
 import type { SessionFile } from "../files/model";
 import type { Session } from "../sessions/model";
 import { sessionKeys } from "../sessions/queryKeys";
-import type {
-  Run,
-  RunToolCallDetail,
-  RunToolCallSummary,
-  SafeSkillApprovalProjection,
+import {
+  resolveToolDisplayName,
+  type Run,
+  type RunToolCallDetail,
+  type RunToolCallSummary,
+  type SafeSkillApprovalProjection,
 } from "./model";
 import { chatKeys } from "./queryKeys";
 
@@ -678,6 +679,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
             { key: "category", label: "费用科目", value: "差旅费" },
             { key: "cost_center", label: "cost_center", value: "CC-2026" },
           ],
+          hidden_argument_count: 0,
           model_name: "erp_expense_mcp__submit_expense",
           ordinal: 1,
           requested_at: "2026-11-20T09:20:00Z",
@@ -690,6 +692,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           call_id: "call-skill-blocked",
           display_name: null,
           formatted_arguments: [],
+          hidden_argument_count: 0,
           model_name: "skill_execute",
           ordinal: 2,
           requested_at: "2026-11-20T09:20:01Z",
@@ -706,6 +709,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           formatted_arguments: [
             { key: "receiver", label: "接收人", value: "财务主管" },
           ],
+          hidden_argument_count: 0,
           model_name: "feishu_mcp__send_notice",
           ordinal: 1,
           requested_at: "2026-11-20T09:20:02Z",
@@ -747,7 +751,8 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
       runs: () => [currentRun],
       toolCallDetail: (callId) =>
         makeToolCallDetail({
-          arguments: { raw_secret: "should_never_fetch" },
+          formatted_arguments: [],
+          hidden_argument_count: 1,
           id: callId,
           ordinal: 1,
           tool_call_id: callId,
@@ -792,7 +797,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
 
     // 2. 验证 Skill 审批遵循 SafeSkillProjection 与 can_approve=false 阻断
     const skillCard = within(mainApprovalRegion).getByRole("article", {
-      name: "操作确认：skill_execute",
+      name: "操作确认：执行技能脚本",
     });
     expect(within(skillCard).getByText("预算导出技能")).toBeInTheDocument();
     expect(
@@ -1089,6 +1094,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           call_id: "call-skill-no-proj",
           display_name: "外部自动化脚本",
           formatted_arguments: [],
+          hidden_argument_count: 0,
           model_name: "skill_execute",
           ordinal: 1,
           requested_at: "2026-11-20T09:20:00Z",
@@ -1101,6 +1107,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           call_id: "call-skill-blocked-proj",
           display_name: "财务凭证脚本",
           formatted_arguments: [],
+          hidden_argument_count: 0,
           model_name: "skill_execute",
           ordinal: 2,
           requested_at: "2026-11-20T09:20:01Z",
@@ -1113,6 +1120,7 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
           call_id: "call-mcp-no-args",
           display_name: "同步组织状态",
           formatted_arguments: [],
+          hidden_argument_count: 0,
           model_name: "org_sync_status",
           ordinal: 3,
           requested_at: "2026-11-20T09:20:02Z",
@@ -1330,5 +1338,311 @@ describe("M2.5 吸底沉浸式对话工作台（下）", () => {
     expect(
       screen.queryByRole("button", { name: "重新编辑发送" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("执行进度非 Skill 工具仅渲染安全投影（摘要/白名单参数/隐藏参数提示/结果白名单/状态徽章），无别名 MCP 不暴露 mcp__xxxx", async () => {
+    const completedRun = makeRun({
+      id: "run-safe-tool-projection",
+      session_id: "session-m25",
+      status: "completed",
+    });
+    const calls: RunToolCallSummary[] = [
+      makeToolCall({
+        display_name: null,
+        duration_ms: 350,
+        id: "tc-mcp-anon",
+        model_name: "mcp__secret_erp_create_order",
+        ordinal: 1,
+        status: "completed",
+        tool_call_id: "call-mcp-anon",
+        tool_id: "tool-mcp-anon",
+        tool_kind: "mcp",
+      }),
+      makeToolCall({
+        display_name: "提交退款审批",
+        duration_ms: 180,
+        id: "tc-mcp-cancelled",
+        model_name: "mcp__refund_apply",
+        ordinal: 2,
+        status: "cancelled",
+        tool_call_id: "call-mcp-cancelled",
+        tool_id: "tool-mcp-cancelled",
+        tool_kind: "mcp",
+      }),
+      makeToolCall({
+        display_name: "查询外部额度",
+        duration_ms: 90,
+        id: "tc-mcp-unknown",
+        model_name: "mcp__quota_query",
+        ordinal: 3,
+        status: "unknown",
+        tool_call_id: "call-mcp-unknown",
+        tool_id: "tool-mcp-unknown",
+        tool_kind: "mcp",
+      }),
+    ];
+
+    installM25Fetch({
+      runs: () => [completedRun],
+      toolCallDetail: (callId) => {
+        if (callId === "tc-mcp-anon") {
+          return makeToolCallDetail({
+            business_summary: "已为当前员工提交差旅申请单",
+            display_name: null,
+            formatted_arguments: [
+              { key: "city", label: "出差城市", value: "杭州" },
+            ],
+            hidden_argument_count: 2,
+            id: "tc-mcp-anon",
+            model_name: "mcp__secret_erp_create_order",
+            ordinal: 1,
+            outcome: {
+              formatted_results: [
+                { key: "order_no", label: "申请单号", value: "TR-2026-088" },
+              ],
+              status: "ok",
+              summary: "申请单已成功创建并进入审批流程。",
+              truncated: true,
+            },
+            tool_call_id: "call-mcp-anon",
+            tool_kind: "mcp",
+            truncated: false,
+          });
+        }
+        if (callId === "tc-mcp-cancelled") {
+          return makeToolCallDetail({
+            business_summary: null,
+            display_name: "提交退款审批",
+            formatted_arguments: [],
+            hidden_argument_count: 0,
+            id: "tc-mcp-cancelled",
+            model_name: "mcp__refund_apply",
+            ordinal: 2,
+            outcome: {
+              formatted_results: [],
+              status: "cancelled",
+              summary: "用户已取消本次退款操作。",
+              truncated: false,
+            },
+            status: "cancelled",
+            tool_call_id: "call-mcp-cancelled",
+            tool_kind: "mcp",
+          });
+        }
+        return makeToolCallDetail({
+          business_summary: null,
+          display_name: "查询外部额度",
+          formatted_arguments: [],
+          hidden_argument_count: 1,
+          id: "tc-mcp-unknown",
+          model_name: "mcp__quota_query",
+          ordinal: 3,
+          outcome: {
+            formatted_results: [],
+            status: "unknown",
+            summary: "外部系统响应超时，结果未知。",
+            truncated: false,
+          },
+          status: "unknown",
+          tool_call_id: "call-mcp-unknown",
+          tool_kind: "mcp",
+        });
+      },
+      toolCalls: () => calls,
+    });
+    const user = userEvent.setup();
+
+    renderApp("/chat/session-m25");
+
+    const progress = await screen.findByRole("region", { name: "执行进度" });
+    // 收起摘要与步骤标题均不得暴露 mcp__secret_erp_create_order
+    expect(
+      screen.queryByText(/mcp__secret_erp_create_order/),
+    ).not.toBeInTheDocument();
+    expect(
+      await within(progress).findByText(
+        /已完成 3 个步骤 · 业务工具操作、提交退款审批、查询外部额度/,
+      ),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(progress).getByRole("button", { name: /已完成 3 个步骤/ }),
+    );
+    const stepList = within(progress).getByRole("list", {
+      name: "工具调用步骤",
+    });
+
+    // 1. 无别名 MCP 工具步骤展开后展示安全投影
+    await user.click(
+      within(stepList).getByRole("button", { name: /业务工具操作/ }),
+    );
+    expect(
+      await within(stepList).findByText("已为当前员工提交差旅申请单"),
+    ).toBeInTheDocument();
+    expect(within(stepList).getByText("关键参数")).toBeInTheDocument();
+    expect(within(stepList).getByText("出差城市")).toBeInTheDocument();
+    expect(within(stepList).getByText("杭州")).toBeInTheDocument();
+    expect(
+      within(stepList).getByText("另有 2 个内部参数未向普通用户展示。"),
+    ).toBeInTheDocument();
+    expect(within(stepList).getByText("执行成功")).toBeInTheDocument();
+    expect(within(stepList).getByText("部分结果已省略展示")).toBeInTheDocument();
+    expect(
+      within(stepList).getByText("申请单已成功创建并进入审批流程。"),
+    ).toBeInTheDocument();
+    expect(within(stepList).getByText("申请单号")).toBeInTheDocument();
+    expect(within(stepList).getByText("TR-2026-088")).toBeInTheDocument();
+
+    // 2. 空参数且无隐藏参数时显示「无额外可展示参数。」及「已取消」结果徽章
+    await user.click(
+      within(stepList).getByRole("button", { name: /提交退款审批/ }),
+    );
+    expect(
+      await within(stepList).findByText("无额外可展示参数。"),
+    ).toBeInTheDocument();
+    expect(
+      within(stepList).getByText("用户已取消本次退款操作。"),
+    ).toBeInTheDocument();
+
+    // 3. unknown 状态徽章渲染「结果未知」，仅有隐藏参数时不显示「无额外可展示参数。」
+    await user.click(
+      within(stepList).getByRole("button", { name: /查询外部额度/ }),
+    );
+    expect(await within(stepList).findByText("结果未知")).toBeInTheDocument();
+    expect(
+      within(stepList).getByText("另有 1 个内部参数未向普通用户展示。"),
+    ).toBeInTheDocument();
+  });
+
+  it("审批卡片对无别名 MCP 兜底显示「业务工具操作」并展示 hidden_argument_count 提示", async () => {
+    const approvalRun = makeRun({
+      id: "run-hidden-arg-approval",
+      pending_approvals: [
+        {
+          approval_summary: "将执行外部账务核对操作",
+          batch_message_id: "batch-hidden-1",
+          call_id: "call-mcp-hidden-1",
+          display_name: null,
+          formatted_arguments: [
+            { key: "month", label: "核算月份", value: "2026-11" },
+          ],
+          hidden_argument_count: 3,
+          model_name: "mcp__internal_ledger_reconcile",
+          ordinal: 1,
+          requested_at: "2026-11-20T09:30:00Z",
+          safe_skill_projection: null,
+          tool_kind: "mcp",
+        },
+        {
+          approval_summary: "将触发无白名单参数的内部同步",
+          batch_message_id: "batch-hidden-1",
+          call_id: "call-mcp-hidden-2",
+          display_name: "同步凭证状态",
+          formatted_arguments: [],
+          hidden_argument_count: 2,
+          model_name: "mcp__internal_sync_voucher",
+          ordinal: 2,
+          requested_at: "2026-11-20T09:30:01Z",
+          safe_skill_projection: null,
+          tool_kind: "mcp",
+        },
+      ],
+      session_id: "session-m25",
+      status: "waiting_for_approval",
+    });
+
+    installM25Fetch({
+      runs: () => [approvalRun],
+    });
+
+    renderApp("/chat/session-m25");
+
+    const region = await screen.findByRole("region", {
+      name: "等待工具审批",
+    });
+    // 无别名 MCP 审批卡绝不暴露 mcp__internal_ledger_reconcile
+    expect(
+      screen.queryByText(/mcp__internal_ledger_reconcile/),
+    ).not.toBeInTheDocument();
+    const anonCard = within(region).getByRole("article", {
+      name: "操作确认：业务工具操作",
+    });
+    expect(within(anonCard).getByText("核算月份")).toBeInTheDocument();
+    expect(within(anonCard).getByText("2026-11")).toBeInTheDocument();
+    expect(
+      within(anonCard).getByText("另有 3 个内部参数未向普通用户展示。"),
+    ).toBeInTheDocument();
+
+    const hiddenOnlyCard = within(region).getByRole("article", {
+      name: "操作确认：同步凭证状态",
+    });
+    expect(
+      within(hiddenOnlyCard).getByText("另有 2 个内部参数未向普通用户展示。"),
+    ).toBeInTheDocument();
+  });
+
+  it("resolveToolDisplayName 纵深防御拒绝无效 mcp__/原名别名并完整对齐内置中文映射", () => {
+    // 1. 即使历史或异常载荷将 display_name 设为 mcp__xxxx 或等于 model_name，也不得穿透展示底层名称
+    expect(
+      resolveToolDisplayName({
+        display_name: "mcp__secret_erp_call",
+        model_name: "mcp__secret_erp_call",
+        tool_kind: "mcp",
+      }),
+    ).toBe("业务工具操作");
+    expect(
+      resolveToolDisplayName(
+        {
+          display_name: "MCP__UPPER_SECRET",
+          model_name: "opaque_tool",
+          tool_kind: "mcp",
+        },
+        "mcp__fallback_secret",
+      ),
+    ).toBe("业务工具操作");
+    expect(
+      resolveToolDisplayName({
+        display_name: "session_file_read",
+        model_name: "session_file_read",
+        tool_kind: "builtin",
+      }),
+    ).toBe("读取会话文件");
+
+    // 2. 与后端 _BUILTIN_DISPLAY_NAMES 完全对齐的内置映射
+    expect(
+      resolveToolDisplayName({
+        display_name: null,
+        model_name: "request_user_input",
+        tool_id: "builtin_request_user_input",
+      }),
+    ).toBe("请求补充信息");
+    expect(
+      resolveToolDisplayName({
+        display_name: null,
+        model_name: "session_file_list",
+        tool_id: "builtin_session_file_list",
+      }),
+    ).toBe("查看会话文件");
+    expect(
+      resolveToolDisplayName({
+        display_name: null,
+        model_name: "session_file_read",
+        tool_id: "builtin_session_file_read",
+      }),
+    ).toBe("读取会话文件");
+    expect(
+      resolveToolDisplayName({
+        display_name: null,
+        model_name: "skill_load",
+        tool_id: "builtin_skill_load",
+      }),
+    ).toBe("加载技能指南");
+    expect(
+      resolveToolDisplayName({
+        display_name: null,
+        model_name: "skill_read_resource",
+        tool_id: "builtin_skill_read_resource",
+      }),
+    ).toBe("读取技能资源");
   });
 });

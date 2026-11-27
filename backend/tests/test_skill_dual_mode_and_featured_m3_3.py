@@ -376,10 +376,10 @@ def test_alembic_initial_schema_skill_dual_mode_and_featured_constraints() -> No
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(pg_cfg)
-    assert script.get_heads() == ["0001_initial_schema"]
-    rev = script.get_revision("0001_initial_schema")
+    assert script.get_heads() == ["0002_add_mcp_tool_result_labels"]
+    rev = script.get_revision("0002_add_mcp_tool_result_labels")
     assert rev is not None
-    assert rev.down_revision is None
+    assert rev.down_revision == "0001_initial_schema"
 
     # 1. PostgreSQL 离线 upgrade / downgrade SQL 校验
     up_buf = StringIO()
@@ -394,7 +394,7 @@ def test_alembic_initial_schema_skill_dual_mode_and_featured_constraints() -> No
 
     down_buf = StringIO()
     with redirect_stdout(down_buf):
-        command.downgrade(pg_cfg, "0001_initial_schema:base", sql=True)
+        command.downgrade(pg_cfg, "0002_add_mcp_tool_result_labels:base", sql=True)
     down_sql = down_buf.getvalue()
     assert "DROP TABLE skills" in down_sql
 

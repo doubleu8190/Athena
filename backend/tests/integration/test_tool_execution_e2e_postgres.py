@@ -567,9 +567,16 @@ def test_mcp_builtin_loop_queries_events_and_unknown_retry_api(
                 assert first_page.status_code == 200
                 assert first_page.json()["next_after_ordinal"] == 2
                 assert second_page.json()["items"][0]["model_name"] == "knowledge_search"
+                assert second_page.json()["items"][0]["display_name"] == "查阅企业知识库"
                 assert details.status_code == 200
-                assert details.json()["arguments"] == {"query": "remote"}
-                assert details.json()["outcome"]["code"] == "mcp_tool_completed"
+                detail_json = details.json()
+                assert "arguments" not in detail_json
+                assert detail_json["formatted_arguments"] == []
+                assert detail_json["hidden_argument_count"] == 1
+                assert detail_json["outcome"]["status"] == "ok"
+                assert detail_json["outcome"]["summary"] == "已完成业务工具调用。"
+                assert detail_json["outcome"]["formatted_results"] == []
+                assert "remote" not in details.text
                 assert "server_e2e" not in details.text
                 event_types = [item["type"] for item in events.json()["items"]]
                 assert event_types.count("tool_call_started") == 3

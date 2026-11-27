@@ -52,10 +52,11 @@ class RuntimeToolDefinition(BaseModel):
     input_schema: dict[str, Any]
     source: RuntimeToolSource
     requires_approval: bool = False
-    # 冻结到 tool_snapshot 的可选业务展示元信息，支持历史待审批在 MCP 变更后优雅回退。
+    # 冻结到 tool_snapshot 的可选业务展示元信息，支持历史待审批与调用详情在 MCP 变更后优雅回退。
     display_name: str | None = None
     approval_summary_template: str | None = None
     parameter_labels: dict[str, str] = Field(default_factory=dict)
+    result_labels: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("description")
     @classmethod

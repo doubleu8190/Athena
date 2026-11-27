@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from api.dto.message import ArtifactFileRefResponse
 from api.dto.run import (
+    FormattedToolArgumentResponse,
     PendingSubagentApprovalResponse,
     PendingSubagentInputResponse,
     RunEventListResponse,
@@ -34,45 +35,17 @@ from domain.run.model import (
     RunStatus,
     SubagentTaskSummary,
 )
-from domain.skill import (
-    SKILL_EXECUTE_TOOL_ID,
-    SKILL_LOAD_TOOL_ID,
-    SKILL_READ_RESOURCE_TOOL_ID,
-    SafeSkillApprovalProjection,
-)
+from domain.skill import SafeSkillApprovalProjection
 from domain.tool import (
     PendingToolApproval,
     RunToolCallDetails,
     RunToolCallPage,
     RunToolCallRecord,
+    SafeToolCallProjection,
+    build_safe_tool_call_projection,
 )
 
 RETRY_WARNING = "整个任务将从头执行，可能重复此前已成功的操作；原操作结果未知时也可能已生效。"
-
-_SKILL_TOOL_IDS = frozenset(
-    {
-        SKILL_EXECUTE_TOOL_ID,
-        SKILL_LOAD_TOOL_ID,
-        SKILL_READ_RESOURCE_TOOL_ID,
-    }
-)
-_SKILL_MODEL_NAMES = frozenset(
-    {
-        "skill_execute",
-        "skill_load",
-        "skill_read_resource",
-    }
-)
-
-
-def _is_skill_call(tool_id: str | None, model_name: str) -> bool:
-    """工具身份缺失或冲突时，仍按归一化 modelName 识别 Skill 调用。"""
-    if tool_id in _SKILL_TOOL_IDS:
-        return True
-    normalized = model_name.strip().lower()
-    return normalized in _SKILL_MODEL_NAMES or any(
-        normalized.endswith(f"_{name}") for name in _SKILL_MODEL_NAMES
-    )
 
 
 def safe_skill_projection_to_response(
@@ -210,6 +183,7 @@ def tool_call_summary_to_response(record: RunToolCallRecord) -> RunToolCallSumma
         tool_id=record.tool_id,
         tool_kind=record.tool_kind,
         model_name=record.model_name,
+        display_name=record.display_name,
         status=record.status,
         started_at=record.started_at,
         finished_at=record.finished_at,
@@ -230,25 +204,59 @@ def tool_call_to_response(details: RunToolCallDetails) -> RunToolCallDetailRespo
     summary = tool_call_summary_to_response(details.record)
     outcome = details.record.outcome
     safe_projection = details.safe_skill_projection
-    # Skill 调用即使投影损坏、tool_id 缺失或与 modelName 分叉也必须统一脱敏，
-    # 不能因数据库旧记录缺少新字段而回退到裸参数和内部结果数据。
-    is_skill_call = _is_skill_call(
-        details.record.tool_id,
-        details.record.model_name,
+    # 若上游（如单测直接构造 RunToolCallDetails）未预填安全投影，则通过统一纯函数兜底生成，
+    # 严禁将任何原始入参、outcome.data 或原始 MCP outcome.message 透出到 HTTP 响应。
+    has_prefilled_projection = (
+        details.display_name is not None
+        or details.business_summary is not None
+        or bool(details.formatted_arguments)
+        or details.hidden_argument_count > 0
+        or details.safe_outcome_summary is not None
+        or bool(details.formatted_results)
     )
+    if not has_prefilled_projection or (
+        outcome is not None and details.safe_outcome_summary is None
+    ):
+        projection = build_safe_tool_call_projection(
+            tool_id=details.record.tool_id,
+            tool_kind=details.record.tool_kind,
+            model_name=details.record.model_name,
+            arguments=details.arguments,
+            outcome=outcome,
+            safe_error_code=details.record.safe_error_code,
+            safe_skill_projection=safe_projection or details.record.safe_skill_projection,
+            meta_display_name=details.display_name or details.record.display_name,
+        )
+    else:
+        projection = SafeToolCallProjection(
+            display_name=details.display_name or details.record.display_name,
+            business_summary=details.business_summary,
+            formatted_arguments=details.formatted_arguments,
+            hidden_argument_count=details.hidden_argument_count,
+            safe_outcome_summary=details.safe_outcome_summary,
+            formatted_results=details.formatted_results,
+        )
+    summary_data = summary.model_dump()
+    summary_data["display_name"] = projection.display_name
     return RunToolCallDetailResponse(
-        **summary.model_dump(),
-        arguments=None if is_skill_call else details.arguments,
+        **summary_data,
+        business_summary=projection.business_summary,
+        formatted_arguments=[
+            FormattedToolArgumentResponse.model_validate(item)
+            for item in projection.formatted_arguments
+        ],
+        hidden_argument_count=projection.hidden_argument_count,
         outcome=(
             None
             if outcome is None
             else RunToolOutcomeResponse(
                 status=outcome.status,
-                code=outcome.code,
-                message=outcome.message,
-                data={} if is_skill_call else outcome.data,
+                summary=projection.safe_outcome_summary or "",
+                formatted_results=[
+                    FormattedToolArgumentResponse.model_validate(item)
+                    for item in projection.formatted_results
+                ],
                 truncated=outcome.truncated,
-                cleanup_error_code=outcome.cleanup_error_code,
             )
         ),
         artifacts=[

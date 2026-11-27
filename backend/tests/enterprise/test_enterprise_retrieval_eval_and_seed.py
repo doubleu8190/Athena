@@ -744,6 +744,7 @@ class _SimulatedAthenaBackend:
                         "display_name": None,
                         "approval_summary_template": None,
                         "parameter_labels": {},
+                        "result_labels": {},
                     }
                 return httpx.Response(201, json=server)
 
@@ -784,6 +785,7 @@ class _SimulatedAthenaBackend:
                 "display_name",
                 "approval_summary_template",
                 "parameter_labels",
+                "result_labels",
             ):
                 if key in body:
                     tool[key] = body[key]
@@ -793,7 +795,11 @@ class _SimulatedAthenaBackend:
             page = int(request.url.params.get("page", "1"))
             page_size = int(request.url.params.get("page_size", "20"))
             visible_tools = [
-                t
+                {
+                    "tool_id": t["tool_id"],
+                    "display_name": t["display_name"],
+                    "description": t["description"],
+                }
                 for t in self.mcp_tools.values()
                 if self._can_read_resource(actor, self.mcp_servers[t["server_id"]])
             ]

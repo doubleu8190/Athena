@@ -227,6 +227,7 @@ async function installWorkbenchFixtures(
                 { key: "destination", label: "出差城市", value: "上海市" },
                 { key: "budget", label: "预计费用", value: "4,800 元" },
               ],
+              hidden_argument_count: 0,
               model_name: "mcp__oa_create_travel_request",
               ordinal: 1,
               requested_at: NOW,

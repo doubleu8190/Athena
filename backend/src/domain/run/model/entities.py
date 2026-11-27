@@ -610,6 +610,7 @@ class PendingSubagentApproval(BaseModel):
     display_name: str | None = None
     approval_summary: str | None = None
     formatted_arguments: tuple[FormattedToolArgument, ...] = ()
+    hidden_argument_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

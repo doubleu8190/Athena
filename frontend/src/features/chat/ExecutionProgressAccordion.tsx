@@ -36,47 +36,15 @@ import {
   isActiveRunStatus,
   isSkillTool,
   isTerminalRunStatus,
+  resolveToolDisplayName,
+  type FormattedToolArgument,
   type Run,
   type RunStatus,
   type RunToolCallSummary,
   type SubagentTaskSummary,
+  type ToolOutcomeStatus,
 } from "./model";
 import { SafeSkillProjection } from "./SafeSkillProjection";
-
-const BUILTIN_TOOL_DISPLAY_NAMES: Record<string, string> = {
-  ask_user_input: "请求补充信息",
-  builtin_ask_user_input: "请求补充信息",
-  builtin_dispatch_subagents: "协调协作助手",
-  builtin_knowledge_search: "查阅企业知识库",
-  builtin_save_user_memory: "记录个人工作偏好",
-  builtin_skill_execute: "执行技能脚本",
-  builtin_skill_load: "加载技能说明",
-  builtin_skill_read_resource: "读取技能资料",
-  dispatch_subagents: "协调协作助手",
-  knowledge_search: "查阅企业知识库",
-  save_user_memory: "记录个人工作偏好",
-  skill_execute: "执行技能脚本",
-  skill_load: "加载技能说明",
-  skill_read_resource: "读取技能资料",
-};
-
-function resolveToolDisplayName(
-  call: Pick<RunToolCallSummary, "display_name" | "model_name" | "tool_id">,
-  approvalDisplayName?: string | null,
-): string {
-  const explicit = call.display_name?.trim() || approvalDisplayName?.trim();
-  if (explicit) {
-    return explicit;
-  }
-  if (call.tool_id && Object.hasOwn(BUILTIN_TOOL_DISPLAY_NAMES, call.tool_id)) {
-    return BUILTIN_TOOL_DISPLAY_NAMES[call.tool_id];
-  }
-  const normalized = call.model_name.toLowerCase();
-  if (Object.hasOwn(BUILTIN_TOOL_DISPLAY_NAMES, normalized)) {
-    return BUILTIN_TOOL_DISPLAY_NAMES[normalized];
-  }
-  return call.model_name;
-}
 
 function formatDurationMs(durationMs: number | null): string | null {
   if (durationMs === null || durationMs < 0 || Number.isNaN(durationMs)) {
@@ -188,36 +156,39 @@ function interactionStatusLabel(status: string): string {
   }
 }
 
-/** 将普通工具的结构化对象格式化为可读键值项，不直接向业务员工堆砌裸 JSON。 */
-function formatReadableEntries(
-  record: Record<string, unknown> | null | undefined,
-): Array<{ key: string; value: string }> {
-  if (!record) {
-    return [];
+function outcomeStatusBadge(status: ToolOutcomeStatus): {
+  label: string;
+  variant: "danger" | "neutral" | "success" | "warning";
+} {
+  switch (status) {
+    case "ok":
+      return { label: "执行成功", variant: "success" };
+    case "error":
+      return { label: "执行失败", variant: "danger" };
+    case "cancelled":
+      return { label: "已取消", variant: "neutral" };
+    case "unknown":
+      return { label: "结果未知", variant: "warning" };
   }
-  return Object.entries(record).map(([key, raw]) => {
-    if (raw === null || raw === undefined) {
-      return { key, value: "—" };
-    }
-    if (typeof raw === "boolean") {
-      return { key, value: raw ? "是" : "否" };
-    }
-    if (typeof raw === "string" || typeof raw === "number") {
-      return { key, value: String(raw) };
-    }
-    if (
-      Array.isArray(raw) &&
-      raw.every(
-        (item) =>
-          typeof item === "string" ||
-          typeof item === "number" ||
-          typeof item === "boolean",
-      )
-    ) {
-      return { key, value: raw.join("、") };
-    }
-    return { key, value: JSON.stringify(raw) };
-  });
+}
+
+/** 渲染后端白名单格式化后的结构化键值项（入参与出参共用）。 */
+function FormattedKeyValueGrid({ items }: { items: FormattedToolArgument[] }) {
+  return (
+    <dl className="grid grid-cols-1 gap-x-5 gap-y-1.5 rounded-lg border border-border-subtle bg-canvas p-2.5 sm:grid-cols-2">
+      {items.map((item) => (
+        <div
+          className="grid min-w-0 grid-cols-[minmax(68px,auto)_1fr] items-baseline gap-2"
+          key={item.key}
+        >
+          <dt className="text-text-secondary">{item.label}</dt>
+          <dd className="min-w-0 break-words font-medium text-text-primary">
+            {item.value}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
 }
 
 function StepArtifactList({
@@ -322,8 +293,15 @@ function ToolStepRow({
   const displayName = resolveToolDisplayName(call, approvalDisplayName);
   const statusInfo = toolStatusBadge(call.status);
   const durationLabel = formatDurationMs(call.duration_ms);
-  const argEntries = formatReadableEntries(details.data?.arguments);
-  const outcomeDataEntries = formatReadableEntries(details.data?.outcome?.data);
+  const businessSummary = details.data?.business_summary?.trim() || null;
+  const formattedArguments = details.data?.formatted_arguments ?? [];
+  const hiddenArgumentCount = details.data?.hidden_argument_count ?? 0;
+  const outcome = details.data?.outcome ?? null;
+  const outcomeStatusInfo = outcome
+    ? outcomeStatusBadge(outcome.status)
+    : null;
+  const outcomeSummary = outcome?.summary.trim() || null;
+  const formattedResults = outcome?.formatted_results ?? [];
 
   return (
     <li className="rounded-lg border border-border-subtle bg-canvas">
@@ -404,71 +382,55 @@ function ToolStepRow({
             </>
           ) : details.data ? (
             <>
+              {businessSummary ? (
+                <p className="leading-relaxed text-text-primary">
+                  {businessSummary}
+                </p>
+              ) : null}
+
               <div className="space-y-1.5">
                 <div className="text-[11px] font-semibold text-text-secondary">
-                  调用参数
+                  关键参数
                 </div>
-                {argEntries.length === 0 ? (
-                  <p className="text-text-tertiary">无额外参数。</p>
+                {formattedArguments.length === 0 &&
+                hiddenArgumentCount === 0 ? (
+                  <p className="text-text-tertiary">无额外可展示参数。</p>
                 ) : (
-                  <dl className="grid grid-cols-1 gap-x-5 gap-y-1.5 rounded-lg border border-border-subtle bg-canvas p-2.5 sm:grid-cols-2">
-                    {argEntries.map((entry) => (
-                      <div
-                        className="grid min-w-0 grid-cols-[minmax(68px,auto)_1fr] items-baseline gap-2"
-                        key={entry.key}
-                      >
-                        <dt className="text-text-secondary">{entry.key}</dt>
-                        <dd className="min-w-0 break-words font-medium text-text-primary">
-                          {entry.value}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
+                  <>
+                    {formattedArguments.length > 0 ? (
+                      <FormattedKeyValueGrid items={formattedArguments} />
+                    ) : null}
+                    {hiddenArgumentCount > 0 ? (
+                      <p className="text-[11px] text-text-tertiary">
+                        另有 {hiddenArgumentCount} 个内部参数未向普通用户展示。
+                      </p>
+                    ) : null}
+                  </>
                 )}
               </div>
 
-              {details.data.outcome ? (
+              {outcome && outcomeStatusInfo ? (
                 <div className="space-y-1.5 border-t border-border-subtle pt-2.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[11px] font-semibold text-text-secondary">
                       执行结果
                     </span>
-                    <Badge
-                      variant={
-                        details.data.outcome.status === "ok"
-                          ? "success"
-                          : "warning"
-                      }
-                    >
-                      {details.data.outcome.status === "ok"
-                        ? "执行成功"
-                        : "执行异常"}
+                    <Badge variant={outcomeStatusInfo.variant}>
+                      {outcomeStatusInfo.label}
                     </Badge>
-                    {details.data.truncated || details.data.outcome.truncated ? (
+                    {details.data.truncated || outcome.truncated ? (
                       <span className="text-[11px] text-text-tertiary">
                         部分结果已省略展示
                       </span>
                     ) : null}
                   </div>
-                  {details.data.outcome.message ? (
+                  {outcomeSummary ? (
                     <p className="leading-relaxed text-text-primary">
-                      {details.data.outcome.message}
+                      {outcomeSummary}
                     </p>
                   ) : null}
-                  {outcomeDataEntries.length > 0 ? (
-                    <dl className="grid grid-cols-1 gap-x-5 gap-y-1.5 rounded-lg border border-border-subtle bg-canvas p-2.5 sm:grid-cols-2">
-                      {outcomeDataEntries.map((entry) => (
-                        <div
-                          className="grid min-w-0 grid-cols-[minmax(68px,auto)_1fr] items-baseline gap-2"
-                          key={entry.key}
-                        >
-                          <dt className="text-text-secondary">{entry.key}</dt>
-                          <dd className="min-w-0 break-words font-medium text-text-primary">
-                            {entry.value}
-                          </dd>
-                        </div>
-                      ))}
-                    </dl>
+                  {formattedResults.length > 0 ? (
+                    <FormattedKeyValueGrid items={formattedResults} />
                   ) : null}
                 </div>
               ) : (
@@ -789,13 +751,7 @@ export function ExecutionProgressAccordion({
       const firstApproval =
         run.pending_approvals[0] ?? run.pending_subagent_approvals?.[0];
       const approvalName = firstApproval
-        ? resolveToolDisplayName(
-            {
-              model_name: firstApproval.model_name,
-              tool_id: null,
-            },
-            firstApproval.display_name,
-          )
+        ? resolveToolDisplayName(firstApproval)
         : null;
       summaryText = approvalName
         ? `等待确认操作「${approvalName}」`

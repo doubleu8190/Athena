@@ -102,6 +102,7 @@ export function makeAdminTool(
     parameter_labels: {},
     remote_name: "knowledge_search",
     requires_approval: false,
+    result_labels: {},
     server_id: "mcp-1",
     tool_id,
     ...rest,

@@ -272,6 +272,7 @@ describe("会话工作台初始加载与历史", () => {
       status: "running",
     });
     const toolCall = makeToolCall({
+      display_name: "联网检索",
       id: "call-record-1",
       ordinal: 1,
       tool_call_id: "model-call-1",
@@ -310,7 +311,7 @@ describe("会话工作台初始加载与历史", () => {
     await user.click(
       await within(progress).findByRole("button", { name: /展开/ }),
     );
-    expect(await within(progress).findByText("web_search")).toBeInTheDocument();
+    expect(await within(progress).findByText("联网检索")).toBeInTheDocument();
     expect(FakeSseStream.instances).toHaveLength(1);
     expect(FakeSseStream.instances[0].url).toBe(
       `/api/v1/sessions/${SESSION.id}/runs/run-1/stream`,
@@ -601,6 +602,7 @@ describe("Run 命令与真实状态", () => {
       call_id: "call-1",
       display_name: null,
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "approval_tool",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:02Z",
@@ -2608,10 +2610,11 @@ describe("审批与失败重试", () => {
       approval_summary: "即将更新 CRM 客户记录",
       batch_message_id: "batch-1",
       call_id: "call-record-1",
-      display_name: null,
+      display_name: "更新 CRM 客户记录",
       formatted_arguments: [
         { key: "query", label: "查询条件", value: "真实参数" },
       ],
+      hidden_argument_count: 0,
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -2622,8 +2625,9 @@ describe("审批与失败重试", () => {
       approval_summary: null,
       batch_message_id: "batch-1",
       call_id: "call-record-2",
-      display_name: null,
+      display_name: "发送通知邮件",
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "send_email",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:01Z",
@@ -2680,8 +2684,8 @@ describe("审批与失败重试", () => {
 
     expect(await screen.findByText("等待工具审批")).toBeInTheDocument();
     expect(FakeSseStream.instances).toHaveLength(0);
-    expect(screen.getByText("write_crm")).toBeInTheDocument();
-    expect(screen.getByText("send_email")).toBeInTheDocument();
+    expect(screen.getByText("更新 CRM 客户记录")).toBeInTheDocument();
+    expect(screen.getByText("发送通知邮件")).toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
     expect(screen.getByText("2 / 2")).toBeInTheDocument();
     expect(screen.getByText("查询条件")).toBeInTheDocument();
@@ -2710,8 +2714,9 @@ describe("审批与失败重试", () => {
       approval_summary: null,
       batch_message_id: "batch-serial",
       call_id: "call-serial-1",
-      display_name: null,
+      display_name: "更新 CRM 客户记录",
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -2722,8 +2727,9 @@ describe("审批与失败重试", () => {
       approval_summary: null,
       batch_message_id: "batch-serial",
       call_id: "call-serial-2",
-      display_name: null,
+      display_name: "发送通知邮件",
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "send_email",
       ordinal: 2,
       requested_at: "2026-11-10T03:00:01Z",
@@ -2804,8 +2810,8 @@ describe("审批与失败重试", () => {
       await firstDecision.promise;
     });
 
-    expect(await screen.findByText("send_email")).toBeInTheDocument();
-    expect(screen.queryByText("write_crm")).not.toBeInTheDocument();
+    expect(await screen.findByText("发送通知邮件")).toBeInTheDocument();
+    expect(screen.queryByText("更新 CRM 客户记录")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "确认执行" }));
     await waitFor(() => expect(decisions).toHaveLength(2));
     expect(decisions).toEqual([
@@ -2824,6 +2830,7 @@ describe("审批与失败重试", () => {
       call_id: "call-stale-approval",
       display_name: null,
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "write_crm",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -2899,6 +2906,7 @@ describe("审批与失败重试", () => {
       call_id: "call-cancel-lock",
       display_name: null,
       formatted_arguments: [],
+      hidden_argument_count: 0,
       model_name: "send_email",
       ordinal: 1,
       requested_at: "2026-11-10T03:00:00Z",
@@ -3152,6 +3160,7 @@ describe("窄屏消息内执行进度与输入区", () => {
         status: "completed",
       });
       const toolCall = makeToolCall({
+        display_name: "联网检索",
         id: "call-record-trace",
         ordinal: 1,
         tool_call_id: "model-call-trace",
@@ -3186,7 +3195,7 @@ describe("窄屏消息内执行进度与输入区", () => {
         name: "工具调用步骤",
       });
       await user.click(
-        within(stepList).getByRole("button", { name: /web_search/ }),
+        within(stepList).getByRole("button", { name: /联网检索/ }),
       );
       expect(await within(progress).findByText("真实参数")).toBeInTheDocument();
       await user.click(
@@ -3523,6 +3532,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
       status: "completed",
     });
     const toolCall = makeToolCall({
+      display_name: "延迟检索工具",
       id: "call-lazy-1",
       model_name: "lazy_search_tool",
       ordinal: 1,
@@ -3552,7 +3562,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
     const progress = await screen.findByRole("region", { name: "执行进度" });
     expect(
       await within(progress).findByRole("button", {
-        name: /已完成 1 个步骤.*lazy_search_tool/,
+        name: /已完成 1 个步骤.*延迟检索工具/,
       }),
     ).toBeInTheDocument();
 
@@ -3574,7 +3584,7 @@ describe("聊天热路径隔离、节流对账与步骤详情按需加载", () =
       name: "工具调用步骤",
     });
     await user.click(
-      within(stepList).getByRole("button", { name: /lazy_search_tool/ }),
+      within(stepList).getByRole("button", { name: /延迟检索工具/ }),
     );
     expect(await within(progress).findByText("真实参数")).toBeInTheDocument();
     expect(countDetailRequests()).toBe(1);

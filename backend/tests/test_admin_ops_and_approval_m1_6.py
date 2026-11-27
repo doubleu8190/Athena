@@ -883,7 +883,7 @@ def test_model_profile_patch_protects_active_default_and_compression_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """禁止通过 PATCH 破坏当前默认模型的流式/工具/启用能力，或禁用当前压缩策略模型。"""
-    from adapter.run.repository._approval_helpers import is_skill_tool_call as _is_skill_tool_call
+    from domain.tool import is_skill_tool_call as _is_skill_tool_call
 
     h = _run(_create_harness(monkeypatch))
     try:
@@ -1589,6 +1589,9 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                             "urgent": "是否加急",
                             "note": "备注",
                         },
+                        "result_labels": {
+                            "order_no": "付款单号",
+                        },
                     },
                 ).status_code
                 == 200
@@ -1733,7 +1736,7 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
             approvals = detail["pending_approvals"]
             assert len(approvals) == 3
 
-            # 1) 有业务映射的 MCP 工具：中文展示名、防注入安全模板、有序键值表与截断。
+            # 1) 有业务映射的 MCP 工具：中文展示名、防注入安全模板、严格白名单参数表与隐藏计数。
             a_pay = approvals[0]
             assert a_pay["display_name"] == "发起对外付款"
             assert (
@@ -1741,10 +1744,10 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                 == "向 星辰科技 付款 18800 元（加急：是，探针：{payee.__class__}）"
             )
             pay_args = a_pay["formatted_arguments"]
-            # 已映射字段优先排列在未映射字段之前（PostgreSQL JSONB 不保留对象键插入顺序，
-            # 因此核验前 4 项恰好为全部已映射字段且标签与格式化值完全准确，未映射字段在后）。
-            assert {item["key"] for item in pay_args[:4]} == {"amount", "payee", "urgent", "note"}
-            mapped_by_key = {item["key"]: item for item in pay_args[:4]}
+            assert len(pay_args) == 4
+            assert a_pay["hidden_argument_count"] == 2
+            assert {item["key"] for item in pay_args} == {"amount", "payee", "urgent", "note"}
+            mapped_by_key = {item["key"]: item for item in pay_args}
             assert mapped_by_key["amount"] == {
                 "key": "amount",
                 "label": "付款金额",
@@ -1765,40 +1768,65 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                 "label": "备注",
                 "value": "无",
             }
-            tail_by_key = {item["key"]: item for item in pay_args[4:]}
-            assert tail_by_key["tags"] == {"key": "tags", "label": "tags", "value": "对公、月结"}
-            assert tail_by_key["extra_ref"]["label"] == "extra_ref"
-            assert len(tail_by_key["extra_ref"]["value"]) == 500
-            assert tail_by_key["extra_ref"]["value"].endswith("…")
+            assert "extra_ref" not in detail_resp.text
+            assert "对公" not in detail_resp.text
 
-            # 2) 无任何映射的 MCP 工具：display_name 优雅回退为 model_name，参数仍返回可读键值表。
+            # 2) 无任何映射的 MCP 工具：display_name 返回 None，严格隐藏全部未映射参数。
             a_raw = approvals[1]
-            assert a_raw["display_name"] == raw_tool["model_name"]
+            assert a_raw["display_name"] is None
             assert a_raw["approval_summary"] is None
-            assert a_raw["formatted_arguments"] == [
-                {"key": "query", "label": "query", "value": "Q4合同"},
-                {"key": "strict", "label": "strict", "value": "否"},
-            ]
+            assert a_raw["formatted_arguments"] == []
+            assert a_raw["hidden_argument_count"] == 2
+            assert "Q4合同" not in detail_resp.text
 
-            # 3) Skill 脚本工具：取 script_label，仅含脱敏可见参数，严禁泄漏隐藏参数！
+            # 3) Skill 脚本工具：取 script_label，仅含脱敏可见参数与隐藏计数，严禁泄漏隐藏参数！
             a_skill = approvals[2]
             assert a_skill["display_name"] == "生成月度薪酬表"
             assert a_skill["approval_summary"] is None
             assert a_skill["formatted_arguments"] == [
                 {"key": "month", "label": "结算月份", "value": "2026-11"}
             ]
+            assert a_skill["hidden_argument_count"] == 1
             assert "SUPER_HIDDEN_PASSWORD_999" not in detail_resp.text
             assert "secret_db_password" not in detail_resp.text
 
-            # 4) 软删除 MCP Server 后，历史待审批仍能回退至 Run 冻结的 tool_snapshot 元信息。
+            # 3b) 调用列表与详情端点同样严格执行白名单收口与 snapshot 回退。
+            calls_list_resp = member_client.get(
+                f"/api/v1/sessions/sess_member/runs/{main_run_id}/tool-calls"
+            )
+            assert calls_list_resp.status_code == 200
+            call_items = calls_list_resp.json()["items"]
+            assert [item["display_name"] for item in call_items] == [
+                "发起对外付款",
+                None,
+                "生成月度薪酬表",
+            ]
+            pay_detail_resp = member_client.get(
+                f"/api/v1/sessions/sess_member/runs/{main_run_id}/tool-calls/{a_pay['call_id']}"
+            )
+            assert pay_detail_resp.status_code == 200
+            pay_detail_json = pay_detail_resp.json()
+            assert "arguments" not in pay_detail_json
+            assert pay_detail_json["display_name"] == "发起对外付款"
+            assert pay_detail_json["hidden_argument_count"] == 2
+            assert {item["key"] for item in pay_detail_json["formatted_arguments"]} == {
+                "amount",
+                "payee",
+                "urgent",
+                "note",
+            }
+            assert "extra_ref" not in pay_detail_resp.text
+
+            # 4) 软删除 MCP Server 后，历史待审批与详情仍能回退至 Run 冻结的 tool_snapshot。
             assert admin_client.delete(f"/api/v1/admin/mcp/servers/{server_id}").status_code == 204
             fallback_detail = member_client.get(
                 f"/api/v1/sessions/sess_member/runs/{main_run_id}"
             ).json()
             assert fallback_detail["pending_approvals"][0]["display_name"] == "发起对外付款"
+            assert fallback_detail["pending_approvals"][0]["hidden_argument_count"] == 2
             fallback_labels = {
                 item["key"]: item["label"]
-                for item in fallback_detail["pending_approvals"][0]["formatted_arguments"][:4]
+                for item in fallback_detail["pending_approvals"][0]["formatted_arguments"]
             }
             assert fallback_labels == {
                 "amount": "付款金额",
@@ -1806,6 +1834,11 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                 "urgent": "是否加急",
                 "note": "备注",
             }
+            fallback_call_detail = member_client.get(
+                f"/api/v1/sessions/sess_member/runs/{main_run_id}/tool-calls/{a_pay['call_id']}"
+            ).json()
+            assert fallback_call_detail["display_name"] == "发起对外付款"
+            assert fallback_call_detail["hidden_argument_count"] == 2
 
             # 5) 子智能体待审批（PendingSubagentApproval）同样返回结构化投影（REST 与 SSE）。
             async def _setup_subagent_pending_approval() -> str:
@@ -1852,6 +1885,9 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                 sub_pay_tool = next(
                     item for item in srv2_tools if item["remote_name"] == "transfer_funds"
                 )
+                sub_raw_tool = next(
+                    item for item in srv2_tools if item["remote_name"] == "raw_lookup"
+                )
                 assert (
                     admin_client.patch(
                         f"/api/v1/admin/tools/{sub_pay_tool['tool_id']}",
@@ -1861,6 +1897,13 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                             "approval_summary_template": "子任务向 {payee} 转账 {amount} 元",
                             "parameter_labels": {"payee": "收款对象", "amount": "转账金额"},
                         },
+                    ).status_code
+                    == 200
+                )
+                assert (
+                    admin_client.patch(
+                        f"/api/v1/admin/tools/{sub_raw_tool['tool_id']}",
+                        json={"requires_approval": True},
                     ).status_code
                     == 200
                 )
@@ -1963,6 +2006,11 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                                         "memo": "运费",
                                     },
                                 ),
+                                ToolCallPart(
+                                    tool_call_id="tc_sub_raw_2",
+                                    name=sub_raw_tool["model_name"],
+                                    arguments={"query": "子任务内部查询"},
+                                ),
                             ),
                             tool_call_id=None,
                             source_message_id=None,
@@ -1978,6 +2026,14 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
                                 tool_kind=ToolKind.MCP,
                                 requires_approval=True,
                             ),
+                            BeginToolCallBatchItem(
+                                record_id=new_id("rtc"),
+                                tool_call_id="tc_sub_raw_2",
+                                model_name=sub_raw_tool["model_name"],
+                                tool_id=sub_raw_tool["tool_id"],
+                                tool_kind=ToolKind.MCP,
+                                requires_approval=True,
+                            ),
                         ),
                         requested_at=h.clock(),
                     )
@@ -1988,27 +2044,34 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
             parent_detail = member_client.get(
                 f"/api/v1/sessions/sess_member/runs/{parent_id}"
             ).json()
-            assert len(parent_detail["pending_subagent_approvals"]) == 1
+            assert len(parent_detail["pending_subagent_approvals"]) == 2
             sub_appr = parent_detail["pending_subagent_approvals"][0]
             assert sub_appr["display_name"] == "子任务对外付款"
             assert sub_appr["approval_summary"] == "子任务向 银河供应商 转账 500 元"
             assert sub_appr["formatted_arguments"] == [
                 {"key": "payee", "label": "收款对象", "value": "银河供应商"},
                 {"key": "amount", "label": "转账金额", "value": "500"},
-                {"key": "memo", "label": "memo", "value": "运费"},
             ]
+            assert sub_appr["hidden_argument_count"] == 1
+            assert "运费" not in str(sub_appr)
+            sub_raw_appr = parent_detail["pending_subagent_approvals"][1]
+            assert sub_raw_appr["display_name"] is None
+            assert sub_raw_appr["approval_summary"] is None
+            assert sub_raw_appr["formatted_arguments"] == []
+            assert sub_raw_appr["hidden_argument_count"] == 1
 
-            # SSE 快照同样携带完整结构化待审批字段。
+            # SSE 快照同样携带完整结构化待审批字段（无别名 MCP 工具 display_name 为 None）。
             stream_snap = _run(
                 h.run_repo.get_stream_snapshot("sess_member", "usr_member", parent_id)
             )
             assert stream_snap is not None
-            assert len(stream_snap.pending_subagent_approvals) == 1
+            assert len(stream_snap.pending_subagent_approvals) == 2
             assert stream_snap.pending_subagent_approvals[0].display_name == "子任务对外付款"
             assert (
                 stream_snap.pending_subagent_approvals[0].approval_summary
                 == "子任务向 银河供应商 转账 500 元"
             )
+            assert stream_snap.pending_subagent_approvals[1].display_name is None
     finally:
         _run(h.aclose())
 
@@ -2019,17 +2082,17 @@ def test_run_pending_approvals_structured_projection_for_mcp_subagent_and_skill(
 
 
 def test_alembic_baseline_contains_admin_ops_and_approval_ddl() -> None:
-    """校验收敛后的基线迁移 0001_initial_schema 保持单一 head，包含管理运维与审批 DDL。"""
+    """校验 Alembic 迁移保持单一 head，包含管理运维、审批与结果白名单 DDL。"""
     cfg = Config(str(ALEMBIC_INI))
     cfg.set_main_option(
         "sqlalchemy.url",
         "postgresql+asyncpg://user:password@127.0.0.1/athena_test",
     )
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0001_initial_schema"]
-    revision = script.get_revision("0001_initial_schema")
+    assert script.get_heads() == ["0002_add_mcp_tool_result_labels"]
+    revision = script.get_revision("0002_add_mcp_tool_result_labels")
     assert revision is not None
-    assert revision.down_revision is None
+    assert revision.down_revision == "0001_initial_schema"
 
     up_buffer = StringIO()
     with redirect_stdout(up_buffer):
@@ -2046,11 +2109,13 @@ def test_alembic_baseline_contains_admin_ops_and_approval_ddl() -> None:
     assert "display_name VARCHAR(120)" in up_sql
     assert "approval_summary_template VARCHAR(500)" in up_sql
     assert "parameter_labels_json JSONB DEFAULT '{}' NOT NULL" in up_sql
+    assert "result_labels_json JSONB DEFAULT '{}' NOT NULL" in up_sql
 
     down_buffer = StringIO()
     with redirect_stdout(down_buffer):
-        command.downgrade(cfg, "0001_initial_schema:base", sql=True)
+        command.downgrade(cfg, "0002_add_mcp_tool_result_labels:base", sql=True)
     down_sql = down_buffer.getvalue()
+    assert "DROP COLUMN result_labels_json" in down_sql
     assert "DROP TABLE mcp_tools" in down_sql
     assert "DROP TABLE mcp_servers" in down_sql
     assert "DROP TABLE runs" in down_sql

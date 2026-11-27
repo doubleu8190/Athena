@@ -252,6 +252,9 @@ export function AdminToolsPage() {
               const paramLabelEntries = Object.entries(
                 tool.parameter_labels ?? {},
               );
+              const resultLabelEntries = Object.entries(
+                tool.result_labels ?? {},
+              );
 
               return (
                 <li
@@ -326,6 +329,16 @@ export function AdminToolsPage() {
                             <dt>参数中文标签</dt>
                             <dd className="[overflow-wrap:anywhere]">
                               {paramLabelEntries
+                                .map(([key, label]) => `${key}: ${label}`)
+                                .join("、")}
+                            </dd>
+                          </div>
+                        ) : null}
+                        {resultLabelEntries.length > 0 ? (
+                          <div className={ADMIN_DETAIL_WIDE_CLASS}>
+                            <dt>可展示结果字段</dt>
+                            <dd className="[overflow-wrap:anywhere]">
+                              {resultLabelEntries
                                 .map(([key, label]) => `${key}: ${label}`)
                                 .join("、")}
                             </dd>

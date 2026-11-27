@@ -672,10 +672,10 @@ def test_alembic_initial_schema_contains_preference_tables_and_no_legacy_memory(
     config = _migration_config()
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0001_initial_schema"]
-    rev = script.get_revision("0001_initial_schema")
+    assert heads == ["0002_add_mcp_tool_result_labels"]
+    rev = script.get_revision("0002_add_mcp_tool_result_labels")
     assert rev is not None
-    assert rev.down_revision is None
+    assert rev.down_revision == "0001_initial_schema"
 
     upgrade_sql_buf = StringIO()
     with redirect_stdout(upgrade_sql_buf):
@@ -706,7 +706,7 @@ def test_alembic_initial_schema_contains_preference_tables_and_no_legacy_memory(
 
     downgrade_sql_buf = StringIO()
     with redirect_stdout(downgrade_sql_buf):
-        command.downgrade(config, "0001_initial_schema:base", sql=True)
+        command.downgrade(config, "0002_add_mcp_tool_result_labels:base", sql=True)
     downgrade_sql = downgrade_sql_buf.getvalue()
     assert "DROP TABLE user_memories" in downgrade_sql
     assert "DROP TABLE user_work_profiles" in downgrade_sql

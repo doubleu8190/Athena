@@ -133,6 +133,12 @@ class McpToolModel(Base):
         server_default=text("'{}'"),
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    result_labels_json: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
 
 
 __all__ = ["McpServerModel", "McpToolModel"]

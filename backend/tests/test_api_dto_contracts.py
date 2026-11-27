@@ -422,7 +422,19 @@ def test_tightened_enum_converters_serialize_to_plain_json_strings() -> None:
     call_json = json.loads(call_detail.model_dump_json())
     assert call_json["status"] == "completed"
     assert call_json["tool_kind"] == "builtin"
-    assert call_json["outcome"]["status"] == "ok"
+    assert call_json["display_name"] == "查阅企业知识库"
+    assert call_json["business_summary"] == "检索知识库：合同"
+    assert call_json["formatted_arguments"] == [
+        {"key": "query", "label": "检索内容", "value": "合同"}
+    ]
+    assert call_json["hidden_argument_count"] == 0
+    assert "arguments" not in call_json
+    assert call_json["outcome"] == {
+        "status": "ok",
+        "summary": "未找到相关知识片段。",
+        "formatted_results": [],
+        "truncated": False,
+    }
 
     message_dto = ConversationMessageResponse.model_validate(
         ConversationMessage(

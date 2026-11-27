@@ -333,6 +333,7 @@ export function makeToolCall(
 ): RunToolCallSummary {
   const { id, ordinal, tool_call_id, ...rest } = overrides;
   return {
+    display_name: null,
     duration_ms: 120,
     finished_at: "2026-11-10T03:00:01Z",
     id,
@@ -355,14 +356,18 @@ export function makeToolCallDetail(
 ): RunToolCallDetail {
   return {
     ...makeToolCall(overrides),
-    arguments: { query: "真实参数" },
     artifacts: [],
+    business_summary: null,
+    formatted_arguments: [
+      { key: "query", label: "查询条件", value: "真实参数" },
+    ],
+    hidden_argument_count: 0,
     outcome: {
-      cleanup_error_code: null,
-      code: "ok",
-      data: { result: "真实结果" },
-      message: "工具执行成功",
+      formatted_results: [
+        { key: "result", label: "查询结果", value: "真实结果" },
+      ],
       status: "ok",
+      summary: "工具执行成功",
       truncated: false,
     },
     safe_skill_projection: null,

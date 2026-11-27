@@ -511,7 +511,7 @@ describe("管理表单纯校验", () => {
     });
   });
 
-  it("工具展示校验支持提取 Schema 参数与空值归一化", () => {
+  it("工具展示校验支持提取 Schema 参数、出参白名单校验与空值归一化", () => {
     expect(
       extractToolSchemaParamNames({
         type: "object",
@@ -526,11 +526,53 @@ describe("管理表单纯校验", () => {
         { id: "1", key: "payee", label: "收款人" },
         { id: "2", key: "", label: "" },
       ],
+      result_labels: [
+        { id: "r1", key: " order_no ", label: " 审批单号 " },
+        { id: "r2", key: "", label: "" },
+      ],
     });
     expect(validated.input).toEqual({
       display_name: null,
       approval_summary_template: "向 {payee} 付款 {amount}",
       parameter_labels: { payee: "收款人" },
+      result_labels: { order_no: "审批单号" },
     });
+
+    // 出参白名单校验：重复键、控制字符、超限均拦截
+    expect(
+      validateToolMetadataForm({
+        display_name: "",
+        approval_summary_template: "",
+        parameter_labels: [],
+        result_labels: [
+          { id: "r1", key: "order_no", label: "单号" },
+          { id: "r2", key: " order_no ", label: "重复单号" },
+        ],
+      }).errors.result_labels,
+    ).toContain("重复");
+
+    expect(
+      validateToolMetadataForm({
+        display_name: "",
+        approval_summary_template: "",
+        parameter_labels: [],
+        result_labels: [
+          { id: "r1", key: "order_no\u0007", label: "单号" },
+        ],
+      }).errors.result_labels,
+    ).toContain("控制字符");
+
+    expect(
+      validateToolMetadataForm({
+        display_name: "",
+        approval_summary_template: "",
+        parameter_labels: [],
+        result_labels: Array.from({ length: 51 }, (_, index) => ({
+          id: `r-${index}`,
+          key: `field_${index}`,
+          label: `字段${index}`,
+        })),
+      }).errors.result_labels,
+    ).toContain("最多配置 50 项");
   });
 });

@@ -452,11 +452,13 @@ async def load_subagent_details_in_session(
                     display_name=display_name,
                     approval_summary=approval_summary,
                     formatted_arguments=formatted_arguments,
+                    hidden_argument_count=hidden_argument_count,
                 )
                 for (call_row, sub_run), skill_proj, (
                     display_name,
                     approval_summary,
                     formatted_arguments,
+                    hidden_argument_count,
                 ) in zip(approval_rows, skill_projections, enriched, strict=True)
             )
 

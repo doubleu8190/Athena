@@ -117,6 +117,7 @@ class RunPendingToolApprovalResponse(BaseModel):
     display_name: str | None
     approval_summary: str | None
     formatted_arguments: list[FormattedToolArgumentResponse]
+    hidden_argument_count: int
 
 
 class RunAttemptUsageResponse(BaseModel):
@@ -241,6 +242,7 @@ class PendingSubagentApprovalResponse(BaseModel):
     display_name: str | None
     approval_summary: str | None
     formatted_arguments: list[FormattedToolArgumentResponse]
+    hidden_argument_count: int
 
 
 class RunResponse(BaseModel):
@@ -305,13 +307,11 @@ class RunEventListResponse(BaseModel):
 
 
 class RunToolOutcomeResponse(BaseModel):
-    # 复用领域 ToolOutcomeStatus / ToolKind / ToolCallStatus 枚举，收紧工具执行结果与调用状态。
+    # 复用领域 ToolOutcomeStatus 枚举，仅对外暴露安全业务摘要与白名单格式化结果。
     status: ToolOutcomeStatus
-    code: str
-    message: str
-    data: dict[str, object]
+    summary: str
+    formatted_results: list[FormattedToolArgumentResponse]
     truncated: bool
-    cleanup_error_code: str | None
 
 
 class RunToolCallSummaryResponse(BaseModel):
@@ -321,6 +321,7 @@ class RunToolCallSummaryResponse(BaseModel):
     tool_id: str | None
     tool_kind: ToolKind | None
     model_name: str
+    display_name: str | None
     status: ToolCallStatus
     started_at: datetime | None
     finished_at: datetime | None
@@ -330,7 +331,9 @@ class RunToolCallSummaryResponse(BaseModel):
 
 
 class RunToolCallDetailResponse(RunToolCallSummaryResponse):
-    arguments: dict[str, object] | None
+    business_summary: str | None
+    formatted_arguments: list[FormattedToolArgumentResponse]
+    hidden_argument_count: int
     outcome: RunToolOutcomeResponse | None
     artifacts: list[ArtifactFileRefResponse]
     safe_skill_projection: SafeSkillApprovalProjectionResponse | None

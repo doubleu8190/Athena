@@ -156,6 +156,7 @@ def test_mcp_error_mapping_uses_only_fixed_codes(
 class _PublicOnlyManager:
     def __init__(self, tool: PublicToolDefinition | None = None) -> None:
         self._tool = tool
+        self.update_tool_metadata: AsyncMock = AsyncMock()
 
     async def list_public_tools(
         self, actor: object, *, offset: int, limit: int
@@ -203,9 +204,7 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
     manager.list_server_tools = AsyncMock(return_value=ToolPage((tool,), 1))  # type: ignore[attr-defined]
     manager.list_admin_tools = AsyncMock(return_value=ToolPage((tool,), 1))  # type: ignore[attr-defined]
     manager.get_admin_tool = AsyncMock(return_value=tool)  # type: ignore[attr-defined]
-    manager.update_tool_metadata = AsyncMock(  # type: ignore[attr-defined]
-        return_value=replace(tool, requires_approval=True)
-    )
+    manager.update_tool_metadata = AsyncMock(return_value=replace(tool, requires_approval=True))
     auth_service = make_auth_service()
     repository = cast(InMemoryAuthRepository, auth_service._repository)
     provision_local_user_sync(auth_service, email="mcp-admin@example.com", password=TEST_PASSWORD)
@@ -284,12 +283,65 @@ def test_admin_routes_return_redacted_server_and_explicit_tool_projections() -> 
     assert invalid_policy.status_code == 422
     assert updated_policy.status_code == 200
     assert updated_policy.json()["requires_approval"] is True
-    manager.update_tool_metadata.assert_awaited_once_with(  # type: ignore[attr-defined]
+    manager.update_tool_metadata.assert_awaited_once_with(
         ANY, tool.tool_id, ToolMetadataPatch(requires_approval=True)
     )
     assert deleted.status_code == 204
     assert public_tools.status_code == 200
     assert "server_id" not in public_tools.text and "remote_name" not in public_tools.text
+    assert "input_schema" not in public_tools.text and "model_name" not in public_tools.text
+
+
+def test_admin_can_update_result_labels_and_rejects_invalid_result_labels() -> None:
+    """管理员可配置和清空 result_labels，非法输入被 422 拒绝。"""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    tool = AdminToolDefinition(
+        tool_id="tool_0123456789abcdef0123456789abcdef",
+        model_name="mcp__0123456789abcdef0123456789abcdef",
+        description="safe description",
+        input_schema={"type": "object"},
+        server_id="mcp_test",
+        remote_name="remote_tool",
+        result_labels={"order_no": "单据号"},
+    )
+    manager = _PublicOnlyManager()
+    manager.update_tool_metadata = AsyncMock(return_value=tool)
+    auth_service = make_auth_service()
+    repository = cast(InMemoryAuthRepository, auth_service._repository)
+    provision_local_user_sync(auth_service, email="res-admin@example.com", password=TEST_PASSWORD)
+    app = create_app(auth_service=auth_service, tool_manager=cast(ToolManager, manager))
+
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/api/v1/auth/login",
+                json={"email": "res-admin@example.com", "password": TEST_PASSWORD},
+            ).status_code
+            == 200
+        )
+        anyio.run(repository.promote_active_user_by_email, "res-admin@example.com", now)
+        updated = client.patch(
+            f"/api/v1/admin/tools/{tool.tool_id}",
+            json={"result_labels": {"order_no": "单据号"}},
+        )
+        cleared = client.patch(
+            f"/api/v1/admin/tools/{tool.tool_id}",
+            json={"result_labels": None},
+        )
+        invalid_type = client.patch(
+            f"/api/v1/admin/tools/{tool.tool_id}",
+            json={"result_labels": ["not_a_dict"]},
+        )
+    assert updated.status_code == 200
+    assert updated.json()["result_labels"] == {"order_no": "单据号"}
+    assert cleared.status_code == 200
+    assert invalid_type.status_code == 422
+    assert manager.update_tool_metadata.await_args_list[0].args[2] == ToolMetadataPatch(
+        result_labels={"order_no": "单据号"}
+    )
+    assert manager.update_tool_metadata.await_args_list[1].args[2] == ToolMetadataPatch(
+        result_labels=None
+    )
 
 
 def test_regular_user_cannot_update_tool_approval_policy() -> None:
@@ -320,9 +372,8 @@ def test_regular_user_cannot_update_tool_approval_policy() -> None:
 def test_mcp_routes_require_login_and_admin_precheck() -> None:
     public_tool = PublicToolDefinition(
         tool_id="tool_0123456789abcdef0123456789abcdef",
-        model_name="mcp__0123456789abcdef0123456789abcdef",
+        display_name="示例工具",
         description="public description",
-        input_schema={"type": "object"},
     )
     auth_service = make_auth_service()
     provision_local_user_sync(auth_service, email="api-user@example.com", password=TEST_PASSWORD)
@@ -411,9 +462,11 @@ def test_mcp_routes_require_login_and_admin_precheck() -> None:
     assert regular_admin.json() == regular_admin_tools.json() == {"detail": "admin_required"}
     assert public_tools.status_code == 200
     public_item = public_tools.json()["items"][0]
-    assert set(public_item) == {"tool_id", "model_name", "description", "input_schema"}
+    assert set(public_item) == {"tool_id", "display_name", "description"}
     assert "server_id" not in public_item and "remote_name" not in public_item
-    assert set(public_detail.json()) == {"tool_id", "model_name", "description", "input_schema"}
+    assert "input_schema" not in public_item and "model_name" not in public_item
+    assert set(public_detail.json()) == {"tool_id", "display_name", "description"}
+    assert public_detail.json()["display_name"] == "示例工具"
     assert public_detail_with_query.status_code == 422
     assert public_detail_with_query.json() == {"detail": "mcp_query_invalid"}
     assert missing_public_detail.status_code == 404

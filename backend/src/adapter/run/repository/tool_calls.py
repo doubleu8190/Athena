@@ -16,6 +16,7 @@ from adapter.run.converter import run_to_domain, tool_call_to_domain
 from adapter.run.model import RunModel, RunToolCallModel
 from adapter.run.repository._approval_helpers import (
     load_pending_approvals_in_session,
+    load_tool_display_metadata_in_session,
     refresh_safe_skill_projection,
     settle_running_skill_execution,
 )
@@ -86,11 +87,14 @@ from domain.tool import (
     RunToolCallRecord,
     ToolApprovalDecision,
     ToolCallStatus,
+    ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
     bounded_outcome,
+    build_safe_tool_call_projection,
     persisted_status_for_outcome,
     protocol_status_for_outcome,
+    resolve_tool_display_name,
 )
 
 _MAX_TOOL_BATCH_SIZE = 8
@@ -686,7 +690,7 @@ class RunToolCallStore:
         after_ordinal: int,
         limit: int,
     ) -> RunToolCallPage | None:
-        """Read one owner-visible ordinal page."""
+        """Read one owner-visible ordinal page with batch-resolved display names."""
         if after_ordinal < 0 or not 1 <= limit <= 100:
             raise ValueError("run_tool_call_page_invalid")
         async with self._session_factory() as session:
@@ -705,8 +709,26 @@ class RunToolCallStore:
                     .limit(limit + 1)
                 )
             ).all()
+            page_rows = rows[:limit]
+            # 批量解析本页记录的业务展示名（MCP 实时表优先，回退冻结快照；内置工具映射固定中文名）。
+            meta_list = await load_tool_display_metadata_in_session(
+                session, [(row, visible) for row in page_rows]
+            )
         has_more = len(rows) > limit
-        items = tuple(tool_call_to_domain(row) for row in rows[:limit])
+        items = tuple(
+            tool_call_to_domain(
+                row,
+                display_name=resolve_tool_display_name(
+                    tool_id=row.tool_id,
+                    tool_kind=None if row.tool_kind is None else ToolKind(row.tool_kind),
+                    model_name=row.model_name,
+                    safe_skill_projection=parsed.safe_skill_projection,
+                    meta_display_name=meta.display_name,
+                ),
+            )
+            for row, meta in zip(page_rows, meta_list, strict=True)
+            for parsed in (tool_call_to_domain(row),)
+        )
         return RunToolCallPage(
             items,
             items[-1].ordinal if has_more and items else None,
@@ -719,23 +741,26 @@ class RunToolCallStore:
         run_id: str,
         call_id: str,
     ) -> RunToolCallDetails | None:
-        """Read arguments and output from their unique execution messages."""
+        """读取授权调用详情并组装严格白名单业务安全投影。"""
         async with self._session_factory() as session:
-            row = await session.scalar(
-                select(RunToolCallModel)
-                .join(RunModel, RunModel.id == RunToolCallModel.run_id)
-                .join(SessionModel, SessionModel.id == RunModel.session_id)
-                .where(
-                    RunToolCallModel.id == call_id,
-                    RunToolCallModel.run_id == run_id,
-                    RunToolCallModel.session_id == session_id,
-                    RunModel.owner_id == owner_id,
-                    SessionModel.owner_id == owner_id,
-                    SessionModel.deleted_time.is_(None),
+            pair = (
+                await session.execute(
+                    select(RunToolCallModel, RunModel)
+                    .join(RunModel, RunModel.id == RunToolCallModel.run_id)
+                    .join(SessionModel, SessionModel.id == RunModel.session_id)
+                    .where(
+                        RunToolCallModel.id == call_id,
+                        RunToolCallModel.run_id == run_id,
+                        RunToolCallModel.session_id == session_id,
+                        RunModel.owner_id == owner_id,
+                        SessionModel.owner_id == owner_id,
+                        SessionModel.deleted_time.is_(None),
+                    )
                 )
-            )
-            if row is None:
+            ).one_or_none()
+            if pair is None:
                 return None
+            row, run_row = pair
             call_message = await session.get(ExecutionMessageModel, row.call_message_id)
             result_message = (
                 None
@@ -745,6 +770,7 @@ class RunToolCallStore:
             if call_message is None:
                 raise ValueError("run_tool_call_message_missing")
             safe_skill_projection = await refresh_safe_skill_projection(session, row)
+            meta = (await load_tool_display_metadata_in_session(session, [(row, run_row)]))[0]
         call_domain = execution_to_domain(call_message)
         call_part = next(
             (
@@ -768,12 +794,34 @@ class RunToolCallStore:
             )
             output = None if result_part is None else result_part.output
             artifacts = () if result_part is None else result_part.artifacts
+        raw_arguments = {} if call_part is None else dict(call_part.arguments)
+        base_record = tool_call_to_domain(row)
+        projection = build_safe_tool_call_projection(
+            tool_id=base_record.tool_id,
+            tool_kind=base_record.tool_kind,
+            model_name=base_record.model_name,
+            arguments=raw_arguments,
+            outcome=base_record.outcome,
+            safe_error_code=base_record.safe_error_code,
+            safe_skill_projection=safe_skill_projection,
+            meta_display_name=meta.display_name,
+            meta_template=meta.approval_summary_template,
+            meta_parameter_labels=meta.parameter_labels,
+            meta_result_labels=meta.result_labels,
+        )
+        record = tool_call_to_domain(row, display_name=projection.display_name)
         return RunToolCallDetails(
-            tool_call_to_domain(row),
-            {} if call_part is None else dict(call_part.arguments),
-            output,
-            artifacts,
-            safe_skill_projection,
+            record=record,
+            arguments=raw_arguments,
+            output=output,
+            artifacts=artifacts,
+            safe_skill_projection=safe_skill_projection,
+            display_name=projection.display_name,
+            business_summary=projection.business_summary,
+            formatted_arguments=projection.formatted_arguments,
+            hidden_argument_count=projection.hidden_argument_count,
+            safe_outcome_summary=projection.safe_outcome_summary,
+            formatted_results=projection.formatted_results,
         )
 
     @staticmethod

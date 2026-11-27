@@ -2009,6 +2009,10 @@ export interface components {
             remote_name: string;
             /** Requires Approval */
             requires_approval: boolean;
+            /** Result Labels */
+            result_labels: {
+                [key: string]: string;
+            };
             /** Server Id */
             server_id: string;
             /** Tool Id */
@@ -3050,6 +3054,8 @@ export interface components {
             display_name: string | null;
             /** Formatted Arguments */
             formatted_arguments: components["schemas"]["FormattedToolArgumentResponse"][];
+            /** Hidden Argument Count */
+            hidden_argument_count: number;
             /** Model Name */
             model_name: string;
             /** Ordinal */
@@ -3180,17 +3186,13 @@ export interface components {
         };
         /**
          * PublicToolResponse
-         * @description 普通用户可见的最小工具投影。
+         * @description 普通用户可见的最小工具投影，彻底收口 model_name 与入参 Schema。
          */
         PublicToolResponse: {
             /** Description */
             description: string;
-            /** Input Schema */
-            input_schema: {
-                [key: string]: unknown;
-            };
-            /** Model Name */
-            model_name: string;
+            /** Display Name */
+            display_name: string | null;
             /** Tool Id */
             tool_id: string;
         };
@@ -3325,6 +3327,8 @@ export interface components {
             display_name: string | null;
             /** Formatted Arguments */
             formatted_arguments: components["schemas"]["FormattedToolArgumentResponse"][];
+            /** Hidden Argument Count */
+            hidden_argument_count: number;
             /** Model Name */
             model_name: string;
             /** Ordinal */
@@ -3496,16 +3500,20 @@ export interface components {
         };
         /** RunToolCallDetailResponse */
         RunToolCallDetailResponse: {
-            /** Arguments */
-            arguments: {
-                [key: string]: unknown;
-            } | null;
             /** Artifacts */
             artifacts: components["schemas"]["ArtifactFileRefResponse"][];
+            /** Business Summary */
+            business_summary: string | null;
+            /** Display Name */
+            display_name: string | null;
             /** Duration Ms */
             duration_ms: number | null;
             /** Finished At */
             finished_at: string | null;
+            /** Formatted Arguments */
+            formatted_arguments: components["schemas"]["FormattedToolArgumentResponse"][];
+            /** Hidden Argument Count */
+            hidden_argument_count: number;
             /** Id */
             id: string;
             /** Model Name */
@@ -3536,6 +3544,8 @@ export interface components {
         };
         /** RunToolCallSummaryResponse */
         RunToolCallSummaryResponse: {
+            /** Display Name */
+            display_name: string | null;
             /** Duration Ms */
             duration_ms: number | null;
             /** Finished At */
@@ -3561,17 +3571,11 @@ export interface components {
         };
         /** RunToolOutcomeResponse */
         RunToolOutcomeResponse: {
-            /** Cleanup Error Code */
-            cleanup_error_code: string | null;
-            /** Code */
-            code: string;
-            /** Data */
-            data: {
-                [key: string]: unknown;
-            };
-            /** Message */
-            message: string;
+            /** Formatted Results */
+            formatted_results: components["schemas"]["FormattedToolArgumentResponse"][];
             status: components["schemas"]["ToolOutcomeStatus"];
+            /** Summary */
+            summary: string;
             /** Truncated */
             truncated: boolean;
         };
@@ -4436,6 +4440,10 @@ export interface components {
             } | null;
             /** Requires Approval */
             requires_approval?: boolean | null;
+            /** Result Labels */
+            result_labels?: {
+                [key: string]: string;
+            } | null;
         };
         /**
          * ToolBatchApprovalRequest

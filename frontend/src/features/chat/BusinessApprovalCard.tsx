@@ -4,8 +4,10 @@ import { useState } from "react";
 import { Badge, Button, InlineAlert, cn } from "../../shared/ui";
 import {
   isSkillTool,
+  resolveToolDisplayName,
   type FormattedToolArgument,
   type SafeSkillApprovalProjection,
+  type ToolKind,
 } from "./model";
 import { SafeSkillProjection } from "./SafeSkillProjection";
 
@@ -15,7 +17,9 @@ export interface BusinessApprovalItem {
   display_name: string | null;
   approval_summary: string | null;
   formatted_arguments: FormattedToolArgument[];
+  hidden_argument_count?: number;
   safe_skill_projection: SafeSkillApprovalProjection | null;
+  tool_kind?: ToolKind | null;
 }
 
 export interface BusinessApprovalCardProps {
@@ -57,10 +61,12 @@ export function BusinessApprovalCard({
     Boolean(projectedSkill) || isSkillTool(approval.model_name);
   const formattedArguments = approval.formatted_arguments;
   const hasFormattedArguments = formattedArguments.length > 0;
+  const hiddenArgumentCount = approval.hidden_argument_count ?? 0;
 
   // 安全铁律：凡识别为技能工具，缺失安全投影或 can_approve=false 时均禁止确认执行，仅允许拒绝。
   const canApprove = !skillCall || Boolean(projectedSkill?.can_approve);
-  const title = approval.display_name?.trim() || approval.model_name;
+  // 业务展示名优先；MCP 工具未配置别名时兜底显示「业务工具操作」，防止暴露底层 mcp__xxxx。
+  const title = resolveToolDisplayName(approval);
   const summary = approval.approval_summary?.trim() || null;
 
   const rejectDisabled = busy || otherCommandPending;
@@ -149,23 +155,32 @@ export function BusinessApprovalCard({
             />
           </div>
         )
-      ) : hasFormattedArguments ? (
-        /* 分支 2：非技能工具直接遍历后端下发的 formatted_arguments 渲染响应式 2 列 / 1 列键值表。 */
-        <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-2 rounded-lg border border-warning-border/70 bg-canvas/90 px-3.5 py-2.5 sm:grid-cols-2">
-          {formattedArguments.map((arg) => (
-            <div
-              className="grid min-w-0 grid-cols-[minmax(72px,auto)_1fr] items-baseline gap-2.5"
-              key={arg.key}
-            >
-              <dt className="text-xs font-medium text-text-secondary">
-                {arg.label}
-              </dt>
-              <dd className="min-w-0 break-words text-xs font-medium text-text-primary">
-                {arg.value}
-              </dd>
-            </div>
-          ))}
-        </dl>
+      ) : hasFormattedArguments || hiddenArgumentCount > 0 ? (
+        /* 分支 2：非技能工具仅遍历后端白名单 formatted_arguments，并在存在隐藏参数时给出轻量提示。 */
+        <div className="mt-3 space-y-1.5">
+          {hasFormattedArguments ? (
+            <dl className="grid grid-cols-1 gap-x-6 gap-y-2 rounded-lg border border-warning-border/70 bg-canvas/90 px-3.5 py-2.5 sm:grid-cols-2">
+              {formattedArguments.map((arg) => (
+                <div
+                  className="grid min-w-0 grid-cols-[minmax(72px,auto)_1fr] items-baseline gap-2.5"
+                  key={arg.key}
+                >
+                  <dt className="text-xs font-medium text-text-secondary">
+                    {arg.label}
+                  </dt>
+                  <dd className="min-w-0 break-words text-xs font-medium text-text-primary">
+                    {arg.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+          {hiddenArgumentCount > 0 ? (
+            <p className="text-[11px] text-text-tertiary">
+              另有 {hiddenArgumentCount} 个内部参数未向普通用户展示。
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       {error ? (

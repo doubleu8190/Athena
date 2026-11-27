@@ -510,14 +510,14 @@ def test_admin_org_sync_endpoint_runs_feishu_sync_and_reports_cycle_error() -> N
 
 
 def test_alembic_initial_schema_single_head_and_org_offline_sql() -> None:
-    """验证 Alembic 基线单 head 为 0001_initial_schema，且离线 SQL 包含完整组织与身份表结构。"""
+    """验证 Alembic 单 head 及离线 SQL 包含完整组织与身份表结构。"""
     config = _migration_config()
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0001_initial_schema"]
-    rev = script.get_revision("0001_initial_schema")
+    assert heads == ["0002_add_mcp_tool_result_labels"]
+    rev = script.get_revision("0002_add_mcp_tool_result_labels")
     assert rev is not None
-    assert rev.down_revision is None
+    assert rev.down_revision == "0001_initial_schema"
 
     upgrade_buf = StringIO()
     with redirect_stdout(upgrade_buf):
@@ -552,7 +552,7 @@ def test_alembic_initial_schema_single_head_and_org_offline_sql() -> None:
 
     downgrade_buf = StringIO()
     with redirect_stdout(downgrade_buf):
-        command.downgrade(config, "0001_initial_schema:base", sql=True)
+        command.downgrade(config, "0002_add_mcp_tool_result_labels:base", sql=True)
     downgrade_sql = downgrade_buf.getvalue()
     for expected in (
         "DROP TABLE dept_admin_scopes",

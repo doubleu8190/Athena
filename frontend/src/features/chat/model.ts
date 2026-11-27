@@ -5,6 +5,7 @@ export type MessageRole = ApiSchemas["ConversationRole"];
 export type MessageStatus = ApiSchemas["MessageStatus"];
 export type RunStatus = ApiSchemas["RunStatus"];
 export type ToolKind = ApiSchemas["ToolKind"];
+export type ToolOutcomeStatus = ApiSchemas["ToolOutcomeStatus"];
 export type ToolResultStatus = ApiSchemas["ToolResultStatus"];
 
 export type TextMessagePart = ApiSchemas["TextPartResponse"];
@@ -39,19 +40,85 @@ export type RunListResponse = ApiSchemas["RunListResponse"];
 export type RunEvent = ApiSchemas["RunEventResponse"];
 export type RunEventListResponse = ApiSchemas["RunEventListResponse"];
 export type RunToolOutcome = ApiSchemas["RunToolOutcomeResponse"];
-// 后端 RunToolCallSummaryResponse 尚未返回 display_name，保留前端可选展示名扩展以兼容业务化步骤标题。
-export type RunToolCallSummary = ApiSchemas["RunToolCallSummaryResponse"] & {
-  display_name?: string | null;
+export type RunToolCallSummary = ApiSchemas["RunToolCallSummaryResponse"];
+export type RunToolCallDetail = ApiSchemas["RunToolCallDetailResponse"];
+export type RunToolCallListResponse = ApiSchemas["RunToolCallListResponse"];
+
+export const BUILTIN_TOOL_DISPLAY_NAMES: Record<string, string> = {
+  ask_user_input: "请求补充信息",
+  builtin_ask_user_input: "请求补充信息",
+  builtin_dispatch_subagents: "协调协作助手",
+  builtin_knowledge_search: "查阅企业知识库",
+  builtin_request_user_input: "请求补充信息",
+  builtin_save_user_memory: "记录个人工作偏好",
+  builtin_session_file_list: "查看会话文件",
+  builtin_session_file_read: "读取会话文件",
+  builtin_skill_execute: "执行技能脚本",
+  builtin_skill_load: "加载技能指南",
+  builtin_skill_read_resource: "读取技能资源",
+  dispatch_subagents: "协调协作助手",
+  knowledge_search: "查阅企业知识库",
+  request_user_input: "请求补充信息",
+  save_user_memory: "记录个人工作偏好",
+  session_file_list: "查看会话文件",
+  session_file_read: "读取会话文件",
+  skill_execute: "执行技能脚本",
+  skill_load: "加载技能指南",
+  skill_read_resource: "读取技能资源",
 };
-export type RunToolCallDetail = ApiSchemas["RunToolCallDetailResponse"] & {
-  display_name?: string | null;
-};
-export type RunToolCallListResponse = Omit<
-  ApiSchemas["RunToolCallListResponse"],
-  "items"
-> & {
-  items: RunToolCallSummary[];
-};
+
+function pickSafeExplicitDisplayName(
+  candidate: string | null | undefined,
+  modelName: string,
+): string | null {
+  const trimmed = candidate?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalized = trimmed.toLowerCase();
+  // 纵深防御：若服务端/历史载荷中的 display_name 等同底层 model_name 或以 mcp__ 开头，视为无效别名并走安全兜底。
+  if (
+    normalized === modelName.trim().toLowerCase() ||
+    normalized.startsWith("mcp__")
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+/**
+ * 解析普通用户可见的工具展示名称：
+ * 优先采用管理员/服务端下发的有效业务展示名，其次匹配内置工具中文映射；
+ * 若仍无名称且属于 MCP 工具（tool_kind === "mcp" 或 model_name 以 mcp__ 开头），
+ * 兜底显示「业务工具操作」，防止向普通用户暴露底层 mcp__xxxx 标识。
+ */
+export function resolveToolDisplayName(
+  tool: {
+    display_name?: string | null;
+    model_name: string;
+    tool_id?: string | null;
+    tool_kind?: ToolKind | null;
+  },
+  fallbackDisplayName?: string | null,
+): string {
+  const explicit =
+    pickSafeExplicitDisplayName(tool.display_name, tool.model_name) ??
+    pickSafeExplicitDisplayName(fallbackDisplayName, tool.model_name);
+  if (explicit) {
+    return explicit;
+  }
+  if (tool.tool_id && Object.hasOwn(BUILTIN_TOOL_DISPLAY_NAMES, tool.tool_id)) {
+    return BUILTIN_TOOL_DISPLAY_NAMES[tool.tool_id];
+  }
+  const normalized = tool.model_name.toLowerCase();
+  if (Object.hasOwn(BUILTIN_TOOL_DISPLAY_NAMES, normalized)) {
+    return BUILTIN_TOOL_DISPLAY_NAMES[normalized];
+  }
+  if (tool.tool_kind === "mcp" || normalized.startsWith("mcp__")) {
+    return "业务工具操作";
+  }
+  return tool.model_name;
+}
 
 export type RunContextStopReason =
   | "no_compressible_history"

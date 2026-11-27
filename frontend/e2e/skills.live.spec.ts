@@ -58,7 +58,12 @@ interface ToolCallDetail {
     filename: string;
     label: string | null;
   }>;
-  arguments: { file_id?: string } | null;
+  formatted_arguments: Array<{
+    key: string;
+    label: string;
+    value: string;
+  }>;
+  hidden_argument_count: number;
   safe_skill_projection: {
     input_files: Array<{ filename: string }>;
     skill_name: string;
@@ -66,8 +71,13 @@ interface ToolCallDetail {
   } | null;
   status: string;
   outcome: {
-    data: unknown;
+    formatted_results: Array<{
+      key: string;
+      label: string;
+      value: string;
+    }>;
     status: string;
+    summary: string;
   } | null;
 }
 
@@ -891,14 +901,10 @@ test.describe.serial("Skills 真实浏览器闭环", () => {
           encodeURIComponent(fileReadCall?.id as string),
       );
       expect(fileReadDetail.status).toBe(200);
-      expect(fileReadDetail.body.arguments?.file_id).toBe(artifact?.id);
+      expect(fileReadDetail.body).not.toHaveProperty("arguments");
       expect(fileReadDetail.body.outcome?.status).toBe("ok");
-      expect(JSON.stringify(fileReadDetail.body.outcome?.data)).toContain(
-        "2026-10",
-      );
-      expect(JSON.stringify(fileReadDetail.body.outcome?.data)).toContain(
-        "42",
-      );
+      expect(fileReadDetail.body.outcome).not.toHaveProperty("data");
+      expect(fileReadDetail.body.outcome?.summary).toBeTruthy();
       const followUpMessages = await apiJSON<ConversationMessagePage>(
         userPage,
         "/api/v1/sessions/" +

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -29,9 +30,6 @@ from domain.message import (
 )
 from domain.run.model import RunToolCallFinishedPayload
 from domain.skill import (
-    SKILL_EXECUTE_TOOL_ID,
-    SKILL_LOAD_TOOL_ID,
-    SKILL_READ_RESOURCE_TOOL_ID,
     SafeSkillApprovalProjection,
     SkillExecutionStatus,
 )
@@ -43,71 +41,132 @@ from domain.tool import (
     ToolKind,
     ToolOutcome,
     ToolOutcomeStatus,
-    format_tool_arguments,
+    is_skill_tool_call,
     persisted_status_for_outcome,
+    project_whitelisted_fields,
     render_approval_summary,
+    resolve_tool_display_name,
 )
 
-_SKILL_TOOL_IDS = frozenset(
-    {
-        SKILL_EXECUTE_TOOL_ID,
-        SKILL_LOAD_TOOL_ID,
-        SKILL_READ_RESOURCE_TOOL_ID,
+
+@dataclass(frozen=True, slots=True)
+class ToolDisplayMetadata:
+    """从实时 MCP 目录或 Run 冻结快照批量解析的工具展示元信息。"""
+
+    display_name: str | None = None
+    approval_summary_template: str | None = None
+    parameter_labels: dict[str, str] | None = None
+    result_labels: dict[str, str] | None = None
+
+
+async def load_tool_display_metadata_in_session(
+    session: AsyncSession,
+    entries: Sequence[tuple[RunToolCallModel, RunModel]],
+) -> list[ToolDisplayMetadata]:
+    """批量加载工具展示元信息（未软删表优先，失效回退冻结快照），避免 N+1 查询。"""
+    if not entries:
+        return []
+
+    mcp_tool_ids = {
+        call_row.tool_id
+        for call_row, _ in entries
+        if call_row.tool_id
+        and call_row.tool_kind != ToolKind.BUILTIN.value
+        and not is_skill_tool_call(call_row.tool_id, call_row.model_name, call_row.tool_kind)
     }
-)
-_SKILL_MODEL_NAMES = frozenset(
-    {
-        "skill_execute",
-        "skill_load",
-        "skill_read_resource",
-    }
-)
 
+    live_tools_by_id: dict[str, McpToolModel] = {}
+    if mcp_tool_ids:
+        live_rows = (
+            await session.scalars(
+                select(McpToolModel)
+                .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
+                .where(
+                    McpToolModel.id.in_(tuple(mcp_tool_ids)),
+                    McpServerModel.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        live_tools_by_id = {row.id: row for row in live_rows}
 
-def is_skill_tool_call(
-    tool_id: str | None,
-    model_name: str,
-    tool_kind: str | None = None,
-) -> bool:
-    """按工具 ID、工具类别与归一化 model_name 识别 Skill 调用，确保审批展示绝不读取原始脚本参数。"""
-    if tool_id in _SKILL_TOOL_IDS:
-        return True
-    # 显式标记为 MCP 工具时跳过名称后缀推断，避免与远端 MCP 工具命名发生语义混淆。
-    if tool_kind == ToolKind.MCP.value:
-        return False
-    normalized = model_name.strip().lower()
-    return normalized in _SKILL_MODEL_NAMES or any(
-        normalized.endswith(f"_{name}") for name in _SKILL_MODEL_NAMES
-    )
+    snapshots_by_run_id: dict[str, RuntimeToolSnapshot | None] = {}
+    resolved: list[ToolDisplayMetadata] = []
+    for call_row, run_row in entries:
+        if call_row.tool_kind == ToolKind.BUILTIN.value or is_skill_tool_call(
+            call_row.tool_id, call_row.model_name, call_row.tool_kind
+        ):
+            resolved.append(ToolDisplayMetadata())
+            continue
+        live_tool = live_tools_by_id.get(call_row.tool_id) if call_row.tool_id is not None else None
+        if live_tool is not None:
+            resolved.append(
+                ToolDisplayMetadata(
+                    display_name=live_tool.display_name,
+                    approval_summary_template=live_tool.approval_summary_template,
+                    parameter_labels=dict(live_tool.parameter_labels_json or {}),
+                    result_labels=dict(live_tool.result_labels_json or {}),
+                )
+            )
+            continue
+        if run_row.id not in snapshots_by_run_id:
+            snapshots_by_run_id[run_row.id] = (
+                None
+                if run_row.tool_snapshot is None
+                else RuntimeToolSnapshot.model_validate(run_row.tool_snapshot)
+            )
+        snapshot = snapshots_by_run_id[run_row.id]
+        snap_tool = (
+            None
+            if snapshot is None
+            else next(
+                (
+                    item
+                    for item in snapshot.tools
+                    if (call_row.tool_id is not None and item.tool_id == call_row.tool_id)
+                    or item.model_name == call_row.model_name
+                ),
+                None,
+            )
+        )
+        if snap_tool is not None:
+            resolved.append(
+                ToolDisplayMetadata(
+                    display_name=snap_tool.display_name,
+                    approval_summary_template=snap_tool.approval_summary_template,
+                    parameter_labels=dict(snap_tool.parameter_labels),
+                    result_labels=dict(snap_tool.result_labels),
+                )
+            )
+        else:
+            resolved.append(ToolDisplayMetadata())
+    return resolved
 
 
 async def enrich_pending_approvals_in_session(
     session: AsyncSession,
     entries: Sequence[tuple[RunToolCallModel, RunModel, SafeSkillApprovalProjection | None]],
-) -> list[tuple[str | None, str | None, tuple[FormattedToolArgument, ...]]]:
-    """批量组装待审批调用的业务展示名、安全摘要与可读键值参数表，避免 N+1 查询。
+) -> list[tuple[str | None, str | None, tuple[FormattedToolArgument, ...], int]]:
+    """批量组装待审批调用的业务展示名、安全摘要、严格白名单参数表及隐藏参数计数。
 
     安全边界：
     - Skill 脚本调用严禁读取原始 ExecutionMessageModel 参数，仅从已脱敏的
-      safe_skill_projection.parameter_summary 映射，防止隐藏脚本参数泄漏；
-    - MCP 调用优先读取实时未软删 McpToolModel 展示元信息，若工具或 Server 已变动
-      则优雅回退至 Run 创建时冻结的 tool_snapshot 元信息。
+      safe_skill_projection.parameter_summary 与 hidden_parameter_count 映射；
+    - 非 Skill 工具严格按管理员配置白名单投影参数，未配置标签的参数只计入隐藏计数绝不透出原键名。
     """
     if not entries:
         return []
 
-    non_skill_indices: set[int] = set()
+    non_skill_indices: list[int] = []
+    non_skill_entries: list[tuple[RunToolCallModel, RunModel]] = []
     call_message_ids: set[str] = set()
-    mcp_tool_ids: set[str] = set()
-    for idx, (call_row, _run_row, skill_proj) in enumerate(entries):
+    for idx, (call_row, run_row, skill_proj) in enumerate(entries):
         if skill_proj is not None or is_skill_tool_call(
             call_row.tool_id, call_row.model_name, call_row.tool_kind
         ):
             continue
-        non_skill_indices.add(idx)
+        non_skill_indices.append(idx)
+        non_skill_entries.append((call_row, run_row))
         call_message_ids.add(call_row.call_message_id)
-        if call_row.tool_id:
-            mcp_tool_ids.add(call_row.tool_id)
 
     # 1. 一次性批量加载非 Skill 待审批调用对应的执行消息参数。
     arguments_by_call: dict[tuple[str, str], dict[str, Any]] = {}
@@ -125,29 +184,23 @@ async def enrich_pending_approvals_in_session(
                 if isinstance(part, ToolCallPart):
                     arguments_by_call[(exec_row.id, part.tool_call_id)] = dict(part.arguments)
 
-    # 2. 一次性批量加载未软删 Server 下的实时 MCP 工具审批展示元信息。
-    live_tools_by_id: dict[str, McpToolModel] = {}
-    if mcp_tool_ids:
-        live_rows = (
-            await session.scalars(
-                select(McpToolModel)
-                .join(McpServerModel, McpServerModel.id == McpToolModel.server_id)
-                .where(
-                    McpToolModel.id.in_(tuple(mcp_tool_ids)),
-                    McpServerModel.deleted_at.is_(None),
-                )
-            )
-        ).all()
-        live_tools_by_id = {row.id: row for row in live_rows}
+    # 2. 一次性批量解析未软删实时表 + Run 冻结快照的工具展示元信息。
+    meta_list = await load_tool_display_metadata_in_session(session, non_skill_entries)
+    meta_by_index = dict(zip(non_skill_indices, meta_list, strict=True))
 
-    # 3. 缓存每个 Run 的冻结 tool_snapshot，作为 MCP 工具或 Server 变更后的优雅回退源。
-    snapshots_by_run_id: dict[str, RuntimeToolSnapshot | None] = {}
-    results: list[tuple[str | None, str | None, tuple[FormattedToolArgument, ...]]] = []
-    for idx, (call_row, run_row, skill_proj) in enumerate(entries):
-        if idx not in non_skill_indices:
-            # Skill 工具严格隔离原始参数，仅从冻结安全投影输出可见摘要项。
+    results: list[tuple[str | None, str | None, tuple[FormattedToolArgument, ...], int]] = []
+    for idx, (call_row, _run_row, skill_proj) in enumerate(entries):
+        meta = meta_by_index.get(idx)
+        display_name = resolve_tool_display_name(
+            tool_id=call_row.tool_id,
+            tool_kind=None if call_row.tool_kind is None else ToolKind(call_row.tool_kind),
+            model_name=call_row.model_name,
+            safe_skill_projection=skill_proj,
+            meta_display_name=None if meta is None else meta.display_name,
+        )
+        if meta is None:
+            # Skill 工具严格隔离原始参数，仅从冻结安全投影输出可见摘要项与隐藏计数。
             if skill_proj is not None:
-                skill_display = skill_proj.script_label or call_row.model_name
                 skill_args = tuple(
                     FormattedToolArgument(
                         key=item.name,
@@ -156,48 +209,17 @@ async def enrich_pending_approvals_in_session(
                     )
                     for item in skill_proj.parameter_summary
                 )
-                results.append((skill_display, None, skill_args))
+                results.append((display_name, None, skill_args, skill_proj.hidden_parameter_count))
             else:
-                results.append((call_row.model_name, None, ()))
+                results.append((display_name, None, (), 0))
             continue
 
         arguments = arguments_by_call.get((call_row.call_message_id, call_row.tool_call_id), {})
-        meta_display_name: str | None = None
-        meta_template: str | None = None
-        meta_labels: dict[str, str] = {}
-
-        live_tool = live_tools_by_id.get(call_row.tool_id) if call_row.tool_id is not None else None
-        if live_tool is not None:
-            meta_display_name = live_tool.display_name
-            meta_template = live_tool.approval_summary_template
-            meta_labels = dict(live_tool.parameter_labels_json or {})
-        else:
-            if run_row.id not in snapshots_by_run_id:
-                snapshots_by_run_id[run_row.id] = (
-                    None
-                    if run_row.tool_snapshot is None
-                    else RuntimeToolSnapshot.model_validate(run_row.tool_snapshot)
-                )
-            snapshot = snapshots_by_run_id[run_row.id]
-            if snapshot is not None:
-                snap_tool = next(
-                    (
-                        item
-                        for item in snapshot.tools
-                        if (call_row.tool_id is not None and item.tool_id == call_row.tool_id)
-                        or item.model_name == call_row.model_name
-                    ),
-                    None,
-                )
-                if snap_tool is not None:
-                    meta_display_name = snap_tool.display_name
-                    meta_template = snap_tool.approval_summary_template
-                    meta_labels = dict(snap_tool.parameter_labels)
-
-        display_name = meta_display_name or call_row.model_name
-        approval_summary = render_approval_summary(meta_template, arguments)
-        formatted_arguments = format_tool_arguments(arguments, meta_labels)
-        results.append((display_name, approval_summary, formatted_arguments))
+        approval_summary = render_approval_summary(meta.approval_summary_template, arguments)
+        formatted_arguments, hidden_count = project_whitelisted_fields(
+            arguments, meta.parameter_labels or {}
+        )
+        results.append((display_name, approval_summary, formatted_arguments, hidden_count))
 
     return results
 
@@ -273,9 +295,12 @@ async def load_pending_approvals_in_session(
         ],
     )
     pending: list[PendingToolApproval] = []
-    for row, skill_proj, (display_name, approval_summary, formatted_arguments) in zip(
-        rows, skill_projections, enriched, strict=True
-    ):
+    for row, skill_proj, (
+        display_name,
+        approval_summary,
+        formatted_arguments,
+        hidden_argument_count,
+    ) in zip(rows, skill_projections, enriched, strict=True):
         assert row.requested_at is not None
         pending.append(
             PendingToolApproval(
@@ -289,6 +314,7 @@ async def load_pending_approvals_in_session(
                 display_name=display_name,
                 approval_summary=approval_summary,
                 formatted_arguments=formatted_arguments,
+                hidden_argument_count=hidden_argument_count,
             )
         )
     return tuple(pending)

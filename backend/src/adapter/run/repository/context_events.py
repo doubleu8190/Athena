@@ -1,12 +1,11 @@
-"""Run 上下文消息、压缩摘要、用量记录与事件流查询的 PostgreSQL 子仓储。"""
+"""Run 上下文消息、压缩摘要、用量记录与事件流查询的 PostgreSQL 组合式 Store。"""
 
 from __future__ import annotations
-
-import logging
 
 from pydantic import TypeAdapter
 from sqlalchemy import func, select
 from sqlalchemy import text as sql_text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.message.converter import conversation_to_domain, execution_to_domain
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
@@ -21,7 +20,17 @@ from adapter.run.model import (
     RunToolCallModel,
     SessionContextSummaryModel,
 )
-from adapter.run.repository._shared import RunRepositorySupportMixin
+from adapter.run.repository._subagent_helpers import load_subagent_details_in_session
+from adapter.run.repository._tx_helpers import (
+    append_event,
+    get_visible_run,
+    lease_is_valid,
+    lock_worker_run,
+    lock_worker_run_only,
+    merge_usage,
+    sync_llm_request_count,
+    work_deadline_is_valid,
+)
 from common.date import utc_now
 from domain.message import (
     ConversationMessage,
@@ -54,21 +63,14 @@ from domain.run.model import (
     SaveContextSummaryCommand,
     SubagentTaskSummary,
 )
-from domain.skill import (
-    SKILL_LOAD_TOOL_ID,
-)
-from domain.tool import (
-    ToolCallStatus,
-    ToolOutcome,
-    ToolOutcomeStatus,
-)
+from domain.skill import SKILL_LOAD_TOOL_ID
+from domain.tool import ToolCallStatus, ToolOutcome, ToolOutcomeStatus
 
 _STREAM_SNAPSHOT_MESSAGES = 8
 _STREAM_SNAPSHOT_EVENTS = 100
 _STREAM_SNAPSHOT_BYTES = MAX_RUN_SSE_SNAPSHOT_BYTES
 _STREAM_SNAPSHOT_PREFIX_RESERVE = 128
 _RUN_EVENT_ADAPTER: TypeAdapter[RunEvent] = TypeAdapter(RunEvent)
-logger = logging.getLogger(__name__)
 
 
 def _stream_message_parts(parts: tuple[MessagePart, ...]) -> tuple[dict[str, object], ...]:
@@ -118,8 +120,12 @@ def _stream_message_parts(parts: tuple[MessagePart, ...]) -> tuple[dict[str, obj
     return tuple(projected)
 
 
-class RunContextEventsMixin(RunRepositorySupportMixin):
-    """负责上下文消息组装、压缩摘要、用量审计与 SSE 快照查询。"""
+class RunContextEventStore:
+    """负责上下文消息组装、压缩摘要、用量审计与 SSE 快照查询的独立 Store。"""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        """保存数据库会话工厂。"""
+        self._session_factory = session_factory
 
     async def record_usage(self, command: RecordRunUsageCommand) -> Run | None:
         """按执行 epoch 和调用序号幂等累加已知 usage；仅锁 runs 单行，不阻塞父表 sessions。"""
@@ -128,17 +134,15 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         async with self._session_factory() as session:
             async with session.begin():
                 # 仅锁 runs 单行并校验租约归属，避免 LLM 流期间写 usage 争抢 sessions 行锁。
-                row = await self._lock_worker_run_only(
+                row = await lock_worker_run_only(
                     session, command.run_id, command.worker_id, command.execution_epoch
                 )
                 db_now = await session.scalar(select(func.clock_timestamp()))
                 if (
                     row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                    or not self._work_deadline_is_valid(row, db_now)
+                    or not lease_is_valid(row, command.worker_id, command.execution_epoch, db_now)
+                    or not work_deadline_is_valid(row, db_now)
                 ):
                     return None
                 incoming = RunAttemptUsage(
@@ -154,10 +158,10 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     total_tokens=command.total_tokens,
                     complete=command.complete,
                 )
-                row.usage = self._merge_usage(row.usage, RunUsage(attempts=(incoming,))).model_dump(
+                row.usage = merge_usage(row.usage, RunUsage(attempts=(incoming,))).model_dump(
                     mode="json"
                 )
-                self._sync_llm_request_count(row, command.llm_request_count)
+                sync_llm_request_count(row, command.llm_request_count)
                 result = run_to_domain(row)
         return result
 
@@ -166,7 +170,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[ConversationMessage | ExecutionMessage, ...] | None:
         """读取 Run 固定 cutoff 前的正式消息及本 Run 执行交互。"""
         async with self._session_factory() as session:
-            run = await self._get_visible_run(session, session_id, owner_id, run_id)
+            run = await get_visible_run(session, session_id, owner_id, run_id)
             if run is None:
                 return None
             # 子 Run 严格上下文隔离：不拉取主会话正式对话历史，仅加载本子 Run 执行消息。
@@ -316,7 +320,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[ContextSummary, ...] | None:
         """读取 cutoff 兼容的摘要版本；不可见 Run 返回 None。"""
         async with self._session_factory() as session:
-            run = await self._get_visible_run(session, session_id, owner_id, run_id)
+            run = await get_visible_run(session, session_id, owner_id, run_id)
             if run is None:
                 return None
             if run.depth >= 1:
@@ -353,17 +357,15 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             raise ValueError("run_context_summary_invalid")
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._lock_worker_run(
+                row = await lock_worker_run(
                     session, command.run_id, command.worker_id, command.execution_epoch
                 )
                 db_now = await session.scalar(select(func.clock_timestamp()))
                 if (
                     row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                    or not self._work_deadline_is_valid(row, db_now)
+                    or not lease_is_valid(row, command.worker_id, command.execution_epoch, db_now)
+                    or not work_deadline_is_valid(row, db_now)
                 ):
                     return None
                 existing = await session.scalar(
@@ -422,7 +424,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                     covered_through_sequence=command.covered_through_sequence,
                     batch_count=command.batch_count,
                 )
-                await self._append_event(session, row, payload, db_now or command.created_at)
+                await append_event(session, row, payload, db_now or command.created_at)
                 await session.flush()
                 event_row = await session.scalar(
                     select(RunEventModel).where(
@@ -442,16 +444,16 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
             raise ValueError("run_compression_event_invalid")
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._lock_worker_run(session, run_id, worker_id, execution_epoch)
+                row = await lock_worker_run(session, run_id, worker_id, execution_epoch)
                 db_now = await session.scalar(select(func.clock_timestamp()))
                 if (
                     row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(row, worker_id, execution_epoch, db_now)
-                    or not self._work_deadline_is_valid(row, db_now)
+                    or not lease_is_valid(row, worker_id, execution_epoch, db_now)
+                    or not work_deadline_is_valid(row, db_now)
                 ):
                     return None
-                await self._append_event(session, row, payload, db_now or utc_now())
+                await append_event(session, row, payload, db_now or utc_now())
                 event_row = await session.scalar(
                     select(RunEventModel).where(
                         RunEventModel.run_id == row.id,
@@ -472,7 +474,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                 await session.execute(sql_text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
 
                 # 步骤 2：校验租户所有权与会话软删除状态，拒绝未授权或失效数据访问。
-                row = await self._get_visible_run(session, session_id, owner_id, run_id)
+                row = await get_visible_run(session, session_id, owner_id, run_id)
                 if row is None:
                     return None
 
@@ -508,7 +510,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
                         subagent_tasks,
                         pending_subagent_inputs,
                         pending_subagent_approvals,
-                    ) = await self._load_subagent_details_in_session(session, session_id, row.id)
+                    ) = await load_subagent_details_in_session(session, session_id, row.id)
 
                 # 在退出事务与归还连接前完成全部轻量领域对象转换，避免事务外访问 ORM 实体。
                 run = run_to_domain(row)
@@ -569,7 +571,6 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
         # 后续 CPU 密集的消息字节预裁剪与 512KB 快照序列化裁剪全部在事务外执行。
 
         # 步骤 5：事务外单趟字节预算裁剪，确保完整 SSE 快照帧严格 <= 512 KiB。
-        # 先按最宽游标占位测量空消息/空事件信封字节数，再按每条消息/事件 JSON 字节累加精确控界。
         messages_before_sequence = messages[0].sequence if has_more_messages and messages else None
         events_after_sequence = events[-1].sequence if has_more_events and events else None
         events_complete = events_after_sequence is None
@@ -662,7 +663,7 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[RunEvent, ...] | None:
         """在单数据库会话内合并 Run 可见性校验与事件分页读取，不可见时返回 None。"""
         async with self._session_factory() as session:
-            visible = await self._get_visible_run(session, session_id, owner_id, run_id)
+            visible = await get_visible_run(session, session_id, owner_id, run_id)
             if visible is None:
                 return None
             rows = (
@@ -710,9 +711,9 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[SubagentTaskSummary, ...]:
         """读取主 Run 下属全部子任务的聚合状态投影。"""
         async with self._session_factory() as session:
-            if await self._get_visible_run(session, session_id, owner_id, parent_run_id) is None:
+            if await get_visible_run(session, session_id, owner_id, parent_run_id) is None:
                 return ()
-            tasks, _, _ = await self._load_subagent_details_in_session(
+            tasks, _, _ = await load_subagent_details_in_session(
                 session,
                 session_id,
                 parent_run_id,
@@ -726,9 +727,9 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[PendingSubagentInput, ...]:
         """读取主 Run 下属子 Run 当前待回答的澄清请求。"""
         async with self._session_factory() as session:
-            if await self._get_visible_run(session, session_id, owner_id, parent_run_id) is None:
+            if await get_visible_run(session, session_id, owner_id, parent_run_id) is None:
                 return ()
-            _, inputs, _ = await self._load_subagent_details_in_session(
+            _, inputs, _ = await load_subagent_details_in_session(
                 session,
                 session_id,
                 parent_run_id,
@@ -742,9 +743,9 @@ class RunContextEventsMixin(RunRepositorySupportMixin):
     ) -> tuple[PendingSubagentApproval, ...]:
         """读取主 Run 下属子 Run 当前待人工审批的工具调用。"""
         async with self._session_factory() as session:
-            if await self._get_visible_run(session, session_id, owner_id, parent_run_id) is None:
+            if await get_visible_run(session, session_id, owner_id, parent_run_id) is None:
                 return ()
-            _, _, approvals = await self._load_subagent_details_in_session(
+            _, _, approvals = await load_subagent_details_in_session(
                 session,
                 session_id,
                 parent_run_id,

@@ -1,11 +1,9 @@
-"""Run 工具批处理、审批与产物发布原子事务的 PostgreSQL 子仓储。"""
+"""Run 工具批处理、审批与产物发布原子事务的 PostgreSQL 组合式 Store。"""
 
 from __future__ import annotations
 
-import logging
-
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adapter.file.repository import (
     count_published_session_files,
@@ -13,16 +11,27 @@ from adapter.file.repository import (
 )
 from adapter.message.converter import execution_to_domain
 from adapter.message.model import ExecutionMessageModel
-from adapter.run.converter import (
-    run_to_domain,
-    tool_call_to_domain,
+from adapter.message.repository import SqlAlchemyMessageRepository
+from adapter.run.converter import run_to_domain, tool_call_to_domain
+from adapter.run.model import RunModel, RunToolCallModel
+from adapter.run.repository._approval_helpers import (
+    load_pending_approvals_in_session,
+    refresh_safe_skill_projection,
+    settle_running_skill_execution,
 )
-from adapter.run.model import (
-    RunModel,
-    RunToolCallModel,
-)
-from adapter.run.repository._shared import (
-    RunRepositorySupportMixin,
+from adapter.run.repository._tx_helpers import (
+    append_event,
+    check_fingerprint,
+    clear_lease,
+    find_request,
+    get_visible_run,
+    lease_is_valid,
+    lock_run,
+    lock_session,
+    lock_worker_run,
+    store_request,
+    sync_llm_request_count,
+    work_deadline_is_valid,
 )
 from adapter.session.model import SessionModel
 from adapter.skill.model import SkillExecutionModel
@@ -85,11 +94,19 @@ from domain.tool import (
 )
 
 _MAX_TOOL_BATCH_SIZE = 8
-logger = logging.getLogger(__name__)
 
 
-class RunToolCallsMixin(RunRepositorySupportMixin):
-    """负责工具批次持久化、准入、审批决策、完成及 Skill 产物发布。"""
+class RunToolCallStore:
+    """负责工具批次持久化、准入、审批决策、完成及 Skill 产物发布的独立 Store。"""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        message_repository: SqlAlchemyMessageRepository,
+    ) -> None:
+        """保存数据库会话工厂与同事务消息追加端口。"""
+        self._session_factory = session_factory
+        self._message_repo = message_repository
 
     async def begin_tool_call_batch(
         self, command: BeginToolCallBatchCommand
@@ -121,7 +138,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         async with self._session_factory() as session:
             async with session.begin():
                 # 锁定会话与 Run，并用 worker_id + execution_epoch 做 fencing，拒绝失租写入。
-                row = await self._lock_worker_run(
+                row = await lock_worker_run(
                     session, command.run_id, command.worker_id, command.execution_epoch
                 )
                 locked_session = await session.get(SessionModel, row.session_id)
@@ -133,10 +150,8 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 if (
                     row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                    or not self._work_deadline_is_valid(row, db_now)
+                    or not lease_is_valid(row, command.worker_id, command.execution_epoch, db_now)
+                    or not work_deadline_is_valid(row, db_now)
                 ):
                     raise RunStateError("run_execution_lease_lost")
                 # 助手消息必须属于当前 Run，防止跨 Run 写入。
@@ -152,7 +167,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 if existing_message is not None:
                     raise RunConflictError("run_tool_batch_conflict")
 
-                self._sync_llm_request_count(row, command.llm_request_count)
+                sync_llm_request_count(row, command.llm_request_count)
 
                 # 续接 Run 内已有工具调用序号，保证批次内 ordinal 单调递增。
                 ordinal = int(
@@ -238,7 +253,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                             locked_session=locked_session,
                         )
                         record.result_message_id = item.result_message.id
-                        await self._append_event(
+                        await append_event(
                             session,
                             row,
                             RunToolCallFinishedPayload(
@@ -259,9 +274,9 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 if pending_record_ids:
                     row.status = RunStatus.WAITING_FOR_APPROVAL.value
                     row.updated_at = command.requested_at
-                    self._clear_lease(row)
+                    clear_lease(row)
                     # 事件携带本批全部待审批调用，供前端展示与后续决策校验。
-                    await self._append_event(
+                    await append_event(
                         session,
                         row,
                         RunWaitingForApprovalPayload(
@@ -339,10 +354,8 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 if (
                     row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                    or not self._work_deadline_is_valid(row, db_now)
+                    or not lease_is_valid(row, command.worker_id, command.execution_epoch, db_now)
+                    or not work_deadline_is_valid(row, db_now)
                     or record.status != ToolCallStatus.APPROVED.value
                 ):
                     return None
@@ -350,7 +363,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 record.execution_epoch = command.execution_epoch
                 record.started_at = command.admitted_at
                 row.updated_at = command.admitted_at
-                await self._append_event(
+                await append_event(
                     session,
                     row,
                     RunToolCallStartedPayload(
@@ -369,12 +382,10 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             # 决策写入、工具结果消息、事件与幂等台账都在同一事务内提交。
             async with session.begin():
                 # 先锁会话再锁 Run，与其它 Run 操作保持一致的加锁顺序，避免死锁。
-                locked_session = await self._lock_session(
-                    session, command.session_id, command.owner_id
-                )
-                row = await self._lock_run(session, command.session_id, command.run_id)
+                locked_session = await lock_session(session, command.session_id, command.owner_id)
+                row = await lock_run(session, command.session_id, command.run_id)
                 # 请求级幂等：同一 request_id 已处理过则直接返回上次结果。
-                replay = await self._find_request(
+                replay = await find_request(
                     session,
                     command.owner_id,
                     command.session_id,
@@ -383,7 +394,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 )
                 if replay is not None:
                     # request_id 被复用于不同参数时视为冲突，防止误认领他人结果。
-                    self._check_fingerprint(replay, command.fingerprint)
+                    check_fingerprint(replay, command.fingerprint)
                     replay_run_id = RunRequestResult.model_validate(replay.result).run_id
                     replay_row = await session.scalar(
                         select(RunModel).where(
@@ -410,7 +421,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 # 记录级幂等：换一个 request_id 重复提交同一决策也视为成功。
                 if record.approval_decision is not None:
                     if record.approval_decision == command.decision.value:
-                        await self._store_request(
+                        await store_request(
                             session,
                             command.owner_id,
                             command.session_id,
@@ -433,7 +444,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     command.decision is ToolApprovalDecision.APPROVE
                     and record.tool_id == SKILL_EXECUTE_TOOL_ID
                 ):
-                    projection = await self._refresh_safe_skill_projection(
+                    projection = await refresh_safe_skill_projection(
                         session,
                         record,
                     )
@@ -495,7 +506,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     record.outcome = denied.model_dump(mode="json")
 
                 # 追加审批结果事件到 Run 事件流，供前端推送与断线对账。
-                await self._append_event(
+                await append_event(
                     session,
                     row,
                     RunToolApprovalDecidedPayload(
@@ -524,15 +535,15 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     row.status = RunStatus.QUEUED.value
                     row.queued_at = command.decided_at
                     row.updated_at = command.decided_at
-                    self._clear_lease(row)
-                    await self._append_event(
+                    clear_lease(row)
+                    await append_event(
                         session,
                         row,
                         RunApprovalResumedPayload(batch_message_id=record.call_message_id),
                         command.decided_at,
                     )
                 # 写入幂等台账，供相同 request_id 的重试直接返回。
-                await self._store_request(
+                await store_request(
                     session,
                     command.owner_id,
                     command.session_id,
@@ -551,16 +562,16 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
     ) -> tuple[PendingToolApproval, ...] | None:
         """读取可见 Run 的安全待审批工具投影，复用共享加载实现。"""
         async with self._session_factory() as session:
-            run_row = await self._get_visible_run(session, session_id, owner_id, run_id)
+            run_row = await get_visible_run(session, session_id, owner_id, run_id)
             if run_row is None:
                 return None
-            return await self._load_pending_approvals_in_session(session, run_row, session_id)
+            return await load_pending_approvals_in_session(session, run_row, session_id)
 
     async def finish_tool_call(self, command: FinishToolCallCommand) -> Run | None:
         """在 Session/Run 既有序内原子持久化工具调用结果、对象引用与配额提交。"""
         async with self._session_factory() as session:
             async with session.begin():
-                row = await self._lock_worker_run(
+                row = await lock_worker_run(
                     session, command.run_id, command.worker_id, command.execution_epoch
                 )
                 locked_session = await session.get(SessionModel, row.session_id)
@@ -597,14 +608,12 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     or row.status != RunStatus.RUNNING.value
                     or row.cancel_requested_at is not None
                     or record.execution_epoch != command.execution_epoch
-                    or not self._lease_is_valid(
-                        row, command.worker_id, command.execution_epoch, db_now
-                    )
-                    or not self._work_deadline_is_valid(row, db_now)
+                    or not lease_is_valid(row, command.worker_id, command.execution_epoch, db_now)
+                    or not work_deadline_is_valid(row, db_now)
                 ):
                     return None
                 if pending_artifacts:
-                    # _lock_worker_run 已锁 SessionModel FOR UPDATE，直接校验配额即可串行。
+                    # lock_worker_run 已锁 SessionModel FOR UPDATE，直接校验配额即可串行。
                     count = await count_published_session_files(session, row.session_id)
                     if count + len(pending_artifacts) > 100:
                         raise ValueError("session_file_quota_exceeded")
@@ -629,7 +638,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                 elif outcome.status is ToolOutcomeStatus.UNKNOWN:
                     # 启动回查失败时没有可信 execution_id，不能猜测新 ID；
                     # 工具结果已确定 UNKNOWN，按 tool_call_record_id 收敛 running 审计。
-                    await self._settle_running_skill_execution(
+                    await settle_running_skill_execution(
                         session,
                         record.id,
                         command.finished_at,
@@ -654,7 +663,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
                     None if outcome.status is ToolOutcomeStatus.OK else outcome.code
                 )
                 record.outcome = outcome.model_dump(mode="json")
-                await self._append_event(
+                await append_event(
                     session,
                     row,
                     RunToolCallFinishedPayload(
@@ -681,7 +690,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         if after_ordinal < 0 or not 1 <= limit <= 100:
             raise ValueError("run_tool_call_page_invalid")
         async with self._session_factory() as session:
-            visible = await self._get_visible_run(session, session_id, owner_id, run_id)
+            visible = await get_visible_run(session, session_id, owner_id, run_id)
             if visible is None:
                 return None
             rows = (
@@ -735,7 +744,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
             )
             if call_message is None:
                 raise ValueError("run_tool_call_message_missing")
-            safe_skill_projection = await self._refresh_safe_skill_projection(session, row)
+            safe_skill_projection = await refresh_safe_skill_projection(session, row)
         call_domain = execution_to_domain(call_message)
         call_part = next(
             (
@@ -835,6 +844,7 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         artifacts: tuple[PendingSessionFile, ...],
     ) -> tuple[PendingSessionFile, ...]:
         """确保待发布文件与唯一 TOOL 结果中的有序引用完全一致。"""
+        del record
         if len(artifacts) > 100:
             raise RunStateError("session_file_quota_exceeded")
         if tuple(item.output_index for item in artifacts) != tuple(range(len(artifacts))):
@@ -942,6 +952,6 @@ class RunToolCallsMixin(RunRepositorySupportMixin):
         skill_execution.log_error_code = completion.log_error_code
         skill_execution.error_code = completion.error_code
         skill_execution.cleanup_error_code = completion.cleanup_error_code
-        skill_execution.result_artifacts = RunToolCallsMixin._serialize_skill_artifacts(artifacts)
+        skill_execution.result_artifacts = RunToolCallStore._serialize_skill_artifacts(artifacts)
         skill_execution.finished_at = completion.finished_at
         await session.flush()

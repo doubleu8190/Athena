@@ -1575,7 +1575,7 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
 
     from adapter.run.model import RunModel
     from adapter.run.repository import context_events as ctx_module
-    from adapter.run.repository.context_events import RunContextEventsMixin
+    from adapter.run.repository.context_events import RunContextEventStore
     from domain.run.model import RunSnapshotEvent
 
     now = datetime.now(UTC)
@@ -1764,11 +1764,9 @@ def test_get_stream_snapshot_trims_outside_transaction_and_advances_cursors(
             del args
             session_active = False
 
-    class _Repo(RunContextEventsMixin):
-        def __init__(self) -> None:
-            self._session_factory = cast(Any, lambda: _FakeSession())
+    repo = RunContextEventStore(cast(Any, lambda: _FakeSession()))
 
-    snapshot = asyncio.run(_Repo().get_stream_snapshot("ses_snap_1", "usr_snap_1", "run_snap_1"))
+    snapshot = asyncio.run(repo.get_stream_snapshot("ses_snap_1", "usr_snap_1", "run_snap_1"))
     assert snapshot is not None
     assert executed_statements == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"]
     # 步骤 7 序列化全部发生在事务与会话完全退出之后。
@@ -2207,7 +2205,7 @@ def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_p
 
     from adapter.run.model import RunModel
     from adapter.run.repository import context_events as ctx_module
-    from adapter.run.repository.context_events import RunContextEventsMixin
+    from adapter.run.repository.context_events import RunContextEventStore
 
     now = datetime.now(UTC)
     # 1. 验证 RunStreamMessage 收紧后的契约：session_id 与 parts 必填，可空元信息字段仍允许省略。
@@ -2403,13 +2401,11 @@ def test_get_stream_snapshot_self_contained_terminal_fields_and_512kb_terminal_p
         async def __aexit__(self, *args: object) -> None:
             del args
 
-    class _Repo(RunContextEventsMixin):
-        def __init__(self) -> None:
-            self._session_factory = cast(Any, lambda: _FakeSession())
+    repo = RunContextEventStore(cast(Any, lambda: _FakeSession()))
 
     # 紧凑预算：全量消息+事件超限，裁掉旧用户消息与尾部事件后可完整保留最终助手消息。
     monkeypatch.setattr(ctx_module, "_STREAM_SNAPSHOT_BYTES", 2000)
-    snapshot = asyncio.run(_Repo().get_stream_snapshot("ses_term_1", "usr_term_1", "run_term_1"))
+    snapshot = asyncio.run(repo.get_stream_snapshot("ses_term_1", "usr_term_1", "run_term_1"))
     assert snapshot is not None
     assert executed_statements == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"]
     assert snapshot.assistant_message_id == "msg_final_assistant"

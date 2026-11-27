@@ -9,7 +9,7 @@ from contextlib import suppress
 from datetime import datetime
 
 from app.run.config import RunWorkerConfig
-from app.run.events import publish_pending_events
+from app.run.event_publisher import publish_run_events
 from app.run.executor import RunExecutor
 from bootstrap.worker import compute_worker_retry_delay, is_recoverable_worker_error
 from common.date import as_utc, utc_now
@@ -321,7 +321,7 @@ class RunWorker:
 
     async def _publish_new_events(self, lease: RunLease, event_sequence: int) -> None:
         """在状态事务提交后尽力发布正式事件，丢通知由 SSE 对账补齐。"""
-        latest_cursor, lookup_failed = await publish_pending_events(
+        await publish_run_events(
             self._repository,
             self._publisher,
             session_id=lease.run.session_id,
@@ -329,34 +329,9 @@ class RunWorker:
             run_id=lease.run.id,
             execution_epoch=lease.run.execution_epoch,
             after_sequence=lease.run.event_sequence,
+            parent_run_id=lease.run.parent_run_id,
             target_sequence=event_sequence,
         )
-        if (
-            not lookup_failed
-            and self._publisher is not None
-            and lease.run.parent_run_id is not None
-            and latest_cursor > lease.run.event_sequence
-        ):
-            # 子 Run 状态变更同步唤醒父 Run 实时频道，避免父 Run SSE 等待周期对账。
-            events = await self._repository.list_events(
-                lease.run.session_id,
-                lease.run.owner_id,
-                lease.run.id,
-                after_sequence=lease.run.event_sequence,
-                limit=100,
-                through_sequence=latest_cursor,
-            )
-            for event in events:
-                try:
-                    await self._publisher.publish_persisted(
-                        lease.run.parent_run_id, lease.run.execution_epoch, event
-                    )
-                except Exception:
-                    logger.warning(
-                        "subagent_parent_event_forward_failed parent_run_id=%s sub_run_id=%s",
-                        lease.run.parent_run_id,
-                        lease.run.id,
-                    )
 
     async def _settle_cancellation(
         self,

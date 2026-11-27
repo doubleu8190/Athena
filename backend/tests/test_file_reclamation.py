@@ -395,7 +395,7 @@ def test_maintenance_scans_only_requested_prefixes() -> None:
         maintenance.run(
             execute=True,
             writers_stopped=True,
-            prefixes=("session-files/", "skills/"),
+            prefixes=("session-files/", "skills/", "session-files/"),
         )
     )
 

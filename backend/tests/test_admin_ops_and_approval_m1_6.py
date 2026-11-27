@@ -883,7 +883,7 @@ def test_model_profile_patch_protects_active_default_and_compression_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """禁止通过 PATCH 破坏当前默认模型的流式/工具/启用能力，或禁用当前压缩策略模型。"""
-    from adapter.run.repository._shared import _is_skill_tool_call
+    from adapter.run.repository._approval_helpers import is_skill_tool_call as _is_skill_tool_call
 
     h = _run(_create_harness(monkeypatch))
     try:

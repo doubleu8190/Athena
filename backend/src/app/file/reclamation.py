@@ -103,7 +103,10 @@ class FileObjectMaintenance:
         counters = _ReclamationCounters()
         pending_candidates: list[str] = []
         pending_deletes: list[str] = []
-        scan_targets: tuple[str | None, ...] = tuple(prefixes) if prefixes is not None else (None,)
+        # 对显式传入的 prefixes 去重保序，避免重复前缀触发重复列举与重复删除计数。
+        scan_targets: tuple[str | None, ...] = (
+            tuple(dict.fromkeys(prefixes)) if prefixes is not None else (None,)
+        )
 
         for prefix in scan_targets:
             await self._scan_prefix(

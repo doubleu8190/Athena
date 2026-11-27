@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,10 +18,20 @@ from adapter.llm.model import ModelProfileVersionModel
 from adapter.message.model import ConversationMessageModel, ExecutionMessageModel
 from adapter.message.repository import SqlAlchemyMessageRepository
 from adapter.run.model import RunModel, RunToolCallModel
-from adapter.run.repository import _shared, context_events, lifecycle, tool_calls
-from adapter.run.repository.lifecycle import RunLifecycleMixin
+from adapter.run.repository import (
+    _approval_helpers,
+    _subagent_helpers,
+    _tx_helpers,
+    context_events,
+    lifecycle,
+    subagents,
+    tool_calls,
+)
+from adapter.run.repository.context_events import RunContextEventStore
+from adapter.run.repository.lifecycle import RunLifecycleStore
 from adapter.run.repository.run import SqlAlchemyRunRepository
-from adapter.run.repository.tool_calls import RunToolCallsMixin
+from adapter.run.repository.subagents import RunSubagentStore
+from adapter.run.repository.tool_calls import RunToolCallStore
 from adapter.session.model import SessionModel
 from adapter.system_prompt.model import SystemPromptVersionModel
 from domain.auth import UserRole, UserStatus
@@ -34,13 +45,16 @@ from domain.tool import (
 )
 
 
-def test_settle_cancelled_contract_and_patch_removed() -> None:
-    """验证 settle_cancelled 形参严格对齐 domain 协议且 RunRepository 删除了打补丁覆盖。"""
-    # 1. 确保 SqlAlchemyRunRepository 本身没有重写 settle_cancelled
-    assert "settle_cancelled" not in SqlAlchemyRunRepository.__dict__
+def test_settle_cancelled_contract_and_composition() -> None:
+    """验证 RunLifecycleStore.settle_cancelled 形参对齐且仓储采用组合模式。"""
+    # 1. 确保 SqlAlchemyRunRepository 已不再使用 Mixin 多继承，仅直接实现 RunRepository 协议
+    assert SqlAlchemyRunRepository.__bases__ == (RunRepository,)
+    assert not hasattr(lifecycle, "RunLifecycleMixin")
+    assert not hasattr(tool_calls, "RunToolCallsMixin")
+    assert not hasattr(context_events, "RunContextEventsMixin")
 
-    # 2. 检查形参对齐情况
-    sig = inspect.signature(RunLifecycleMixin.settle_cancelled)
+    # 2. 检查 RunLifecycleStore 与门面形参对齐情况
+    sig = inspect.signature(RunLifecycleStore.settle_cancelled)
     params = list(sig.parameters.keys())
     assert "self" in params
     assert "run_id" in params
@@ -52,14 +66,18 @@ def test_settle_cancelled_contract_and_patch_removed() -> None:
 
     # 3. 严格契约类型验证
     domain_sig = inspect.signature(RunRepository.settle_cancelled)
+    facade_sig = inspect.signature(SqlAlchemyRunRepository.settle_cancelled)
     for p in ("run_id", "worker_id", "execution_epoch", "settled_at", "llm_request_count"):
         assert sig.parameters[p].name == domain_sig.parameters[p].name
         assert sig.parameters[p].kind == domain_sig.parameters[p].kind
         assert sig.parameters[p].default == domain_sig.parameters[p].default
+        assert facade_sig.parameters[p].name == domain_sig.parameters[p].name
+        assert facade_sig.parameters[p].kind == domain_sig.parameters[p].kind
+        assert facade_sig.parameters[p].default == domain_sig.parameters[p].default
 
 
 def test_message_repository_property_and_attribute() -> None:
-    """验证仓储内部统一持有 _message_repo，已移除旧过渡兼容属性 _messages。"""
+    """验证仓储内部统一持有 _message_repo 且装配 4 个 Store，已移除 _shared 与 _messages。"""
     mock_session_factory = MagicMock()
     mock_message_repo = MagicMock()
 
@@ -68,62 +86,74 @@ def test_message_repository_property_and_attribute() -> None:
         mock_message_repo,
     )
     assert repo._message_repo is mock_message_repo
+    assert isinstance(repo._lifecycle, RunLifecycleStore)
+    assert isinstance(repo._subagents, RunSubagentStore)
+    assert isinstance(repo._tool_calls, RunToolCallStore)
+    assert isinstance(repo._context_events, RunContextEventStore)
     assert not hasattr(repo, "_messages")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("adapter.run.repository._shared")
 
 
-def test_shared_and_lifecycle_method_signatures() -> None:
-    """验证生命周期及共享辅助方法的形参和命名。"""
-    # 模型配置已改为无锁读取与统一可用性校验，3 个旧 *_id 死封装已移除
-    assert hasattr(SqlAlchemyRunRepository, "_load_default_profile_row")
-    assert hasattr(SqlAlchemyRunRepository, "_validate_usable_profile")
-    assert hasattr(SqlAlchemyRunRepository, "_database_now")
-    assert not hasattr(SqlAlchemyRunRepository, "_lock_default_profile")
-    assert not hasattr(SqlAlchemyRunRepository, "_lock_default_profile_id")
-    assert not hasattr(SqlAlchemyRunRepository, "_lock_selected_profile_id")
-    assert not hasattr(SqlAlchemyRunRepository, "_lock_retry_profile_id")
-    assert not hasattr(SqlAlchemyRunRepository, "_next_run_created_at")
+def test_helpers_and_lifecycle_method_signatures() -> None:
+    """验证拆分后的 _tx_helpers / _subagent_helpers / _approval_helpers 形参和命名规范。"""
+    # 模型配置已改为无锁读取与统一可用性校验，旧 *_id 死封装已移除
+    assert hasattr(_tx_helpers, "load_default_profile_row")
+    assert hasattr(_tx_helpers, "validate_usable_profile")
+    assert hasattr(_tx_helpers, "database_now")
+    assert not hasattr(_tx_helpers, "lock_default_profile")
+    assert not hasattr(_tx_helpers, "lock_default_profile_id")
+    assert not hasattr(_tx_helpers, "lock_selected_profile_id")
+    assert not hasattr(_tx_helpers, "lock_retry_profile_id")
+    assert not hasattr(_tx_helpers, "next_run_created_at")
     assert not hasattr(SqlAlchemyRunRepository, "reserve_llm_request")
 
-    # _validate_and_merge_input_file_ids 存在，旧命名不存在
-    assert hasattr(SqlAlchemyRunRepository, "_validate_and_merge_input_file_ids")
-    assert not hasattr(SqlAlchemyRunRepository, "_validated_input_file_ids")
+    # validate_and_merge_input_file_ids 存在，旧命名不存在
+    assert hasattr(_tx_helpers, "validate_and_merge_input_file_ids")
+    assert not hasattr(_tx_helpers, "validated_input_file_ids")
 
-    # _lock_worker_run 形参规范化
-    lock_sig = inspect.signature(SqlAlchemyRunRepository._lock_worker_run)
+    # lock_worker_run 形参规范化
+    lock_sig = inspect.signature(_tx_helpers.lock_worker_run)
     assert "execution_epoch" in lock_sig.parameters
     assert "epoch" not in lock_sig.parameters
 
-    # _lease_is_valid 形参规范化
-    lease_sig = inspect.signature(SqlAlchemyRunRepository._lease_is_valid)
+    # lease_is_valid 形参规范化
+    lease_sig = inspect.signature(_tx_helpers.lease_is_valid)
     assert "execution_epoch" in lease_sig.parameters
     assert "epoch" not in lease_sig.parameters
 
-    # _try_wake_parent_run 形参规范化
-    wake_sig = inspect.signature(SqlAlchemyRunRepository._try_wake_parent_run)
+    # try_wake_parent_run 形参规范化
+    wake_sig = inspect.signature(_subagent_helpers.try_wake_parent_run)
     assert "sub_run" in wake_sig.parameters
     assert "sub_row" not in wake_sig.parameters
 
+    # 子智能体批处理独立拆至 RunSubagentStore，不再留在 RunLifecycleStore
+    assert hasattr(RunSubagentStore, "count_subagent_dispatches")
+    assert hasattr(RunSubagentStore, "begin_subagent_batch")
+    assert "count_subagent_dispatches" not in RunLifecycleStore.__dict__
+    assert "begin_subagent_batch" not in RunLifecycleStore.__dict__
+
 
 def test_tool_calls_structure_and_dead_constants() -> None:
-    """验证 tool_calls 方法命名、双层事务重构、深比对重放清理及死常量清理。"""
+    """验证 RunToolCallStore 方法命名、单层事务重构、深比对重放清理及死常量清理。"""
     # 验证双层事务消除套娃：finish_tool_call 直接单层落库，无多余私有包装方法
-    assert hasattr(RunToolCallsMixin, "finish_tool_call")
-    assert not hasattr(RunToolCallsMixin, "_finish_tool_call_in_session")
-    assert not hasattr(RunToolCallsMixin, "_finish_tool_call_transaction")
-    assert not hasattr(RunToolCallsMixin, "_finish_tool_call_transaction_inner")
+    assert hasattr(RunToolCallStore, "finish_tool_call")
+    assert not hasattr(RunToolCallStore, "_finish_tool_call_in_session")
+    assert not hasattr(RunToolCallStore, "_finish_tool_call_transaction")
+    assert not hasattr(RunToolCallStore, "_finish_tool_call_transaction_inner")
 
     # 验证产物校验方法动词原形
-    assert hasattr(RunToolCallsMixin, "_validate_pending_artifacts")
-    assert not hasattr(RunToolCallsMixin, "_validated_pending_artifacts")
+    assert hasattr(RunToolCallStore, "_validate_pending_artifacts")
+    assert not hasattr(RunToolCallStore, "_validated_pending_artifacts")
 
     # 验证已删除深比对重放、converge_tool_batch 与死查询 list_retry_context
-    assert not hasattr(RunToolCallsMixin, "_skill_execution_row_matches")
-    assert not hasattr(RunToolCallsMixin, "_skill_completion_matches")
-    assert not hasattr(RunToolCallsMixin, "_delivery_message_matches")
-    assert not hasattr(RunToolCallsMixin, "_artifact_rows_match")
-    assert not hasattr(RunToolCallsMixin, "converge_tool_batch")
-    assert not hasattr(RunToolCallsMixin, "list_retry_context")
-    assert not hasattr(_shared, "_skill_execution_row_matches")
+    assert not hasattr(RunToolCallStore, "_skill_execution_row_matches")
+    assert not hasattr(RunToolCallStore, "_skill_completion_matches")
+    assert not hasattr(RunToolCallStore, "_delivery_message_matches")
+    assert not hasattr(RunToolCallStore, "_artifact_rows_match")
+    assert not hasattr(RunToolCallStore, "converge_tool_batch")
+    assert not hasattr(RunToolCallStore, "list_retry_context")
+    assert not hasattr(_approval_helpers, "_skill_execution_row_matches")
 
     # 验证常量清理
     assert not hasattr(tool_calls, "_ACTIVE_STATUSES")
@@ -133,12 +163,13 @@ def test_tool_calls_structure_and_dead_constants() -> None:
     assert not hasattr(tool_calls, "_STREAM_SNAPSHOT_PREFIX_RESERVE")
     assert hasattr(tool_calls, "_MAX_TOOL_BATCH_SIZE")
 
-    assert not hasattr(_shared, "_STREAM_SNAPSHOT_MESSAGES")
-    assert not hasattr(_shared, "_STREAM_SNAPSHOT_EVENTS")
-    assert not hasattr(_shared, "_STREAM_SNAPSHOT_BYTES")
-    assert not hasattr(_shared, "_STREAM_SNAPSHOT_PREFIX_RESERVE")
-    assert not hasattr(_shared, "_MAX_TOOL_BATCH_SIZE")
-    assert not hasattr(_shared, "_ACTIVE_STATUSES")
+    for helper_mod in (_tx_helpers, _subagent_helpers, _approval_helpers, subagents):
+        assert not hasattr(helper_mod, "_STREAM_SNAPSHOT_MESSAGES")
+        assert not hasattr(helper_mod, "_STREAM_SNAPSHOT_EVENTS")
+        assert not hasattr(helper_mod, "_STREAM_SNAPSHOT_BYTES")
+        assert not hasattr(helper_mod, "_STREAM_SNAPSHOT_PREFIX_RESERVE")
+        assert not hasattr(helper_mod, "_MAX_TOOL_BATCH_SIZE")
+        assert not hasattr(helper_mod, "_ACTIVE_STATUSES")
 
 
 def test_context_events_dead_constants() -> None:
@@ -161,10 +192,10 @@ def test_run_micro_ops_do_not_touch_or_lock_parent_sessions(
     # 同步确认 lifecycle 重复辅助与死常量均已收口。
     assert not hasattr(lifecycle, "_STREAM_SNAPSHOT_MESSAGES")
     assert not hasattr(lifecycle, "_MAX_TOOL_BATCH_SIZE")
-    assert "_refresh_safe_skill_projection_in_session" not in RunLifecycleMixin.__dict__
-    assert "_extract_subagent_task_summary" not in RunLifecycleMixin.__dict__
-    assert "_load_subagent_details_in_session" not in RunLifecycleMixin.__dict__
-    assert "list_visible_events" not in RunLifecycleMixin.__dict__
+    assert "_refresh_safe_skill_projection_in_session" not in RunLifecycleStore.__dict__
+    assert "_extract_subagent_task_summary" not in RunLifecycleStore.__dict__
+    assert "_load_subagent_details_in_session" not in RunLifecycleStore.__dict__
+    assert "list_visible_events" not in RunLifecycleStore.__dict__
 
     async def scenario() -> None:
         engine, factory = await create_pg_unit_db()

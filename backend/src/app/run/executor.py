@@ -1,4 +1,4 @@
-"""Run 的模型循环、单工具执行、澄清和原子完成。"""
+"""Run 的模型循环、上下文装配、澄清和原子完成主状态机。"""
 
 from __future__ import annotations
 
@@ -7,20 +7,15 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
 from app.access import AccessPolicyService
 from app.preference import PreferenceService, render_preference_context
-from app.run.auto_title import (
-    AUTO_TITLE_PROMPT_INPUT_MAX_CHARS,
-    AUTO_TITLE_SYSTEM_PROMPT,
-    AUTO_TITLE_TIMEOUT_SECONDS,
-    fallback_title_from_message,
-    sanitize_generated_title,
-)
+from app.run.auto_title import AUTO_TITLE_TIMEOUT_SECONDS
+from app.run.auto_title_runner import AutoTitleRunner
 from app.run.budget import RunLlmBudget
 from app.run.compression import ContextCompressor, ContextPreparation
 from app.run.config import RunWorkerConfig
@@ -31,26 +26,22 @@ from app.run.context import (
     RunInputImageAttachment,
     measure_llm_request,
 )
-from app.run.events import publish_pending_events
+from app.run.event_publisher import publish_run_events
 from app.run.prompt import render_project_instructions_context
 from app.run.safe_stop import SafeStopReporter
+from app.run.subagent_dispatcher import SubagentDispatcher
+from app.run.tool_batch_executor import ToolBatchExecutor
 from app.tool.ports import RunToolRuntime
-from app.tool.runtime import (
-    MCP_TOOL_WATCHDOG_GRACE_SECONDS,
-    REQUEST_USER_INPUT_DEFINITION,
-)
+from app.tool.runtime import REQUEST_USER_INPUT_DEFINITION
 from common.date import as_utc, utc_now
 from common.ids import new_id
 from common.json import utf8_size
-from domain.access import ResourceType
-from domain.file import VISION_IMAGE_MIME_TYPES, PendingSessionFile
+from domain.file import VISION_IMAGE_MIME_TYPES
 from domain.llm.model import (
     LlmError,
-    LlmMessage,
     LlmProviderError,
     LlmRequest,
     LlmResponse,
-    LlmRole,
     LlmText,
     LlmTool,
     LlmToolCall,
@@ -64,7 +55,6 @@ from domain.llm.model.profile import RuntimeModelProfile
 from domain.llm.ports import LlmStreamProvider
 from domain.llm.profile_ports import ModelProfileRepository
 from domain.message import (
-    ArtifactFileRef,
     ConversationMessage,
     ConversationMessageDraft,
     ConversationRole,
@@ -76,13 +66,10 @@ from domain.message import (
     MessageStatus,
     TextPart,
     ToolCallPart,
-    ToolResultPart,
 )
 from domain.preference import DEFAULT_PREFERENCE_MEMORY_TOKEN_BUDGET
 from domain.run.model import (
     DISPATCH_SUBAGENTS_TOOL_ID,
-    BeginSubagentBatchCommand,
-    BeginSubagentBatchItem,
     ContextStopReason,
     FailRunCommand,
     FinishRunCommand,
@@ -93,30 +80,14 @@ from domain.run.model import (
     RunStatus,
     RunUsage,
 )
-from domain.run.model.errors import RunConflictError, RunInputResourceError, RunStateError
 from domain.run.ports import RunEventTransport, RunRepository
 from domain.session import SessionScope
-from domain.skill import SKILL_EXECUTE_TOOL_ID, SkillExecutionStatus
 from domain.tool import (
-    AdmitToolCallCommand,
     AuthorizedRunContext,
-    BeginToolCallBatchCommand,
-    BeginToolCallBatchItem,
-    FinishToolCallCommand,
     InitializeRunToolsCommand,
     RuntimeToolDefinition,
     RuntimeToolSnapshot,
     RunToolBatch,
-    RunToolBatchCall,
-    ToolCallPreparation,
-    ToolCallStatus,
-    ToolExecutionContext,
-    ToolExecutionResult,
-    ToolKind,
-    ToolOutcome,
-    ToolOutcomeStatus,
-    bounded_outcome,
-    protocol_status_for_outcome,
 )
 
 if TYPE_CHECKING:
@@ -197,7 +168,6 @@ class RunExecutor:
         self._preferences = preferences
         self._preference_memory_token_budget = preference_memory_token_budget
         self._auto_title_timeout_seconds = max(0.01, float(auto_title_timeout_seconds))
-        self._background_tasks: set[asyncio.Task[None]] = set()
         # 有界保存当前执行代次的在途预算引用，供 RunWorker 在取消或超时收敛时回收已消耗计数。
         self._active_budgets: dict[tuple[str, int], RunLlmBudget] = {}
         self._id_factory = id_factory
@@ -214,12 +184,31 @@ class RunExecutor:
             id_factory=id_factory,
             now=self._now,
         )
+        self._auto_title_runner = AutoTitleRunner(
+            profiles=profiles,
+            provider=provider,
+            sessions=sessions,
+            timeout_seconds=self._auto_title_timeout_seconds,
+        )
+        self._subagent_dispatcher = SubagentDispatcher(
+            repository=repository,
+            subagents=subagents,
+            tool_runtime=tool_runtime,
+            access_policy=access_policy,
+            id_factory=id_factory,
+            now=self._now,
+        )
+        self._tool_batch_executor = ToolBatchExecutor(
+            repository=repository,
+            tool_runtime=tool_runtime,
+            config=self._config,
+            id_factory=id_factory,
+            now=self._now,
+        )
 
     async def wait_background_tasks(self) -> None:
         """等待受控后台任务（如首轮自动标题生成）全部安全退出，供测试与优雅停机使用。"""
-        while self._background_tasks:
-            pending = tuple(self._background_tasks)
-            await asyncio.gather(*pending, return_exceptions=True)
+        await self._auto_title_runner.wait_background_tasks()
 
     def _register_active_budget(self, run: Run, budget: RunLlmBudget) -> None:
         """登记本代次在途预算并按插入序限容，避免直接单测调用 execute 时无限累积。"""
@@ -855,87 +844,6 @@ class RunExecutor:
         calls = tuple(part for part in response.output if isinstance(part, LlmToolCall))
         return text, calls
 
-    def _definition_for_call(
-        self,
-        state: _ExecutionState,
-        model_name: str,
-    ) -> RuntimeToolDefinition | None:
-        # 只允许冻结快照中存在的工具，其余一律视为未知工具。
-        return state.snapshot.by_model_name(model_name)
-
-    def _validate_business_call(
-        self,
-        definition: RuntimeToolDefinition | None,
-        call: LlmToolCall,
-    ) -> ToolOutcome | None:
-        """Validate locally before deciding whether a call needs approval."""
-        # 未启用工具运行时：模型仍可能调用工具，直接返回可展示的失败结果。
-        if self._tool_runtime is None:
-            return ToolOutcome(
-                status=ToolOutcomeStatus.ERROR,
-                code="tool_unavailable",
-                message="当前 Run 未启用业务工具执行。",
-            )
-        # 运行时校验器负责参数级本地校验，不发起任何网络调用。
-        return self._tool_runtime.validate_call(definition, call.name, dict(call.arguments))
-
-    async def _prepare_business_call(
-        self,
-        state: _ExecutionState,
-        definition: RuntimeToolDefinition | None,
-        call: LlmToolCall,
-        *,
-        record_id: str,
-    ) -> ToolCallPreparation:
-        """先做本地和 Run 固定 Skill 预校验，再决定是否进入审批。"""
-        if self._tool_runtime is not None:
-            return await self._tool_runtime.prepare_call(
-                definition,
-                call.name,
-                dict(call.arguments),
-                state.run,
-                state.authorized,
-                call_id=record_id,
-            )
-        outcome = self._validate_business_call(definition, call)
-        return ToolCallPreparation(
-            outcome=outcome,
-            requires_approval=bool(
-                outcome is None and definition is not None and definition.requires_approval
-            ),
-        )
-
-    def _tool_result_draft(
-        self,
-        state: _ExecutionState,
-        *,
-        tool_call_id: str,
-        outcome: ToolOutcome,
-        created_at: datetime,
-        thread_id: str | None = None,
-        artifacts: tuple[ArtifactFileRef, ...] = (),
-    ) -> ExecutionMessageDraft:
-        return ExecutionMessageDraft(
-            id=self._id_factory("exec"),
-            session_id=state.run.session_id,
-            owner_id=state.run.owner_id,
-            run_id=state.run.id,
-            thread_id=thread_id or state.run.id,
-            role=ExecutionRole.TOOL,
-            parts=(
-                ToolResultPart(
-                    tool_call_id=tool_call_id,
-                    status=protocol_status_for_outcome(outcome),
-                    output=outcome.canonical_output(),
-                    artifacts=artifacts,
-                ),
-            ),
-            tool_call_id=tool_call_id,
-            source_message_id=None,
-            created_at=created_at,
-            metadata=MessageMetadata(),
-        )
-
     async def _submit_and_execute_batch(
         self,
         state: _ExecutionState,
@@ -943,445 +851,36 @@ class RunExecutor:
         explanation: str,
         response: LlmResponse,
     ) -> bool:
-        """Persist all calls together, then execute only if no approval barrier exists."""
-        run = state.run
-        # 助手消息承载解释文本与全部工具调用，作为一个批次原子持久化。
-        call_message_id = self._id_factory("exec")
-        created_at = self._now()
-        call_message = ExecutionMessageDraft(
-            id=call_message_id,
-            session_id=run.session_id,
-            owner_id=run.owner_id,
-            run_id=run.id,
-            thread_id=run.id,
-            role=ExecutionRole.ASSISTANT,
-            parts=(
-                *((TextPart(explanation),) if explanation.strip() else ()),
-                *(ToolCallPart(call.call_id, call.name, dict(call.arguments)) for call in calls),
-            ),
-            tool_call_id=None,
-            source_message_id=None,
-            created_at=created_at,
-            metadata=MessageMetadata(provider="chat_completions", model=response.model),
+        """委托 ToolBatchExecutor 落库工具批次并在无审批屏障时执行。"""
+        return await self._tool_batch_executor.submit_and_execute_batch(
+            run=state.run,
+            authorized=state.authorized,
+            snapshot=state.snapshot,
+            loop_deadline=state.loop_deadline,
+            round_number=state.round,
+            llm_request_count=state.budget.used,
+            calls=calls,
+            explanation=explanation,
+            response=response,
+            publish_events=lambda: self._publish_pending_events(state),
+            execute_persisted_batch=lambda batch: self._execute_persisted_batch(state, batch),
         )
-        items: list[BeginToolCallBatchItem] = []
-        # 逐条先做本地校验：校验失败生成即时错误结果，不进入审批或外部执行。
-        for call in calls:
-            definition = self._definition_for_call(state, call.name)
-            record_id = self._id_factory("toolcall")
-            prepared = await self._prepare_business_call(
-                state,
-                definition,
-                call,
-                record_id=record_id,
-            )
-            outcome = prepared.outcome
-            items.append(
-                BeginToolCallBatchItem(
-                    record_id=record_id,
-                    tool_call_id=call.call_id,
-                    model_name=call.name,
-                    tool_id=None if definition is None else definition.tool_id,
-                    tool_kind=(None if definition is None else ToolKind(definition.source.kind)),
-                    # 只有校验通过且定义要求审批的调用才进入审批屏障。
-                    requires_approval=prepared.requires_approval,
-                    immediate_outcome=outcome,
-                    result_message=(
-                        None
-                        if outcome is None
-                        else self._tool_result_draft(
-                            state,
-                            tool_call_id=call.call_id,
-                            outcome=bounded_outcome(
-                                outcome,
-                                maximum_bytes=self._config.tool_result_bytes,
-                            ),
-                            created_at=created_at,
-                        )
-                    ),
-                    safe_skill_projection=prepared.safe_skill_projection,
-                )
-            )
-        # 仓储在同一事务内写入消息、调用记录、即时结果与事件，
-        # 并根据是否存在待审批调用决定 Run 是否进入等待状态。
-        committed = await self._repository.begin_tool_call_batch(
-            BeginToolCallBatchCommand(
-                run_id=run.id,
-                worker_id=run.worker_id or "",
-                execution_epoch=run.execution_epoch,
-                call_message=call_message,
-                calls=tuple(items),
-                requested_at=created_at,
-                round=state.round,
-                llm_request_count=state.budget.used,
-            )
-        )
-        await self._publish_pending_events(state)
-        # 进入审批屏障时结束本次执行，等待用户决策后 Run 会被重新入队。
-        if committed.waiting_for_approval:
-            return False
-        # 无审批屏障时立即执行已批准的调用。
-        return await self._execute_persisted_batch(state, committed.batch)
 
     async def _execute_persisted_batch(
         self,
         state: _ExecutionState,
         batch: RunToolBatch,
     ) -> bool:
-        """按 ordinal 顺序排入信号量并发执行已批准调用，并在收尾统一通过 fail 收敛错误批次。"""
-        # 存在结果未知的调用时必须先收敛整个批次与 Run，避免重复执行产生外部副作用。
-        if any(call.record.status is ToolCallStatus.UNKNOWN for call in batch.calls):
-            failed = await self._repository.fail(
-                FailRunCommand(
-                    run_id=state.run.id,
-                    worker_id=state.run.worker_id or "",
-                    execution_epoch=state.run.execution_epoch,
-                    safe_error_code="tool_outcome_unknown",
-                    failed_at=self._now(),
-                    llm_request_count=state.budget.used,
-                )
-            )
-            if failed is None:
-                raise LlmError("run_execution_lease_lost")
-            await self._publish_pending_events(state)
-            return False
-        # 只调度 APPROVED 的调用；待审批或已终态的调用不再执行。
-        approved = [call for call in batch.calls if call.record.status is ToolCallStatus.APPROVED]
-        if not approved:
-            return True
-
-        semaphore = asyncio.Semaphore(self._config.tool_concurrency)
-        # 串行化准入临界区，保证高并发下派发严格遵循 ordinal 序且 stop_dispatch 后绝不超额准入。
-        admit_lock = asyncio.Lock()
-        stop_dispatch = asyncio.Event()
-        stop_error_code: str | None = None
-        lease_lost = False
-
-        async def run_one(call: RunToolBatchCall) -> None:
-            nonlocal stop_error_code, lease_lost
-            async with semaphore:
-                async with admit_lock:
-                    if stop_dispatch.is_set():
-                        return
-                    admitted = await self._repository.admit_tool_call(
-                        AdmitToolCallCommand(
-                            run_id=state.run.id,
-                            worker_id=state.run.worker_id or "",
-                            execution_epoch=state.run.execution_epoch,
-                            record_id=call.record.id,
-                            admitted_at=self._now(),
-                        )
-                    )
-                    if admitted is None:
-                        lease_lost = True
-                        stop_dispatch.set()
-                        return
-                call_stop_error, call_lease_lost = await self._execute_admitted_call(
-                    state,
-                    call,
-                    batch.thread_id,
-                    stop_dispatch,
-                )
-                if call_lease_lost:
-                    lease_lost = True
-                    stop_dispatch.set()
-                if call_stop_error is not None:
-                    stop_error_code = stop_error_code or call_stop_error
-                    stop_dispatch.set()
-
-        tasks = [asyncio.create_task(run_one(call)) for call in approved]
-        try:
-            await asyncio.gather(*tasks)
-        except BaseException:
-            # 取消或异常时先取消并等待所有活跃工具任务，避免遗留后台外部调用。
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-
-        # 失租优先上报，由 Worker 监督循环决定是否收敛状态。
-        if lease_lost:
-            raise LlmError("run_execution_lease_lost")
-        # 终止性错误：复用 lifecycle.fail() 原子结算未执行调用、写终态事件并唤醒父 Run。
-        if stop_error_code is not None:
-            failed = await self._repository.fail(
-                FailRunCommand(
-                    run_id=state.run.id,
-                    worker_id=state.run.worker_id or "",
-                    execution_epoch=state.run.execution_epoch,
-                    safe_error_code=stop_error_code,
-                    failed_at=self._now(),
-                    llm_request_count=state.budget.used,
-                )
-            )
-            if failed is None:
-                raise LlmError("run_execution_lease_lost")
-            await self._publish_pending_events(state)
-            return False
-        # 批次正常结束：发布事件后返回 True，主循环继续请求模型。
-        await self._publish_pending_events(state)
-        return True
-
-    async def _execute_admitted_call(
-        self,
-        state: _ExecutionState,
-        call: RunToolBatchCall,
-        thread_id: str,
-        stop_dispatch: asyncio.Event,
-    ) -> tuple[str | None, bool]:
-        """执行单个已准入调用并持久化唯一结果；返回 (stop_error_code, lease_lost)。"""
-        # 定位冻结快照中的定义并执行单个工具；结果先按字节上限裁剪。
-        definition = self._definition_for_call(state, call.record.model_name)
-        result = await self._execute_tool(
-            state,
-            definition,
-            LlmToolCall(
-                call.record.tool_call_id,
-                call.record.model_name,
-                call.arguments,
-            ),
-            record_id=call.record.id,
+        """委托 ToolBatchExecutor 按信号量并发执行已落库且已批准的工具批次。"""
+        return await self._tool_batch_executor.execute_persisted_batch(
+            run=state.run,
+            authorized=state.authorized,
+            snapshot=state.snapshot,
+            loop_deadline=state.loop_deadline,
+            llm_request_count=state.budget.used,
+            batch=batch,
+            publish_events=lambda: self._publish_pending_events(state),
         )
-        outcome = bounded_outcome(
-            result.outcome,
-            maximum_bytes=self._config.tool_result_bytes,
-        )
-        artifact_refs = tuple(
-            ArtifactFileRef(
-                file_id=artifact.id,
-                filename=artifact.filename,
-                label=artifact.label,
-                mime_type=artifact.mime_type,
-                size_bytes=artifact.size_bytes,
-            )
-            for artifact in result.artifacts
-        )
-        finished_at = self._now()
-        delivery_message = (
-            None
-            if not result.artifacts or state.run.depth >= 1
-            else ConversationMessageDraft(
-                id=f"msg-{call.record.id}",
-                session_id=state.run.session_id,
-                owner_id=state.run.owner_id,
-                role=ConversationRole.ASSISTANT,
-                status=MessageStatus.COMPLETED,
-                parts=(
-                    TextPart("已生成以下交付文件。"),
-                    *(
-                        FileRefPart(
-                            file_id=artifact.id,
-                            filename=artifact.filename,
-                            mime_type=artifact.mime_type,
-                            size_bytes=artifact.size_bytes,
-                        )
-                        for artifact in result.artifacts
-                    ),
-                ),
-                reply_to_message_id=state.run.trigger_message_id,
-                run_id=state.run.id,
-                client_message_id=None,
-                created_at=finished_at,
-                completed_at=finished_at,
-                metadata=MessageMetadata(),
-                context_turn_id=state.run.trigger_message_id,
-            )
-        )
-        # 原子写入结果消息、事件与记录终态；返回 None 表示租约已丢失。
-        try:
-            finished = await self._repository.finish_tool_call(
-                FinishToolCallCommand(
-                    run_id=state.run.id,
-                    worker_id=state.run.worker_id or "",
-                    execution_epoch=state.run.execution_epoch,
-                    record_id=call.record.id,
-                    result_message=self._tool_result_draft(
-                        state,
-                        tool_call_id=call.record.tool_call_id,
-                        outcome=outcome,
-                        created_at=finished_at,
-                        thread_id=thread_id,
-                        artifacts=artifact_refs,
-                    ),
-                    outcome=outcome,
-                    finished_at=finished_at,
-                    artifacts=result.artifacts,
-                    delivery_message=delivery_message,
-                    skill_execution_completion=result.skill_execution_completion,
-                )
-            )
-        except (ValueError, RunStateError) as error:
-            if str(error) != "session_file_quota_exceeded" or not result.artifacts:
-                raise
-            # 会话文件数量达到配额上限导致事务回滚：先清理本次刚上传至对象存储的临时产物，
-            # 再将本次工具调用与脚本审计收敛为配额错误，防止 MinIO 孤儿对象和未收口审计行。
-            await self._abandon_artifacts_safely(result.artifacts)
-            outcome = ToolOutcome(
-                status=ToolOutcomeStatus.ERROR,
-                code="session_file_quota_exceeded",
-                message="当前会话的文件数量已达上限，无法保存本次脚本产物。",
-                cleanup_error_code=outcome.cleanup_error_code,
-            )
-            quota_completion = (
-                None
-                if result.skill_execution_completion is None
-                else result.skill_execution_completion.model_copy(
-                    update={
-                        "status": SkillExecutionStatus.FAILED,
-                        "error_code": "session_file_quota_exceeded",
-                    }
-                )
-            )
-            finished = await self._repository.finish_tool_call(
-                FinishToolCallCommand(
-                    run_id=state.run.id,
-                    worker_id=state.run.worker_id or "",
-                    execution_epoch=state.run.execution_epoch,
-                    record_id=call.record.id,
-                    result_message=self._tool_result_draft(
-                        state,
-                        tool_call_id=call.record.tool_call_id,
-                        outcome=outcome,
-                        created_at=finished_at,
-                        thread_id=thread_id,
-                        artifacts=(),
-                    ),
-                    outcome=outcome,
-                    finished_at=finished_at,
-                    artifacts=(),
-                    delivery_message=None,
-                    skill_execution_completion=quota_completion,
-                )
-            )
-        if finished is None:
-            stop_dispatch.set()
-            return None, True
-        # 结果未知或工具要求终止 Run 时，通知调度器停止派发后续调用。
-        stop_error = (
-            result.terminate_run_error_code
-            if result.terminate_run_error_code is not None
-            else ("tool_outcome_unknown" if outcome.status is ToolOutcomeStatus.UNKNOWN else None)
-        )
-        if stop_error is not None:
-            stop_dispatch.set()
-        return stop_error, False
-
-    async def _abandon_artifacts_safely(
-        self,
-        artifacts: tuple[PendingSessionFile, ...],
-    ) -> None:
-        """尽力清理落库失败的临时产物对象，清理异常不影响调用状态收敛。"""
-        if not artifacts or self._tool_runtime is None:
-            return
-        try:
-            await self._tool_runtime.abandon_artifacts(artifacts)
-        except Exception as error:
-            logger.warning(
-                "run_tool_artifact_abandon_failed count=%d exception_type=%s",
-                len(artifacts),
-                type(error).__name__,
-            )
-
-    async def _execute_tool(
-        self,
-        state: _ExecutionState,
-        definition: RuntimeToolDefinition | None,
-        call: LlmToolCall,
-        *,
-        record_id: str,
-    ) -> ToolExecutionResult:
-        """Execute exactly one business tool with a bounded deadline and no retry."""
-        # 定义缺失或未启用工具运行时：返回安全错误，不发起外部调用。
-        if definition is None:
-            return ToolExecutionResult(
-                ToolOutcome(
-                    status=ToolOutcomeStatus.ERROR,
-                    code="tool_unknown",
-                    message="模型请求了冻结目录中不存在的工具。",
-                )
-            )
-        if self._tool_runtime is None:
-            return ToolExecutionResult(
-                ToolOutcome(
-                    status=ToolOutcomeStatus.ERROR,
-                    code="tool_unavailable",
-                    message="当前 Run 未启用业务工具执行。",
-                )
-            )
-        run_remaining_seconds = self._remaining_seconds(state)
-        # skill_execute 只受 Run 总截止时间约束；其他工具保留通用 tool_timeout 语义。
-        skill_execution = (
-            definition.source.kind == "builtin" and definition.tool_id == SKILL_EXECUTE_TOOL_ID
-        )
-        deadline_seconds = (
-            run_remaining_seconds
-            if skill_execution
-            else min(self._config.tool_timeout_seconds, run_remaining_seconds)
-        )
-        if deadline_seconds <= 0:
-            # 执行前时间已耗尽：外部操作是否发生不可知，按 UNKNOWN 处理。
-            return ToolExecutionResult(
-                ToolOutcome(
-                    status=ToolOutcomeStatus.UNKNOWN,
-                    code="tool_deadline_exhausted",
-                    message="工具执行前 Run 的执行时间已经耗尽，结果无法确认。",
-                )
-            )
-        context = ToolExecutionContext(
-            owner_id=state.run.owner_id,
-            chat_session_id=state.run.session_id,
-            project_id=None if state.authorized is None else state.authorized.project_id,
-            run_id=state.run.id,
-            execution_epoch=state.run.execution_epoch,
-            auth_session_id=state.run.auth_session_id or "",
-            deadline_at=self._now() + timedelta(seconds=deadline_seconds),
-            tool_call_record_id=record_id,
-            skill_snapshot=state.run.skill_snapshot,
-            knowledge_base_ids=state.run.knowledge_base_ids,
-        )
-        # MCP 内部按业务与清理两段超时收敛；外层守护必须完整包住该 envelope 并留调度余量，
-        # 否则已确定结果会被抢先误报为 unknown。内置工具不加额外预算。
-        execution_timeout_seconds = deadline_seconds
-        if definition.source.kind == "mcp":
-            execution_timeout_seconds += (
-                self._config.tool_cleanup_seconds + MCP_TOOL_WATCHDOG_GRACE_SECONDS
-            )
-        try:
-            async with asyncio.timeout(execution_timeout_seconds):
-                return await self._tool_runtime.execute(
-                    definition,
-                    call.name,
-                    dict(call.arguments),
-                    context,
-                    deadline_seconds=deadline_seconds,
-                    run_remaining_seconds=run_remaining_seconds,
-                )
-        except asyncio.CancelledError:
-            raise
-        except TimeoutError:
-            # 超时后结果不可确认（外部操作可能已生效），标记 UNKNOWN 交给上层收敛。
-            return ToolExecutionResult(
-                ToolOutcome(
-                    status=ToolOutcomeStatus.UNKNOWN,
-                    code="tool_timeout",
-                    message="工具在截止时间前没有返回确定结果，可能已经生效。",
-                )
-            )
-        except Exception as error:
-            # 非预期异常同样按 UNKNOWN 收敛，不向模型暴露内部异常细节。
-            logger.warning(
-                "run_tool_execution_failed run_id=%s exception_type=%s",
-                state.run.id,
-                type(error).__name__,
-            )
-            return ToolExecutionResult(
-                ToolOutcome(
-                    status=ToolOutcomeStatus.UNKNOWN,
-                    code="tool_execution_failed",
-                    message="工具执行中断，结果无法确认。",
-                )
-            )
 
     async def _save_clarification(
         self,
@@ -1459,156 +958,19 @@ class RunExecutor:
         explanation: str,
         response: LlmResponse,
     ) -> None:
-        """校验 dispatch_subagents 参数并原子派发子 Run 批次，随后释放主 Run 租约。"""
-        run = state.run
-        if run.depth != 0:
-            raise LlmError("subagent_nested_dispatch_forbidden")
-        if self._tool_runtime is not None and await self._authorize(run) is None:
-            raise LlmError("run_auth_session_invalid")
-        if self._subagents is None:
-            raise LlmError("subagent_runtime_unavailable")
-        definition = self._definition_for_call(state, call.name)
-        if definition is None or definition.tool_id != DISPATCH_SUBAGENTS_TOOL_ID:
-            raise LlmError("tool_unknown")
-        if self._tool_runtime is not None:
-            validation = self._tool_runtime.validate_call(
-                definition, call.name, dict(call.arguments)
-            )
-            if validation is not None:
-                raise LlmError(validation.code)
-
-        raw_tasks = call.arguments.get("tasks")
-        if not isinstance(raw_tasks, list) or not 1 <= len(raw_tasks) <= 5:
-            raise LlmError("subagent_batch_size_invalid")
-
-        created_at = self._now()
-        batch_items: list[BeginSubagentBatchItem] = []
-        for raw_task in raw_tasks:
-            if not isinstance(raw_task, dict):
-                raise LlmError("tool_arguments_invalid")
-            slug = raw_task.get("subagent_slug")
-            task_text = raw_task.get("task")
-            context_text = raw_task.get("context")
-            raw_files = raw_task.get("input_file_ids", [])
-            if (
-                not isinstance(slug, str)
-                or not slug.strip()
-                or not isinstance(task_text, str)
-                or not task_text.strip()
-            ):
-                raise LlmError("tool_arguments_invalid")
-            if context_text is not None and not isinstance(context_text, str):
-                raise LlmError("tool_arguments_invalid")
-            if (
-                not isinstance(raw_files, list)
-                or any(not isinstance(item, str) or not item for item in raw_files)
-                or len(raw_files) != len(set(raw_files))
-            ):
-                raise LlmError("run_input_file_ids_invalid")
-
-            profile = await self._subagents.get_by_slug(slug.strip())
-            if profile is None or not profile.enabled:
-                raise LlmError("subagent_profile_unavailable")
-
-            # 调度执行前实时复核当前员工是否对目标子智能体拥有读权限，
-            # 防止模型强行拼出他部门 subagent slug 或员工调岗后越权触发子 Run。
-            if self._access_policy is not None:
-                if not await self._access_policy.can_read_resource(
-                    run.owner_id,
-                    ResourceType.SUBAGENT,
-                    profile.id,
-                ):
-                    raise LlmError("subagent_profile_unavailable")
-            elif self._tool_runtime is not None:
-                if not await self._tool_runtime.can_read_subagent(
-                    run.owner_id,
-                    profile.id,
-                ):
-                    raise LlmError("subagent_profile_unavailable")
-
-            if self._tool_runtime is not None:
-                if state.authorized is None:
-                    raise LlmError("run_auth_session_invalid")
-                sub_snapshot = await self._tool_runtime.build_snapshot(
-                    run.prompt_template_version,
-                    state.authorized,
-                    depth=1,
-                    allowed_tool_ids=profile.allowed_tool_ids,
-                    knowledge_base_ids=run.knowledge_base_ids,
-                )
-            else:
-                sub_snapshot = RuntimeToolSnapshot(tools=())
-
-            sub_run_id = self._id_factory("run")
-            formatted_task = (
-                f"任务：\n{task_text.strip()}\n\n补充上下文：\n{context_text.strip()}"
-                if isinstance(context_text, str) and context_text.strip()
-                else task_text.strip()
-            )
-            task_message = ExecutionMessageDraft(
-                id=self._id_factory("exec"),
-                session_id=run.session_id,
-                owner_id=run.owner_id,
-                run_id=sub_run_id,
-                thread_id=sub_run_id,
-                role=ExecutionRole.USER,
-                parts=(TextPart(formatted_task),),
-                tool_call_id=None,
-                source_message_id=None,
-                created_at=created_at,
-                metadata=MessageMetadata(),
-            )
-            batch_items.append(
-                BeginSubagentBatchItem(
-                    sub_run_id=sub_run_id,
-                    subagent_profile_id=profile.id,
-                    subagent_slug=profile.slug,
-                    subagent_name=profile.name,
-                    system_prompt=profile.system_prompt,
-                    model_profile_id=profile.model_profile_id or run.model_config_version_id,
-                    tool_snapshot=sub_snapshot,
-                    skill_snapshot=run.skill_snapshot,
-                    input_file_ids=tuple(raw_files),
-                    task_message=task_message,
-                    max_llm_requests=profile.max_llm_requests,
-                    timeout_seconds=profile.timeout_seconds,
-                )
-            )
-
-        call_message = ExecutionMessageDraft(
-            id=self._id_factory("exec"),
-            session_id=run.session_id,
-            owner_id=run.owner_id,
-            run_id=run.id,
-            thread_id=run.id,
-            role=ExecutionRole.ASSISTANT,
-            parts=(
-                *((TextPart(explanation),) if explanation.strip() else ()),
-                ToolCallPart(call.call_id, call.name, dict(call.arguments)),
-            ),
-            tool_call_id=None,
-            source_message_id=None,
-            created_at=created_at,
-            metadata=MessageMetadata(provider="chat_completions", model=response.model),
+        """委托 SubagentDispatcher 校验参数与实时权限并原子派发子 Run 批次。"""
+        await self._subagent_dispatcher.dispatch(
+            run=state.run,
+            authorized=state.authorized,
+            snapshot=state.snapshot,
+            round_number=state.round,
+            llm_request_count=lambda: state.budget.used,
+            call=call,
+            explanation=explanation,
+            response=response,
+            authorize=self._authorize,
+            publish_events=lambda: self._publish_pending_events(state),
         )
-        try:
-            await self._repository.begin_subagent_batch(
-                BeginSubagentBatchCommand(
-                    run_id=run.id,
-                    worker_id=run.worker_id or "",
-                    execution_epoch=run.execution_epoch,
-                    tool_call_id=call.call_id,
-                    call_message=call_message,
-                    record_id=self._id_factory("toolcall"),
-                    items=tuple(batch_items),
-                    requested_at=created_at,
-                    round=state.round,
-                    llm_request_count=state.budget.used,
-                )
-            )
-        except (RunStateError, RunInputResourceError, RunConflictError) as error:
-            raise LlmError(str(error)) from error
-        await self._publish_pending_events(state)
 
     async def _save_final(
         self,
@@ -1654,130 +1016,13 @@ class RunExecutor:
         await self._publish_pending_events(state)
         # 仅在主 Run 成功落库 completed 并推送事件后异步触发轻量标题生成，
         # 全程与主 Run 终态隔离，超时或失败绝不回滚主 Run。
-        if finished.status is RunStatus.COMPLETED and run.depth == 0 and self._sessions is not None:
-            self._schedule_auto_title(
+        if finished.status is RunStatus.COMPLETED and run.depth == 0:
+            self._auto_title_runner.schedule(
                 owner_id=run.owner_id,
                 session_id=run.session_id,
                 run_model_profile_id=run.model_config_version_id,
                 trigger_text=state.trigger_text or "",
             )
-
-    def _schedule_auto_title(
-        self,
-        *,
-        owner_id: str,
-        session_id: str,
-        run_model_profile_id: str,
-        trigger_text: str,
-    ) -> None:
-        """登记受控异步后台任务生成首轮标题，避免未回收 Task 警告。"""
-        task = asyncio.create_task(
-            self._run_auto_title_task(
-                owner_id=owner_id,
-                session_id=session_id,
-                run_model_profile_id=run_model_profile_id,
-                trigger_text=trigger_text,
-            )
-        )
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    async def _run_auto_title_task(
-        self,
-        *,
-        owner_id: str,
-        session_id: str,
-        run_model_profile_id: str,
-        trigger_text: str,
-    ) -> None:
-        """仅当未删除会话仍无标题时生成并条件写入自动标题，异常全量兜底隔离。"""
-        if self._sessions is None:
-            return
-        try:
-            visible = await self._sessions.get_visible(
-                SessionScope(session_id=session_id, owner_id=owner_id)
-            )
-            if visible is None or visible.title is not None:
-                return
-            title = await self._generate_auto_title(
-                run_model_profile_id=run_model_profile_id,
-                trigger_text=trigger_text,
-            )
-            if not title:
-                return
-            await self._sessions.set_title_if_empty(owner_id, session_id, title)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            logger.warning(
-                "session_auto_title_failed session_id=%s exception_type=%s",
-                session_id,
-                type(error).__name__,
-            )
-
-    async def _generate_auto_title(
-        self,
-        *,
-        run_model_profile_id: str,
-        trigger_text: str,
-    ) -> str:
-        """优先调用压缩模型（否则复用本次 Run 模型）限时生成 <=20 字标题，
-        失败或超时则降级截取前 24 字。
-        """
-        fallback = fallback_title_from_message(trigger_text)
-        excerpt = trigger_text.strip()[:AUTO_TITLE_PROMPT_INPUT_MAX_CHARS]
-        if not excerpt:
-            return fallback
-
-        runtime: RuntimeModelProfile | None = None
-        try:
-            policy = await self._profiles.get_current_compression_policy()
-            if policy is not None:
-                runtime = await self._profiles.get_runtime(policy.compression_model_profile_id)
-        except Exception:
-            runtime = None
-        if runtime is None:
-            try:
-                runtime = await self._profiles.get_runtime(run_model_profile_id)
-            except Exception:
-                runtime = None
-        if runtime is None:
-            return fallback
-
-        request = LlmRequest(
-            model_profile=runtime.version.id,
-            messages=(
-                LlmMessage(role=LlmRole.SYSTEM, content=AUTO_TITLE_SYSTEM_PROMPT),
-                LlmMessage(role=LlmRole.USER, content=excerpt),
-            ),
-            tool_choice="none",
-            max_output_tokens=min(64, runtime.version.max_output_tokens),
-            temperature=(
-                0.2 if runtime.version.temperature is None else runtime.version.temperature
-            ),
-            timeout_seconds=min(
-                float(runtime.version.request_timeout_seconds),
-                self._auto_title_timeout_seconds,
-            ),
-        )
-        try:
-            async with asyncio.timeout(self._auto_title_timeout_seconds):
-                response = await self._provider.complete(runtime, request)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            logger.warning(
-                "session_auto_title_llm_fallback model_profile_id=%s exception_type=%s",
-                runtime.version.id,
-                type(error).__name__,
-            )
-            return fallback
-
-        if response.status != "completed":
-            return fallback
-        raw_text = "".join(part.text for part in response.output if isinstance(part, LlmText))
-        cleaned = sanitize_generated_title(raw_text)
-        return cleaned or fallback
 
     async def _stop_for_context_safety(
         self,
@@ -1810,8 +1055,7 @@ class RunExecutor:
         # 无实时传输时直接跳过；客户端 SSE 会从 PostgreSQL 对账补齐。
         if state.publish_disabled or self._publisher is None:
             return
-        previous_cursor = state.event_cursor
-        state.event_cursor, lookup_failed = await publish_pending_events(
+        state.event_cursor, lookup_failed = await publish_run_events(
             self._repository,
             self._publisher,
             session_id=state.run.session_id,
@@ -1819,30 +1063,10 @@ class RunExecutor:
             run_id=state.run.id,
             execution_epoch=state.run.execution_epoch,
             after_sequence=state.event_cursor,
+            parent_run_id=state.run.parent_run_id,
         )
         if lookup_failed:
             state.publish_disabled = True
-        elif state.run.parent_run_id is not None and state.event_cursor > previous_cursor:
-            # 子 Run 事件同步转发至父 Run 频道，触发主 Run SSE 立即对账推送最新子任务状态。
-            events = await self._repository.list_events(
-                state.run.session_id,
-                state.run.owner_id,
-                state.run.id,
-                after_sequence=previous_cursor,
-                limit=100,
-                through_sequence=state.event_cursor,
-            )
-            for event in events:
-                try:
-                    await self._publisher.publish_persisted(
-                        state.run.parent_run_id, state.run.execution_epoch, event
-                    )
-                except Exception:
-                    logger.warning(
-                        "subagent_parent_event_forward_failed parent_run_id=%s sub_run_id=%s",
-                        state.run.parent_run_id,
-                        state.run.id,
-                    )
 
     async def _fail(
         self,
